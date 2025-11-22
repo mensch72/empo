@@ -362,6 +362,16 @@ Contributions are welcome! Please:
 4. Test with both Docker and Singularity
 5. Submit a pull request
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
+
+## Documentation
+
+- **[README.md](README.md)** - This file, comprehensive setup and usage guide
+- **[QUICKSTART.md](QUICKSTART.md)** - Get started in 5 minutes
+- **[IMPLEMENTATION.md](IMPLEMENTATION.md)** - Detailed implementation notes
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** - Contribution guidelines
+- **[.env.example](.env.example)** - Environment variables template
+
 ## License
 
 See [LICENSE](LICENSE) file for details.
