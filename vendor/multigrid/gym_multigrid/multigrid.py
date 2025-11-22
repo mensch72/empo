@@ -1463,8 +1463,6 @@ class MultiGridEnv(gym.Env):
         Returns:
             tuple: A hashable representation of the complete environment state
         """
-        from copy import deepcopy
-        
         # Serialize grid state
         grid_state = []
         for j in range(self.grid.height):
@@ -1589,8 +1587,6 @@ class MultiGridEnv(gym.Env):
         Args:
             state: A state tuple as returned by get_state()
         """
-        from copy import deepcopy
-        
         # Convert state tuple back to dict for easier access
         state_dict = dict(state)
         
@@ -1633,28 +1629,6 @@ class MultiGridEnv(gym.Env):
                 cell_data = grid_data[idx]
                 idx += 1
                 
-                if cell_data is None:
-                    self.grid.set(i, j, None)
-                else:
-                    obj = self._deserialize_object(dict(cell_data))
-                    self.grid.set(i, j, obj)
-        
-        # Restore agent states
-        agents_data = state_dict['agents']
-        for agent_idx, agent_state in enumerate(agents_data):
-            agent_dict = dict(agent_state)
-            agent = self.agents[agent_idx]
-            
-            agent.pos = np.array(agent_dict['pos']) if agent_dict['pos'] is not None else None
-            agent.dir = agent_dict['dir']
-            agent.terminated = agent_dict['terminated']
-            agent.started = agent_dict['started']
-            agent.paused = agent_dict['paused']
-            
-            if agent_dict['carrying'] is not None:
-                agent.carrying = self._deserialize_object(dict(agent_dict['carrying']))
-            else:
-                agent.carrying = None
                 if cell_data is None:
                     self.grid.set(i, j, None)
                 else:
