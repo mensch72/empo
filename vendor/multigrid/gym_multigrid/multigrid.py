@@ -1888,6 +1888,12 @@ class MultiGridEnv(gym.Env):
         Returns:
             list of lists: Each inner list is a conflict block of agent indices
         """
+        # Constants for resource types
+        RESOURCE_INDEPENDENT = 'independent'
+        RESOURCE_CELL = 'cell'
+        RESOURCE_PICKUP = 'pickup'
+        RESOURCE_DROP_AGENT = 'drop_agent'
+        
         # Restore to the query state to inspect agent positions and targets
         self.set_state(state)
         
@@ -1902,7 +1908,7 @@ class MultiGridEnv(gym.Env):
             if action == self.actions.forward:
                 # Target is the cell they're moving into
                 target_pos = tuple(agent.front_pos)
-                agent_targets[agent_idx] = ('cell', target_pos)
+                agent_targets[agent_idx] = (RESOURCE_CELL, target_pos)
             
             elif action == self.actions.pickup:
                 # Target is the object at the forward position
@@ -1910,10 +1916,10 @@ class MultiGridEnv(gym.Env):
                 fwd_cell = self.grid.get(*fwd_pos)
                 if fwd_cell and fwd_cell.can_pickup():
                     # Use object position as identifier
-                    agent_targets[agent_idx] = ('pickup', tuple(fwd_pos))
+                    agent_targets[agent_idx] = (RESOURCE_PICKUP, tuple(fwd_pos))
                 else:
                     # No valid target, agent acts independently
-                    agent_targets[agent_idx] = ('independent', agent_idx)
+                    agent_targets[agent_idx] = (RESOURCE_INDEPENDENT, agent_idx)
             
             elif action == self.actions.drop:
                 # Check if dropping on another agent or specific location
@@ -1921,14 +1927,14 @@ class MultiGridEnv(gym.Env):
                 fwd_cell = self.grid.get(*fwd_pos)
                 if fwd_cell and fwd_cell.type == 'agent':
                     # Interacting with another agent
-                    agent_targets[agent_idx] = ('drop_agent', tuple(fwd_pos))
+                    agent_targets[agent_idx] = (RESOURCE_DROP_AGENT, tuple(fwd_pos))
                 else:
                     # Dropping on ground, independent action
-                    agent_targets[agent_idx] = ('independent', agent_idx)
+                    agent_targets[agent_idx] = (RESOURCE_INDEPENDENT, agent_idx)
             
             else:
                 # Other actions (toggle, build, done) - typically independent
-                agent_targets[agent_idx] = ('independent', agent_idx)
+                agent_targets[agent_idx] = (RESOURCE_INDEPENDENT, agent_idx)
         
         # Group agents by their target resource
         resource_to_agents = {}
@@ -1941,7 +1947,7 @@ class MultiGridEnv(gym.Env):
         # Only resources with multiple agents form conflict blocks
         conflict_blocks = []
         for resource, agent_list in resource_to_agents.items():
-            if len(agent_list) > 1 and resource[0] != 'independent':
+            if len(agent_list) > 1 and resource[0] != RESOURCE_INDEPENDENT:
                 # Multiple agents competing for same resource
                 conflict_blocks.append(agent_list)
             else:
@@ -1976,10 +1982,9 @@ class MultiGridEnv(gym.Env):
         for winner in winners:
             ordering.append(winner)
         
-        # Add all other agents in their original order
+        # Add all inactive agents in their original order
         for i in range(num_agents):
-            if i not in winner_set and i not in active_agents:
-                # Inactive agents
+            if i not in active_agents:
                 ordering.append(i)
         
         # Add non-winning active agents
