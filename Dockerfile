@@ -15,7 +15,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
 WORKDIR /workspace
 
 # Install system dependencies (no CUDA libraries)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Use BuildKit cache mount for apt to avoid re-downloading packages
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
     python3.10 \
     python3-pip \
     python3-dev \
@@ -30,9 +33,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libglib2.0-0 \
     libsm6 \
     libxext6 \
-    libxrender-dev \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
+    libxrender-dev
 
 # Create python symlink and upgrade pip
 RUN ln -s /usr/bin/python3 /usr/bin/python && \

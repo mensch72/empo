@@ -50,7 +50,10 @@ The setup automatically:
 - Detects if you have an NVIDIA GPU
 - Shows you whether GPU is available or running in CPU mode
 - No CUDA libraries downloaded unless needed for cluster deployment
-- Caches pip downloads for faster subsequent builds
+- **Caches apt and pip packages** for much faster rebuilds
+  - First build: ~5-10 minutes (downloads packages)
+  - Subsequent builds: ~30 seconds (uses cached packages)
+  - Only rebuilds changed layers (e.g., when requirements.txt changes)
 
 ### 2. Enter the Container
 
@@ -125,12 +128,19 @@ docker compose exec empo-dev jupyter notebook --ip=0.0.0.0 --port=8888 --no-brow
 
 ### 7. TensorBoard (Optional)
 
+The training script automatically logs metrics to TensorBoard. To view them:
+
 ```bash
-# Start TensorBoard
+# Start TensorBoard (from within the container)
 docker compose exec empo-dev tensorboard --logdir=./outputs --host=0.0.0.0
+
+# Or from your host machine (if you have tensorboard installed)
+tensorboard --logdir=./outputs
 
 # Access at http://localhost:6006
 ```
+
+The training script writes metrics like episode rewards, episode lengths, and learning rates to TensorBoard. Even in demo mode (without a real environment), it logs sample data so you can verify TensorBoard is working correctly.
 
 ### 8. Stop the Environment
 

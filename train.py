@@ -14,6 +14,7 @@ from typing import Dict, Any
 import numpy as np
 import torch
 import gymnasium as gym
+from torch.utils.tensorboard import SummaryWriter
 
 
 def setup_environment(env_name: str, **kwargs) -> gym.Env:
@@ -65,6 +66,11 @@ def train(config: Dict[str, Any]) -> None:
     for key, value in config.items():
         print(f"  {key}: {value}")
     
+    # Initialize TensorBoard writer
+    writer = SummaryWriter(log_dir=config["output_dir"])
+    print(f"\n✓ TensorBoard logging to: {config['output_dir']}")
+    print(f"  View with: tensorboard --logdir {config['output_dir']}")
+    
     # Setup environment
     env = setup_environment(config["env_name"])
     
@@ -82,12 +88,31 @@ def train(config: Dict[str, Any]) -> None:
             # - Empowerment computation
             # - Policy updates
             # - Logging metrics
+            
+            # Example: Log some dummy metrics to TensorBoard
+            episode_reward = np.random.randn() * 10 + 50  # Dummy reward
+            episode_length = np.random.randint(50, 200)    # Dummy length
+            
+            writer.add_scalar("Training/EpisodeReward", episode_reward, episode)
+            writer.add_scalar("Training/EpisodeLength", episode_length, episode)
+            writer.add_scalar("Training/LearningRate", config["learning_rate"], episode)
     else:
         print(f"\nSkipping training (no environment available)")
         print("This is a demonstration mode - install environments to train")
+        
+        # Still log something to TensorBoard so it's not empty
+        print(f"\nLogging demo data to TensorBoard...")
+        for episode in range(config["num_episodes"]):
+            # Log dummy metrics for demonstration
+            demo_metric = np.sin(episode / 10) * 50 + 100
+            writer.add_scalar("Demo/Metric", demo_metric, episode)
+    
+    # Close TensorBoard writer
+    writer.close()
     
     print("\n" + "=" * 60)
     print("Training completed!")
+    print(f"TensorBoard logs saved to: {config['output_dir']}")
     print("=" * 60)
     
     if env is not None:
