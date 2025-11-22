@@ -1,4 +1,4 @@
-# EMPO: Empowerment-based Multi-Agent Reinforcement Learning
+# EMPO – Empowerment-based Multi-Agent Reinforcement Learning
 
 A unified framework for training multi-agent reinforcement learning (MARL) agents using empowerment-based objectives on multigrid environments. This repository supports both local development (Docker Compose) and cluster deployment (Singularity/Apptainer).
 
