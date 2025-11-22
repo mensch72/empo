@@ -1,11 +1,13 @@
-.PHONY: help build up up-gpu down restart shell logs clean test lint
+.PHONY: help build build-cpu up up-cpu up-gpu down restart shell logs clean test lint
 
 # Default target
 help:
 	@echo "EMPO Development Commands"
 	@echo "========================="
-	@echo "make build          - Build Docker image"
-	@echo "make up             - Start development environment (CPU mode)"
+	@echo "make build          - Build Docker image (with CUDA, ~5GB)"
+	@echo "make build-cpu      - Build CPU-only Docker image (lighter, ~2GB)"
+	@echo "make up             - Start development environment (with CUDA base)"
+	@echo "make up-cpu         - Start development environment (CPU-only, lighter)"
 	@echo "make up-gpu         - Start development environment (GPU mode)"
 	@echo "make down           - Stop development environment"
 	@echo "make restart        - Restart development environment"
@@ -22,14 +24,23 @@ help:
 build:
 	docker compose build
 
+build-cpu:
+	docker compose -f docker-compose.cpu.yml build
+
 up:
-	docker compose up -d
-	@echo "Development environment started (CPU mode)."
+	docker compose up -d --build
+	@echo "Development environment started (CUDA base image)."
 	@echo "Use 'make shell' to enter."
+	@echo "For lighter CPU-only image, use 'make up-cpu' instead."
 	@echo "For GPU support, use 'make up-gpu' instead."
 
+up-cpu:
+	docker compose -f docker-compose.cpu.yml up -d --build
+	@echo "Development environment started (CPU-only, lighter image)."
+	@echo "Use 'make shell' to enter."
+
 up-gpu:
-	docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+	docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build
 	@echo "Development environment started (GPU mode)."
 	@echo "Use 'make shell' to enter."
 

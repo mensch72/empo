@@ -37,15 +37,23 @@ cd empo
 
 ### 1. Build and Start the Development Environment
 
-**For CPU-only systems (laptops without GPU):**
+**Option 1: CPU-only (lighter image, ~2GB, recommended for laptops):**
 ```bash
-# Build and start the container (CPU mode - no GPU required)
+# Build and start with CPU-only Dockerfile (no CUDA libraries)
+make up-cpu
+# Or directly:
+docker compose -f docker-compose.cpu.yml up -d
+```
+
+**Option 2: With CUDA libraries (for GPU systems or cluster compatibility):**
+```bash
+# Build and start with CUDA base image (~5GB, works on CPU too)
 make up
 # Or directly:
 docker compose up -d
 ```
 
-**For systems with NVIDIA GPU:**
+**Option 3: With GPU enabled (requires NVIDIA GPU):**
 ```bash
 # Build and start with GPU support
 make up-gpu
@@ -53,7 +61,10 @@ make up-gpu
 docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 ```
 
-**Note**: The base Docker image includes CUDA libraries (~5GB). On CPU-only systems, these libraries won't be used but the image size remains the same. The container works fine without GPU - PyTorch will automatically use CPU.
+**Recommendation**: 
+- Use `make up-cpu` on laptops without GPU (lighter, faster download)
+- Use `make up` if you need cluster-compatible image with CUDA libraries
+- Use `make up-gpu` on GPU systems for GPU acceleration
 
 ### 2. Enter the Container
 
