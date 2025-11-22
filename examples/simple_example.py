@@ -98,7 +98,7 @@ def main():
     }, checkpoint_path)
     print(f"\n5. Checkpoint saved to: {checkpoint_path}")
     print(f"   TensorBoard logs saved to: {output_dir}")
-    print(f"   View logs with: tensorboard --logdir=outputs --host=0.0.0.0")
+    print(f"   View logs with: tensorboard --logdir={output_dir.parent} --host=0.0.0.0")
     
     print("\n" + "=" * 60)
     print("Example completed successfully!")
