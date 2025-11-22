@@ -53,7 +53,14 @@ done
 # Check Python syntax
 echo ""
 echo "3. Checking Python syntax..."
-python_files=$(find . -name "*.py" -not -path "./.venv/*" -not -path "./venv/*")
+python_files=$(find . -name "*.py" \
+    -not -path "./.venv/*" \
+    -not -path "./venv/*" \
+    -not -path "./__pycache__/*" \
+    -not -path "*/__pycache__/*" \
+    -not -path "./.pytest_cache/*" \
+    -not -path "./build/*" \
+    -not -path "./dist/*")
 for file in $python_files; do
     if python3 -m py_compile "$file" 2>/dev/null; then
         echo "   ✓ $file"

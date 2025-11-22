@@ -3,6 +3,9 @@
 #
 # Usage: sbatch scripts/run_cluster.sh
 # Or modify and adapt for your specific cluster setup
+#
+# Security Note: This script uses environment variables for configuration.
+# Ensure variables are properly validated in production environments.
 
 #SBATCH --job-name=empo-training
 #SBATCH --output=logs/empo_%j.out
@@ -14,6 +17,7 @@
 #SBATCH --mem=32G
 
 # Configuration - modify these for your setup
+# Use absolute paths for security and clarity
 REPO_PATH="${REPO_PATH:-$(pwd)}"
 IMAGE_PATH="${IMAGE_PATH:-./empo.sif}"
 SCRIPT_PATH="${SCRIPT_PATH:-train.py}"
