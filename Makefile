@@ -1,6 +1,10 @@
 .PHONY: help build up down restart shell logs clean test lint
 .PHONY: build-gpu push-gpu build-sif up-gpu-docker-hub up-gpu-sif-file
 
+# Load .env file if it exists
+-include .env
+export
+
 # Enable Docker BuildKit for faster builds and cache mounts
 export DOCKER_BUILDKIT=1
 export COMPOSE_DOCKER_CLI_BUILD=1
