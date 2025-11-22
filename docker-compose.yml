@@ -47,7 +47,7 @@ services:
     environment:
       - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-all}
       - WANDB_API_KEY=${WANDB_API_KEY:-}
-      - PYTHONPATH=/workspace
+      - PYTHONPATH=/workspace:/workspace/vendor/multigrid
     
     # Default command
     command: /bin/bash

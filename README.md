@@ -228,14 +228,43 @@ empo/
 ├── src/
 │   └── empo/                  # Main package
 │       └── __init__.py
+├── vendor/
+│   └── multigrid/             # Vendored Multigrid source (live editable)
 ├── configs/
 │   └── default.yaml           # Example configuration
 ├── scripts/
 │   ├── run_cluster.sh         # SLURM job script
 │   └── setup_cluster_image.sh # Cluster image setup helper
 ├── examples/                  # Example scripts and notebooks
+├── VENDOR.md                  # Documentation for vendored dependencies
 └── README.md                  # This file
 ```
+
+## Vendored Dependencies
+
+This repository includes the [Multigrid](https://github.com/ArnaudFickinger/gym-multigrid) source code in `vendor/multigrid/` to enable live editing without container rebuilds.
+
+**How it works:**
+- Multigrid is imported via `PYTHONPATH` (not pip installed)
+- Edit files in `vendor/multigrid/gym_multigrid/` and changes take effect immediately
+- No Docker rebuild needed for modifications
+- Perfect for making extensive changes to environments
+
+**Modifying Multigrid:**
+```bash
+# 1. Edit source files
+vim vendor/multigrid/gym_multigrid/envs/collect_game.py
+
+# 2. Restart Python or re-import (no rebuild needed)
+docker compose restart empo-dev
+```
+
+**Updating from upstream:**
+```bash
+git subtree pull --prefix=vendor/multigrid https://github.com/ArnaudFickinger/gym-multigrid.git master --squash
+```
+
+See [VENDOR.md](VENDOR.md) for detailed documentation on managing vendored dependencies.
 
 ## Configuration
 
@@ -370,6 +399,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
 - **[QUICKSTART.md](QUICKSTART.md)** - Get started in 5 minutes
 - **[IMPLEMENTATION.md](IMPLEMENTATION.md)** - Detailed implementation notes
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** - Contribution guidelines
+- **[VENDOR.md](VENDOR.md)** - Managing vendored dependencies (Multigrid)
 - **[.env.example](.env.example)** - Environment variables template
 
 ## License

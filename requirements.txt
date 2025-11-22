@@ -6,7 +6,8 @@ gymnasium>=0.28.0
 
 # MARL and Multigrid dependencies
 pettingzoo>=1.24.0
-multigrid>=0.1.0
+# Note: multigrid is vendored in vendor/multigrid/ and imported via PYTHONPATH
+# This allows live editing without container rebuild. See VENDOR.md for details.
 
 # Optional JAX support
 # To enable JAX with CUDA 12 support, uncomment and install:

@@ -7,7 +7,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     LANG=C.UTF-8 \
-    LC_ALL=C.UTF-8
+    LC_ALL=C.UTF-8 \
+    PYTHONPATH=/workspace:/workspace/vendor/multigrid
 
 # Set working directory
 WORKDIR /workspace
