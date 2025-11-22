@@ -4,43 +4,31 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        # Enable dev mode to install development dependencies
         DEV_MODE: "true"
-        # Match host user ID for file permissions
         USER_ID: ${USER_ID:-1000}
         GROUP_ID: ${GROUP_ID:-1000}
-    # Tag the built image with this name
     image: empo:dev
-    # Don't try to pull from registry before building
     pull_policy: build
     container_name: empo-dev
     
-    # Bind mount the repository for live development
     volumes:
       - .:/workspace
-      # Optional: persist pip cache
       - pip-cache:/home/appuser/.cache/pip
     
-    # Keep container running for interactive development
     stdin_open: true
     tty: true
     
-    # Optional: expose ports for debugging, Jupyter, TensorBoard, etc.
     ports:
-      - "8888:8888"  # Jupyter
-      - "6006:6006"  # TensorBoard
-      - "5678:5678"  # Python debugger (debugpy)
+      - "8888:8888"
+      - "6006:6006"
+      - "5678:5678"
     
-    # Set working directory
     working_dir: /workspace
     
-    # Optional: pass environment variables
     environment:
-      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-}
       - WANDB_API_KEY=${WANDB_API_KEY:-}
       - PYTHONPATH=/workspace:/workspace/vendor/multigrid
     
-    # Default command
     command: /bin/bash
 
 volumes:

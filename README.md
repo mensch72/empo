@@ -37,34 +37,19 @@ cd empo
 
 ### 1. Build and Start the Development Environment
 
-**Option 1: CPU-only (lighter image, ~2GB, recommended for laptops):**
 ```bash
-# Build and start with CPU-only Dockerfile (no CUDA libraries)
-make up-cpu
-# Or directly:
-docker compose -f docker-compose.cpu.yml up -d
-```
-
-**Option 2: With CUDA libraries (for GPU systems or cluster compatibility):**
-```bash
-# Build and start with CUDA base image (~5GB, works on CPU too)
+# Single command that works everywhere
 make up
-# Or directly:
+
+# Or using docker compose directly
 docker compose up -d
 ```
 
-**Option 3: With GPU enabled (requires NVIDIA GPU):**
-```bash
-# Build and start with GPU support
-make up-gpu
-# Or directly:
-docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
-```
-
-**Recommendation**: 
-- Use `make up-cpu` on laptops without GPU (lighter, faster download)
-- Use `make up` if you need cluster-compatible image with CUDA libraries
-- Use `make up-gpu` on GPU systems for GPU acceleration
+The setup automatically:
+- Uses a lightweight Ubuntu-based image (~2GB)
+- Detects if you have an NVIDIA GPU
+- Shows you whether GPU is available or running in CPU mode
+- No CUDA libraries downloaded unless needed for cluster deployment
 
 ### 2. Enter the Container
 
@@ -106,27 +91,27 @@ docker compose exec empo-dev python train.py
 
 ### 5. GPU Support
 
-**Enabling GPU support:**
-
-For systems with NVIDIA GPU, use the GPU-enabled docker-compose configuration:
+GPU support is automatically detected when you run `make up`:
 
 ```bash
-# Start with GPU support
-make up-gpu
-# Or:
-docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+# Just use the standard command
+make up
 ```
 
-**Verifying GPU access:**
+The system will:
+- Detect if you have an NVIDIA GPU with `nvidia-smi`
+- Display "GPU detected" or "No GPU detected"  
+- Work correctly either way - no configuration needed
+
+**Verifying GPU access (if GPU is available):**
 
 ```bash
+# This will work if GPU was detected
 docker compose exec empo-dev nvidia-smi
 docker compose exec empo-dev python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
 ```
 
-**CPU-only mode:**
-
-The default `make up` or `docker compose up` starts in CPU mode without GPU requirements. This works on any system including laptops without GPU. PyTorch will automatically use CPU for computations.
+**Note:** The Docker image uses a lightweight Ubuntu base (~2GB), not CUDA base, so it's fast to download on any system. PyTorch automatically uses GPU if available, or CPU otherwise.
 
 ### 6. Jupyter Notebook (Optional)
 

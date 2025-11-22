@@ -1,6 +1,8 @@
-# Use NVIDIA CUDA base image for GPU support
-# Compatible with both Docker and Singularity/Apptainer with --nv flag
-FROM nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04
+# Lightweight Dockerfile for MARL development
+# Uses Ubuntu 22.04 base (~2GB) - works on systems with or without GPU
+# PyTorch automatically uses GPU if available via Docker GPU passthrough
+
+FROM ubuntu:22.04
 
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -13,7 +15,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # Set working directory
 WORKDIR /workspace
 
-# Install system dependencies
+# Install system dependencies (no CUDA libraries)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.10 \
     python3-pip \

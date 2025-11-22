@@ -29,20 +29,12 @@ bash scripts/verify_setup.sh
 
 ### 2. Start Development Environment
 
-**Recommended for laptops (CPU-only, lighter ~2GB):**
 ```bash
-make up-cpu
-```
-
-**With CUDA libraries (cluster-compatible, ~5GB):**
-```bash
+# Single command that auto-detects GPU
 make up
 ```
 
-**With GPU enabled (requires NVIDIA GPU):**
-```bash
-make up-gpu
-```
+That's it! The setup automatically detects if you have a GPU and configures accordingly.
 
 ### 3. Enter the Container
 
