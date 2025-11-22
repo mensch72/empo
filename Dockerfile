@@ -43,8 +43,12 @@ COPY requirements.txt /tmp/requirements.txt
 COPY requirements-dev.txt /tmp/requirements-dev.txt
 
 # Install Python dependencies
-# Install base requirements first
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+# Use CPU-only PyTorch to avoid downloading large CUDA packages (~2GB vs ~5GB)
+# GPU will still work if available via Docker GPU passthrough (--gpus flag)
+RUN pip install --no-cache-dir \
+    --index-url https://download.pytorch.org/whl/cpu \
+    --extra-index-url https://pypi.org/simple \
+    -r /tmp/requirements.txt
 
 # Install dev dependencies only if DEV_MODE is set (for Docker Compose)
 # This allows the same Dockerfile to be used for both dev and production

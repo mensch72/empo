@@ -1,4 +1,6 @@
 # Core ML frameworks
+# Note: Use CPU-only PyTorch to avoid large CUDA downloads
+# GPU will still work via Docker GPU passthrough (--gpus flag)
 torch>=2.0.0
 numpy>=1.24.0
 scipy>=1.10.0
