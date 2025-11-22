@@ -7,7 +7,6 @@ FROM ubuntu:22.04
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1 \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
     PYTHONPATH=/workspace:/workspace/vendor/multigrid
@@ -46,7 +45,8 @@ COPY requirements-dev.txt /tmp/requirements-dev.txt
 # Install Python dependencies
 # Use CPU-only PyTorch to avoid downloading large CUDA packages (~2GB vs ~5GB)
 # GPU will still work if available via Docker GPU passthrough (--gpus flag)
-RUN pip install --no-cache-dir \
+RUN --mount=type=cache,target=/root/.cache/pip,uid=0,gid=0 \
+    pip install \
     --index-url https://download.pytorch.org/whl/cpu \
     --extra-index-url https://pypi.org/simple \
     -r /tmp/requirements.txt
@@ -54,8 +54,9 @@ RUN pip install --no-cache-dir \
 # Install dev dependencies only if DEV_MODE is set (for Docker Compose)
 # This allows the same Dockerfile to be used for both dev and production
 ARG DEV_MODE=false
-RUN if [ "$DEV_MODE" = "true" ] ; then \
-    pip install --no-cache-dir -r /tmp/requirements-dev.txt ; \
+RUN --mount=type=cache,target=/root/.cache/pip,uid=0,gid=0 \
+    if [ "$DEV_MODE" = "true" ] ; then \
+    pip install -r /tmp/requirements-dev.txt ; \
     fi
 
 # Create a non-root user for better security

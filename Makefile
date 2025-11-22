@@ -1,5 +1,9 @@
 .PHONY: help build up down restart shell logs clean test lint
 
+# Enable Docker BuildKit for faster builds and cache mounts
+export DOCKER_BUILDKIT=1
+export COMPOSE_DOCKER_CLI_BUILD=1
+
 # Default target
 help:
 	@echo "EMPO Development Commands"

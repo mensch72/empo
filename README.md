@@ -50,6 +50,7 @@ The setup automatically:
 - Detects if you have an NVIDIA GPU
 - Shows you whether GPU is available or running in CPU mode
 - No CUDA libraries downloaded unless needed for cluster deployment
+- Caches pip downloads for faster subsequent builds
 
 ### 2. Enter the Container
 
