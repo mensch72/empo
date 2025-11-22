@@ -12,6 +12,7 @@ This script shows how to:
 import torch
 import numpy as np
 from pathlib import Path
+from torch.utils.tensorboard import SummaryWriter
 
 
 def main():
@@ -34,6 +35,10 @@ def main():
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"\n2. Output directory: {output_dir}")
     
+    # Initialize TensorBoard writer
+    writer = SummaryWriter(log_dir=str(output_dir))
+    print(f"   TensorBoard logs: {output_dir}")
+    
     # Simulate a simple agent-environment interaction
     print("\n3. Running simple agent-environment interaction...")
     state_dim = 4
@@ -50,6 +55,7 @@ def main():
     
     # Simulate episode
     total_reward = 0.0
+    episode_rewards = []
     for step in range(num_steps):
         # Random state (placeholder for actual environment observation)
         state = torch.randn(1, state_dim).to(device)
@@ -62,6 +68,11 @@ def main():
         # Simulate reward
         reward = np.random.random()
         total_reward += reward
+        episode_rewards.append(reward)
+        
+        # Log to TensorBoard
+        writer.add_scalar('Step/Reward', reward, step)
+        writer.add_scalar('Step/CumulativeReward', total_reward, step)
         
         if step % 20 == 0:
             print(f"   Step {step:3d}: action={action.item()}, reward={reward:.3f}")
@@ -71,6 +82,14 @@ def main():
     print(f"   Total steps: {num_steps}")
     print(f"   Average reward: {avg_reward:.3f}")
     
+    # Log summary statistics to TensorBoard
+    writer.add_scalar('Summary/AverageReward', avg_reward, 0)
+    writer.add_scalar('Summary/TotalReward', total_reward, 0)
+    writer.add_histogram('Summary/RewardDistribution', np.array(episode_rewards), 0)
+    
+    # Close the writer
+    writer.close()
+    
     # Save a dummy checkpoint
     checkpoint_path = output_dir / "checkpoint.pt"
     torch.save({
@@ -78,6 +97,8 @@ def main():
         'avg_reward': avg_reward,
     }, checkpoint_path)
     print(f"\n5. Checkpoint saved to: {checkpoint_path}")
+    print(f"   TensorBoard logs saved to: {output_dir}")
+    print(f"   View logs with: tensorboard --logdir=outputs --host=0.0.0.0")
     
     print("\n" + "=" * 60)
     print("Example completed successfully!")
