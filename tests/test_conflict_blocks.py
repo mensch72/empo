@@ -284,13 +284,38 @@ def test_two_conflict_blocks():
     """
     print("Test: Two separate conflict blocks (2×2)...")
     
-    env = CollectGame4HEnv10x10N2()
+    # Create a custom environment with 4 agents to test 2 blocks of 2
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent / "vendor" / "multigrid"))
+    from gym_multigrid.multigrid import MultiGridEnv, Agent, World, Grid, Wall
+    
+    class FourAgentEnv(MultiGridEnv):
+        def __init__(self):
+            agents = [Agent(World, i+1, view_size=7) for i in range(4)]
+            super().__init__(
+                grid_size=10,
+                max_steps=100,
+                agents=agents,
+                agent_view_size=7
+            )
+        
+        def _gen_grid(self, width, height):
+            self.grid = Grid(width, height)
+            # Generate walls
+            self.grid.horz_wall(World, 0, 0)
+            self.grid.horz_wall(World, 0, height-1)
+            self.grid.vert_wall(World, 0, 0)
+            self.grid.vert_wall(World, width-1, 0)
+            # Place agents
+            for a in self.agents:
+                self.place_agent(a)
+    
+    env = FourAgentEnv()
     env.reset()
     
-    # Manufacture state:
-    # Agents 0,1 compete for cell (3, 3)
-    # Agents 2 at a different location, will stay still
-    # We only have 3 agents, so let's make 2 compete for one cell
+    # Manufacture state with TWO conflict blocks:
+    # Block 1: Agents 0,1 compete for cell (3, 3)
+    # Block 2: Agents 2,3 compete for cell (6, 6)
     
     initial_state = env.get_state()
     state_dict = dict(initial_state)
@@ -298,6 +323,7 @@ def test_two_conflict_blocks():
     # Modify agent positions
     agents_data = list(state_dict['agents'])
     
+    # Block 1: Agents 0,1 compete for (3, 3)
     # Agent 0 at (2, 3) facing right - will move to (3, 3)
     agent0_dict = dict(agents_data[0])
     agent0_dict['pos'] = (2, 3)
@@ -310,11 +336,18 @@ def test_two_conflict_blocks():
     agent1_dict['dir'] = 2
     agents_data[1] = tuple(sorted(agent1_dict.items()))
     
-    # Agent 2 stays still
+    # Block 2: Agents 2,3 compete for (6, 6)
+    # Agent 2 at (5, 6) facing right - will move to (6, 6)
     agent2_dict = dict(agents_data[2])
-    agent2_dict['pos'] = (7, 7)
+    agent2_dict['pos'] = (5, 6)
     agent2_dict['dir'] = 0
     agents_data[2] = tuple(sorted(agent2_dict.items()))
+    
+    # Agent 3 at (7, 6) facing left - will move to (6, 6)
+    agent3_dict = dict(agents_data[3])
+    agent3_dict['pos'] = (7, 6)
+    agent3_dict['dir'] = 2
+    agents_data[3] = tuple(sorted(agent3_dict.items()))
     
     # Update state
     modified_state = tuple(sorted([
@@ -326,26 +359,29 @@ def test_two_conflict_blocks():
     
     env.set_state(modified_state)
     
-    # Agents 0,1 compete, agent 2 stays still
-    actions = [Actions.forward, Actions.forward, Actions.still]
+    # All 4 agents move forward, creating 2 separate conflicts
+    actions = [Actions.forward, Actions.forward, Actions.forward, Actions.forward]
     
     result = env.transition_probabilities(modified_state, actions)
     
-    # Should have 2 outcomes (agent 0 wins or agent 1 wins)
-    if len(result) != 2:
-        print(f"  ✗ Expected 2 outcomes, got {len(result)}")
+    # Should have 2×2=4 outcomes
+    # (agent 0 or 1 wins cell A) × (agent 2 or 3 wins cell B)
+    if len(result) != 4:
+        print(f"  ✗ Expected 4 outcomes (2×2), got {len(result)}")
         for i, (prob, _) in enumerate(result):
             print(f"    Outcome {i+1}: probability = {prob:.4f}")
         return False
     
-    # Each outcome should have probability 0.5
+    # Each outcome should have probability 1/4
+    expected_prob = 0.25
     for i, (prob, _) in enumerate(result):
-        if abs(prob - 0.5) > 1e-9:
-            print(f"  ✗ Outcome {i+1}: expected 0.5, got {prob:.4f}")
+        if abs(prob - expected_prob) > 1e-9:
+            print(f"  ✗ Outcome {i+1}: expected 0.25, got {prob:.4f}")
             return False
-        print(f"  ✓ Outcome {i+1}: probability = {prob:.4f} = 1/2")
+        print(f"  ✓ Outcome {i+1}: probability = {prob:.4f} = 1/4")
     
-    print(f"  ✓ Conflict block correctly produces 2 outcomes with equal probability")
+    print(f"  ✓ Two conflict blocks (2×2) correctly produce 4 outcomes")
+    print(f"  ✓ Each outcome has probability 1/4 (= 1/2 × 1/2)")
     
     return True
 
