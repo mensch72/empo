@@ -1,0 +1,35 @@
+services:
+  empo-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        DEV_MODE: "true"
+        USER_ID: ${USER_ID:-1000}
+        GROUP_ID: ${GROUP_ID:-1000}
+    image: empo:dev
+    pull_policy: build
+    container_name: empo-dev
+    
+    volumes:
+      - .:/workspace
+      - pip-cache:/home/appuser/.cache/pip
+    
+    stdin_open: true
+    tty: true
+    
+    ports:
+      - "8888:8888"
+      - "6006:6006"
+      - "5678:5678"
+    
+    working_dir: /workspace
+    
+    environment:
+      - WANDB_API_KEY=${WANDB_API_KEY:-}
+      - PYTHONPATH=/workspace:/workspace/vendor/multigrid
+    
+    command: /bin/bash
+
+volumes:
+  pip-cache:
