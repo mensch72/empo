@@ -17,6 +17,8 @@
 REPO_PATH="${REPO_PATH:-$(pwd)}"
 IMAGE_PATH="${IMAGE_PATH:-./empo.sif}"
 SCRIPT_PATH="${SCRIPT_PATH:-train.py}"
+NUM_EPISODES="${NUM_EPISODES:-1000}"
+OUTPUT_DIR="${OUTPUT_DIR:-/workspace/outputs}"
 
 echo "==================================="
 echo "EMPO Cluster Training Job"
@@ -37,6 +39,7 @@ echo "Starting training with Apptainer..."
 echo "Repository: $REPO_PATH"
 echo "Image: $IMAGE_PATH"
 echo "Script: $SCRIPT_PATH"
+echo "Episodes: $NUM_EPISODES"
 echo ""
 
 # Run the training script using Apptainer with GPU support
@@ -46,8 +49,8 @@ apptainer exec --nv \
   -B "${REPO_PATH}:/workspace" \
   "${IMAGE_PATH}" \
   python /workspace/"${SCRIPT_PATH}" \
-  --num-episodes 1000 \
-  --output-dir /workspace/outputs
+  --num-episodes "${NUM_EPISODES}" \
+  --output-dir "${OUTPUT_DIR}"
 
 echo ""
 echo "==================================="

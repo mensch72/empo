@@ -14,6 +14,8 @@ services:
     
     # GPU support - automatically uses GPUs if available
     # Requires nvidia-docker2 and NVIDIA Container Toolkit installed
+    # Note: 'count: all' reserves all GPUs. To use specific GPUs, set CUDA_VISIBLE_DEVICES
+    # environment variable or change 'count: all' to 'count: 1' (or specific number)
     deploy:
       resources:
         reservations:

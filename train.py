@@ -69,18 +69,22 @@ def train(config: Dict[str, Any]) -> None:
     env = setup_environment(config["env_name"])
     
     # Training loop placeholder
-    print(f"\nTraining for {config['num_episodes']} episodes...")
-    
-    for episode in range(config["num_episodes"]):
-        if episode % 10 == 0:
-            print(f"Episode {episode}/{config['num_episodes']}")
+    if env is not None:
+        print(f"\nTraining for {config['num_episodes']} episodes...")
         
-        # Placeholder for actual training logic
-        # In production, this would include:
-        # - Agent interactions with environment
-        # - Empowerment computation
-        # - Policy updates
-        # - Logging metrics
+        for episode in range(config["num_episodes"]):
+            if episode % 10 == 0:
+                print(f"Episode {episode}/{config['num_episodes']}")
+            
+            # Placeholder for actual training logic
+            # In production, this would include:
+            # - Agent interactions with environment
+            # - Empowerment computation
+            # - Policy updates
+            # - Logging metrics
+    else:
+        print(f"\nSkipping training (no environment available)")
+        print("This is a demonstration mode - install environments to train")
     
     print("\n" + "=" * 60)
     print("Training completed!")

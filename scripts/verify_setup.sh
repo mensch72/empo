@@ -67,12 +67,18 @@ done
 echo ""
 echo "4. Checking YAML syntax..."
 if command -v python3 &> /dev/null; then
-    if python3 -c "import yaml; yaml.safe_load(open('configs/default.yaml'))" 2>/dev/null; then
-        echo "   ✓ configs/default.yaml"
+    if python3 -c "import yaml" 2>/dev/null; then
+        if python3 -c "import yaml; yaml.safe_load(open('configs/default.yaml'))" 2>/dev/null; then
+            echo "   ✓ configs/default.yaml"
+        else
+            echo "   ✗ configs/default.yaml (syntax error)"
+            exit 1
+        fi
     else
-        echo "   ✗ configs/default.yaml (syntax error)"
-        exit 1
+        echo "   ⚠ PyYAML not installed, skipping YAML validation"
     fi
+else
+    echo "   ⚠ Python3 not available, skipping YAML validation"
 fi
 
 # Check Docker Compose syntax
