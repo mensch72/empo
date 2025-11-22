@@ -1748,11 +1748,17 @@ class MultiGridEnv(gym.Env):
         2. Only rotation/still actions are used (always commutative)
         3. Order only matters for conflicting actions
         
-        We optimize by:
+        We optimize by using **conflict block partitioning** (suggested by @mensch72):
         1. Early exit if ≤1 active agents (deterministic)
-        2. Computing a sample of orderings first to detect if all lead to same state
-        3. Only permuting the subset of active agents, not all agents
-        4. Using efficient state hashing to detect duplicates quickly
+        2. Early exit if all actions are rotations (commutative)
+        3. Partition agents into conflict blocks (agents competing for same resource)
+        4. Compute Cartesian product of blocks instead of all k! permutations
+        5. Each outcome has equal probability: 1 / product(block_sizes)
+        
+        This is MORE efficient than permutation enumeration:
+        - If 2 blocks of 2 agents each: 2×2=4 outcomes instead of 4!=24 permutations
+        - Most blocks are singletons (no conflicts), making this very fast
+        - Only conflicting agents need to be considered in different orderings
         
         Args:
             state: A state tuple as returned by get_state()
@@ -1811,75 +1817,50 @@ class MultiGridEnv(gym.Env):
                 successor_state = self._compute_successor_state(state, actions, tuple(range(num_agents)))
                 return [(1.0, successor_state)]
             
-            # OPTIMIZATION 3: Only permute active agents, keep inactive ones in fixed positions
-            # This reduces permutations from n! to k! where k = number of active agents
-            from itertools import permutations
-            from math import factorial
+            # OPTIMIZATION 3: Partition agents into conflict blocks
+            # This is MORE efficient than permuting all active agents
+            # Instead of k! permutations, we compute the Cartesian product of conflict blocks
+            conflict_blocks = self._identify_conflict_blocks(state, actions, active_agents)
             
-            # Generate all permutations of just the active agents
-            active_permutations = list(permutations(active_agents))
-            total_orderings = len(active_permutations)  # = k!
+            # If all blocks are singletons (no conflicts), result is deterministic
+            if all(len(block) == 1 for block in conflict_blocks):
+                successor_state = self._compute_successor_state(state, actions, tuple(range(num_agents)))
+                return [(1.0, successor_state)]
             
-            # OPTIMIZATION 4: Sample a few orderings first to check if result is deterministic
-            # This handles the common case where agents don't interact
-            if total_orderings > 6:  # Only sample if there are many orderings
-                sample_size = min(6, total_orderings)
-                sample_orderings = active_permutations[:sample_size]
-                
-                # Compute states for sample
-                sample_states = set()
-                for active_perm in sample_orderings:
-                    # Build full ordering: inactive agents in original order, active as permuted
-                    full_ordering = self._build_full_ordering(num_agents, active_perm, inactive_agents)
-                    succ_state = self._compute_successor_state(state, actions, full_ordering)
-                    sample_states.add(succ_state)
-                
-                # If all sampled orderings produce same state, likely all do
-                if len(sample_states) == 1:
-                    # Verify with one more ordering from the end
-                    if total_orderings > sample_size:
-                        last_perm = active_permutations[-1]
-                        full_ordering = self._build_full_ordering(num_agents, last_perm, inactive_agents)
-                        last_state = self._compute_successor_state(state, actions, full_ordering)
-                        
-                        if last_state == list(sample_states)[0]:
-                            # Very likely deterministic, return early
-                            return [(1.0, last_state)]
+            # OPTIMIZATION 4: Compute outcomes via Cartesian product of conflict blocks
+            # Each outcome has probability = 1 / product(block_sizes)
+            from itertools import product
             
-            # OPTIMIZATION 5: Compute all orderings with efficient state tracking
-            successor_counts = {}
+            # Generate all possible "winner" combinations (one per block)
+            # Each tuple in the product represents which agent succeeds in each block
+            block_sizes = [len(block) for block in conflict_blocks]
+            total_outcomes = 1
+            for size in block_sizes:
+                total_outcomes *= size
             
-            for active_perm in active_permutations:
-                # Build full ordering
-                full_ordering = self._build_full_ordering(num_agents, active_perm, inactive_agents)
-                
-                # Compute successor state
-                succ_state = self._compute_successor_state(state, actions, full_ordering)
-                
-                # Count occurrences (state is hashable tuple)
-                if succ_state not in successor_counts:
-                    successor_counts[succ_state] = 0
-                successor_counts[succ_state] += 1
-                
-                # OPTIMIZATION 6: Early exit if we've found all states are the same
-                # After computing 25% of orderings, check if all identical
-                if len(successor_counts) == 1 and len(active_permutations) > 12:
-                    progress = sum(successor_counts.values())
-                    if progress == total_orderings // 4:
-                        # Check one from the end to confirm
-                        last_perm = active_permutations[-1]
-                        full_ordering = self._build_full_ordering(num_agents, last_perm, inactive_agents)
-                        last_state = self._compute_successor_state(state, actions, full_ordering)
-                        
-                        if last_state in successor_counts:
-                            # Very likely all the same, return early
-                            return [(1.0, last_state)]
+            # Each outcome has equal probability
+            outcome_probability = 1.0 / total_outcomes
             
-            # Convert counts to probabilities
-            result = []
-            for succ_state, count in successor_counts.items():
-                probability = count / total_orderings
-                result.append((probability, succ_state))
+            # Compute successor state for each outcome
+            successor_states = {}
+            
+            for winner_indices in product(*[range(len(block)) for block in conflict_blocks]):
+                # winner_indices[i] tells us which agent wins in block i
+                winners = [conflict_blocks[i][winner_indices[i]] for i in range(len(conflict_blocks))]
+                
+                # Compute the successor state for this outcome
+                # We need an ordering that respects the winners
+                ordering = self._build_ordering_with_winners(num_agents, active_agents, 
+                                                             conflict_blocks, winners)
+                succ_state = self._compute_successor_state(state, actions, ordering)
+                
+                # Aggregate probabilities for identical successor states
+                if succ_state not in successor_states:
+                    successor_states[succ_state] = 0.0
+                successor_states[succ_state] += outcome_probability
+            
+            # Convert to result list
+            result = [(prob, state) for state, prob in successor_states.items()]
             
             # Sort by probability (descending) for consistency
             result.sort(key=lambda x: x[0], reverse=True)
@@ -1889,6 +1870,124 @@ class MultiGridEnv(gym.Env):
         finally:
             # Always restore original state
             self.set_state(original_state)
+    
+    def _identify_conflict_blocks(self, state, actions, active_agents):
+        """
+        Partition active agents into conflict blocks where agents compete for resources.
+        
+        Agents are in the same block if they:
+        - Try to move into the same cell (forward action to same position)
+        - Try to pick up the same object
+        - Interact with each other directly
+        
+        Args:
+            state: Current state tuple
+            actions: List of action indices
+            active_agents: List of active agent indices
+            
+        Returns:
+            list of lists: Each inner list is a conflict block of agent indices
+        """
+        # Restore to the query state to inspect agent positions and targets
+        self.set_state(state)
+        
+        # Track which resource each agent targets
+        agent_targets = {}  # agent_idx -> resource identifier
+        
+        for agent_idx in active_agents:
+            action = actions[agent_idx]
+            agent = self.agents[agent_idx]
+            
+            # Determine what resource this agent is targeting
+            if action == self.actions.forward:
+                # Target is the cell they're moving into
+                target_pos = tuple(agent.front_pos)
+                agent_targets[agent_idx] = ('cell', target_pos)
+            
+            elif action == self.actions.pickup:
+                # Target is the object at the forward position
+                fwd_pos = agent.front_pos
+                fwd_cell = self.grid.get(*fwd_pos)
+                if fwd_cell and fwd_cell.can_pickup():
+                    # Use object position as identifier
+                    agent_targets[agent_idx] = ('pickup', tuple(fwd_pos))
+                else:
+                    # No valid target, agent acts independently
+                    agent_targets[agent_idx] = ('independent', agent_idx)
+            
+            elif action == self.actions.drop:
+                # Check if dropping on another agent or specific location
+                fwd_pos = agent.front_pos
+                fwd_cell = self.grid.get(*fwd_pos)
+                if fwd_cell and fwd_cell.type == 'agent':
+                    # Interacting with another agent
+                    agent_targets[agent_idx] = ('drop_agent', tuple(fwd_pos))
+                else:
+                    # Dropping on ground, independent action
+                    agent_targets[agent_idx] = ('independent', agent_idx)
+            
+            else:
+                # Other actions (toggle, build, done) - typically independent
+                agent_targets[agent_idx] = ('independent', agent_idx)
+        
+        # Group agents by their target resource
+        resource_to_agents = {}
+        for agent_idx, resource in agent_targets.items():
+            if resource not in resource_to_agents:
+                resource_to_agents[resource] = []
+            resource_to_agents[resource].append(agent_idx)
+        
+        # Convert to list of blocks
+        # Only resources with multiple agents form conflict blocks
+        conflict_blocks = []
+        for resource, agent_list in resource_to_agents.items():
+            if len(agent_list) > 1 and resource[0] != 'independent':
+                # Multiple agents competing for same resource
+                conflict_blocks.append(agent_list)
+            else:
+                # Each agent acts independently (singleton blocks)
+                for agent_idx in agent_list:
+                    conflict_blocks.append([agent_idx])
+        
+        return conflict_blocks
+    
+    def _build_ordering_with_winners(self, num_agents, active_agents, conflict_blocks, winners):
+        """
+        Build an agent ordering that respects conflict block winners.
+        
+        Winners go first in their blocks, giving them priority for contested resources.
+        
+        Args:
+            num_agents: Total number of agents
+            active_agents: List of active agent indices
+            conflict_blocks: List of conflict blocks
+            winners: List of winning agent indices (one per block)
+            
+        Returns:
+            tuple: Full ordering of all agent indices
+        """
+        # Build ordering: winners first, then other agents in original order
+        ordering = []
+        
+        # Track which agents are winners
+        winner_set = set(winners)
+        
+        # Add winners first (in the order they win)
+        for winner in winners:
+            ordering.append(winner)
+        
+        # Add all other agents in their original order
+        for i in range(num_agents):
+            if i not in winner_set and i not in active_agents:
+                # Inactive agents
+                ordering.append(i)
+        
+        # Add non-winning active agents
+        for agent_idx in active_agents:
+            if agent_idx not in winner_set:
+                ordering.append(agent_idx)
+        
+        return tuple(ordering)
     
     def _build_full_ordering(self, num_agents, active_perm, inactive_agents):
         """

@@ -101,9 +101,9 @@ actions = [toggle, forward, still]  # Agent 0 opens door, Agent 1 moves through
 
 ## Computing Exact Probabilities
 
-The `transition_probabilities(state, actions)` method computes **exact** probabilities through exhaustive enumeration, not sampling:
+The `transition_probabilities(state, actions)` method computes **exact** probabilities using an efficient conflict block partitioning algorithm:
 
-### Algorithm
+### Algorithm (Optimized with Conflict Blocks)
 
 1. **Identify active agents**: Which agents will actually act (not terminated/paused/still)
 
@@ -111,42 +111,68 @@ The `transition_probabilities(state, actions)` method computes **exact** probabi
    - ≤1 active agent → return single outcome with prob 1.0
    - All rotations → return single outcome with prob 1.0
 
-3. **Generate permutations**: Create all k! orderings of k active agents
+3. **Partition into conflict blocks**: Group agents that compete for the same resource
+   - Agents moving to same cell → in same block
+   - Agents picking up same object → in same block
+   - Independent agents → singleton blocks
 
-4. **Compute each outcome**: For each ordering, deterministically compute the successor state
+4. **Compute via Cartesian product**: For each combination of winners (one per block)
+   - Total outcomes = product of block sizes
+   - Each outcome has equal probability = 1 / product(block_sizes)
 
-5. **Aggregate probabilities**: Count how many orderings lead to each unique state
-   ```python
-   probability = count / k!
-   ```
+5. **Aggregate probabilities**: Multiple outcomes may lead to same state
 
 6. **Return results**: List of (probability, successor_state) pairs
 
+### Why This Is More Efficient
+
+**Traditional approach** (enumerating all permutations):
+- With k active agents: k! permutations to check
+- Example: 4 agents = 24 permutations
+
+**Conflict block approach** (suggested by @mensch72):
+- Partition agents into conflict blocks
+- Cartesian product of blocks
+- Example: 2 blocks of 2 agents each = 2×2 = **4 outcomes** (6× faster!)
+
 ### Example
 
-With 3 agents all acting (forward, forward, forward):
-- Total orderings: 3! = 6
-- If 4 orderings lead to state A and 2 to state B:
-  - State A: probability 4/6 = 0.667
-  - State B: probability 2/6 = 0.333
+Scenario: 4 agents, where agents 0&1 compete for cell A, agents 2&3 compete for cell B
+
+**Conflict blocks**: [[0, 1], [2, 3]]
+
+**Outcomes**: 2 × 2 = 4 possible outcomes:
+- Agent 0 wins A, Agent 2 wins B: probability 1/4
+- Agent 0 wins A, Agent 3 wins B: probability 1/4
+- Agent 1 wins A, Agent 2 wins B: probability 1/4
+- Agent 1 wins A, Agent 3 wins B: probability 1/4
+
+Compare to traditional: 4! = 24 permutations (6× slower)
+
+Most cases have many singleton blocks (no conflicts), making this very fast.
 
 ## Optimization Strategy
 
-The implementation is optimized for the common case where most orderings produce the same result:
+The implementation uses conflict block partitioning for maximum efficiency:
 
 ### Optimizations Applied
 
 1. **Early deterministic detection**: Check for ≤1 active agent or all-rotations
-2. **Active-only permutations**: Only permute active agents (k! instead of n!)
-3. **Sampling check**: Test a sample of orderings to detect likely deterministic cases
-4. **Early exit**: If 25% of orderings all produce same state, likely all do
-5. **Efficient state hashing**: Use hashable state tuples for fast duplicate detection
+2. **Conflict block partitioning**: Group only agents that actually compete
+3. **Cartesian product**: Compute product of block sizes instead of k! permutations
+4. **Equal probability**: Each outcome has 1 / product(block_sizes)
+5. **Efficient state computation**: Only compute necessary state transitions
 
 ### Performance
 
 - **Best case** (deterministic): O(1) - single state computation
-- **Common case** (mostly same result): O(k) - early exit after sampling
-- **Worst case** (truly probabilistic): O(k! × S) where S is state computation cost
+- **Typical case** (few conflicts): O(product of conflict block sizes) << O(k!)
+- **Worst case** (all agents conflict): O(k!) but very rare in practice
+
+For 4 agents:
+- Traditional worst case: 24 state computations
+- Conflict blocks (2+2): 4 state computations (6× faster)
+- No conflicts: 1 state computation (24× faster)
 
 For typical scenarios with k=3 agents, worst case is 6 state computations.
 
