@@ -1,11 +1,12 @@
-.PHONY: help build up down restart shell logs clean test lint
+.PHONY: help build up up-gpu down restart shell logs clean test lint
 
 # Default target
 help:
 	@echo "EMPO Development Commands"
 	@echo "========================="
 	@echo "make build          - Build Docker image"
-	@echo "make up             - Start development environment"
+	@echo "make up             - Start development environment (CPU mode)"
+	@echo "make up-gpu         - Start development environment (GPU mode)"
 	@echo "make down           - Stop development environment"
 	@echo "make restart        - Restart development environment"
 	@echo "make shell          - Open shell in container"
@@ -23,7 +24,14 @@ build:
 
 up:
 	docker compose up -d
-	@echo "Development environment started. Use 'make shell' to enter."
+	@echo "Development environment started (CPU mode)."
+	@echo "Use 'make shell' to enter."
+	@echo "For GPU support, use 'make up-gpu' instead."
+
+up-gpu:
+	docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+	@echo "Development environment started (GPU mode)."
+	@echo "Use 'make shell' to enter."
 
 down:
 	docker compose down

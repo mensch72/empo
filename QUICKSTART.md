@@ -29,12 +29,20 @@ bash scripts/verify_setup.sh
 
 ### 2. Start Development Environment
 
+**CPU mode (default - works on all systems):**
 ```bash
 # Start the container
 make up
-
 # Or manually
 docker compose up -d
+```
+
+**GPU mode (for systems with NVIDIA GPU):**
+```bash
+# Start with GPU support
+make up-gpu
+# Or manually
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 ```
 
 ### 3. Enter the Container

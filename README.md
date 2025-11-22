@@ -37,13 +37,23 @@ cd empo
 
 ### 1. Build and Start the Development Environment
 
+**For CPU-only systems (laptops without GPU):**
 ```bash
-# Build and start the container
+# Build and start the container (CPU mode - no GPU required)
+make up
+# Or directly:
 docker compose up -d
-
-# Or rebuild if you've made changes
-docker compose up --build -d
 ```
+
+**For systems with NVIDIA GPU:**
+```bash
+# Build and start with GPU support
+make up-gpu
+# Or directly:
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+```
+
+**Note**: The base Docker image includes CUDA libraries (~5GB). On CPU-only systems, these libraries won't be used but the image size remains the same. The container works fine without GPU - PyTorch will automatically use CPU.
 
 ### 2. Enter the Container
 
@@ -85,12 +95,27 @@ docker compose exec empo-dev python train.py
 
 ### 5. GPU Support
 
-GPU support is automatically enabled if you have NVIDIA Docker runtime installed. Verify GPU access:
+**Enabling GPU support:**
+
+For systems with NVIDIA GPU, use the GPU-enabled docker-compose configuration:
+
+```bash
+# Start with GPU support
+make up-gpu
+# Or:
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+```
+
+**Verifying GPU access:**
 
 ```bash
 docker compose exec empo-dev nvidia-smi
 docker compose exec empo-dev python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}')"
 ```
+
+**CPU-only mode:**
+
+The default `make up` or `docker compose up` starts in CPU mode without GPU requirements. This works on any system including laptops without GPU. PyTorch will automatically use CPU for computations.
 
 ### 6. Jupyter Notebook (Optional)
 

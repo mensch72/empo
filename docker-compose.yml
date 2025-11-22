@@ -12,18 +12,6 @@ services:
     image: empo:dev
     container_name: empo-dev
     
-    # GPU support - automatically uses GPUs if available
-    # Requires nvidia-docker2 and NVIDIA Container Toolkit installed
-    # Note: 'count: all' reserves all GPUs. To use specific GPUs, set CUDA_VISIBLE_DEVICES
-    # environment variable or change 'count: all' to 'count: 1' (or specific number)
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-    
     # Bind mount the repository for live development
     volumes:
       - .:/workspace
@@ -45,7 +33,7 @@ services:
     
     # Optional: pass environment variables
     environment:
-      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-all}
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-}
       - WANDB_API_KEY=${WANDB_API_KEY:-}
       - PYTHONPATH=/workspace:/workspace/vendor/multigrid
     
