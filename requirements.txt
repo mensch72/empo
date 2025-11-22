@@ -1,0 +1,21 @@
+# Core ML frameworks
+torch>=2.0.0
+numpy>=1.24.0
+gymnasium>=0.28.0
+
+# MARL and Multigrid dependencies
+pettingzoo>=1.24.0
+multigrid>=0.1.0
+
+# Optional JAX support
+# jax[cuda12]==0.4.23
+# jaxlib
+
+# Utilities
+PyYAML>=6.0
+matplotlib>=3.7.0
+tensorboard>=2.13.0
+wandb>=0.15.0
+
+# MPI for distributed training (optional)
+mpi4py>=3.1.0

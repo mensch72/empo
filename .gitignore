@@ -207,3 +207,15 @@ marimo/_lsp/
 __marimo__/
 
 nohup.out
+
+# Docker and Singularity
+*.tar
+*.sif
+.env
+
+# Outputs and logs
+outputs/
+logs/
+checkpoints/
+wandb/
+runs/
