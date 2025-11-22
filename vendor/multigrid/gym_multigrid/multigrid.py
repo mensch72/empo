@@ -1078,7 +1078,11 @@ class MultiGridEnv(gym.Env):
         Generate random integer in [low,high[
         """
 
-        return self.np_random.randint(low, high)
+        # Handle both old and new numpy random API
+        if hasattr(self.np_random, 'randint'):
+            return self.np_random.randint(low, high)
+        else:
+            return self.np_random.integers(low, high)
 
     def _rand_float(self, low, high):
         """
@@ -1092,7 +1096,11 @@ class MultiGridEnv(gym.Env):
         Generate random boolean value
         """
 
-        return (self.np_random.randint(0, 2) == 0)
+        # Handle both old and new numpy random API
+        if hasattr(self.np_random, 'randint'):
+            return (self.np_random.randint(0, 2) == 0)
+        else:
+            return (self.np_random.integers(0, 2) == 0)
 
     def _rand_elem(self, iterable):
         """
@@ -1440,3 +1448,593 @@ class MultiGridEnv(gym.Env):
             self.window.show_img(img)
 
         return img
+
+    def get_state(self):
+        """
+        Get the complete state of the environment.
+        
+        Returns a hashable dictionary containing everything needed to predict
+        the consequences of possible actions:
+        - Grid state (all objects and their properties)
+        - Agent states (positions, directions, carrying items, status flags)
+        - Step count (for timeout tracking)
+        - Random number generator state
+        
+        Returns:
+            tuple: A hashable representation of the complete environment state
+        """
+        from copy import deepcopy
+        
+        # Serialize grid state
+        grid_state = []
+        for j in range(self.grid.height):
+            for i in range(self.grid.width):
+                cell = self.grid.get(i, j)
+                if cell is None:
+                    grid_state.append(None)
+                else:
+                    # Serialize object with all its properties
+                    obj_data = {
+                        'type': cell.type,
+                        'color': cell.color,
+                        'init_pos': tuple(cell.init_pos) if cell.init_pos is not None else None,
+                        'cur_pos': tuple(cell.cur_pos) if cell.cur_pos is not None else None,
+                    }
+                    
+                    # Add type-specific properties
+                    if hasattr(cell, 'is_open'):
+                        obj_data['is_open'] = cell.is_open
+                    if hasattr(cell, 'is_locked'):
+                        obj_data['is_locked'] = cell.is_locked
+                    if hasattr(cell, 'contains'):
+                        # Recursively serialize contained objects
+                        if cell.contains is not None:
+                            obj_data['contains'] = self._serialize_object(cell.contains)
+                        else:
+                            obj_data['contains'] = None
+                    if hasattr(cell, 'index'):
+                        obj_data['index'] = cell.index
+                    if hasattr(cell, 'reward'):
+                        obj_data['reward'] = cell.reward
+                    if hasattr(cell, 'target_type'):
+                        obj_data['target_type'] = cell.target_type
+                    if isinstance(cell, Agent):
+                        # For agents in grid, just store basic info (detailed agent state below)
+                        obj_data['agent_index'] = cell.index
+                    
+                    grid_state.append(tuple(sorted(obj_data.items())))
+        
+        # Serialize agent states
+        agents_state = []
+        for agent in self.agents:
+            agent_data = {
+                'pos': tuple(agent.pos) if agent.pos is not None else None,
+                'dir': agent.dir,
+                'index': agent.index,
+                'view_size': agent.view_size,
+                'terminated': agent.terminated,
+                'started': agent.started,
+                'paused': agent.paused,
+                'carrying': self._serialize_object(agent.carrying) if agent.carrying is not None else None,
+            }
+            agents_state.append(tuple(sorted(agent_data.items())))
+        
+        # Get RNG state - serialize in a way that works across numpy versions
+        rng_state = self.np_random.bit_generator.state
+        
+        # Serialize RNG state in a version-agnostic way
+        if isinstance(rng_state['state'], dict):
+            # New numpy format (PCG64, etc.)
+            rng_state_tuple = (
+                rng_state['bit_generator'],
+                tuple(sorted(rng_state['state'].items())),  # Serialize as tuple of items
+                rng_state.get('has_uint32', 0),
+                rng_state.get('uinteger', 0),
+            )
+        else:
+            # Old numpy format (MT19937)
+            rng_state_tuple = (
+                rng_state['bit_generator'],
+                tuple(rng_state['state']['key']),
+                rng_state['state']['pos'],
+                rng_state.get('has_gauss', 0),
+                rng_state.get('gauss', 0.0),
+            )
+        
+        # Create complete state tuple
+        state = (
+            ('grid', tuple(grid_state)),
+            ('agents', tuple(agents_state)),
+            ('step_count', self.step_count),
+            ('rng_state', rng_state_tuple),
+        )
+        
+        return state
+    
+    def _serialize_object(self, obj):
+        """Helper method to serialize a WorldObj into a hashable structure."""
+        if obj is None:
+            return None
+        
+        obj_data = {
+            'type': obj.type,
+            'color': obj.color,
+            'init_pos': tuple(obj.init_pos) if obj.init_pos is not None else None,
+            'cur_pos': tuple(obj.cur_pos) if obj.cur_pos is not None else None,
+        }
+        
+        # Add type-specific properties
+        if hasattr(obj, 'is_open'):
+            obj_data['is_open'] = obj.is_open
+        if hasattr(obj, 'is_locked'):
+            obj_data['is_locked'] = obj.is_locked
+        if hasattr(obj, 'index'):
+            obj_data['index'] = obj.index
+        if hasattr(obj, 'reward'):
+            obj_data['reward'] = obj.reward
+        if hasattr(obj, 'target_type'):
+            obj_data['target_type'] = obj.target_type
+        if hasattr(obj, 'contains'):
+            if obj.contains is not None:
+                obj_data['contains'] = self._serialize_object(obj.contains)
+            else:
+                obj_data['contains'] = None
+        
+        return tuple(sorted(obj_data.items()))
+    
+    def set_state(self, state):
+        """
+        Set the environment to a specific state.
+        
+        Args:
+            state: A state tuple as returned by get_state()
+        """
+        from copy import deepcopy
+        
+        # Convert state tuple back to dict for easier access
+        state_dict = dict(state)
+        
+        # Restore step count
+        self.step_count = state_dict['step_count']
+        
+        # Restore RNG state - handle different formats
+        rng_info = state_dict['rng_state']
+        bit_generator_name = rng_info[0]
+        
+        # Reconstruct the RNG state dict based on format
+        if isinstance(rng_info[1], tuple) and len(rng_info[1]) > 0 and isinstance(rng_info[1][0], tuple):
+            # New format with dict serialized as tuple of items
+            state_dict_items = dict(rng_info[1])
+            rng_state = {
+                'bit_generator': bit_generator_name,
+                'state': state_dict_items,
+                'has_uint32': rng_info[2],
+                'uinteger': rng_info[3],
+            }
+        else:
+            # Old format or fallback
+            rng_state = {
+                'bit_generator': bit_generator_name,
+                'state': {
+                    'key': np.array(rng_info[1], dtype=np.uint32),
+                    'pos': rng_info[2],
+                },
+                'has_gauss': rng_info[3],
+                'gauss': rng_info[4],
+            }
+        
+        self.np_random.bit_generator.state = rng_state
+        
+        # Restore grid
+        grid_data = state_dict['grid']
+        idx = 0
+        for j in range(self.grid.height):
+            for i in range(self.grid.width):
+                cell_data = grid_data[idx]
+                idx += 1
+                
+                if cell_data is None:
+                    self.grid.set(i, j, None)
+                else:
+                    obj = self._deserialize_object(dict(cell_data))
+                    self.grid.set(i, j, obj)
+        
+        # Restore agent states
+        agents_data = state_dict['agents']
+        for agent_idx, agent_state in enumerate(agents_data):
+            agent_dict = dict(agent_state)
+            agent = self.agents[agent_idx]
+            
+            agent.pos = np.array(agent_dict['pos']) if agent_dict['pos'] is not None else None
+            agent.dir = agent_dict['dir']
+            agent.terminated = agent_dict['terminated']
+            agent.started = agent_dict['started']
+            agent.paused = agent_dict['paused']
+            
+            if agent_dict['carrying'] is not None:
+                agent.carrying = self._deserialize_object(dict(agent_dict['carrying']))
+            else:
+                agent.carrying = None
+                if cell_data is None:
+                    self.grid.set(i, j, None)
+                else:
+                    obj = self._deserialize_object(dict(cell_data))
+                    self.grid.set(i, j, obj)
+        
+        # Restore agent states
+        agents_data = state_dict['agents']
+        for agent_idx, agent_state in enumerate(agents_data):
+            agent_dict = dict(agent_state)
+            agent = self.agents[agent_idx]
+            
+            agent.pos = np.array(agent_dict['pos']) if agent_dict['pos'] is not None else None
+            agent.dir = agent_dict['dir']
+            agent.terminated = agent_dict['terminated']
+            agent.started = agent_dict['started']
+            agent.paused = agent_dict['paused']
+            
+            if agent_dict['carrying'] is not None:
+                agent.carrying = self._deserialize_object(dict(agent_dict['carrying']))
+            else:
+                agent.carrying = None
+    
+    def _deserialize_object(self, obj_data):
+        """Helper method to deserialize a WorldObj from a dictionary."""
+        obj_type = obj_data['type']
+        color = obj_data['color']
+        
+        # Create appropriate object based on type
+        if obj_type == 'wall':
+            obj = Wall(self.objects, color)
+        elif obj_type == 'floor':
+            obj = Floor(self.objects, color)
+        elif obj_type == 'lava':
+            obj = Lava(self.objects)
+        elif obj_type == 'door':
+            obj = Door(self.objects, color, 
+                      is_open=obj_data.get('is_open', False),
+                      is_locked=obj_data.get('is_locked', False))
+        elif obj_type == 'key':
+            obj = Key(self.objects, color)
+        elif obj_type == 'ball':
+            obj = Ball(self.objects, 
+                      index=obj_data.get('index', 0),
+                      reward=obj_data.get('reward', 1))
+        elif obj_type == 'box':
+            contains = None
+            if 'contains' in obj_data and obj_data['contains'] is not None:
+                contains = self._deserialize_object(dict(obj_data['contains']))
+            obj = Box(self.objects, color, contains=contains)
+        elif obj_type == 'goal':
+            obj = Goal(self.objects, 
+                      index=obj_data.get('index', 0),
+                      reward=obj_data.get('reward', 1),
+                      color=self.objects.COLOR_TO_IDX.get(color))
+        elif obj_type == 'objgoal':
+            obj = ObjectGoal(self.objects,
+                           index=obj_data.get('index', 0),
+                           target_type=obj_data.get('target_type', 'ball'),
+                           reward=obj_data.get('reward', 1),
+                           color=self.objects.COLOR_TO_IDX.get(color))
+        elif obj_type == 'switch':
+            obj = Switch(self.objects)
+        elif obj_type == 'agent':
+            # For agents in the grid, find the agent by its index attribute (color)
+            agent_color_idx = obj_data.get('agent_index', 0)
+            # Find the agent in self.agents that has this color index
+            obj = None
+            for agent in self.agents:
+                if agent.index == agent_color_idx:
+                    obj = agent
+                    break
+            if obj is None:
+                raise ValueError(f"Could not find agent with index {agent_color_idx}")
+        else:
+            raise ValueError(f"Unknown object type: {obj_type}")
+        
+        # Restore position information
+        if obj_data['init_pos'] is not None:
+            obj.init_pos = np.array(obj_data['init_pos'])
+        if obj_data['cur_pos'] is not None:
+            obj.cur_pos = np.array(obj_data['cur_pos'])
+        
+        return obj
+    
+    def transition_probabilities(self, state, actions):
+        """
+        Given a state and vector of actions, return possible transitions with exact probabilities.
+        
+        **When transitions are probabilistic vs deterministic:**
+        
+        Transitions in multigrid environments are **deterministic** EXCEPT in the following case:
+        - When multiple agents are active (not terminated/paused/started=False) AND
+        - At least 2+ agents choose non-"still" actions AND  
+        - The order of action execution matters for the outcome
+        
+        The ONLY source of non-determinism is the random permutation of agent execution order
+        at line 1257 of the step() function: `order = np.random.permutation(len(actions))`
+        
+        All individual actions (left, right, forward, pickup, drop, toggle, etc.) are 
+        themselves deterministic - there is no randomness in their effects.
+        
+        **When order matters:**
+        Order of execution can matter when:
+        - Two agents try to move into the same cell
+        - Two agents try to pick up the same object
+        - Agents interact with each other (e.g., stealing carried objects)
+        - An agent's action depends on the grid state that another agent modifies
+        
+        **Computing exact probabilities (optimized):**
+        Since np.random.permutation creates a uniform distribution over all n! permutations,
+        each permutation has probability 1/n! where n is the number of agents.
+        
+        **Optimization strategy:**
+        Most of the time, most permutations lead to the same result because:
+        1. Agents are often far apart and don't interact
+        2. Only rotation/still actions are used (always commutative)
+        3. Order only matters for conflicting actions
+        
+        We optimize by:
+        1. Early exit if ≤1 active agents (deterministic)
+        2. Computing a sample of orderings first to detect if all lead to same state
+        3. Only permuting the subset of active agents, not all agents
+        4. Using efficient state hashing to detect duplicates quickly
+        
+        Args:
+            state: A state tuple as returned by get_state()
+            actions: List of action indices, one per agent
+            
+        Returns:
+            list: List of (probability, successor_state) tuples describing all
+                  possible transitions. Returns None if the state is terminal
+                  or if any action is not feasible in the given state.
+        """
+        # Check if we're in a terminal state
+        state_dict = dict(state)
+        if state_dict['step_count'] >= self.max_steps:
+            return None
+        
+        # Check if all actions are valid
+        for action in actions:
+            if action < 0 or action >= self.action_space.n:
+                return None
+        
+        # Save current state to restore later
+        original_state = self.get_state()
+        
+        try:
+            # Restore to the query state
+            self.set_state(state)
+            
+            num_agents = len(self.agents)
+            
+            # Identify which agents will actually act
+            active_agents = []
+            inactive_agents = []
+            for i in range(num_agents):
+                if (not self.agents[i].terminated and 
+                    not self.agents[i].paused and 
+                    self.agents[i].started and 
+                    actions[i] != self.actions.still):
+                    active_agents.append(i)
+                else:
+                    inactive_agents.append(i)
+            
+            # OPTIMIZATION 1: If ≤1 agents active, transition is deterministic
+            if len(active_agents) <= 1:
+                # Only one or zero agents acting - order doesn't matter
+                successor_state = self._compute_successor_state(state, actions, tuple(range(num_agents)))
+                return [(1.0, successor_state)]
+            
+            # OPTIMIZATION 2: Check if all actions are rotations (left/right)
+            # Rotations never interfere with each other, so order doesn't matter
+            all_rotations = all(
+                actions[i] in [self.actions.left, self.actions.right] 
+                for i in active_agents
+            )
+            if all_rotations:
+                # Rotations are commutative - result is deterministic
+                successor_state = self._compute_successor_state(state, actions, tuple(range(num_agents)))
+                return [(1.0, successor_state)]
+            
+            # OPTIMIZATION 3: Only permute active agents, keep inactive ones in fixed positions
+            # This reduces permutations from n! to k! where k = number of active agents
+            from itertools import permutations
+            from math import factorial
+            
+            # Generate all permutations of just the active agents
+            active_permutations = list(permutations(active_agents))
+            total_orderings = len(active_permutations)  # = k!
+            
+            # OPTIMIZATION 4: Sample a few orderings first to check if result is deterministic
+            # This handles the common case where agents don't interact
+            if total_orderings > 6:  # Only sample if there are many orderings
+                sample_size = min(6, total_orderings)
+                sample_orderings = active_permutations[:sample_size]
+                
+                # Compute states for sample
+                sample_states = set()
+                for active_perm in sample_orderings:
+                    # Build full ordering: inactive agents in original order, active as permuted
+                    full_ordering = self._build_full_ordering(num_agents, active_perm, inactive_agents)
+                    succ_state = self._compute_successor_state(state, actions, full_ordering)
+                    sample_states.add(succ_state)
+                
+                # If all sampled orderings produce same state, likely all do
+                if len(sample_states) == 1:
+                    # Verify with one more ordering from the end
+                    if total_orderings > sample_size:
+                        last_perm = active_permutations[-1]
+                        full_ordering = self._build_full_ordering(num_agents, last_perm, inactive_agents)
+                        last_state = self._compute_successor_state(state, actions, full_ordering)
+                        
+                        if last_state == list(sample_states)[0]:
+                            # Very likely deterministic, return early
+                            return [(1.0, last_state)]
+            
+            # OPTIMIZATION 5: Compute all orderings with efficient state tracking
+            successor_counts = {}
+            
+            for active_perm in active_permutations:
+                # Build full ordering
+                full_ordering = self._build_full_ordering(num_agents, active_perm, inactive_agents)
+                
+                # Compute successor state
+                succ_state = self._compute_successor_state(state, actions, full_ordering)
+                
+                # Count occurrences (state is hashable tuple)
+                if succ_state not in successor_counts:
+                    successor_counts[succ_state] = 0
+                successor_counts[succ_state] += 1
+                
+                # OPTIMIZATION 6: Early exit if we've found all states are the same
+                # After computing 25% of orderings, check if all identical
+                if len(successor_counts) == 1 and len(active_permutations) > 12:
+                    progress = sum(successor_counts.values())
+                    if progress == total_orderings // 4:
+                        # Check one from the end to confirm
+                        last_perm = active_permutations[-1]
+                        full_ordering = self._build_full_ordering(num_agents, last_perm, inactive_agents)
+                        last_state = self._compute_successor_state(state, actions, full_ordering)
+                        
+                        if last_state in successor_counts:
+                            # Very likely all the same, return early
+                            return [(1.0, last_state)]
+            
+            # Convert counts to probabilities
+            result = []
+            for succ_state, count in successor_counts.items():
+                probability = count / total_orderings
+                result.append((probability, succ_state))
+            
+            # Sort by probability (descending) for consistency
+            result.sort(key=lambda x: x[0], reverse=True)
+            
+            return result
+            
+        finally:
+            # Always restore original state
+            self.set_state(original_state)
+    
+    def _build_full_ordering(self, num_agents, active_perm, inactive_agents):
+        """
+        Build a full agent ordering from a permutation of active agents.
+        
+        Inactive agents are placed in their original positions, active agents
+        are placed in the order specified by active_perm.
+        
+        Args:
+            num_agents: Total number of agents
+            active_perm: Tuple of active agent indices in some order
+            inactive_agents: List of inactive agent indices
+            
+        Returns:
+            tuple: Full ordering of all agent indices
+        """
+        # Build ordering that respects relative order of active agents
+        # but keeps inactive agents in their original positions
+        ordering = []
+        active_iter = iter(active_perm)
+        
+        for i in range(num_agents):
+            if i in inactive_agents:
+                ordering.append(i)
+            else:
+                ordering.append(next(active_iter))
+        
+        return tuple(ordering)
+    
+    def _compute_successor_state(self, state, actions, ordering):
+        """
+        Compute the exact successor state for given actions and agent ordering.
+        
+        This is a pure computation that doesn't rely on RNG or executing step().
+        It replicates the deterministic logic of step() with a fixed ordering.
+        
+        Args:
+            state: Current state tuple
+            actions: List of action indices
+            ordering: Tuple specifying the order in which agents act
+            
+        Returns:
+            tuple: The successor state
+        """
+        # Start from the given state
+        self.set_state(state)
+        
+        # Increment step counter
+        self.step_count += 1
+        
+        # Execute each agent's action in the specified order
+        rewards = np.zeros(len(actions))
+        done = False
+        
+        for i in ordering:
+            # Skip if agent shouldn't act
+            if (self.agents[i].terminated or 
+                self.agents[i].paused or 
+                not self.agents[i].started or 
+                actions[i] == self.actions.still):
+                continue
+            
+            # Get the position in front of the agent
+            fwd_pos = self.agents[i].front_pos
+            
+            # Get the contents of the cell in front of the agent
+            fwd_cell = self.grid.get(*fwd_pos)
+            
+            # Execute the action
+            if actions[i] == self.actions.left:
+                # Rotate left
+                self.agents[i].dir -= 1
+                if self.agents[i].dir < 0:
+                    self.agents[i].dir += 4
+            
+            elif actions[i] == self.actions.right:
+                # Rotate right
+                self.agents[i].dir = (self.agents[i].dir + 1) % 4
+            
+            elif actions[i] == self.actions.forward:
+                # Move forward
+                if fwd_cell is not None:
+                    if fwd_cell.type == 'goal':
+                        done = True
+                        self._reward(i, rewards, 1)
+                    elif fwd_cell.type == 'switch':
+                        self._handle_switch(i, rewards, fwd_pos, fwd_cell)
+                if fwd_cell is None or fwd_cell.can_overlap():
+                    self.grid.set(*fwd_pos, self.agents[i])
+                    self.grid.set(*self.agents[i].pos, None)
+                    self.agents[i].pos = fwd_pos
+                self._handle_special_moves(i, rewards, fwd_pos, fwd_cell)
+            
+            elif 'build' in self.actions.available and actions[i] == self.actions.build:
+                self._handle_build(i, rewards, fwd_pos, fwd_cell)
+            
+            elif actions[i] == self.actions.pickup:
+                # Pick up an object
+                self._handle_pickup(i, rewards, fwd_pos, fwd_cell)
+            
+            elif actions[i] == self.actions.drop:
+                # Drop an object
+                self._handle_drop(i, rewards, fwd_pos, fwd_cell)
+            
+            elif actions[i] == self.actions.toggle:
+                # Toggle/activate an object
+                if fwd_cell:
+                    fwd_cell.toggle(self, fwd_pos)
+            
+            elif actions[i] == self.actions.done:
+                # Done action (not used by default)
+                pass
+            
+            else:
+                # Invalid action
+                return None
+        
+        # Check if max steps reached
+        if self.step_count >= self.max_steps:
+            done = True
+        
+        # Return the resulting state
+        return self.get_state()
