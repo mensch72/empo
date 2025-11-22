@@ -154,6 +154,61 @@ docker compose down -v
 
 ## Cluster Deployment
 
+EMPO provides streamlined GPU-enabled cluster deployment with two methods. See [CLUSTER.md](CLUSTER.md) for the complete guide.
+
+### Quick Deploy to Cluster
+
+#### Method 1: Via Docker Hub (Recommended)
+
+Build locally and push to Docker Hub, then pull on cluster:
+
+```bash
+# On local machine:
+# 1. Configure Docker Hub credentials in .env
+cp .env.example .env
+# Edit .env and set DOCKER_USERNAME
+
+# 2. Build and push GPU image
+make up-gpu-docker-hub
+
+# On cluster:
+# 3. Pull and run
+cd ~/bega/empo
+mkdir -p git && cd git && git clone <your-repo-url> . && cd ..
+apptainer pull empo.sif docker://yourusername/empo:gpu-latest
+cd git && sbatch ../scripts/run_cluster_sif.sh
+```
+
+#### Method 2: Direct SIF Transfer
+
+Build SIF file locally and copy directly to cluster (requires Apptainer/Singularity locally):
+
+```bash
+# On local machine:
+# 1. Build SIF file
+make up-gpu-sif-file
+
+# 2. Copy to cluster
+scp empo-gpu.sif user@cluster:~/bega/empo/
+
+# On cluster:
+# 3. Run training
+cd ~/bega/empo/git
+sbatch ../scripts/run_cluster_sif.sh
+```
+
+### Key Features
+
+- ✅ **GPU Support**: Full CUDA 12.1 support for cluster GPUs
+- ✅ **No Rebuild**: Same workflows as local development
+- ✅ **Fixed Working Directory**: No more "chdir" warnings
+- ✅ **SLURM Ready**: Pre-configured job scripts included
+
+### Cluster Deployment (Legacy Instructions)
+
+<details>
+<summary>Click to expand older deployment methods</summary>
+
 ### 1. Build the Docker Image
 
 First, build the production Docker image (without dev dependencies):
