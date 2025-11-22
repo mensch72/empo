@@ -22,13 +22,17 @@ build:
 
 up:
 	@echo "Starting development environment..."
-	@if command -v nvidia-smi > /dev/null 2>&1 && nvidia-smi > /dev/null 2>&1; then \
+	@# Set USER_ID and GROUP_ID if not already set
+	@if [ -z "$$USER_ID" ]; then export USER_ID=$$(id -u); fi; \
+	if [ -z "$$GROUP_ID" ]; then export GROUP_ID=$$(id -g); fi; \
+	if command -v nvidia-smi > /dev/null 2>&1 && nvidia-smi > /dev/null 2>&1; then \
 		echo "✓ GPU detected - GPU will be available in container"; \
-		export DOCKER_DEFAULT_PLATFORM=linux/amd64; \
-		docker compose up -d --build; \
+		echo "✓ Using USER_ID=$$USER_ID, GROUP_ID=$$GROUP_ID for file permissions"; \
+		USER_ID=$$USER_ID GROUP_ID=$$GROUP_ID docker compose up -d --build; \
 	else \
 		echo "✓ No GPU detected - running in CPU mode"; \
-		docker compose up -d --build; \
+		echo "✓ Using USER_ID=$$USER_ID, GROUP_ID=$$GROUP_ID for file permissions"; \
+		USER_ID=$$USER_ID GROUP_ID=$$GROUP_ID docker compose up -d --build; \
 	fi
 	@echo "Development environment started. Use 'make shell' to enter."
 

@@ -341,12 +341,20 @@ docker compose config
 ```
 
 **Permission issues:**
+
+The `make up` command automatically sets USER_ID and GROUP_ID to match your host user. If you encounter permission issues:
+
 ```bash
-# Set correct user IDs
+# Make sure you're using make up (recommended)
+make up
+
+# Or manually set user IDs with docker compose
 export USER_ID=$(id -u)
 export GROUP_ID=$(id -g)
 docker compose up --build
 ```
+
+If you still have issues, ensure you have write permissions to the repository directory on your host system.
 
 ### Singularity/Apptainer Issues
 

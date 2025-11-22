@@ -35,8 +35,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Upgrade pip and install build tools
-RUN python3 -m pip install --upgrade pip setuptools wheel
+# Create python symlink and upgrade pip
+RUN ln -s /usr/bin/python3 /usr/bin/python && \
+    python3 -m pip install --upgrade pip setuptools wheel
 
 # Copy requirements files
 COPY requirements.txt /tmp/requirements.txt
@@ -63,11 +64,14 @@ ARG GROUP_ID=1000
 RUN groupadd -g ${GROUP_ID} appuser && \
     useradd -m -u ${USER_ID} -g appuser -s /bin/bash appuser
 
-# Set permissions for workspace
-RUN chown -R appuser:appuser /workspace
+# Create workspace directory and set permissions
+RUN mkdir -p /workspace && chown -R appuser:appuser /workspace
 
 # Switch to non-root user
 USER appuser
+
+# Create common output directories
+RUN mkdir -p /workspace/outputs /workspace/logs
 
 # Default command (can be overridden)
 CMD ["/bin/bash"]
