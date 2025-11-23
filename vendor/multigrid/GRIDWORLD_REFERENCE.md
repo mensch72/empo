@@ -10,7 +10,7 @@ MultiGrid is a 2D grid-based multi-agent environment where agents navigate a gri
 
 Each cell in the grid can contain:
 - **Empty space** (None) - Agents can move through
-- **One object** - Wall, floor, door, key, ball, box, goal, lava, switch, or object goal
+- **One object** - Wall, floor, door, key, ball, box, goal, lava, switch, object goal, block, or rock
 - **One agent** - When an agent occupies a cell
 
 ## Object Types
@@ -126,7 +126,54 @@ Each cell in the grid can contain:
   - **Forward action** onto switch: Triggers switch activation
   - Effects depend on environment implementation
 
-### 11. Agent
+### 11. Block
+- **Type**: `block`
+- **Color**: Brown (light brown)
+- **Appearance**: Light brown square
+- **Properties**:
+  - Cannot be passed through by agents
+  - Cannot be picked up or carried
+  - **Can be pushed** by any agent moving forward into it
+  - Multiple consecutive blocks can be pushed as a group
+- **Push Mechanics**:
+  - Agent must be facing the block
+  - Agent uses **forward action** to push
+  - Block(s) move one cell in the direction the agent is facing
+  - Push succeeds only if the cell behind the block (or consecutive flight of blocks) is empty
+  - If cell behind is blocked, push fails and agent doesn't move
+  - All blocks in a consecutive line are pushed together
+- **Interaction**:
+  - **Forward action** when facing block: Attempts to push the block(s)
+  - Cannot be picked up with pickup action
+  - Cannot be toggled
+
+### 12. Rock
+- **Type**: `rock`
+- **Color**: Grey (medium grey)
+- **Appearance**: Irregularly shaped rock (medium grey with darker texture)
+- **Properties**:
+  - Cannot be passed through by agents
+  - Cannot be picked up or carried
+  - **Can be pushed** only by specific agents (based on agent type/role)
+  - Multiple consecutive rocks/blocks can be pushed as a group
+- **Agent Restrictions**:
+  - Each rock has a `pushable_by` attribute that specifies which agents can push it
+  - Can be set to:
+    - `None`: Pushable by all agents (behaves like block)
+    - Single agent index (e.g., `0`): Only that specific agent can push
+    - List of agent indices (e.g., `[0, 2]`): Only those agents can push
+  - If agent cannot push a rock, forward action is blocked
+- **Push Mechanics**:
+  - Same as blocks: agent must face the rock, uses forward action
+  - Rock(s) move one cell in the direction the agent is facing
+  - Push succeeds only if the cell behind is empty
+  - Can push consecutive rocks and blocks together (if agent has permission)
+- **Interaction**:
+  - **Forward action** when facing rock: Attempts to push if agent has permission
+  - Cannot be picked up with pickup action
+  - Cannot be toggled
+
+### 13. Agent
 - **Type**: `agent`
 - **Color**: Red, green, blue, purple, yellow (assigned by index)
 - **Properties**:
@@ -283,10 +330,9 @@ Transitions remain deterministic when:
 - Agent carries object while moving
 - Agent uses **drop** action to place object
 
-**NOT supported**:
-- ❌ Pushing objects
+**NOT supported for these objects**:
+- ❌ Pushing keys, balls, or boxes
 - ❌ Pulling objects
-- ❌ Pushing multiple objects in a row
 - ❌ Moving objects without picking them up
 
 ### Boxes Specifically
@@ -295,7 +341,24 @@ Transitions remain deterministic when:
 - Boxes must be **picked up** to be moved
 - Agent can carry one box at a time
 - Box can contain another object (revealed when toggled)
-- **No box pushing mechanics** exist in this environment
+- **Box pushing is NOT supported** in this environment
+
+### Pushable Objects (Blocks and Rocks)
+
+**Movement method**: Pushing only
+- Agent uses **forward** action while facing the object
+- Agent pushes object(s) one cell in the direction they're facing
+- Objects move immediately when pushed
+- Agent moves into the space the object vacated
+
+**Push mechanics**:
+- ✅ Blocks can be pushed by any agent
+- ✅ Rocks can be pushed only by authorized agents (based on `pushable_by` attribute)
+- ✅ Multiple consecutive blocks/rocks can be pushed as a group
+- ✅ Push succeeds only if cell behind the object(s) is empty
+- ❌ Cannot push if cell behind is blocked by wall, door, agent, or other objects
+- ❌ Blocks and rocks cannot be picked up or carried
+- ❌ Cannot pull blocks or rocks (push only)
 
 ## Doors and Keys
 
@@ -371,16 +434,18 @@ Episodes end when:
 ## Summary
 
 **Key Points**:
-- **11 object types**: wall, floor, door, key, ball, box, goal, objgoal, lava, switch, agent
+- **13 object types**: wall, floor, door, key, ball, box, goal, objgoal, lava, switch, block, rock, agent
 - **8 standard actions**: still, left, right, forward, pickup, drop, toggle, done
-- **Single agent type**: No distinction between robot/human or different agent classes
+- **Single agent type**: No distinction between robot/human or different agent classes (though rocks can have agent-specific push permissions)
 - **Boxes are NOT pushable**: Must be picked up and carried
+- **Blocks ARE pushable**: Can be pushed by any agent using forward action
+- **Rocks ARE pushable with restrictions**: Can only be pushed by specific agents based on rock's `pushable_by` attribute
 - **Keys are reusable**: Not consumed when unlocking doors
 - **Color matching required**: Keys must match door color
 - **Stochasticity source**: Agent execution order (random permutation)
 - **No agent subtypes**: All agents have same capabilities, distinguished by color/index only
 
-This gridworld focuses on **multi-agent coordination** and **object manipulation** rather than physics-based mechanics like box pushing.
+This gridworld focuses on **multi-agent coordination** and **object manipulation**, including Sokoban-style pushing mechanics for blocks and rocks.
 
 ## Additional Clarifications
 
