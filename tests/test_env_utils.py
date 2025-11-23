@@ -19,14 +19,16 @@ class SimpleMockEnv:
     """
     A minimal mock environment for testing get_dag.
     
-    This creates a simple DAG structure:
+    This creates a DAG structure with DIFFERENT PATH LENGTHS:
         State 0 (root)
          /    \
-      State 1  State 2
-         \    /
-        State 3 (terminal)
+        1     2 --> 3 --> 1
+        
+    Path lengths to State 1:
+    - Direct path: 0 -> 1 (length 1)
+    - Long path: 0 -> 2 -> 3 -> 1 (length 3)
     
-    This demonstrates the critical case where State 3 is reachable via
+    This demonstrates the critical case where State 1 is reachable via
     two paths of different lengths.
     """
     
@@ -49,12 +51,12 @@ class SimpleMockEnv:
         """
         Define the DAG structure:
         - State 0 -> State 1 (action 0) or State 2 (action 1)
-        - State 1 -> State 3 (any action)
+        - State 1 -> None (terminal)
         - State 2 -> State 3 (any action)
-        - State 3 -> None (terminal)
+        - State 3 -> State 1 (any action)
         """
-        if state == 3:
-            # Terminal state
+        if state == 1:
+            # State 1 is terminal
             return None
         
         if state == 0:
@@ -63,12 +65,12 @@ class SimpleMockEnv:
                 return [(1.0, 1)]
             else:
                 return [(1.0, 2)]
-        elif state == 1:
-            # State 1 always goes to state 3
-            return [(1.0, 3)]
         elif state == 2:
             # State 2 always goes to state 3
             return [(1.0, 3)]
+        elif state == 3:
+            # State 3 always goes to state 1
+            return [(1.0, 1)]
         else:
             return None
 
@@ -206,28 +208,30 @@ def test_get_dag_topological_ordering():
 
 def test_get_dag_multiple_paths_different_lengths():
     """
-    Test the CRITICAL case: when a state is reachable via paths of different lengths.
+    Test the CRITICAL case: when a state is reachable via paths of DIFFERENT lengths.
     
     This is the key insight that BFS alone would fail on. Consider this DAG:
     
-        Root (A)
-        /     \\
-       B       C
-        \\     /
-          D
+        Root (0)
+         /    \\
+        1     2 -> 3 -> 1
+        
+    Paths to state 1:
+    - Direct: 0 -> 1 (length 1)
+    - Long: 0 -> 2 -> 3 -> 1 (length 3)
     
     If we discover states via BFS:
-    - A is discovered first (index 0)
-    - B is discovered next via A→B (index 1)
-    - D is discovered next via B→D (index 2)  <-- WRONG!
-    - C is discovered next via A→C (index 3)
-    - But C→D is an edge, meaning C (index 3) → D (index 2)
+    - 0 is discovered first (index 0)
+    - 1 is discovered next via 0→1 (index 1)  <-- WRONG!
+    - 2 is discovered next via 0→2 (index 2)
+    - 3 is discovered next via 2→3 (index 3)
+    - But 3→1 is an edge, meaning 3 (index 3) → 1 (index 1)
     - This violates topological order!
     
     With proper topological sort:
-    - A gets index 0
-    - B and C get indices 1,2 (order doesn't matter, both depend only on A)
-    - D gets index 3 (depends on both B and C)
+    - 0 gets index 0
+    - 2 and 3 get indices 1,2 (must come before 1)
+    - 1 gets index 3 (depends on both paths)
     
     This test verifies that our implementation handles this correctly.
     """
@@ -342,8 +346,8 @@ def test_get_dag_reachability():
 
 
 def test_get_dag_with_simple_env():
-    """Test get_dag with the specific diamond-shaped DAG."""
-    print("Test: diamond DAG structure...")
+    """Test get_dag with the DAG having different path lengths."""
+    print("Test: different path lengths DAG structure...")
     
     env = create_tiny_env()
     states, state_to_idx, successors = get_dag(env)
@@ -358,19 +362,20 @@ def test_get_dag_with_simple_env():
         print(f"  ✗ Expected root state 0, got {states[0]}")
         return False
     
-    # State 3 should be last (terminal state with highest index)
-    if states[3] != 3:
-        print(f"  ✗ Expected terminal state 3 at index 3, got {states[3]}")
+    # State 1 should be last (terminal state with highest index due to long path)
+    if states[3] != 1:
+        print(f"  ✗ Expected terminal state 1 at index 3, got {states[3]}")
         return False
     
-    # States 1 and 2 should be in the middle (indices 1 and 2)
+    # States 2 and 3 should be in the middle (indices 1 and 2)
     middle_states = {states[1], states[2]}
-    if middle_states != {1, 2}:
-        print(f"  ✗ Expected states 1 and 2 in middle, got {middle_states}")
+    if middle_states != {2, 3}:
+        print(f"  ✗ Expected states 2 and 3 in middle, got {middle_states}")
         return False
     
-    print(f"  ✓ Diamond DAG structure is correct")
+    print(f"  ✓ Different path lengths DAG structure is correct")
     print(f"    Topological order: {states}")
+    print(f"    Path 0->1 (length 1) and path 0->2->3->1 (length 3)")
     return True
 
 

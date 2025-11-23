@@ -3,7 +3,7 @@
 Example script showcasing the get_dag function and DAG visualization.
 
 This demonstrates how to:
-1. Create a simple environment with a diamond-shaped DAG structure
+1. Create a simple environment with paths of DIFFERENT lengths to the same state
 2. Compute the DAG using get_dag()
 3. Visualize the DAG using plot_dag()
 """
@@ -17,23 +17,24 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from empo.env_utils import get_dag, plot_dag
 
 
-class DiamondDAGEnv:
+class DifferentPathLengthsEnv:
     """
-    A simple environment with a diamond-shaped DAG structure.
+    A simple environment demonstrating paths of DIFFERENT lengths.
     
-    This demonstrates the critical case where a state (State 3) is reachable
-    via two paths of different lengths:
+    This is the critical case where State 1 is reachable via paths of different lengths:
     
         State 0 (root)
          /    \\
-      State 1  State 2
-         \\    /
-        State 3 (terminal)
+        1     2 --> 3 --> 1
+        
+    Path lengths to State 1:
+    - Direct path: 0 -> 1 (length 1) 
+    - Long path: 0 -> 2 -> 3 -> 1 (length 3)
     
     - From State 0, action 0 leads to State 1, action 1 leads to State 2
-    - From State 1, any action leads to State 3
     - From State 2, any action leads to State 3
-    - State 3 is terminal
+    - From State 3, any action leads to State 1
+    - State 1 is terminal
     """
     
     def __init__(self):
@@ -61,8 +62,8 @@ class DiamondDAGEnv:
         Returns:
             List of (probability, next_state) tuples, or None if terminal
         """
-        if state == 3:
-            # Terminal state
+        if state == 1:
+            # State 1 is terminal
             return None
         
         if state == 0:
@@ -71,12 +72,12 @@ class DiamondDAGEnv:
                 return [(1.0, 1)]
             else:
                 return [(1.0, 2)]
-        elif state == 1:
-            # State 1 always goes to state 3
-            return [(1.0, 3)]
         elif state == 2:
             # State 2 always goes to state 3
             return [(1.0, 3)]
+        elif state == 3:
+            # State 3 always goes to state 1
+            return [(1.0, 1)]
         else:
             return None
 
@@ -95,8 +96,8 @@ def main():
     print()
     
     # Create environment
-    print("Creating diamond-shaped DAG environment...")
-    env = DiamondDAGEnv()
+    print("Creating environment with DIFFERENT path lengths...")
+    env = DifferentPathLengthsEnv()
     print("  ✓ Environment created")
     print()
     
@@ -137,19 +138,23 @@ def main():
     print()
     
     # Highlight the critical case
-    print("Critical Test: Multiple Paths to Same State")
+    print("Critical Test: Multiple Paths with DIFFERENT Lengths")
     print("-" * 60)
-    print("State 3 is reachable via two paths:")
-    print("  Path 1: 0 -> 1 -> 3 (length 2)")
-    print("  Path 2: 0 -> 2 -> 3 (length 2)")
+    print("State 1 is reachable via two paths of DIFFERENT lengths:")
+    print("  Path 1: 0 -> 1 (length 1)")
+    print("  Path 2: 0 -> 2 -> 3 -> 1 (length 3)")
     print()
-    print("With naive BFS, if we discovered state 3 via path 0->1->3,")
-    print("we might assign it index 2, but state 2 would get index 3,")
-    print("creating an invalid edge 2->3 where predecessor > successor!")
+    print("With naive BFS, if we discovered state 1 via path 0->1 first,")
+    print("we might assign it index 1, but then state 2 gets index 2,")
+    print("state 3 gets index 3, and 3->1 creates an invalid edge!")
     print()
-    print("Our topological sort ensures state 3 gets the highest index,")
-    print(f"so both states 1 and 2 have lower indices: {state_to_idx}")
+    print("Our topological sort ensures state 1 gets the highest index,")
+    print(f"so all predecessor states have lower indices: {state_to_idx}")
     print()
+    
+    # Create outputs directory if it doesn't exist
+    outputs_dir = Path(__file__).parent.parent / "outputs"
+    outputs_dir.mkdir(exist_ok=True)
     
     # Plot DAG
     print("Generating visualization...")
@@ -157,16 +162,16 @@ def main():
         # Create custom labels for better readability
         state_labels = {
             0: "Root\\n(State 0)",
-            1: "State 1",
+            1: "Terminal\\n(State 1)",
             2: "State 2", 
-            3: "Terminal\\n(State 3)"
+            3: "State 3"
         }
         
         output_file = plot_dag(
             states,
             state_to_idx,
             successors,
-            output_file="diamond_dag",
+            output_file=str(outputs_dir / "different_path_lengths_dag"),
             format="png",
             state_labels=state_labels,
             rankdir="TB"
