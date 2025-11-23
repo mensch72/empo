@@ -416,7 +416,15 @@ class Rock(WorldObj):
         return False
     
     def can_be_pushed_by(self, agent):
-        """Check if this rock can be pushed by the given agent"""
+        """
+        Check if this rock can be pushed by the given agent.
+        
+        Args:
+            agent: The Agent object attempting to push this rock
+            
+        Returns:
+            bool: True if the agent is authorized to push this rock, False otherwise
+        """
         if self.pushable_by is None:
             return True
         if isinstance(self.pushable_by, list):
@@ -432,7 +440,7 @@ class Rock(WorldObj):
         fill_coords(img, point_in_circle(0.55, 0.45, 0.30), c)
         fill_coords(img, point_in_circle(0.50, 0.60, 0.28), c)
         # Add some texture/detail with darker grey
-        darker_grey = np.array([80, 80, 80])
+        darker_grey = np.array([70, 70, 70])  # Darker shade for texture
         fill_coords(img, point_in_circle(0.35, 0.40, 0.12), darker_grey)
         fill_coords(img, point_in_circle(0.65, 0.55, 0.10), darker_grey)
 
