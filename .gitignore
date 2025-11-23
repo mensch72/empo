@@ -219,3 +219,13 @@ logs/
 checkpoints/
 wandb/
 runs/
+
+# Graphviz generated files
+*.gv
+*.gv.pdf
+*.gv.png
+*.gv.svg
+diamond_dag*
+*_dag.png
+*_dag.pdf
+*_dag.svg

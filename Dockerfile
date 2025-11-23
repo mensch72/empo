@@ -33,7 +33,8 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libglib2.0-0 \
     libsm6 \
     libxext6 \
-    libxrender-dev
+    libxrender-dev \
+    graphviz
 
 # Create python symlink and upgrade pip
 RUN ln -s /usr/bin/python3 /usr/bin/python && \
