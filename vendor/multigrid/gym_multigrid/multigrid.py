@@ -18,7 +18,8 @@ COLORS = {
     'blue': np.array([0, 0, 255]),
     'purple': np.array([112, 39, 195]),
     'yellow': np.array([255, 255, 0]),
-    'grey': np.array([100, 100, 100])
+    'grey': np.array([100, 100, 100]),
+    'brown': np.array([139, 90, 43])
 }
 
 COLOR_NAMES = sorted(list(COLORS.keys()))
@@ -36,7 +37,8 @@ class World:
         'blue': 2,
         'purple': 3,
         'yellow': 4,
-        'grey': 5
+        'grey': 5,
+        'brown': 6
     }
 
     IDX_TO_COLOR = dict(zip(COLOR_TO_IDX.values(), COLOR_TO_IDX.keys()))
@@ -55,7 +57,9 @@ class World:
         'lava': 9,
         'agent': 10,
         'objgoal': 11,
-        'switch': 12
+        'switch': 12,
+        'block': 13,
+        'rock': 14
     }
     IDX_TO_OBJECT = dict(zip(OBJECT_TO_IDX.values(), OBJECT_TO_IDX.keys()))
 
@@ -380,6 +384,56 @@ class Box(WorldObj):
         # Replace the box by its contents
         env.grid.set(*pos, self.contains)
         return True
+
+
+class Block(WorldObj):
+    def __init__(self, world):
+        super(Block, self).__init__(world, 'block', 'brown')
+
+    def can_overlap(self):
+        return False
+
+    def can_pickup(self):
+        return False
+
+    def render(self, img):
+        # Light brown square
+        c = COLORS[self.color]
+        fill_coords(img, point_in_rect(0, 1, 0, 1), c)
+
+
+class Rock(WorldObj):
+    def __init__(self, world, pushable_by=None):
+        super(Rock, self).__init__(world, 'rock', 'grey')
+        # pushable_by can be an agent index, a list of indices, or None (pushable by all)
+        self.pushable_by = pushable_by
+
+    def can_overlap(self):
+        return False
+
+    def can_pickup(self):
+        return False
+    
+    def can_be_pushed_by(self, agent):
+        """Check if this rock can be pushed by the given agent"""
+        if self.pushable_by is None:
+            return True
+        if isinstance(self.pushable_by, list):
+            return agent.index in self.pushable_by
+        return agent.index == self.pushable_by
+
+    def render(self, img):
+        # Medium grey irregular rock shape
+        c = COLORS[self.color]
+        # Create an irregular rock-like shape using multiple overlapping shapes
+        # Base rock body
+        fill_coords(img, point_in_circle(0.45, 0.5, 0.35), c)
+        fill_coords(img, point_in_circle(0.55, 0.45, 0.30), c)
+        fill_coords(img, point_in_circle(0.50, 0.60, 0.28), c)
+        # Add some texture/detail with darker grey
+        darker_grey = np.array([80, 80, 80])
+        fill_coords(img, point_in_circle(0.35, 0.40, 0.12), darker_grey)
+        fill_coords(img, point_in_circle(0.65, 0.55, 0.10), darker_grey)
 
 
 class Agent(WorldObj):
@@ -974,7 +1028,7 @@ class MultiGridEnv(gym.Env):
         if self.partial_obs:
             obs = self.gen_obs()
         else:
-            obs = [self.grid.encode_for_agents(self.agents[i].pos) for i in range(len(self.agents))]
+            obs = [self.grid.encode_for_agents(self.objects, self.agents[i].pos) for i in range(len(self.agents))]
         obs=[self.objects.normalize_obs*ob for ob in obs]
         return obs
 
@@ -1062,6 +1116,76 @@ class MultiGridEnv(gym.Env):
 
     def _handle_special_moves(self, i, rewards, fwd_pos, fwd_cell):
         pass
+    
+    def _can_push_objects(self, agent, start_pos):
+        """
+        Check if agent can push blocks/rocks starting at start_pos.
+        Returns (can_push, num_objects, end_pos) where:
+        - can_push: True if push is possible
+        - num_objects: number of consecutive blocks/rocks
+        - end_pos: position where the last object would move to
+        """
+        # Check if there are consecutive blocks/rocks in the direction the agent is facing
+        direction = agent.dir_vec
+        current_pos = np.array(start_pos)
+        num_objects = 0
+        
+        # Count consecutive blocks/rocks
+        while True:
+            cell = self.grid.get(*current_pos)
+            if cell is None:
+                break
+            if cell.type not in ['block', 'rock']:
+                break
+            # For rocks, check if agent can push this rock
+            if cell.type == 'rock' and not cell.can_be_pushed_by(agent):
+                return False, 0, None
+            num_objects += 1
+            current_pos = current_pos + direction
+            
+            # Bounds check
+            if current_pos[0] < 0 or current_pos[0] >= self.grid.width or \
+               current_pos[1] < 0 or current_pos[1] >= self.grid.height:
+                return False, 0, None
+        
+        # current_pos is now the first empty cell after the objects
+        # Check if this cell is empty or can be overlapped
+        end_cell = self.grid.get(*current_pos)
+        if end_cell is None or end_cell.can_overlap():
+            return True, num_objects, current_pos
+        else:
+            return False, 0, None
+    
+    def _push_objects(self, agent, start_pos):
+        """
+        Push blocks/rocks starting at start_pos in the direction agent is facing.
+        Returns True if push was successful.
+        """
+        can_push, num_objects, end_pos = self._can_push_objects(agent, start_pos)
+        
+        if not can_push or num_objects == 0:
+            return False
+        
+        # Move objects from back to front to avoid overwriting
+        direction = agent.dir_vec
+        # Start from the end position and work backwards
+        for j in range(num_objects):
+            from_pos = end_pos - direction * (j + 1)
+            to_pos = end_pos - direction * j
+            obj = self.grid.get(*from_pos)
+            self.grid.set(*to_pos, obj)
+            if obj:
+                obj.cur_pos = to_pos
+        
+        # Clear the original start position (now empty)
+        self.grid.set(*start_pos, None)
+        
+        # Now agent can move into start_pos
+        self.grid.set(*start_pos, agent)
+        self.grid.set(*agent.pos, None)
+        agent.pos = np.array(start_pos)
+        
+        return True
 
     def _handle_switch(self, i, rewards, fwd_pos, fwd_cell):
         pass
@@ -1282,16 +1406,38 @@ class MultiGridEnv(gym.Env):
 
             # Move forward
             elif actions[i] == self.actions.forward:
-                if fwd_cell is not None:
+                moved = False
+                # Check if forward cell contains a block or rock that can be pushed
+                if fwd_cell is not None and fwd_cell.type in ['block', 'rock']:
+                    # Try to push the object(s)
+                    pushed = self._push_objects(self.agents[i], fwd_pos)
+                    moved = pushed
+                elif fwd_cell is not None:
                     if fwd_cell.type == 'goal':
                         done = True
                         self._reward(i, rewards, 1)
+                        # Agent can still move onto goal
+                        self.grid.set(*fwd_pos, self.agents[i])
+                        self.grid.set(*self.agents[i].pos, None)
+                        self.agents[i].pos = fwd_pos
+                        moved = True
                     elif fwd_cell.type == 'switch':
                         self._handle_switch(i, rewards, fwd_pos, fwd_cell)
-                elif fwd_cell is None or fwd_cell.can_overlap():
+                        # Agent can move onto switch
+                        self.grid.set(*fwd_pos, self.agents[i])
+                        self.grid.set(*self.agents[i].pos, None)
+                        self.agents[i].pos = fwd_pos
+                        moved = True
+                    elif fwd_cell.can_overlap():
+                        self.grid.set(*fwd_pos, self.agents[i])
+                        self.grid.set(*self.agents[i].pos, None)
+                        self.agents[i].pos = fwd_pos
+                        moved = True
+                elif fwd_cell is None:
                     self.grid.set(*fwd_pos, self.agents[i])
                     self.grid.set(*self.agents[i].pos, None)
                     self.agents[i].pos = fwd_pos
+                    moved = True
                 self._handle_special_moves(i, rewards, fwd_pos, fwd_cell)
 
             elif 'build' in self.actions.available and actions[i]==self.actions.build:
@@ -1323,7 +1469,7 @@ class MultiGridEnv(gym.Env):
         if self.partial_obs:
             obs = self.gen_obs()
         else:
-            obs = [self.grid.encode_for_agents(self.agents[i].pos) for i in range(len(actions))]
+            obs = [self.grid.encode_for_agents(self.objects, self.agents[i].pos) for i in range(len(actions))]
 
         obs=[self.objects.normalize_obs*ob for ob in obs]
 
@@ -1496,6 +1642,9 @@ class MultiGridEnv(gym.Env):
                         obj_data['reward'] = cell.reward
                     if hasattr(cell, 'target_type'):
                         obj_data['target_type'] = cell.target_type
+                    if hasattr(cell, 'pushable_by'):
+                        # For rocks, serialize the pushable_by attribute
+                        obj_data['pushable_by'] = cell.pushable_by
                     if isinstance(cell, Agent):
                         # For agents in grid, just store basic info (detailed agent state below)
                         obj_data['agent_index'] = cell.index
@@ -1577,6 +1726,9 @@ class MultiGridEnv(gym.Env):
                 obj_data['contains'] = self._serialize_object(obj.contains)
             else:
                 obj_data['contains'] = None
+        if hasattr(obj, 'pushable_by'):
+            # For rocks, serialize the pushable_by attribute
+            obj_data['pushable_by'] = obj.pushable_by
         
         return tuple(sorted(obj_data.items()))
     
@@ -1692,6 +1844,10 @@ class MultiGridEnv(gym.Env):
                            color=self.objects.COLOR_TO_IDX.get(color))
         elif obj_type == 'switch':
             obj = Switch(self.objects)
+        elif obj_type == 'block':
+            obj = Block(self.objects)
+        elif obj_type == 'rock':
+            obj = Rock(self.objects, pushable_by=obj_data.get('pushable_by'))
         elif obj_type == 'agent':
             # For agents in the grid, find the agent by its index attribute (color)
             agent_color_idx = obj_data.get('agent_index', 0)
@@ -1906,9 +2062,24 @@ class MultiGridEnv(gym.Env):
             
             # Determine what resource this agent is targeting
             if action == self.actions.forward:
-                # Target is the cell they're moving into
-                target_pos = tuple(agent.front_pos)
-                agent_targets[agent_idx] = (RESOURCE_CELL, target_pos)
+                # Check what the agent is trying to move into
+                fwd_pos = agent.front_pos
+                fwd_cell = self.grid.get(*fwd_pos)
+                
+                # If pushing blocks/rocks, the resource is the final cell where objects land
+                if fwd_cell and fwd_cell.type in ['block', 'rock']:
+                    can_push, num_objects, end_pos = self._can_push_objects(agent, fwd_pos)
+                    if can_push:
+                        # Agent will push objects and move into fwd_pos
+                        # The contested resource is the end_pos where objects land
+                        agent_targets[agent_idx] = (RESOURCE_CELL, tuple(end_pos))
+                    else:
+                        # Can't push, agent won't move - independent action
+                        agent_targets[agent_idx] = (RESOURCE_INDEPENDENT, agent_idx)
+                else:
+                    # Normal movement - target is the cell they're moving into
+                    target_pos = tuple(agent.front_pos)
+                    agent_targets[agent_idx] = (RESOURCE_CELL, target_pos)
             
             elif action == self.actions.pickup:
                 # Target is the object at the forward position
@@ -2074,16 +2245,38 @@ class MultiGridEnv(gym.Env):
             
             elif actions[i] == self.actions.forward:
                 # Move forward
-                if fwd_cell is not None:
+                moved = False
+                # Check if forward cell contains a block or rock that can be pushed
+                if fwd_cell is not None and fwd_cell.type in ['block', 'rock']:
+                    # Try to push the object(s)
+                    pushed = self._push_objects(self.agents[i], fwd_pos)
+                    moved = pushed
+                elif fwd_cell is not None:
                     if fwd_cell.type == 'goal':
                         done = True
                         self._reward(i, rewards, 1)
+                        # Agent can still move onto goal
+                        self.grid.set(*fwd_pos, self.agents[i])
+                        self.grid.set(*self.agents[i].pos, None)
+                        self.agents[i].pos = fwd_pos
+                        moved = True
                     elif fwd_cell.type == 'switch':
                         self._handle_switch(i, rewards, fwd_pos, fwd_cell)
-                if fwd_cell is None or fwd_cell.can_overlap():
+                        # Agent can move onto switch
+                        self.grid.set(*fwd_pos, self.agents[i])
+                        self.grid.set(*self.agents[i].pos, None)
+                        self.agents[i].pos = fwd_pos
+                        moved = True
+                    elif fwd_cell.can_overlap():
+                        self.grid.set(*fwd_pos, self.agents[i])
+                        self.grid.set(*self.agents[i].pos, None)
+                        self.agents[i].pos = fwd_pos
+                        moved = True
+                elif fwd_cell is None:
                     self.grid.set(*fwd_pos, self.agents[i])
                     self.grid.set(*self.agents[i].pos, None)
                     self.agents[i].pos = fwd_pos
+                    moved = True
                 self._handle_special_moves(i, rewards, fwd_pos, fwd_cell)
             
             elif 'build' in self.actions.available and actions[i] == self.actions.build:
