@@ -7,6 +7,7 @@ from gym.utils import seeding
 from .rendering import *
 from .window import Window
 import numpy as np
+from itertools import product
 
 # Size in pixels of a tile in the full-scale human view
 TILE_PIXELS = 32
@@ -1806,13 +1807,13 @@ class MultiGridEnv(gym.Env):
                 successor_state = self._compute_successor_state(state, actions, tuple(range(num_agents)))
                 return [(1.0, successor_state)]
             
-            # OPTIMIZATION 2: Check if all actions are rotations (left/right)
+            # OPTIMIZATION 2: Check if all but at most one actions are rotations (left/right)
             # Rotations never interfere with each other, so order doesn't matter
-            all_rotations = all(
-                actions[i] in [self.actions.left, self.actions.right] 
+            n_non_rotations = sum(
+                actions[i] not in [self.actions.left, self.actions.right] 
                 for i in active_agents
             )
-            if all_rotations:
+            if n_non_rotations < 2:
                 # Rotations are commutative - result is deterministic
                 successor_state = self._compute_successor_state(state, actions, tuple(range(num_agents)))
                 return [(1.0, successor_state)]
