@@ -42,10 +42,11 @@ Each cell in the grid can contain:
   - **Locked door**: Cannot be opened without the matching colored key
 - **Interaction**:
   - **Toggle action** on unlocked door: Opens/closes the door
-  - **Toggle action** on locked door with matching key: Unlocks and opens the door
+  - **Toggle action** on locked door with matching key: Unlocks and opens the door (door becomes unlocked AND open)
   - **Toggle action** on locked door without key: No effect
 - **Key matching**: A key can only unlock a door of the same color
 - **Key reusability**: Keys are held by the agent and can be reused multiple times (not consumed)
+- **Re-locking**: **Once unlocked, a door cannot be locked again**. It can only be opened/closed via toggle.
 
 ### 4. Key
 - **Type**: `key`
@@ -380,3 +381,261 @@ Episodes end when:
 - **No agent subtypes**: All agents have same capabilities, distinguished by color/index only
 
 This gridworld focuses on **multi-agent coordination** and **object manipulation** rather than physics-based mechanics like box pushing.
+
+## Additional Clarifications
+
+### Can doors be locked again after being unlocked?
+
+**No.** Once a door is unlocked (by using a matching key with the toggle action), it permanently becomes an unlocked door. The `is_locked` flag is set to `False` and cannot be set back to `True` through any standard mechanism. After unlocking, the door can only be opened and closed via the toggle action, but never re-locked.
+
+### Can there be more than 6 different door/ball/box/goal types?
+
+**No, maximum 6 colors.** The environment is limited to **6 colors** defined in `World.COLOR_TO_IDX`:
+- Red (0)
+- Green (1)
+- Blue (2)
+- Purple (3)
+- Yellow (4)
+- Grey (5)
+
+This means:
+- Maximum 6 different colored doors
+- Maximum 6 different colored keys
+- Maximum 6 different colored balls
+- Maximum 6 different colored boxes
+- Maximum 6 different colored goals
+
+Since agents are also assigned colors by index, and there are 6 colors, you can have at most 6 agents (though technically agent index can be 0 which might allow special behavior in some environments).
+
+### Can agents pass by keys, balls, boxes without picking them up?
+
+**No.** Keys, balls, and boxes **block movement**. These objects have `can_overlap() = False` and `can_pickup() = True`, which means:
+
+- **Agents cannot walk through cells** containing keys, balls, or boxes using the forward action
+- **The cell is blocked** until the object is removed
+- **To interact**: 
+  1. Use **pickup** action to take the object (if not already carrying something), OR
+  2. **Walk around** the cell containing the object
+
+**Objects that CAN be passed through** (have `can_overlap() = True`):
+- Floor tiles
+- Goals
+- Open doors
+- Lava
+- Switches
+
+So agents automatically walk over these objects when using the forward action, without needing to pick them up.
+
+### Can agents be made to observe the state fully?
+
+**Yes.** The environment supports both partial and full observability via the `partial_obs` parameter:
+
+- **Partial observation** (`partial_obs=True`, default):
+  - Each agent has a limited field of view (default 7×7 grid)
+  - Observation is agent-centric and rotated based on agent direction
+  - Agents cannot see through walls or closed doors
+  
+- **Full observation** (`partial_obs=False`):
+  - Agents observe the entire grid state
+  - Observation includes all objects and all agents' positions
+  - No visibility restrictions
+
+Set when creating the environment:
+```python
+env = MultiGridEnv(partial_obs=False, ...)  # Full observability
+```
+
+### What makes an agent pause or unpause?
+
+**Agent pause/unpause is NOT automatically controlled** by the base environment. The `paused` and `started` flags exist as attributes on each agent, but the base `MultiGridEnv` class does **not** provide methods to pause or unpause agents.
+
+These flags are:
+- **Checked** in the step function: `if self.agents[i].terminated or self.agents[i].paused or not self.agents[i].started`
+- **Initialized**: `paused=False`, `started=True` by default
+- **Not modified** by any base environment code
+
+**To use these flags**, you must:
+1. Create a custom environment that extends `MultiGridEnv`
+2. Implement your own logic to set `agent.paused = True/False` or `agent.started = True/False`
+3. Common use cases might include:
+   - Turn-based gameplay (pause agents waiting for their turn)
+   - Agents that enter/leave the game dynamically
+   - Penalty states where agents are temporarily frozen
+
+### What determines what a switch does and what could it do?
+
+**Switches are environment-specific.** The `Switch` object is defined in the base code, but its behavior is **completely customizable** through the `_handle_switch()` method:
+
+```python
+def _handle_switch(self, i, rewards, fwd_pos, fwd_cell):
+    pass  # Base implementation does nothing
+```
+
+**To implement switch behavior**, create a custom environment:
+
+```python
+class MyEnv(MultiGridEnv):
+    def _handle_switch(self, i, rewards, fwd_pos, fwd_cell):
+        # Custom logic, e.g.:
+        # - Open/close doors
+        # - Spawn objects
+        # - Give rewards
+        # - Change environment state
+        # - Toggle lights/visibility
+        # - Activate mechanisms
+        pass
+```
+
+**Switch is triggered** when an agent moves forward onto a cell containing a switch (forward action into switch cell).
+
+### Does the code provide means for adding further object types and interaction logic?
+
+**Yes, the code is designed for extension.** You can add new object types and behaviors by:
+
+#### 1. **Adding New Object Types**
+
+```python
+# Define new object class
+class MyNewObject(WorldObj):
+    def __init__(self, world, color='blue'):
+        super().__init__(world, 'mynewobject', color)
+    
+    def can_overlap(self):
+        return True  # or False
+    
+    def can_pickup(self):
+        return True  # or False
+    
+    def toggle(self, env, pos):
+        # Define toggle behavior
+        return True
+    
+    def render(self, img):
+        # Define how to render this object
+        pass
+```
+
+#### 2. **Extending World Object Registry**
+
+Add your object type to the `OBJECT_TO_IDX` dictionary (requires modifying base code):
+
+```python
+OBJECT_TO_IDX = {
+    # ... existing types ...
+    'mynewobject': 13,
+}
+```
+
+#### 3. **Customizing Interaction Logic**
+
+Override handler methods in your custom environment:
+
+```python
+class MyEnv(MultiGridEnv):
+    def _handle_pickup(self, i, rewards, fwd_pos, fwd_cell):
+        # Custom pickup logic
+        pass
+    
+    def _handle_drop(self, i, rewards, fwd_pos, fwd_cell):
+        # Custom drop logic
+        pass
+    
+    def _handle_special_moves(self, i, rewards, fwd_pos, fwd_cell):
+        # Custom movement consequences
+        pass
+    
+    def _handle_switch(self, i, rewards, fwd_pos, fwd_cell):
+        # Custom switch behavior
+        pass
+    
+    def _handle_build(self, i, rewards, fwd_pos, fwd_cell):
+        # Custom build action (if using MineActions)
+        pass
+```
+
+#### 4. **Creating Custom Actions**
+
+Define a new action set:
+
+```python
+class MyActions:
+    available = ['still', 'left', 'right', 'forward', 'custom1', 'custom2']
+    still = 0
+    left = 1
+    right = 2
+    forward = 3
+    custom1 = 4
+    custom2 = 5
+```
+
+Then handle these actions in your environment's step function (would require overriding `step()`).
+
+**Examples in the codebase:**
+- `CollectGameEnv`: Customizes `_handle_pickup()` and `_reward()` for ball collection
+- `SoccerGameEnv`: Customizes pickup/drop for ball passing mechanics
+- `MineActions`: Adds a "build" action for construction
+
+### What are tasks and how are they set?
+
+**Tasks are defined by the environment implementation**, not by a formal task system. A "task" in MultiGrid is simply the objective that the environment designer creates through:
+
+#### 1. **Grid Generation** (`_gen_grid` method)
+```python
+def _gen_grid(self, width, height):
+    # Place walls, objects, goals, agents
+    # This defines the initial state and objective
+    self.grid = Grid(width, height)
+    # ... place objects ...
+    # ... place agents ...
+```
+
+#### 2. **Reward Structure** (`_reward` method)
+```python
+def _reward(self, i, rewards, reward=1):
+    # Define which agents get rewards for which actions
+    rewards[i] += reward
+```
+
+#### 3. **Termination Conditions** (`step` method)
+```python
+def step(self, actions):
+    # ... execute actions ...
+    if <task_completed>:
+        done = True
+    if self.step_count >= self.max_steps:
+        done = True
+    return obs, rewards, done, info
+```
+
+**Common task patterns:**
+
+- **Collection task**: Agents collect objects of matching color
+  - Reward when correct object picked up
+  - Penalty when wrong object picked up
+  
+- **Goal-reaching task**: Agents navigate to goal locations
+  - Reward when agent moves onto goal cell
+  - Episode terminates on goal reach
+
+- **Delivery task**: Agents deliver objects to specific locations
+  - Reward when object dropped at correct location
+  
+- **Cooperative task**: Multiple agents must coordinate
+  - Shared rewards for team success
+  - Individual penalties for failures
+
+- **Competitive task**: Agents compete for resources
+  - Zero-sum rewards
+  - First agent to complete wins
+
+**Task parameters** are typically passed to the environment constructor:
+```python
+env = CollectGameEnv(
+    num_balls=[5],           # Task: collect 5 balls
+    agents_index=[1, 2, 3],  # 3 agents participate
+    balls_reward=[1],        # Reward value
+    zero_sum=True            # Competitive (zero-sum)
+)
+```
+
+**There is no formal task specification language** - tasks are implemented programmatically by creating custom environment classes that inherit from `MultiGridEnv` and override the relevant methods.
