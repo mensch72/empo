@@ -67,21 +67,21 @@ class SmallDAGEnv(MultiGridEnv):
         agent1.dir = 2  # facing left
         self.grid.set(2, 2, agent1)
         
-        # Place 2 blocks in the center area
+        # Place 2 blocks in the center/wall area
         block1 = Block(World)
         self.grid.set(1, 2, block1)
         
         block2 = Block(World)
         self.grid.set(2, 1, block2)
         
-        # Place 2 rocks in the center area
-        # Rock pushable only by agent 1
+        # Place 2 rocks on the wall boundaries (replacing walls)
+        # Rock pushable only by agent 1 (who can push rocks)
         rock1 = Rock(World, pushable_by=1)
-        self.grid.set(2, 3, rock1)
+        self.grid.set(2, 3, rock1)  # Top boundary
         
         # Another rock pushable only by agent 1
         rock2 = Rock(World, pushable_by=1)
-        self.grid.set(3, 2, rock2)
+        self.grid.set(3, 2, rock2)  # Right boundary
 
 
 def render_grid_to_array(env):
