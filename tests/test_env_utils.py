@@ -205,15 +205,15 @@ def test_get_dag_topological_ordering():
 
 
 def test_get_dag_multiple_paths_different_lengths():
-    r"""
+    """
     Test the CRITICAL case: when a state is reachable via paths of different lengths.
     
     This is the key insight that BFS alone would fail on. Consider this DAG:
     
         Root (A)
-        /     \
+        /     \\
        B       C
-        \     /
+        \\     /
           D
     
     If we discover states via BFS:
@@ -260,12 +260,14 @@ def test_get_dag_multiple_paths_different_lengths():
     
     if violations:
         print(f"  ✗ Found {len(violations)} violations of topological ordering:")
-        for pred, succ in violations[:3]:
+        MAX_VIOLATIONS_TO_SHOW = 3
+        for pred, succ in violations[:MAX_VIOLATIONS_TO_SHOW]:
             print(f"    State {pred} → State {succ} (predecessor has higher/equal index!)")
         return False
     
     # Additionally, verify that the state appears AFTER all its predecessors
     # This is a stronger check: it should appear after the MAXIMUM predecessor index
+    MAX_VIOLATIONS_TO_SHOW = 3
     for state_idx in states_with_multiple_paths:
         max_pred_idx = max(predecessors[state_idx])
         if state_idx <= max_pred_idx:
