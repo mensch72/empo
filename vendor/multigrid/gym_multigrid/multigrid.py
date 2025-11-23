@@ -1830,7 +1830,6 @@ class MultiGridEnv(gym.Env):
             
             # OPTIMIZATION 4: Compute outcomes via Cartesian product of conflict blocks
             # Each outcome has probability = 1 / product(block_sizes)
-            from itertools import product
             
             # Generate all possible "winner" combinations (one per block)
             # Each tuple in the product represents which agent succeeds in each block
