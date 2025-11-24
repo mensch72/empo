@@ -2214,16 +2214,22 @@ class MultiGridEnv(gym.Env):
                     successor_state = self._compute_successor_state(state, actions, tuple(range(num_agents)))
                     return [(1.0, successor_state)]
             
-            # OPTIMIZATION 3: Partition agents into conflict blocks
-            # This is MORE efficient than permuting all active agents
-            # Instead of k! permutations, we compute the Cartesian product of conflict blocks
-            conflict_blocks = self._identify_conflict_blocks(state, actions, active_agents)
-            
-            # NEW: Identify unsteady-forward agents (agents on unsteady ground attempting forward)
+            # NEW: Identify unsteady-forward agents FIRST (agents on unsteady ground attempting forward)
+            # These agents will NOT be included in conflict blocks because their conflicts
+            # have deterministic outcomes (all fail), unlike normal conflicts where one agent wins
             unsteady_forward_agents = []
+            normal_active_agents = []
             for i in active_agents:
                 if actions[i] == self.actions.forward and self.agents[i].on_unsteady_ground:
                     unsteady_forward_agents.append(i)
+                else:
+                    normal_active_agents.append(i)
+            
+            # OPTIMIZATION 3: Partition ONLY normal (non-stumbling) agents into conflict blocks
+            # Stumbling agents are excluded because their conflicts are deterministic (all fail)
+            # This is MORE efficient than permuting all active agents
+            # Instead of k! permutations, we compute the Cartesian product of conflict blocks
+            conflict_blocks = self._identify_conflict_blocks(state, actions, normal_active_agents)
             
             # If no conflicts and no unsteady agents, result is deterministic
             if all(len(block) == 1 for block in conflict_blocks) and len(unsteady_forward_agents) == 0:
