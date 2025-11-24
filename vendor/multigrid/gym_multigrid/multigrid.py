@@ -1557,6 +1557,7 @@ class MultiGridEnv(gym.Env):
         # Process unsteady-forward agents after normal agents
         # First, determine target cells and stumbling for all unsteady agents simultaneously
         unsteady_targets = {}  # agent_idx -> (target_pos, stumbled, turn_dir)
+        unsteady_end_positions = {}  # agent_idx -> end_pos (for pushing)
         occupied_targets = set()  # Track which targets are already occupied or contested
         
         for i in unsteady_forward_agents:
@@ -1583,9 +1584,25 @@ class MultiGridEnv(gym.Env):
             # Compute target position
             target_pos = tuple(self.agents[i].front_pos)
             unsteady_targets[i] = (target_pos, stumbles, turn_dir)
+            
+            # Check if target involves pushing blocks/rocks
+            target_cell = self.grid.get(*target_pos)
+            if target_cell is not None and target_cell.type in ['block', 'rock']:
+                can_push, num_objects, end_pos = self._can_push_objects(self.agents[i], np.array(target_pos))
+                if can_push:
+                    # The contested resource is where blocks land
+                    unsteady_end_positions[i] = tuple(end_pos)
+                else:
+                    # Can't push, mark as None
+                    unsteady_end_positions[i] = None
+            else:
+                # Not pushing, no end position
+                unsteady_end_positions[i] = None
         
         # Identify which targets are contested or occupied
         target_counts = {}
+        end_pos_counts = {}
+        
         for i, (target_pos, _, _) in unsteady_targets.items():
             target_counts[target_pos] = target_counts.get(target_pos, 0) + 1
             
@@ -1593,11 +1610,39 @@ class MultiGridEnv(gym.Env):
             target_cell = self.grid.get(*target_pos)
             if target_cell is not None and target_cell.type == 'agent':
                 occupied_targets.add(target_pos)
+            
+            # Track end positions for pushing
+            end_pos = unsteady_end_positions.get(i)
+            if end_pos is not None:
+                end_pos_counts[end_pos] = end_pos_counts.get(end_pos, 0) + 1
         
         # Mark contested targets (multiple agents targeting same cell)
         for target_pos, count in target_counts.items():
             if count > 1:
                 occupied_targets.add(target_pos)
+        
+        # Mark contested end positions (multiple agents pushing to same location)
+        for end_pos, count in end_pos_counts.items():
+            if count > 1:
+                # If multiple agents try to push to the same end position, block them
+                # Find which agents are affected
+                for agent_idx, agent_end_pos in unsteady_end_positions.items():
+                    if agent_end_pos == end_pos:
+                        # Block this agent's target
+                        target_pos, _, _ = unsteady_targets[agent_idx]
+                        occupied_targets.add(target_pos)
+        
+        # NEW: Check if any agent's target cell conflicts with another agent's block end position
+        # If agent A targets cell X, and agent B pushes a block to land at cell X, both should fail
+        for agent_idx, (target_pos, _, _) in unsteady_targets.items():
+            for other_idx, other_end_pos in unsteady_end_positions.items():
+                if agent_idx != other_idx and other_end_pos is not None:
+                    if target_pos == other_end_pos:
+                        # Agent's target conflicts with where another agent's block will land
+                        # Block both agents
+                        occupied_targets.add(target_pos)
+                        other_target_pos, _, _ = unsteady_targets[other_idx]
+                        occupied_targets.add(other_target_pos)
         
         # Now process movements for unsteady agents
         for i in unsteady_forward_agents:
@@ -2137,11 +2182,20 @@ class MultiGridEnv(gym.Env):
                 else:
                     inactive_agents.append(i)
             
-            # OPTIMIZATION 1: If ≤1 agents active, transition is deterministic
+            # OPTIMIZATION 1: If ≤1 agents active, check if transition is deterministic
+            # (only deterministic if the agent is NOT on unsteady ground attempting forward)
             if len(active_agents) <= 1:
-                # Only one or zero agents acting - order doesn't matter
-                successor_state = self._compute_successor_state(state, actions, tuple(range(num_agents)))
-                return [(1.0, successor_state)]
+                # Check if the single agent is on unsteady ground attempting forward
+                is_unsteady = False
+                if len(active_agents) == 1:
+                    agent_idx = active_agents[0]
+                    if actions[agent_idx] == self.actions.forward and self.agents[agent_idx].on_unsteady_ground:
+                        is_unsteady = True
+                
+                if not is_unsteady:
+                    # Only one or zero agents acting and not on unsteady ground - order doesn't matter
+                    successor_state = self._compute_successor_state(state, actions, tuple(range(num_agents)))
+                    return [(1.0, successor_state)]
             
             # OPTIMIZATION 2: Check if all but at most one actions are rotations (left/right)
             # Rotations never interfere with each other, so order doesn't matter
@@ -2150,9 +2204,15 @@ class MultiGridEnv(gym.Env):
                 for i in active_agents
             )
             if n_non_rotations < 2:
-                # Rotations are commutative - result is deterministic
-                successor_state = self._compute_successor_state(state, actions, tuple(range(num_agents)))
-                return [(1.0, successor_state)]
+                # Check if any agents are on unsteady ground attempting forward
+                has_unsteady = any(
+                    actions[i] == self.actions.forward and self.agents[i].on_unsteady_ground
+                    for i in active_agents
+                )
+                if not has_unsteady:
+                    # Rotations are commutative and no unsteady agents - result is deterministic
+                    successor_state = self._compute_successor_state(state, actions, tuple(range(num_agents)))
+                    return [(1.0, successor_state)]
             
             # OPTIMIZATION 3: Partition agents into conflict blocks
             # This is MORE efficient than permuting all active agents
@@ -2653,7 +2713,8 @@ class MultiGridEnv(gym.Env):
         
         # Now process unsteady-forward agents
         # First, apply turns and determine targets simultaneously for all
-        unsteady_targets = {}
+        unsteady_targets = {}  # agent_idx -> target_pos
+        unsteady_end_positions = {}  # agent_idx -> end_pos (for pushing)
         occupied_targets = set()
         
         for agent_idx, outcome_type in unsteady_forward_agents.items():
@@ -2669,19 +2730,63 @@ class MultiGridEnv(gym.Env):
             # Compute target
             target_pos = tuple(self.agents[agent_idx].front_pos)
             unsteady_targets[agent_idx] = target_pos
+            
+            # Check if target involves pushing blocks/rocks
+            target_cell = self.grid.get(*target_pos)
+            if target_cell is not None and target_cell.type in ['block', 'rock']:
+                can_push, num_objects, end_pos = self._can_push_objects(self.agents[agent_idx], np.array(target_pos))
+                if can_push:
+                    # The contested resource is where blocks land
+                    unsteady_end_positions[agent_idx] = tuple(end_pos)
+                else:
+                    # Can't push, mark as independent
+                    unsteady_end_positions[agent_idx] = None
+            else:
+                # Not pushing, end position is same as target
+                unsteady_end_positions[agent_idx] = None
         
         # Identify occupied and contested targets
+        # For pushing, we check both the target cell and the end position
         target_counts = {}
+        end_pos_counts = {}
+        
         for agent_idx, target_pos in unsteady_targets.items():
             target_counts[target_pos] = target_counts.get(target_pos, 0) + 1
             
             target_cell = self.grid.get(*target_pos)
             if target_cell is not None and target_cell.type == 'agent':
                 occupied_targets.add(target_pos)
+            
+            # Track end positions for pushing
+            end_pos = unsteady_end_positions.get(agent_idx)
+            if end_pos is not None:
+                end_pos_counts[end_pos] = end_pos_counts.get(end_pos, 0) + 1
         
+        # Mark contested targets (multiple agents targeting same cell)
         for target_pos, count in target_counts.items():
             if count > 1:
                 occupied_targets.add(target_pos)
+        
+        # Mark contested end positions (multiple agents pushing to same location)
+        for end_pos, count in end_pos_counts.items():
+            if count > 1:
+                # If multiple agents try to push to the same end position, block them
+                # Find which agents are affected
+                for agent_idx, agent_end_pos in unsteady_end_positions.items():
+                    if agent_end_pos == end_pos:
+                        # Block this agent's target
+                        occupied_targets.add(unsteady_targets[agent_idx])
+        
+        # NEW: Check if any agent's target cell conflicts with another agent's block end position
+        # If agent A targets cell X, and agent B pushes a block to land at cell X, both should fail
+        for agent_idx, target_pos in unsteady_targets.items():
+            for other_idx, other_end_pos in unsteady_end_positions.items():
+                if agent_idx != other_idx and other_end_pos is not None:
+                    if target_pos == other_end_pos:
+                        # Agent's target conflicts with where another agent's block will land
+                        # Block both agents
+                        occupied_targets.add(target_pos)
+                        occupied_targets.add(unsteady_targets[other_idx])
         
         # Process movements
         for agent_idx in unsteady_forward_agents.keys():
