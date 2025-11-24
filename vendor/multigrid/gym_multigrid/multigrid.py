@@ -2561,15 +2561,19 @@ class MultiGridEnv(gym.Env):
                 all_blocks.append(('unsteady', agent_idx, outcomes))
             
             # Add magic wall agent blocks (one per magic-wall-entry agent)
-            # Each block has 2 outcomes with probabilities
+            # Each block has 3 outcomes with probabilities: succeed, fail (stays magic), solidify (turns to wall)
             for agent_idx in magic_wall_agents:
                 fwd_pos = self.agents[agent_idx].front_pos
                 fwd_cell = self.grid.get(*fwd_pos)
                 entry_prob = fwd_cell.entry_probability if fwd_cell else 0.5
+                solidify_prob = fwd_cell.solidify_probability if fwd_cell else 0.0
                 # Block elements are (probability, outcome) pairs
+                # On failure, there's a chance to solidify into a normal wall
+                fail_prob = 1.0 - entry_prob
                 outcomes = [
                     (entry_prob, 'succeed'),
-                    (1.0 - entry_prob, 'fail')
+                    (fail_prob * (1.0 - solidify_prob), 'fail'),
+                    (fail_prob * solidify_prob, 'solidify')
                 ]
                 all_blocks.append(('magicwall', agent_idx, outcomes))
             
@@ -2972,7 +2976,14 @@ class MultiGridEnv(gym.Env):
                     self.terrain_grid.set(*fwd_pos, fwd_cell)
                     self._move_agent_to_cell(i, fwd_pos, fwd_cell)
                     self._handle_special_moves(i, rewards, fwd_pos, fwd_cell)
-                # If outcome is 'fail', agent stays in place (no action)
+                elif outcome == 'solidify':
+                    # Entry failed and magic wall solidifies into a normal wall
+                    fwd_pos = self.agents[i].front_pos
+                    fwd_cell = self.grid.get(*fwd_pos)
+                    if fwd_cell and fwd_cell.type == 'magicwall':
+                        normal_wall = Wall(self.objects, fwd_cell.color)
+                        self.grid.set(*fwd_pos, normal_wall)
+                # If outcome is 'fail', agent stays in place and wall stays magic (no action)
         
         # Check if max steps reached
         if self.step_count >= self.max_steps:

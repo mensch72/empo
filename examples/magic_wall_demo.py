@@ -23,18 +23,18 @@ from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, Wall, World, Magi
 class MagicWallDemoEnv(MultiGridEnv):
     """Demo environment showing agents navigating magic walls."""
     
-    def __init__(self, num_agents=10, num_magic_walls=20):
+    def __init__(self, num_agents=10, num_magic_walls=30):
         self.num_magic_walls = num_magic_walls
         # World only has 6 colors (indices 0-5), so we cycle through them
-        # First 5 agents can enter magic walls, rest cannot
+        # All but one agent can enter magic walls (9 out of 10)
         self.agents = []
         for i in range(num_agents):
-            can_enter = (i < 5)  # First 5 agents can enter magic walls
+            can_enter = (i < num_agents - 1)  # All but last agent can enter magic walls
             self.agents.append(Agent(World, i % 6, can_enter_magic_walls=can_enter))
         
         super().__init__(
-            width=14,
-            height=14,
+            width=16,
+            height=16,
             max_steps=200,
             agents=self.agents,
             partial_obs=False,
@@ -96,15 +96,15 @@ def create_animation(output_path='magic_wall_animation.mp4', num_steps=50):
     """Create and save an animation showing agents navigating magic walls."""
     
     print("Creating magic wall animation...")
-    print(f"  Grid size: 14x14")
-    print(f"  Number of agents: 10 (5 can enter magic walls, 5 cannot)")
-    print(f"  Number of magic walls: 20")
+    print(f"  Grid size: 16x16")
+    print(f"  Number of agents: 10 (9 can enter magic walls, 1 cannot)")
+    print(f"  Number of magic walls: 30")
     print(f"  Entry probabilities: 50% to 100% (random)")
     print(f"  Solidify probabilities: 10% to 30% (random)")
     print()
     
     # Create environment
-    env = MagicWallDemoEnv(num_agents=10, num_magic_walls=20)
+    env = MagicWallDemoEnv(num_agents=10, num_magic_walls=30)
     env.reset()
     
     # Print agent capabilities
@@ -202,8 +202,8 @@ def main():
     print("=" * 70)
     print()
     print("This example demonstrates:")
-    print("  - Creating a 14x14 multigrid environment with 20 magic walls")
-    print("  - 10 agents navigating (5 can enter magic walls, 5 cannot)")
+    print("  - Creating a 16x16 multigrid environment with 30 magic walls")
+    print("  - 10 agents navigating (9 can enter magic walls, 1 cannot)")
     print("  - Magic walls that can only be entered from specific directions")
     print("  - Probabilistic entry success (50% to 100%)")
     print("  - Magic walls that may solidify into normal walls on failed entry")
