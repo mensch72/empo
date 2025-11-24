@@ -2835,7 +2835,7 @@ class MultiGridEnv(gym.Env):
             active_agents: List of active agent indices
             conflict_blocks: List of conflict blocks
             conflict_winners: List of (block_idx, winner_agent_idx) tuples
-            magic_wall_outcomes: Optional dict mapping agent_idx -> outcome_type ('success' or 'failure')
+            magic_wall_outcomes: Optional dict mapping agent_idx -> outcome_type ('succeed' or 'fail')
             
         Returns:
             tuple: The successor state

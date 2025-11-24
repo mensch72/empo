@@ -66,7 +66,7 @@ def test_magic_wall_creation():
     assert cell.magic_side == 0
     assert cell.entry_probability == 0.7
     assert not cell.see_behind()
-    assert cell.can_overlap()  # Agents can step off magic walls
+    assert not cell.can_overlap()  # Magic walls block normal movement
 
 
 def test_magic_wall_different_sides():
