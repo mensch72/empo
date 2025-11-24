@@ -1478,6 +1478,184 @@ class MultiGridEnv(gym.Env):
 
         return obs_cell is not None and obs_cell.type == world_cell.type
 
+    def _execute_single_agent_action(self, agent_idx, action, rewards):
+        """
+        Execute a single agent's action. This is the core action execution logic
+        shared by step(), _compute_successor_state(), and _compute_successor_state_with_unsteady().
+        
+        Args:
+            agent_idx: Index of the agent
+            action: Action to execute
+            rewards: Rewards array to update
+            
+        Returns:
+            bool: True if the action resulted in reaching a goal (done condition)
+        """
+        done = False
+        fwd_pos = self.agents[agent_idx].front_pos
+        fwd_cell = self.grid.get(*fwd_pos)
+        
+        if action == self.actions.left:
+            self.agents[agent_idx].dir -= 1
+            if self.agents[agent_idx].dir < 0:
+                self.agents[agent_idx].dir += 4
+        
+        elif action == self.actions.right:
+            self.agents[agent_idx].dir = (self.agents[agent_idx].dir + 1) % 4
+        
+        elif action == self.actions.forward:
+            moved = False
+            if fwd_cell is not None and fwd_cell.type in ['block', 'rock']:
+                pushed = self._push_objects(self.agents[agent_idx], fwd_pos)
+                moved = pushed
+            elif fwd_cell is not None:
+                if fwd_cell.type == 'goal':
+                    done = True
+                    self._reward(agent_idx, rewards, 1)
+                    self._move_agent_to_cell(agent_idx, fwd_pos, fwd_cell)
+                    moved = True
+                elif fwd_cell.type == 'switch':
+                    self._handle_switch(agent_idx, rewards, fwd_pos, fwd_cell)
+                    self._move_agent_to_cell(agent_idx, fwd_pos, fwd_cell)
+                    moved = True
+                elif fwd_cell.can_overlap():
+                    self._move_agent_to_cell(agent_idx, fwd_pos, fwd_cell)
+                    moved = True
+            elif fwd_cell is None:
+                self._move_agent_to_cell(agent_idx, fwd_pos, fwd_cell)
+                moved = True
+            self._handle_special_moves(agent_idx, rewards, fwd_pos, fwd_cell)
+        
+        elif 'build' in self.actions.available and action == self.actions.build:
+            self._handle_build(agent_idx, rewards, fwd_pos, fwd_cell)
+        
+        elif action == self.actions.pickup:
+            self._handle_pickup(agent_idx, rewards, fwd_pos, fwd_cell)
+        
+        elif action == self.actions.drop:
+            self._handle_drop(agent_idx, rewards, fwd_pos, fwd_cell)
+        
+        elif action == self.actions.toggle:
+            if fwd_cell:
+                fwd_cell.toggle(self, fwd_pos)
+        
+        elif action == self.actions.done:
+            pass
+        
+        else:
+            assert False, "unknown action"
+        
+        return done
+
+    def _process_unsteady_forward_agents(self, unsteady_forward_agents, rewards, unsteady_outcomes=None):
+        """
+        Process agents on unsteady ground attempting forward movement.
+        This handles stumbling stochasticity and conflict resolution for unsteady agents.
+        
+        Args:
+            unsteady_forward_agents: List of agent indices on unsteady ground
+            rewards: Rewards array to update
+            unsteady_outcomes: Optional dict mapping agent_idx -> outcome_type 
+                             ('forward', 'left-forward', 'right-forward')
+                             If None, randomly determine outcomes
+        
+        Returns:
+            bool: True if any agent reached a goal (done condition)
+        """
+        done = False
+        unsteady_targets = {}  # agent_idx -> (target_pos, stumbled, turn_dir)
+        contested_cells = {}  # agent_idx -> contested_cell
+        occupied_targets = set()
+        
+        # Determine stumbling outcomes and target cells for all unsteady agents
+        for i in unsteady_forward_agents:
+            # Determine outcome
+            if unsteady_outcomes is not None and i in unsteady_outcomes:
+                # Use provided outcome
+                outcome_type = unsteady_outcomes[i]
+                if outcome_type == 'left-forward':
+                    turn_dir = 'left'
+                    stumbles = True
+                elif outcome_type == 'right-forward':
+                    turn_dir = 'right'
+                    stumbles = True
+                else:  # 'forward'
+                    turn_dir = None
+                    stumbles = False
+            else:
+                # Randomly determine stumbling
+                stumble_prob = 0.5
+                stumbles = self.np_random.random() < stumble_prob
+                turn_dir = self.np_random.choice(['left', 'right']) if stumbles else None
+            
+            # Apply turn if stumbling
+            if stumbles:
+                if turn_dir == 'left':
+                    self.agents[i].dir -= 1
+                    if self.agents[i].dir < 0:
+                        self.agents[i].dir += 4
+                else:  # right
+                    self.agents[i].dir = (self.agents[i].dir + 1) % 4
+            
+            # Compute target position
+            target_pos = tuple(self.agents[i].front_pos)
+            unsteady_targets[i] = (target_pos, stumbles, turn_dir)
+            
+            # Determine contested cell (target or block end position)
+            target_cell = self.grid.get(*target_pos)
+            if target_cell is not None and target_cell.type in ['block', 'rock']:
+                can_push, num_objects, end_pos = self._can_push_objects(self.agents[i], np.array(target_pos))
+                contested_cells[i] = tuple(end_pos) if can_push else target_pos
+            else:
+                contested_cells[i] = target_pos
+        
+        # Check for conflicts
+        contested_counts = {}
+        for i, contested_cell in contested_cells.items():
+            contested_counts[contested_cell] = contested_counts.get(contested_cell, 0) + 1
+            cell_obj = self.grid.get(*contested_cell)
+            if cell_obj is not None and cell_obj.type == 'agent':
+                occupied_targets.add(contested_cell)
+        
+        for contested_cell, count in contested_counts.items():
+            if count > 1:
+                occupied_targets.add(contested_cell)
+        
+        # Execute movements for unsteady agents
+        for i in unsteady_forward_agents:
+            target_pos, stumbled, turn_dir = unsteady_targets[i]
+            fwd_pos = np.array(target_pos)
+            fwd_cell = self.grid.get(*fwd_pos)
+            
+            can_move = contested_cells[i] not in occupied_targets
+            
+            if can_move:
+                if fwd_cell is not None and fwd_cell.type in ['block', 'rock']:
+                    pushed = self._push_objects(self.agents[i], fwd_pos)
+                    can_move = pushed
+                elif fwd_cell is not None:
+                    if fwd_cell.type == 'goal':
+                        done = True
+                        self._reward(i, rewards, 1)
+                        can_move = True
+                    elif fwd_cell.type == 'switch':
+                        self._handle_switch(i, rewards, fwd_pos, fwd_cell)
+                        can_move = True
+                    elif fwd_cell.can_overlap():
+                        can_move = True
+                    else:
+                        can_move = False
+                elif fwd_cell is None:
+                    can_move = True
+                else:
+                    can_move = False
+            
+            if can_move:
+                self._move_agent_to_cell(i, fwd_pos, fwd_cell)
+                self._handle_special_moves(i, rewards, fwd_pos, fwd_cell)
+        
+        return done
+
     def step(self, actions):
         self.step_count += 1
 
@@ -1502,170 +1680,15 @@ class MultiGridEnv(gym.Env):
         rewards = np.zeros(len(actions))
         done = False
 
-        # Process normal agents
+        # Process normal agents using the shared helper
         for i in order:
-            # Get the position in front of the agent
-            fwd_pos = self.agents[i].front_pos
-
-            # Get the contents of the cell in front of the agent
-            fwd_cell = self.grid.get(*fwd_pos)
-
-            # Rotate left
-            if actions[i] == self.actions.left:
-                self.agents[i].dir -= 1
-                if self.agents[i].dir < 0:
-                    self.agents[i].dir += 4
-
-            # Rotate right
-            elif actions[i] == self.actions.right:
-                self.agents[i].dir = (self.agents[i].dir + 1) % 4
-
-            # Move forward
-            elif actions[i] == self.actions.forward:
-                moved = False
-                # Check if forward cell contains a block or rock that can be pushed
-                if fwd_cell is not None and fwd_cell.type in ['block', 'rock']:
-                    # Try to push the object(s)
-                    pushed = self._push_objects(self.agents[i], fwd_pos)
-                    moved = pushed
-                elif fwd_cell is not None:
-                    if fwd_cell.type == 'goal':
-                        done = True
-                        self._reward(i, rewards, 1)
-                        # Agent can still move onto goal
-                        self._move_agent_to_cell(i, fwd_pos, fwd_cell)
-                        moved = True
-                    elif fwd_cell.type == 'switch':
-                        self._handle_switch(i, rewards, fwd_pos, fwd_cell)
-                        # Agent can move onto switch
-                        self._move_agent_to_cell(i, fwd_pos, fwd_cell)
-                        moved = True
-                    elif fwd_cell.can_overlap():
-                        self._move_agent_to_cell(i, fwd_pos, fwd_cell)
-                        moved = True
-                elif fwd_cell is None:
-                    self._move_agent_to_cell(i, fwd_pos, fwd_cell)
-                    moved = True
-                self._handle_special_moves(i, rewards, fwd_pos, fwd_cell)
-
-            elif 'build' in self.actions.available and actions[i]==self.actions.build:
-                self._handle_build(i, rewards, fwd_pos, fwd_cell)
-
-            # Pick up an object
-            elif actions[i] == self.actions.pickup:
-                self._handle_pickup(i, rewards, fwd_pos, fwd_cell)
-
-            # Drop an object
-            elif actions[i] == self.actions.drop:
-                self._handle_drop(i, rewards, fwd_pos, fwd_cell)
-
-            # Toggle/activate an object
-            elif actions[i] == self.actions.toggle:
-                if fwd_cell:
-                    fwd_cell.toggle(self, fwd_pos)
-
-            # Done action (not used by default)
-            elif actions[i] == self.actions.done:
-                pass
-
-            else:
-                assert False, "unknown action"
+            agent_done = self._execute_single_agent_action(i, actions[i], rewards)
+            done = done or agent_done
         
-        # Process unsteady-forward agents after normal agents
-        # First, determine target cells and stumbling for all unsteady agents simultaneously
-        unsteady_targets = {}  # agent_idx -> (target_pos, stumbled, turn_dir)
-        contested_cells = {}  # agent_idx -> contested_cell (either target or block end pos)
-        occupied_targets = set()  # Track which targets are already occupied or contested
-        
-        for i in unsteady_forward_agents:
-            # Get stumble probability - need to track this separately since agent is on the cell
-            # For now, use default 0.5 - this will need to be stored with the agent or environment
-            stumble_prob = 0.5  # Default stumble probability
-            
-            # Determine if agent stumbles
-            stumbles = self.np_random.random() < stumble_prob
-            
-            if stumbles:
-                # Choose left or right randomly
-                turn_dir = self.np_random.choice(['left', 'right'])
-                # Apply turn
-                if turn_dir == 'left':
-                    self.agents[i].dir -= 1
-                    if self.agents[i].dir < 0:
-                        self.agents[i].dir += 4
-                else:  # right
-                    self.agents[i].dir = (self.agents[i].dir + 1) % 4
-            else:
-                turn_dir = None
-            
-            # Compute target position
-            target_pos = tuple(self.agents[i].front_pos)
-            unsteady_targets[i] = (target_pos, stumbles, turn_dir)
-            
-            # Determine the contested cell: either target cell or block end position
-            target_cell = self.grid.get(*target_pos)
-            if target_cell is not None and target_cell.type in ['block', 'rock']:
-                can_push, num_objects, end_pos = self._can_push_objects(self.agents[i], np.array(target_pos))
-                if can_push:
-                    # The contested cell is where blocks land
-                    contested_cells[i] = tuple(end_pos)
-                else:
-                    # Can't push, contested cell is the target (will fail anyway)
-                    contested_cells[i] = target_pos
-            else:
-                # Not pushing, contested cell is the target
-                contested_cells[i] = target_pos
-        
-        # Count how many agents contest each cell and check for occupied cells
-        contested_counts = {}
-        for i, contested_cell in contested_cells.items():
-            contested_counts[contested_cell] = contested_counts.get(contested_cell, 0) + 1
-            
-            # Check if cell is occupied by an agent
-            cell_obj = self.grid.get(*contested_cell)
-            if cell_obj is not None and cell_obj.type == 'agent':
-                occupied_targets.add(contested_cell)
-        
-        # Mark cells contested by multiple agents
-        for contested_cell, count in contested_counts.items():
-            if count > 1:
-                occupied_targets.add(contested_cell)
-        
-        # Now process movements for unsteady agents
-        for i in unsteady_forward_agents:
-            target_pos, stumbled, turn_dir = unsteady_targets[i]
-            fwd_pos = np.array(target_pos)
-            fwd_cell = self.grid.get(*fwd_pos)
-            
-            # Check if movement is possible - blocked if contested cell is occupied
-            can_move = contested_cells[i] not in occupied_targets
-            
-            if can_move:
-                # Check additional movement constraints (walls, etc.)
-                if fwd_cell is not None and fwd_cell.type in ['block', 'rock']:
-                    pushed = self._push_objects(self.agents[i], fwd_pos)
-                    can_move = pushed
-                elif fwd_cell is not None:
-                    if fwd_cell.type == 'goal':
-                        done = True
-                        self._reward(i, rewards, 1)
-                        can_move = True
-                    elif fwd_cell.type == 'switch':
-                        self._handle_switch(i, rewards, fwd_pos, fwd_cell)
-                        can_move = True
-                    elif fwd_cell.can_overlap():
-                        can_move = True
-                    else:
-                        can_move = False
-                elif fwd_cell is None:
-                    can_move = True
-                else:
-                    can_move = False
-            
-            if can_move:
-                # Move the agent
-                self._move_agent_to_cell(i, fwd_pos, fwd_cell)
-                self._handle_special_moves(i, rewards, fwd_pos, fwd_cell)
+        # Process unsteady-forward agents using the shared helper
+        if unsteady_forward_agents:
+            unsteady_done = self._process_unsteady_forward_agents(unsteady_forward_agents, rewards)
+            done = done or unsteady_done
 
         if self.step_count >= self.max_steps:
             done = True
@@ -2511,74 +2534,9 @@ class MultiGridEnv(gym.Env):
                 actions[i] == self.actions.still):
                 continue
             
-            # Get the position in front of the agent
-            fwd_pos = self.agents[i].front_pos
-            
-            # Get the contents of the cell in front of the agent
-            fwd_cell = self.grid.get(*fwd_pos)
-            
-            # Execute the action
-            if actions[i] == self.actions.left:
-                # Rotate left
-                self.agents[i].dir -= 1
-                if self.agents[i].dir < 0:
-                    self.agents[i].dir += 4
-            
-            elif actions[i] == self.actions.right:
-                # Rotate right
-                self.agents[i].dir = (self.agents[i].dir + 1) % 4
-            
-            elif actions[i] == self.actions.forward:
-                # Move forward
-                moved = False
-                # Check if forward cell contains a block or rock that can be pushed
-                if fwd_cell is not None and fwd_cell.type in ['block', 'rock']:
-                    # Try to push the object(s)
-                    pushed = self._push_objects(self.agents[i], fwd_pos)
-                    moved = pushed
-                elif fwd_cell is not None:
-                    if fwd_cell.type == 'goal':
-                        done = True
-                        self._reward(i, rewards, 1)
-                        # Agent can still move onto goal
-                        self._move_agent_to_cell(i, fwd_pos, fwd_cell)
-                        moved = True
-                    elif fwd_cell.type == 'switch':
-                        self._handle_switch(i, rewards, fwd_pos, fwd_cell)
-                        # Agent can move onto switch
-                        self._move_agent_to_cell(i, fwd_pos, fwd_cell)
-                        moved = True
-                    elif fwd_cell.can_overlap():
-                        self._move_agent_to_cell(i, fwd_pos, fwd_cell)
-                        moved = True
-                elif fwd_cell is None:
-                    self._move_agent_to_cell(i, fwd_pos, fwd_cell)
-                    moved = True
-                self._handle_special_moves(i, rewards, fwd_pos, fwd_cell)
-            
-            elif 'build' in self.actions.available and actions[i] == self.actions.build:
-                self._handle_build(i, rewards, fwd_pos, fwd_cell)
-            
-            elif actions[i] == self.actions.pickup:
-                # Pick up an object
-                self._handle_pickup(i, rewards, fwd_pos, fwd_cell)
-            
-            elif actions[i] == self.actions.drop:
-                # Drop an object
-                self._handle_drop(i, rewards, fwd_pos, fwd_cell)
-            
-            elif actions[i] == self.actions.toggle:
-                # Toggle/activate an object
-                if fwd_cell:
-                    fwd_cell.toggle(self, fwd_pos)
-            
-            elif actions[i] == self.actions.done:
-                # Done action (not used by default)
-                pass
-            
-            else:
-                # Invalid action
-                return None
+            # Execute the action using shared helper
+            agent_done = self._execute_single_agent_action(i, actions[i], rewards)
+            done = done or agent_done
         
         # Check if max steps reached
         if self.step_count >= self.max_steps:
@@ -2615,7 +2573,8 @@ class MultiGridEnv(gym.Env):
         
         # Separate agents into normal and unsteady-forward
         normal_agents = []
-        unsteady_forward_agents = {}  # agent_idx -> outcome_type
+        unsteady_forward_agents_list = []
+        unsteady_outcomes_dict = {}  # agent_idx -> outcome_type
         
         for i in range(num_agents):
             if (self.agents[i].terminated or 
@@ -2628,7 +2587,8 @@ class MultiGridEnv(gym.Env):
                 # This is an unsteady agent with (action, outcome_type)
                 orig_action, outcome_type = action
                 if orig_action != self.actions.still:
-                    unsteady_forward_agents[i] = outcome_type
+                    unsteady_forward_agents_list.append(i)
+                    unsteady_outcomes_dict[i] = outcome_type
             elif action != self.actions.still:
                 normal_agents.append(i)
         
@@ -2646,7 +2606,7 @@ class MultiGridEnv(gym.Env):
             if i not in winner_set:
                 ordering.append(i)
         
-        # Process normal agents
+        # Process normal agents using the shared helper
         rewards = np.zeros(num_agents)
         done = False
         
@@ -2655,138 +2615,15 @@ class MultiGridEnv(gym.Env):
             if isinstance(action, tuple):
                 action = action[0]  # Extract original action
             
-            fwd_pos = self.agents[i].front_pos
-            fwd_cell = self.grid.get(*fwd_pos)
-            
-            if action == self.actions.left:
-                self.agents[i].dir -= 1
-                if self.agents[i].dir < 0:
-                    self.agents[i].dir += 4
-            
-            elif action == self.actions.right:
-                self.agents[i].dir = (self.agents[i].dir + 1) % 4
-            
-            elif action == self.actions.forward:
-                moved = False
-                if fwd_cell is not None and fwd_cell.type in ['block', 'rock']:
-                    pushed = self._push_objects(self.agents[i], fwd_pos)
-                    moved = pushed
-                elif fwd_cell is not None:
-                    if fwd_cell.type == 'goal':
-                        done = True
-                        self._reward(i, rewards, 1)
-                        self._move_agent_to_cell(i, fwd_pos, fwd_cell)
-                        moved = True
-                    elif fwd_cell.type == 'switch':
-                        self._handle_switch(i, rewards, fwd_pos, fwd_cell)
-                        self._move_agent_to_cell(i, fwd_pos, fwd_cell)
-                        moved = True
-                    elif fwd_cell.can_overlap():
-                        self._move_agent_to_cell(i, fwd_pos, fwd_cell)
-                        moved = True
-                elif fwd_cell is None:
-                    self._move_agent_to_cell(i, fwd_pos, fwd_cell)
-                    moved = True
-                self._handle_special_moves(i, rewards, fwd_pos, fwd_cell)
-            
-            elif 'build' in self.actions.available and action == self.actions.build:
-                self._handle_build(i, rewards, fwd_pos, fwd_cell)
-            
-            elif action == self.actions.pickup:
-                self._handle_pickup(i, rewards, fwd_pos, fwd_cell)
-            
-            elif action == self.actions.drop:
-                self._handle_drop(i, rewards, fwd_pos, fwd_cell)
-            
-            elif action == self.actions.toggle:
-                if fwd_cell:
-                    fwd_cell.toggle(self, fwd_pos)
-            
-            elif action == self.actions.done:
-                pass
+            agent_done = self._execute_single_agent_action(i, action, rewards)
+            done = done or agent_done
         
-        # Now process unsteady-forward agents
-        # First, apply turns and determine targets simultaneously for all
-        unsteady_targets = {}  # agent_idx -> target_pos
-        contested_cells = {}  # agent_idx -> contested_cell (either target or block end pos)
-        occupied_targets = set()
-        
-        for agent_idx, outcome_type in unsteady_forward_agents.items():
-            # Apply turn based on outcome
-            if outcome_type == 'left-forward':
-                self.agents[agent_idx].dir -= 1
-                if self.agents[agent_idx].dir < 0:
-                    self.agents[agent_idx].dir += 4
-            elif outcome_type == 'right-forward':
-                self.agents[agent_idx].dir = (self.agents[agent_idx].dir + 1) % 4
-            # else: outcome_type == 'forward', no turn
-            
-            # Compute target
-            target_pos = tuple(self.agents[agent_idx].front_pos)
-            unsteady_targets[agent_idx] = target_pos
-            
-            # Determine the contested cell: either target cell or block end position
-            target_cell = self.grid.get(*target_pos)
-            if target_cell is not None and target_cell.type in ['block', 'rock']:
-                can_push, num_objects, end_pos = self._can_push_objects(self.agents[agent_idx], np.array(target_pos))
-                if can_push:
-                    # The contested cell is where blocks land
-                    contested_cells[agent_idx] = tuple(end_pos)
-                else:
-                    # Can't push, contested cell is the target (will fail anyway)
-                    contested_cells[agent_idx] = target_pos
-            else:
-                # Not pushing, contested cell is the target
-                contested_cells[agent_idx] = target_pos
-        
-        # Count how many agents contest each cell and check for occupied cells
-        contested_counts = {}
-        for agent_idx, contested_cell in contested_cells.items():
-            contested_counts[contested_cell] = contested_counts.get(contested_cell, 0) + 1
-            
-            # Check if cell is occupied by an agent
-            cell_obj = self.grid.get(*contested_cell)
-            if cell_obj is not None and cell_obj.type == 'agent':
-                occupied_targets.add(contested_cell)
-        
-        # Mark cells contested by multiple agents
-        for contested_cell, count in contested_counts.items():
-            if count > 1:
-                occupied_targets.add(contested_cell)
-        
-        # Process movements
-        for agent_idx in unsteady_forward_agents.keys():
-            target_pos = unsteady_targets[agent_idx]
-            fwd_pos = np.array(target_pos)
-            fwd_cell = self.grid.get(*fwd_pos)
-            
-            # Check if movement is possible - blocked if contested cell is occupied
-            can_move = contested_cells[agent_idx] not in occupied_targets
-            
-            if can_move:
-                if fwd_cell is not None and fwd_cell.type in ['block', 'rock']:
-                    pushed = self._push_objects(self.agents[agent_idx], fwd_pos)
-                    can_move = pushed
-                elif fwd_cell is not None:
-                    if fwd_cell.type == 'goal':
-                        done = True
-                        self._reward(agent_idx, rewards, 1)
-                        can_move = True
-                    elif fwd_cell.type == 'switch':
-                        self._handle_switch(agent_idx, rewards, fwd_pos, fwd_cell)
-                        can_move = True
-                    elif fwd_cell.can_overlap():
-                        can_move = True
-                    else:
-                        can_move = False
-                elif fwd_cell is None:
-                    can_move = True
-                else:
-                    can_move = False
-            
-            if can_move:
-                self._move_agent_to_cell(agent_idx, fwd_pos, fwd_cell)
-                self._handle_special_moves(agent_idx, rewards, fwd_pos, fwd_cell)
+        # Process unsteady-forward agents using the shared helper
+        if unsteady_forward_agents_list:
+            unsteady_done = self._process_unsteady_forward_agents(
+                unsteady_forward_agents_list, rewards, unsteady_outcomes_dict
+            )
+            done = done or unsteady_done
         
         # Check if max steps reached
         if self.step_count >= self.max_steps:
