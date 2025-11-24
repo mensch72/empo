@@ -1,3 +1,4 @@
+LICENSE
 README.md
 setup.py
 gym_multigrid/__init__.py
