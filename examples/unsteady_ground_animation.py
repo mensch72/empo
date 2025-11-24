@@ -21,7 +21,8 @@ class UnsteadyGroundDemoEnv(MultiGridEnv):
     
     def __init__(self, num_agents=10, num_unsteady_cells=10):
         self.num_unsteady_cells = num_unsteady_cells
-        self.agents = [Agent(World, i) for i in range(num_agents)]
+        # World only has 6 colors (indices 0-5), so we cycle through them
+        self.agents = [Agent(World, i % 6) for i in range(num_agents)]
         super().__init__(
             width=10,
             height=10,
@@ -61,11 +62,14 @@ class UnsteadyGroundDemoEnv(MultiGridEnv):
             while True:
                 x = self._rand_int(1, width-1)
                 y = self._rand_int(1, height-1)
-                if self.grid.get(x, y) is None or self.grid.get(x, y).type == 'unsteadyground':
+                cell = self.grid.get(x, y)
+                if cell is None or cell.type == 'unsteadyground':
                     agent.pos = np.array([x, y])
                     agent.dir = self._rand_int(0, 4)
                     agent.init_dir = agent.dir
                     agent.init_pos = agent.pos.copy()
+                    # Set on_unsteady_ground flag if the agent is placed on unsteady ground
+                    agent.on_unsteady_ground = (cell is not None and cell.type == 'unsteadyground')
                     self.grid.set(x, y, agent)
                     break
 

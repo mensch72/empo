@@ -508,6 +508,7 @@ class Agent(WorldObj):
         self.terminated = False
         self.started = True
         self.paused = False
+        self.on_unsteady_ground = False  # Track if agent is on unsteady ground
 
     def render(self, img):
         c = COLORS[self.color]
@@ -1248,6 +1249,30 @@ class MultiGridEnv(gym.Env):
         
         return True
 
+    def _move_agent_to_cell(self, agent_idx, target_pos, target_cell):
+        """
+        Move an agent to a target cell and update terrain tracking.
+        
+        Args:
+            agent_idx: Index of the agent to move
+            target_pos: Target position (numpy array or tuple)
+            target_cell: The object/cell at the target position (can be None)
+        """
+        # Clear old position
+        self.grid.set(*self.agents[agent_idx].pos, None)
+        
+        # Update agent position
+        self.agents[agent_idx].pos = np.array(target_pos) if not isinstance(target_pos, np.ndarray) else target_pos
+        
+        # Track if the agent is now on unsteady ground
+        if target_cell is not None and target_cell.type == 'unsteadyground':
+            self.agents[agent_idx].on_unsteady_ground = True
+        else:
+            self.agents[agent_idx].on_unsteady_ground = False
+        
+        # Set new position
+        self.grid.set(*self.agents[agent_idx].pos, self.agents[agent_idx])
+    
     def _handle_switch(self, i, rewards, fwd_pos, fwd_cell):
         pass
 
@@ -1448,10 +1473,8 @@ class MultiGridEnv(gym.Env):
                 continue
                 
             # Check if agent is on unsteady ground and attempting forward
-            current_cell = self.grid.get(*self.agents[i].pos)
             if (actions[i] == self.actions.forward and 
-                current_cell is not None and 
-                current_cell.type == 'unsteadyground'):
+                self.agents[i].on_unsteady_ground):
                 unsteady_forward_agents.append(i)
             else:
                 normal_agents.append(i)
@@ -1493,26 +1516,18 @@ class MultiGridEnv(gym.Env):
                         done = True
                         self._reward(i, rewards, 1)
                         # Agent can still move onto goal
-                        self.grid.set(*fwd_pos, self.agents[i])
-                        self.grid.set(*self.agents[i].pos, None)
-                        self.agents[i].pos = fwd_pos
+                        self._move_agent_to_cell(i, fwd_pos, fwd_cell)
                         moved = True
                     elif fwd_cell.type == 'switch':
                         self._handle_switch(i, rewards, fwd_pos, fwd_cell)
                         # Agent can move onto switch
-                        self.grid.set(*fwd_pos, self.agents[i])
-                        self.grid.set(*self.agents[i].pos, None)
-                        self.agents[i].pos = fwd_pos
+                        self._move_agent_to_cell(i, fwd_pos, fwd_cell)
                         moved = True
                     elif fwd_cell.can_overlap():
-                        self.grid.set(*fwd_pos, self.agents[i])
-                        self.grid.set(*self.agents[i].pos, None)
-                        self.agents[i].pos = fwd_pos
+                        self._move_agent_to_cell(i, fwd_pos, fwd_cell)
                         moved = True
                 elif fwd_cell is None:
-                    self.grid.set(*fwd_pos, self.agents[i])
-                    self.grid.set(*self.agents[i].pos, None)
-                    self.agents[i].pos = fwd_pos
+                    self._move_agent_to_cell(i, fwd_pos, fwd_cell)
                     moved = True
                 self._handle_special_moves(i, rewards, fwd_pos, fwd_cell)
 
@@ -1545,8 +1560,9 @@ class MultiGridEnv(gym.Env):
         occupied_targets = set()  # Track which targets are already occupied or contested
         
         for i in unsteady_forward_agents:
-            current_cell = self.grid.get(*self.agents[i].pos)
-            stumble_prob = current_cell.stumble_probability if hasattr(current_cell, 'stumble_probability') else 0.5
+            # Get stumble probability - need to track this separately since agent is on the cell
+            # For now, use default 0.5 - this will need to be stored with the agent or environment
+            stumble_prob = 0.5  # Default stumble probability
             
             # Determine if agent stumbles
             stumbles = self.np_random.random() < stumble_prob
@@ -1616,9 +1632,7 @@ class MultiGridEnv(gym.Env):
             
             if can_move:
                 # Move the agent
-                self.grid.set(*fwd_pos, self.agents[i])
-                self.grid.set(*self.agents[i].pos, None)
-                self.agents[i].pos = fwd_pos
+                self._move_agent_to_cell(i, fwd_pos, fwd_cell)
                 self._handle_special_moves(i, rewards, fwd_pos, fwd_cell)
 
         if self.step_count >= self.max_steps:
@@ -1820,6 +1834,7 @@ class MultiGridEnv(gym.Env):
                 'terminated': agent.terminated,
                 'started': agent.started,
                 'paused': agent.paused,
+                'on_unsteady_ground': agent.on_unsteady_ground,
                 'carrying': self._serialize_object(agent.carrying) if agent.carrying is not None else None,
             }
             agents_state.append(tuple(sorted(agent_data.items())))
@@ -1959,6 +1974,7 @@ class MultiGridEnv(gym.Env):
             agent.terminated = agent_dict['terminated']
             agent.started = agent_dict['started']
             agent.paused = agent_dict['paused']
+            agent.on_unsteady_ground = agent_dict.get('on_unsteady_ground', False)
             
             if agent_dict['carrying'] is not None:
                 agent.carrying = self._deserialize_object(dict(agent_dict['carrying']))
@@ -2146,10 +2162,8 @@ class MultiGridEnv(gym.Env):
             # NEW: Identify unsteady-forward agents (agents on unsteady ground attempting forward)
             unsteady_forward_agents = []
             for i in active_agents:
-                if actions[i] == self.actions.forward:
-                    current_cell = self.grid.get(*self.agents[i].pos)
-                    if current_cell is not None and current_cell.type == 'unsteadyground':
-                        unsteady_forward_agents.append(i)
+                if actions[i] == self.actions.forward and self.agents[i].on_unsteady_ground:
+                    unsteady_forward_agents.append(i)
             
             # If no conflicts and no unsteady agents, result is deterministic
             if all(len(block) == 1 for block in conflict_blocks) and len(unsteady_forward_agents) == 0:
@@ -2473,26 +2487,18 @@ class MultiGridEnv(gym.Env):
                         done = True
                         self._reward(i, rewards, 1)
                         # Agent can still move onto goal
-                        self.grid.set(*fwd_pos, self.agents[i])
-                        self.grid.set(*self.agents[i].pos, None)
-                        self.agents[i].pos = fwd_pos
+                        self._move_agent_to_cell(i, fwd_pos, fwd_cell)
                         moved = True
                     elif fwd_cell.type == 'switch':
                         self._handle_switch(i, rewards, fwd_pos, fwd_cell)
                         # Agent can move onto switch
-                        self.grid.set(*fwd_pos, self.agents[i])
-                        self.grid.set(*self.agents[i].pos, None)
-                        self.agents[i].pos = fwd_pos
+                        self._move_agent_to_cell(i, fwd_pos, fwd_cell)
                         moved = True
                     elif fwd_cell.can_overlap():
-                        self.grid.set(*fwd_pos, self.agents[i])
-                        self.grid.set(*self.agents[i].pos, None)
-                        self.agents[i].pos = fwd_pos
+                        self._move_agent_to_cell(i, fwd_pos, fwd_cell)
                         moved = True
                 elif fwd_cell is None:
-                    self.grid.set(*fwd_pos, self.agents[i])
-                    self.grid.set(*self.agents[i].pos, None)
-                    self.agents[i].pos = fwd_pos
+                    self._move_agent_to_cell(i, fwd_pos, fwd_cell)
                     moved = True
                 self._handle_special_moves(i, rewards, fwd_pos, fwd_cell)
             
@@ -2615,25 +2621,17 @@ class MultiGridEnv(gym.Env):
                     if fwd_cell.type == 'goal':
                         done = True
                         self._reward(i, rewards, 1)
-                        self.grid.set(*fwd_pos, self.agents[i])
-                        self.grid.set(*self.agents[i].pos, None)
-                        self.agents[i].pos = fwd_pos
+                        self._move_agent_to_cell(i, fwd_pos, fwd_cell)
                         moved = True
                     elif fwd_cell.type == 'switch':
                         self._handle_switch(i, rewards, fwd_pos, fwd_cell)
-                        self.grid.set(*fwd_pos, self.agents[i])
-                        self.grid.set(*self.agents[i].pos, None)
-                        self.agents[i].pos = fwd_pos
+                        self._move_agent_to_cell(i, fwd_pos, fwd_cell)
                         moved = True
                     elif fwd_cell.can_overlap():
-                        self.grid.set(*fwd_pos, self.agents[i])
-                        self.grid.set(*self.agents[i].pos, None)
-                        self.agents[i].pos = fwd_pos
+                        self._move_agent_to_cell(i, fwd_pos, fwd_cell)
                         moved = True
                 elif fwd_cell is None:
-                    self.grid.set(*fwd_pos, self.agents[i])
-                    self.grid.set(*self.agents[i].pos, None)
-                    self.agents[i].pos = fwd_pos
+                    self._move_agent_to_cell(i, fwd_pos, fwd_cell)
                     moved = True
                 self._handle_special_moves(i, rewards, fwd_pos, fwd_cell)
             
@@ -2715,9 +2713,7 @@ class MultiGridEnv(gym.Env):
                     can_move = False
             
             if can_move:
-                self.grid.set(*fwd_pos, self.agents[agent_idx])
-                self.grid.set(*self.agents[agent_idx].pos, None)
-                self.agents[agent_idx].pos = fwd_pos
+                self._move_agent_to_cell(agent_idx, fwd_pos, fwd_cell)
                 self._handle_special_moves(agent_idx, rewards, fwd_pos, fwd_cell)
         
         # Check if max steps reached
