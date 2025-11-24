@@ -173,7 +173,43 @@ Each cell in the grid can contain:
   - Cannot be picked up with pickup action
   - Cannot be toggled
 
-### 13. Agent
+### 13. Unsteady Ground
+- **Type**: `unsteadyground`
+- **Color**: Brown (default) or other colors
+- **Appearance**: Floor-like tile with diagonal lines indicating instability
+- **Properties**:
+  - Can be overlapped (agents can walk on it)
+  - **Stochastic movement**: Agents attempting forward action on unsteady ground may stumble
+  - Each unsteady ground cell has a `stumble_probability` parameter (default 0.5)
+  - Behaves like empty floor for all other actions (left, right, pickup, etc.)
+- **Stumbling Mechanic**:
+  - When an agent on unsteady ground attempts **forward action**:
+    - With probability `stumble_probability`: Agent stumbles and the forward action is replaced by **left+forward** or **right+forward** (chosen randomly)
+    - With probability `1 - stumble_probability`: Agent moves straight forward (no stumble)
+  - The turn (left/right) and forward movement happen **in the same time step**
+  - Stumbling does **not** consume extra actions or time steps
+- **Special Processing Order**:
+  - Agents on unsteady ground attempting forward are processed **after** all other agents
+  - Other agents (including those on unsteady ground doing non-forward actions) are processed first in random order
+  - This ensures unsteady-forward agents' stumbling is resolved after normal agent movements
+- **Conflict Resolution**:
+  - If an unsteady-forward agent's target cell is occupied by another agent, the forward movement is blocked (but the turn still occurs)
+  - If multiple unsteady-forward agents compete for the same target cell, **none of them move forward** (but they still turn)
+  - This differs from normal conflict resolution, which picks a winner randomly
+- **Transition Probabilities**:
+  - In `transition_probabilities()` method, each unsteady-forward agent creates a stochastic block with 3 outcomes:
+    1. Forward (straight)
+    2. Left+forward
+    3. Right+forward
+  - All outcomes have equal probability (1/3 each if no other factors)
+  - These blocks are combined with regular conflict blocks via Cartesian product
+- **Use Cases**:
+  - Simulating difficult terrain (ice, mud, loose gravel)
+  - Adding stochasticity to agent movement
+  - Creating navigation challenges
+  - Testing robustness of multi-agent policies
+
+### 14. Agent
 - **Type**: `agent`
 - **Color**: Red, green, blue, purple, yellow (assigned by index)
 - **Properties**:
@@ -291,16 +327,25 @@ Extended action set for building:
 Most individual actions are **deterministic**:
 - Rotation (left/right) always succeeds
 - Pickup/drop/toggle have predictable effects
-- Forward movement is deterministic given current state
+- Forward movement is deterministic given current state (except on unsteady ground)
 
-### Source of Non-Determinism
+### Sources of Non-Determinism
 
-**Agent execution order** is the ONLY source of stochasticity:
+There are **two sources** of stochasticity in the environment:
+
+#### 1. Agent Execution Order (Multi-Agent Conflicts)
 - When multiple agents act simultaneously, they execute in random order
 - Order determined by: `order = np.random.permutation(len(actions))`
-- Each permutation has equal probability: 1/n!
+- Each permutation has equal probability: 1/n! where n is the number of active agents
+- **Exception**: Agents on unsteady ground attempting forward are processed after all other agents
 
-### When Order Matters (Probabilistic Outcomes)
+#### 2. Unsteady Ground Stumbling (Movement Stochasticity)
+- When an agent on unsteady ground attempts forward action
+- Agent may stumble with probability defined by the cell's `stumble_probability` parameter
+- If stumbling occurs, the forward action is replaced by left+forward or right+forward (50-50 chance)
+- This introduces action-level stochasticity independent of agent ordering
+
+### When Order Matters (Probabilistic Outcomes from Conflicts)
 
 Transitions become probabilistic when 2+ agents:
 1. **Compete for same cell**: Two agents move forward to same empty cell
@@ -314,12 +359,26 @@ Transitions become probabilistic when 2+ agents:
    - Example: Agent A opens door, Agent B moves through
    - If B acts first, door is still closed
 
+### When Stumbling Matters (Probabilistic Outcomes from Unsteady Ground)
+
+Movement becomes probabilistic when:
+1. **Agent on unsteady ground moves forward**:
+   - May move straight (probability 1 - stumble_probability)
+   - May turn left and move (probability stumble_probability / 2)
+   - May turn right and move (probability stumble_probability / 2)
+
+2. **Multiple unsteady-forward agents compete for same cell**:
+   - Each agent's stumbling is resolved independently
+   - If agents target the same cell (after stumbling), none move forward
+   - This creates complex probability distributions combining stumbling and conflicts
+
 ### When Order Doesn't Matter (Deterministic Outcomes)
 
 Transitions remain deterministic when:
-- Only 0 or 1 agent acts
+- Only 0 or 1 agent acts (no conflicts)
 - All agents only rotate (rotations never interfere)
 - Agents act on independent, non-overlapping resources
+- No agents are on unsteady ground attempting forward action
 
 ## Object Movement
 
@@ -434,18 +493,21 @@ Episodes end when:
 ## Summary
 
 **Key Points**:
-- **13 object types**: wall, floor, door, key, ball, box, goal, objgoal, lava, switch, block, rock, agent
+- **14 object types**: wall, floor, door, key, ball, box, goal, objgoal, lava, switch, block, rock, unsteady ground, and agent
 - **8 standard actions**: still, left, right, forward, pickup, drop, toggle, done
 - **Single agent type**: No distinction between robot/human or different agent classes (though rocks can have agent-specific push permissions)
 - **Boxes are NOT pushable**: Must be picked up and carried
 - **Blocks ARE pushable**: Can be pushed by any agent using forward action
 - **Rocks ARE pushable with restrictions**: Can only be pushed by specific agents based on rock's `pushable_by` attribute
+- **Unsteady ground introduces stochasticity**: Agents may stumble when moving forward on unsteady ground
 - **Keys are reusable**: Not consumed when unlocking doors
 - **Color matching required**: Keys must match door color
-- **Stochasticity source**: Agent execution order (random permutation)
+- **Stochasticity sources**: 
+  1. Agent execution order (random permutation for normal agents)
+  2. Unsteady ground stumbling (configurable probability per cell)
 - **No agent subtypes**: All agents have same capabilities, distinguished by color/index only
 
-This gridworld focuses on **multi-agent coordination** and **object manipulation**, including Sokoban-style pushing mechanics for blocks and rocks.
+This gridworld focuses on **multi-agent coordination** and **object manipulation**, including Sokoban-style pushing mechanics for blocks and rocks, and stochastic movement on unsteady ground.
 
 ## Additional Clarifications
 
