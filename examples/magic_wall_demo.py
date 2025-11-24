@@ -1,30 +1,41 @@
+#!/usr/bin/env python3
 """
-Example demonstrating magic walls in action.
+Example script demonstrating magic wall cell type.
 
-This creates a simple environment with magic walls that agents can attempt to enter
-with certain probabilities from specific directions.
+This script creates a 12x12 multigrid environment with magic walls
+and agents, simulates their movements, and saves the result as an animation.
+
+Magic walls can only be entered from a specific direction (their "magic side")
+with a configurable probability. Only agents with can_enter_magic_walls=True
+can attempt to enter them.
 """
+
 import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
 
 import numpy as np
-from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, MagicWall, Wall, World, Floor
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, Wall, World, MagicWall
 
 
-class MagicWallDemo(MultiGridEnv):
-    """Demo environment showcasing magic walls."""
+class MagicWallDemoEnv(MultiGridEnv):
+    """Demo environment showing agents navigating magic walls."""
     
-    def __init__(self):
-        # Create 2 agents: one can enter magic walls, one cannot
-        self.agents = [
-            Agent(World, 0, can_enter_magic_walls=True),   # Red agent CAN enter
-            Agent(World, 1, can_enter_magic_walls=False),  # Green agent CANNOT enter
-        ]
+    def __init__(self, num_agents=8, num_magic_walls=6):
+        self.num_magic_walls = num_magic_walls
+        # World only has 6 colors (indices 0-5), so we cycle through them
+        # Half the agents can enter magic walls, half cannot
+        self.agents = []
+        for i in range(num_agents):
+            can_enter = (i % 2 == 0)  # Even-indexed agents can enter magic walls
+            self.agents.append(Agent(World, i % 6, can_enter_magic_walls=can_enter))
+        
         super().__init__(
             width=12,
-            height=8,
-            max_steps=100,
+            height=12,
+            max_steps=200,
             agents=self.agents,
             partial_obs=False,
             objects_set=World
@@ -41,108 +52,175 @@ class MagicWallDemo(MultiGridEnv):
             self.grid.set(0, j, Wall(World))
             self.grid.set(width-1, j, Wall(World))
         
-        # Place agents on the left side
-        self.agents[0].pos = np.array([2, 2])
-        self.agents[0].dir = 0  # facing right
-        self.grid.set(2, 2, self.agents[0])
+        # Place magic walls randomly
+        magic_wall_positions = []
+        for _ in range(self.num_magic_walls):
+            while True:
+                x = self._rand_int(2, width-2)
+                y = self._rand_int(2, height-2)
+                if self.grid.get(x, y) is None and (x, y) not in magic_wall_positions:
+                    magic_wall_positions.append((x, y))
+                    break
+            
+            # Create magic wall with random magic side and entry probability
+            magic_side = self._rand_int(0, 4)  # 0=right, 1=down, 2=left, 3=up
+            entry_prob = 0.3 + 0.7 * np.random.random()  # 30% to 100%
+            magic_wall = MagicWall(World, magic_side=magic_side, 
+                                   entry_probability=entry_prob, color='grey')
+            self.grid.set(x, y, magic_wall)
         
-        self.agents[1].pos = np.array([2, 5])
-        self.agents[1].dir = 0  # facing right
-        self.grid.set(2, 5, self.agents[1])
+        # Place agents randomly in empty cells
+        for agent in self.agents:
+            while True:
+                x = self._rand_int(1, width-1)
+                y = self._rand_int(1, height-1)
+                cell = self.grid.get(x, y)
+                if cell is None:
+                    agent.pos = np.array([x, y])
+                    agent.dir = self._rand_int(0, 4)
+                    agent.init_dir = agent.dir
+                    agent.init_pos = agent.pos.copy()
+                    self.grid.set(x, y, agent)
+                    break
+
+
+def render_grid_to_array(env):
+    """Render the environment grid to a numpy array for animation."""
+    img = env.render(mode='rgb_array', highlight=False)
+    return img
+
+
+def create_animation(output_path='magic_wall_animation.mp4', num_steps=50):
+    """Create and save an animation showing agents navigating magic walls."""
+    
+    print("Creating magic wall animation...")
+    print(f"  Grid size: 12x12")
+    print(f"  Number of agents: 8 (4 can enter magic walls, 4 cannot)")
+    print(f"  Number of magic walls: 6")
+    print(f"  Entry probabilities: 30% to 100% (random)")
+    print()
+    
+    # Create environment
+    env = MagicWallDemoEnv(num_agents=8, num_magic_walls=6)
+    env.reset()
+    
+    # Print agent capabilities
+    print("Agent capabilities:")
+    for i, agent in enumerate(env.agents):
+        status = "CAN" if agent.can_enter_magic_walls else "CANNOT"
+        print(f"  Agent {i} (color {agent.color}): {status} enter magic walls")
+    print()
+    
+    # Collect frames
+    frames = []
+    
+    # Initial state
+    frames.append(render_grid_to_array(env))
+    
+    # Simulate steps with agents moving forward randomly
+    print(f"Simulating {num_steps} steps...")
+    for step in range(num_steps):
+        # Most agents move forward, some turn
+        actions = []
+        for i in range(len(env.agents)):
+            # 70% forward, 15% left, 15% right
+            rand = np.random.random()
+            if rand < 0.7:
+                actions.append(3)  # forward
+            elif rand < 0.85:
+                actions.append(1)  # left
+            else:
+                actions.append(2)  # right
         
-        # Create magic walls with different properties
-        # Magic wall 1: Can be entered from left (magic_side=2), 100% probability
-        mw1 = MagicWall(World, magic_side=2, entry_probability=1.0, color='grey')
-        self.grid.set(5, 2, mw1)
+        obs, rewards, done, info = env.step(actions)
+        frames.append(render_grid_to_array(env))
         
-        # Magic wall 2: Can be entered from left (magic_side=2), 50% probability
-        mw2 = MagicWall(World, magic_side=2, entry_probability=0.5, color='grey')
-        self.grid.set(5, 5, mw2)
+        if (step + 1) % 10 == 0:
+            print(f"  Step {step + 1}/{num_steps} complete")
+    
+    print(f"\nCollected {len(frames)} frames")
+    
+    # Create animation
+    print(f"Saving animation to {output_path}...")
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.set_aspect('equal')
+    ax.axis('off')
+    
+    # Initialize the image
+    im = ax.imshow(frames[0])
+    
+    def update(frame_idx):
+        im.set_array(frames[frame_idx])
+        ax.set_title(f'Magic Wall Demo - Step {frame_idx}/{len(frames)-1}\n'
+                     'Even agents (0,2,4,6) CAN enter magic walls, '
+                     'Odd agents (1,3,5,7) CANNOT', 
+                     fontsize=10, fontweight='bold')
+        return [im]
+    
+    # Create animation
+    anim = animation.FuncAnimation(
+        fig, 
+        update, 
+        frames=len(frames),
+        interval=200,  # 200ms between frames (5 fps)
+        blit=True,
+        repeat=True
+    )
+    
+    # Save as MP4
+    try:
+        writer = animation.FFMpegWriter(fps=5, bitrate=1800)
+        anim.save(output_path, writer=writer)
+        print(f"✓ Animation saved successfully to {output_path}")
+        print(f"  Total frames: {len(frames)}")
+        print(f"  Duration: ~{len(frames)/5:.1f} seconds")
+    except Exception as e:
+        print(f"✗ Error saving animation: {e}")
+        print("  Note: FFmpeg is required to save MP4 files.")
+        print("  Install with: apt-get install ffmpeg  (on Ubuntu)")
+        print("               brew install ffmpeg     (on macOS)")
         
-        # Add some floor markers to make the demo clearer
-        for i in range(3, 5):
-            self.grid.set(i, 2, Floor(World, color='blue'))
-            self.grid.set(i, 5, Floor(World, color='green'))
-        
-        # Add goal areas past the magic walls
-        for i in range(6, 9):
-            self.grid.set(i, 2, Floor(World, color='yellow'))
-            self.grid.set(i, 5, Floor(World, color='yellow'))
+        # Try saving as GIF as fallback
+        print("\nTrying to save as GIF instead...")
+        gif_path = output_path.replace('.mp4', '.gif')
+        try:
+            anim.save(gif_path, writer='pillow', fps=5)
+            print(f"✓ Animation saved as GIF to {gif_path}")
+        except Exception as e2:
+            print(f"✗ Error saving GIF: {e2}")
+    
+    plt.close()
 
 
 def main():
-    print("Magic Wall Demo")
-    print("=" * 50)
+    """Main function to run the animation example."""
+    print("=" * 70)
+    print("Magic Wall Animation Example")
+    print("=" * 70)
     print()
-    print("Setup:")
-    print("- RED agent (top): CAN enter magic walls")
-    print("- GREEN agent (bottom): CANNOT enter magic walls")
-    print()
-    print("Magic Walls:")
-    print("- Top wall (row 2): 100% entry probability")
-    print("- Bottom wall (row 5): 50% entry probability")
-    print("- Both can be entered from the LEFT side (marked with blue dashed line)")
-    print()
-    print("Watch as agents try to pass through!")
+    print("This example demonstrates:")
+    print("  - Creating a 12x12 multigrid environment with magic walls")
+    print("  - 8 agents navigating the environment (half can enter magic walls)")
+    print("  - Magic walls that can only be entered from specific directions")
+    print("  - Probabilistic entry success (30% to 100%)")
+    print("  - Blue dashed lines indicate which side can be entered")
     print()
     
-    env = MagicWallDemo()
-    env.reset()
+    # Create output directory
+    output_dir = os.path.join(os.path.dirname(__file__), '..', 'outputs')
+    os.makedirs(output_dir, exist_ok=True)
     
-    # Try to render
-    try:
-        import matplotlib.pyplot as plt
-        img = env.render(mode='rgb_array')
-        plt.figure(figsize=(10, 6))
-        plt.imshow(img)
-        plt.axis('off')
-        plt.title('Magic Wall Demo - Initial State')
-        plt.tight_layout()
-        plt.savefig('/tmp/magic_wall_demo_initial.png', dpi=150, bbox_inches='tight')
-        print("Saved initial state to /tmp/magic_wall_demo_initial.png")
-        print()
-    except Exception as e:
-        print(f"Could not render: {e}")
-        import traceback
-        traceback.print_exc()
+    output_path = os.path.join(output_dir, 'magic_wall_animation.mp4')
     
-    # Simulate some steps
-    print("Simulation:")
-    for step_num in range(1, 11):
-        # Both agents try to move forward
-        actions = [3, 3]  # forward for both
-        obs, rewards, done, info = env.step(actions)
-        
-        print(f"Step {step_num}:")
-        print(f"  RED agent position: {tuple(env.agents[0].pos)}")
-        print(f"  GREEN agent position: {tuple(env.agents[1].pos)}")
-        
-        # Check if agents reached magic walls
-        if step_num == 3:
-            red_pos = tuple(env.agents[0].pos)
-            green_pos = tuple(env.agents[1].pos)
-            if red_pos[0] == 5:
-                print(f"  -> RED agent ENTERED the magic wall at {red_pos}!")
-            else:
-                print(f"  -> RED agent still approaching...")
-            
-            if green_pos[0] == 5:
-                print(f"  -> GREEN agent tried but CANNOT enter (no permission)")
-            else:
-                print(f"  -> GREEN agent blocked by magic wall")
-        
-        if done:
-            print("  Episode done!")
-            break
+    # Create animation
+    create_animation(output_path, num_steps=50)
     
     print()
-    print("Demo complete!")
-    print()
-    print("Key observations:")
-    print("- RED agent can pass through the magic wall (has permission)")
-    print("- GREEN agent cannot pass through (no permission)")
-    print("- The 50% probability wall may require multiple attempts")
+    print("=" * 70)
+    print("Done! You can view the animation at:")
+    print(f"  {os.path.abspath(output_path)}")
+    print("=" * 70)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
