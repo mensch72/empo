@@ -1689,7 +1689,10 @@ class MultiGridEnv(gym.Env):
         
         elif action == self.actions.toggle:
             if fwd_cell:
+                # Set env.carrying to agent's carrying for Door compatibility
+                self.carrying = self.agents[agent_idx].carrying
                 fwd_cell.toggle(self, fwd_pos)
+                self.carrying = None  # Reset after toggle
         
         elif action == self.actions.done:
             pass
