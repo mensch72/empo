@@ -751,6 +751,7 @@ class Grid:
             cls,
             world,
             obj,
+            terrain=None,
             highlights=[],
             tile_size=TILE_PIXELS,
             subdivs=3
@@ -759,8 +760,11 @@ class Grid:
         Render a tile and cache the result
         """
 
+        # Include terrain in cache key
         key = (*highlights, tile_size)
         key = obj.encode(world) + key if obj else key
+        if terrain:
+            key = terrain.encode(world) + key
 
         if key in cls.tile_cache:
             return cls.tile_cache[key]
@@ -771,6 +775,11 @@ class Grid:
         fill_coords(img, point_in_rect(0, 0.031, 0, 1), (100, 100, 100))
         fill_coords(img, point_in_rect(0, 1, 0, 0.031), (100, 100, 100))
 
+        # Render terrain first (if present)
+        if terrain != None:
+            terrain.render(img)
+        
+        # Render object on top
         if obj != None:
             obj.render(img)
 
@@ -791,12 +800,14 @@ class Grid:
             self,
             world,
             tile_size,
+            terrain_grid=None,
             highlight_masks=None
     ):
         """
         Render this grid at a given scale
         :param r: target renderer object
         :param tile_size: tile size in pixels
+        :param terrain_grid: optional terrain grid to render under objects
         """
 
         # Compute the total grid size
@@ -809,11 +820,13 @@ class Grid:
         for j in range(0, self.height):
             for i in range(0, self.width):
                 cell = self.get(i, j)
+                terrain = terrain_grid.get(i, j) if terrain_grid else None
 
                 # agent_here = np.array_equal(agent_pos, (i, j))
                 tile_img = Grid.render_tile(
                     world,
                     cell,
+                    terrain=terrain,
                     highlights=[] if highlight_masks is None else highlight_masks[i, j],
                     tile_size=tile_size
                 )
@@ -1064,6 +1077,10 @@ class MultiGridEnv(gym.Env):
 
     def reset(self):
 
+        # Create terrain grid first, before _gen_grid
+        # This stores overlappable terrain (like unsteady ground) that persists under agents
+        self.terrain_grid = Grid(self.width, self.height)
+        
         # Generate a new random grid at the start of each episode
         # To keep the same grid for each episode, call env.seed() with
         # the same seed before calling env.reset()
@@ -1253,8 +1270,13 @@ class MultiGridEnv(gym.Env):
             target_pos: Target position (numpy array or tuple)
             target_cell: The object/cell at the target position (can be None)
         """
-        # Clear old position
-        self.grid.set(*self.agents[agent_idx].pos, None)
+        # Restore terrain at old position (if any)
+        old_pos = self.agents[agent_idx].pos
+        terrain_at_old_pos = self.terrain_grid.get(*old_pos)
+        if terrain_at_old_pos is not None:
+            self.grid.set(*old_pos, terrain_at_old_pos)
+        else:
+            self.grid.set(*old_pos, None)
         
         # Update agent position
         self.agents[agent_idx].pos = np.array(target_pos) if not isinstance(target_pos, np.ndarray) else target_pos
@@ -1552,7 +1574,7 @@ class MultiGridEnv(gym.Env):
         # Process unsteady-forward agents after normal agents
         # First, determine target cells and stumbling for all unsteady agents simultaneously
         unsteady_targets = {}  # agent_idx -> (target_pos, stumbled, turn_dir)
-        unsteady_end_positions = {}  # agent_idx -> end_pos (for pushing)
+        contested_cells = {}  # agent_idx -> contested_cell (either target or block end pos)
         occupied_targets = set()  # Track which targets are already occupied or contested
         
         for i in unsteady_forward_agents:
@@ -1580,64 +1602,34 @@ class MultiGridEnv(gym.Env):
             target_pos = tuple(self.agents[i].front_pos)
             unsteady_targets[i] = (target_pos, stumbles, turn_dir)
             
-            # Check if target involves pushing blocks/rocks
+            # Determine the contested cell: either target cell or block end position
             target_cell = self.grid.get(*target_pos)
             if target_cell is not None and target_cell.type in ['block', 'rock']:
                 can_push, num_objects, end_pos = self._can_push_objects(self.agents[i], np.array(target_pos))
                 if can_push:
-                    # The contested resource is where blocks land
-                    unsteady_end_positions[i] = tuple(end_pos)
+                    # The contested cell is where blocks land
+                    contested_cells[i] = tuple(end_pos)
                 else:
-                    # Can't push, mark as None
-                    unsteady_end_positions[i] = None
+                    # Can't push, contested cell is the target (will fail anyway)
+                    contested_cells[i] = target_pos
             else:
-                # Not pushing, no end position
-                unsteady_end_positions[i] = None
+                # Not pushing, contested cell is the target
+                contested_cells[i] = target_pos
         
-        # Identify which targets are contested or occupied
-        target_counts = {}
-        end_pos_counts = {}
-        
-        for i, (target_pos, _, _) in unsteady_targets.items():
-            target_counts[target_pos] = target_counts.get(target_pos, 0) + 1
+        # Count how many agents contest each cell and check for occupied cells
+        contested_counts = {}
+        for i, contested_cell in contested_cells.items():
+            contested_counts[contested_cell] = contested_counts.get(contested_cell, 0) + 1
             
-            # Check if target is occupied by an agent
-            target_cell = self.grid.get(*target_pos)
-            if target_cell is not None and target_cell.type == 'agent':
-                occupied_targets.add(target_pos)
-            
-            # Track end positions for pushing
-            end_pos = unsteady_end_positions.get(i)
-            if end_pos is not None:
-                end_pos_counts[end_pos] = end_pos_counts.get(end_pos, 0) + 1
+            # Check if cell is occupied by an agent
+            cell_obj = self.grid.get(*contested_cell)
+            if cell_obj is not None and cell_obj.type == 'agent':
+                occupied_targets.add(contested_cell)
         
-        # Mark contested targets (multiple agents targeting same cell)
-        for target_pos, count in target_counts.items():
+        # Mark cells contested by multiple agents
+        for contested_cell, count in contested_counts.items():
             if count > 1:
-                occupied_targets.add(target_pos)
-        
-        # Mark contested end positions (multiple agents pushing to same location)
-        for end_pos, count in end_pos_counts.items():
-            if count > 1:
-                # If multiple agents try to push to the same end position, block them
-                # Find which agents are affected
-                for agent_idx, agent_end_pos in unsteady_end_positions.items():
-                    if agent_end_pos == end_pos:
-                        # Block this agent's target
-                        target_pos, _, _ = unsteady_targets[agent_idx]
-                        occupied_targets.add(target_pos)
-        
-        # NEW: Check if any agent's target cell conflicts with another agent's block end position
-        # If agent A targets cell X, and agent B pushes a block to land at cell X, both should fail
-        for agent_idx, (target_pos, _, _) in unsteady_targets.items():
-            for other_idx, other_end_pos in unsteady_end_positions.items():
-                if agent_idx != other_idx and other_end_pos is not None:
-                    if target_pos == other_end_pos:
-                        # Agent's target conflicts with where another agent's block will land
-                        # Block both agents
-                        occupied_targets.add(target_pos)
-                        other_target_pos, _, _ = unsteady_targets[other_idx]
-                        occupied_targets.add(other_target_pos)
+                occupied_targets.add(contested_cell)
         
         # Now process movements for unsteady agents
         for i in unsteady_forward_agents:
@@ -1645,8 +1637,8 @@ class MultiGridEnv(gym.Env):
             fwd_pos = np.array(target_pos)
             fwd_cell = self.grid.get(*fwd_pos)
             
-            # Check if movement is possible
-            can_move = target_pos not in occupied_targets
+            # Check if movement is possible - blocked if contested cell is occupied
+            can_move = contested_cells[i] not in occupied_targets
             
             if can_move:
                 # Check additional movement constraints (walls, etc.)
@@ -1799,6 +1791,7 @@ class MultiGridEnv(gym.Env):
         img = self.grid.render(
             self.objects,
             tile_size,
+            terrain_grid=self.terrain_grid if hasattr(self, 'terrain_grid') else None,
             highlight_masks=highlight_masks if highlight else None
         )
 
@@ -2715,7 +2708,7 @@ class MultiGridEnv(gym.Env):
         # Now process unsteady-forward agents
         # First, apply turns and determine targets simultaneously for all
         unsteady_targets = {}  # agent_idx -> target_pos
-        unsteady_end_positions = {}  # agent_idx -> end_pos (for pushing)
+        contested_cells = {}  # agent_idx -> contested_cell (either target or block end pos)
         occupied_targets = set()
         
         for agent_idx, outcome_type in unsteady_forward_agents.items():
@@ -2732,62 +2725,34 @@ class MultiGridEnv(gym.Env):
             target_pos = tuple(self.agents[agent_idx].front_pos)
             unsteady_targets[agent_idx] = target_pos
             
-            # Check if target involves pushing blocks/rocks
+            # Determine the contested cell: either target cell or block end position
             target_cell = self.grid.get(*target_pos)
             if target_cell is not None and target_cell.type in ['block', 'rock']:
                 can_push, num_objects, end_pos = self._can_push_objects(self.agents[agent_idx], np.array(target_pos))
                 if can_push:
-                    # The contested resource is where blocks land
-                    unsteady_end_positions[agent_idx] = tuple(end_pos)
+                    # The contested cell is where blocks land
+                    contested_cells[agent_idx] = tuple(end_pos)
                 else:
-                    # Can't push, mark as independent
-                    unsteady_end_positions[agent_idx] = None
+                    # Can't push, contested cell is the target (will fail anyway)
+                    contested_cells[agent_idx] = target_pos
             else:
-                # Not pushing, end position is same as target
-                unsteady_end_positions[agent_idx] = None
+                # Not pushing, contested cell is the target
+                contested_cells[agent_idx] = target_pos
         
-        # Identify occupied and contested targets
-        # For pushing, we check both the target cell and the end position
-        target_counts = {}
-        end_pos_counts = {}
-        
-        for agent_idx, target_pos in unsteady_targets.items():
-            target_counts[target_pos] = target_counts.get(target_pos, 0) + 1
+        # Count how many agents contest each cell and check for occupied cells
+        contested_counts = {}
+        for agent_idx, contested_cell in contested_cells.items():
+            contested_counts[contested_cell] = contested_counts.get(contested_cell, 0) + 1
             
-            target_cell = self.grid.get(*target_pos)
-            if target_cell is not None and target_cell.type == 'agent':
-                occupied_targets.add(target_pos)
-            
-            # Track end positions for pushing
-            end_pos = unsteady_end_positions.get(agent_idx)
-            if end_pos is not None:
-                end_pos_counts[end_pos] = end_pos_counts.get(end_pos, 0) + 1
+            # Check if cell is occupied by an agent
+            cell_obj = self.grid.get(*contested_cell)
+            if cell_obj is not None and cell_obj.type == 'agent':
+                occupied_targets.add(contested_cell)
         
-        # Mark contested targets (multiple agents targeting same cell)
-        for target_pos, count in target_counts.items():
+        # Mark cells contested by multiple agents
+        for contested_cell, count in contested_counts.items():
             if count > 1:
-                occupied_targets.add(target_pos)
-        
-        # Mark contested end positions (multiple agents pushing to same location)
-        for end_pos, count in end_pos_counts.items():
-            if count > 1:
-                # If multiple agents try to push to the same end position, block them
-                # Find which agents are affected
-                for agent_idx, agent_end_pos in unsteady_end_positions.items():
-                    if agent_end_pos == end_pos:
-                        # Block this agent's target
-                        occupied_targets.add(unsteady_targets[agent_idx])
-        
-        # NEW: Check if any agent's target cell conflicts with another agent's block end position
-        # If agent A targets cell X, and agent B pushes a block to land at cell X, both should fail
-        for agent_idx, target_pos in unsteady_targets.items():
-            for other_idx, other_end_pos in unsteady_end_positions.items():
-                if agent_idx != other_idx and other_end_pos is not None:
-                    if target_pos == other_end_pos:
-                        # Agent's target conflicts with where another agent's block will land
-                        # Block both agents
-                        occupied_targets.add(target_pos)
-                        occupied_targets.add(unsteady_targets[other_idx])
+                occupied_targets.add(contested_cell)
         
         # Process movements
         for agent_idx in unsteady_forward_agents.keys():
@@ -2795,7 +2760,8 @@ class MultiGridEnv(gym.Env):
             fwd_pos = np.array(target_pos)
             fwd_cell = self.grid.get(*fwd_pos)
             
-            can_move = target_pos not in occupied_targets
+            # Check if movement is possible - blocked if contested cell is occupied
+            can_move = contested_cells[agent_idx] not in occupied_targets
             
             if can_move:
                 if fwd_cell is not None and fwd_cell.type in ['block', 'rock']:

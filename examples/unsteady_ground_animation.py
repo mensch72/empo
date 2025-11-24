@@ -56,6 +56,8 @@ class UnsteadyGroundDemoEnv(MultiGridEnv):
             # Create unsteady ground with 50% stumble probability
             unsteady = UnsteadyGround(World, stumble_probability=0.5, color='brown')
             self.grid.set(x, y, unsteady)
+            # Also store in terrain grid so it persists under agents
+            self.terrain_grid.set(x, y, unsteady)
         
         # Place agents randomly in empty cells
         for agent in self.agents:
@@ -70,6 +72,9 @@ class UnsteadyGroundDemoEnv(MultiGridEnv):
                     agent.init_pos = agent.pos.copy()
                     # Set on_unsteady_ground flag if the agent is placed on unsteady ground
                     agent.on_unsteady_ground = (cell is not None and cell.type == 'unsteadyground')
+                    # If placing on unsteady ground, also store it in terrain_grid
+                    if agent.on_unsteady_ground:
+                        self.terrain_grid.set(x, y, cell)
                     self.grid.set(x, y, agent)
                     break
 
