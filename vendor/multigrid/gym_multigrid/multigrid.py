@@ -299,6 +299,18 @@ class UnsteadyGround(WorldObj):
         for i in range(-1, 2):  # Create 3 diagonal lines
             # Diagonal line from bottom-left to top-right
             fill_coords(img, point_in_line(i * 0.3, 1 + i * 0.3, 1 + i * 0.3, i * 0.3, 0.02), line_color)
+    
+    def render_with_stumble(self, img):
+        """Render unsteady ground with a highlight indicating a stumble occurred."""
+        c = COLORS[self.color]
+        # Brighter base color to indicate stumbling
+        fill_coords(img, point_in_rect(0.031, 1, 0.031, 1), c / 1.5)
+        
+        # Add diagonal lines (more visible)
+        line_color = np.array([255, 200, 0])  # Yellow/orange for emphasis
+        for i in range(-1, 2):  # Create 3 diagonal lines
+            # Diagonal line from bottom-left to top-right
+            fill_coords(img, point_in_line(i * 0.3, 1 + i * 0.3, 1 + i * 0.3, i * 0.3, 0.03), line_color)
 
 
 class Wall(WorldObj):
@@ -754,14 +766,17 @@ class Grid:
             terrain=None,
             highlights=[],
             tile_size=TILE_PIXELS,
-            subdivs=3
+            subdivs=3,
+            stumbled=False
     ):
         """
         Render a tile and cache the result
         """
 
-        # Include terrain in cache key
-        key = (*highlights, tile_size)
+        # Include terrain and stumbled state in cache key
+        # Convert highlights to tuple for hashing
+        highlights_tuple = tuple(highlights) if highlights else ()
+        key = (*highlights_tuple, tile_size, stumbled)
         key = obj.encode(world) + key if obj else key
         if terrain:
             key = terrain.encode(world) + key
@@ -777,7 +792,11 @@ class Grid:
 
         # Render terrain first (if present)
         if terrain != None:
-            terrain.render(img)
+            # Pass stumbled state to terrain if it's unsteady ground
+            if hasattr(terrain, 'render_with_stumble') and stumbled:
+                terrain.render_with_stumble(img)
+            else:
+                terrain.render(img)
         
         # Render object on top
         if obj != None:
@@ -801,13 +820,15 @@ class Grid:
             world,
             tile_size,
             terrain_grid=None,
-            highlight_masks=None
+            highlight_masks=None,
+            stumbled_cells=None
     ):
         """
         Render this grid at a given scale
         :param r: target renderer object
         :param tile_size: tile size in pixels
         :param terrain_grid: optional terrain grid to render under objects
+        :param stumbled_cells: optional set of (x, y) positions where stumbling occurred
         """
 
         # Compute the total grid size
@@ -821,6 +842,7 @@ class Grid:
             for i in range(0, self.width):
                 cell = self.get(i, j)
                 terrain = terrain_grid.get(i, j) if terrain_grid else None
+                stumbled_here = bool(stumbled_cells and (i, j) in stumbled_cells)
 
                 # agent_here = np.array_equal(agent_pos, (i, j))
                 tile_img = Grid.render_tile(
@@ -828,7 +850,8 @@ class Grid:
                     cell,
                     terrain=terrain,
                     highlights=[] if highlight_masks is None else highlight_masks[i, j],
-                    tile_size=tile_size
+                    tile_size=tile_size,
+                    stumbled=stumbled_here
                 )
 
                 ymin = j * tile_size
@@ -1097,6 +1120,9 @@ class MultiGridEnv(gym.Env):
 
         # Step count since episode start
         self.step_count = 0
+        
+        # Track cells where stumbling occurred in the current step (for visual feedback)
+        self.stumbled_cells = set()
 
         # Return first observation
         if self.partial_obs:
@@ -1584,6 +1610,10 @@ class MultiGridEnv(gym.Env):
             
             # Apply turn if stumbling
             if stumbles:
+                # Record the agent's position for visual feedback
+                if hasattr(self, 'stumbled_cells'):
+                    self.stumbled_cells.add(tuple(self.agents[i].pos))
+                
                 if turn_dir == 'left':
                     self.agents[i].dir -= 1
                     if self.agents[i].dir < 0:
@@ -1652,6 +1682,9 @@ class MultiGridEnv(gym.Env):
 
     def step(self, actions):
         self.step_count += 1
+        
+        # Clear stumbled cells from previous step (for visual feedback)
+        self.stumbled_cells = set()
 
         # Separate agents into normal and unsteady-forward groups
         normal_agents = []
@@ -1809,7 +1842,8 @@ class MultiGridEnv(gym.Env):
             self.objects,
             tile_size,
             terrain_grid=self.terrain_grid if hasattr(self, 'terrain_grid') else None,
-            highlight_masks=highlight_masks if highlight else None
+            highlight_masks=highlight_masks if highlight else None,
+            stumbled_cells=self.stumbled_cells if hasattr(self, 'stumbled_cells') else None
         )
 
         if mode == 'human':
