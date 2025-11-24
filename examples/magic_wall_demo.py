@@ -103,6 +103,8 @@ def main():
         print()
     except Exception as e:
         print(f"Could not render: {e}")
+        import traceback
+        traceback.print_exc()
     
     # Simulate some steps
     print("Simulation:")
