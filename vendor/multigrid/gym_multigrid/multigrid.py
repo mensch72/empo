@@ -1504,26 +1504,20 @@ class MultiGridEnv(gym.Env):
             self.agents[agent_idx].dir = (self.agents[agent_idx].dir + 1) % 4
         
         elif action == self.actions.forward:
-            moved = False
             if fwd_cell is not None and fwd_cell.type in ['block', 'rock']:
-                pushed = self._push_objects(self.agents[agent_idx], fwd_pos)
-                moved = pushed
+                self._push_objects(self.agents[agent_idx], fwd_pos)
             elif fwd_cell is not None:
                 if fwd_cell.type == 'goal':
                     done = True
                     self._reward(agent_idx, rewards, 1)
                     self._move_agent_to_cell(agent_idx, fwd_pos, fwd_cell)
-                    moved = True
                 elif fwd_cell.type == 'switch':
                     self._handle_switch(agent_idx, rewards, fwd_pos, fwd_cell)
                     self._move_agent_to_cell(agent_idx, fwd_pos, fwd_cell)
-                    moved = True
                 elif fwd_cell.can_overlap():
                     self._move_agent_to_cell(agent_idx, fwd_pos, fwd_cell)
-                    moved = True
             elif fwd_cell is None:
                 self._move_agent_to_cell(agent_idx, fwd_pos, fwd_cell)
-                moved = True
             self._handle_special_moves(agent_idx, rewards, fwd_pos, fwd_cell)
         
         elif 'build' in self.actions.available and action == self.actions.build:
