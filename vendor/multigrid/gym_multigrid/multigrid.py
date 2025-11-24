@@ -287,23 +287,18 @@ class UnsteadyGround(WorldObj):
             return (world.OBJECT_TO_IDX[self.type], world.COLOR_TO_IDX[self.color], 
                    stumble_encoded, 0, 0, 0)
     
-    def render(self, r):
-        """Render unsteady ground with a distinctive pattern."""
+    def render(self, img):
+        """Render unsteady ground with a distinctive pattern (diagonal lines)."""
         c = COLORS[self.color]
-        r.setLineColor(100, 100, 100, 0)
-        # Slightly darker than floor to show it's different
-        r.setColor(*(c / 2.5))
-        r.drawPolygon([
-            (1, TILE_PIXELS),
-            (TILE_PIXELS, TILE_PIXELS),
-            (TILE_PIXELS, 1),
-            (1, 1)
-        ])
+        # Base color - slightly darker than floor
+        fill_coords(img, point_in_rect(0.031, 1, 0.031, 1), c / 2.5)
         
         # Add diagonal lines to indicate unsteadiness
-        r.setLineColor(50, 50, 50)
-        for offset in range(0, TILE_PIXELS, 8):
-            r.drawLine(offset, 0, offset + TILE_PIXELS, TILE_PIXELS)
+        # Create diagonal stripes across the tile
+        line_color = np.array([50, 50, 50])
+        for i in range(-1, 2):  # Create 3 diagonal lines
+            # Diagonal line from bottom-left to top-right
+            fill_coords(img, point_in_line(i * 0.3, 1 + i * 0.3, 1 + i * 0.3, i * 0.3, 0.02), line_color)
 
 
 class Wall(WorldObj):
