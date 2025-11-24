@@ -28,7 +28,7 @@ from empo.env_utils import get_dag, plot_dag
 
 
 class SmallDAGEnv(MultiGridEnv):
-    """Small 4x4 environment for DAG visualization."""
+    """Small 4x4 environment for DAG visualization with no walls."""
     
     def __init__(self):
         # Create 2 agents - agent 1 can push rocks, agent 0 cannot
@@ -46,42 +46,273 @@ class SmallDAGEnv(MultiGridEnv):
     def _gen_grid(self, width, height):
         self.grid = Grid(width, height)
         
-        # Add walls around the perimeter
-        for i in range(width):
-            self.grid.set(i, 0, Wall(World))
-            self.grid.set(i, height-1, Wall(World))
-        for j in range(height):
-            self.grid.set(0, j, Wall(World))
-            self.grid.set(width-1, j, Wall(World))
+        # No walls - empty grid
         
-        # Place agents in opposite corners
-        # Agent 0 in bottom-left corner (cannot push rocks)
+        # Place agents in opposite corners of the 4x4 grid
+        # Agent 0 at (0, 0) - bottom-left corner (cannot push rocks)
         agent0 = self.agents[0]
-        agent0.pos = np.array([1, 1])
+        agent0.pos = np.array([0, 0])
         agent0.dir = 0  # facing right
-        self.grid.set(1, 1, agent0)
+        self.grid.set(0, 0, agent0)
         
-        # Agent 1 in top-right corner (can push rocks)
+        # Agent 1 at (3, 3) - top-right corner (can push rocks)
         agent1 = self.agents[1]
-        agent1.pos = np.array([2, 2])
+        agent1.pos = np.array([3, 3])
         agent1.dir = 2  # facing left
-        self.grid.set(2, 2, agent1)
+        self.grid.set(3, 3, agent1)
         
-        # Place 2 blocks in the center/wall area
+        # Place 2 blocks at (1,1) and (1,2)
         block1 = Block(World)
-        self.grid.set(1, 2, block1)
+        self.grid.set(1, 1, block1)
         
         block2 = Block(World)
-        self.grid.set(2, 1, block2)
+        self.grid.set(1, 2, block2)
         
-        # Place 2 rocks on the wall boundaries (replacing walls)
-        # Rock pushable only by agent 1 (who can push rocks)
+        # Place 2 rocks at (2,1) and (2,2)
+        # Both rocks pushable only by agent 1 (who can push rocks)
         rock1 = Rock(World, pushable_by=1)
-        self.grid.set(2, 3, rock1)  # Top boundary
+        self.grid.set(2, 1, rock1)
         
-        # Another rock pushable only by agent 1
         rock2 = Rock(World, pushable_by=1)
-        self.grid.set(3, 2, rock2)  # Right boundary
+        self.grid.set(2, 2, rock2)
+    
+    def _is_valid_pos(self, pos):
+        """Check if a position is within grid bounds."""
+        x, y = pos
+        return 0 <= x < self.width and 0 <= y < self.height
+    
+    def _compute_successor_state(self, state, actions, ordering):
+        """
+        Override to handle out-of-bounds positions gracefully.
+        Treat grid boundaries as implicit walls.
+        """
+        # Start from the given state
+        self.set_state(state)
+        
+        # Increment step counter
+        self.step_count += 1
+        
+        # Execute each agent's action in the specified order
+        for i in ordering:
+            # Skip if agent shouldn't act
+            if (self.agents[i].terminated or 
+                self.agents[i].paused or 
+                not self.agents[i].started or 
+                actions[i] == self.actions.still):
+                continue
+            
+            # Get the position in front of the agent
+            fwd_pos = self.agents[i].front_pos
+            
+            # Check bounds before accessing grid
+            if not self._is_valid_pos(fwd_pos):
+                # Treat out-of-bounds as wall - skip this action
+                if actions[i] == self.actions.left:
+                    self.agents[i].dir = (self.agents[i].dir - 1) % 4
+                elif actions[i] == self.actions.right:
+                    self.agents[i].dir = (self.agents[i].dir + 1) % 4
+                continue
+            
+            # Get the contents of the cell in front of the agent
+            fwd_cell = self.grid.get(*fwd_pos)
+            
+            # Execute the action
+            if actions[i] == self.actions.left:
+                self.agents[i].dir = (self.agents[i].dir - 1) % 4
+            
+            elif actions[i] == self.actions.right:
+                self.agents[i].dir = (self.agents[i].dir + 1) % 4
+            
+            elif actions[i] == self.actions.forward:
+                if fwd_cell is None or fwd_cell.can_overlap():
+                    # Move forward
+                    self.grid.set(*self.agents[i].pos, None)
+                    self.grid.set(*fwd_pos, self.agents[i])
+                    self.agents[i].pos = fwd_pos
+                elif fwd_cell.type in ['block', 'rock']:
+                    # Try to push
+                    if fwd_cell.type == 'rock' and not fwd_cell.can_be_pushed_by(self.agents[i]):
+                        continue
+                    
+                    # Calculate push position
+                    push_pos = fwd_pos + self.agents[i].dir_vec
+                    
+                    if not self._is_valid_pos(push_pos):
+                        continue  # Can't push out of bounds
+                    
+                    push_cell = self.grid.get(*push_pos)
+                    
+                    if push_cell is None or push_cell.can_overlap():
+                        # Push object
+                        self.grid.set(*self.agents[i].pos, None)
+                        self.grid.set(*fwd_pos, self.agents[i])
+                        self.grid.set(*push_pos, fwd_cell)
+                        self.agents[i].pos = fwd_pos
+        
+        # Return new state
+        return self.get_state()
+    
+    def _identify_conflict_blocks(self, state, actions, active_agents):
+        """
+        Override to handle out-of-bounds positions gracefully.
+        """
+        # Constants for resource types
+        RESOURCE_INDEPENDENT = 'independent'
+        RESOURCE_CELL = 'cell'
+        RESOURCE_PICKUP = 'pickup'
+        RESOURCE_DROP_AGENT = 'drop_agent'
+        
+        # Restore to the query state to inspect agent positions and targets
+        self.set_state(state)
+        
+        # Track which resource each agent targets
+        agent_targets = {}  # agent_idx -> resource identifier
+        
+        for agent_idx in active_agents:
+            action = actions[agent_idx]
+            agent = self.agents[agent_idx]
+            
+            # Determine what resource this agent is targeting
+            if action == self.actions.forward:
+                # Check what the agent is trying to move into
+                fwd_pos = agent.front_pos
+                
+                # Check bounds
+                if not self._is_valid_pos(fwd_pos):
+                    # Out of bounds - treat as independent (can't move)
+                    agent_targets[agent_idx] = (RESOURCE_INDEPENDENT, agent_idx)
+                    continue
+                
+                fwd_cell = self.grid.get(*fwd_pos)
+                
+                # If pushing blocks/rocks, check if can push
+                if fwd_cell and fwd_cell.type in ['block', 'rock']:
+                    # Simplified: just check if can push one step
+                    push_pos = fwd_pos + agent.dir_vec
+                    if not self._is_valid_pos(push_pos):
+                        agent_targets[agent_idx] = (RESOURCE_INDEPENDENT, agent_idx)
+                    else:
+                        push_cell = self.grid.get(*push_pos)
+                        if push_cell is None or push_cell.can_overlap():
+                            agent_targets[agent_idx] = (RESOURCE_CELL, tuple(push_pos))
+                        else:
+                            agent_targets[agent_idx] = (RESOURCE_INDEPENDENT, agent_idx)
+                else:
+                    # Normal movement
+                    agent_targets[agent_idx] = (RESOURCE_CELL, tuple(fwd_pos))
+            
+            elif action == self.actions.pickup:
+                fwd_pos = agent.front_pos
+                if not self._is_valid_pos(fwd_pos):
+                    agent_targets[agent_idx] = (RESOURCE_INDEPENDENT, agent_idx)
+                else:
+                    fwd_cell = self.grid.get(*fwd_pos)
+                    if fwd_cell and fwd_cell.can_pickup():
+                        agent_targets[agent_idx] = (RESOURCE_PICKUP, tuple(fwd_pos))
+                    else:
+                        agent_targets[agent_idx] = (RESOURCE_INDEPENDENT, agent_idx)
+            
+            elif action == self.actions.drop:
+                fwd_pos = agent.front_pos
+                if not self._is_valid_pos(fwd_pos):
+                    agent_targets[agent_idx] = (RESOURCE_INDEPENDENT, agent_idx)
+                else:
+                    fwd_cell = self.grid.get(*fwd_pos)
+                    if fwd_cell and fwd_cell.type == 'agent':
+                        agent_targets[agent_idx] = (RESOURCE_DROP_AGENT, tuple(fwd_pos))
+                    else:
+                        agent_targets[agent_idx] = (RESOURCE_INDEPENDENT, agent_idx)
+            
+            else:
+                agent_targets[agent_idx] = (RESOURCE_INDEPENDENT, agent_idx)
+        
+        # Group agents by their target resource
+        resource_to_agents = {}
+        for agent_idx, resource in agent_targets.items():
+            if resource not in resource_to_agents:
+                resource_to_agents[resource] = []
+            resource_to_agents[resource].append(agent_idx)
+        
+        # Extract conflict blocks (resources targeted by > 1 agent)
+        conflict_blocks = []
+        for resource, agents in resource_to_agents.items():
+            resource_type, _ = resource
+            if resource_type == RESOURCE_INDEPENDENT:
+                # Independent agents each form their own "block" of size 1
+                for agent_idx in agents:
+                    conflict_blocks.append([agent_idx])
+            elif len(agents) > 1:
+                # Multiple agents target same resource - conflict!
+                conflict_blocks.append(agents)
+            else:
+                # Single agent targeting a resource - no conflict
+                conflict_blocks.append(agents)
+        
+        return conflict_blocks
+    
+    def step(self, actions):
+        """Override step to handle out-of-bounds positions gracefully."""
+        self.step_count += 1
+
+        order = np.random.permutation(len(actions))
+        rewards = np.zeros(len(actions))
+        done = False
+
+        for i in order:
+            agent = self.agents[i]
+            
+            if agent.terminated or agent.paused or not agent.started or actions[i] == self.actions.still:
+                continue
+
+            # Get the position in front of the agent
+            fwd_pos = agent.front_pos
+            
+            # Check if forward position is valid (treat out-of-bounds as wall)
+            if not self._is_valid_pos(fwd_pos):
+                # Can't move out of bounds - treat as wall
+                continue
+            
+            # Get the forward cell
+            fwd_cell = self.grid.get(*fwd_pos)
+
+            # Handle different actions
+            if actions[i] == self.actions.forward:
+                if fwd_cell is None or fwd_cell.can_overlap():
+                    self.grid.set(*agent.pos, None)
+                    self.grid.set(*fwd_pos, agent)
+                    agent.pos = fwd_pos
+                elif fwd_cell.type in ['block', 'rock']:
+                    # Try to push the object
+                    if fwd_cell.type == 'rock' and not fwd_cell.can_be_pushed_by(agent):
+                        continue  # Can't push this rock
+                    
+                    # Calculate where object would be pushed to
+                    push_pos = fwd_pos + agent.dir_vec
+                    
+                    if not self._is_valid_pos(push_pos):
+                        continue  # Can't push out of bounds
+                    
+                    push_cell = self.grid.get(*push_pos)
+                    
+                    if push_cell is None or push_cell.can_overlap():
+                        # Can push - move object and agent
+                        self.grid.set(*agent.pos, None)
+                        self.grid.set(*fwd_pos, agent)
+                        self.grid.set(*push_pos, fwd_cell)
+                        agent.pos = fwd_pos
+                        
+            elif actions[i] == self.actions.left:
+                agent.dir = (agent.dir - 1) % 4
+            elif actions[i] == self.actions.right:
+                agent.dir = (agent.dir + 1) % 4
+
+        # Check termination
+        if self.step_count >= self.max_steps:
+            done = True
+
+        obs = self.gen_obs()
+        return obs, rewards, done, {}
+
 
 
 def render_grid_to_array(env):
@@ -172,24 +403,31 @@ def compute_and_plot_dag(env, output_path='dag_plot.pdf'):
         total_edges = sum(len(succ_list) for succ_list in successors)
         print(f"  Total transitions: {total_edges}")
         
-        # Plot DAG
-        print(f"\nPlotting DAG to {output_path}...")
+        # Plot DAG (skip if too large for visualization)
+        MAX_STATES_FOR_PLOT = 500  # Graphviz becomes very slow beyond this
         
-        # Create simple labels showing state index
-        state_labels = {state: f"S{idx}" for idx, state in enumerate(states)}
-        
-        # Plot with PDF format
-        plot_dag(
-            states, 
-            state_to_idx, 
-            successors, 
-            output_file=output_path.replace('.pdf', ''),
-            format='pdf',
-            state_labels=state_labels,
-            rankdir='TB'  # Top to bottom layout
-        )
-        
-        print(f"✓ DAG plot saved to {output_path}")
+        if len(states) > MAX_STATES_FOR_PLOT:
+            print(f"\n⚠ Skipping DAG plot: {len(states)} states exceeds visualization limit ({MAX_STATES_FOR_PLOT})")
+            print(f"  The state space is too large to visualize effectively.")
+            print(f"  Consider adding walls or reducing the grid size for visualization.")
+        else:
+            print(f"\nPlotting DAG to {output_path}...")
+            
+            # Create simple labels showing state index
+            state_labels = {state: f"S{idx}" for idx, state in enumerate(states)}
+            
+            # Plot with PDF format
+            plot_dag(
+                states, 
+                state_to_idx, 
+                successors, 
+                output_file=output_path.replace('.pdf', ''),
+                format='pdf',
+                state_labels=state_labels,
+                rankdir='TB'  # Top to bottom layout
+            )
+            
+            print(f"✓ DAG plot saved to {output_path}")
         
         return states, state_to_idx, successors
         
@@ -207,11 +445,12 @@ def main():
     print("=" * 70)
     print()
     print("Environment Setup:")
-    print("  - Grid size: 4x4")
+    print("  - Grid size: 4x4 (no walls)")
     print("  - Agents: 2 (in opposite corners)")
-    print("  - Agent 0: Bottom-left corner (cannot push rocks)")
-    print("  - Agent 1: Top-right corner (can push rocks)")
-    print("  - Objects: 2 blocks + 2 rocks in center area")
+    print("  - Agent 0: Position (0,0) - bottom-left (cannot push rocks)")
+    print("  - Agent 1: Position (3,3) - top-right (can push rocks)")
+    print("  - Blocks: At positions (1,1) and (1,2)")
+    print("  - Rocks: At positions (2,1) and (2,2)")
     print("  - Timeout: 10 steps")
     print()
     
