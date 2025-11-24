@@ -326,21 +326,25 @@ class MagicWall(WorldObj):
     Attributes:
         magic_side: Direction from which the wall can be entered (0=right, 1=down, 2=left, 3=up)
         entry_probability: Probability (0.0 to 1.0) that an authorized agent successfully enters
+        solidify_probability: Probability (0.0 to 1.0) that a failed entry attempt turns this into a normal wall
     """
     
-    def __init__(self, world, magic_side, entry_probability, color='grey'):
+    def __init__(self, world, magic_side, entry_probability, solidify_probability=0.0, color='grey'):
         """
         Args:
             world: World object defining the environment
             magic_side: Direction from which agents can attempt to enter (0-3)
             entry_probability: Probability of successful entry (0.0 to 1.0)
+            solidify_probability: Probability that a failed entry turns this into a normal wall (0.0 to 1.0)
             color: Color of the wall for rendering
         """
         super().__init__(world, 'magicwall', color)
         assert 0 <= magic_side <= 3, "magic_side must be 0 (right), 1 (down), 2 (left), or 3 (up)"
         assert 0.0 <= entry_probability <= 1.0, "entry_probability must be between 0.0 and 1.0"
+        assert 0.0 <= solidify_probability <= 1.0, "solidify_probability must be between 0.0 and 1.0"
         self.magic_side = magic_side
         self.entry_probability = entry_probability
+        self.solidify_probability = solidify_probability
     
     def see_behind(self):
         return False
@@ -360,8 +364,9 @@ class MagicWall(WorldObj):
         else:
             # Encode magic_side in state field and entry_probability scaled to 0-255
             entry_prob_encoded = int(self.entry_probability * 255)
+            solidify_prob_encoded = int(self.solidify_probability * 255)
             return (world.OBJECT_TO_IDX[self.type], world.COLOR_TO_IDX[self.color], 
-                   self.magic_side, entry_prob_encoded, 0, 0)
+                   self.magic_side, entry_prob_encoded, solidify_prob_encoded, 0)
     
     def render(self, img):
         """Render magic wall like a normal wall with a dashed blue line near its magic side."""
@@ -404,6 +409,41 @@ class MagicWall(WorldObj):
             for x in np.arange(x_start, x_end, dash_length + gap_length):
                 dash_end = min(x + dash_length, x_end)
                 fill_coords(img, point_in_rect(x, dash_end, y_pos - line_width/2, y_pos + line_width/2), blue_color)
+    
+    def render_with_magic_entry(self, img):
+        """Render magic wall with a bright highlight indicating successful entry."""
+        # Brighter base color to indicate magic entry
+        c = COLORS[self.color]
+        fill_coords(img, point_in_rect(0, 1, 0, 1), np.clip(c * 1.5, 0, 255).astype(np.uint8))
+        
+        # Add bright cyan/magenta dashed line to show magic activation
+        magic_color = np.array([255, 0, 255])  # Magenta for visibility
+        line_width = 0.06  # Thicker line
+        dash_length = 0.15
+        gap_length = 0.10
+        offset = 0.15
+        
+        # Create dashed line based on magic_side direction (same positions, different color)
+        if self.magic_side == 0:  # Right
+            x_pos = 1 - offset
+            for y in np.arange(0.05, 0.95, dash_length + gap_length):
+                dash_end = min(y + dash_length, 0.95)
+                fill_coords(img, point_in_rect(x_pos - line_width/2, x_pos + line_width/2, y, dash_end), magic_color)
+        elif self.magic_side == 1:  # Down
+            y_pos = 1 - offset
+            for x in np.arange(0.05, 0.95, dash_length + gap_length):
+                dash_end = min(x + dash_length, 0.95)
+                fill_coords(img, point_in_rect(x, dash_end, y_pos - line_width/2, y_pos + line_width/2), magic_color)
+        elif self.magic_side == 2:  # Left
+            x_pos = offset
+            for y in np.arange(0.05, 0.95, dash_length + gap_length):
+                dash_end = min(y + dash_length, 0.95)
+                fill_coords(img, point_in_rect(x_pos - line_width/2, x_pos + line_width/2, y, dash_end), magic_color)
+        elif self.magic_side == 3:  # Up
+            y_pos = offset
+            for x in np.arange(0.05, 0.95, dash_length + gap_length):
+                dash_end = min(x + dash_length, 0.95)
+                fill_coords(img, point_in_rect(x, dash_end, y_pos - line_width/2, y_pos + line_width/2), magic_color)
 
 
 
@@ -851,16 +891,17 @@ class Grid:
             highlights=[],
             tile_size=TILE_PIXELS,
             subdivs=3,
-            stumbled=False
+            stumbled=False,
+            magic_entered=False
     ):
         """
         Render a tile and cache the result
         """
 
-        # Include terrain and stumbled state in cache key
+        # Include terrain, stumbled, and magic_entered state in cache key
         # Convert highlights to tuple for hashing
         highlights_tuple = tuple(highlights) if highlights else ()
-        key = (*highlights_tuple, tile_size, stumbled)
+        key = (*highlights_tuple, tile_size, stumbled, magic_entered)
         key = obj.encode(world) + key if obj else key
         if terrain:
             key = terrain.encode(world) + key
@@ -879,6 +920,9 @@ class Grid:
             # Pass stumbled state to terrain if it's unsteady ground
             if hasattr(terrain, 'render_with_stumble') and stumbled:
                 terrain.render_with_stumble(img)
+            # Pass magic_entered state to terrain if it's magic wall
+            elif hasattr(terrain, 'render_with_magic_entry') and magic_entered:
+                terrain.render_with_magic_entry(img)
             else:
                 terrain.render(img)
         
@@ -905,7 +949,8 @@ class Grid:
             tile_size,
             terrain_grid=None,
             highlight_masks=None,
-            stumbled_cells=None
+            stumbled_cells=None,
+            magic_wall_entered_cells=None
     ):
         """
         Render this grid at a given scale
@@ -913,6 +958,7 @@ class Grid:
         :param tile_size: tile size in pixels
         :param terrain_grid: optional terrain grid to render under objects
         :param stumbled_cells: optional set of (x, y) positions where stumbling occurred
+        :param magic_wall_entered_cells: optional set of (x, y) positions where magic wall entry succeeded
         """
 
         # Compute the total grid size
@@ -927,6 +973,7 @@ class Grid:
                 cell = self.get(i, j)
                 terrain = terrain_grid.get(i, j) if terrain_grid else None
                 stumbled_here = bool(stumbled_cells and (i, j) in stumbled_cells)
+                magic_entered_here = bool(magic_wall_entered_cells and (i, j) in magic_wall_entered_cells)
 
                 # agent_here = np.array_equal(agent_pos, (i, j))
                 tile_img = Grid.render_tile(
@@ -935,7 +982,8 @@ class Grid:
                     terrain=terrain,
                     highlights=[] if highlight_masks is None else highlight_masks[i, j],
                     tile_size=tile_size,
-                    stumbled=stumbled_here
+                    stumbled=stumbled_here,
+                    magic_entered=magic_entered_here
                 )
 
                 ymin = j * tile_size
@@ -1773,6 +1821,7 @@ class MultiGridEnv(gym.Env):
         """
         Process agents attempting to enter magic walls.
         These agents are processed last, and entry succeeds with the magic wall's probability.
+        If entry fails, the magic wall may solidify into a normal wall based on solidify_probability.
         
         Args:
             magic_wall_agents: List of agent indices attempting to enter magic walls
@@ -1793,12 +1842,21 @@ class MultiGridEnv(gym.Env):
             
             # Check if entry succeeds based on probability
             if self.np_random.random() < fwd_cell.entry_probability:
-                # Entry succeeds - move agent into the magic wall cell
+                # Entry succeeds - record the magic wall position for visual feedback
+                if hasattr(self, 'magic_wall_entered_cells'):
+                    self.magic_wall_entered_cells.add(tuple(fwd_pos))
+                
+                # Move agent into the magic wall cell
                 # First, save the magic wall to terrain_grid so agent can step off it later
                 self.terrain_grid.set(*fwd_pos, fwd_cell)
                 self._move_agent_to_cell(i, fwd_pos, fwd_cell)
                 self._handle_special_moves(i, rewards, fwd_pos, fwd_cell)
-            # If entry fails, agent stays in place (no action taken)
+            else:
+                # Entry fails - check if magic wall should solidify into a normal wall
+                if self.np_random.random() < fwd_cell.solidify_probability:
+                    # Replace magic wall with a normal wall
+                    normal_wall = Wall(self.objects, fwd_cell.color)
+                    self.grid.set(*fwd_pos, normal_wall)
         
         return done
     
@@ -1878,6 +1936,9 @@ class MultiGridEnv(gym.Env):
         
         # Clear stumbled cells from previous step (for visual feedback)
         self.stumbled_cells = set()
+        
+        # Clear magic wall entered cells from previous step (for visual feedback)
+        self.magic_wall_entered_cells = set()
 
         # Categorize agents using shared helper
         normal_agents, unsteady_forward_agents, magic_wall_agents = self._categorize_agents(actions)
@@ -2029,7 +2090,8 @@ class MultiGridEnv(gym.Env):
             tile_size,
             terrain_grid=self.terrain_grid if hasattr(self, 'terrain_grid') else None,
             highlight_masks=highlight_masks if highlight else None,
-            stumbled_cells=self.stumbled_cells if hasattr(self, 'stumbled_cells') else None
+            stumbled_cells=self.stumbled_cells if hasattr(self, 'stumbled_cells') else None,
+            magic_wall_entered_cells=self.magic_wall_entered_cells if hasattr(self, 'magic_wall_entered_cells') else None
         )
 
         if mode == 'human':

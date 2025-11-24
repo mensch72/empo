@@ -23,18 +23,18 @@ from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, Wall, World, Magi
 class MagicWallDemoEnv(MultiGridEnv):
     """Demo environment showing agents navigating magic walls."""
     
-    def __init__(self, num_agents=8, num_magic_walls=6):
+    def __init__(self, num_agents=10, num_magic_walls=20):
         self.num_magic_walls = num_magic_walls
         # World only has 6 colors (indices 0-5), so we cycle through them
-        # Half the agents can enter magic walls, half cannot
+        # First 5 agents can enter magic walls, rest cannot
         self.agents = []
         for i in range(num_agents):
-            can_enter = (i % 2 == 0)  # Even-indexed agents can enter magic walls
+            can_enter = (i < 5)  # First 5 agents can enter magic walls
             self.agents.append(Agent(World, i % 6, can_enter_magic_walls=can_enter))
         
         super().__init__(
-            width=12,
-            height=12,
+            width=14,
+            height=14,
             max_steps=200,
             agents=self.agents,
             partial_obs=False,
@@ -62,11 +62,13 @@ class MagicWallDemoEnv(MultiGridEnv):
                     magic_wall_positions.append((x, y))
                     break
             
-            # Create magic wall with random magic side and entry probability
+            # Create magic wall with random magic side, entry probability, and solidify probability
             magic_side = self._rand_int(0, 4)  # 0=right, 1=down, 2=left, 3=up
-            entry_prob = 0.3 + 0.7 * np.random.random()  # 30% to 100%
+            entry_prob = 0.5 + 0.5 * np.random.random()  # 50% to 100% for better visibility
+            solidify_prob = 0.1 + 0.2 * np.random.random()  # 10% to 30% chance to solidify on failed entry
             magic_wall = MagicWall(World, magic_side=magic_side, 
-                                   entry_probability=entry_prob, color='grey')
+                                   entry_probability=entry_prob, 
+                                   solidify_probability=solidify_prob, color='grey')
             self.grid.set(x, y, magic_wall)
         
         # Place agents randomly in empty cells
@@ -94,14 +96,15 @@ def create_animation(output_path='magic_wall_animation.mp4', num_steps=50):
     """Create and save an animation showing agents navigating magic walls."""
     
     print("Creating magic wall animation...")
-    print(f"  Grid size: 12x12")
-    print(f"  Number of agents: 8 (4 can enter magic walls, 4 cannot)")
-    print(f"  Number of magic walls: 6")
-    print(f"  Entry probabilities: 30% to 100% (random)")
+    print(f"  Grid size: 14x14")
+    print(f"  Number of agents: 10 (5 can enter magic walls, 5 cannot)")
+    print(f"  Number of magic walls: 20")
+    print(f"  Entry probabilities: 50% to 100% (random)")
+    print(f"  Solidify probabilities: 10% to 30% (random)")
     print()
     
     # Create environment
-    env = MagicWallDemoEnv(num_agents=8, num_magic_walls=6)
+    env = MagicWallDemoEnv(num_agents=10, num_magic_walls=20)
     env.reset()
     
     # Print agent capabilities
@@ -199,11 +202,13 @@ def main():
     print("=" * 70)
     print()
     print("This example demonstrates:")
-    print("  - Creating a 12x12 multigrid environment with magic walls")
-    print("  - 8 agents navigating the environment (half can enter magic walls)")
+    print("  - Creating a 14x14 multigrid environment with 20 magic walls")
+    print("  - 10 agents navigating (5 can enter magic walls, 5 cannot)")
     print("  - Magic walls that can only be entered from specific directions")
-    print("  - Probabilistic entry success (30% to 100%)")
+    print("  - Probabilistic entry success (50% to 100%)")
+    print("  - Magic walls that may solidify into normal walls on failed entry")
     print("  - Blue dashed lines indicate which side can be entered")
+    print("  - Magenta flash indicates successful entry")
     print()
     
     # Create output directory

@@ -212,16 +212,18 @@ Each cell in the grid can contain:
 ### 14. Magic Wall
 - **Type**: `magicwall`
 - **Color**: Grey (default) or other colors
-- **Appearance**: Wall with a dashed blue line near the magic side, parallel to it
+- **Appearance**: Wall with a dashed blue line near the magic side, parallel to it; magenta flash on successful entry
 - **Properties**:
   - Cannot be passed through by agents under normal circumstances
   - Cannot be seen through (blocks vision)
   - Can be entered by specific agents with a certain probability from one specific direction
   - Once entered, agents can step off as if it was an empty cell (can overlap)
   - Cannot be picked up or moved
+  - May turn into a normal wall after a failed entry attempt
 - **Attributes**:
   - `magic_side`: Direction from which the wall can be entered (0=right, 1=down, 2=left, 3=up)
   - `entry_probability`: Probability (0.0 to 1.0) that an authorized agent successfully enters from the magic side
+  - `solidify_probability`: Probability (0.0 to 1.0) that a failed entry attempt turns the magic wall into a normal wall (default 0.0)
 - **Agent Requirements**:
   - Agent must have `can_enter_magic_walls` attribute set to `True` to attempt entry
   - Agent must approach from the magic side (opposite direction to their facing direction)
@@ -231,6 +233,7 @@ Each cell in the grid can contain:
   - Entry succeeds with probability `entry_probability`
   - If entry succeeds, agent moves into the magic wall cell
   - If entry fails, agent remains in place
+  - If entry fails AND random < `solidify_probability`, the magic wall becomes a normal wall
   - Entry attempts are processed **last** in each step (after normal agents and unsteady ground agents)
   - **No conflicts possible**: At most one agent can be next to the magic side of each magic wall
 - **Rendering**:
@@ -241,10 +244,11 @@ Each cell in the grid can contain:
     - magic_side=1 (down): Line on bottom edge
     - magic_side=2 (left): Line on left edge
     - magic_side=3 (up): Line on top edge
+  - Magenta flash and brighter wall color when entry succeeds
 - **Use Cases**:
   - Adding controlled stochasticity to navigation
   - Creating special passages accessible only to certain agents
-  - Simulating doors with uncertain access
+  - Simulating doors with uncertain access that may lock permanently
   - Testing agent behavior with probabilistic barriers
 
 ### 15. Agent
