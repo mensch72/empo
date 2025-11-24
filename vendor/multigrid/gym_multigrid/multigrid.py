@@ -1,9 +1,9 @@
 import math
-import gym
+import gymnasium as gym
 from enum import IntEnum
 import numpy as np
-from gym import error, spaces, utils
-from gym.utils import seeding
+from gymnasium import error, spaces, utils
+from gymnasium.utils import seeding
 from .rendering import *
 from .window import Window
 import numpy as np
