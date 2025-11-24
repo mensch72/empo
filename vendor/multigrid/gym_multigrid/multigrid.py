@@ -353,8 +353,12 @@ class MagicWall(WorldObj):
         return False
     
     def can_overlap(self):
-        """Agents can walk off the magic wall as if it was empty"""
-        return True
+        """
+        Magic walls cannot be overlapped in normal movement.
+        Agents can only step OFF magic walls (if they're already on one).
+        Entry is only through the special magic wall processing.
+        """
+        return False
     
     def encode(self, world, current_agent=False):
         """Encode the magic wall with its magic side and entry probability."""
@@ -1797,6 +1801,8 @@ class MultiGridEnv(gym.Env):
             # Check if entry succeeds based on probability
             if self.np_random.random() < fwd_cell.entry_probability:
                 # Entry succeeds - move agent into the magic wall cell
+                # First, save the magic wall to terrain_grid so agent can step off it later
+                self.terrain_grid.set(*fwd_pos, fwd_cell)
                 self._move_agent_to_cell(i, fwd_pos, fwd_cell)
                 self._handle_special_moves(i, rewards, fwd_pos, fwd_cell)
             # If entry fails, agent stays in place (no action taken)
@@ -2907,6 +2913,8 @@ class MultiGridEnv(gym.Env):
                     # Agent successfully enters the magic wall
                     fwd_pos = self.agents[i].front_pos
                     fwd_cell = self.grid.get(*fwd_pos)
+                    # Save magic wall to terrain_grid so agent can step off it later
+                    self.terrain_grid.set(*fwd_pos, fwd_cell)
                     self._move_agent_to_cell(i, fwd_pos, fwd_cell)
                     self._handle_special_moves(i, rewards, fwd_pos, fwd_cell)
                 # If outcome is 'fail', agent stays in place (no action)
