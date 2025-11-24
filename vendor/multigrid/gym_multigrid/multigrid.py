@@ -61,7 +61,8 @@ class World:
         'switch': 12,
         'block': 13,
         'rock': 14,
-        'unsteadyground': 15
+        'unsteadyground': 15,
+        'magicwall': 16
     }
     IDX_TO_OBJECT = dict(zip(OBJECT_TO_IDX.values(), OBJECT_TO_IDX.keys()))
 
@@ -219,17 +220,10 @@ class Floor(WorldObj):
     def can_overlap(self):
         return True
 
-    def render(self, r):
+    def render(self, img):
         # Give the floor a pale color
         c = COLORS[self.color]
-        r.setLineColor(100, 100, 100, 0)
-        r.setColor(*c / 2)
-        r.drawPolygon([
-            (1, TILE_PIXELS),
-            (TILE_PIXELS, TILE_PIXELS),
-            (TILE_PIXELS, 1),
-            (1, 1)
-        ])
+        fill_coords(img, point_in_rect(0.031, 1, 0.031, 1), c / 2)
 
 
 class Lava(WorldObj):
@@ -322,6 +316,135 @@ class Wall(WorldObj):
 
     def render(self, img):
         fill_coords(img, point_in_rect(0, 1, 0, 1), COLORS[self.color])
+
+
+class MagicWall(WorldObj):
+    """
+    Magic wall that can be entered by certain agents with a certain probability 
+    from one specific direction.
+    
+    Attributes:
+        magic_side: Direction from which the wall can be entered (0=right, 1=down, 2=left, 3=up)
+        entry_probability: Probability (0.0 to 1.0) that an authorized agent successfully enters
+        solidify_probability: Probability (0.0 to 1.0) that a failed entry attempt turns this into a normal wall
+    """
+    
+    def __init__(self, world, magic_side, entry_probability, solidify_probability=0.0, color='grey'):
+        """
+        Args:
+            world: World object defining the environment
+            magic_side: Direction from which agents can attempt to enter (0-3)
+            entry_probability: Probability of successful entry (0.0 to 1.0)
+            solidify_probability: Probability that a failed entry turns this into a normal wall (0.0 to 1.0)
+            color: Color of the wall for rendering
+        """
+        super().__init__(world, 'magicwall', color)
+        assert 0 <= magic_side <= 3, "magic_side must be 0 (right), 1 (down), 2 (left), or 3 (up)"
+        assert 0.0 <= entry_probability <= 1.0, "entry_probability must be between 0.0 and 1.0"
+        assert 0.0 <= solidify_probability <= 1.0, "solidify_probability must be between 0.0 and 1.0"
+        self.magic_side = magic_side
+        self.entry_probability = entry_probability
+        self.solidify_probability = solidify_probability
+    
+    def see_behind(self):
+        return False
+    
+    def can_overlap(self):
+        """
+        Magic walls cannot be overlapped in normal movement.
+        Agents can only step OFF magic walls (if they're already on one).
+        Entry is only through the special magic wall processing.
+        """
+        return False
+    
+    def encode(self, world, current_agent=False):
+        """Encode the magic wall with its magic side and entry probability."""
+        if world.encode_dim == 3:
+            return (world.OBJECT_TO_IDX[self.type], world.COLOR_TO_IDX[self.color], self.magic_side)
+        else:
+            # Encode magic_side in state field and entry_probability scaled to 0-255
+            entry_prob_encoded = int(self.entry_probability * 255)
+            solidify_prob_encoded = int(self.solidify_probability * 255)
+            return (world.OBJECT_TO_IDX[self.type], world.COLOR_TO_IDX[self.color], 
+                   self.magic_side, entry_prob_encoded, solidify_prob_encoded, 0)
+    
+    def render(self, img):
+        """Render magic wall like a normal wall with a dashed blue line near its magic side."""
+        # Render base wall
+        fill_coords(img, point_in_rect(0, 1, 0, 1), COLORS[self.color])
+        
+        # Add dashed blue line parallel to magic side
+        blue_color = COLORS['blue']
+        line_width = 0.04
+        dash_length = 0.15
+        gap_length = 0.10
+        offset = 0.15  # Distance from the edge
+        
+        # Create dashed line based on magic_side direction
+        if self.magic_side == 0:  # Right - vertical dashed line near right edge
+            x_pos = 1 - offset
+            y_start = 0.05
+            y_end = 0.95
+            for y in np.arange(y_start, y_end, dash_length + gap_length):
+                dash_end = min(y + dash_length, y_end)
+                fill_coords(img, point_in_rect(x_pos - line_width/2, x_pos + line_width/2, y, dash_end), blue_color)
+        elif self.magic_side == 1:  # Down - horizontal dashed line near bottom edge
+            y_pos = 1 - offset
+            x_start = 0.05
+            x_end = 0.95
+            for x in np.arange(x_start, x_end, dash_length + gap_length):
+                dash_end = min(x + dash_length, x_end)
+                fill_coords(img, point_in_rect(x, dash_end, y_pos - line_width/2, y_pos + line_width/2), blue_color)
+        elif self.magic_side == 2:  # Left - vertical dashed line near left edge
+            x_pos = offset
+            y_start = 0.05
+            y_end = 0.95
+            for y in np.arange(y_start, y_end, dash_length + gap_length):
+                dash_end = min(y + dash_length, y_end)
+                fill_coords(img, point_in_rect(x_pos - line_width/2, x_pos + line_width/2, y, dash_end), blue_color)
+        elif self.magic_side == 3:  # Up - horizontal dashed line near top edge
+            y_pos = offset
+            x_start = 0.05
+            x_end = 0.95
+            for x in np.arange(x_start, x_end, dash_length + gap_length):
+                dash_end = min(x + dash_length, x_end)
+                fill_coords(img, point_in_rect(x, dash_end, y_pos - line_width/2, y_pos + line_width/2), blue_color)
+    
+    def render_with_magic_entry(self, img):
+        """Render magic wall with a bright highlight indicating successful entry."""
+        # Brighter base color to indicate magic entry
+        c = COLORS[self.color]
+        fill_coords(img, point_in_rect(0, 1, 0, 1), np.clip(c * 1.5, 0, 255).astype(np.uint8))
+        
+        # Add bright cyan/magenta dashed line to show magic activation
+        magic_color = np.array([255, 0, 255])  # Magenta for visibility
+        line_width = 0.06  # Thicker line
+        dash_length = 0.15
+        gap_length = 0.10
+        offset = 0.15
+        
+        # Create dashed line based on magic_side direction (same positions, different color)
+        if self.magic_side == 0:  # Right
+            x_pos = 1 - offset
+            for y in np.arange(0.05, 0.95, dash_length + gap_length):
+                dash_end = min(y + dash_length, 0.95)
+                fill_coords(img, point_in_rect(x_pos - line_width/2, x_pos + line_width/2, y, dash_end), magic_color)
+        elif self.magic_side == 1:  # Down
+            y_pos = 1 - offset
+            for x in np.arange(0.05, 0.95, dash_length + gap_length):
+                dash_end = min(x + dash_length, 0.95)
+                fill_coords(img, point_in_rect(x, dash_end, y_pos - line_width/2, y_pos + line_width/2), magic_color)
+        elif self.magic_side == 2:  # Left
+            x_pos = offset
+            for y in np.arange(0.05, 0.95, dash_length + gap_length):
+                dash_end = min(y + dash_length, 0.95)
+                fill_coords(img, point_in_rect(x_pos - line_width/2, x_pos + line_width/2, y, dash_end), magic_color)
+        elif self.magic_side == 3:  # Up
+            y_pos = offset
+            for x in np.arange(0.05, 0.95, dash_length + gap_length):
+                dash_end = min(x + dash_length, 0.95)
+                fill_coords(img, point_in_rect(x, dash_end, y_pos - line_width/2, y_pos + line_width/2), magic_color)
+
 
 
 class Door(WorldObj):
@@ -505,7 +628,7 @@ class Rock(WorldObj):
 
 
 class Agent(WorldObj):
-    def __init__(self, world, index=0, view_size=7):
+    def __init__(self, world, index=0, view_size=7, can_enter_magic_walls=False):
         super(Agent, self).__init__(world, 'agent', world.IDX_TO_COLOR[index])
         self.pos = None
         self.dir = None
@@ -516,6 +639,7 @@ class Agent(WorldObj):
         self.started = True
         self.paused = False
         self.on_unsteady_ground = False  # Track if agent is on unsteady ground
+        self.can_enter_magic_walls = can_enter_magic_walls  # Can attempt to enter magic walls
 
     def render(self, img):
         c = COLORS[self.color]
@@ -767,16 +891,17 @@ class Grid:
             highlights=[],
             tile_size=TILE_PIXELS,
             subdivs=3,
-            stumbled=False
+            stumbled=False,
+            magic_entered=False
     ):
         """
         Render a tile and cache the result
         """
 
-        # Include terrain and stumbled state in cache key
+        # Include terrain, stumbled, and magic_entered state in cache key
         # Convert highlights to tuple for hashing
         highlights_tuple = tuple(highlights) if highlights else ()
-        key = (*highlights_tuple, tile_size, stumbled)
+        key = (*highlights_tuple, tile_size, stumbled, magic_entered)
         key = obj.encode(world) + key if obj else key
         if terrain:
             key = terrain.encode(world) + key
@@ -795,6 +920,9 @@ class Grid:
             # Pass stumbled state to terrain if it's unsteady ground
             if hasattr(terrain, 'render_with_stumble') and stumbled:
                 terrain.render_with_stumble(img)
+            # Pass magic_entered state to terrain if it's magic wall
+            elif hasattr(terrain, 'render_with_magic_entry') and magic_entered:
+                terrain.render_with_magic_entry(img)
             else:
                 terrain.render(img)
         
@@ -821,7 +949,8 @@ class Grid:
             tile_size,
             terrain_grid=None,
             highlight_masks=None,
-            stumbled_cells=None
+            stumbled_cells=None,
+            magic_wall_entered_cells=None
     ):
         """
         Render this grid at a given scale
@@ -829,6 +958,7 @@ class Grid:
         :param tile_size: tile size in pixels
         :param terrain_grid: optional terrain grid to render under objects
         :param stumbled_cells: optional set of (x, y) positions where stumbling occurred
+        :param magic_wall_entered_cells: optional set of (x, y) positions where magic wall entry succeeded
         """
 
         # Compute the total grid size
@@ -843,6 +973,7 @@ class Grid:
                 cell = self.get(i, j)
                 terrain = terrain_grid.get(i, j) if terrain_grid else None
                 stumbled_here = bool(stumbled_cells and (i, j) in stumbled_cells)
+                magic_entered_here = bool(magic_wall_entered_cells and (i, j) in magic_wall_entered_cells)
 
                 # agent_here = np.array_equal(agent_pos, (i, j))
                 tile_img = Grid.render_tile(
@@ -851,7 +982,8 @@ class Grid:
                     terrain=terrain,
                     highlights=[] if highlight_masks is None else highlight_masks[i, j],
                     tile_size=tile_size,
-                    stumbled=stumbled_here
+                    stumbled=stumbled_here,
+                    magic_entered=magic_entered_here
                 )
 
                 ymin = j * tile_size
@@ -1557,7 +1689,10 @@ class MultiGridEnv(gym.Env):
         
         elif action == self.actions.toggle:
             if fwd_cell:
+                # Set env.carrying to agent's carrying for Door compatibility
+                self.carrying = self.agents[agent_idx].carrying
                 fwd_cell.toggle(self, fwd_pos)
+                self.carrying = None  # Reset after toggle
         
         elif action == self.actions.done:
             pass
@@ -1603,8 +1738,13 @@ class MultiGridEnv(gym.Env):
                     turn_dir = None
                     stumbles = False
             else:
-                # Randomly determine stumbling
-                stumble_prob = 0.5
+                # Randomly determine stumbling based on the cell's stumble_probability
+                # Get the stumble probability from the unsteady ground cell
+                current_cell = self.grid.get(*self.agents[i].pos)
+                if current_cell and current_cell.type == 'unsteadyground':
+                    stumble_prob = current_cell.stumble_probability
+                else:
+                    stumble_prob = 0.5  # Default fallback (shouldn't happen)
                 stumbles = self.np_random.random() < stumble_prob
                 turn_dir = self.np_random.choice(['left', 'right']) if stumbles else None
             
@@ -1679,20 +1819,111 @@ class MultiGridEnv(gym.Env):
                 self._handle_special_moves(i, rewards, fwd_pos, fwd_cell)
         
         return done
-
-    def step(self, actions):
-        self.step_count += 1
+    
+    def _process_magic_wall_agents(self, magic_wall_agents, rewards):
+        """
+        Process agents attempting to enter magic walls.
+        These agents are processed last, and entry succeeds with the magic wall's probability.
+        If entry fails, the magic wall may solidify into a normal wall based on solidify_probability.
         
-        # Clear stumbled cells from previous step (for visual feedback)
-        self.stumbled_cells = set()
-
-        # Separate agents into normal and unsteady-forward groups
+        Args:
+            magic_wall_agents: List of agent indices attempting to enter magic walls
+            rewards: Rewards array to update
+        
+        Returns:
+            bool: True if any agent reached a goal (done condition)
+        """
+        done = False
+        
+        for i in magic_wall_agents:
+            fwd_pos = self.agents[i].front_pos
+            fwd_cell = self.grid.get(*fwd_pos)
+            
+            # Verify it's still a magic wall (shouldn't change, but be safe)
+            if fwd_cell is None or fwd_cell.type != 'magicwall':
+                continue
+            
+            # Check if entry succeeds based on probability
+            if self.np_random.random() < fwd_cell.entry_probability:
+                # Entry succeeds - record the magic wall position for visual feedback
+                if hasattr(self, 'magic_wall_entered_cells'):
+                    self.magic_wall_entered_cells.add(tuple(fwd_pos))
+                
+                # Move agent into the magic wall cell
+                # First, save the magic wall to terrain_grid so agent can step off it later
+                self.terrain_grid.set(*fwd_pos, fwd_cell)
+                self._move_agent_to_cell(i, fwd_pos, fwd_cell)
+                self._handle_special_moves(i, rewards, fwd_pos, fwd_cell)
+            else:
+                # Entry fails - check if magic wall should solidify into a normal wall
+                if self.np_random.random() < fwd_cell.solidify_probability:
+                    # Replace magic wall with a normal wall
+                    normal_wall = Wall(self.objects, fwd_cell.color)
+                    self.grid.set(*fwd_pos, normal_wall)
+        
+        return done
+    
+    def _categorize_agents(self, actions, active_agents=None):
+        """
+        Helper function to categorize agents into normal, unsteady-forward, and magic-wall-entry groups.
+        This logic is shared between step() and transition_probabilities().
+        
+        **IMPORTANT NOTE FOR DEVELOPERS:**
+        When adding any new object type or stochastic behavior that affects agent actions:
+        
+        1. Add categorization logic HERE in _categorize_agents() to identify affected agents
+        2. Update step() to process the new agent category appropriately
+        3. Update transition_probabilities() to add corresponding uncertainty blocks
+        4. Update _compute_successor_state_with_unsteady() (or create a new helper) to handle 
+           deterministic execution based on resolved outcomes
+        
+        This ensures consistency between:
+        - step(): which samples stochastic outcomes randomly
+        - transition_probabilities(): which enumerates all possible outcomes with exact probabilities
+        
+        Both functions MUST produce the same distribution over successor states for any given 
+        state-action pair. Failing to maintain this consistency will break the correctness of 
+        probability computations and planning algorithms that depend on them.
+        
+        Examples of stochastic elements that follow this pattern:
+        - Unsteady ground: agent stumbles with probability, creating 3 outcomes (forward, left+forward, right+forward)
+        - Magic walls: agent enters with probability, creating 2 outcomes (succeed, fail)
+        
+        Args:
+            actions: List of action indices, one per agent
+            active_agents: List of active agent indices (if None, determines from agent states)
+            
+        Returns:
+            tuple: (normal_agents, unsteady_forward_agents, magic_wall_agents)
+        """
         normal_agents = []
         unsteady_forward_agents = []
+        magic_wall_agents = []
         
-        for i in range(len(actions)):
-            if self.agents[i].terminated or self.agents[i].paused or not self.agents[i].started or actions[i] == self.actions.still:
-                continue
+        # Determine active agents if not provided
+        if active_agents is None:
+            active_agents = []
+            for i in range(len(actions)):
+                if (not self.agents[i].terminated and 
+                    not self.agents[i].paused and 
+                    self.agents[i].started and 
+                    actions[i] != self.actions.still):
+                    active_agents.append(i)
+        
+        for i in active_agents:
+            # Check if agent is attempting to enter a magic wall
+            if (actions[i] == self.actions.forward and 
+                self.agents[i].can_enter_magic_walls):
+                fwd_pos = self.agents[i].front_pos
+                fwd_cell = self.grid.get(*fwd_pos)
+                if fwd_cell is not None and fwd_cell.type == 'magicwall':
+                    # Check if agent is approaching from the magic side
+                    # Agent's direction is where they're facing, magic_side is where wall can be entered from
+                    # If agent faces right (dir=0), they approach from left (opposite of right=0 is left=2)
+                    approach_dir = (self.agents[i].dir + 2) % 4
+                    if approach_dir == fwd_cell.magic_side:
+                        magic_wall_agents.append(i)
+                        continue
                 
             # Check if agent is on unsteady ground and attempting forward
             if (actions[i] == self.actions.forward and 
@@ -1700,6 +1931,20 @@ class MultiGridEnv(gym.Env):
                 unsteady_forward_agents.append(i)
             else:
                 normal_agents.append(i)
+        
+        return normal_agents, unsteady_forward_agents, magic_wall_agents
+
+    def step(self, actions):
+        self.step_count += 1
+        
+        # Clear stumbled cells from previous step (for visual feedback)
+        self.stumbled_cells = set()
+        
+        # Clear magic wall entered cells from previous step (for visual feedback)
+        self.magic_wall_entered_cells = set()
+
+        # Categorize agents using shared helper
+        normal_agents, unsteady_forward_agents, magic_wall_agents = self._categorize_agents(actions)
         
         # Process normal agents in random order (as before)
         order = np.random.permutation(normal_agents) if normal_agents else []
@@ -1716,6 +1961,11 @@ class MultiGridEnv(gym.Env):
         if unsteady_forward_agents:
             unsteady_done = self._process_unsteady_forward_agents(unsteady_forward_agents, rewards)
             done = done or unsteady_done
+        
+        # Process magic wall entry attempts last
+        if magic_wall_agents:
+            magic_done = self._process_magic_wall_agents(magic_wall_agents, rewards)
+            done = done or magic_done
 
         if self.step_count >= self.max_steps:
             done = True
@@ -1843,7 +2093,8 @@ class MultiGridEnv(gym.Env):
             tile_size,
             terrain_grid=self.terrain_grid if hasattr(self, 'terrain_grid') else None,
             highlight_masks=highlight_masks if highlight else None,
-            stumbled_cells=self.stumbled_cells if hasattr(self, 'stumbled_cells') else None
+            stumbled_cells=self.stumbled_cells if hasattr(self, 'stumbled_cells') else None,
+            magic_wall_entered_cells=self.magic_wall_entered_cells if hasattr(self, 'magic_wall_entered_cells') else None
         )
 
         if mode == 'human':
@@ -2222,17 +2473,26 @@ class MultiGridEnv(gym.Env):
                     inactive_agents.append(i)
             
             # OPTIMIZATION 1: If ≤1 agents active, check if transition is deterministic
-            # (only deterministic if the agent is NOT on unsteady ground attempting forward)
+            # (only deterministic if the agent is NOT on unsteady ground attempting forward
+            # and NOT attempting to enter a magic wall)
             if len(active_agents) <= 1:
-                # Check if the single agent is on unsteady ground attempting forward
-                is_unsteady = False
+                # Check if the single agent is on unsteady ground or attempting magic wall entry
+                is_stochastic = False
                 if len(active_agents) == 1:
                     agent_idx = active_agents[0]
-                    if actions[agent_idx] == self.actions.forward and self.agents[agent_idx].on_unsteady_ground:
-                        is_unsteady = True
+                    if actions[agent_idx] == self.actions.forward:
+                        if self.agents[agent_idx].on_unsteady_ground:
+                            is_stochastic = True
+                        elif self.agents[agent_idx].can_enter_magic_walls:
+                            fwd_pos = self.agents[agent_idx].front_pos
+                            fwd_cell = self.grid.get(*fwd_pos)
+                            if fwd_cell is not None and fwd_cell.type == 'magicwall':
+                                approach_dir = (self.agents[agent_idx].dir + 2) % 4
+                                if approach_dir == fwd_cell.magic_side:
+                                    is_stochastic = True
                 
-                if not is_unsteady:
-                    # Only one or zero agents acting and not on unsteady ground - order doesn't matter
+                if not is_stochastic:
+                    # Only one or zero agents acting and not stochastic - order doesn't matter
                     successor_state = self._compute_successor_state(state, actions, tuple(range(num_agents)))
                     return [(1.0, successor_state)]
             
@@ -2243,42 +2503,42 @@ class MultiGridEnv(gym.Env):
                 for i in active_agents
             )
             if n_non_rotations < 2:
-                # Check if any agents are on unsteady ground attempting forward
-                has_unsteady = any(
-                    actions[i] == self.actions.forward and self.agents[i].on_unsteady_ground
+                # Check if any agents are on unsteady ground or attempting magic wall entry
+                has_stochastic = any(
+                    actions[i] == self.actions.forward and (
+                        self.agents[i].on_unsteady_ground or
+                        (self.agents[i].can_enter_magic_walls and
+                         self.grid.get(*self.agents[i].front_pos) is not None and
+                         self.grid.get(*self.agents[i].front_pos).type == 'magicwall' and
+                         (self.agents[i].dir + 2) % 4 == self.grid.get(*self.agents[i].front_pos).magic_side)
+                    )
                     for i in active_agents
                 )
-                if not has_unsteady:
-                    # Rotations are commutative and no unsteady agents - result is deterministic
+                if not has_stochastic:
+                    # Rotations are commutative and no stochastic agents - result is deterministic
                     successor_state = self._compute_successor_state(state, actions, tuple(range(num_agents)))
                     return [(1.0, successor_state)]
             
-            # NEW: Identify unsteady-forward agents FIRST (agents on unsteady ground attempting forward)
-            # These agents will NOT be included in conflict blocks because their conflicts
-            # have deterministic outcomes (all fail), unlike normal conflicts where one agent wins
-            unsteady_forward_agents = []
-            normal_active_agents = []
-            for i in active_agents:
-                if actions[i] == self.actions.forward and self.agents[i].on_unsteady_ground:
-                    unsteady_forward_agents.append(i)
-                else:
-                    normal_active_agents.append(i)
+            # Use helper to categorize agents
+            normal_active_agents, unsteady_forward_agents, magic_wall_agents = self._categorize_agents(actions, active_agents)
             
-            # OPTIMIZATION 3: Partition ONLY normal (non-stumbling) agents into conflict blocks
-            # Stumbling agents are excluded because their conflicts are deterministic (all fail)
+            # OPTIMIZATION 3: Partition ONLY normal (non-stochastic) agents into conflict blocks
+            # Unsteady and magic wall agents are excluded because they're handled separately
             # This is MORE efficient than permuting all active agents
             # Instead of k! permutations, we compute the Cartesian product of conflict blocks
             conflict_blocks = self._identify_conflict_blocks(state, actions, normal_active_agents)
             
-            # If no conflicts and no unsteady agents, result is deterministic
-            if all(len(block) == 1 for block in conflict_blocks) and len(unsteady_forward_agents) == 0:
+            # If no conflicts and no stochastic agents, result is deterministic
+            if (all(len(block) == 1 for block in conflict_blocks) and 
+                len(unsteady_forward_agents) == 0 and 
+                len(magic_wall_agents) == 0):
                 successor_state = self._compute_successor_state(state, actions, tuple(range(num_agents)))
                 return [(1.0, successor_state)]
             
-            # OPTIMIZATION 4: Compute outcomes via Cartesian product of conflict blocks AND unsteady blocks
+            # OPTIMIZATION 4: Compute outcomes via Cartesian product of conflict blocks, unsteady blocks, and magic wall blocks
             # Each outcome has probability = 1 / product(block_sizes)
             
-            # Build list of all blocks (conflict blocks + unsteady agent blocks)
+            # Build list of all blocks (conflict blocks + unsteady agent blocks + magic wall blocks)
             all_blocks = []
             
             # Add conflict blocks
@@ -2286,28 +2546,54 @@ class MultiGridEnv(gym.Env):
                 all_blocks.append(('conflict', block))
             
             # Add unsteady agent blocks (one per unsteady-forward agent)
-            # Each block has 3 outcomes: forward, left+forward, right+forward
+            # Each block has 3 outcomes with probabilities
             for agent_idx in unsteady_forward_agents:
-                # Block has 3 elements representing the 3 possible outcomes
-                all_blocks.append(('unsteady', agent_idx, ['forward', 'left-forward', 'right-forward']))
+                # Get the stumble probability from the unsteady ground cell
+                current_cell = self.grid.get(*self.agents[agent_idx].pos)
+                if current_cell and current_cell.type == 'unsteadyground':
+                    stumble_prob = current_cell.stumble_probability
+                else:
+                    stumble_prob = 0.5  # Default fallback
+                # Block elements are (probability, outcome) pairs
+                # If stumbles, 50% chance of left-forward, 50% chance of right-forward
+                outcomes = [
+                    (1.0 - stumble_prob, 'forward'),
+                    (stumble_prob * 0.5, 'left-forward'),
+                    (stumble_prob * 0.5, 'right-forward')
+                ]
+                all_blocks.append(('unsteady', agent_idx, outcomes))
+            
+            # Add magic wall agent blocks (one per magic-wall-entry agent)
+            # Each block has 3 outcomes with probabilities: succeed, fail (stays magic), solidify (turns to wall)
+            for agent_idx in magic_wall_agents:
+                fwd_pos = self.agents[agent_idx].front_pos
+                fwd_cell = self.grid.get(*fwd_pos)
+                entry_prob = fwd_cell.entry_probability if fwd_cell else 0.5
+                solidify_prob = fwd_cell.solidify_probability if fwd_cell else 0.0
+                # Block elements are (probability, outcome) pairs
+                # On failure, there's a chance to solidify into a normal wall
+                fail_prob = 1.0 - entry_prob
+                outcomes = [
+                    (entry_prob, 'succeed'),
+                    (fail_prob * (1.0 - solidify_prob), 'fail'),
+                    (fail_prob * solidify_prob, 'solidify')
+                ]
+                all_blocks.append(('magicwall', agent_idx, outcomes))
             
             # Generate all possible outcome combinations
-            # For conflict blocks: winner index (which agent wins)
-            # For unsteady blocks: outcome index (0=forward, 1=left-forward, 2=right-forward)
+            # For conflict blocks: winner index (which agent wins) - uniform probability
+            # For unsteady blocks: outcome index into (probability, outcome) pairs
+            # For magic wall blocks: outcome index into (probability, outcome) pairs
             
             def get_block_size(block):
                 if block[0] == 'conflict':
                     return len(block[1])
-                else:  # unsteady
-                    return len(block[2])  # Always 3
+                elif block[0] in ['unsteady', 'magicwall']:
+                    return len(block[2])  # Number of (probability, outcome) pairs
+                else:
+                    return 1
             
             block_sizes = [get_block_size(block) for block in all_blocks]
-            total_outcomes = 1
-            for size in block_sizes:
-                total_outcomes *= size
-            
-            # Each outcome has equal probability
-            outcome_probability = 1.0 / total_outcomes
             
             # Compute successor state for each outcome
             successor_states = {}
@@ -2317,6 +2603,18 @@ class MultiGridEnv(gym.Env):
             
             for outcome_indices in product(*block_ranges):
                 # outcome_indices[i] tells us which outcome for block i
+                
+                # Compute probability for this outcome combination
+                outcome_probability = 1.0
+                for i, block in enumerate(all_blocks):
+                    outcome_idx = outcome_indices[i]
+                    if block[0] == 'conflict':
+                        # Uniform probability over conflict block members
+                        outcome_probability *= 1.0 / len(block[1])
+                    elif block[0] in ['unsteady', 'magicwall']:
+                        # Use the probability from the (probability, outcome) pair
+                        prob, _ = block[2][outcome_idx]
+                        outcome_probability *= prob
                 
                 # Process conflict blocks to determine winners
                 conflict_winners = []
@@ -2333,17 +2631,25 @@ class MultiGridEnv(gym.Env):
                     if block[0] == 'unsteady':
                         agent_idx = block[1]
                         outcome_idx = outcome_indices[i]
-                        outcome_type = block[2][outcome_idx]
+                        _, outcome_type = block[2][outcome_idx]  # Extract outcome from (probability, outcome) pair
                         
                         # Modify actions based on outcome
                         # We'll encode the outcome in the action temporarily
-                        # 0=forward, 1=left-forward, 2=right-forward
                         modified_actions[agent_idx] = (actions[agent_idx], outcome_type)
+                
+                # Process magic wall blocks to determine outcomes
+                magic_wall_outcomes = {}
+                for i, block in enumerate(all_blocks):
+                    if block[0] == 'magicwall':
+                        agent_idx = block[1]
+                        outcome_idx = outcome_indices[i]
+                        _, outcome_type = block[2][outcome_idx]  # Extract outcome from (probability, outcome) pair
+                        magic_wall_outcomes[agent_idx] = outcome_type
                 
                 # Compute the successor state for this outcome
                 succ_state = self._compute_successor_state_with_unsteady(
                     state, modified_actions, num_agents, active_agents, 
-                    conflict_blocks, conflict_winners
+                    conflict_blocks, conflict_winners, magic_wall_outcomes
                 )
                 
                 # Aggregate probabilities for identical successor states
@@ -2574,13 +2880,15 @@ class MultiGridEnv(gym.Env):
         return self.get_state()
     
     def _compute_successor_state_with_unsteady(self, state, modified_actions, num_agents, 
-                                               active_agents, conflict_blocks, conflict_winners):
+                                               active_agents, conflict_blocks, conflict_winners, 
+                                               magic_wall_outcomes=None):
         """
-        Compute successor state with unsteady ground stochasticity.
+        Compute successor state with unsteady ground and magic wall stochasticity.
         
-        This handles the special processing order required for unsteady ground:
+        This handles the special processing order required for stochastic elements:
         1. Process normal agents first (with conflict resolution)
         2. Process unsteady-forward agents after (with stumbling outcomes)
+        3. Process magic wall entry attempts last (with probabilistic outcomes)
         
         Args:
             state: Current state tuple
@@ -2589,6 +2897,7 @@ class MultiGridEnv(gym.Env):
             active_agents: List of active agent indices
             conflict_blocks: List of conflict blocks
             conflict_winners: List of (block_idx, winner_agent_idx) tuples
+            magic_wall_outcomes: Optional dict mapping agent_idx -> outcome_type ('succeed' or 'fail')
             
         Returns:
             tuple: The successor state
@@ -2599,10 +2908,11 @@ class MultiGridEnv(gym.Env):
         # Increment step counter
         self.step_count += 1
         
-        # Separate agents into normal and unsteady-forward
+        # Separate agents into normal, unsteady-forward, and magic-wall
         normal_agents = []
         unsteady_forward_agents_list = []
         unsteady_outcomes_dict = {}  # agent_idx -> outcome_type
+        magic_wall_agents_list = []
         
         for i in range(num_agents):
             if (self.agents[i].terminated or 
@@ -2618,7 +2928,11 @@ class MultiGridEnv(gym.Env):
                     unsteady_forward_agents_list.append(i)
                     unsteady_outcomes_dict[i] = outcome_type
             elif action != self.actions.still:
-                normal_agents.append(i)
+                # Check if this is a magic wall agent
+                if magic_wall_outcomes and i in magic_wall_outcomes:
+                    magic_wall_agents_list.append(i)
+                else:
+                    normal_agents.append(i)
         
         # Build ordering for normal agents based on conflict winners
         winner_set = set(w[1] for w in conflict_winners)
@@ -2652,6 +2966,27 @@ class MultiGridEnv(gym.Env):
                 unsteady_forward_agents_list, rewards, unsteady_outcomes_dict
             )
             done = done or unsteady_done
+        
+        # Process magic wall agents (deterministic based on outcome)
+        if magic_wall_agents_list:
+            for i in magic_wall_agents_list:
+                outcome = magic_wall_outcomes[i]
+                if outcome == 'succeed':
+                    # Agent successfully enters the magic wall
+                    fwd_pos = self.agents[i].front_pos
+                    fwd_cell = self.grid.get(*fwd_pos)
+                    # Save magic wall to terrain_grid so agent can step off it later
+                    self.terrain_grid.set(*fwd_pos, fwd_cell)
+                    self._move_agent_to_cell(i, fwd_pos, fwd_cell)
+                    self._handle_special_moves(i, rewards, fwd_pos, fwd_cell)
+                elif outcome == 'solidify':
+                    # Entry failed and magic wall solidifies into a normal wall
+                    fwd_pos = self.agents[i].front_pos
+                    fwd_cell = self.grid.get(*fwd_pos)
+                    if fwd_cell and fwd_cell.type == 'magicwall':
+                        normal_wall = Wall(self.objects, fwd_cell.color)
+                        self.grid.set(*fwd_pos, normal_wall)
+                # If outcome is 'fail', agent stays in place and wall stays magic (no action)
         
         # Check if max steps reached
         if self.step_count >= self.max_steps:

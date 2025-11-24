@@ -209,7 +209,49 @@ Each cell in the grid can contain:
   - Creating navigation challenges
   - Testing robustness of multi-agent policies
 
-### 14. Agent
+### 14. Magic Wall
+- **Type**: `magicwall`
+- **Color**: Grey (default) or other colors
+- **Appearance**: Wall with a dashed blue line near the magic side, parallel to it; magenta flash on successful entry
+- **Properties**:
+  - Cannot be passed through by agents under normal circumstances
+  - Cannot be seen through (blocks vision)
+  - Can be entered by specific agents with a certain probability from one specific direction
+  - Once entered, agents can step off as if it was an empty cell (can overlap)
+  - Cannot be picked up or moved
+  - May turn into a normal wall after a failed entry attempt
+- **Attributes**:
+  - `magic_side`: Direction from which the wall can be entered (0=right, 1=down, 2=left, 3=up)
+  - `entry_probability`: Probability (0.0 to 1.0) that an authorized agent successfully enters from the magic side
+  - `solidify_probability`: Probability (0.0 to 1.0) that a failed entry attempt turns the magic wall into a normal wall (default 0.0)
+- **Agent Requirements**:
+  - Agent must have `can_enter_magic_walls` attribute set to `True` to attempt entry
+  - Agent must approach from the magic side (opposite direction to their facing direction)
+  - Entry attempt is probabilistic based on `entry_probability`
+- **Entry Mechanics**:
+  - Agent uses **forward action** when facing the magic wall from the magic side
+  - Entry succeeds with probability `entry_probability`
+  - If entry succeeds, agent moves into the magic wall cell
+  - If entry fails, agent remains in place
+  - If entry fails AND random < `solidify_probability`, the magic wall becomes a normal wall
+  - Entry attempts are processed **last** in each step (after normal agents and unsteady ground agents)
+  - **No conflicts possible**: At most one agent can be next to the magic side of each magic wall
+- **Rendering**:
+  - Base wall rendered in configured color (default grey)
+  - Dashed blue line drawn parallel to and near the magic side
+  - Line position indicates which side can be entered from:
+    - magic_side=0 (right): Line on right edge
+    - magic_side=1 (down): Line on bottom edge
+    - magic_side=2 (left): Line on left edge
+    - magic_side=3 (up): Line on top edge
+  - Magenta flash and brighter wall color when entry succeeds
+- **Use Cases**:
+  - Adding controlled stochasticity to navigation
+  - Creating special passages accessible only to certain agents
+  - Simulating doors with uncertain access that may lock permanently
+  - Testing agent behavior with probabilistic barriers
+
+### 15. Agent
 - **Type**: `agent`
 - **Color**: Red, green, blue, purple, yellow (assigned by index)
 - **Properties**:
@@ -226,6 +268,7 @@ Each cell in the grid can contain:
   - `paused`: Whether agent is temporarily inactive
   - `started`: Whether agent has begun acting
   - `view_size`: Size of observable area (default 7)
+  - `can_enter_magic_walls`: Whether agent can attempt to enter magic walls (default False)
 
 ## Agent Types
 
@@ -493,21 +536,101 @@ Episodes end when:
 ## Summary
 
 **Key Points**:
-- **14 object types**: wall, floor, door, key, ball, box, goal, objgoal, lava, switch, block, rock, unsteady ground, and agent
+- **15 object types**: wall, floor, door, key, ball, box, goal, objgoal, lava, switch, block, rock, unsteady ground, magic wall, and agent
 - **8 standard actions**: still, left, right, forward, pickup, drop, toggle, done
-- **Single agent type**: No distinction between robot/human or different agent classes (though rocks can have agent-specific push permissions)
+- **Single agent type**: No distinction between robot/human or different agent classes (though rocks can have agent-specific push permissions and agents can have magic wall entry capability)
 - **Boxes are NOT pushable**: Must be picked up and carried
 - **Blocks ARE pushable**: Can be pushed by any agent using forward action
 - **Rocks ARE pushable with restrictions**: Can only be pushed by specific agents based on rock's `pushable_by` attribute
 - **Unsteady ground introduces stochasticity**: Agents may stumble when moving forward on unsteady ground
+- **Magic walls introduce stochasticity**: Agents with `can_enter_magic_walls=True` can attempt entry with configurable probability from one specific direction
 - **Keys are reusable**: Not consumed when unlocking doors
 - **Color matching required**: Keys must match door color
 - **Stochasticity sources**: 
   1. Agent execution order (random permutation for normal agents)
   2. Unsteady ground stumbling (configurable probability per cell)
+  3. Magic wall entry (configurable probability per wall)
 - **No agent subtypes**: All agents have same capabilities, distinguished by color/index only
 
-This gridworld focuses on **multi-agent coordination** and **object manipulation**, including Sokoban-style pushing mechanics for blocks and rocks, and stochastic movement on unsteady ground.
+This gridworld focuses on **multi-agent coordination** and **object manipulation**, including Sokoban-style pushing mechanics for blocks and rocks, and stochastic movement on unsteady ground and magic wall entry.
+
+## Developer Notes
+
+### Adding New Stochastic Object Types
+
+**CRITICAL**: When adding any new object type or stochastic behavior that affects agent actions, you MUST maintain consistency between `step()` and `transition_probabilities()` methods. Both must produce the same probability distribution over successor states.
+
+**Required changes** for adding a new stochastic element:
+
+1. **Update `_categorize_agents()` helper**: Add logic to identify agents affected by the new stochastic element
+2. **Update `step()` method**: Process the new agent category appropriately, sampling stochastic outcomes
+3. **Update `transition_probabilities()` method**: Add uncertainty blocks for the new stochastic element to the Cartesian product
+4. **Update `_compute_successor_state_with_unsteady()` method**: Handle deterministic execution based on resolved outcomes
+
+**Uncertainty Block Pattern**:
+
+All sources of randomness must be represented as **uncertainty blocks** that are combined via Cartesian product. Each block represents one stochastic element (e.g., one agent on unsteady ground, one agent attempting magic wall entry).
+
+Each uncertainty block contains a list of **(probability, outcome)** pairs:
+- The probabilities must sum to 1.0 for each block
+- Each outcome is a string identifier (e.g., 'forward', 'succeed', 'fail')
+- The Cartesian product of all blocks generates all possible outcome combinations
+- Each combination's probability = product of individual outcome probabilities
+
+**Example pattern** (as used for unsteady ground and magic walls):
+
+```python
+# In _categorize_agents(): Identify affected agents
+if condition_for_stochastic_element:
+    stochastic_agents.append(i)
+
+# In step(): Sample random outcome based on probabilities
+rand_val = random()
+if rand_val < probability_a:
+    outcome = 'option_a'
+else:
+    outcome = 'option_b'
+    
+# In transition_probabilities(): Create uncertainty block with (probability, outcome) pairs
+outcomes = [
+    (probability_a, 'option_a'),
+    (1.0 - probability_a, 'option_b')
+]
+all_blocks.append(('element_type', agent_idx, outcomes))
+
+# When computing outcome probabilities (automatic from structure):
+for outcome_idx, (prob, outcome_name) in enumerate(block_outcomes):
+    outcome_probability *= prob  # Multiply probabilities in Cartesian product
+
+# In _compute_successor_state_with_unsteady(): Execute based on outcome
+if outcome == 'option_a':
+    # execute option A
+else:
+    # execute option B
+```
+
+**Existing examples**:
+1. **Conflict blocks**: Multiple agents compete for same resource
+   - Structure: ('conflict', [agent_indices])
+   - Probabilities: uniform (1 / num_agents per agent)
+   - Note: conflict blocks use a different structure for efficiency
+
+2. **Unsteady ground blocks**: Agent stumbles when moving forward
+   - Structure: ('unsteady', agent_idx, [(prob, outcome), ...])
+   - Example outcomes with stumble_probability=0.5:
+     - (0.5, 'forward') - doesn't stumble
+     - (0.25, 'left-forward') - stumbles left
+     - (0.25, 'right-forward') - stumbles right
+
+3. **Magic wall blocks**: Agent attempts probabilistic entry
+   - Structure: ('magicwall', agent_idx, [(prob, outcome), ...])
+   - Example outcomes with entry_probability=0.7:
+     - (0.7, 'succeed') - entry succeeds
+     - (0.3, 'fail') - entry fails
+
+**All future additions** of randomness sources MUST follow this uncertainty block pattern with **(probability, outcome)** pairs to maintain consistency between step() and transition_probabilities().
+
+Failure to maintain this consistency will break correctness of probability computations and planning algorithms.
 
 ## Additional Clarifications
 
