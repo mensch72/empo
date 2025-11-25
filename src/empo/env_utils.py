@@ -1,5 +1,9 @@
 """
 Utility functions for working with gym environments.
+
+Note: These functions are provided for backward compatibility.
+The preferred approach is to use the corresponding methods directly on
+StateEnv instances (env.get_dag() and env.plot_dag()).
 """
 
 from collections import deque
@@ -9,6 +13,10 @@ from typing import List, Dict, Tuple, Any, Optional
 def get_dag(env) -> Tuple[List[Any], Dict[Any, int], List[List[int]]]:
     """
     Efficiently compute the DAG structure of an acyclic finite gym environment.
+    
+    This function delegates to the get_dag() method on the environment if available.
+    For environments that inherit from StateEnv, this calls env.get_dag() directly.
+    For other environments, it uses the standalone implementation.
     
     This function uses a two-phase algorithm:
     1. BFS to discover all reachable states and edges
@@ -47,6 +55,21 @@ def get_dag(env) -> Tuple[List[Any], Dict[Any, int], List[List[int]]]:
         >>> # state_to_idx[states[i]] == i
         >>> # successors[i] are indices of states reachable from states[i]
         >>> # For any edge i -> j in the DAG: i < j (topological ordering)
+    """
+    # If the environment has a get_dag method (e.g., inherits from StateEnv), use it
+    if hasattr(env, 'get_dag') and callable(env.get_dag):
+        return env.get_dag()
+    
+    # Fallback to standalone implementation for environments without the method
+    return _get_dag_standalone(env)
+
+
+def _get_dag_standalone(env) -> Tuple[List[Any], Dict[Any, int], List[List[int]]]:
+    """
+    Standalone implementation of get_dag for environments without the method.
+    
+    This is the original implementation that works with any environment
+    that provides get_state, set_state, and transition_probabilities.
     """
     # Reset environment to get root state
     env.reset()
