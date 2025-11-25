@@ -9,7 +9,13 @@
 # See: https://github.com/ollama/ollama-python
 ollama>=0.1.0
 
+# Pillow - Image processing library (needed for vision LLM integration)
+Pillow>=10.0.0
+
 # MineRL - Reinforcement Learning in Minecraft
-# Requires Java JDK 8 to be installed on the system
+# Note: MineRL bundles Minecraft/Malmo internally - no separate server needed.
+# System requirements (handled in Dockerfile when HIERARCHICAL_MODE=true):
+#   - Java JDK 8 (strict requirement)
+#   - xvfb for headless rendering in Docker
 # See: https://minerl.readthedocs.io/en/latest/tutorials/index.html
 minerl>=1.0.0

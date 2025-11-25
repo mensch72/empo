@@ -1,6 +1,6 @@
-.PHONY: help build up down restart shell logs clean test lint
+.PHONY: help build up down down-dev restart shell logs clean test lint
 .PHONY: build-gpu push-gpu build-sif up-gpu-docker-hub up-gpu-sif-file
-.PHONY: build-hierarchical build-gpu-hierarchical test-minerl up-hierarchical
+.PHONY: build-hierarchical build-gpu-hierarchical test-minerl test-minerl-integration up-hierarchical
 
 # Load .env file if it exists
 -include .env
@@ -33,7 +33,8 @@ help:
 	@echo "  make train          - Run training script"
 	@echo "  make example        - Run simple example"
 	@echo "  make test           - Run tests"
-	@echo "  make test-minerl    - Test MineRL installation (requires hierarchical build)"
+	@echo "  make test-minerl    - Test MineRL installation (basic import tests)"
+	@echo "  make test-minerl-integration - Test MineRL + Ollama vision (full integration)"
 	@echo "  make lint           - Run linters"
 	@echo "  make clean          - Clean up outputs and cache"
 	@echo ""
@@ -73,7 +74,12 @@ up:
 	@echo "Development environment started. Use 'make shell' to enter."
 
 down:
+	@# Stop all containers including hierarchical profile services
 	docker compose --profile hierarchical down
+
+down-dev:
+	@# Stop only the main development container (preserves Ollama if running)
+	docker compose down
 
 restart:
 	docker compose restart
@@ -225,5 +231,14 @@ build-gpu-hierarchical:
 
 # Test MineRL installation (requires hierarchical build)
 test-minerl:
-	@echo "Testing MineRL installation..."
+	@echo "Testing MineRL installation (basic import tests)..."
 	docker compose exec empo-dev python tests/test_minerl_installation.py
+
+# Test MineRL + Ollama integration (requires up-hierarchical and qwen2.5-vl:3b model)
+test-minerl-integration:
+	@echo "Testing MineRL + Ollama integration..."
+	@echo "Make sure you have:"
+	@echo "  1. Started with: make up-hierarchical"
+	@echo "  2. Pulled model: docker exec ollama ollama pull qwen2.5-vl:3b"
+	@echo ""
+	docker compose exec empo-dev python tests/test_minerl_installation.py --integration

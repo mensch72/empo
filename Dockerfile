@@ -63,12 +63,16 @@ RUN --mount=type=cache,target=/root/.cache/pip,uid=0,gid=0 \
     fi
 
 # Install hierarchical dependencies only if HIERARCHICAL_MODE is set
-# These are large packages (Ollama client, MineRL) that require Java JDK 8 for MineRL
+# MineRL requires Java JDK 8 and xvfb for headless rendering
+# MineRL bundles Minecraft/Malmo internally - no separate server needed
 ARG HIERARCHICAL_MODE=false
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
-    apt-get update && apt-get install -y --no-install-recommends openjdk-8-jdk ; \
+    apt-get update && apt-get install -y --no-install-recommends \
+        openjdk-8-jdk \
+        xvfb \
+        xauth ; \
     fi
 RUN --mount=type=cache,target=/root/.cache/pip,uid=0,gid=0 \
     if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
