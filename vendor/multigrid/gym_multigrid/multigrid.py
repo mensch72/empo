@@ -9,6 +9,16 @@ from .window import Window
 import numpy as np
 from itertools import product
 
+# Import WorldModel base class from empo
+import sys
+from pathlib import Path
+# Add src directory to path if not already there
+_src_path = str(Path(__file__).parent.parent.parent.parent / "src")
+if _src_path not in sys.path:
+    sys.path.insert(0, _src_path)
+
+from empo.world_model import WorldModel
+
 # Size in pixels of a tile in the full-scale human view
 TILE_PIXELS = 32
 
@@ -1148,9 +1158,16 @@ class MineActions:
     forward = 3
     build = 4
 
-class MultiGridEnv(gym.Env):
+class MultiGridEnv(WorldModel):
     """
     2D grid world game environment
+    
+    Inherits from WorldModel which provides:
+    - get_state(): Get a hashable representation of the environment state
+    - set_state(): Restore the environment to a specific state
+    - transition_probabilities(): Compute exact transition probabilities
+    - get_dag(): Compute the DAG structure of the environment
+    - plot_dag(): Visualize the DAG structure
     """
 
     metadata = {
