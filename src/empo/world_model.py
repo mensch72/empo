@@ -12,6 +12,7 @@ from collections import deque
 from typing import List, Dict, Tuple, Any, Optional
 
 import gymnasium as gym
+import numpy as np
 
 
 class WorldModel(gym.Env):
@@ -170,8 +171,6 @@ class WorldModel(gym.Env):
                 - truncated: False (subclasses should override for truncation logic)
                 - info: Empty dict (subclasses can add additional info)
         """
-        import numpy as np
-        
         # Ensure actions is a list for multi-agent compatibility
         if not isinstance(actions, (list, tuple)):
             actions = [actions]

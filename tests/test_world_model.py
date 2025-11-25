@@ -23,6 +23,12 @@ from gym_multigrid.multigrid import MultiGridEnv
 from gym_multigrid.envs import CollectGame4HEnv10x10N2
 
 
+class MockActionSpace:
+    """Reusable mock action space for testing."""
+    def __init__(self, n=1):
+        self.n = n
+
+
 def test_world_model_inherits_from_gym_env():
     """Test that WorldModel properly inherits from gymnasium.Env."""
     assert issubclass(WorldModel, gym.Env), "WorldModel should inherit from gymnasium.Env"
@@ -150,7 +156,7 @@ class SimpleWorldModelEnv(WorldModel):
     def __init__(self):
         self.current_state = 0
         self.agents = [0]  # Single agent (index 0)
-        self.action_space = type('MockActionSpace', (), {'n': 2})()
+        self.action_space = MockActionSpace(n=2)
         self.step_count = 0
         self.max_steps = 10
     
@@ -219,7 +225,7 @@ def test_default_step_with_probabilistic_transitions():
         def __init__(self):
             self.current_state = 0
             self.agents = [0]
-            self.action_space = type('MockActionSpace', (), {'n': 1})()
+            self.action_space = MockActionSpace(n=1)
         
         def reset(self, seed=None, options=None):
             self.current_state = 0
@@ -262,8 +268,8 @@ class CyclicMockEnv:
     
     def __init__(self):
         self.current_state = 0
-        self.agents = [None]  # Single agent
-        self.action_space = type('MockActionSpace', (), {'n': 1})()
+        self.agents = [0]  # Single agent (index 0)
+        self.action_space = MockActionSpace(n=1)
     
     def reset(self):
         self.current_state = 0
