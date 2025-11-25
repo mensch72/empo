@@ -1,10 +1,9 @@
 """
-Base class for Gymnasium environments with state management capabilities.
+Base class for Gymnasium environments with state management and transition probability computation capabilities.
 
 This module provides a base class that extends gymnasium.Env with methods
 for explicit state management (get_state, set_state) and transition probability
-computation. These methods are essential for planning and empowerment computation
-in multi-agent reinforcement learning settings.
+computation.
 """
 
 from abc import abstractmethod
