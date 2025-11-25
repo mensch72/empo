@@ -42,11 +42,25 @@ RUN ln -s /usr/bin/python3 /usr/bin/python && \
 
 # Copy requirements files
 COPY requirements.txt /tmp/requirements.txt
+COPY requirements-hierarchical.txt /tmp/requirements-hierarchical.txt
 
 # Install Python dependencies with CUDA support
 # Uses default PyTorch index with CUDA 12.1 support for GPU acceleration
 RUN --mount=type=cache,target=/root/.cache/pip,uid=0,gid=0 \
     pip install -r /tmp/requirements.txt
+
+# Install hierarchical dependencies only if HIERARCHICAL_MODE is set
+# These are large packages (Ollama client, MineRL) that require Java JDK 8 for MineRL
+ARG HIERARCHICAL_MODE=false
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
+    apt-get update && apt-get install -y --no-install-recommends openjdk-8-jdk ; \
+    fi
+RUN --mount=type=cache,target=/root/.cache/pip,uid=0,gid=0 \
+    if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
+    pip install -r /tmp/requirements-hierarchical.txt ; \
+    fi
 
 # Create a non-root user for better security
 ARG USER_ID=1000

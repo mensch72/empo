@@ -7,6 +7,7 @@ services:
         DEV_MODE: "true"
         USER_ID: ${USER_ID:-1000}
         GROUP_ID: ${GROUP_ID:-1000}
+        HIERARCHICAL_MODE: ${HIERARCHICAL_MODE:-false}
     image: empo:dev
     pull_policy: build
     container_name: empo-dev
@@ -28,8 +29,30 @@ services:
     environment:
       - WANDB_API_KEY=${WANDB_API_KEY:-}
       - PYTHONPATH=/workspace:/workspace/vendor/multigrid
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://ollama:11434}
     
     command: /bin/bash
 
+  # Optional Ollama service for local LLM inference
+  # Start with: HIERARCHICAL_MODE=true docker compose --profile hierarchical up -d
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    profiles:
+      - hierarchical
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-models:/root/.ollama
+    # Uncomment the following for GPU support:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
 volumes:
   pip-cache:
+  ollama-models:

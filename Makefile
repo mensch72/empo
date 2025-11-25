@@ -1,5 +1,6 @@
 .PHONY: help build up down restart shell logs clean test lint
 .PHONY: build-gpu push-gpu build-sif up-gpu-docker-hub up-gpu-sif-file
+.PHONY: build-hierarchical build-gpu-hierarchical test-minerl up-hierarchical
 
 # Load .env file if it exists
 -include .env
@@ -22,7 +23,9 @@ help:
 	@echo "========================="
 	@echo "Local Development:"
 	@echo "  make build          - Build Docker image (CPU)"
+	@echo "  make build-hierarchical - Build Docker image with hierarchical deps (Ollama client, MineRL)"
 	@echo "  make up             - Start development environment (auto-detects GPU)"
+	@echo "  make up-hierarchical - Start with Ollama server container (for LLM inference)"
 	@echo "  make down           - Stop development environment"
 	@echo "  make restart        - Restart development environment"
 	@echo "  make shell          - Open shell in container"
@@ -30,21 +33,24 @@ help:
 	@echo "  make train          - Run training script"
 	@echo "  make example        - Run simple example"
 	@echo "  make test           - Run tests"
+	@echo "  make test-minerl    - Test MineRL installation (requires hierarchical build)"
 	@echo "  make lint           - Run linters"
 	@echo "  make clean          - Clean up outputs and cache"
 	@echo ""
 	@echo "Cluster Deployment (GPU):"
-	@echo "  make up-gpu-docker-hub - Build GPU image and push to Docker Hub"
-	@echo "  make up-gpu-sif-file   - Build GPU image and convert to SIF file locally"
-	@echo "  make build-gpu         - Build GPU Docker image only"
-	@echo "  make push-gpu          - Push GPU image to Docker Hub"
-	@echo "  make build-sif         - Convert GPU Docker image to SIF file"
+	@echo "  make build-gpu              - Build GPU Docker image only"
+	@echo "  make build-gpu-hierarchical - Build GPU image with hierarchical deps"
+	@echo "  make up-gpu-docker-hub      - Build GPU image and push to Docker Hub"
+	@echo "  make up-gpu-sif-file        - Build GPU image and convert to SIF file locally"
+	@echo "  make push-gpu               - Push GPU image to Docker Hub"
+	@echo "  make build-sif              - Convert GPU Docker image to SIF file"
 	@echo ""
 	@echo "Configuration via .env or environment:"
-	@echo "  DOCKER_USERNAME    - Docker Hub username (default: $(DOCKER_USERNAME))"
-	@echo "  DOCKER_REGISTRY    - Docker registry (default: $(DOCKER_REGISTRY))"
-	@echo "  GPU_IMAGE_TAG      - GPU image tag (default: $(GPU_IMAGE_TAG))"
-	@echo "  SIF_FILE           - Output SIF filename (default: $(SIF_FILE))"
+	@echo "  DOCKER_USERNAME      - Docker Hub username (default: $(DOCKER_USERNAME))"
+	@echo "  DOCKER_REGISTRY      - Docker registry (default: $(DOCKER_REGISTRY))"
+	@echo "  GPU_IMAGE_TAG        - GPU image tag (default: $(GPU_IMAGE_TAG))"
+	@echo "  SIF_FILE             - Output SIF filename (default: $(SIF_FILE))"
+	@echo "  HIERARCHICAL_MODE    - Enable hierarchical deps in build (default: false)"
 
 # Docker Compose commands
 build:
@@ -67,10 +73,23 @@ up:
 	@echo "Development environment started. Use 'make shell' to enter."
 
 down:
-	docker compose down
+	docker compose --profile hierarchical down
 
 restart:
 	docker compose restart
+
+# Start development environment with Ollama server for LLM inference
+up-hierarchical:
+	@echo "Starting development environment with Ollama server..."
+	@if [ -z "$$USER_ID" ]; then export USER_ID=$$(id -u); fi; \
+	if [ -z "$$GROUP_ID" ]; then export GROUP_ID=$$(id -g); fi; \
+	echo "✓ Using USER_ID=$$USER_ID, GROUP_ID=$$GROUP_ID for file permissions"; \
+	USER_ID=$$USER_ID GROUP_ID=$$GROUP_ID HIERARCHICAL_MODE=true \
+		docker compose --profile hierarchical up -d --build
+	@echo "Development environment with Ollama started."
+	@echo "Use 'make shell' to enter the dev container."
+	@echo "Ollama API available at http://localhost:11434"
+	@echo "Pull a model with: docker exec ollama ollama pull llama2"
 
 shell:
 	docker compose exec empo-dev bash
@@ -184,3 +203,27 @@ up-gpu-sif-file: build-gpu build-sif
 	@echo "  ssh user@cluster"
 	@echo "  cd ~/bega/empo/git"
 	@echo "  sbatch ../scripts/run_cluster_sif.sh"
+
+# Build Docker image with hierarchical dependencies (Ollama, MineRL)
+# These are large packages that require Java JDK 8
+build-hierarchical:
+	@echo "Building Docker image with hierarchical dependencies..."
+	docker build --build-arg DEV_MODE=true --build-arg HIERARCHICAL_MODE=true \
+		-t $(DOCKER_IMAGE_NAME):hierarchical .
+	@echo "✓ Hierarchical image built successfully"
+
+# Build GPU Docker image with hierarchical dependencies
+build-gpu-hierarchical:
+	@echo "Building GPU Docker image with hierarchical dependencies..."
+	@echo "Image: $(DOCKER_IMAGE_NAME):$(GPU_IMAGE_TAG)-hierarchical"
+	docker build -f Dockerfile.gpu \
+		--build-arg HIERARCHICAL_MODE=true \
+		-t $(DOCKER_IMAGE_NAME):$(GPU_IMAGE_TAG)-hierarchical \
+		-t $(DOCKER_REGISTRY)/$(DOCKER_USERNAME)/$(DOCKER_IMAGE_NAME):$(GPU_IMAGE_TAG)-hierarchical \
+		.
+	@echo "✓ GPU hierarchical image built successfully"
+
+# Test MineRL installation (requires hierarchical build)
+test-minerl:
+	@echo "Testing MineRL installation..."
+	docker compose exec empo-dev python tests/test_minerl_installation.py
