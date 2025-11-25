@@ -85,6 +85,57 @@ def test_world_model_exported_from_empo():
     assert ImportedWorldModel is WorldModel, "WorldModel should be exported from empo package"
 
 
+class CyclicMockEnv:
+    """
+    A mock environment with a cycle for testing get_dag error handling.
+    
+    Creates a cyclic state space:
+        State 0 (root) -> State 1 -> State 2 -> State 0 (cycle!)
+    """
+    
+    def __init__(self):
+        self.current_state = 0
+        self.agents = [None]  # Single agent
+        self.action_space = type('MockActionSpace', (), {'n': 1})()
+    
+    def reset(self):
+        self.current_state = 0
+        return self.current_state
+    
+    def get_state(self):
+        return self.current_state
+    
+    def set_state(self, state):
+        self.current_state = state
+    
+    def transition_probabilities(self, state, actions):
+        """
+        Define a cyclic structure:
+        - State 0 -> State 1
+        - State 1 -> State 2
+        - State 2 -> State 0 (cycle!)
+        """
+        if state == 0:
+            return [(1.0, 1)]
+        elif state == 1:
+            return [(1.0, 2)]
+        elif state == 2:
+            return [(1.0, 0)]  # Cycle back to state 0
+        else:
+            return None
+
+
+def test_get_dag_raises_on_cyclic_env():
+    """Test that get_dag raises ValueError for environments with cycles."""
+    import pytest
+    
+    cyclic_env = CyclicMockEnv()
+    
+    # The get_dag function should raise ValueError when it detects a cycle
+    with pytest.raises(ValueError, match="Environment contains cycles"):
+        env_utils.get_dag(cyclic_env)
+
+
 def run_all_tests():
     """Run all tests and report results."""
     tests = [
@@ -96,6 +147,7 @@ def run_all_tests():
         test_multigrid_env_get_dag_method,
         test_backward_compatible_get_dag_function,
         test_world_model_exported_from_empo,
+        test_get_dag_raises_on_cyclic_env,
     ]
     
     print("=" * 60)
