@@ -1,15 +1,17 @@
-# EMPO – Empowerment-based Multi-Agent Reinforcement Learning
+# EMPO – Human Empowerment AI Agents
 
-A unified framework for training multi-agent reinforcement learning (MARL) agents using empowerment-based objectives on multigrid environments. This repository supports both local development (Docker Compose) and cluster deployment (Singularity/Apptainer).
+A framework for studying the soft maximization of aggregate human power by AI agents in multigrid and other multi-agent model worlds related to [this paper](https://arxiv.org/html/2508.00159v2).
+Currently under construction.
 
 ## Features
 
-- 🚀 Unified Docker image for development and cluster deployment
-- 🎮 MARL training with empowerment-based objectives
-- 🔧 Easy local development with Docker Compose
-- 🖥️ Cluster-ready with Singularity/Apptainer support
-- 🎯 GPU acceleration support (NVIDIA CUDA)
-- 📊 Integration with TensorBoard and Weights & Biases
+- Unified Docker image for development and cluster deployment
+- Exact planning algorithms for simple enough world models (TODO: implement formulas from paper)
+- Multi-Agent Reinforcement Learning approach to approximate planning with complex world simulators (TODO: implement approach described in paper) 
+- Easy local development with Docker Compose
+- Cluster-ready with Singularity/Apptainer support
+- GPU acceleration support (NVIDIA CUDA)
+- Integration with TensorBoard and Weights & Biases
 
 ## Quick Start
 
@@ -29,7 +31,7 @@ A unified framework for training multi-agent reinforcement learning (MARL) agent
 Clone the repository:
 
 ```bash
-git clone https://github.com/pik-gane/empo.git
+git clone https://github.com/mensch72/empo.git
 cd empo
 ```
 
