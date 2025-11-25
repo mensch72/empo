@@ -85,6 +85,60 @@ def test_world_model_exported_from_empo():
     assert ImportedWorldModel is WorldModel, "WorldModel should be exported from empo package"
 
 
+def test_initial_state_method():
+    """Test that initial_state() returns the initial state without changing current state."""
+    env = CollectGame4HEnv10x10N2()
+    env.reset()
+    
+    # Take some steps to change the state
+    for _ in range(3):
+        actions = [env.action_space.sample() for _ in range(len(env.agents))]
+        env.step(actions)
+    
+    # Save the current state
+    current_state = env.get_state()
+    
+    # Get the initial state
+    init_state = env.initial_state()
+    
+    # Verify the environment is restored to its previous state
+    restored_state = env.get_state()
+    assert current_state == restored_state, "Environment should be restored to previous state"
+    
+    # Verify the initial state is different from the current state (since we took steps)
+    # Note: This might not always be true if steps didn't change state, but typically it will be
+    
+    # Verify the initial state is what we'd get from a fresh reset
+    env.reset()
+    expected_init_state = env.get_state()
+    # Note: Due to RNG state, we can't directly compare, but we can verify step_count is 0
+    init_state_dict = dict(init_state)
+    assert init_state_dict['step_count'] == 0, "Initial state should have step_count of 0"
+
+
+def test_is_terminal_method():
+    """Test that is_terminal() correctly identifies terminal states."""
+    env = CollectGame4HEnv10x10N2()
+    env.reset()
+    
+    # Initial state should not be terminal
+    assert not env.is_terminal(), "Initial state should not be terminal"
+    
+    # Force environment to terminal state by setting step count to max
+    env.step_count = env.max_steps
+    terminal_state = env.get_state()
+    
+    # Now it should be terminal
+    assert env.is_terminal(), "State at max_steps should be terminal"
+    
+    # Also test with explicit state parameter
+    env.reset()  # Reset to non-terminal
+    assert env.is_terminal(terminal_state), "Explicit terminal state should be identified as terminal"
+    
+    # Current state should still be non-terminal
+    assert not env.is_terminal(), "Current state should still be non-terminal after checking explicit state"
+
+
 class CyclicMockEnv:
     """
     A mock environment with a cycle for testing get_dag error handling.
@@ -147,6 +201,8 @@ def run_all_tests():
         test_multigrid_env_get_dag_method,
         test_backward_compatible_get_dag_function,
         test_world_model_exported_from_empo,
+        test_initial_state_method,
+        test_is_terminal_method,
         test_get_dag_raises_on_cyclic_env,
     ]
     

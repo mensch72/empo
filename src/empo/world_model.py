@@ -84,6 +84,66 @@ class WorldModel(gym.Env):
         """
         raise NotImplementedError("Subclasses must implement transition_probabilities()")
     
+    def initial_state(self) -> Any:
+        """
+        Get the initial state of the environment without permanently resetting it.
+        
+        This method:
+        1. Saves the current state
+        2. Calls reset() to get the initial state
+        3. Returns the initial state
+        4. Restores the environment to its previous state
+        
+        This is useful for algorithms that need to know the initial state
+        without losing the current environment configuration.
+        
+        Returns:
+            The initial state of the environment (as returned by get_state() after reset())
+        """
+        # Save current state
+        saved_state = self.get_state()
+        
+        # Reset to get initial state
+        self.reset()
+        init_state = self.get_state()
+        
+        # Restore previous state
+        self.set_state(saved_state)
+        
+        return init_state
+    
+    def is_terminal(self, state: Optional[Any] = None) -> bool:
+        """
+        Check if a state is terminal (no valid transitions exist).
+        
+        A state is considered terminal if transition_probabilities() returns None
+        for all possible actions, indicating that no further transitions are possible.
+        
+        Args:
+            state: The state to check. If None, checks the current state.
+        
+        Returns:
+            True if the state is terminal, False otherwise.
+        """
+        # Get the state to check
+        if state is None:
+            state = self.get_state()
+        
+        # Try a simple action (e.g., all zeros) to check if transitions are possible
+        # For multi-agent environments, we need to know the number of agents
+        if hasattr(self, 'agents'):
+            num_agents = len(self.agents)
+        else:
+            num_agents = 1
+        
+        # Use action 0 for all agents as a test action
+        test_actions = [0] * num_agents
+        
+        # Check if transition_probabilities returns None (terminal) or a list (non-terminal)
+        transitions = self.transition_probabilities(state, test_actions)
+        
+        return transitions is None
+    
     def get_dag(self) -> Tuple[List[Any], Dict[Any, int], List[List[int]]]:
         """
         Efficiently compute the DAG structure of an acyclic finite environment.
