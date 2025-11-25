@@ -3,7 +3,7 @@ Utility functions for working with gym environments.
 
 Note: These functions are provided for backward compatibility.
 The preferred approach is to use the corresponding methods directly on
-StateEnv instances (env.get_dag() and env.plot_dag()).
+WorldModel instances (env.get_dag() and env.plot_dag()).
 """
 
 from collections import deque
@@ -15,7 +15,7 @@ def get_dag(env) -> Tuple[List[Any], Dict[Any, int], List[List[int]]]:
     Efficiently compute the DAG structure of an acyclic finite gym environment.
     
     This function delegates to the get_dag() method on the environment if available.
-    For environments that inherit from StateEnv, this calls env.get_dag() directly.
+    For environments that inherit from WorldModel, this calls env.get_dag() directly.
     For other environments, it uses the standalone implementation.
     
     This function uses a two-phase algorithm:
@@ -56,7 +56,7 @@ def get_dag(env) -> Tuple[List[Any], Dict[Any, int], List[List[int]]]:
         >>> # successors[i] are indices of states reachable from states[i]
         >>> # For any edge i -> j in the DAG: i < j (topological ordering)
     """
-    # If the environment has a get_dag method (e.g., inherits from StateEnv), use it
+    # If the environment has a get_dag method (e.g., inherits from WorldModel), use it
     if hasattr(env, 'get_dag') and callable(env.get_dag):
         return env.get_dag()
     

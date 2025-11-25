@@ -139,6 +139,119 @@ def test_is_terminal_method():
     assert not env.is_terminal(), "Current state should still be non-terminal after checking explicit state"
 
 
+class SimpleWorldModelEnv(WorldModel):
+    """
+    A simple WorldModel implementation for testing the default step() method.
+    
+    Creates a linear state space:
+        State 0 (root) -> State 1 -> State 2 -> Terminal
+    """
+    
+    def __init__(self):
+        self.current_state = 0
+        self.agents = [0]  # Single agent (index 0)
+        self.action_space = type('MockActionSpace', (), {'n': 2})()
+        self.step_count = 0
+        self.max_steps = 10
+    
+    def reset(self, seed=None, options=None):
+        self.current_state = 0
+        self.step_count = 0
+        return self.current_state, {}
+    
+    def get_state(self):
+        return (self.current_state, self.step_count)
+    
+    def set_state(self, state):
+        self.current_state, self.step_count = state
+    
+    def transition_probabilities(self, state, actions):
+        """
+        Define a linear structure with probabilistic branching:
+        - State 0 -> State 1 (action 0) or State 2 (action 1)
+        - State 1 -> State 2 (deterministic)
+        - State 2 -> Terminal (None)
+        """
+        current, step = state
+        if step >= self.max_steps:
+            return None  # Terminal due to max steps
+        if current >= 2:
+            return None  # Terminal state
+        
+        new_step = step + 1
+        if current == 0:
+            if actions[0] == 0:
+                return [(1.0, (1, new_step))]
+            else:
+                return [(1.0, (2, new_step))]
+        elif current == 1:
+            return [(1.0, (2, new_step))]
+        else:
+            return None
+
+
+def test_default_step_method():
+    """Test that the default step() implementation works correctly."""
+    env = SimpleWorldModelEnv()
+    env.reset()
+    
+    # Initial state should be (0, 0)
+    assert env.get_state() == (0, 0), "Initial state should be (0, 0)"
+    
+    # Take action 0 to go to state 1
+    obs, reward, terminated, truncated, info = env.step([0])
+    assert obs == (1, 1), f"After action 0, state should be (1, 1), got {obs}"
+    assert not terminated, "State 1 should not be terminal"
+    assert reward == 0.0, "Default reward should be 0.0"
+    
+    # Take action 0 to go to state 2
+    obs, reward, terminated, truncated, info = env.step([0])
+    assert obs == (2, 2), f"After action 0, state should be (2, 2), got {obs}"
+    assert terminated, "State 2 should be terminal"
+
+
+def test_default_step_with_probabilistic_transitions():
+    """Test that default step() correctly samples from probabilistic transitions."""
+    
+    class ProbabilisticEnv(WorldModel):
+        """Environment with probabilistic transitions for testing."""
+        
+        def __init__(self):
+            self.current_state = 0
+            self.agents = [0]
+            self.action_space = type('MockActionSpace', (), {'n': 1})()
+        
+        def reset(self, seed=None, options=None):
+            self.current_state = 0
+            return self.current_state, {}
+        
+        def get_state(self):
+            return self.current_state
+        
+        def set_state(self, state):
+            self.current_state = state
+        
+        def transition_probabilities(self, state, actions):
+            if state >= 2:
+                return None  # Terminal
+            # 50% chance to go to state 1, 50% chance to go to state 2
+            return [(0.5, 1), (0.5, 2)]
+    
+    env = ProbabilisticEnv()
+    env.reset()
+    
+    # Run multiple trials and check we get both outcomes
+    outcomes = {1: 0, 2: 0}
+    for _ in range(100):
+        env.reset()
+        obs, _, _, _, _ = env.step([0])
+        outcomes[obs] += 1
+    
+    # Both outcomes should occur (with high probability given 100 trials)
+    assert outcomes[1] > 0, "Should sometimes transition to state 1"
+    assert outcomes[2] > 0, "Should sometimes transition to state 2"
+
+
 class CyclicMockEnv:
     """
     A mock environment with a cycle for testing get_dag error handling.
@@ -203,6 +316,8 @@ def run_all_tests():
         test_world_model_exported_from_empo,
         test_initial_state_method,
         test_is_terminal_method,
+        test_default_step_method,
+        test_default_step_with_probabilistic_transitions,
         test_get_dag_raises_on_cyclic_env,
     ]
     

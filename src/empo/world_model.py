@@ -144,6 +144,66 @@ class WorldModel(gym.Env):
         
         return transitions is None
     
+    def step(self, actions: Any) -> Tuple[Any, float, bool, bool, Dict[str, Any]]:
+        """
+        Execute one step in the environment using transition probabilities.
+        
+        This default implementation:
+        1. Gets the current state
+        2. Calls transition_probabilities() to get possible transitions
+        3. Samples from those transitions based on probabilities
+        4. Calls set_state() with the sampled successor state
+        5. Returns (observation, reward, terminated, truncated, info)
+        
+        Subclasses may override this for more efficient implementations or
+        to add custom logic (e.g., rendering, reward computation).
+        
+        Args:
+            actions: Action(s) to take. For multi-agent environments, this should
+                    be a list of actions, one per agent.
+        
+        Returns:
+            tuple: (observation, reward, terminated, truncated, info)
+                - observation: The new state (as returned by get_state())
+                - reward: 0.0 (subclasses should override for actual rewards)
+                - terminated: True if the new state is terminal
+                - truncated: False (subclasses should override for truncation logic)
+                - info: Empty dict (subclasses can add additional info)
+        """
+        import numpy as np
+        
+        # Ensure actions is a list for multi-agent compatibility
+        if not isinstance(actions, (list, tuple)):
+            actions = [actions]
+        
+        # Get current state
+        current_state = self.get_state()
+        
+        # Get transition probabilities
+        transitions = self.transition_probabilities(current_state, list(actions))
+        
+        # If terminal state (no transitions), return current state
+        if transitions is None:
+            return current_state, 0.0, True, False, {}
+        
+        # Sample from transitions based on probabilities
+        probabilities = [prob for prob, _ in transitions]
+        successor_states = [state for _, state in transitions]
+        
+        # Use numpy to sample based on probabilities
+        chosen_idx = np.random.choice(len(transitions), p=probabilities)
+        new_state = successor_states[chosen_idx]
+        
+        # Set the environment to the new state
+        self.set_state(new_state)
+        
+        # Check if new state is terminal
+        terminated = self.is_terminal(new_state)
+        
+        # Return observation (the new state), reward, terminated, truncated, info
+        # Subclasses should override to provide actual rewards
+        return new_state, 0.0, terminated, False, {}
+    
     def get_dag(self) -> Tuple[List[Any], Dict[Any, int], List[List[int]]]:
         """
         Efficiently compute the DAG structure of an acyclic finite environment.
