@@ -85,17 +85,44 @@ RUN --mount=type=cache,target=/root/.cache/pip,uid=0,gid=0 \
     echo "Installing hierarchical Python dependencies..." && \
     pip install -r /tmp/requirements-hierarchical.txt ; \
     fi
-# Clone and install MineLand from GitHub
-# Note: Using main branch; consider pinning to a specific commit for reproducible builds
+# Clone MineLand from GitHub first (separate layer for better caching)
+# Also fix their broken setup.py (where='mineland' should be where='.')
 RUN if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
-    set -e && \
-    echo "Cloning and installing MineLand from GitHub..." && \
+    echo "Cloning MineLand from GitHub..." && \
     git clone --depth 1 https://github.com/cocacola-lab/MineLand.git /opt/MineLand && \
+    echo "Fixing MineLand setup.py bug (wrong find_packages where parameter)..." && \
+    sed -i "s/where='mineland'/where='.'/" /opt/MineLand/setup.py && \
+    cat /opt/MineLand/setup.py ; \
+    fi
+
+# Install MineLand's requirements.txt first (heavy dependencies like chromadb, langchain)
+# This allows Docker to cache these large dependencies separately
+RUN --mount=type=cache,target=/root/.cache/pip,uid=0,gid=0 \
+    if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
+    echo "Installing MineLand dependencies (this may take a while)..." && \
+    pip install -r /opt/MineLand/requirements.txt && \
+    echo "✓ MineLand dependencies installed" ; \
+    fi
+
+# Install MineLand package itself (editable install, much faster after deps are installed)
+RUN --mount=type=cache,target=/root/.cache/pip,uid=0,gid=0 \
+    if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
+    echo "Installing MineLand package..." && \
     cd /opt/MineLand && \
-    pip install -e . && \
+    pip install -e . --no-deps && \
+    echo "✓ MineLand package installed" ; \
+    fi
+
+# Install MineLand's Node.js dependencies (mineflayer)
+RUN if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
+    echo "Installing MineLand mineflayer dependencies..." && \
     cd /opt/MineLand/mineland/sim/mineflayer && \
     npm ci && \
-    echo "✓ MineLand installed successfully" && \
+    echo "✓ MineLand mineflayer installed" ; \
+    fi
+
+# Verify MineLand installation
+RUN if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
     python3 -c "import mineland; print('✓ MineLand import verification passed')" ; \
     else \
     echo "HIERARCHICAL_MODE is not true ($HIERARCHICAL_MODE), skipping MineLand installation" ; \
