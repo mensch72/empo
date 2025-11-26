@@ -9,4 +9,18 @@ Install with: pip install -r requirements-hierarchical.txt
 Note: MineLand requires additional setup from https://github.com/cocacola-lab/MineLand
 """
 
-__all__ = []
+from .minecraft_world import (
+    create_three_player_world_config,
+    get_spawn_coordinates,
+    get_player_spawn_info,
+    create_mineland_environment,
+    generate_world_description,
+)
+
+__all__ = [
+    "create_three_player_world_config",
+    "get_spawn_coordinates",
+    "get_player_spawn_info",
+    "create_mineland_environment",
+    "generate_world_description",
+]
