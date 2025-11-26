@@ -8,22 +8,24 @@ This script checks that:
 3. A screenshot can be captured from Minecraft and sent to a vision LLM
 
 Architecture (when running with `make up-hierarchical`):
-- empo-dev container: Your RL/planning code + MineLand client + Ollama client
-- mineland container: Runs Minecraft server via MineLand (accessible at mineland:25565)
+- empo-dev container: Your RL/planning code + MineLand + Ollama client
+- mineland container: Provides Xvfb display (optional, for non-headless mode)
 - ollama container: Runs the LLM server (accessible at ollama:11434)
 
-Your code in empo-dev connects to:
-- mineland:25565 for Minecraft interactions
-- ollama:11434 for LLM inference
+IMPORTANT: MineLand spawns Minecraft internally - the RL code and Minecraft
+must run in the SAME container because MineLand uses local process management.
+
+Options for running MineLand:
+1. From empo-dev (recommended): Use mineland.make() with headless=True
+2. From mineland container: Has Xvfb display pre-configured
 
 Run basic tests: python tests/test_mineland_installation.py
 Run integration tests: python tests/test_mineland_installation.py --integration
 
 For the full integration test (--integration flag):
-    1. Start all containers: make up-hierarchical
-    2. Wait for mineland container to start Minecraft (~2 min): make test-mineland-validate
-    3. Pull the vision model: docker exec ollama ollama pull qwen2.5vl:7b
-    4. Run: make test-mineland-integration
+    1. Start containers: make up-hierarchical
+    2. Pull the vision model: docker exec ollama ollama pull qwen2.5vl:7b
+    3. Run: make test-mineland-integration
 
 See https://github.com/cocacola-lab/MineLand for more information.
 """
@@ -32,7 +34,6 @@ import argparse
 import io
 import os
 import signal
-import socket
 import sys
 
 
@@ -43,11 +44,6 @@ import sys
 # Default Ollama server host
 # When running in Docker, use container name 'ollama' for inter-container communication
 DEFAULT_OLLAMA_HOST = "http://ollama:11434"
-
-# Default MineLand/Minecraft server host and port
-# When running in Docker, 'mineland' container runs the Minecraft server
-DEFAULT_MINELAND_SERVER_HOST = "mineland"
-DEFAULT_MINELAND_SERVER_PORT = 25565
 
 # Default vision model for Ollama (qwen2.5vl is a vision-language model)
 DEFAULT_VISION_MODEL = "qwen2.5vl:7b"
@@ -71,18 +67,6 @@ class TimeoutError(Exception):
 def timeout_handler(signum, frame):
     """Signal handler for timeout."""
     raise TimeoutError("Operation timed out")
-
-
-def check_port_open(host: str, port: int, timeout: float = 5.0) -> bool:
-    """Check if a TCP port is open on a host."""
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        result = sock.connect_ex((host, port))
-        sock.close()
-        return result == 0
-    except socket.error:
-        return False
 
 
 # =============================================================================
@@ -185,35 +169,20 @@ def test_ollama_connection():
 def test_mineland_screenshot():
     """Test capturing a screenshot from MineLand environment.
     
-    This test runs from empo-dev and connects to the Minecraft server
-    running in the mineland container at mineland:25565.
+    MineLand spawns Minecraft internally, so this test runs MineLand
+    directly in the current container (empo-dev) using headless mode.
     
-    The mineland container runs MineLand which spawns and manages Minecraft.
-    We use MineLand's client API to connect to it.
+    Note: This requires significant resources and can take 1-2 minutes
+    to start Minecraft on first run.
     """
     env = None
     try:
         import mineland
         import numpy as np
         
-        # Get Minecraft server host/port from environment
-        server_host = os.environ.get("MINELAND_SERVER_HOST", DEFAULT_MINELAND_SERVER_HOST)
-        server_port = int(os.environ.get("MINELAND_SERVER_PORT", DEFAULT_MINELAND_SERVER_PORT))
-        
-        print(f"  Connecting to Minecraft server at {server_host}:{server_port}...")
-        print("  Note: Wait for mineland container to start (~2 min after make up-hierarchical)")
-        
-        # First, check if the Minecraft server port is open
-        print(f"  Checking if port {server_port} is open on {server_host}...")
-        if not check_port_open(server_host, server_port, timeout=10.0):
-            print(f"✗ Cannot connect to {server_host}:{server_port}")
-            print("  The Minecraft server may still be starting. Wait 2-3 minutes and try again.")
-            print("  Check server status: make test-mineland-validate")
-            print("  Check logs: docker logs mineland")
-            return None
-        print(f"  ✓ Port {server_port} is open")
-        
-        print(f"  Initializing MineLand client (timeout: {MINELAND_TIMEOUT}s)...")
+        print("  Starting MineLand in headless mode...")
+        print("  Note: First run downloads Minecraft (~1-2 minutes)")
+        print(f"  Timeout: {MINELAND_TIMEOUT}s")
         
         # Set up a timeout for the MineLand initialization
         if hasattr(signal, 'SIGALRM'):
@@ -221,15 +190,15 @@ def test_mineland_screenshot():
             signal.alarm(MINELAND_TIMEOUT)
         
         try:
-            # Connect to the Minecraft server running in mineland container
-            # Use MineLand class with server_host/server_port
-            env = mineland.MineLand(
-                server_host=server_host,
-                server_port=server_port,
+            # Create MineLand environment
+            # This will spawn Minecraft internally
+            env = mineland.make(
+                task_id="playground",
                 agents_count=1,
                 headless=True,
             )
             
+            print("  ✓ MineLand environment created")
             print("  Resetting environment...")
             obs = env.reset()
             
@@ -269,8 +238,8 @@ def test_mineland_screenshot():
     
     except TimeoutError:
         print(f"✗ MineLand initialization timed out after {MINELAND_TIMEOUT} seconds")
-        print("  The Minecraft server may not be responding.")
-        print("  Check logs: docker logs mineland")
+        print("  Minecraft may still be downloading or starting.")
+        print("  Try again or increase timeout.")
         if env is not None:
             try:
                 env.close()
