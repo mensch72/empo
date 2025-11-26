@@ -15,6 +15,9 @@ from .minecraft_world import (
     get_player_spawn_info,
     create_mineland_environment,
     generate_world_description,
+    generate_world_commands,
+    generate_teleport_commands,
+    setup_three_player_world,
 )
 
 __all__ = [
@@ -23,4 +26,7 @@ __all__ = [
     "get_player_spawn_info",
     "create_mineland_environment",
     "generate_world_description",
+    "generate_world_commands",
+    "generate_teleport_commands",
+    "setup_three_player_world",
 ]
