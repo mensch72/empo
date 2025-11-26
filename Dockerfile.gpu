@@ -61,6 +61,10 @@ RUN --mount=type=cache,target=/root/.cache/pip,uid=0,gid=0 \
 # MineLand requires Java JDK 17, Node.js 18.x, and xvfb for headless rendering
 # MineLand is a multi-agent Minecraft RL platform from https://github.com/cocacola-lab/MineLand
 ARG HIERARCHICAL_MODE=false
+RUN echo "HIERARCHICAL_MODE is set to: $HIERARCHICAL_MODE" && \
+    if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
+    echo "Installing Java, xvfb, and xauth for MineLand..." ; \
+    fi
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
@@ -72,21 +76,26 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     fi
 # Install Node.js 18.x for MineLand (using NodeSource repository)
 RUN if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
+    echo "Installing Node.js 18.x for MineLand..." && \
     curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && \
     apt-get install -y nodejs ; \
     fi
 RUN --mount=type=cache,target=/root/.cache/pip,uid=0,gid=0 \
     if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
+    echo "Installing hierarchical Python dependencies..." && \
     pip install -r /tmp/requirements-hierarchical.txt ; \
     fi
 # Clone and install MineLand from GitHub
 # Note: Using main branch; consider pinning to a specific commit for reproducible builds
 RUN if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
+    set -e && \
+    echo "Cloning and installing MineLand from GitHub..." && \
     git clone --depth 1 https://github.com/cocacola-lab/MineLand.git /opt/MineLand && \
     cd /opt/MineLand && \
     pip install -e . && \
     cd /opt/MineLand/mineland/sim/mineflayer && \
-    npm ci ; \
+    npm ci && \
+    echo "✓ MineLand installed successfully" ; \
     fi
 
 # Create a non-root user for better security
