@@ -1,8 +1,8 @@
 # Lightweight Dockerfile for MARL development
-# Uses Ubuntu 22.04 base (~2GB) - works on systems with or without GPU
+# Uses Python 3.11 slim base for MineLand compatibility
 # PyTorch automatically uses GPU if available via Docker GPU passthrough
 
-FROM ubuntu:22.04
+FROM python:3.11-slim-bookworm
 
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -16,18 +16,9 @@ WORKDIR /workspace
 
 # Install system dependencies (no CUDA libraries)
 # Use BuildKit cache mount for apt to avoid re-downloading packages
-# Add deadsnakes PPA for Python 3.11 (required by MineLand)
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-    software-properties-common \
-    gpg-agent \
-    && add-apt-repository -y ppa:deadsnakes/ppa \
-    && apt-get update && apt-get install -y --no-install-recommends \
-    python3.11 \
-    python3.11-venv \
-    python3.11-dev \
-    python3.11-distutils \
     git \
     wget \
     curl \
@@ -40,13 +31,11 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libsm6 \
     libxext6 \
     libxrender-dev \
-    graphviz
+    graphviz \
+    && rm -rf /var/lib/apt/lists/*
 
-# Create python symlink to Python 3.11 and install pip using get-pip.py
-RUN ln -sf /usr/bin/python3.11 /usr/bin/python3 && \
-    ln -sf /usr/bin/python3.11 /usr/bin/python && \
-    curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11 && \
-    python3.11 -m pip install --upgrade pip setuptools wheel
+# Upgrade pip
+RUN pip install --upgrade pip setuptools wheel
 
 # Copy requirements files
 COPY requirements.txt /tmp/requirements.txt
@@ -74,18 +63,15 @@ RUN --mount=type=cache,target=/root/.cache/pip,uid=0,gid=0 \
 # MineLand requires Java JDK 17, Node.js 18.x, and xvfb for headless rendering
 # MineLand is a multi-agent Minecraft RL platform from https://github.com/cocacola-lab/MineLand
 ARG HIERARCHICAL_MODE=false
-RUN echo "HIERARCHICAL_MODE is set to: $HIERARCHICAL_MODE" && \
-    if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
-    echo "Installing Java, xvfb, and xauth for MineLand..." ; \
-    fi
+RUN echo "HIERARCHICAL_MODE is set to: $HIERARCHICAL_MODE"
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
+    echo "Installing Java, xvfb, and xauth for MineLand..." && \
     apt-get update && apt-get install -y --no-install-recommends \
         openjdk-17-jdk \
         xvfb \
-        xauth \
-        curl ; \
+        xauth ; \
     fi
 # Install Node.js 18.x for MineLand (using NodeSource repository)
 RUN if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
@@ -109,7 +95,7 @@ RUN if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
     cd /opt/MineLand/mineland/sim/mineflayer && \
     npm ci && \
     echo "✓ MineLand installed successfully" && \
-    python3 -c "import mineland; print('✓ MineLand import verification passed')" ; \
+    python -c "import mineland; print('✓ MineLand import verification passed')" ; \
     else \
     echo "HIERARCHICAL_MODE is not true ($HIERARCHICAL_MODE), skipping MineLand installation" ; \
     fi

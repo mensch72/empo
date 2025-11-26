@@ -14,14 +14,14 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # Set working directory
 WORKDIR /workspace
 
-# Install system dependencies
+# Install system dependencies and Python 3.11 from deadsnakes PPA
 # Use BuildKit cache mount for apt to avoid re-downloading packages
-# Add deadsnakes PPA for Python 3.11 (required by MineLand)
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
     software-properties-common \
     gpg-agent \
+    ca-certificates \
     && add-apt-repository -y ppa:deadsnakes/ppa \
     && apt-get update && apt-get install -y --no-install-recommends \
     python3.11 \
@@ -48,6 +48,9 @@ RUN ln -sf /usr/bin/python3.11 /usr/bin/python3 && \
     curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11 && \
     python3.11 -m pip install --upgrade pip setuptools wheel
 
+# Verify Python version
+RUN python3 --version && python3 -c "import sys; assert sys.version_info >= (3, 11), 'Python 3.11+ required'"
+
 # Copy requirements files
 COPY requirements.txt /tmp/requirements.txt
 COPY requirements-hierarchical.txt /tmp/requirements-hierarchical.txt
@@ -61,18 +64,15 @@ RUN --mount=type=cache,target=/root/.cache/pip,uid=0,gid=0 \
 # MineLand requires Java JDK 17, Node.js 18.x, and xvfb for headless rendering
 # MineLand is a multi-agent Minecraft RL platform from https://github.com/cocacola-lab/MineLand
 ARG HIERARCHICAL_MODE=false
-RUN echo "HIERARCHICAL_MODE is set to: $HIERARCHICAL_MODE" && \
-    if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
-    echo "Installing Java, xvfb, and xauth for MineLand..." ; \
-    fi
+RUN echo "HIERARCHICAL_MODE is set to: $HIERARCHICAL_MODE"
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
+    echo "Installing Java, xvfb, and xauth for MineLand..." && \
     apt-get update && apt-get install -y --no-install-recommends \
         openjdk-17-jdk \
         xvfb \
-        xauth \
-        curl ; \
+        xauth ; \
     fi
 # Install Node.js 18.x for MineLand (using NodeSource repository)
 RUN if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
