@@ -1,22 +1,30 @@
 #!/usr/bin/env python3
 """
-Test script to verify MineRL and Ollama installation and integration.
+Test script to verify MineLand and Ollama installation and integration.
 
 This script checks that:
-1. MineRL can be imported and environments are available
+1. MineLand can be imported and environments are available
 2. Ollama client can connect to the Ollama server
 3. A screenshot can be captured from Minecraft and sent to a vision LLM
 
-Run with: python tests/test_minerl_installation.py
-Or with pytest: pytest tests/test_minerl_installation.py -v
+Run with: python tests/test_mineland_installation.py
+Or with pytest: pytest tests/test_mineland_installation.py -v
 
 For the full integration test (--integration flag):
     1. Start Ollama: make up-hierarchical
     2. Pull the vision model: docker exec ollama ollama pull qwen2.5-vl:3b
-    3. Run: python tests/test_minerl_installation.py --integration
+    3. Run: python tests/test_mineland_installation.py --integration
 
 Note: This test requires the hierarchical dependencies to be installed:
     pip install -r requirements-hierarchical.txt
+    
+MineLand also requires (see https://github.com/cocacola-lab/MineLand):
+    - Python 3.11
+    - Java JDK 17 (apt-get install openjdk-17-jdk)
+    - Node.js 18.x (via nvm or nodesource)
+    - Clone and install:
+        git clone https://github.com/cocacola-lab/MineLand.git
+        cd MineLand && pip install -e .
 """
 
 import argparse
@@ -35,11 +43,8 @@ DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 # Default vision model for Ollama
 DEFAULT_VISION_MODEL = "qwen2.5-vl:3b"
 
-# Default MineRL environment to use for testing
-DEFAULT_MINERL_ENV = "MineRLNavigateDense-v0"
-
 # Number of random actions to take to get an interesting Minecraft scene
-# This allows the agent to move around a bit and see something other than spawn point
+# This allows the agents to move around a bit and see something other than spawn point
 NUM_WARMUP_STEPS = 10
 
 
@@ -47,40 +52,43 @@ NUM_WARMUP_STEPS = 10
 # Basic Import Tests
 # =============================================================================
 
-def test_minerl_import():
-    """Test that minerl can be imported."""
+def test_mineland_import():
+    """Test that mineland can be imported."""
     try:
-        import minerl
-        print(f"✓ MineRL version: {minerl.__version__}")
+        import mineland
+        print("✓ MineLand imported successfully")
         return True
     except ImportError as e:
-        print(f"✗ Failed to import minerl: {e}")
-        print("  Install with: pip install -r requirements-hierarchical.txt")
+        print(f"✗ Failed to import mineland: {e}")
+        print("  MineLand must be installed from GitHub:")
+        print("    git clone https://github.com/cocacola-lab/MineLand.git")
+        print("    cd MineLand && pip install -e .")
         return False
 
 
-def test_minerl_envs_available():
-    """Test that MineRL environments are registered."""
+def test_mineland_dependencies():
+    """Test that MineLand's key dependencies are available."""
+    results = []
+    
+    # Check gymnasium
     try:
-        import minerl
         import gymnasium as gym
-        
-        # Check if any MineRL environments are registered
-        env_specs = [spec for spec in gym.envs.registry.keys() if 'MineRL' in spec]
-        if env_specs:
-            print(f"✓ Found {len(env_specs)} MineRL environments registered")
-            for spec in env_specs[:5]:  # Show first 5
-                print(f"  - {spec}")
-            if len(env_specs) > 5:
-                print(f"  ... and {len(env_specs) - 5} more")
-            return True
-        else:
-            print("⚠ No MineRL environments found in gym registry")
-            print("  This might be expected if environments need explicit loading")
-            return True  # Not a failure, just a warning
-    except Exception as e:
-        print(f"✗ Error checking MineRL environments: {e}")
-        return False
+        print("✓ gymnasium is available")
+        results.append(True)
+    except ImportError as e:
+        print(f"✗ gymnasium not available: {e}")
+        results.append(False)
+    
+    # Check numpy
+    try:
+        import numpy as np
+        print("✓ numpy is available")
+        results.append(True)
+    except ImportError as e:
+        print(f"✗ numpy not available: {e}")
+        results.append(False)
+    
+    return all(results)
 
 
 def test_ollama_import():
@@ -124,43 +132,43 @@ def test_ollama_connection():
 # Integration Tests
 # =============================================================================
 
-def test_minerl_screenshot():
-    """Test capturing a screenshot from MineRL environment."""
+def test_mineland_screenshot():
+    """Test capturing a screenshot from MineLand environment."""
     try:
-        import minerl
-        import gymnasium as gym
+        import mineland
         import numpy as np
         
-        print("  Creating MineRL environment (this may take a moment)...")
+        print("  Creating MineLand environment (this may take a moment)...")
+        print("  Note: MineLand requires a Minecraft server to be running.")
         
-        # Try the default environment, fall back to any available MineRL env
-        env_name = os.environ.get("MINERL_ENV", DEFAULT_MINERL_ENV)
-        try:
-            env = gym.make(env_name)
-        except gym.error.Error:
-            # Fall back to finding any available MineRL environment
-            minerl_envs = [spec for spec in gym.envs.registry.keys() if 'MineRL' in spec]
-            if not minerl_envs:
-                print(f"✗ No MineRL environments available")
-                return None
-            env_name = minerl_envs[0]
-            print(f"  Falling back to {env_name}")
-            env = gym.make(env_name)
+        # MineLand uses a different API than MineRL
+        # It creates multi-agent environments with the make() function
+        env = mineland.make(
+            task_id="survival_single",  # Basic survival task with single agent
+            agents_count=1,
+        )
         
-        print(f"  Using environment: {env_name}")
         print("  Resetting environment...")
-        obs, info = env.reset()
+        obs = env.reset()
         
         # Take random actions to get an interesting frame (move around from spawn)
         for _ in range(NUM_WARMUP_STEPS):
+            # MineLand uses a different action format
             action = env.action_space.sample()
             obs, reward, terminated, truncated, info = env.step(action)
             if terminated or truncated:
-                obs, info = env.reset()
+                obs = env.reset()
         
-        # Extract the POV (point of view) image
-        if isinstance(obs, dict) and "pov" in obs:
-            screenshot = obs["pov"]
+        # Extract the RGB observation image
+        # MineLand observations contain 'rgb' key for the visual observation
+        if isinstance(obs, dict) and "rgb" in obs:
+            screenshot = obs["rgb"]
+        elif isinstance(obs, list) and len(obs) > 0:
+            # Multi-agent case: get first agent's observation
+            if isinstance(obs[0], dict) and "rgb" in obs[0]:
+                screenshot = obs[0]["rgb"]
+            else:
+                screenshot = obs[0]
         elif isinstance(obs, np.ndarray):
             screenshot = obs
         else:
@@ -174,7 +182,7 @@ def test_minerl_screenshot():
         return screenshot
         
     except Exception as e:
-        print(f"✗ Failed to capture MineRL screenshot: {e}")
+        print(f"✗ Failed to capture MineLand screenshot: {e}")
         import traceback
         traceback.print_exc()
         return None
@@ -205,7 +213,7 @@ def test_vision_llm_description(screenshot):
         
         # Convert numpy array to PIL Image, then to bytes
         if isinstance(screenshot, np.ndarray):
-            # MineRL images are typically RGB
+            # MineLand images are typically RGB
             img = Image.fromarray(screenshot.astype("uint8"), "RGB")
         else:
             img = screenshot
@@ -241,18 +249,18 @@ def test_vision_llm_description(screenshot):
 def run_basic_tests():
     """Run basic import tests only."""
     print("=" * 60)
-    print("MineRL & Ollama Installation Test (Basic)")
+    print("MineLand & Ollama Installation Test (Basic)")
     print("=" * 60)
     print()
     
     results = []
     
-    print("1. Testing MineRL import...")
-    results.append(test_minerl_import())
+    print("1. Testing MineLand import...")
+    results.append(test_mineland_import())
     print()
     
-    print("2. Testing MineRL environments...")
-    results.append(test_minerl_envs_available())
+    print("2. Testing MineLand dependencies...")
+    results.append(test_mineland_dependencies())
     print()
     
     print("3. Testing Ollama import...")
@@ -269,16 +277,16 @@ def run_basic_tests():
 
 
 def run_integration_tests():
-    """Run full integration tests including MineRL environment and Ollama vision."""
+    """Run full integration tests including MineLand environment and Ollama vision."""
     print("=" * 60)
-    print("MineRL & Ollama Integration Test")
+    print("MineLand & Ollama Integration Test")
     print("=" * 60)
     print()
     
     results = []
     
-    print("1. Testing MineRL import...")
-    results.append(test_minerl_import())
+    print("1. Testing MineLand import...")
+    results.append(test_mineland_import())
     print()
     
     print("2. Testing Ollama import...")
@@ -290,8 +298,8 @@ def run_integration_tests():
     results.append(ollama_ok)
     print()
     
-    print("4. Testing MineRL screenshot capture...")
-    screenshot = test_minerl_screenshot()
+    print("4. Testing MineLand screenshot capture...")
+    screenshot = test_mineland_screenshot()
     results.append(screenshot is not None)
     print()
     
@@ -314,14 +322,14 @@ def run_integration_tests():
 
 
 def main():
-    """Run MineRL and Ollama tests."""
+    """Run MineLand and Ollama tests."""
     parser = argparse.ArgumentParser(
-        description="Test MineRL and Ollama installation and integration"
+        description="Test MineLand and Ollama installation and integration"
     )
     parser.add_argument(
         "--integration",
         action="store_true",
-        help="Run full integration test (requires Ollama server and MineRL environment)",
+        help="Run full integration test (requires Ollama server and MineLand environment)",
     )
     args = parser.parse_args()
     

@@ -1,6 +1,6 @@
 .PHONY: help build up down down-dev restart shell logs clean test lint
 .PHONY: build-gpu push-gpu build-sif up-gpu-docker-hub up-gpu-sif-file
-.PHONY: build-hierarchical build-gpu-hierarchical test-minerl test-minerl-integration up-hierarchical
+.PHONY: build-hierarchical build-gpu-hierarchical test-mineland test-mineland-integration up-hierarchical
 
 # Load .env file if it exists
 -include .env
@@ -23,7 +23,7 @@ help:
 	@echo "========================="
 	@echo "Local Development:"
 	@echo "  make build          - Build Docker image (CPU)"
-	@echo "  make build-hierarchical - Build Docker image with hierarchical deps (Ollama client, MineRL)"
+	@echo "  make build-hierarchical - Build Docker image with hierarchical deps (Ollama client, MineLand)"
 	@echo "  make up             - Start development environment (auto-detects GPU)"
 	@echo "  make up-hierarchical - Start with Ollama server container (for LLM inference)"
 	@echo "  make down           - Stop development environment"
@@ -33,8 +33,8 @@ help:
 	@echo "  make train          - Run training script"
 	@echo "  make example        - Run simple example"
 	@echo "  make test           - Run tests"
-	@echo "  make test-minerl    - Test MineRL installation (basic import tests)"
-	@echo "  make test-minerl-integration - Test MineRL + Ollama vision (full integration)"
+	@echo "  make test-mineland  - Test MineLand installation (basic import tests)"
+	@echo "  make test-mineland-integration - Test MineLand + Ollama vision (full integration)"
 	@echo "  make lint           - Run linters"
 	@echo "  make clean          - Clean up outputs and cache"
 	@echo ""
@@ -210,8 +210,8 @@ up-gpu-sif-file: build-gpu build-sif
 	@echo "  cd ~/bega/empo/git"
 	@echo "  sbatch ../scripts/run_cluster_sif.sh"
 
-# Build Docker image with hierarchical dependencies (Ollama, MineRL)
-# These are large packages that require Java JDK 8
+# Build Docker image with hierarchical dependencies (Ollama, MineLand)
+# These are large packages that require Java JDK 17 and Node.js 18
 build-hierarchical:
 	@echo "Building Docker image with hierarchical dependencies..."
 	docker build --build-arg DEV_MODE=true --build-arg HIERARCHICAL_MODE=true \
@@ -229,16 +229,16 @@ build-gpu-hierarchical:
 		.
 	@echo "✓ GPU hierarchical image built successfully"
 
-# Test MineRL installation (requires hierarchical build)
-test-minerl:
-	@echo "Testing MineRL installation (basic import tests)..."
-	docker compose exec empo-dev python tests/test_minerl_installation.py
+# Test MineLand installation (requires hierarchical build)
+test-mineland:
+	@echo "Testing MineLand installation (basic import tests)..."
+	docker compose exec empo-dev python tests/test_mineland_installation.py
 
-# Test MineRL + Ollama integration (requires up-hierarchical and qwen2.5-vl:3b model)
-test-minerl-integration:
-	@echo "Testing MineRL + Ollama integration..."
+# Test MineLand + Ollama integration (requires up-hierarchical and qwen2.5-vl:3b model)
+test-mineland-integration:
+	@echo "Testing MineLand + Ollama integration..."
 	@echo "Make sure you have:"
 	@echo "  1. Started with: make up-hierarchical"
 	@echo "  2. Pulled model: docker exec ollama ollama pull qwen2.5-vl:3b"
 	@echo ""
-	docker compose exec empo-dev python tests/test_minerl_installation.py --integration
+	docker compose exec empo-dev python tests/test_mineland_installation.py --integration

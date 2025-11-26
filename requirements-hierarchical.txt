@@ -12,10 +12,14 @@ ollama>=0.1.0
 # Pillow - Image processing library (needed for vision LLM integration)
 Pillow>=10.0.0
 
-# MineRL - Reinforcement Learning in Minecraft
-# Note: MineRL bundles Minecraft/Malmo internally - no separate server needed.
-# System requirements (handled in Dockerfile when HIERARCHICAL_MODE=true):
-#   - Java JDK 8 (strict requirement)
-#   - xvfb for headless rendering in Docker
-# See: https://minerl.readthedocs.io/en/latest/tutorials/index.html
-minerl>=1.0.0
+# MineLand - Multi-agent Reinforcement Learning in Minecraft
+# Note: MineLand is installed from GitHub, not PyPI. This file only lists
+# its Python dependencies. The full MineLand setup requires:
+#   - Python 3.11 (MineLand requirement; may differ from base project Python)
+#   - Node.js 18.18.x  
+#   - Java JDK 17
+#   - Clone and install: git clone https://github.com/cocacola-lab/MineLand.git && pip install -e .
+# See: https://github.com/cocacola-lab/MineLand
+# MineLand Python dependencies (subset that can be pre-installed):
+gymnasium>=0.28.0
+numpy>=1.24.0
