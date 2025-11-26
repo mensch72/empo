@@ -4,7 +4,7 @@ Minecraft world generation for multi-agent reinforcement learning.
 This module provides functions to create Minecraft worlds with specific
 terrain features and resource distributions for multi-agent experiments.
 
-The main function `create_three_player_world()` generates a world with:
+The main function `create_three_player_world_config()` generates a world with:
 - A large valley with a river dividing it
 - Asymmetric resource distribution across regions
 - Three spawn points for a robot and two human players

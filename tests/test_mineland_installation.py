@@ -56,6 +56,24 @@ XVFB_DISPLAY = ":99"
 XVFB_RESOLUTION = "1024x768x24"
 XVFB_STARTUP_DELAY = 1  # seconds to wait for Xvfb to start
 
+# Prompt template for three-player LLM descriptions
+# This prompt asks the vision LLM to provide detailed spatial descriptions
+THREE_PLAYER_DESCRIPTION_PROMPT = """Describe this Minecraft screenshot in detail. \
+This is the view from the perspective of a player named '{player_name}' \
+who has spawned at coordinates {coords}.
+
+Expected spawn location: {location_desc}
+Expected nearby resources: {resource_desc}
+
+Please provide a detailed description including:
+1. What terrain and environment features are visible (trees, mountains, water, plains, etc.)
+2. Spatial information: what is to the left, right, ahead, and behind relative to the view
+3. Any visible resources or structures
+4. The approximate direction the player is facing
+5. Any notable landmarks that would help orient the player
+
+Be specific about positions and distances where possible."""
+
 
 # =============================================================================
 # Helper Functions
@@ -672,20 +690,13 @@ def test_three_player_llm_descriptions(screenshots):
             resources = player_info.get("nearby_resources", {})
             resource_desc = resources.get("description", "")
 
-            # Build context-aware prompt
-            prompt = f"""Describe this Minecraft screenshot in detail. This is the view from the perspective of a player named '{player_name}' who has spawned at coordinates {coords}.
-
-Expected spawn location: {location_desc}
-Expected nearby resources: {resource_desc}
-
-Please provide a detailed description including:
-1. What terrain and environment features are visible (trees, mountains, water, plains, etc.)
-2. Spatial information: what is to the left, right, ahead, and behind relative to the view
-3. Any visible resources or structures
-4. The approximate direction the player is facing
-5. Any notable landmarks that would help orient the player
-
-Be specific about positions and distances where possible."""
+            # Build context-aware prompt using the template
+            prompt = THREE_PLAYER_DESCRIPTION_PROMPT.format(
+                player_name=player_name,
+                coords=coords,
+                location_desc=location_desc,
+                resource_desc=resource_desc,
+            )
 
             print(f"  Sending {player_name} screenshot to {model_name}...")
 
