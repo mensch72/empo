@@ -51,6 +51,11 @@ NUM_WARMUP_STEPS = 10
 # Timeout for MineLand operations (in seconds)
 MINELAND_TIMEOUT = 120  # 2 minutes
 
+# Xvfb (virtual display) configuration for MineLand RGB capture
+XVFB_DISPLAY = ':99'
+XVFB_RESOLUTION = '1024x768x24'
+XVFB_STARTUP_DELAY = 1  # seconds to wait for Xvfb to start
+
 
 # =============================================================================
 # Helper Functions
