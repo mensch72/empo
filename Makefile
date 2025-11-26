@@ -237,34 +237,31 @@ test-mineland:
 	@echo "Testing MineLand installation (basic import tests)..."
 	docker compose exec empo-dev python tests/test_mineland_installation.py
 
-# Validate MineLand server container is running
-# The mineland container runs the Minecraft server, not Python code
-# Python code runs in empo-dev which connects to mineland:25565
+# Validate MineLand server is running in mineland container
+# The mineland container runs Minecraft via MineLand
 test-mineland-validate:
-	@echo "Validating MineLand server container..."
+	@echo "Validating MineLand server..."
 	@echo ""
 	@echo "Checking if mineland container is running..."
 	@docker ps --filter "name=mineland" --format "{{.Status}}" | grep -q "Up" && echo "✓ mineland container is running" || (echo "✗ mineland container is not running. Start with: make up-hierarchical" && exit 1)
 	@echo ""
-	@echo "Checking network connectivity from empo-dev to mineland:25565..."
-	@docker exec empo-dev bash -c "timeout 5 bash -c '</dev/tcp/mineland/25565' 2>/dev/null && echo '✓ Port 25565 is open on mineland container' || echo '⚠ Port 25565 not responding yet (Minecraft server may still be starting)'"
+	@echo "Checking if Minecraft server is responding on port 25565..."
+	@docker exec empo-dev bash -c "timeout 5 bash -c '</dev/tcp/mineland/25565' 2>/dev/null && echo '✓ Minecraft server is responding at mineland:25565' || echo '⚠ Minecraft server not responding yet (may still be starting, wait 2-3 min)'"
 	@echo ""
-	@echo "Note: The mineland container runs the Minecraft server."
-	@echo "Your Python code runs in empo-dev and connects to mineland:25565"
+	@echo "Check mineland container logs: docker logs mineland"
 
-# Test MineLand + Ollama integration (requires up-hierarchical and qwen2.5vl:7b model)
-# Runs in empo-dev container which has all your RL/planning packages
-# Connects to mineland container for Minecraft and ollama container for LLM
+# Test MineLand + Ollama integration (runs in empo-dev, connects to mineland + ollama)
 test-mineland-integration:
 	@echo "Testing MineLand + Ollama integration..."
 	@echo ""
 	@echo "Architecture:"
-	@echo "  empo-dev  -> runs your RL/planning code + MineLand client"
-	@echo "  mineland  -> runs Minecraft server (accessible at mineland:25565)"
-	@echo "  ollama    -> runs LLM server (accessible at ollama:11434)"
+	@echo "  empo-dev  -> your RL/planning code (this is where we run)"
+	@echo "  mineland  -> Minecraft server (mineland:25565)"
+	@echo "  ollama    -> LLM server (ollama:11434)"
 	@echo ""
 	@echo "Make sure you have:"
 	@echo "  1. Started with: make up-hierarchical"
-	@echo "  2. Pulled model: docker exec ollama ollama pull qwen2.5vl:7b"
+	@echo "  2. Waited for Minecraft to start (~2 min): make test-mineland-validate"
+	@echo "  3. Pulled model: docker exec ollama ollama pull qwen2.5vl:7b"
 	@echo ""
 	docker compose exec empo-dev python tests/test_mineland_installation.py --integration

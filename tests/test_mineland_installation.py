@@ -8,20 +8,23 @@ This script checks that:
 3. A screenshot can be captured from Minecraft and sent to a vision LLM
 
 Architecture (when running with `make up-hierarchical`):
-- empo-dev container: Runs your Python RL/planning code with MineLand client + Ollama client
-- mineland container: Runs the Minecraft server (accessible at mineland:25565)
+- empo-dev container: Your RL/planning code + MineLand client + Ollama client
+- mineland container: Runs Minecraft server via MineLand (accessible at mineland:25565)
 - ollama container: Runs the LLM server (accessible at ollama:11434)
 
-Run with: python tests/test_mineland_installation.py
-Or with pytest: pytest tests/test_mineland_installation.py -v
+Your code in empo-dev connects to:
+- mineland:25565 for Minecraft interactions
+- ollama:11434 for LLM inference
+
+Run basic tests: python tests/test_mineland_installation.py
+Run integration tests: python tests/test_mineland_installation.py --integration
 
 For the full integration test (--integration flag):
     1. Start all containers: make up-hierarchical
-    2. Pull the vision model: docker exec ollama ollama pull qwen2.5vl:7b
-    3. Run: make test-mineland-integration
+    2. Wait for mineland container to start Minecraft (~2 min): make test-mineland-validate
+    3. Pull the vision model: docker exec ollama ollama pull qwen2.5vl:7b
+    4. Run: make test-mineland-integration
 
-Note: MineLand client is installed in empo-dev when using `make up-hierarchical`.
-The Docker image includes all dependencies (Java JDK 17, Node.js 18.x, MineLand).
 See https://github.com/cocacola-lab/MineLand for more information.
 """
 
@@ -39,7 +42,6 @@ import sys
 
 # Default Ollama server host
 # When running in Docker, use container name 'ollama' for inter-container communication
-# The OLLAMA_HOST env var is set in docker-compose.yml for empo-dev container
 DEFAULT_OLLAMA_HOST = "http://ollama:11434"
 
 # Default MineLand/Minecraft server host and port
@@ -48,11 +50,9 @@ DEFAULT_MINELAND_SERVER_HOST = "mineland"
 DEFAULT_MINELAND_SERVER_PORT = 25565
 
 # Default vision model for Ollama (qwen2.5vl is a vision-language model)
-# Note: The smallest variant is 7b. Use 'qwen2.5vl:3b' if a 3b version becomes available.
 DEFAULT_VISION_MODEL = "qwen2.5vl:7b"
 
 # Number of random actions to take to get an interesting Minecraft scene
-# This allows the agents to move around a bit and see something other than spawn point
 NUM_WARMUP_STEPS = 10
 
 # Timeout for MineLand operations (in seconds)
@@ -185,15 +185,11 @@ def test_ollama_connection():
 def test_mineland_screenshot():
     """Test capturing a screenshot from MineLand environment.
     
-    MineLand has two modes:
-    1. Internal server mode - MineLand starts its own Minecraft server (default)
-    2. External server mode - Connect to existing Minecraft server via server_host/server_port
+    This test runs from empo-dev and connects to the Minecraft server
+    running in the mineland container at mineland:25565.
     
-    When running in Docker with separate containers:
-    - empo-dev: Runs this test with MineLand Python client
-    - mineland: Runs the Minecraft server at mineland:25565
-    
-    We use external server mode to connect from empo-dev to the mineland container.
+    The mineland container runs MineLand which spawns and manages Minecraft.
+    We use MineLand's client API to connect to it.
     """
     env = None
     try:
@@ -205,60 +201,51 @@ def test_mineland_screenshot():
         server_port = int(os.environ.get("MINELAND_SERVER_PORT", DEFAULT_MINELAND_SERVER_PORT))
         
         print(f"  Connecting to Minecraft server at {server_host}:{server_port}...")
-        print("  Note: The mineland container must be running (make up-hierarchical)")
+        print("  Note: Wait for mineland container to start (~2 min after make up-hierarchical)")
         
         # First, check if the Minecraft server port is open
         print(f"  Checking if port {server_port} is open on {server_host}...")
         if not check_port_open(server_host, server_port, timeout=10.0):
             print(f"✗ Cannot connect to {server_host}:{server_port}")
-            print("  The Minecraft server may not be running or still starting up.")
-            print("  Try waiting a minute and running again, or check: make test-mineland-validate")
+            print("  The Minecraft server may still be starting. Wait 2-3 minutes and try again.")
+            print("  Check server status: make test-mineland-validate")
+            print("  Check logs: docker logs mineland")
             return None
         print(f"  ✓ Port {server_port} is open")
         
-        print(f"  Initializing MineLand (timeout: {MINELAND_TIMEOUT}s)...")
-        print("  This can take 30-60 seconds while Mineflayer connects...")
+        print(f"  Initializing MineLand client (timeout: {MINELAND_TIMEOUT}s)...")
         
         # Set up a timeout for the MineLand initialization
-        # Note: signal.alarm only works on Unix
         if hasattr(signal, 'SIGALRM'):
             old_handler = signal.signal(signal.SIGALRM, timeout_handler)
             signal.alarm(MINELAND_TIMEOUT)
         
         try:
-            # Use MineLand class with server_host/server_port to connect to external server
-            # When these are provided, MineLand connects to an existing server
-            # instead of starting its own
+            # Connect to the Minecraft server running in mineland container
+            # Use MineLand class with server_host/server_port
             env = mineland.MineLand(
                 server_host=server_host,
                 server_port=server_port,
                 agents_count=1,
                 headless=True,
-                is_printing_server_info=True,  # Enable to see what's happening
-                is_printing_mineflayer_info=True,
             )
             
             print("  Resetting environment...")
             obs = env.reset()
             
         finally:
-            # Cancel the alarm
             if hasattr(signal, 'SIGALRM'):
                 signal.alarm(0)
                 signal.signal(signal.SIGALRM, old_handler)
         
-        # Take random actions to get an interesting frame (move around from spawn)
+        # Take actions to get an interesting frame
+        print(f"  Taking {NUM_WARMUP_STEPS} warmup steps...")
         for step in range(NUM_WARMUP_STEPS):
-            # MineLand uses Action objects for each agent
-            # Create a simple forward movement action
-            action = [mineland.Action()] * 1  # No-op action for 1 agent
+            action = [mineland.Action()] * 1
             obs, code_info, event, done, task_info = env.step(action)
         
         # Extract the RGB observation image
-        # MineLand observations are a list of agent observations
-        # Each agent obs contains 'rgb' attribute for the visual observation
         if isinstance(obs, list) and len(obs) > 0:
-            # Multi-agent case: get first agent's observation
             agent_obs = obs[0]
             if hasattr(agent_obs, 'rgb'):
                 screenshot = agent_obs.rgb
@@ -266,7 +253,6 @@ def test_mineland_screenshot():
                 screenshot = agent_obs["rgb"]
             else:
                 print(f"✗ Unexpected agent observation format: {type(agent_obs)}")
-                print(f"  Available attributes: {dir(agent_obs)}")
                 env.close()
                 return None
         elif isinstance(obs, np.ndarray):
@@ -283,18 +269,8 @@ def test_mineland_screenshot():
     
     except TimeoutError:
         print(f"✗ MineLand initialization timed out after {MINELAND_TIMEOUT} seconds")
-        print("  The Minecraft server may not be responding or Mineflayer failed to connect.")
-        print("  Check the mineland container logs: docker logs mineland")
-        if env is not None:
-            try:
-                env.close()
-            except Exception:
-                pass
-        return None
-    except ConnectionRefusedError:
-        print("✗ Could not connect to Minecraft server.")
-        print(f"  Make sure the mineland container is running: make up-hierarchical")
-        print(f"  Check container status: docker ps | grep mineland")
+        print("  The Minecraft server may not be responding.")
+        print("  Check logs: docker logs mineland")
         if env is not None:
             try:
                 env.close()
@@ -303,16 +279,9 @@ def test_mineland_screenshot():
         return None
     except Exception as e:
         error_msg = str(e)
-        if "connection" in error_msg.lower() or "refused" in error_msg.lower():
-            print("✗ Could not connect to Minecraft server.")
-            print(f"  Make sure the mineland container is running: make up-hierarchical")
-        elif "java" in error_msg.lower():
-            print("✗ Java not found or incorrect version.")
-            print("  MineLand requires Java 17+. Check with: java -version")
-        else:
-            print(f"✗ Failed to capture MineLand screenshot: {e}")
-            import traceback
-            traceback.print_exc()
+        print(f"✗ Failed to capture MineLand screenshot: {e}")
+        import traceback
+        traceback.print_exc()
         if env is not None:
             try:
                 env.close()
