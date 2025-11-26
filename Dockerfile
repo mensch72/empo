@@ -1,8 +1,8 @@
 # Lightweight Dockerfile for MARL development
-# Uses Ubuntu 22.04 base (~2GB) - works on systems with or without GPU
+# Uses Python 3.11 slim base for MineLand compatibility
 # PyTorch automatically uses GPU if available via Docker GPU passthrough
 
-FROM ubuntu:22.04
+FROM python:3.11-slim-bookworm
 
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -19,9 +19,6 @@ WORKDIR /workspace
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-    python3.10 \
-    python3-pip \
-    python3-dev \
     git \
     wget \
     curl \
@@ -34,15 +31,16 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libsm6 \
     libxext6 \
     libxrender-dev \
-    graphviz
+    graphviz \
+    && rm -rf /var/lib/apt/lists/*
 
-# Create python symlink and upgrade pip
-RUN ln -s /usr/bin/python3 /usr/bin/python && \
-    python3 -m pip install --upgrade pip setuptools wheel
+# Upgrade pip
+RUN pip install --upgrade pip setuptools wheel
 
 # Copy requirements files
 COPY requirements.txt /tmp/requirements.txt
 COPY requirements-dev.txt /tmp/requirements-dev.txt
+COPY requirements-hierarchical.txt /tmp/requirements-hierarchical.txt
 
 # Install Python dependencies
 # Use CPU-only PyTorch to avoid downloading large CUDA packages (~2GB vs ~5GB)
@@ -61,6 +59,75 @@ RUN --mount=type=cache,target=/root/.cache/pip,uid=0,gid=0 \
     pip install -r /tmp/requirements-dev.txt ; \
     fi
 
+# Install hierarchical dependencies only if HIERARCHICAL_MODE is set
+# MineLand requires Java JDK 17, Node.js 18.x, and xvfb for headless rendering
+# MineLand is a multi-agent Minecraft RL platform from https://github.com/cocacola-lab/MineLand
+ARG HIERARCHICAL_MODE=false
+RUN echo "HIERARCHICAL_MODE is set to: $HIERARCHICAL_MODE"
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
+    echo "Installing Java, xvfb, xauth, and ffmpeg for MineLand..." && \
+    apt-get update && apt-get install -y --no-install-recommends \
+        openjdk-17-jdk \
+        xvfb \
+        xauth \
+        ffmpeg ; \
+    fi
+# Install Node.js 18.x for MineLand (using NodeSource repository)
+RUN if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
+    echo "Installing Node.js 18.x for MineLand..." && \
+    curl -fsSL https://deb.nodesource.com/setup_18.x | bash - && \
+    apt-get install -y nodejs ; \
+    fi
+RUN --mount=type=cache,target=/root/.cache/pip,uid=0,gid=0 \
+    if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
+    echo "Installing hierarchical Python dependencies..." && \
+    pip install -r /tmp/requirements-hierarchical.txt ; \
+    fi
+# Clone MineLand from GitHub first (separate layer for better caching)
+# Also fix their broken setup.py (where='mineland' should be where='.')
+RUN if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
+    echo "Cloning MineLand from GitHub..." && \
+    git clone --depth 1 https://github.com/cocacola-lab/MineLand.git /opt/MineLand && \
+    echo "Fixing MineLand setup.py bug (wrong find_packages where parameter)..." && \
+    sed -i "s/where='mineland'/where='.'/" /opt/MineLand/setup.py && \
+    cat /opt/MineLand/setup.py ; \
+    fi
+
+# Install MineLand's requirements.txt first (heavy dependencies like chromadb, langchain)
+# This allows Docker to cache these large dependencies separately
+RUN --mount=type=cache,target=/root/.cache/pip,uid=0,gid=0 \
+    if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
+    echo "Installing MineLand dependencies (this may take a while)..." && \
+    pip install -r /opt/MineLand/requirements.txt && \
+    echo "✓ MineLand dependencies installed" ; \
+    fi
+
+# Install MineLand package itself (editable install, much faster after deps are installed)
+RUN --mount=type=cache,target=/root/.cache/pip,uid=0,gid=0 \
+    if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
+    echo "Installing MineLand package..." && \
+    cd /opt/MineLand && \
+    pip install -e . --no-deps && \
+    echo "✓ MineLand package installed" ; \
+    fi
+
+# Install MineLand's Node.js dependencies (mineflayer)
+RUN if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
+    echo "Installing MineLand mineflayer dependencies..." && \
+    cd /opt/MineLand/mineland/sim/mineflayer && \
+    npm ci && \
+    echo "✓ MineLand mineflayer installed" ; \
+    fi
+
+# Verify MineLand installation
+RUN if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
+    python -c "import mineland; print('✓ MineLand import verification passed')" ; \
+    else \
+    echo "HIERARCHICAL_MODE is not true ($HIERARCHICAL_MODE), skipping MineLand installation" ; \
+    fi
+
 # Create a non-root user for better security
 ARG USER_ID=1000
 ARG GROUP_ID=1000
@@ -68,7 +135,11 @@ RUN groupadd -g ${GROUP_ID} appuser && \
     useradd -m -u ${USER_ID} -g appuser -s /bin/bash appuser
 
 # Create workspace directory and set permissions
+# Also fix MineLand permissions (installed as root but needs to be writable by appuser)
 RUN mkdir -p /workspace && chown -R appuser:appuser /workspace
+RUN if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
+    chown -R appuser:appuser /opt/MineLand ; \
+    fi
 
 # Switch to non-root user
 USER appuser

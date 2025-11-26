@@ -1,5 +1,6 @@
-.PHONY: help build up down restart shell logs clean test lint
+.PHONY: help build up down down-dev restart shell logs clean test lint
 .PHONY: build-gpu push-gpu build-sif up-gpu-docker-hub up-gpu-sif-file
+.PHONY: build-hierarchical build-gpu-hierarchical test-mineland test-mineland-integration up-hierarchical
 
 # Load .env file if it exists
 -include .env
@@ -22,7 +23,9 @@ help:
 	@echo "========================="
 	@echo "Local Development:"
 	@echo "  make build          - Build Docker image (CPU)"
+	@echo "  make build-hierarchical - Build Docker image with hierarchical deps (Ollama client, MineLand)"
 	@echo "  make up             - Start development environment (auto-detects GPU)"
+	@echo "  make up-hierarchical - Start with Ollama server container (for LLM inference)"
 	@echo "  make down           - Stop development environment"
 	@echo "  make restart        - Restart development environment"
 	@echo "  make shell          - Open shell in container"
@@ -30,21 +33,25 @@ help:
 	@echo "  make train          - Run training script"
 	@echo "  make example        - Run simple example"
 	@echo "  make test           - Run tests"
+	@echo "  make test-mineland  - Test MineLand installation (basic import tests)"
+	@echo "  make test-mineland-integration - Test MineLand + Ollama vision (full integration)"
 	@echo "  make lint           - Run linters"
 	@echo "  make clean          - Clean up outputs and cache"
 	@echo ""
 	@echo "Cluster Deployment (GPU):"
-	@echo "  make up-gpu-docker-hub - Build GPU image and push to Docker Hub"
-	@echo "  make up-gpu-sif-file   - Build GPU image and convert to SIF file locally"
-	@echo "  make build-gpu         - Build GPU Docker image only"
-	@echo "  make push-gpu          - Push GPU image to Docker Hub"
-	@echo "  make build-sif         - Convert GPU Docker image to SIF file"
+	@echo "  make build-gpu              - Build GPU Docker image only"
+	@echo "  make build-gpu-hierarchical - Build GPU image with hierarchical deps"
+	@echo "  make up-gpu-docker-hub      - Build GPU image and push to Docker Hub"
+	@echo "  make up-gpu-sif-file        - Build GPU image and convert to SIF file locally"
+	@echo "  make push-gpu               - Push GPU image to Docker Hub"
+	@echo "  make build-sif              - Convert GPU Docker image to SIF file"
 	@echo ""
 	@echo "Configuration via .env or environment:"
-	@echo "  DOCKER_USERNAME    - Docker Hub username (default: $(DOCKER_USERNAME))"
-	@echo "  DOCKER_REGISTRY    - Docker registry (default: $(DOCKER_REGISTRY))"
-	@echo "  GPU_IMAGE_TAG      - GPU image tag (default: $(GPU_IMAGE_TAG))"
-	@echo "  SIF_FILE           - Output SIF filename (default: $(SIF_FILE))"
+	@echo "  DOCKER_USERNAME      - Docker Hub username (default: $(DOCKER_USERNAME))"
+	@echo "  DOCKER_REGISTRY      - Docker registry (default: $(DOCKER_REGISTRY))"
+	@echo "  GPU_IMAGE_TAG        - GPU image tag (default: $(GPU_IMAGE_TAG))"
+	@echo "  SIF_FILE             - Output SIF filename (default: $(SIF_FILE))"
+	@echo "  HIERARCHICAL_MODE    - Enable hierarchical deps in build (default: false)"
 
 # Docker Compose commands
 build:
@@ -67,10 +74,31 @@ up:
 	@echo "Development environment started. Use 'make shell' to enter."
 
 down:
+	@# Stop all containers including hierarchical profile services
+	docker compose --profile hierarchical down
+
+down-dev:
+	@# Stop only the main development container (preserves Ollama if running)
 	docker compose down
 
 restart:
 	docker compose restart
+
+# Start development environment with Ollama server for LLM inference
+up-hierarchical:
+	@echo "Starting development environment with Ollama server..."
+	@if [ -z "$$USER_ID" ]; then export USER_ID=$$(id -u); fi; \
+	if [ -z "$$GROUP_ID" ]; then export GROUP_ID=$$(id -g); fi; \
+	echo "✓ Using USER_ID=$$USER_ID, GROUP_ID=$$GROUP_ID for file permissions"; \
+	echo "✓ Building with HIERARCHICAL_MODE=true (uses Docker cache for faster rebuilds)"; \
+	USER_ID=$$USER_ID GROUP_ID=$$GROUP_ID HIERARCHICAL_MODE=true \
+		docker compose --profile hierarchical build && \
+	USER_ID=$$USER_ID GROUP_ID=$$GROUP_ID HIERARCHICAL_MODE=true \
+		docker compose --profile hierarchical up -d
+	@echo "Development environment with Ollama started."
+	@echo "Use 'make shell' to enter the dev container."
+	@echo "Ollama API available at http://localhost:11434"
+	@echo "Pull a vision model with: docker exec ollama ollama pull qwen2.5vl:7b"
 
 shell:
 	docker compose exec empo-dev bash
@@ -184,3 +212,59 @@ up-gpu-sif-file: build-gpu build-sif
 	@echo "  ssh user@cluster"
 	@echo "  cd ~/bega/empo/git"
 	@echo "  sbatch ../scripts/run_cluster_sif.sh"
+
+# Build Docker image with hierarchical dependencies (Ollama, MineLand)
+# These are large packages that require Java JDK 17 and Node.js 18
+build-hierarchical:
+	@echo "Building Docker image with hierarchical dependencies..."
+	docker build --build-arg DEV_MODE=true --build-arg HIERARCHICAL_MODE=true \
+		-t $(DOCKER_IMAGE_NAME):hierarchical .
+	@echo "✓ Hierarchical image built successfully"
+
+# Build GPU Docker image with hierarchical dependencies
+build-gpu-hierarchical:
+	@echo "Building GPU Docker image with hierarchical dependencies..."
+	@echo "Image: $(DOCKER_IMAGE_NAME):$(GPU_IMAGE_TAG)-hierarchical"
+	docker build -f Dockerfile.gpu \
+		--build-arg HIERARCHICAL_MODE=true \
+		-t $(DOCKER_IMAGE_NAME):$(GPU_IMAGE_TAG)-hierarchical \
+		-t $(DOCKER_REGISTRY)/$(DOCKER_USERNAME)/$(DOCKER_IMAGE_NAME):$(GPU_IMAGE_TAG)-hierarchical \
+		.
+	@echo "✓ GPU hierarchical image built successfully"
+
+# Test MineLand installation (requires hierarchical build)
+test-mineland:
+	@echo "Testing MineLand installation (basic import tests)..."
+	docker compose exec empo-dev python tests/test_mineland_installation.py
+
+# Validate MineLand setup
+# Note: MineLand spawns Minecraft internally in empo-dev, so there's no separate server
+test-mineland-validate:
+	@echo "Validating MineLand setup..."
+	@echo ""
+	@echo "Checking if containers are running..."
+	@docker ps --filter "name=empo-dev" --format "{{.Status}}" | grep -q "Up" && echo "✓ empo-dev container is running" || (echo "✗ empo-dev container is not running. Start with: make up-hierarchical" && exit 1)
+	@docker ps --filter "name=ollama" --format "{{.Status}}" | grep -q "Up" && echo "✓ ollama container is running" || echo "⚠ ollama container is not running"
+	@echo ""
+	@echo "Architecture (simplified):"
+	@echo "  empo-dev  -> Your RL code + MineLand (spawns Minecraft internally via headless mode)"
+	@echo "  ollama    -> LLM server (accessible at ollama:11434)"
+	@echo ""
+	@echo "No separate Minecraft server needed - MineLand handles everything."
+
+# Test MineLand + Ollama integration (runs in empo-dev)
+# Note: MineLand spawns Minecraft internally - may take 1-2 minutes on first run
+test-mineland-integration:
+	@echo "Testing MineLand + Ollama integration..."
+	@echo ""
+	@echo "Architecture:"
+	@echo "  empo-dev  -> your RL/planning code + MineLand (spawns Minecraft internally)"
+	@echo "  ollama    -> LLM server (ollama:11434)"
+	@echo ""
+	@echo "Make sure you have:"
+	@echo "  1. Started with: make up-hierarchical"
+	@echo "  2. Pulled model: docker exec ollama ollama pull qwen2.5vl:7b"
+	@echo ""
+	@echo "Note: First run may take 1-2 minutes to download Minecraft"
+	@echo ""
+	docker compose exec empo-dev python tests/test_mineland_installation.py --integration
