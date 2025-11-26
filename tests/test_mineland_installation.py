@@ -28,6 +28,8 @@ See https://github.com/cocacola-lab/MineLand for more information.
 import argparse
 import io
 import os
+import signal
+import socket
 import sys
 
 
@@ -52,6 +54,35 @@ DEFAULT_VISION_MODEL = "qwen2.5vl:7b"
 # Number of random actions to take to get an interesting Minecraft scene
 # This allows the agents to move around a bit and see something other than spawn point
 NUM_WARMUP_STEPS = 10
+
+# Timeout for MineLand operations (in seconds)
+MINELAND_TIMEOUT = 120  # 2 minutes
+
+
+# =============================================================================
+# Helper Functions
+# =============================================================================
+
+class TimeoutError(Exception):
+    """Raised when an operation times out."""
+    pass
+
+
+def timeout_handler(signum, frame):
+    """Signal handler for timeout."""
+    raise TimeoutError("Operation timed out")
+
+
+def check_port_open(host: str, port: int, timeout: float = 5.0) -> bool:
+    """Check if a TCP port is open on a host."""
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        result = sock.connect_ex((host, port))
+        sock.close()
+        return result == 0
+    except socket.error:
+        return False
 
 
 # =============================================================================
@@ -164,6 +195,7 @@ def test_mineland_screenshot():
     
     We use external server mode to connect from empo-dev to the mineland container.
     """
+    env = None
     try:
         import mineland
         import numpy as np
@@ -175,20 +207,45 @@ def test_mineland_screenshot():
         print(f"  Connecting to Minecraft server at {server_host}:{server_port}...")
         print("  Note: The mineland container must be running (make up-hierarchical)")
         
-        # Use MineLand class with server_host/server_port to connect to external server
-        # When these are provided, MineLand connects to an existing server
-        # instead of starting its own
-        env = mineland.MineLand(
-            server_host=server_host,
-            server_port=server_port,
-            agents_count=1,
-            headless=True,
-            is_printing_server_info=False,
-            is_printing_mineflayer_info=False,
-        )
+        # First, check if the Minecraft server port is open
+        print(f"  Checking if port {server_port} is open on {server_host}...")
+        if not check_port_open(server_host, server_port, timeout=10.0):
+            print(f"✗ Cannot connect to {server_host}:{server_port}")
+            print("  The Minecraft server may not be running or still starting up.")
+            print("  Try waiting a minute and running again, or check: make test-mineland-validate")
+            return None
+        print(f"  ✓ Port {server_port} is open")
         
-        print("  Resetting environment...")
-        obs = env.reset()
+        print(f"  Initializing MineLand (timeout: {MINELAND_TIMEOUT}s)...")
+        print("  This can take 30-60 seconds while Mineflayer connects...")
+        
+        # Set up a timeout for the MineLand initialization
+        # Note: signal.alarm only works on Unix
+        if hasattr(signal, 'SIGALRM'):
+            old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+            signal.alarm(MINELAND_TIMEOUT)
+        
+        try:
+            # Use MineLand class with server_host/server_port to connect to external server
+            # When these are provided, MineLand connects to an existing server
+            # instead of starting its own
+            env = mineland.MineLand(
+                server_host=server_host,
+                server_port=server_port,
+                agents_count=1,
+                headless=True,
+                is_printing_server_info=True,  # Enable to see what's happening
+                is_printing_mineflayer_info=True,
+            )
+            
+            print("  Resetting environment...")
+            obs = env.reset()
+            
+        finally:
+            # Cancel the alarm
+            if hasattr(signal, 'SIGALRM'):
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, old_handler)
         
         # Take random actions to get an interesting frame (move around from spawn)
         for step in range(NUM_WARMUP_STEPS):
@@ -223,11 +280,26 @@ def test_mineland_screenshot():
         
         env.close()
         return screenshot
-        
+    
+    except TimeoutError:
+        print(f"✗ MineLand initialization timed out after {MINELAND_TIMEOUT} seconds")
+        print("  The Minecraft server may not be responding or Mineflayer failed to connect.")
+        print("  Check the mineland container logs: docker logs mineland")
+        if env is not None:
+            try:
+                env.close()
+            except Exception:
+                pass
+        return None
     except ConnectionRefusedError:
         print("✗ Could not connect to Minecraft server.")
         print(f"  Make sure the mineland container is running: make up-hierarchical")
         print(f"  Check container status: docker ps | grep mineland")
+        if env is not None:
+            try:
+                env.close()
+            except Exception:
+                pass
         return None
     except Exception as e:
         error_msg = str(e)
@@ -241,6 +313,11 @@ def test_mineland_screenshot():
             print(f"✗ Failed to capture MineLand screenshot: {e}")
             import traceback
             traceback.print_exc()
+        if env is not None:
+            try:
+                env.close()
+            except Exception:
+                pass
         return None
 
 
