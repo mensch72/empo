@@ -32,7 +32,9 @@ import sys
 # =============================================================================
 
 # Default Ollama server host
-DEFAULT_OLLAMA_HOST = "http://localhost:11434"
+# When running in Docker, use container name 'ollama' for inter-container communication
+# The OLLAMA_HOST env var is set in docker-compose.yml for empo-dev container
+DEFAULT_OLLAMA_HOST = "http://ollama:11434"
 
 # Default vision model for Ollama (qwen2.5vl is a vision-language model)
 # Note: The smallest variant is 7b. Use 'qwen2.5vl:3b' if a 3b version becomes available.
@@ -264,6 +266,10 @@ def test_vision_llm_description(screenshot):
         print(f"  \"{description}\"")
         return True
         
+    except ImportError as e:
+        print(f"✗ Missing required package: {e}")
+        print("  Install with: pip install ollama Pillow")
+        return False
     except Exception as e:
         print(f"✗ Failed to get LLM description: {e}")
         import traceback

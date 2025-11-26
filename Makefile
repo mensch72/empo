@@ -237,13 +237,21 @@ test-mineland:
 	@echo "Testing MineLand installation (basic import tests)..."
 	docker compose exec empo-dev python tests/test_mineland_installation.py
 
+# Validate MineLand installation using official MineLand container
+# This runs MineLand's own validation script in the yxhxianyu/mineland image
+test-mineland-validate:
+	@echo "Validating MineLand installation in official container..."
+	@echo "This runs MineLand's validate_install_simulator.py script."
+	@echo ""
+	docker exec mineland python scripts/validate_install_simulator.py
+
 # Test MineLand + Ollama integration (requires up-hierarchical and qwen2.5vl:7b model)
+# Uses the official MineLand container for full Minecraft control
 test-mineland-integration:
 	@echo "Testing MineLand + Ollama integration..."
 	@echo "Make sure you have:"
 	@echo "  1. Started with: make up-hierarchical"
 	@echo "  2. Pulled model: docker exec ollama ollama pull qwen2.5vl:7b"
-	@echo "  3. MineLand Minecraft setup complete (MineLand manages its own server)"
-	@echo "     See: https://github.com/cocacola-lab/MineLand#setup-minecraft-server"
 	@echo ""
-	docker compose exec empo-dev python tests/test_mineland_installation.py --integration
+	@echo "Running integration test in MineLand container..."
+	docker exec mineland python /workspace/tests/test_mineland_installation.py --integration

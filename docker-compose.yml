@@ -53,6 +53,49 @@ services:
     #           count: all
     #           capabilities: [gpu]
 
+  # MineLand Minecraft simulator container (alternative to running MineLand in empo-dev)
+  # Uses official MineLand Docker image with Minecraft server managed internally
+  # Port 25565 is exposed for connecting Minecraft clients (optional debugging)
+  # 
+  # You can either:
+  # 1. Run MineLand tests in empo-dev container (MineLand is pre-installed)
+  # 2. Use this dedicated mineland container for more isolation
+  mineland:
+    image: yxhxianyu/mineland:latest
+    container_name: mineland
+    profiles:
+      - hierarchical
+    ports:
+      - "25565:25565"  # Minecraft server port (for optional vanilla client connection)
+    volumes:
+      - mineland-data:/root/MineLand/data  # Persist world data
+      - .:/workspace:ro  # Mount workspace read-only to access test scripts
+    environment:
+      - DISPLAY=:1
+      - OLLAMA_HOST=http://ollama:11434  # For integration tests with Ollama
+    working_dir: /root/MineLand
+    # Start Xvfb for headless display, then keep container running
+    command: >
+      /bin/bash -c "
+        Xvfb :1 -screen 0 1024x768x24 </dev/null &
+        sleep 2 &&
+        echo 'MineLand container ready. Run validation with:' &&
+        echo '  docker exec mineland python scripts/validate_install_simulator.py' &&
+        echo 'Or run integration test with:' &&
+        echo '  make test-mineland-integration' &&
+        tail -f /dev/null
+      "
+    # Health check to ensure Xvfb is running
+    healthcheck:
+      test: ["CMD", "pgrep", "Xvfb"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    # Ensure mineland can reach ollama container
+    depends_on:
+      - ollama
+
 volumes:
   pip-cache:
   ollama-models:
+  mineland-data:
