@@ -84,6 +84,15 @@ RUN --mount=type=cache,target=/root/.cache/pip,uid=0,gid=0 \
     if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
     pip install -r /tmp/requirements-hierarchical.txt ; \
     fi
+# Clone and install MineLand from GitHub
+# Note: Using main branch; consider pinning to a specific commit for reproducible builds
+RUN if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
+    git clone --depth 1 https://github.com/cocacola-lab/MineLand.git /opt/MineLand && \
+    cd /opt/MineLand && \
+    pip install -e . && \
+    cd /opt/MineLand/mineland/sim/mineflayer && \
+    npm ci ; \
+    fi
 
 # Create a non-root user for better security
 ARG USER_ID=1000

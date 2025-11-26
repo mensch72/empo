@@ -15,16 +15,9 @@ For the full integration test (--integration flag):
     2. Pull the vision model: docker exec ollama ollama pull qwen2.5-vl:3b
     3. Run: python tests/test_mineland_installation.py --integration
 
-Note: This test requires the hierarchical dependencies to be installed:
-    pip install -r requirements-hierarchical.txt
-    
-MineLand also requires (see https://github.com/cocacola-lab/MineLand):
-    - Python 3.11
-    - Java JDK 17 (apt-get install openjdk-17-jdk)
-    - Node.js 18.x (via nvm or nodesource)
-    - Clone and install:
-        git clone https://github.com/cocacola-lab/MineLand.git
-        cd MineLand && pip install -e .
+Note: MineLand is automatically installed when using `make up-hierarchical`.
+The Docker image includes all dependencies (Java JDK 17, Node.js 18.x, MineLand).
+See https://github.com/cocacola-lab/MineLand for more information.
 """
 
 import argparse
@@ -60,9 +53,8 @@ def test_mineland_import():
         return True
     except ImportError as e:
         print(f"✗ Failed to import mineland: {e}")
-        print("  MineLand must be installed from GitHub:")
-        print("    git clone https://github.com/cocacola-lab/MineLand.git")
-        print("    cd MineLand && pip install -e .")
+        print("  Make sure you started the environment with: make up-hierarchical")
+        print("  MineLand is automatically installed in the hierarchical Docker image.")
         return False
 
 
