@@ -243,7 +243,7 @@ test-mineland-validate:
 	@echo "Validating MineLand installation in official container..."
 	@echo "This runs MineLand's validate_install_simulator.py script."
 	@echo ""
-	docker exec mineland python scripts/validate_install_simulator.py
+	docker exec mineland python3 scripts/validate_install_simulator.py
 
 # Test MineLand + Ollama integration (requires up-hierarchical and qwen2.5vl:7b model)
 # Runs in empo-dev container which has all your RL/planning packages

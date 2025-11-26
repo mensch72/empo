@@ -141,14 +141,14 @@ def test_mineland_screenshot():
     """Test capturing a screenshot from MineLand environment.
     
     MineLand has two modes:
-    1. Task Mode (mineland.make) - MineLand manages its own Minecraft server internally
-    2. Simulation Mode (mineland.Sim) - Connect to external Minecraft servers
+    1. Internal server mode - MineLand starts its own Minecraft server (default)
+    2. External server mode - Connect to existing Minecraft server via server_host/server_port
     
     When running in Docker with separate containers:
     - empo-dev: Runs this test with MineLand Python client
     - mineland: Runs the Minecraft server at mineland:25565
     
-    We use Simulation Mode to connect from empo-dev to the mineland container.
+    We use external server mode to connect from empo-dev to the mineland container.
     """
     try:
         import mineland
@@ -161,29 +161,31 @@ def test_mineland_screenshot():
         print(f"  Connecting to Minecraft server at {server_host}:{server_port}...")
         print("  Note: The mineland container must be running (make up-hierarchical)")
         
-        # Use Simulation Mode to connect to external Minecraft server
-        # This is the correct approach when Minecraft runs in a separate container
-        sim = mineland.Sim(
+        # Use MineLand class with server_host/server_port to connect to external server
+        # When these are provided, MineLand connects to an existing server
+        # instead of starting its own
+        env = mineland.MineLand(
             server_host=server_host,
             server_port=server_port,
-            num_agents=1,
+            agents_count=1,
+            headless=True,
+            is_printing_server_info=False,
+            is_printing_mineflayer_info=False,
         )
         
         print("  Resetting environment...")
-        obs = sim.reset()
+        obs = env.reset()
         
         # Take random actions to get an interesting frame (move around from spawn)
         for step in range(NUM_WARMUP_STEPS):
             # MineLand uses Action objects for each agent
             # Create a simple forward movement action
             action = [mineland.Action()] * 1  # No-op action for 1 agent
-            obs, code_info, event, done, task_info = sim.step(action)
-            if done:
-                obs = sim.reset()
+            obs, code_info, event, done, task_info = env.step(action)
         
         # Extract the RGB observation image
         # MineLand observations are a list of agent observations
-        # Each agent obs contains 'rgb' key for the visual observation
+        # Each agent obs contains 'rgb' attribute for the visual observation
         if isinstance(obs, list) and len(obs) > 0:
             # Multi-agent case: get first agent's observation
             agent_obs = obs[0]
@@ -194,18 +196,18 @@ def test_mineland_screenshot():
             else:
                 print(f"✗ Unexpected agent observation format: {type(agent_obs)}")
                 print(f"  Available attributes: {dir(agent_obs)}")
-                sim.close()
+                env.close()
                 return None
         elif isinstance(obs, np.ndarray):
             screenshot = obs
         else:
             print(f"✗ Unexpected observation format: {type(obs)}")
-            sim.close()
+            env.close()
             return None
         
         print(f"✓ Captured screenshot: shape={screenshot.shape}, dtype={screenshot.dtype}")
         
-        sim.close()
+        env.close()
         return screenshot
         
     except ConnectionRefusedError:
