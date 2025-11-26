@@ -189,10 +189,12 @@ def test_mineland_screenshot():
         try:
             # Create MineLand environment
             # This will spawn Minecraft internally
+            # Note: Must specify image_size to get RGB observations
             env = mineland.make(
                 task_id="playground",
                 agents_count=1,
                 headless=True,
+                image_size=(180, 320),  # (height, width) - required for RGB capture
             )
             
             print("  ✓ MineLand environment created")
@@ -212,6 +214,7 @@ def test_mineland_screenshot():
             obs, code_info, event, done, task_info = env.step(action)
         
         # Extract the RGB observation image
+        # MineLand returns observations in CHW format (channels, height, width)
         if isinstance(obs, list) and len(obs) > 0:
             agent_obs = obs[0]
             if hasattr(agent_obs, 'rgb'):
@@ -220,6 +223,7 @@ def test_mineland_screenshot():
                 screenshot = agent_obs["rgb"]
             else:
                 print(f"✗ Unexpected agent observation format: {type(agent_obs)}")
+                print(f"  Available attributes: {dir(agent_obs) if hasattr(agent_obs, '__dir__') else 'N/A'}")
                 env.close()
                 return None
         elif isinstance(obs, np.ndarray):
@@ -229,7 +233,35 @@ def test_mineland_screenshot():
             env.close()
             return None
         
+        # Check if screenshot is valid (not empty)
+        if screenshot is None or screenshot.size == 0 or (len(screenshot.shape) >= 2 and screenshot.shape[1] == 0):
+            print(f"✗ Screenshot is empty or invalid: shape={screenshot.shape if screenshot is not None else 'None'}")
+            print("  Make sure image_size is specified in mineland.make()")
+            env.close()
+            return None
+        
         print(f"✓ Captured screenshot: shape={screenshot.shape}, dtype={screenshot.dtype}")
+        
+        # Convert from CHW to HWC format (MineLand uses CHW, PIL uses HWC)
+        if len(screenshot.shape) == 3 and screenshot.shape[0] == 3:
+            screenshot = np.transpose(screenshot, (1, 2, 0))
+            print(f"  Transposed to HWC format: shape={screenshot.shape}")
+        
+        # Save screenshot to outputs directory
+        try:
+            from PIL import Image
+            outputs_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "outputs")
+            os.makedirs(outputs_dir, exist_ok=True)
+            screenshot_path = os.path.join(outputs_dir, "mineland_screenshot.png")
+            
+            # Convert numpy array to PIL Image and save
+            if screenshot.dtype != np.uint8:
+                screenshot = (screenshot * 255).astype(np.uint8)
+            img = Image.fromarray(screenshot)
+            img.save(screenshot_path)
+            print(f"✓ Screenshot saved to: {screenshot_path}")
+        except Exception as e:
+            print(f"⚠ Could not save screenshot: {e}")
         
         env.close()
         return screenshot
@@ -306,6 +338,20 @@ def test_vision_llm_description(screenshot):
         description = response["message"]["content"]
         print(f"✓ LLM description received:")
         print(f"  \"{description}\"")
+        
+        # Save LLM response to outputs directory
+        try:
+            outputs_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "outputs")
+            os.makedirs(outputs_dir, exist_ok=True)
+            response_path = os.path.join(outputs_dir, "mineland_llm_response.txt")
+            with open(response_path, "w") as f:
+                f.write(f"Model: {model_name}\n")
+                f.write(f"Prompt: Describe what you see in this Minecraft screenshot in 2-3 sentences.\n")
+                f.write(f"\nResponse:\n{description}\n")
+            print(f"✓ LLM response saved to: {response_path}")
+        except Exception as e:
+            print(f"⚠ Could not save LLM response: {e}")
+        
         return True
         
     except ImportError as e:
