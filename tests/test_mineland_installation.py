@@ -129,40 +129,36 @@ def test_ollama_connection():
 def test_mineland_screenshot():
     """Test capturing a screenshot from MineLand environment.
     
-    Note: MineLand requires a Minecraft server to be running externally.
-    The integration test will skip screenshot capture if the server is not available.
+    MineLand has two modes:
+    1. Task Mode (mineland.make) - MineLand manages its own Minecraft server internally
+    2. Simulation Mode (mineland.Sim) - Connect to external Minecraft servers
+    
+    We use Task Mode with a local Minecraft server managed by MineLand.
+    This requires MineLand's internal Minecraft setup to be complete.
     """
     try:
         import mineland
         import numpy as np
         
         print("  Creating MineLand environment (this may take a moment)...")
-        print("  Note: MineLand requires a Minecraft server to be running externally.")
-        print("  See: https://github.com/cocacola-lab/MineLand#setup-minecraft-server")
+        print("  Note: MineLand manages its own Minecraft server internally.")
+        print("  This requires Java 17+ and the MineLand Minecraft setup.")
         
-        # MineLand uses a different API than MineRL
-        # It creates multi-agent environments with the make() function
-        # Use 'survival' which is the default task type in MineLand
-        # The server_host and server_port should point to a running Minecraft server
-        server_host = os.environ.get("MINELAND_SERVER_HOST", "localhost")
-        server_port = int(os.environ.get("MINELAND_SERVER_PORT", "25565"))
-        
-        print(f"  Connecting to Minecraft server at {server_host}:{server_port}...")
-        
+        # Use mineland.make() with task_id for Task Mode
+        # Task mode manages the Minecraft server internally (no external server needed)
+        # Available tasks: 'playground', 'survival', 'creative', etc.
         env = mineland.make(
-            task_id="playground",  # Use playground task - a simple sandbox without goals
+            task_id="playground",  # Sandbox task - free exploration
             agents_count=1,
-            server_host=server_host,
-            server_port=server_port,
         )
         
-        print("  Resetting environment...")
+        print("  Resetting environment (starting Minecraft server)...")
         obs = env.reset()
         
         # Take random actions to get an interesting frame (move around from spawn)
-        for _ in range(NUM_WARMUP_STEPS):
-            # MineLand uses a different action format - action is per agent
-            # For simplicity, use no-op action (agent stays still)
+        for step in range(NUM_WARMUP_STEPS):
+            # MineLand uses Action objects for each agent
+            # Create a simple forward movement action
             action = [mineland.Action()] * 1  # No-op action for 1 agent
             obs, code_info, event, done, task_info = env.step(action)
             if done:
@@ -195,17 +191,21 @@ def test_mineland_screenshot():
         env.close()
         return screenshot
         
-    except ConnectionRefusedError:
-        print("✗ Could not connect to Minecraft server.")
-        print("  MineLand requires an external Minecraft server.")
+    except FileNotFoundError as e:
+        print("✗ MineLand Minecraft setup not found.")
+        print("  MineLand requires additional setup for its internal Minecraft server.")
         print("  See: https://github.com/cocacola-lab/MineLand#setup-minecraft-server")
+        print(f"  Error: {e}")
         return None
     except Exception as e:
         error_msg = str(e)
         if "connection" in error_msg.lower() or "refused" in error_msg.lower():
-            print("✗ Could not connect to Minecraft server.")
-            print("  MineLand requires an external Minecraft server.")
+            print("✗ Could not start or connect to Minecraft server.")
+            print("  MineLand requires additional setup for its internal Minecraft server.")
             print("  See: https://github.com/cocacola-lab/MineLand#setup-minecraft-server")
+        elif "java" in error_msg.lower():
+            print("✗ Java not found or incorrect version.")
+            print("  MineLand requires Java 17+. Check with: java -version")
         else:
             print(f"✗ Failed to capture MineLand screenshot: {e}")
             import traceback

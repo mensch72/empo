@@ -243,6 +243,7 @@ test-mineland-integration:
 	@echo "Make sure you have:"
 	@echo "  1. Started with: make up-hierarchical"
 	@echo "  2. Pulled model: docker exec ollama ollama pull qwen2.5vl:7b"
-	@echo "  3. A Minecraft server running (see MineLand docs)"
+	@echo "  3. MineLand Minecraft setup complete (MineLand manages its own server)"
+	@echo "     See: https://github.com/cocacola-lab/MineLand#setup-minecraft-server"
 	@echo ""
 	docker compose exec empo-dev python tests/test_mineland_installation.py --integration
