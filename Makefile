@@ -90,9 +90,9 @@ up-hierarchical:
 	@if [ -z "$$USER_ID" ]; then export USER_ID=$$(id -u); fi; \
 	if [ -z "$$GROUP_ID" ]; then export GROUP_ID=$$(id -g); fi; \
 	echo "✓ Using USER_ID=$$USER_ID, GROUP_ID=$$GROUP_ID for file permissions"; \
-	echo "✓ Building with HIERARCHICAL_MODE=true (forces MineLand installation)"; \
+	echo "✓ Building with HIERARCHICAL_MODE=true (uses Docker cache for faster rebuilds)"; \
 	USER_ID=$$USER_ID GROUP_ID=$$GROUP_ID HIERARCHICAL_MODE=true \
-		docker compose --profile hierarchical build --no-cache && \
+		docker compose --profile hierarchical build && \
 	USER_ID=$$USER_ID GROUP_ID=$$GROUP_ID HIERARCHICAL_MODE=true \
 		docker compose --profile hierarchical up -d
 	@echo "Development environment with Ollama started."
