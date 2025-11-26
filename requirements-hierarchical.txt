@@ -15,6 +15,7 @@ Pillow>=10.0.0
 # MineLand - Multi-agent Reinforcement Learning in Minecraft
 # MineLand is automatically installed from GitHub when HIERARCHICAL_MODE=true
 # System requirements (installed by Dockerfile):
+#   - Python 3.11+ (required by MineLand)
 #   - Node.js 18.18.x  
 #   - Java JDK 17
 # See: https://github.com/cocacola-lab/MineLand

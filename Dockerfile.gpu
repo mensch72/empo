@@ -16,12 +16,17 @@ WORKDIR /workspace
 
 # Install system dependencies
 # Use BuildKit cache mount for apt to avoid re-downloading packages
+# Add deadsnakes PPA for Python 3.11 (required by MineLand)
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-    python3.10 \
+    software-properties-common \
+    && add-apt-repository -y ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 \
+    python3.11-venv \
+    python3.11-dev \
     python3-pip \
-    python3-dev \
     git \
     wget \
     curl \
@@ -36,9 +41,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libxrender-dev \
     graphviz
 
-# Create python symlink and upgrade pip
-RUN ln -s /usr/bin/python3 /usr/bin/python && \
-    python3 -m pip install --upgrade pip setuptools wheel
+# Create python symlink to Python 3.11 and upgrade pip
+RUN ln -sf /usr/bin/python3.11 /usr/bin/python3 && \
+    ln -sf /usr/bin/python3.11 /usr/bin/python && \
+    python3.11 -m pip install --upgrade pip setuptools wheel
 
 # Copy requirements files
 COPY requirements.txt /tmp/requirements.txt
