@@ -492,10 +492,12 @@ def run_integration_tests():
     print("=" * 60)
     if all(results):
         print("✓ All integration tests passed!")
-        return 0
+        # Force exit because MineLand spawns background threads that don't terminate cleanly
+        os._exit(0)
     else:
         print("✗ Some tests failed")
-        return 1
+        # Force exit because MineLand spawns background threads that don't terminate cleanly
+        os._exit(1)
 
 
 def main():
