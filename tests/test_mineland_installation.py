@@ -235,13 +235,13 @@ def test_mineland_screenshot():
         try:
             # Create MineLand environment
             # This will spawn Minecraft internally
-            # Note: Must specify image_size AND enable_rgb to get RGB observations
+            # Note: Must specify image_size to get RGB observations
+            # See: https://github.com/cocacola-lab/MineLand/blob/main/scripts/rgb_frame.py
             env = mineland.make(
                 task_id="playground",
                 agents_count=1,
                 headless=True,
                 image_size=(180, 320),  # (height, width) - required for RGB capture
-                enable_rgb=True,  # Must be True to capture RGB frames
             )
             
             print("  ✓ MineLand environment created")
