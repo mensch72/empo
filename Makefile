@@ -246,12 +246,18 @@ test-mineland-validate:
 	docker exec mineland python scripts/validate_install_simulator.py
 
 # Test MineLand + Ollama integration (requires up-hierarchical and qwen2.5vl:7b model)
-# Uses the official MineLand container for full Minecraft control
+# Runs in empo-dev container which has all your RL/planning packages
+# Connects to mineland container for Minecraft and ollama container for LLM
 test-mineland-integration:
 	@echo "Testing MineLand + Ollama integration..."
+	@echo ""
+	@echo "Architecture:"
+	@echo "  empo-dev  -> runs your RL/planning code + MineLand client"
+	@echo "  mineland  -> runs Minecraft server (accessible at mineland:25565)"
+	@echo "  ollama    -> runs LLM server (accessible at ollama:11434)"
+	@echo ""
 	@echo "Make sure you have:"
 	@echo "  1. Started with: make up-hierarchical"
 	@echo "  2. Pulled model: docker exec ollama ollama pull qwen2.5vl:7b"
 	@echo ""
-	@echo "Running integration test in MineLand container..."
-	docker exec mineland python /workspace/tests/test_mineland_installation.py --integration
+	docker compose exec empo-dev python tests/test_mineland_installation.py --integration

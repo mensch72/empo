@@ -7,16 +7,20 @@ This script checks that:
 2. Ollama client can connect to the Ollama server
 3. A screenshot can be captured from Minecraft and sent to a vision LLM
 
+Architecture (when running with `make up-hierarchical`):
+- empo-dev container: Runs your Python RL/planning code with MineLand client + Ollama client
+- mineland container: Runs the Minecraft server (accessible at mineland:25565)
+- ollama container: Runs the LLM server (accessible at ollama:11434)
+
 Run with: python tests/test_mineland_installation.py
 Or with pytest: pytest tests/test_mineland_installation.py -v
 
 For the full integration test (--integration flag):
-    1. Start Ollama: make up-hierarchical
+    1. Start all containers: make up-hierarchical
     2. Pull the vision model: docker exec ollama ollama pull qwen2.5vl:7b
-    3. Set up a Minecraft server (see MineLand docs)
-    4. Run: python tests/test_mineland_installation.py --integration
+    3. Run: make test-mineland-integration
 
-Note: MineLand is automatically installed when using `make up-hierarchical`.
+Note: MineLand client is installed in empo-dev when using `make up-hierarchical`.
 The Docker image includes all dependencies (Java JDK 17, Node.js 18.x, MineLand).
 See https://github.com/cocacola-lab/MineLand for more information.
 """
@@ -35,6 +39,11 @@ import sys
 # When running in Docker, use container name 'ollama' for inter-container communication
 # The OLLAMA_HOST env var is set in docker-compose.yml for empo-dev container
 DEFAULT_OLLAMA_HOST = "http://ollama:11434"
+
+# Default MineLand/Minecraft server host and port
+# When running in Docker, 'mineland' container runs the Minecraft server
+DEFAULT_MINELAND_SERVER_HOST = "mineland"
+DEFAULT_MINELAND_SERVER_PORT = 25565
 
 # Default vision model for Ollama (qwen2.5vl is a vision-language model)
 # Note: The smallest variant is 7b. Use 'qwen2.5vl:3b' if a 3b version becomes available.
@@ -135,36 +144,42 @@ def test_mineland_screenshot():
     1. Task Mode (mineland.make) - MineLand manages its own Minecraft server internally
     2. Simulation Mode (mineland.Sim) - Connect to external Minecraft servers
     
-    We use Task Mode with a local Minecraft server managed by MineLand.
-    This requires MineLand's internal Minecraft setup to be complete.
+    When running in Docker with separate containers:
+    - empo-dev: Runs this test with MineLand Python client
+    - mineland: Runs the Minecraft server at mineland:25565
+    
+    We use Simulation Mode to connect from empo-dev to the mineland container.
     """
     try:
         import mineland
         import numpy as np
         
-        print("  Creating MineLand environment (this may take a moment)...")
-        print("  Note: MineLand manages its own Minecraft server internally.")
-        print("  This requires Java 17+ and the MineLand Minecraft setup.")
+        # Get Minecraft server host/port from environment
+        server_host = os.environ.get("MINELAND_SERVER_HOST", DEFAULT_MINELAND_SERVER_HOST)
+        server_port = int(os.environ.get("MINELAND_SERVER_PORT", DEFAULT_MINELAND_SERVER_PORT))
         
-        # Use mineland.make() with task_id for Task Mode
-        # Task mode manages the Minecraft server internally (no external server needed)
-        # Available tasks: 'playground', 'survival', 'creative', etc.
-        env = mineland.make(
-            task_id="playground",  # Sandbox task - free exploration
-            agents_count=1,
+        print(f"  Connecting to Minecraft server at {server_host}:{server_port}...")
+        print("  Note: The mineland container must be running (make up-hierarchical)")
+        
+        # Use Simulation Mode to connect to external Minecraft server
+        # This is the correct approach when Minecraft runs in a separate container
+        sim = mineland.Sim(
+            server_host=server_host,
+            server_port=server_port,
+            num_agents=1,
         )
         
-        print("  Resetting environment (starting Minecraft server)...")
-        obs = env.reset()
+        print("  Resetting environment...")
+        obs = sim.reset()
         
         # Take random actions to get an interesting frame (move around from spawn)
         for step in range(NUM_WARMUP_STEPS):
             # MineLand uses Action objects for each agent
             # Create a simple forward movement action
             action = [mineland.Action()] * 1  # No-op action for 1 agent
-            obs, code_info, event, done, task_info = env.step(action)
+            obs, code_info, event, done, task_info = sim.step(action)
             if done:
-                obs = env.reset()
+                obs = sim.reset()
         
         # Extract the RGB observation image
         # MineLand observations are a list of agent observations
@@ -179,32 +194,30 @@ def test_mineland_screenshot():
             else:
                 print(f"✗ Unexpected agent observation format: {type(agent_obs)}")
                 print(f"  Available attributes: {dir(agent_obs)}")
-                env.close()
+                sim.close()
                 return None
         elif isinstance(obs, np.ndarray):
             screenshot = obs
         else:
             print(f"✗ Unexpected observation format: {type(obs)}")
-            env.close()
+            sim.close()
             return None
         
         print(f"✓ Captured screenshot: shape={screenshot.shape}, dtype={screenshot.dtype}")
         
-        env.close()
+        sim.close()
         return screenshot
         
-    except FileNotFoundError as e:
-        print("✗ MineLand Minecraft setup not found.")
-        print("  MineLand requires additional setup for its internal Minecraft server.")
-        print("  See: https://github.com/cocacola-lab/MineLand#setup-minecraft-server")
-        print(f"  Error: {e}")
+    except ConnectionRefusedError:
+        print("✗ Could not connect to Minecraft server.")
+        print(f"  Make sure the mineland container is running: make up-hierarchical")
+        print(f"  Check container status: docker ps | grep mineland")
         return None
     except Exception as e:
         error_msg = str(e)
         if "connection" in error_msg.lower() or "refused" in error_msg.lower():
-            print("✗ Could not start or connect to Minecraft server.")
-            print("  MineLand requires additional setup for its internal Minecraft server.")
-            print("  See: https://github.com/cocacola-lab/MineLand#setup-minecraft-server")
+            print("✗ Could not connect to Minecraft server.")
+            print(f"  Make sure the mineland container is running: make up-hierarchical")
         elif "java" in error_msg.lower():
             print("✗ Java not found or incorrect version.")
             print("  MineLand requires Java 17+. Check with: java -version")
