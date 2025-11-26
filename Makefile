@@ -237,18 +237,20 @@ test-mineland:
 	@echo "Testing MineLand installation (basic import tests)..."
 	docker compose exec empo-dev python tests/test_mineland_installation.py
 
-# Validate MineLand installation using official MineLand container
-# This checks if the MineLand server is running and accessible
+# Validate MineLand server container is running
+# The mineland container runs the Minecraft server, not Python code
+# Python code runs in empo-dev which connects to mineland:25565
 test-mineland-validate:
-	@echo "Validating MineLand server in official container..."
+	@echo "Validating MineLand server container..."
 	@echo ""
 	@echo "Checking if mineland container is running..."
-	@docker exec mineland test -f /root/MineLand/mineland/__init__.py && echo "✓ MineLand package found" || echo "✗ MineLand package not found"
+	@docker ps --filter "name=mineland" --format "{{.Status}}" | grep -q "Up" && echo "✓ mineland container is running" || (echo "✗ mineland container is not running. Start with: make up-hierarchical" && exit 1)
 	@echo ""
-	@echo "Checking Minecraft server status..."
-	@docker exec mineland bash -c "cd /root/MineLand && python3 -c \"import mineland; print('✓ MineLand module imported successfully')\"" || echo "Note: MineLand import test failed - the server may still be starting"
+	@echo "Checking network connectivity from empo-dev to mineland:25565..."
+	@docker exec empo-dev bash -c "timeout 5 bash -c '</dev/tcp/mineland/25565' 2>/dev/null && echo '✓ Port 25565 is open on mineland container' || echo '⚠ Port 25565 not responding yet (Minecraft server may still be starting)'"
 	@echo ""
-	@echo "MineLand server should be accessible at mineland:25565 from empo-dev container."
+	@echo "Note: The mineland container runs the Minecraft server."
+	@echo "Your Python code runs in empo-dev and connects to mineland:25565"
 
 # Test MineLand + Ollama integration (requires up-hierarchical and qwen2.5vl:7b model)
 # Runs in empo-dev container which has all your RL/planning packages
