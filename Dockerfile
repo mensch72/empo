@@ -108,7 +108,10 @@ RUN if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
     pip install -e . && \
     cd /opt/MineLand/mineland/sim/mineflayer && \
     npm ci && \
-    echo "✓ MineLand installed successfully" ; \
+    echo "✓ MineLand installed successfully" && \
+    python3 -c "import mineland; print('✓ MineLand import verification passed')" ; \
+    else \
+    echo "HIERARCHICAL_MODE is not true ($HIERARCHICAL_MODE), skipping MineLand installation" ; \
     fi
 
 # Create a non-root user for better security

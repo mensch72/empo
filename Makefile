@@ -90,8 +90,11 @@ up-hierarchical:
 	@if [ -z "$$USER_ID" ]; then export USER_ID=$$(id -u); fi; \
 	if [ -z "$$GROUP_ID" ]; then export GROUP_ID=$$(id -g); fi; \
 	echo "✓ Using USER_ID=$$USER_ID, GROUP_ID=$$GROUP_ID for file permissions"; \
+	echo "✓ Building with HIERARCHICAL_MODE=true (forces MineLand installation)"; \
 	USER_ID=$$USER_ID GROUP_ID=$$GROUP_ID HIERARCHICAL_MODE=true \
-		docker compose --profile hierarchical up -d --build
+		docker compose --profile hierarchical build --no-cache && \
+	USER_ID=$$USER_ID GROUP_ID=$$GROUP_ID HIERARCHICAL_MODE=true \
+		docker compose --profile hierarchical up -d
 	@echo "Development environment with Ollama started."
 	@echo "Use 'make shell' to enter the dev container."
 	@echo "Ollama API available at http://localhost:11434"
