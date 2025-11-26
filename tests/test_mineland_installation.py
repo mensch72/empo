@@ -207,7 +207,8 @@ def test_mineland_screenshot():
         # Take actions to get an interesting frame
         print(f"  Taking {NUM_WARMUP_STEPS} warmup steps...")
         for step in range(NUM_WARMUP_STEPS):
-            action = [mineland.Action()] * 1
+            # Use no-op action: Action(type=RESUME, code="")
+            action = mineland.Action.no_op(1)  # 1 agent
             obs, code_info, event, done, task_info = env.step(action)
         
         # Extract the RGB observation image
