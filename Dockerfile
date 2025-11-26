@@ -135,7 +135,11 @@ RUN groupadd -g ${GROUP_ID} appuser && \
     useradd -m -u ${USER_ID} -g appuser -s /bin/bash appuser
 
 # Create workspace directory and set permissions
+# Also fix MineLand permissions (installed as root but needs to be writable by appuser)
 RUN mkdir -p /workspace && chown -R appuser:appuser /workspace
+RUN if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
+    chown -R appuser:appuser /opt/MineLand ; \
+    fi
 
 # Switch to non-root user
 USER appuser

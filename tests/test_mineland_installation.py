@@ -8,16 +8,11 @@ This script checks that:
 3. A screenshot can be captured from Minecraft and sent to a vision LLM
 
 Architecture (when running with `make up-hierarchical`):
-- empo-dev container: Your RL/planning code + MineLand + Ollama client
-- mineland container: Provides Xvfb display (optional, for non-headless mode)
+- empo-dev container: Your RL/planning code + MineLand (spawns Minecraft internally)
 - ollama container: Runs the LLM server (accessible at ollama:11434)
 
-IMPORTANT: MineLand spawns Minecraft internally - the RL code and Minecraft
-must run in the SAME container because MineLand uses local process management.
-
-Options for running MineLand:
-1. From empo-dev (recommended): Use mineland.make() with headless=True
-2. From mineland container: Has Xvfb display pre-configured
+IMPORTANT: MineLand spawns Minecraft internally using headless mode.
+No separate Minecraft server container is needed.
 
 Run basic tests: python tests/test_mineland_installation.py
 Run integration tests: python tests/test_mineland_installation.py --integration
@@ -26,6 +21,8 @@ For the full integration test (--integration flag):
     1. Start containers: make up-hierarchical
     2. Pull the vision model: docker exec ollama ollama pull qwen2.5vl:7b
     3. Run: make test-mineland-integration
+
+Note: First run may take 1-2 minutes to download Minecraft.
 
 See https://github.com/cocacola-lab/MineLand for more information.
 """

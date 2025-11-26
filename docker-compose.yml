@@ -30,9 +30,6 @@ services:
       - WANDB_API_KEY=${WANDB_API_KEY:-}
       - PYTHONPATH=/workspace:/workspace/vendor/multigrid
       - OLLAMA_HOST=${OLLAMA_HOST:-http://ollama:11434}
-      # MineLand server host for Simulation Mode (connects to mineland container)
-      - MINELAND_SERVER_HOST=${MINELAND_SERVER_HOST:-mineland}
-      - MINELAND_SERVER_PORT=${MINELAND_SERVER_PORT:-25565}
     
     command: /bin/bash
 
@@ -56,58 +53,6 @@ services:
     #           count: all
     #           capabilities: [gpu]
 
-  # MineLand container - runs Minecraft server for empo-dev to connect to
-  # 
-  # Architecture:
-  # - mineland: Runs Minecraft server via MineLand (port 25565)
-  # - empo-dev: Your Python RL/planning code connects via MineLand client
-  # - ollama: LLM server
-  #
-  # Your code in empo-dev uses MineLand to connect to mineland:25565
-  # MineLand container - provides Xvfb display for headless Minecraft rendering
-  # 
-  # IMPORTANT: MineLand spawns Minecraft internally - the RL code and Minecraft
-  # must run in the SAME container because MineLand uses local IPC.
-  # 
-  # Two options for running MineLand:
-  # 1. Run your RL code directly in the mineland container (has MineLand + display)
-  # 2. Run your RL code in empo-dev using headless mode (no display needed)
-  #
-  # For most RL use cases, option 2 is recommended - just use mineland.make()
-  # in empo-dev with headless=True.
-  mineland:
-    image: yxhxianyu/mineland:latest
-    container_name: mineland
-    profiles:
-      - hierarchical
-    ports:
-      - "25565:25565"  # Minecraft server port (if external debugging needed)
-    volumes:
-      - mineland-data:/root/MineLand/data  # Persist world data
-      - .:/workspace:ro  # Mount workspace for running scripts
-    environment:
-      - DISPLAY=:1
-    working_dir: /root/MineLand
-    # Start Xvfb and keep container running for MineLand experiments
-    command: >
-      /bin/bash -c "
-        echo 'Starting MineLand container...' &&
-        Xvfb :1 -screen 0 1024x768x24 &
-        sleep 2 &&
-        echo '✓ Xvfb started on DISPLAY=:1' &&
-        echo '' &&
-        echo 'MineLand container ready!' &&
-        echo '' &&
-        echo 'Options for running MineLand:' &&
-        echo '  1. From empo-dev (recommended): Use mineland.make() with headless=True' &&
-        echo '  2. From mineland container: docker exec -it mineland python your_script.py' &&
-        echo '' &&
-        echo 'Container is alive and waiting...' &&
-        tail -f /dev/null
-      "
-    # No health check - Minecraft is spawned on-demand by mineland.make()
-
 volumes:
   pip-cache:
   ollama-models:
-  mineland-data:

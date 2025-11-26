@@ -238,7 +238,7 @@ test-mineland:
 	docker compose exec empo-dev python tests/test_mineland_installation.py
 
 # Validate MineLand setup
-# Note: MineLand spawns Minecraft internally, so there's no separate server to check
+# Note: MineLand spawns Minecraft internally in empo-dev, so there's no separate server
 test-mineland-validate:
 	@echo "Validating MineLand setup..."
 	@echo ""
@@ -246,11 +246,11 @@ test-mineland-validate:
 	@docker ps --filter "name=empo-dev" --format "{{.Status}}" | grep -q "Up" && echo "✓ empo-dev container is running" || (echo "✗ empo-dev container is not running. Start with: make up-hierarchical" && exit 1)
 	@docker ps --filter "name=ollama" --format "{{.Status}}" | grep -q "Up" && echo "✓ ollama container is running" || echo "⚠ ollama container is not running"
 	@echo ""
-	@echo "Note: MineLand spawns Minecraft internally when you call mineland.make()"
-	@echo "The mineland container provides Xvfb for non-headless mode (optional)"
+	@echo "Architecture (simplified):"
+	@echo "  empo-dev  -> Your RL code + MineLand (spawns Minecraft internally via headless mode)"
+	@echo "  ollama    -> LLM server (accessible at ollama:11434)"
 	@echo ""
-	@echo "Your Python code runs in empo-dev and uses MineLand in headless mode."
-	@echo "Ollama is accessible at ollama:11434 from empo-dev."
+	@echo "No separate Minecraft server needed - MineLand handles everything."
 
 # Test MineLand + Ollama integration (runs in empo-dev)
 # Note: MineLand spawns Minecraft internally - may take 1-2 minutes on first run
@@ -260,7 +260,6 @@ test-mineland-integration:
 	@echo "Architecture:"
 	@echo "  empo-dev  -> your RL/planning code + MineLand (spawns Minecraft internally)"
 	@echo "  ollama    -> LLM server (ollama:11434)"
-	@echo "  mineland  -> Xvfb display (optional, for non-headless mode)"
 	@echo ""
 	@echo "Make sure you have:"
 	@echo "  1. Started with: make up-hierarchical"
