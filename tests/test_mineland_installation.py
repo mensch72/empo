@@ -237,10 +237,14 @@ def test_mineland_screenshot():
             # This will spawn Minecraft internally
             # Note: Must specify image_size to get RGB observations
             # See: https://github.com/cocacola-lab/MineLand/blob/main/scripts/rgb_frame.py
+            # 
+            # IMPORTANT: headless=False is required for RGB capture!
+            # headless=True disables the prismarine-viewer which captures RGB frames.
+            # The Xvfb virtual display provides a "fake" screen for rendering.
             env = mineland.make(
                 task_id="playground",
                 agents_count=1,
-                headless=True,
+                headless=False,  # Must be False to capture RGB frames (Xvfb provides display)
                 image_size=(180, 320),  # (height, width) - required for RGB capture
             )
             
