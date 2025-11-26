@@ -63,6 +63,20 @@ def test_mineland_import():
     try:
         import mineland
         print("✓ MineLand imported successfully")
+        
+        # Check key exports are available
+        if hasattr(mineland, 'MineLand'):
+            print("  ✓ mineland.MineLand class available")
+        else:
+            print("  ⚠ mineland.MineLand not found - may need different API")
+            print(f"    Available exports: {[x for x in dir(mineland) if not x.startswith('_')]}")
+        
+        if hasattr(mineland, 'make'):
+            print("  ✓ mineland.make() function available")
+        
+        if hasattr(mineland, 'Action'):
+            print("  ✓ mineland.Action class available")
+            
         return True
     except ImportError as e:
         print(f"✗ Failed to import mineland: {e}")
