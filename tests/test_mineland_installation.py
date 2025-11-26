@@ -163,6 +163,41 @@ def test_ollama_connection():
 # Integration Tests
 # =============================================================================
 
+def start_xvfb():
+    """Start Xvfb virtual display for MineLand rendering.
+    
+    MineLand requires Xvfb even in headless mode to capture RGB frames.
+    Returns the subprocess if started, None if already running or failed.
+    """
+    import subprocess
+    import time
+    
+    # Check if DISPLAY is already set (Xvfb might already be running)
+    if os.environ.get('DISPLAY'):
+        print(f"  DISPLAY already set to {os.environ['DISPLAY']}")
+        return None
+    
+    # Start Xvfb on display :99 (common convention for headless)
+    print("  Starting Xvfb virtual display...")
+    try:
+        xvfb_proc = subprocess.Popen(
+            ['Xvfb', ':99', '-screen', '0', '1024x768x24'],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        time.sleep(1)  # Give Xvfb time to start
+        os.environ['DISPLAY'] = ':99'
+        print(f"  ✓ Xvfb started on DISPLAY={os.environ['DISPLAY']}")
+        return xvfb_proc
+    except FileNotFoundError:
+        print("  ⚠ Xvfb not found - install with: apt-get install xvfb")
+        print("    MineLand may not capture RGB frames without a display")
+        return None
+    except Exception as e:
+        print(f"  ⚠ Failed to start Xvfb: {e}")
+        return None
+
+
 def test_mineland_screenshot():
     """Test capturing a screenshot from MineLand environment.
     
@@ -171,11 +206,17 @@ def test_mineland_screenshot():
     
     Note: This requires significant resources and can take 1-2 minutes
     to start Minecraft on first run.
+    
+    IMPORTANT: MineLand requires Xvfb for RGB capture even in headless mode!
     """
     env = None
+    xvfb_proc = None
     try:
         import mineland
         import numpy as np
+        
+        # Start Xvfb if not already running (required for RGB capture)
+        xvfb_proc = start_xvfb()
         
         print("  Starting MineLand in headless mode...")
         print("  Note: First run downloads Minecraft (~1-2 minutes)")
@@ -264,6 +305,9 @@ def test_mineland_screenshot():
             print(f"⚠ Could not save screenshot: {e}")
         
         env.close()
+        # Stop Xvfb if we started it
+        if xvfb_proc is not None:
+            xvfb_proc.terminate()
         return screenshot
     
     except TimeoutError:
@@ -275,6 +319,8 @@ def test_mineland_screenshot():
                 env.close()
             except Exception:
                 pass
+        if xvfb_proc is not None:
+            xvfb_proc.terminate()
         return None
     except Exception as e:
         error_msg = str(e)
@@ -286,6 +332,8 @@ def test_mineland_screenshot():
                 env.close()
             except Exception:
                 pass
+        if xvfb_proc is not None:
+            xvfb_proc.terminate()
         return None
 
 
