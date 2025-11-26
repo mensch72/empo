@@ -482,21 +482,22 @@ def test_vision_llm_description(screenshot):
         return False
 
 
-def test_three_player_screenshots():
+def test_three_player_screenshots(env=None, reuse_env=False):
     """Capture screenshots from all three player positions in a three-player world.
 
-    This test creates a MineLand environment with 1 agent that teleports to each
-    spawn position to capture screenshots. This avoids the WebGL multi-context
-    issue that occurs with multiple simultaneous agents.
+    This test teleports an agent to each spawn position to capture screenshots.
+    It builds the custom terrain using Minecraft commands.
 
-    Uses the world configuration from llm_hierarchical_modeler.minecraft_world
-    and actually builds the custom terrain using setup_three_player_world().
+    Args:
+        env: Optional existing MineLand environment to reuse. If None, creates new one.
+        reuse_env: If True, don't close the environment when done (for reuse).
 
     Returns:
-        List of (player_name, screenshot) tuples, or None if failed.
+        Tuple of (screenshots, env) where screenshots is list of (player_name, screenshot)
+        tuples. Returns (None, None) if failed.
     """
-    env = None
     xvfb_proc = None
+    created_env = False
     try:
         import mineland
         import numpy as np
@@ -504,53 +505,58 @@ def test_three_player_screenshots():
 
         # Import our world configuration and setup functions
         from src.llm_hierarchical_modeler import (
-            create_three_player_world_config,
             get_player_spawn_info,
             generate_world_commands,
         )
 
-        # Get the world configuration
-        config = create_three_player_world_config()
-        spawn_info = get_player_spawn_info(config)
+        # Get the spawn info
+        spawn_info = get_player_spawn_info()
 
-        print(f"  World configuration: {config['world_settings']['name']}")
         print(f"  Number of spawn points: {len(spawn_info)}")
         for info in spawn_info:
             print(
                 f"    - {info['name']}: {info['coordinates']} ({info['description']})"
             )
 
-        # Start Xvfb if not already running (required for RGB capture)
-        xvfb_proc = start_xvfb()
+        # Create environment if not provided
+        if env is None:
+            # Start Xvfb if not already running (required for RGB capture)
+            xvfb_proc = start_xvfb()
 
-        print("  Starting MineLand with 1 agent (will teleport to each position)...")
-        print("  Note: First run downloads Minecraft (~1-2 minutes)")
-        print(f"  Timeout: {MINELAND_TIMEOUT}s")
-
-        # Set up a timeout for the MineLand initialization
-        if hasattr(signal, "SIGALRM"):
-            old_handler = signal.signal(signal.SIGALRM, timeout_handler)
-            signal.alarm(MINELAND_TIMEOUT)
-
-        try:
-            # Create MineLand environment with 1 agent to avoid WebGL issues
-            # We'll teleport this agent to each spawn position
-            env = mineland.make(
-                task_id="playground",
-                agents_count=1,
-                agents_config=[{"name": "observer"}],
-                headless=False,  # Required for RGB capture
-                image_size=(180, 320),  # (height, width)
+            print(
+                "  Starting MineLand with 1 agent (will teleport to each position)..."
             )
+            print("  Note: First run downloads Minecraft (~1-2 minutes)")
+            print(f"  Timeout: {MINELAND_TIMEOUT}s")
 
-            print("  ✓ MineLand environment created")
-            print("  Resetting environment...")
-            obs = env.reset()
-
-        finally:
+            # Set up a timeout for the MineLand initialization
             if hasattr(signal, "SIGALRM"):
-                signal.alarm(0)
-                signal.signal(signal.SIGALRM, old_handler)
+                old_handler = signal.signal(signal.SIGALRM, timeout_handler)
+                signal.alarm(MINELAND_TIMEOUT)
+
+            try:
+                env = mineland.make(
+                    task_id="playground",
+                    agents_count=1,
+                    agents_config=[{"name": "observer"}],
+                    headless=False,  # Required for RGB capture
+                    image_size=(180, 320),  # (height, width)
+                )
+                created_env = True
+
+                print("  ✓ MineLand environment created")
+                print("  Resetting environment...")
+                obs = env.reset()
+
+            finally:
+                if hasattr(signal, "SIGALRM"):
+                    signal.alarm(0)
+                    signal.signal(signal.SIGALRM, old_handler)
+        else:
+            print("  Reusing existing MineLand environment")
+            # Just take a step to ensure we have an observation
+            action = mineland.Action.no_op(1)
+            obs, _, _, _, _ = env.step(action)
 
         # Access server manager to execute commands
         server_manager = None
@@ -564,9 +570,8 @@ def test_three_player_screenshots():
         else:
             # Build the custom world terrain
             print("  Building custom world terrain...")
-            world_commands = generate_world_commands(config)
+            world_commands = generate_world_commands()
             # Execute a subset of commands to avoid timeout
-            # (full world build would take too long for a test)
             for i, cmd in enumerate(world_commands[:MAX_TEST_WORLD_COMMANDS]):
                 server_manager.execute(cmd)
                 if i % 10 == 0:
@@ -575,8 +580,6 @@ def test_three_player_screenshots():
                 f"  ✓ Executed {min(MAX_TEST_WORLD_COMMANDS, len(world_commands))} "
                 "world build commands"
             )
-
-            # Wait for commands to be processed
             time.sleep(2)
 
         # Take initial warmup steps
@@ -634,10 +637,11 @@ def test_three_player_screenshots():
 
         if len(screenshots) == 0:
             print("✗ No screenshots captured")
-            env.close()
+            if not reuse_env and env is not None:
+                env.close()
             if xvfb_proc is not None:
                 xvfb_proc.terminate()
-            return None
+            return (None, None)
 
         # Save screenshots to outputs directory
         try:
@@ -658,35 +662,38 @@ def test_three_player_screenshots():
         except Exception as e:
             print(f"  ⚠ Could not save screenshots: {e}")
 
-        env.close()
-        if xvfb_proc is not None:
-            xvfb_proc.terminate()
-
-        return screenshots
+        # Only close if we created the env and not reusing
+        if not reuse_env:
+            env.close()
+            if xvfb_proc is not None:
+                xvfb_proc.terminate()
+            return (screenshots, None)
+        else:
+            return (screenshots, env)
 
     except TimeoutError:
         print(f"✗ MineLand initialization timed out after {MINELAND_TIMEOUT} seconds")
-        if env is not None:
+        if env is not None and created_env:
             try:
                 env.close()
             except Exception:
                 pass
         if xvfb_proc is not None:
             xvfb_proc.terminate()
-        return None
+        return (None, None)
     except Exception as e:
         print(f"✗ Failed to capture three-player screenshots: {e}")
         import traceback
 
         traceback.print_exc()
-        if env is not None:
+        if env is not None and created_env:
             try:
                 env.close()
             except Exception:
                 pass
         if xvfb_proc is not None:
             xvfb_proc.terminate()
-        return None
+        return (None, None)
 
 
 def test_three_player_llm_descriptions(screenshots):
@@ -905,7 +912,8 @@ def run_integration_tests():
 
     # Three-player world test with detailed spatial descriptions
     print("6. Testing three-player world screenshots...")
-    three_player_screenshots = test_three_player_screenshots()
+    three_player_result = test_three_player_screenshots()
+    three_player_screenshots = three_player_result[0] if three_player_result else None
     results.append(
         three_player_screenshots is not None and len(three_player_screenshots) == 3
     )

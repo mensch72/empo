@@ -10,23 +10,27 @@ Note: MineLand requires additional setup from https://github.com/cocacola-lab/Mi
 """
 
 from .minecraft_world import (
-    create_three_player_world_config,
-    get_spawn_coordinates,
-    get_player_spawn_info,
-    create_mineland_environment,
-    generate_world_description,
+    # Core functions
+    get_spawn_points,
     generate_world_commands,
     generate_teleport_commands,
     setup_three_player_world,
+    # Legacy/compatibility
+    create_three_player_world_config,
+    get_spawn_coordinates,
+    get_player_spawn_info,
+    generate_world_description,
 )
 
 __all__ = [
-    "create_three_player_world_config",
-    "get_spawn_coordinates",
-    "get_player_spawn_info",
-    "create_mineland_environment",
-    "generate_world_description",
+    # Core functions
+    "get_spawn_points",
     "generate_world_commands",
     "generate_teleport_commands",
     "setup_three_player_world",
+    # Legacy/compatibility
+    "create_three_player_world_config",
+    "get_spawn_coordinates",
+    "get_player_spawn_info",
+    "generate_world_description",
 ]
