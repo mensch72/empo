@@ -73,61 +73,18 @@ services:
       - "25565:25565"  # Minecraft server port
     volumes:
       - mineland-data:/root/MineLand/data  # Persist world data
-      - .:/workspace:ro  # Mount workspace read-only for validation scripts
+      - ./scripts:/scripts:ro  # Mount scripts directory
     environment:
       - DISPLAY=:1
     working_dir: /root/MineLand
-    # Start Xvfb and run a MineLand environment that acts as a server
-    # This spawns Minecraft and keeps it running for external connections
+    # Start Xvfb and run MineLand server script
     command: >
       /bin/bash -c "
         echo 'Starting MineLand Minecraft server...' &&
-        Xvfb :1 -screen 0 1024x768x24 </dev/null &
+        Xvfb :1 -screen 0 1024x768x24 &
         sleep 2 &&
         echo 'Xvfb started on DISPLAY=:1' &&
-        echo '' &&
-        echo 'Starting Minecraft server via MineLand...' &&
-        python -c \"
-import mineland
-import time
-import signal
-import sys
-
-def signal_handler(sig, frame):
-    print('Shutting down...')
-    sys.exit(0)
-
-signal.signal(signal.SIGTERM, signal_handler)
-signal.signal(signal.SIGINT, signal_handler)
-
-print('Creating MineLand environment (spawns Minecraft server)...')
-print('This will take 1-2 minutes on first run...')
-
-try:
-    env = mineland.make(
-        task_id='playground',
-        agents_count=1,
-        headless=True,
-    )
-    print('✓ Minecraft server started!')
-    print('Server accessible at mineland:25565 from empo-dev')
-    print('')
-    print('Keeping server alive...')
-    
-    # Keep the environment alive
-    obs = env.reset()
-    while True:
-        action = [mineland.Action()]
-        obs, code_info, event, done, task_info = env.step(action)
-        time.sleep(1)
-except Exception as e:
-    print(f'Error: {e}')
-    import traceback
-    traceback.print_exc()
-    # Keep container running for debugging
-    while True:
-        time.sleep(60)
-\" 2>&1
+        python /scripts/start_mineland_server.py
       "
     # Health check - verify Minecraft is responding
     healthcheck:
