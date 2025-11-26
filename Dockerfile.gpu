@@ -21,12 +21,13 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
     software-properties-common \
+    gpg-agent \
     && add-apt-repository -y ppa:deadsnakes/ppa \
     && apt-get update && apt-get install -y --no-install-recommends \
     python3.11 \
     python3.11-venv \
     python3.11-dev \
-    python3-pip \
+    python3.11-distutils \
     git \
     wget \
     curl \
@@ -41,9 +42,10 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libxrender-dev \
     graphviz
 
-# Create python symlink to Python 3.11 and upgrade pip
+# Create python symlink to Python 3.11 and install pip using get-pip.py
 RUN ln -sf /usr/bin/python3.11 /usr/bin/python3 && \
     ln -sf /usr/bin/python3.11 /usr/bin/python && \
+    curl -sS https://bootstrap.pypa.io/get-pip.py | python3.11 && \
     python3.11 -m pip install --upgrade pip setuptools wheel
 
 # Copy requirements files
