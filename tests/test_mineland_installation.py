@@ -12,8 +12,9 @@ Or with pytest: pytest tests/test_mineland_installation.py -v
 
 For the full integration test (--integration flag):
     1. Start Ollama: make up-hierarchical
-    2. Pull the vision model: docker exec ollama ollama pull qwen2.5-vl:3b
-    3. Run: python tests/test_mineland_installation.py --integration
+    2. Pull the vision model: docker exec ollama ollama pull qwen2.5vl:7b
+    3. Set up a Minecraft server (see MineLand docs)
+    4. Run: python tests/test_mineland_installation.py --integration
 
 Note: MineLand is automatically installed when using `make up-hierarchical`.
 The Docker image includes all dependencies (Java JDK 17, Node.js 18.x, MineLand).
@@ -33,8 +34,9 @@ import sys
 # Default Ollama server host
 DEFAULT_OLLAMA_HOST = "http://localhost:11434"
 
-# Default vision model for Ollama
-DEFAULT_VISION_MODEL = "qwen2.5-vl:3b"
+# Default vision model for Ollama (qwen2.5vl is a vision-language model)
+# Note: The smallest variant is 7b. Use 'qwen2.5vl:3b' if a 3b version becomes available.
+DEFAULT_VISION_MODEL = "qwen2.5vl:7b"
 
 # Number of random actions to take to get an interesting Minecraft scene
 # This allows the agents to move around a bit and see something other than spawn point

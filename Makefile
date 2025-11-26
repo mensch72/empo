@@ -98,7 +98,7 @@ up-hierarchical:
 	@echo "Development environment with Ollama started."
 	@echo "Use 'make shell' to enter the dev container."
 	@echo "Ollama API available at http://localhost:11434"
-	@echo "Pull a model with: docker exec ollama ollama pull llama2"
+	@echo "Pull a vision model with: docker exec ollama ollama pull qwen2.5vl:7b"
 
 shell:
 	docker compose exec empo-dev bash
@@ -237,11 +237,12 @@ test-mineland:
 	@echo "Testing MineLand installation (basic import tests)..."
 	docker compose exec empo-dev python tests/test_mineland_installation.py
 
-# Test MineLand + Ollama integration (requires up-hierarchical and qwen2.5-vl:3b model)
+# Test MineLand + Ollama integration (requires up-hierarchical and qwen2.5vl:7b model)
 test-mineland-integration:
 	@echo "Testing MineLand + Ollama integration..."
 	@echo "Make sure you have:"
 	@echo "  1. Started with: make up-hierarchical"
-	@echo "  2. Pulled model: docker exec ollama ollama pull qwen2.5-vl:3b"
+	@echo "  2. Pulled model: docker exec ollama ollama pull qwen2.5vl:7b"
+	@echo "  3. A Minecraft server running (see MineLand docs)"
 	@echo ""
 	docker compose exec empo-dev python tests/test_mineland_installation.py --integration
