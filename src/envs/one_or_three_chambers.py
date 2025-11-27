@@ -320,6 +320,54 @@ class OneOrThreeChambersMapEnv(MultiGridEnv):
         self.num_robots = sum(1 for a in self.agents if a.color == 'green')
 
 
+# Small environment for DAG computation and backward induction
+# This is a simplified version with only 1 robot and 1 human
+# The grid is 9x5 with walls around the perimeter
+# Target cell for reward is (7, 3) which is in the right chamber
+
+SMALL_ONE_OR_TWO_CHAMBERS_MAP = """
+WeWeWeWeWeWeWeWeWe
+We..............We
+WeWeWeAr..WeWe..We
+We......Ag......We
+WeWeWeWeWeWeWeWeWe
+"""
+
+
+class SmallOneOrTwoChambersMapEnv(MultiGridEnv):
+    """
+    A small multi-chamber environment for DAG computation and backward induction.
+    
+    This is a simplified environment designed to have a tractable state space
+    for computing the full DAG and performing backward induction.
+    
+    Layout (9 columns x 5 rows):
+    - Walls around the perimeter
+    - A small obstacle wall creating two connected chambers
+    - 1 human agent (red) in the left chamber
+    - 1 robot agent (green) in the center
+    
+    The environment uses a 9-step timeout to keep the state space finite.
+    
+    Target cell for reward: (7, 3) - the robot receives reward 1 when reaching this cell.
+    """
+    
+    def __init__(self):
+        """
+        Initialize the Small One or Two Chambers environment.
+        """
+        super().__init__(
+            map=SMALL_ONE_OR_TWO_CHAMBERS_MAP,
+            max_steps=9,
+            partial_obs=False,
+            objects_set=World
+        )
+        
+        # Track counts for compatibility
+        self.num_humans = sum(1 for a in self.agents if a.color == 'red')
+        self.num_robots = sum(1 for a in self.agents if a.color == 'green')
+
+
 if __name__ == "__main__":
     # Simple test to verify the environment works
     env = OneOrThreeChambersEnv()
