@@ -108,15 +108,20 @@ def compute_value_functions_and_policy(env, states, state_to_idx, successors):
     print(f"Number of actions per agent: {num_actions}")
     print(f"Total action combinations: {num_actions}^{num_agents} = {num_actions ** num_agents}")
     
-    # Find the robot agent index (the grey one)
+    # Find the robot agent (the grey one)
     robot_idx = None
+    robot_agent = None
     for i, agent in enumerate(env.agents):
         if agent.color == 'grey':
             robot_idx = i
+            robot_agent = agent
             break
     
     if robot_idx is None:
         raise ValueError("No robot (grey) agent found in environment")
+    
+    # Convert TARGET_CELL to numpy array to match agent.pos type
+    target_pos = np.array(TARGET_CELL)
     
     human_indices = [i for i in range(num_agents) if i != robot_idx]
     num_humans = len(human_indices)
@@ -132,7 +137,10 @@ def compute_value_functions_and_policy(env, states, state_to_idx, successors):
     for state_idx in range(num_states):
         if len(successors[state_idx]) == 0:
             # Terminal state - value is just the immediate reward
-            value_function[state_idx] = compute_reward(env, states[state_idx])
+            # Inline reward computation: 1 if robot at target, else 0
+            env.set_state(states[state_idx])
+            reward = 1.0 if np.array_equal(robot_agent.pos, target_pos) else 0.0
+            value_function[state_idx] = reward
             optimal_policy[state_idx] = env.actions.still
     
     print(f"\nInitialized {len(value_function)} terminal states")
@@ -161,7 +169,9 @@ def compute_value_functions_and_policy(env, states, state_to_idx, successors):
             continue
         
         state = states[state_idx]
-        immediate_reward = compute_reward(env, state)
+        # Inline reward computation: 1 if robot at target, else 0
+        env.set_state(state)
+        immediate_reward = 1.0 if np.array_equal(robot_agent.pos, target_pos) else 0.0
         
         # Compute expected value for each robot action
         best_value = float('-inf')
