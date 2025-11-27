@@ -9,7 +9,7 @@ This script demonstrates backward induction on the SmallOneOrTwoChambersMapEnv:
 4. Assumes humans move randomly and the robot follows an optimal policy
 5. Produces a movie of an episode showing optimal robot play vs random humans
 
-The reward function gives +1 when the robot is in cell (7, 3), 0 otherwise.
+The reward function gives +1 when the robot is in cell (3, 7), 0 otherwise.
 """
 
 import sys
@@ -29,7 +29,17 @@ from empo.env_utils import get_dag
 
 
 # Target cell where the robot receives a reward of 1
-TARGET_CELL = (7, 3)
+# In the map, this is position (3, 7) - column 3, row 7:
+# We We We We We .. .. .. .. ..    <- row 0
+# We .. We Ay We .. .. .. .. ..    <- row 1
+# We .. We Ay We We We .. .. ..    <- row 2
+# We Ae Ro .. .. .. We .. .. ..    <- row 3
+# We .. We We We .. We We We ..    <- row 4
+# We .. .. .. We .. .. .. We We    <- row 5
+# We .. .. We .. .. Bl .. .. We    <- row 6
+# We .. .. TT We We .. We We We    <- row 7 (target at column 3)
+# We We We We .. We We We .. ..    <- row 8
+TARGET_CELL = (3, 7)
 
 
 def get_robot_position_from_state(env, state):
