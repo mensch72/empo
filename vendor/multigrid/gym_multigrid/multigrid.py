@@ -2839,6 +2839,7 @@ class MultiGridEnv(WorldModel):
                 # Mutable immobile objects: doors can open/close
                 elif obj_type == 'door':
                     mutable_objects.append((
+                        'door',
                         i, j,  # position is key
                         cell.is_open,
                         cell.is_locked,
@@ -2849,10 +2850,32 @@ class MultiGridEnv(WorldModel):
                     contains_type = cell.contains.type if cell.contains else None
                     contains_color = cell.contains.color if cell.contains else None
                     mutable_objects.append((
+                        'box',
                         i, j,
                         contains_type,
                         contains_color,
                     ))
+                
+                # Magic walls can solidify into regular walls
+                # Store 1 if still magic, 0 if would be wall (but we track the original position)
+                elif obj_type == 'magicwall':
+                    mutable_objects.append((
+                        'magicwall',
+                        i, j,
+                        1,  # 1 = still a magic wall
+                        cell.magic_side,
+                        cell.entry_probability,
+                        cell.solidify_probability,
+                    ))
+                
+                # Regular walls at magic wall positions mean the magic wall solidified
+                # We need to track this only if we know this was originally a magic wall
+                # For simplicity, we'll track wall positions that could be solidified magic walls
+                # by checking if there's a wall where init_pos matches a known magic wall position
+                elif obj_type == 'wall':
+                    # Check if this wall might be a solidified magic wall
+                    # We include walls with specific markers (we can't easily tell, so skip for now)
+                    pass
         
         # Sort mobile objects for deterministic ordering
         mobile_objects.sort()
@@ -2936,18 +2959,21 @@ class MultiGridEnv(WorldModel):
             obj.cur_pos = np.array([x, y])
             self.grid.set(x, y, obj)
         
-        # Restore mutable objects (doors, boxes)
+        # Restore mutable objects (doors, boxes, magic walls)
         for mutable_obj in mutable_objects:
-            x, y = mutable_obj[0], mutable_obj[1]
+            obj_type = mutable_obj[0]
+            x, y = mutable_obj[1], mutable_obj[2]
             cell = self.grid.get(x, y)
             
-            if cell is not None:
-                if cell.type == 'door':
-                    cell.is_open = mutable_obj[2]
-                    cell.is_locked = mutable_obj[3]
-                elif cell.type == 'box':
-                    contains_type = mutable_obj[2]
-                    contains_color = mutable_obj[3]
+            if obj_type == 'door':
+                if cell is not None and cell.type == 'door':
+                    cell.is_open = mutable_obj[3]
+                    cell.is_locked = mutable_obj[4]
+            
+            elif obj_type == 'box':
+                if cell is not None and cell.type == 'box':
+                    contains_type = mutable_obj[3]
+                    contains_color = mutable_obj[4]
                     if contains_type is not None:
                         if contains_type == 'ball':
                             cell.contains = Ball(self.objects, color=contains_color)
@@ -2957,6 +2983,25 @@ class MultiGridEnv(WorldModel):
                             cell.contains = None
                     else:
                         cell.contains = None
+            
+            elif obj_type == 'magicwall':
+                is_magic = mutable_obj[3]
+                if is_magic == 1:
+                    # Should still be a magic wall
+                    if cell is None or cell.type != 'magicwall':
+                        # Restore magic wall
+                        magic_side = mutable_obj[4]
+                        entry_prob = mutable_obj[5]
+                        solidify_prob = mutable_obj[6]
+                        magic_wall = MagicWall(self.objects, magic_side, entry_prob, solidify_prob)
+                        magic_wall.cur_pos = np.array([x, y])
+                        self.grid.set(x, y, magic_wall)
+                else:
+                    # Magic wall solidified into regular wall
+                    if cell is None or cell.type != 'wall':
+                        wall = Wall(self.objects)
+                        wall.cur_pos = np.array([x, y])
+                        self.grid.set(x, y, wall)
     
     def transition_probabilities_compact(self, compact_state, actions, restore_state=True):
         """

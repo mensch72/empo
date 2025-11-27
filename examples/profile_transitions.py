@@ -29,20 +29,117 @@ Current performance with cached transitions:
 - DAG computation (4338 states): ~22s
 - Backward induction with cached transitions: 0.2s
 - Total speedup vs recomputing transitions: ~3 orders of magnitude
+
+LINE PROFILING
+==============
+
+To run line-by-line profiling, install line_profiler:
+    pip install line_profiler
+
+Then run:
+    kernprof -l -v examples/profile_transitions.py
+
+Or use the manual line profiling in this script which times specific code sections.
 """
 
 import sys
 import os
 import time
-import cProfile
-import pstats
-from io import StringIO
 
 # Add paths for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from envs.one_or_three_chambers import SmallOneOrTwoChambersMapEnv
+
+
+def manual_line_profile_transition_probabilities():
+    """
+    Manual line-by-line profiling of transition_probabilities.
+    
+    This breaks down the time spent in each major section of the function.
+    """
+    print("=" * 70)
+    print("Manual Line Profiling of transition_probabilities()")
+    print("=" * 70)
+    
+    env = SmallOneOrTwoChambersMapEnv()
+    env.reset()
+    
+    initial_state = env.get_state()
+    num_agents = len(env.agents)
+    actions = [0] * num_agents  # still for all agents
+    
+    n_iter = 500
+    
+    # Time each section of transition_probabilities
+    print(f"\nProfiling with {n_iter} iterations...")
+    
+    # 1. Time dict(state) conversion
+    start = time.time()
+    for _ in range(n_iter):
+        state_dict = dict(initial_state)
+        _ = state_dict['step_count']
+    dict_time = (time.time() - start) / n_iter * 1000
+    
+    # 2. Time get_state() (backup)
+    start = time.time()
+    for _ in range(n_iter):
+        original_state = env.get_state()
+    get_state_time = (time.time() - start) / n_iter * 1000
+    
+    # 3. Time set_state() (restore to query state)
+    start = time.time()
+    for _ in range(n_iter):
+        env.set_state(initial_state)
+    set_state_time = (time.time() - start) / n_iter * 1000
+    
+    # 4. Time active agent identification
+    start = time.time()
+    for _ in range(n_iter):
+        active_agents = []
+        for i in range(num_agents):
+            if (not env.agents[i].terminated and 
+                not env.agents[i].paused and 
+                env.agents[i].started and 
+                actions[i] != env.actions.still):
+                active_agents.append(i)
+    active_agent_time = (time.time() - start) / n_iter * 1000
+    
+    # 5. Time full transition_probabilities call
+    start = time.time()
+    for _ in range(n_iter):
+        env.transition_probabilities(initial_state, actions)
+    full_time = (time.time() - start) / n_iter * 1000
+    
+    # 6. Time compact state operations
+    compact_state = env.get_compact_state()
+    
+    start = time.time()
+    for _ in range(n_iter):
+        _ = env.get_compact_state()
+    get_compact_time = (time.time() - start) / n_iter * 1000
+    
+    start = time.time()
+    for _ in range(n_iter):
+        env.set_compact_state(compact_state)
+    set_compact_time = (time.time() - start) / n_iter * 1000
+    
+    print("\nLine-by-line breakdown:")
+    print(f"  1. dict(state) conversion:      {dict_time:.4f}ms")
+    print(f"  2. get_state() backup:          {get_state_time:.4f}ms")
+    print(f"  3. set_state() to query:        {set_state_time:.4f}ms")
+    print(f"  4. Active agent identification: {active_agent_time:.4f}ms")
+    print(f"  5. Full transition_probs call:  {full_time:.4f}ms")
+    print()
+    print("  Compact state alternatives:")
+    print(f"  6. get_compact_state():         {get_compact_time:.4f}ms ({get_state_time/get_compact_time:.1f}x faster)")
+    print(f"  7. set_compact_state():         {set_compact_time:.4f}ms ({set_state_time/set_compact_time:.1f}x faster)")
+    
+    # Calculate overhead breakdown
+    overhead = get_state_time + set_state_time
+    print()
+    print(f"  State save/restore overhead: {overhead:.4f}ms ({100*overhead/full_time:.0f}% of total)")
 
 
 def profile_transition_probabilities():
@@ -241,7 +338,8 @@ def time_individual_operations():
     env.reset()
     
     initial_state = env.get_state()
-    actions = [0, 0]  # still, still
+    num_agents = len(env.agents)
+    actions = [0] * num_agents  # still for all agents
     
     # Time get_state
     n_iter = 1000
@@ -278,7 +376,7 @@ def time_individual_operations():
     print(f"    dict(state): {dict_time:.3f}ms")
     
     # Time with different action types
-    actions_forward = [3, 3]  # forward, forward
+    actions_forward = [3] * num_agents  # forward for all agents
     start = time.time()
     for _ in range(n_iter):
         env.transition_probabilities(initial_state, actions_forward)
@@ -296,15 +394,17 @@ def analyze_return_format():
     env.reset()
     
     initial_state = env.get_state()
+    num_agents = len(env.agents)
+    num_actions = env.action_space.n
     
     # Get some sample transitions
     results = []
-    for combo_idx in range(16):
+    for combo_idx in range(min(16, num_actions ** num_agents)):
         actions = []
         temp = combo_idx
-        for _ in range(2):
-            actions.append(temp % 4)
-            temp //= 4
+        for _ in range(num_agents):
+            actions.append(temp % num_actions)
+            temp //= num_actions
         
         result = env.transition_probabilities(initial_state, actions)
         if result:
@@ -345,11 +445,11 @@ def analyze_return_format():
 
 
 if __name__ == "__main__":
+    manual_line_profile_transition_probabilities()
+    print()
     time_individual_operations()
     print()
     analyze_return_format()
-    print()
-    profile_transition_probabilities()
     print()
     compare_state_representations()
     print()
