@@ -1158,6 +1158,244 @@ class MineActions:
     forward = 3
     build = 4
 
+
+# Map encoding constants
+MAP_COLOR_CODES = {
+    'r': 'red',
+    'g': 'green',
+    'b': 'blue',
+    'p': 'purple',
+    'y': 'yellow',
+    'e': 'grey',
+}
+
+
+def parse_map_string(map_spec, objects_set=World):
+    """
+    Parse a map specification string into a 2D list of cell specifications.
+    
+    The map can be specified as:
+    - A single string with newlines separating rows
+    - A list of strings (one per row)
+    - A list of lists of two-character strings (one per cell)
+    
+    Cell encoding (two characters each):
+    - .. : empty cell
+    - Wc : wall of color c
+    - Bl : block
+    - Ro : rock  
+    - Lc : locked door of color c
+    - Cc : closed door of color c
+    - Oc : open door of color c
+    - Kc : key of color c
+    - Bc : ball of color c
+    - Xc : box of color c
+    - Gc : goal of color c
+    - La : lava
+    - Sw : switch
+    - Un : unsteady ground
+    - Mn : magic wall with north magic side
+    - Ms : magic wall with south magic side
+    - Mw : magic wall with west magic side
+    - Me : magic wall with east magic side
+    - Ac : agent of color c
+    
+    Color codes (c):
+    - r : red
+    - g : green
+    - b : blue
+    - p : purple
+    - y : yellow
+    - e : grey
+    
+    Whitespace between cells is allowed and will be stripped.
+    
+    Args:
+        map_spec: The map specification (string, list of strings, or list of lists)
+        objects_set: The World class to use for object creation
+        
+    Returns:
+        tuple: (width, height, cells) where cells is a 2D list of cell specs
+               Each cell spec is a tuple (type, params_dict) or None for empty
+    """
+    # Normalize to list of strings (one per row)
+    if isinstance(map_spec, str):
+        # Single string with newlines
+        rows = map_spec.strip().split('\n')
+    elif isinstance(map_spec, list):
+        if len(map_spec) > 0 and isinstance(map_spec[0], list):
+            # List of lists - each inner list is a row of two-char strings
+            # Join them back to strings for uniform processing
+            rows = [''.join(row) for row in map_spec]
+        else:
+            # List of strings
+            rows = map_spec
+    else:
+        raise ValueError(f"map_spec must be a string, list of strings, or list of lists, got {type(map_spec)}")
+    
+    # Strip whitespace from each row
+    rows = [''.join(row.split()) for row in rows]
+    
+    # Validate all rows have the same length and even number of chars
+    if len(rows) == 0:
+        raise ValueError("Map specification is empty")
+    
+    # Each cell is 2 characters, so row length must be even
+    for i, row in enumerate(rows):
+        if len(row) % 2 != 0:
+            raise ValueError(f"Row {i} has odd length {len(row)}, expected even (2 chars per cell)")
+    
+    width = len(rows[0]) // 2
+    for i, row in enumerate(rows):
+        row_width = len(row) // 2
+        if row_width != width:
+            raise ValueError(f"Row {i} has width {row_width}, expected {width}")
+    
+    height = len(rows)
+    
+    # Parse each cell
+    cells = []
+    agents = []  # Track agent positions and colors for later creation
+    
+    for y, row in enumerate(rows):
+        cell_row = []
+        for x in range(width):
+            cell_str = row[x*2:x*2+2]
+            cell_spec = _parse_cell(cell_str, objects_set)
+            cell_row.append(cell_spec)
+            
+            # Track agents for later
+            if cell_spec and cell_spec[0] == 'agent':
+                agents.append((x, y, cell_spec[1]))
+        
+        cells.append(cell_row)
+    
+    return width, height, cells, agents
+
+
+def _parse_cell(cell_str, objects_set):
+    """
+    Parse a two-character cell specification.
+    
+    Args:
+        cell_str: Two-character cell specification
+        objects_set: The World class to use
+        
+    Returns:
+        tuple: (type, params_dict) or None for empty cell
+    """
+    if cell_str == '..':
+        return None
+    
+    cell_type = cell_str[0:2]
+    
+    # Handle cells without color codes
+    if cell_type == 'Bl':
+        return ('block', {})
+    elif cell_type == 'Ro':
+        return ('rock', {})
+    elif cell_type == 'La':
+        return ('lava', {})
+    elif cell_type == 'Sw':
+        return ('switch', {})
+    elif cell_type == 'Un':
+        return ('unsteady', {})
+    
+    # Handle magic walls
+    if cell_str[0] == 'M':
+        direction = cell_str[1]
+        magic_side_map = {'n': 3, 's': 1, 'w': 2, 'e': 0}  # up=3, down=1, left=2, right=0
+        if direction not in magic_side_map:
+            raise ValueError(f"Invalid magic wall direction: {direction}")
+        return ('magicwall', {'magic_side': magic_side_map[direction]})
+    
+    # Handle cells with color codes
+    obj_code = cell_str[0]
+    color_code = cell_str[1]
+    
+    if color_code not in MAP_COLOR_CODES:
+        raise ValueError(f"Invalid color code '{color_code}' in cell '{cell_str}'")
+    
+    color = MAP_COLOR_CODES[color_code]
+    
+    if obj_code == 'W':
+        return ('wall', {'color': color})
+    elif obj_code == 'L':
+        return ('door', {'color': color, 'is_locked': True, 'is_open': False})
+    elif obj_code == 'C':
+        return ('door', {'color': color, 'is_locked': False, 'is_open': False})
+    elif obj_code == 'O':
+        return ('door', {'color': color, 'is_locked': False, 'is_open': True})
+    elif obj_code == 'K':
+        return ('key', {'color': color})
+    elif obj_code == 'B':
+        return ('ball', {'color': color})
+    elif obj_code == 'X':
+        return ('box', {'color': color})
+    elif obj_code == 'G':
+        return ('goal', {'color': color})
+    elif obj_code == 'A':
+        return ('agent', {'color': color})
+    else:
+        raise ValueError(f"Unknown cell type: {cell_str}")
+
+
+def create_object_from_spec(cell_spec, objects_set):
+    """
+    Create a WorldObj from a cell specification.
+    
+    Args:
+        cell_spec: Tuple (type, params_dict) from _parse_cell
+        objects_set: The World class to use
+        
+    Returns:
+        WorldObj or None for empty cells
+    """
+    if cell_spec is None:
+        return None
+    
+    obj_type, params = cell_spec
+    
+    if obj_type == 'wall':
+        return Wall(objects_set, params.get('color', 'grey'))
+    elif obj_type == 'block':
+        return Block(objects_set)
+    elif obj_type == 'rock':
+        return Rock(objects_set, pushable_by=params.get('pushable_by'))
+    elif obj_type == 'lava':
+        return Lava(objects_set)
+    elif obj_type == 'switch':
+        return Switch(objects_set)
+    elif obj_type == 'unsteady':
+        return UnsteadyGround(objects_set)
+    elif obj_type == 'magicwall':
+        return MagicWall(objects_set, 
+                        magic_side=params.get('magic_side', 0),
+                        entry_probability=params.get('entry_probability', 0.5))
+    elif obj_type == 'door':
+        return Door(objects_set, 
+                   params.get('color', 'blue'),
+                   is_open=params.get('is_open', False),
+                   is_locked=params.get('is_locked', False))
+    elif obj_type == 'key':
+        return Key(objects_set, params.get('color', 'blue'))
+    elif obj_type == 'ball':
+        color = params.get('color', 'red')
+        color_idx = objects_set.COLOR_TO_IDX.get(color, 0)
+        return Ball(objects_set, index=color_idx)
+    elif obj_type == 'box':
+        return Box(objects_set, params.get('color', 'blue'))
+    elif obj_type == 'goal':
+        color = params.get('color', 'green')
+        color_idx = objects_set.COLOR_TO_IDX.get(color, 1)
+        return Goal(objects_set, index=color_idx, color=color_idx)
+    elif obj_type == 'agent':
+        # Agents are handled separately in the environment
+        return None
+    else:
+        raise ValueError(f"Unknown object type: {obj_type}")
+
+
 class MultiGridEnv(WorldModel):
     """
     2D grid world game environment
@@ -1189,8 +1427,30 @@ class MultiGridEnv(WorldModel):
             partial_obs=True,
             agent_view_size=7,
             actions_set=Actions,
-            objects_set = World
+            objects_set = World,
+            map=None
     ):
+        # Store map specification for use in _gen_grid
+        self._map_spec = map
+        self._map_parsed = None
+        
+        # If map is provided, parse it to get dimensions and agents
+        if map is not None:
+            map_width, map_height, cells, map_agents = parse_map_string(map, objects_set)
+            self._map_parsed = (map_width, map_height, cells, map_agents)
+            
+            # Override width/height with map dimensions
+            width = map_width
+            height = map_height
+            
+            # Auto-create agents from map if not provided
+            if agents is None:
+                agents = []
+                for x, y, agent_params in map_agents:
+                    color = agent_params.get('color', 'red')
+                    color_idx = objects_set.COLOR_TO_IDX.get(color, 0)
+                    agents.append(Agent(objects_set, color_idx))
+        
         self.agents = agents
 
         # Does the agents have partial or full observation?
@@ -1352,7 +1612,42 @@ class MultiGridEnv(WorldModel):
         return str
 
     def _gen_grid(self, width, height):
-        assert False, "_gen_grid needs to be implemented by each environment"
+        """
+        Generate the grid layout.
+        
+        If a map specification was provided to __init__, this will use it.
+        Otherwise, subclasses must override this method.
+        """
+        if self._map_parsed is not None:
+            self._gen_grid_from_map()
+        else:
+            assert False, "_gen_grid needs to be implemented by each environment"
+    
+    def _gen_grid_from_map(self):
+        """
+        Generate the grid from the parsed map specification.
+        """
+        map_width, map_height, cells, map_agents = self._map_parsed
+        
+        # Create the grid
+        self.grid = Grid(map_width, map_height)
+        
+        # Place objects from the map
+        for y in range(map_height):
+            for x in range(map_width):
+                cell_spec = cells[y][x]
+                if cell_spec is not None and cell_spec[0] != 'agent':
+                    obj = create_object_from_spec(cell_spec, self.objects)
+                    if obj is not None:
+                        self.grid.set(x, y, obj)
+        
+        # Place agents
+        for agent_idx, (x, y, agent_params) in enumerate(map_agents):
+            if agent_idx < len(self.agents):
+                agent = self.agents[agent_idx]
+                agent.pos = np.array([x, y])
+                agent.dir = 0  # Default facing right
+                self.grid.set(x, y, agent)
 
     def _handle_pickup(self, i, rewards, fwd_pos, fwd_cell):
         pass
