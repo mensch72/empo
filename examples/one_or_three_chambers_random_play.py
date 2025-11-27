@@ -29,7 +29,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 
-from env.one_or_three_chambers import OneOrThreeChambersEnv
+from envs.one_or_three_chambers import OneOrThreeChambersEnv
 
 
 def render_grid_to_array(env):
