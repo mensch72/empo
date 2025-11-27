@@ -329,9 +329,9 @@ def compare_state_representations():
 
 
 def profile_get_dag():
-    """Profile the get_dag method."""
+    """Profile the get_dag method with both full and compact state modes."""
     print("=" * 70)
-    print("Profiling get_dag()")
+    print("Profiling get_dag() - Full State Mode")
     print("=" * 70)
     
     env = SmallOneOrTwoChambersMapEnv()
@@ -341,12 +341,12 @@ def profile_get_dag():
     profiler.enable()
     
     start = time.time()
-    states, state_to_idx, successors, transitions = env.get_dag(return_probabilities=True)
+    states, state_to_idx, successors, transitions = env.get_dag(return_probabilities=True, use_compact_states=False)
     elapsed = time.time() - start
     
     profiler.disable()
     
-    print(f"\nget_dag completed in {elapsed:.2f}s")
+    print(f"\nget_dag (full state) completed in {elapsed:.2f}s")
     print(f"  States: {len(states)}")
     print(f"  Transitions cached: {sum(len(t) for t in transitions)}")
     
@@ -354,9 +354,39 @@ def profile_get_dag():
     stream = StringIO()
     stats = pstats.Stats(profiler, stream=stream)
     stats.sort_stats('cumulative')
-    stats.print_stats(30)
-    print("\nTop functions by cumulative time:")
+    stats.print_stats(20)
+    print("\nTop functions by cumulative time (full state mode):")
     print(stream.getvalue())
+    
+    # Now profile with compact states
+    print("=" * 70)
+    print("Profiling get_dag() - Compact State Mode (NATIVE)")
+    print("=" * 70)
+    
+    env2 = SmallOneOrTwoChambersMapEnv()
+    env2.reset()
+    
+    profiler2 = cProfile.Profile()
+    profiler2.enable()
+    
+    start = time.time()
+    states2, state_to_idx2, successors2, transitions2 = env2.get_dag(return_probabilities=True, use_compact_states=True)
+    elapsed2 = time.time() - start
+    
+    profiler2.disable()
+    
+    print(f"\nget_dag (compact state) completed in {elapsed2:.2f}s")
+    print(f"  States: {len(states2)}")
+    print(f"  Transitions cached: {sum(len(t) for t in transitions2)}")
+    print(f"\n  SPEEDUP: {elapsed / elapsed2:.1f}x faster with compact states!")
+    
+    # Print profiling stats
+    stream2 = StringIO()
+    stats2 = pstats.Stats(profiler2, stream=stream2)
+    stats2.sort_stats('cumulative')
+    stats2.print_stats(20)
+    print("\nTop functions by cumulative time (compact state mode):")
+    print(stream2.getvalue())
 
 
 def time_individual_operations():

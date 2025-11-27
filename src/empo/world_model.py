@@ -202,7 +202,7 @@ class WorldModel(gym.Env):
         # Subclasses should override to provide actual rewards
         return new_state, 0.0, terminated, False, {}
     
-    def get_dag(self, return_probabilities: bool = False):
+    def get_dag(self, return_probabilities: bool = False, use_compact_states: bool = False):
         """
         Efficiently compute the DAG structure of an acyclic finite environment.
         
@@ -225,6 +225,10 @@ class WorldModel(gym.Env):
                 tuples for that state, where action is the action tuple, probs is a
                 list of transition probabilities, and succ_indices is a list of
                 successor state indices (parallel lists).
+            use_compact_states: If True, use compact state representation and
+                transition_probabilities_native() for faster computation. The environment
+                must support get_compact_state(), set_compact_state(), and
+                transition_probabilities_native() methods.
         
         Returns:
             A tuple containing:
@@ -248,10 +252,28 @@ class WorldModel(gym.Env):
             >>> # With probabilities:
             >>> states, state_to_idx, successors, transitions = env.get_dag(return_probabilities=True)
             >>> # transitions[i] = [(action, probs, succ_indices), ...]
+            
+            >>> # With compact states (faster):
+            >>> states, state_to_idx, successors, transitions = env.get_dag(
+            ...     return_probabilities=True, use_compact_states=True)
         """
+        # Choose state functions based on mode
+        if use_compact_states:
+            if not hasattr(self, 'get_compact_state') or not hasattr(self, 'set_compact_state'):
+                raise ValueError("Environment does not support compact states")
+            if not hasattr(self, 'transition_probabilities_native'):
+                raise ValueError("Environment does not support transition_probabilities_native")
+            get_state_fn = self.get_compact_state
+            set_state_fn = self.set_compact_state
+            trans_prob_fn = self.transition_probabilities_native
+        else:
+            get_state_fn = self.get_state
+            set_state_fn = self.set_state
+            trans_prob_fn = self.transition_probabilities
+        
         # Reset environment to get root state
         self.reset()
-        root_state = self.get_state()
+        root_state = get_state_fn()
         
         # PHASE 1: Discover all states and edges using BFS
         discovered_states = []  # Temporary list during discovery
@@ -273,7 +295,7 @@ class WorldModel(gym.Env):
             current_idx = temp_state_to_idx[current_state]
             
             # Restore environment to current state to explore transitions
-            self.set_state(current_state)
+            set_state_fn(current_state)
             num_agents = len(self.agents)
             num_actions = self.action_space.n
             
@@ -294,7 +316,7 @@ class WorldModel(gym.Env):
                 actions_tuple = tuple(actions)
                 
                 # Get transition probabilities for this action combination
-                trans_result = self.transition_probabilities(current_state, actions)
+                trans_result = trans_prob_fn(current_state, actions)
                 
                 # If None, state is terminal or actions are invalid
                 if trans_result is None:

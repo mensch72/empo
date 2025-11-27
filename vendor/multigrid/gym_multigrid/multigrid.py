@@ -3426,11 +3426,8 @@ class MultiGridEnv(WorldModel):
         # Reset to query state
         self.set_compact_state(compact_state)
         
-        # Use the full state for conflict block identification
-        full_state = self.get_state()
-        
         # Use the full implementation but return compact states
-        conflict_blocks = self._identify_conflict_blocks(full_state, actions, active_agents)
+        conflict_blocks = self._identify_conflict_blocks(active_agents, actions)
         
         # Compute all possible orderings from conflict blocks
         from itertools import product
