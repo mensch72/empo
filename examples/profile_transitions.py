@@ -92,6 +92,114 @@ def profile_transition_probabilities():
     print(stream.getvalue())
 
 
+def compare_state_representations():
+    """Compare performance of full state vs compact state representations."""
+    print("=" * 70)
+    print("Comparing State Representations")
+    print("=" * 70)
+    
+    env = SmallOneOrTwoChambersMapEnv()
+    env.reset()
+    
+    n_iter = 1000
+    
+    # Time get_state (full)
+    start = time.time()
+    for _ in range(n_iter):
+        state = env.get_state()
+    get_state_time = (time.time() - start) / n_iter * 1000
+    
+    # Time set_state (full)
+    start = time.time()
+    for _ in range(n_iter):
+        env.set_state(state)
+    set_state_time = (time.time() - start) / n_iter * 1000
+    
+    # Time get_compact_state
+    start = time.time()
+    for _ in range(n_iter):
+        compact_state = env.get_compact_state()
+    get_compact_time = (time.time() - start) / n_iter * 1000
+    
+    # Time set_compact_state
+    start = time.time()
+    for _ in range(n_iter):
+        env.set_compact_state(compact_state)
+    set_compact_time = (time.time() - start) / n_iter * 1000
+    
+    print(f"\nFull state representation:")
+    print(f"  get_state: {get_state_time:.3f}ms per call")
+    print(f"  set_state: {set_state_time:.3f}ms per call")
+    print(f"  State size: {len(state)} top-level items")
+    print(f"  Grid items: {len(dict(state)['grid'])}")
+    
+    print(f"\nCompact state representation:")
+    print(f"  get_compact_state: {get_compact_time:.3f}ms per call")
+    print(f"  set_compact_state: {set_compact_time:.3f}ms per call")
+    print(f"  State size: {len(compact_state)} top-level items")
+    print(f"  Agents: {len(compact_state[1])}, Mobile: {len(compact_state[2])}, Mutable: {len(compact_state[3])}")
+    
+    speedup_get = get_state_time / get_compact_time
+    speedup_set = set_state_time / set_compact_time
+    print(f"\nSpeedup:")
+    print(f"  get: {speedup_get:.1f}x faster")
+    print(f"  set: {speedup_set:.1f}x faster")
+    
+    # Compare transition_probabilities vs transition_probabilities_compact
+    print(f"\nComparing transition_probabilities:")
+    
+    # Simple case (still, still) - deterministic
+    actions_still = [0, 0]
+    
+    n_iter_trans = 500
+    start = time.time()
+    for _ in range(n_iter_trans):
+        env.transition_probabilities(state, actions_still)
+    full_trans_time = (time.time() - start) / n_iter_trans * 1000
+    
+    start = time.time()
+    for _ in range(n_iter_trans):
+        env.transition_probabilities_compact(compact_state, actions_still, restore_state=True)
+    compact_trans_time = (time.time() - start) / n_iter_trans * 1000
+    
+    start = time.time()
+    for _ in range(n_iter_trans):
+        env.set_compact_state(compact_state)
+        env.transition_probabilities_compact(compact_state, actions_still, restore_state=False)
+    compact_trans_no_restore = (time.time() - start) / n_iter_trans * 1000
+    
+    print(f"  Full (still actions): {full_trans_time:.3f}ms")
+    print(f"  Compact (still, restore=True): {compact_trans_time:.3f}ms")
+    print(f"  Compact (still, restore=False): {compact_trans_no_restore:.3f}ms")
+    print(f"  Speedup (no restore): {full_trans_time / compact_trans_no_restore:.1f}x")
+    
+    # Verify correctness: round-trip should work
+    print("\nVerifying correctness...")
+    env.reset()
+    original_full = env.get_state()
+    compact = env.get_compact_state()
+    
+    # Make some moves
+    env.step([3, 3])  # Both agents forward
+    env.step([1, 2])  # Left, right
+    
+    after_moves_full = env.get_state()
+    after_moves_compact = env.get_compact_state()
+    
+    # Restore from compact and check if full state matches
+    env.set_compact_state(compact)
+    restored_compact = env.get_compact_state()
+    
+    if restored_compact == compact:
+        print("  ✓ Compact state round-trip: PASS")
+    else:
+        print("  ✗ Compact state round-trip: FAIL")
+    
+    # Verify state hashing works
+    compact_set = {compact, after_moves_compact}
+    print(f"  ✓ Compact states are hashable: {len(compact_set)} unique states")
+
+
 def profile_get_dag():
     """Profile the get_dag method."""
     print("=" * 70)
@@ -242,5 +350,7 @@ if __name__ == "__main__":
     analyze_return_format()
     print()
     profile_transition_probabilities()
+    print()
+    compare_state_representations()
     print()
     profile_get_dag()

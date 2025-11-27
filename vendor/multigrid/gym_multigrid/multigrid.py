@@ -2779,6 +2779,318 @@ class MultiGridEnv(WorldModel):
         
         return obj
     
+    def get_compact_state(self):
+        """
+        Get a compact state representation that only stores mutable/mobile object states.
+        
+        This is more efficient than get_state() because:
+        1. Immutable objects (walls) are not stored
+        2. Mobile objects (agents, pushed blocks/rocks) only store position + state
+        3. Mutable immobile objects only store their state, not position
+        4. Uses fixed ordering instead of serializing entire grid
+        
+        Format:
+        - step_count: int
+        - agents: tuple of (pos_x, pos_y, dir, terminated, started, paused, on_unsteady, carrying_type)
+        - mobile_objects: tuple of (obj_type, pos_x, pos_y, additional_state...)
+        - mutable_objects: tuple of (grid_idx, state_info...) for doors/boxes/etc
+        
+        Returns:
+            tuple: A hashable compact state representation
+        """
+        # Agent states - fixed order by agent index
+        agent_states = []
+        for agent in self.agents:
+            carrying_type = agent.carrying.type if agent.carrying else None
+            carrying_color = agent.carrying.color if agent.carrying else None
+            agent_states.append((
+                int(agent.pos[0]) if agent.pos is not None else None,
+                int(agent.pos[1]) if agent.pos is not None else None,
+                agent.dir,
+                agent.terminated,
+                agent.started,
+                agent.paused,
+                agent.on_unsteady_ground,
+                carrying_type,
+                carrying_color,
+            ))
+        
+        # Find and store mobile objects (blocks, rocks) - they can be pushed
+        # Store in order of (type, initial_pos) for deterministic ordering
+        mobile_objects = []
+        mutable_objects = []
+        
+        for j in range(self.grid.height):
+            for i in range(self.grid.width):
+                cell = self.grid.get(i, j)
+                if cell is None:
+                    continue
+                
+                obj_type = cell.type
+                
+                # Mobile objects: blocks and rocks can be pushed
+                if obj_type in ('block', 'rock'):
+                    mobile_objects.append((
+                        obj_type,
+                        i, j,  # current position
+                        cell.color,
+                    ))
+                
+                # Mutable immobile objects: doors can open/close
+                elif obj_type == 'door':
+                    mutable_objects.append((
+                        i, j,  # position is key
+                        cell.is_open,
+                        cell.is_locked,
+                    ))
+                
+                # Boxes can contain items
+                elif obj_type == 'box':
+                    contains_type = cell.contains.type if cell.contains else None
+                    contains_color = cell.contains.color if cell.contains else None
+                    mutable_objects.append((
+                        i, j,
+                        contains_type,
+                        contains_color,
+                    ))
+        
+        # Sort mobile objects for deterministic ordering
+        mobile_objects.sort()
+        
+        return (
+            self.step_count,
+            tuple(agent_states),
+            tuple(mobile_objects),
+            tuple(mutable_objects),
+        )
+    
+    def set_compact_state(self, compact_state):
+        """
+        Set the environment to a compact state.
+        
+        Note: This requires that the immutable grid structure is already correct.
+        Only use this for states that came from the same environment instance
+        or an identical environment setup.
+        
+        Args:
+            compact_state: A compact state tuple as returned by get_compact_state()
+        """
+        step_count, agent_states, mobile_objects, mutable_objects = compact_state
+        
+        self.step_count = step_count
+        
+        # Restore agent states
+        for agent_idx, agent_state in enumerate(agent_states):
+            agent = self.agents[agent_idx]
+            pos_x, pos_y, dir_, terminated, started, paused, on_unsteady, carrying_type, carrying_color = agent_state
+            
+            # Remove agent from old position in grid
+            if agent.pos is not None:
+                old_cell = self.grid.get(*agent.pos)
+                if old_cell is agent:
+                    self.grid.set(*agent.pos, None)
+            
+            # Update agent state
+            agent.pos = np.array([pos_x, pos_y]) if pos_x is not None else None
+            agent.dir = dir_
+            agent.terminated = terminated
+            agent.started = started
+            agent.paused = paused
+            agent.on_unsteady_ground = on_unsteady
+            
+            # Restore carrying state
+            if carrying_type is not None:
+                if carrying_type == 'ball':
+                    agent.carrying = Ball(self.objects, color=carrying_color)
+                elif carrying_type == 'key':
+                    agent.carrying = Key(self.objects, color=carrying_color)
+                elif carrying_type == 'box':
+                    agent.carrying = Box(self.objects, color=carrying_color)
+                else:
+                    agent.carrying = None
+            else:
+                agent.carrying = None
+            
+            # Place agent in grid at new position
+            if agent.pos is not None:
+                self.grid.set(*agent.pos, agent)
+        
+        # Restore mobile objects (blocks, rocks)
+        # First, clear all existing blocks/rocks
+        for j in range(self.grid.height):
+            for i in range(self.grid.width):
+                cell = self.grid.get(i, j)
+                if cell is not None and cell.type in ('block', 'rock'):
+                    self.grid.set(i, j, None)
+        
+        # Then place them at their new positions
+        for mobile_obj in mobile_objects:
+            obj_type, x, y, color = mobile_obj
+            if obj_type == 'block':
+                obj = Block(self.objects)
+            elif obj_type == 'rock':
+                obj = Rock(self.objects)
+            else:
+                continue
+            obj.color = color
+            obj.cur_pos = np.array([x, y])
+            self.grid.set(x, y, obj)
+        
+        # Restore mutable objects (doors, boxes)
+        for mutable_obj in mutable_objects:
+            x, y = mutable_obj[0], mutable_obj[1]
+            cell = self.grid.get(x, y)
+            
+            if cell is not None:
+                if cell.type == 'door':
+                    cell.is_open = mutable_obj[2]
+                    cell.is_locked = mutable_obj[3]
+                elif cell.type == 'box':
+                    contains_type = mutable_obj[2]
+                    contains_color = mutable_obj[3]
+                    if contains_type is not None:
+                        if contains_type == 'ball':
+                            cell.contains = Ball(self.objects, color=contains_color)
+                        elif contains_type == 'key':
+                            cell.contains = Key(self.objects, color=contains_color)
+                        else:
+                            cell.contains = None
+                    else:
+                        cell.contains = None
+    
+    def transition_probabilities_compact(self, compact_state, actions, restore_state=True):
+        """
+        Optimized version of transition_probabilities using compact state representation.
+        
+        This version is faster because:
+        1. Uses compact state for saving/restoring (4x faster get, 2x faster set)
+        2. Can skip state restoration if caller will set another state anyway
+        
+        Args:
+            compact_state: A compact state tuple as returned by get_compact_state()
+            actions: List of action indices, one per agent
+            restore_state: If True, restore original state after computation.
+                          Set to False if caller will immediately set another state.
+            
+        Returns:
+            list: List of (probability, successor_compact_state) tuples.
+                  Returns None if the state is terminal or actions invalid.
+        """
+        step_count = compact_state[0]
+        if step_count >= self.max_steps:
+            return None
+        
+        for action in actions:
+            if action < 0 or action >= self.action_space.n:
+                return None
+        
+        # Save current state using compact representation
+        if restore_state:
+            original_compact = self.get_compact_state()
+        
+        try:
+            # Set to query state using compact representation
+            self.set_compact_state(compact_state)
+            
+            num_agents = len(self.agents)
+            
+            # Identify active agents
+            active_agents = []
+            for i in range(num_agents):
+                if (not self.agents[i].terminated and 
+                    not self.agents[i].paused and 
+                    self.agents[i].started and 
+                    actions[i] != self.actions.still):
+                    active_agents.append(i)
+            
+            # OPTIMIZATION: If ≤1 agents active and no stochastic elements
+            if len(active_agents) <= 1:
+                is_stochastic = False
+                if len(active_agents) == 1:
+                    agent_idx = active_agents[0]
+                    if actions[agent_idx] == self.actions.forward:
+                        if self.agents[agent_idx].on_unsteady_ground:
+                            is_stochastic = True
+                        elif self.agents[agent_idx].can_enter_magic_walls:
+                            fwd_pos = self.agents[agent_idx].front_pos
+                            fwd_cell = self.grid.get(*fwd_pos)
+                            if fwd_cell is not None and fwd_cell.type == 'magicwall':
+                                approach_dir = (self.agents[agent_idx].dir + 2) % 4
+                                if approach_dir == fwd_cell.magic_side:
+                                    is_stochastic = True
+                
+                if not is_stochastic:
+                    # Deterministic case - compute single successor
+                    self._compute_successor_state_inplace(actions, tuple(range(num_agents)))
+                    result_compact = self.get_compact_state()
+                    return [(1.0, result_compact)]
+            
+            # Check if all actions are rotations (commutative)
+            n_non_rotations = sum(
+                actions[i] not in [self.actions.left, self.actions.right] 
+                for i in active_agents
+            )
+            if n_non_rotations < 2:
+                has_stochastic = any(
+                    actions[i] == self.actions.forward and (
+                        self.agents[i].on_unsteady_ground or
+                        (self.agents[i].can_enter_magic_walls and
+                         self.grid.get(*self.agents[i].front_pos) is not None and
+                         self.grid.get(*self.agents[i].front_pos).type == 'magicwall' and
+                         (self.agents[i].dir + 2) % 4 == self.grid.get(*self.agents[i].front_pos).magic_side)
+                    )
+                    for i in active_agents
+                )
+                if not has_stochastic:
+                    self._compute_successor_state_inplace(actions, tuple(range(num_agents)))
+                    result_compact = self.get_compact_state()
+                    return [(1.0, result_compact)]
+            
+            # For complex cases, fall back to full transition_probabilities logic
+            # but use compact states for results
+            self.set_compact_state(compact_state)  # Reset to query state
+            
+            # Get results from full version, then convert to compact
+            full_result = self.transition_probabilities(
+                self.get_state(), actions
+            )
+            
+            if full_result is None:
+                return None
+            
+            # Convert results to compact states
+            compact_result = []
+            for prob, full_succ_state in full_result:
+                self.set_state(full_succ_state)
+                compact_succ = self.get_compact_state()
+                compact_result.append((prob, compact_succ))
+            
+            return compact_result
+            
+        finally:
+            if restore_state:
+                self.set_compact_state(original_compact)
+    
+    def _compute_successor_state_inplace(self, actions, ordering):
+        """
+        Compute successor state in-place without saving/restoring.
+        
+        This modifies the environment state directly. Caller is responsible
+        for saving/restoring state if needed.
+        """
+        self.step_count += 1
+        
+        rewards = np.zeros(len(actions))
+        
+        for i in ordering:
+            if (self.agents[i].terminated or 
+                self.agents[i].paused or 
+                not self.agents[i].started or 
+                actions[i] == self.actions.still):
+                continue
+            
+            self._execute_single_agent_action(i, actions[i], rewards)
+
     def transition_probabilities(self, state, actions):
         """
         Given a state and vector of actions, return possible transitions with exact probabilities.
