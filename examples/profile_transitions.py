@@ -45,6 +45,9 @@ Or use the manual line profiling in this script which times specific code sectio
 import sys
 import os
 import time
+import cProfile
+import pstats
+from io import StringIO
 
 # Add paths for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
@@ -245,8 +248,9 @@ def compare_state_representations():
     # Compare transition_probabilities vs transition_probabilities_compact
     print(f"\nComparing transition_probabilities:")
     
-    # Simple case (still, still) - deterministic
-    actions_still = [0, 0]
+    # Simple case (still for all agents) - deterministic
+    num_agents = len(env.agents)
+    actions_still = [0] * num_agents
     
     n_iter_trans = 500
     start = time.time()
@@ -270,15 +274,25 @@ def compare_state_representations():
     print(f"  Compact (still, restore=False): {compact_trans_no_restore:.3f}ms")
     print(f"  Speedup (no restore): {full_trans_time / compact_trans_no_restore:.1f}x")
     
+    # Test native transition probabilities
+    start = time.time()
+    for _ in range(n_iter_trans):
+        env.transition_probabilities_native(compact_state, actions_still)
+    native_trans_time = (time.time() - start) / n_iter_trans * 1000
+    
+    print(f"  Native (compact): {native_trans_time:.3f}ms")
+    print(f"  Speedup (native vs full): {full_trans_time / native_trans_time:.1f}x")
+    
     # Verify correctness: round-trip should work
     print("\nVerifying correctness...")
     env.reset()
     original_full = env.get_state()
     compact = env.get_compact_state()
     
-    # Make some moves
-    env.step([3, 3])  # Both agents forward
-    env.step([1, 2])  # Left, right
+    # Make some moves using dynamic agent count
+    num_agents = len(env.agents)
+    env.step([3] * num_agents)  # All agents forward
+    env.step([1] * num_agents)  # All agents left
     
     after_moves_full = env.get_state()
     after_moves_compact = env.get_compact_state()
@@ -295,6 +309,23 @@ def compare_state_representations():
     # Verify state hashing works
     compact_set = {compact, after_moves_compact}
     print(f"  ✓ Compact states are hashable: {len(compact_set)} unique states")
+    
+    # Verify native transition probabilities gives same results
+    env.reset()
+    compact = env.get_compact_state()
+    full_result = env.transition_probabilities(env.get_state(), actions_still)
+    native_result = env.transition_probabilities_native(compact, actions_still)
+    
+    if len(full_result) == len(native_result):
+        # Compare probabilities and check states match
+        full_probs = sorted([p for p, s in full_result])
+        native_probs = sorted([p for p, s in native_result])
+        if full_probs == native_probs:
+            print("  ✓ Native transition_probabilities: PASS")
+        else:
+            print("  ✗ Native transition_probabilities: FAIL (probabilities differ)")
+    else:
+        print(f"  ✗ Native transition_probabilities: FAIL (result counts differ: {len(full_result)} vs {len(native_result)})")
 
 
 def profile_get_dag():

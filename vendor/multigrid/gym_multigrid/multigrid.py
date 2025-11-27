@@ -1556,6 +1556,59 @@ class MultiGridEnv(WorldModel):
 
         # Initialize the state
         self.reset()
+        
+        # Native compact mode: when enabled, env.state stores the compact state directly
+        # and get_state/set_state just return/overwrite it without serialization
+        self._native_compact_mode = False
+        self._cached_compact_state = None
+
+    def enable_native_compact_mode(self):
+        """
+        Enable native compact mode where state is stored directly as compact representation.
+        
+        In this mode:
+        - get_state() returns env.state (the cached compact state) directly
+        - set_state() overwrites env.state and syncs grid from it
+        - No serialization/deserialization overhead for get_state()
+        
+        Call sync_compact_state() after any grid modifications to update the cached state.
+        """
+        self._native_compact_mode = True
+        self._cached_compact_state = self.get_compact_state()
+    
+    def disable_native_compact_mode(self):
+        """Disable native compact mode and return to full state serialization."""
+        self._native_compact_mode = False
+        self._cached_compact_state = None
+    
+    def sync_compact_state(self):
+        """
+        Sync the cached compact state with the current grid state.
+        
+        Call this after any grid modifications when in native compact mode.
+        """
+        if self._native_compact_mode:
+            self._cached_compact_state = self.get_compact_state()
+    
+    def get_native_state(self):
+        """
+        Get state in native compact mode (returns cached state directly).
+        
+        This is O(1) when in native compact mode vs O(grid_size) for get_state().
+        """
+        if self._native_compact_mode and self._cached_compact_state is not None:
+            return self._cached_compact_state
+        return self.get_compact_state()
+    
+    def set_native_state(self, compact_state):
+        """
+        Set state in native compact mode (stores state and syncs grid).
+        
+        Args:
+            compact_state: A compact state tuple
+        """
+        self._cached_compact_state = compact_state
+        self.set_compact_state(compact_state)
 
     def reset(self):
 
@@ -3135,6 +3188,139 @@ class MultiGridEnv(WorldModel):
                 continue
             
             self._execute_single_agent_action(i, actions[i], rewards)
+    
+    def transition_probabilities_native(self, compact_state, actions):
+        """
+        Compute transition probabilities using native compact state representation.
+        
+        This is the fastest version because:
+        1. No serialization/deserialization of full grid state
+        2. Compact state is stored directly in env._cached_compact_state
+        3. get_native_state() is O(1) when in native compact mode
+        
+        Args:
+            compact_state: A compact state tuple as returned by get_compact_state()
+            actions: List of action indices, one per agent
+            
+        Returns:
+            list: List of (probability, successor_compact_state) tuples.
+                  Returns None if the state is terminal or actions invalid.
+        """
+        step_count = compact_state[0]
+        if step_count >= self.max_steps:
+            return None
+        
+        for action in actions:
+            if action < 0 or action >= self.action_space.n:
+                return None
+        
+        # Set to query state
+        self.set_compact_state(compact_state)
+        
+        num_agents = len(self.agents)
+        
+        # Identify active agents from compact state directly
+        agent_states = compact_state[1]
+        active_agents = []
+        for i in range(num_agents):
+            agent_state = agent_states[i]
+            terminated = agent_state[3]
+            started = agent_state[4]
+            paused = agent_state[5]
+            if (not terminated and not paused and started and 
+                actions[i] != self.actions.still):
+                active_agents.append(i)
+        
+        # OPTIMIZATION: If ≤1 agents active and no stochastic elements
+        if len(active_agents) <= 1:
+            is_stochastic = False
+            if len(active_agents) == 1:
+                agent_idx = active_agents[0]
+                if actions[agent_idx] == self.actions.forward:
+                    on_unsteady = agent_states[agent_idx][6]
+                    if on_unsteady:
+                        is_stochastic = True
+                    elif self.agents[agent_idx].can_enter_magic_walls:
+                        fwd_pos = self.agents[agent_idx].front_pos
+                        fwd_cell = self.grid.get(*fwd_pos)
+                        if fwd_cell is not None and fwd_cell.type == 'magicwall':
+                            approach_dir = (self.agents[agent_idx].dir + 2) % 4
+                            if approach_dir == fwd_cell.magic_side:
+                                is_stochastic = True
+            
+            if not is_stochastic:
+                # Deterministic case - compute single successor
+                self._compute_successor_state_inplace(actions, tuple(range(num_agents)))
+                result_compact = self.get_compact_state()
+                return [(1.0, result_compact)]
+        
+        # Check if all actions are rotations (commutative)
+        n_non_rotations = sum(
+            actions[i] not in [self.actions.left, self.actions.right] 
+            for i in active_agents
+        )
+        if n_non_rotations < 2:
+            has_stochastic = any(
+                actions[i] == self.actions.forward and (
+                    agent_states[i][6] or  # on_unsteady_ground
+                    (self.agents[i].can_enter_magic_walls and
+                     self.grid.get(*self.agents[i].front_pos) is not None and
+                     self.grid.get(*self.agents[i].front_pos).type == 'magicwall' and
+                     (self.agents[i].dir + 2) % 4 == self.grid.get(*self.agents[i].front_pos).magic_side)
+                )
+                for i in active_agents
+            )
+            if not has_stochastic:
+                self._compute_successor_state_inplace(actions, tuple(range(num_agents)))
+                result_compact = self.get_compact_state()
+                return [(1.0, result_compact)]
+        
+        # For complex cases with multiple active agents, use conflict block partitioning
+        # Reset to query state
+        self.set_compact_state(compact_state)
+        
+        # Use the full implementation but return compact states
+        conflict_blocks = self._identify_conflict_blocks(active_agents, actions)
+        
+        # Compute all possible orderings from conflict blocks
+        from itertools import product
+        block_orderings = [list(range(len(block))) for block in conflict_blocks]
+        
+        results = {}
+        total_orderings = 1
+        for block in conflict_blocks:
+            total_orderings *= len(block)
+        
+        prob_per_ordering = 1.0 / total_orderings
+        
+        for ordering_combo in product(*[range(len(block)) for block in conflict_blocks]):
+            # Reset to query state
+            self.set_compact_state(compact_state)
+            
+            # Build full ordering
+            full_ordering = []
+            for block_idx, pos_in_block in enumerate(ordering_combo):
+                block = conflict_blocks[block_idx]
+                # Rotate the block to put pos_in_block first
+                rotated = block[pos_in_block:] + block[:pos_in_block]
+                full_ordering.extend(rotated)
+            
+            # Add inactive agents
+            for i in range(num_agents):
+                if i not in active_agents:
+                    full_ordering.append(i)
+            
+            # Compute successor
+            self._compute_successor_state_inplace(actions, tuple(full_ordering))
+            result_compact = self.get_compact_state()
+            
+            # Aggregate by result state
+            if result_compact in results:
+                results[result_compact] += prob_per_ordering
+            else:
+                results[result_compact] = prob_per_ordering
+        
+        return [(prob, state) for state, prob in results.items()]
 
     def transition_probabilities(self, state, actions):
         """
