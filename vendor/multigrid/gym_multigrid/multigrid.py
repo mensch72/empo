@@ -1169,10 +1169,16 @@ MAP_COLOR_CODES = {
     'e': 'grey',
 }
 
+# Magic wall direction constants (matching DIR_TO_VEC indices)
+MAGIC_SIDE_EAST = 0   # Entry from east (approaching from west)
+MAGIC_SIDE_SOUTH = 1  # Entry from south (approaching from north)
+MAGIC_SIDE_WEST = 2   # Entry from west (approaching from east)
+MAGIC_SIDE_NORTH = 3  # Entry from north (approaching from south)
+
 
 def parse_map_string(map_spec, objects_set=World):
     """
-    Parse a map specification string into a 2D list of cell specifications.
+    Parse a map specification string into cell specifications.
     
     The map can be specified as:
     - A single string with newlines separating rows
@@ -1215,8 +1221,11 @@ def parse_map_string(map_spec, objects_set=World):
         objects_set: The World class to use for object creation
         
     Returns:
-        tuple: (width, height, cells) where cells is a 2D list of cell specs
-               Each cell spec is a tuple (type, params_dict) or None for empty
+        tuple: (width, height, cells, agents) where:
+               - width: The grid width in cells
+               - height: The grid height in cells
+               - cells: A 2D list of cell specs, each is a tuple (type, params_dict) or None for empty
+               - agents: A list of (x, y, params_dict) tuples for each agent found
     """
     # Normalize to list of strings (one per row)
     if isinstance(map_spec, str):
@@ -1287,24 +1296,29 @@ def _parse_cell(cell_str, objects_set):
     if cell_str == '..':
         return None
     
-    cell_type = cell_str[0:2]
+    full_cell_code = cell_str[0:2]
     
     # Handle cells without color codes
-    if cell_type == 'Bl':
+    if full_cell_code == 'Bl':
         return ('block', {})
-    elif cell_type == 'Ro':
+    elif full_cell_code == 'Ro':
         return ('rock', {})
-    elif cell_type == 'La':
+    elif full_cell_code == 'La':
         return ('lava', {})
-    elif cell_type == 'Sw':
+    elif full_cell_code == 'Sw':
         return ('switch', {})
-    elif cell_type == 'Un':
+    elif full_cell_code == 'Un':
         return ('unsteady', {})
     
     # Handle magic walls
     if cell_str[0] == 'M':
         direction = cell_str[1]
-        magic_side_map = {'n': 3, 's': 1, 'w': 2, 'e': 0}  # up=3, down=1, left=2, right=0
+        magic_side_map = {
+            'n': MAGIC_SIDE_NORTH,
+            's': MAGIC_SIDE_SOUTH,
+            'w': MAGIC_SIDE_WEST,
+            'e': MAGIC_SIDE_EAST
+        }
         if direction not in magic_side_map:
             raise ValueError(f"Invalid magic wall direction: {direction}")
         return ('magicwall', {'magic_side': magic_side_map[direction]})
