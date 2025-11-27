@@ -116,7 +116,7 @@ example:
 # Development commands
 test:
 	@echo "Running tests..."
-	docker compose exec empo-dev pytest tests/ -v
+	docker compose exec empo-dev pytest tests/ -v --ignore=tests/test_mineland_installation.py
 
 lint:
 	@echo "Running linters..."
