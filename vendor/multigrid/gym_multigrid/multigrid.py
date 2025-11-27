@@ -2532,7 +2532,11 @@ class MultiGridEnv(WorldModel):
                         obj_data['target_type'] = cell.target_type
                     if hasattr(cell, 'pushable_by'):
                         # For rocks, serialize the pushable_by attribute
-                        obj_data['pushable_by'] = cell.pushable_by
+                        # Convert list to tuple for hashability
+                        if isinstance(cell.pushable_by, list):
+                            obj_data['pushable_by'] = tuple(cell.pushable_by)
+                        else:
+                            obj_data['pushable_by'] = cell.pushable_by
                     if isinstance(cell, Agent):
                         # For agents in grid, just store basic info (detailed agent state below)
                         obj_data['agent_index'] = cell.index
@@ -2617,7 +2621,11 @@ class MultiGridEnv(WorldModel):
                 obj_data['contains'] = None
         if hasattr(obj, 'pushable_by'):
             # For rocks, serialize the pushable_by attribute
-            obj_data['pushable_by'] = obj.pushable_by
+            # Convert list to tuple for hashability
+            if isinstance(obj.pushable_by, list):
+                obj_data['pushable_by'] = tuple(obj.pushable_by)
+            else:
+                obj_data['pushable_by'] = obj.pushable_by
         if hasattr(obj, 'stumble_probability'):
             # For unsteady ground, serialize the stumble probability
             obj_data['stumble_probability'] = obj.stumble_probability
@@ -2740,7 +2748,11 @@ class MultiGridEnv(WorldModel):
         elif obj_type == 'block':
             obj = Block(self.objects)
         elif obj_type == 'rock':
-            obj = Rock(self.objects, pushable_by=obj_data.get('pushable_by'))
+            # Convert tuple back to list for pushable_by if needed
+            pushable_by = obj_data.get('pushable_by')
+            if isinstance(pushable_by, tuple):
+                pushable_by = list(pushable_by)
+            obj = Rock(self.objects, pushable_by=pushable_by)
         elif obj_type == 'unsteadyground':
             obj = UnsteadyGround(self.objects, 
                                stumble_probability=obj_data.get('stumble_probability', 0.5),
@@ -3104,7 +3116,7 @@ class MultiGridEnv(WorldModel):
                     target_pos = tuple(agent.front_pos)
                     agent_targets[agent_idx] = (RESOURCE_CELL, target_pos)
             
-            elif action == self.actions.pickup:
+            elif hasattr(self.actions, 'pickup') and action == self.actions.pickup:
                 # Target is the object at the forward position
                 fwd_pos = agent.front_pos
                 fwd_cell = self.grid.get(*fwd_pos)
@@ -3115,7 +3127,7 @@ class MultiGridEnv(WorldModel):
                     # No valid target, agent acts independently
                     agent_targets[agent_idx] = (RESOURCE_INDEPENDENT, agent_idx)
             
-            elif action == self.actions.drop:
+            elif hasattr(self.actions, 'drop') and action == self.actions.drop:
                 # Check if dropping on another agent or specific location
                 fwd_pos = agent.front_pos
                 fwd_cell = self.grid.get(*fwd_pos)

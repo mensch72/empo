@@ -46,9 +46,9 @@ def get_robot_position_from_state(env, state):
     # Set the environment to this state to easily extract information
     env.set_state(state)
     
-    # Find the robot agent (green, index 1)
+    # Find the robot agent (grey)
     for agent in env.agents:
-        if agent.color == 'green':
+        if agent.color == 'grey':
             return tuple(agent.pos)
     return None
 
@@ -72,7 +72,7 @@ def compute_reward(env, state):
     return 0.0
 
 
-def compute_value_functions_and_policy(env, states, state_to_idx, successors, use_movement_only=True):
+def compute_value_functions_and_policy(env, states, state_to_idx, successors):
     """
     Compute value functions and optimal policy using backward induction.
     
@@ -95,8 +95,6 @@ def compute_value_functions_and_policy(env, states, state_to_idx, successors, us
         states: List of states in topological order (from get_dag)
         state_to_idx: Dictionary mapping states to indices
         successors: List of successor indices for each state
-        use_movement_only: If True, only use movement actions (still, left, right, forward)
-                          for faster computation. Default: True
         
     Returns:
         tuple: (value_function, optimal_policy)
@@ -105,27 +103,20 @@ def compute_value_functions_and_policy(env, states, state_to_idx, successors, us
     """
     num_states = len(states)
     num_agents = len(env.agents)
+    num_actions = env.action_space.n
     
-    # Determine which actions to use
-    if use_movement_only:
-        # Only use movement actions: still (0), left (1), right (2), forward (3)
-        action_set = [env.actions.still, env.actions.left, env.actions.right, env.actions.forward]
-        num_actions = 4
-        print("Using movement-only actions: still, left, right, forward")
-    else:
-        action_set = list(range(env.action_space.n))
-        num_actions = env.action_space.n
-        print(f"Using all {num_actions} actions")
+    print(f"Number of actions per agent: {num_actions}")
+    print(f"Total action combinations: {num_actions}^{num_agents} = {num_actions ** num_agents}")
     
-    # Find the robot agent index (the green one)
+    # Find the robot agent index (the grey one)
     robot_idx = None
     for i, agent in enumerate(env.agents):
-        if agent.color == 'green':
+        if agent.color == 'grey':
             robot_idx = i
             break
     
     if robot_idx is None:
-        raise ValueError("No robot (green) agent found in environment")
+        raise ValueError("No robot (grey) agent found in environment")
     
     human_indices = [i for i in range(num_agents) if i != robot_idx]
     num_humans = len(human_indices)
@@ -146,7 +137,8 @@ def compute_value_functions_and_policy(env, states, state_to_idx, successors, us
     
     print(f"\nInitialized {len(value_function)} terminal states")
     
-    # Pre-compute all action combinations using the reduced action set
+    # Pre-compute all action combinations
+    action_set = list(range(num_actions))
     all_action_combinations = list(product(action_set, repeat=num_agents))
     num_human_actions = num_actions ** num_humans
     
@@ -194,7 +186,8 @@ def compute_value_functions_and_policy(env, states, state_to_idx, successors, us
                     # Terminal state or invalid action
                     continue
                 
-                # Each human action combination has equal probability (1/num_human_actions)
+                # Accumulate expected value for this human action combination
+                # We sum over all transition outcomes weighted by their probabilities
                 for prob, successor_state in transitions:
                     if successor_state in state_to_idx:
                         succ_idx = state_to_idx[successor_state]
@@ -203,7 +196,8 @@ def compute_value_functions_and_policy(env, states, state_to_idx, successors, us
                             valid_transitions += 1
             
             if valid_transitions > 0:
-                # Average over all human action combinations
+                # Divide by number of human action combinations to get the expected value
+                # under uniformly random human actions (each combo has prob 1/num_human_actions)
                 expected_value = expected_value / num_human_actions
                 
                 if expected_value > best_value:
@@ -257,7 +251,7 @@ def run_episode_with_optimal_policy(env, states, state_to_idx, optimal_policy, m
     # Find robot and human indices
     robot_idx = None
     for i, agent in enumerate(env.agents):
-        if agent.color == 'green':
+        if agent.color == 'grey':
             robot_idx = i
             break
     

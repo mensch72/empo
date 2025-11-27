@@ -43,7 +43,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'vendor', 'multigrid'))
 
 import numpy as np
-from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, Wall, Block, Rock, World
+from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, Wall, Block, Rock, World, SmallActions
 
 
 class OneOrThreeChambersEnv(MultiGridEnv):
@@ -351,17 +351,8 @@ class SmallOneOrThreeChambersMapEnv(MultiGridEnv):
         self.num_robots = sum(1 for a in self.agents if a.color == 'grey')
 
 # Small environment for DAG computation and backward induction
-# This is a simplified version with only 1 robot and 1 human
-# The grid is 9x5 with walls around the perimeter
-# Target cell for reward is (7, 3) which is in the right chamber
-
-SMALL_ONE_OR_TWO_CHAMBERS_MAP = """
-WeWeWeWeWeWeWeWeWe
-We..............We
-WeWeWeAr..WeWe..We
-We......Ag......We
-WeWeWeWeWeWeWeWeWe
-"""
+# This uses SMALL_ONE_OR_THREE_CHAMBERS_MAP with 1 robot (grey) and 2 humans (yellow)
+# Target cell for reward is (7, 3)
 
 
 class SmallOneOrTwoChambersMapEnv(MultiGridEnv):
@@ -371,13 +362,14 @@ class SmallOneOrTwoChambersMapEnv(MultiGridEnv):
     This is a simplified environment designed to have a tractable state space
     for computing the full DAG and performing backward induction.
     
-    Layout (9 columns x 5 rows):
-    - Walls around the perimeter
-    - A small obstacle wall creating two connected chambers
-    - 1 human agent (red) in the left chamber
-    - 1 robot agent (green) in the center
+    Layout (10 columns x 10 rows):
+    - Walls creating chamber structure
+    - 2 human agents (yellow) in upper left area
+    - 1 robot agent (grey) in left side
+    - 1 rock and 1 block as obstacles
     
     The environment uses a 9-step timeout to keep the state space finite.
+    Each agent has 4 actions: still, left, right, forward (4^3 = 64 combinations).
     
     Target cell for reward: (7, 3) - the robot receives reward 1 when reaching this cell.
     """
@@ -387,15 +379,16 @@ class SmallOneOrTwoChambersMapEnv(MultiGridEnv):
         Initialize the Small One or Two Chambers environment.
         """
         super().__init__(
-            map=SMALL_ONE_OR_TWO_CHAMBERS_MAP,
+            map=SMALL_ONE_OR_THREE_CHAMBERS_MAP,
             max_steps=9,
             partial_obs=False,
-            objects_set=World
+            objects_set=World,
+            actions_set=SmallActions
         )
         
         # Track counts for compatibility
-        self.num_humans = sum(1 for a in self.agents if a.color == 'red')
-        self.num_robots = sum(1 for a in self.agents if a.color == 'green')
+        self.num_humans = sum(1 for a in self.agents if a.color == 'yellow')
+        self.num_robots = sum(1 for a in self.agents if a.color == 'grey')
 
 
 if __name__ == "__main__":
