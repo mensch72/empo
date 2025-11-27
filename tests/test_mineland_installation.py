@@ -5,7 +5,9 @@ Test script to verify MineLand and Ollama installation and integration.
 This script checks that:
 1. MineLand can be imported and environments are available
 2. Ollama client can connect to the Ollama server
-3. A screenshot can be captured from Minecraft and sent to a vision LLM
+3. A three-player Minecraft world can be created with custom terrain
+4. Screenshots can be captured from all three player perspectives
+5. Vision LLM can describe the screenshots with spatial information
 
 Architecture (when running with `make up-hierarchical`):
 - empo-dev container: Your RL/planning code + MineLand (spawns Minecraft internally)
@@ -46,37 +48,49 @@ DEFAULT_OLLAMA_HOST = "http://ollama:11434"
 DEFAULT_VISION_MODEL = "qwen2.5vl:7b"
 
 # Number of random actions to take to get an interesting Minecraft scene
-NUM_WARMUP_STEPS = 10
+NUM_WARMUP_STEPS = 5
 
 # Timeout for MineLand operations (in seconds)
-MINELAND_TIMEOUT = 120  # 2 minutes
+MINELAND_TIMEOUT = 180  # 3 minutes for 3 agents
 
 # Maximum number of world build commands to execute during tests
 # (Full world build has thousands of commands, we limit for test speed)
-MAX_TEST_WORLD_COMMANDS = 50
+MAX_TEST_WORLD_COMMANDS = 100
+
+# Number of agents in the three-player world
+AGENTS_COUNT = 3
 
 # Xvfb (virtual display) configuration for MineLand RGB capture
 XVFB_DISPLAY = ":99"
 XVFB_RESOLUTION = "1024x768x24"
 XVFB_STARTUP_DELAY = 1  # seconds to wait for Xvfb to start
 
-# Prompt template for three-player LLM descriptions
-# This prompt asks the vision LLM to provide detailed spatial descriptions
-THREE_PLAYER_DESCRIPTION_PROMPT = """Describe this Minecraft screenshot in detail. \
-This is the view from the perspective of a player named '{player_name}' \
-who has spawned at coordinates {coords}.
+# Prompt template for multi-player LLM descriptions with all 6 images
+SIX_IMAGE_DESCRIPTION_PROMPT = """You are analyzing 6 Minecraft screenshots from a three-player world.
+The world has:
+- A central river dividing east and west
+- Western forest (abundant wood, some stone)
+- Eastern rocky area (abundant stone, some wood)
+- Northern mountain with cave system
+- Southern plains with farmland
 
-Expected spawn location: {location_desc}
-Expected nearby resources: {resource_desc}
+The three players are:
+1. **Robot** at coordinates (0, 70, 0) - center of valley near river
+2. **Human A** at coordinates (-60, 70, 0) - west side, forest area
+3. **Human B** at coordinates (60, 70, 0) - east side, rocky area
 
-Please provide a detailed description including:
-1. What terrain and environment features are visible (trees, mountains, water, plains, etc.)
-2. Spatial information: what is to the left, right, ahead, and behind relative to the view
-3. Any visible resources or structures
-4. The approximate direction the player is facing
-5. Any notable landmarks that would help orient the player
+The 6 images are arranged as follows:
+- Row 1: Robot (step 1), Human A (step 1), Human B (step 1)
+- Row 2: Robot (step 2), Human A (step 2), Human B (step 2)
 
-Be specific about positions and distances where possible."""
+Please describe each of the 6 views in detail, including:
+1. What terrain and environment features are visible
+2. Spatial information: what is to the left, right, ahead relative to each player's view
+3. Any visible resources (trees, stone, water, ores)
+4. How the views differ between the two timesteps for each player
+5. Notable landmarks that would help orient each player
+
+Be specific about positions and distances. Format your response with clear headers for each player and timestep."""
 
 
 # =============================================================================
@@ -93,6 +107,41 @@ class TimeoutError(Exception):
 def timeout_handler(signum, frame):
     """Signal handler for timeout."""
     raise TimeoutError("Operation timed out")
+
+
+def start_xvfb():
+    """Start Xvfb virtual display for MineLand rendering.
+
+    MineLand requires Xvfb even in headless mode to capture RGB frames.
+    Returns the subprocess if started, None if already running or failed.
+    """
+    import subprocess
+    import time
+
+    # Check if DISPLAY is already set (Xvfb might already be running)
+    if os.environ.get("DISPLAY"):
+        print(f"  DISPLAY already set to {os.environ['DISPLAY']}")
+        return None
+
+    # Start Xvfb on display :99 (common convention for headless)
+    print("  Starting Xvfb virtual display...")
+    try:
+        xvfb_proc = subprocess.Popen(
+            ["Xvfb", ":99", "-screen", "0", "1024x768x24"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        time.sleep(1)  # Give Xvfb time to start
+        os.environ["DISPLAY"] = ":99"
+        print(f"  ✓ Xvfb started on DISPLAY={os.environ['DISPLAY']}")
+        return xvfb_proc
+    except FileNotFoundError:
+        print("  ⚠ Xvfb not found - install with: apt-get install xvfb")
+        print("    MineLand may not capture RGB frames without a display")
+        return None
+    except Exception as e:
+        print(f"  ⚠ Failed to start Xvfb: {e}")
+        return None
 
 
 # =============================================================================
@@ -136,7 +185,7 @@ def test_mineland_dependencies():
 
     # Check gymnasium
     try:
-        import gymnasium as gym
+        import gymnasium
 
         print("✓ gymnasium is available")
         results.append(True)
@@ -146,7 +195,7 @@ def test_mineland_dependencies():
 
     # Check numpy
     try:
-        import numpy as np
+        import numpy
 
         print("✓ numpy is available")
         results.append(True)
@@ -204,62 +253,85 @@ def test_ollama_connection():
 # =============================================================================
 
 
-def start_xvfb():
-    """Start Xvfb virtual display for MineLand rendering.
+def extract_screenshot(agent_obs, agent_name="agent"):
+    """Extract RGB screenshot from agent observation.
 
-    MineLand requires Xvfb even in headless mode to capture RGB frames.
-    Returns the subprocess if started, None if already running or failed.
+    Args:
+        agent_obs: Agent observation object from MineLand
+        agent_name: Name for logging purposes
+
+    Returns:
+        numpy array in HWC format (height, width, channels), or None if failed
     """
-    import subprocess
-    import time
+    import numpy as np
 
-    # Check if DISPLAY is already set (Xvfb might already be running)
-    if os.environ.get("DISPLAY"):
-        print(f"  DISPLAY already set to {os.environ['DISPLAY']}")
+    screenshot = None
+    if hasattr(agent_obs, "rgb"):
+        screenshot = agent_obs.rgb
+    elif isinstance(agent_obs, dict) and "rgb" in agent_obs:
+        screenshot = agent_obs["rgb"]
+    else:
+        print(f"  ⚠ Could not get RGB for {agent_name}")
         return None
 
-    # Start Xvfb on display :99 (common convention for headless)
-    print("  Starting Xvfb virtual display...")
-    try:
-        xvfb_proc = subprocess.Popen(
-            ["Xvfb", ":99", "-screen", "0", "1024x768x24"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        time.sleep(1)  # Give Xvfb time to start
-        os.environ["DISPLAY"] = ":99"
-        print(f"  ✓ Xvfb started on DISPLAY={os.environ['DISPLAY']}")
-        return xvfb_proc
-    except FileNotFoundError:
-        print("  ⚠ Xvfb not found - install with: apt-get install xvfb")
-        print("    MineLand may not capture RGB frames without a display")
-        return None
-    except Exception as e:
-        print(f"  ⚠ Failed to start Xvfb: {e}")
+    # Check if screenshot is valid
+    if screenshot is None or screenshot.size == 0:
+        print(f"  ⚠ Empty screenshot for {agent_name}")
         return None
 
+    # Convert from CHW to HWC format if needed
+    if len(screenshot.shape) == 3 and screenshot.shape[0] == 3:
+        screenshot = np.transpose(screenshot, (1, 2, 0))
 
-def test_mineland_screenshot():
-    """Test capturing a screenshot from MineLand environment.
+    # Convert to uint8 if needed
+    if screenshot.dtype != np.uint8:
+        screenshot = (screenshot * 255).astype(np.uint8)
 
-    MineLand spawns Minecraft internally, so this test runs MineLand
-    directly in the current container (empo-dev) using headless mode.
+    return screenshot
 
-    Note: This requires significant resources and can take 1-2 minutes
-    to start Minecraft on first run.
 
-    IMPORTANT: MineLand requires Xvfb for RGB capture even in headless mode!
+def test_three_player_world():
+    """Create a 3-player MineLand world and capture screenshots from all perspectives.
+
+    This test:
+    1. Creates a MineLand environment with 3 agents (robot, human_a, human_b)
+    2. Sets up the custom world terrain using Minecraft commands
+    3. Takes 2 steps with random actions to get 6 screenshots (3 players × 2 timesteps)
+    4. Returns the 6 screenshots organized by player and timestep
+
+    Returns:
+        Dictionary with keys 'step1' and 'step2', each containing a dict mapping
+        player names to screenshots. Returns None if failed.
     """
     env = None
     xvfb_proc = None
     try:
         import mineland
-        import numpy as np
+        import time
+
+        # Import our world configuration and setup functions
+        from src.llm_hierarchical_modeler import (
+            get_spawn_points,
+            get_player_spawn_info,
+            generate_world_commands,
+            generate_teleport_commands,
+        )
+
+        # Get the spawn info
+        spawn_points = get_spawn_points()
+        spawn_info = get_player_spawn_info()
+        player_names = [sp["name"] for sp in spawn_points]
+
+        print(f"  Creating 3-player world with players: {player_names}")
+        for info in spawn_info:
+            print(
+                f"    - {info['name']}: {info['coordinates']} ({info['description']})"
+            )
 
         # Start Xvfb if not already running (required for RGB capture)
         xvfb_proc = start_xvfb()
 
-        print("  Starting MineLand in headless mode...")
+        print("  Starting MineLand with 3 agents...")
         print("  Note: First run downloads Minecraft (~1-2 minutes)")
         print(f"  Timeout: {MINELAND_TIMEOUT}s")
 
@@ -269,22 +341,18 @@ def test_mineland_screenshot():
             signal.alarm(MINELAND_TIMEOUT)
 
         try:
-            # Create MineLand environment
-            # This will spawn Minecraft internally
-            # Note: Must specify image_size to get RGB observations
-            # See: https://github.com/cocacola-lab/MineLand/blob/main/scripts/rgb_frame.py
-            #
-            # IMPORTANT: headless=False is required for RGB capture!
-            # headless=True disables the prismarine-viewer which captures RGB frames.
-            # The Xvfb virtual display provides a "fake" screen for rendering.
+            # Create agent configs for all 3 players
+            agents_config = [{"name": name} for name in player_names]
+
             env = mineland.make(
                 task_id="playground",
-                agents_count=1,
-                headless=False,  # Must be False to capture RGB frames (Xvfb provides display)
-                image_size=(180, 320),  # (height, width) - required for RGB capture
+                agents_count=AGENTS_COUNT,
+                agents_config=agents_config,
+                headless=False,  # Required for RGB capture
+                image_size=(180, 320),  # (height, width)
             )
 
-            print("  ✓ MineLand environment created")
+            print(f"  ✓ MineLand {AGENTS_COUNT}-agent environment created")
             print("  Resetting environment...")
             obs = env.reset()
 
@@ -292,271 +360,6 @@ def test_mineland_screenshot():
             if hasattr(signal, "SIGALRM"):
                 signal.alarm(0)
                 signal.signal(signal.SIGALRM, old_handler)
-
-        # Take actions to get an interesting frame
-        print(f"  Taking {NUM_WARMUP_STEPS} warmup steps...")
-        for step in range(NUM_WARMUP_STEPS):
-            # Use no-op action: Action(type=RESUME, code="")
-            action = mineland.Action.no_op(1)  # 1 agent
-            obs, code_info, event, done, task_info = env.step(action)
-
-        # Extract the RGB observation image
-        # MineLand returns observations in CHW format (channels, height, width)
-        if isinstance(obs, list) and len(obs) > 0:
-            agent_obs = obs[0]
-            if hasattr(agent_obs, "rgb"):
-                screenshot = agent_obs.rgb
-            elif isinstance(agent_obs, dict) and "rgb" in agent_obs:
-                screenshot = agent_obs["rgb"]
-            else:
-                print(f"✗ Unexpected agent observation format: {type(agent_obs)}")
-                print(
-                    f"  Available attributes: {dir(agent_obs) if hasattr(agent_obs, '__dir__') else 'N/A'}"
-                )
-                env.close()
-                return None
-        elif isinstance(obs, np.ndarray):
-            screenshot = obs
-        else:
-            print(f"✗ Unexpected observation format: {type(obs)}")
-            env.close()
-            return None
-
-        # Check if screenshot is valid (not empty)
-        if (
-            screenshot is None
-            or screenshot.size == 0
-            or (len(screenshot.shape) >= 2 and screenshot.shape[1] == 0)
-        ):
-            print(
-                f"✗ Screenshot is empty or invalid: shape={screenshot.shape if screenshot is not None else 'None'}"
-            )
-            print("  Make sure image_size is specified in mineland.make()")
-            env.close()
-            return None
-
-        print(
-            f"✓ Captured screenshot: shape={screenshot.shape}, dtype={screenshot.dtype}"
-        )
-
-        # Convert from CHW to HWC format (MineLand uses CHW, PIL uses HWC)
-        if len(screenshot.shape) == 3 and screenshot.shape[0] == 3:
-            screenshot = np.transpose(screenshot, (1, 2, 0))
-            print(f"  Transposed to HWC format: shape={screenshot.shape}")
-
-        # Save screenshot to outputs directory
-        try:
-            from PIL import Image
-
-            outputs_dir = os.path.join(
-                os.path.dirname(os.path.dirname(__file__)), "outputs"
-            )
-            os.makedirs(outputs_dir, exist_ok=True)
-            screenshot_path = os.path.join(outputs_dir, "mineland_screenshot.png")
-
-            # Convert numpy array to PIL Image and save
-            if screenshot.dtype != np.uint8:
-                screenshot = (screenshot * 255).astype(np.uint8)
-            img = Image.fromarray(screenshot)
-            img.save(screenshot_path)
-            print(f"✓ Screenshot saved to: {screenshot_path}")
-        except Exception as e:
-            print(f"⚠ Could not save screenshot: {e}")
-
-        env.close()
-        # Stop Xvfb if we started it
-        if xvfb_proc is not None:
-            xvfb_proc.terminate()
-        return screenshot
-
-    except TimeoutError:
-        print(f"✗ MineLand initialization timed out after {MINELAND_TIMEOUT} seconds")
-        print("  Minecraft may still be downloading or starting.")
-        print("  Try again or increase timeout.")
-        if env is not None:
-            try:
-                env.close()
-            except Exception:
-                pass
-        if xvfb_proc is not None:
-            xvfb_proc.terminate()
-        return None
-    except Exception as e:
-        error_msg = str(e)
-        print(f"✗ Failed to capture MineLand screenshot: {e}")
-        import traceback
-
-        traceback.print_exc()
-        if env is not None:
-            try:
-                env.close()
-            except Exception:
-                pass
-        if xvfb_proc is not None:
-            xvfb_proc.terminate()
-        return None
-
-
-def test_vision_llm_description(screenshot):
-    """Send screenshot to Ollama vision LLM and get description."""
-    try:
-        import ollama
-        from PIL import Image
-        import numpy as np
-
-        ollama_host = os.environ.get("OLLAMA_HOST", DEFAULT_OLLAMA_HOST)
-        model_name = os.environ.get("OLLAMA_VISION_MODEL", DEFAULT_VISION_MODEL)
-
-        # Check if the model is available
-        client = ollama.Client(host=ollama_host)
-        models = client.list()
-        model_names = [
-            m.get("name", m.get("model", "")) for m in models.get("models", [])
-        ]
-
-        if not any(model_name in name for name in model_names):
-            print(f"✗ Vision model '{model_name}' not found in Ollama")
-            print(
-                f"  Available models: {', '.join(model_names) if model_names else 'none'}"
-            )
-            print(f"  Pull it with: docker exec ollama ollama pull {model_name}")
-            return False
-
-        print(f"  Sending screenshot to {model_name} via {ollama_host}...")
-
-        # Convert numpy array to PIL Image, then to bytes
-        if isinstance(screenshot, np.ndarray):
-            # MineLand images are typically RGB
-            img = Image.fromarray(screenshot.astype("uint8"), "RGB")
-        else:
-            img = screenshot
-
-        # Save to bytes buffer
-        buffer = io.BytesIO()
-        img.save(buffer, format="PNG")
-        image_bytes = buffer.getvalue()
-
-        response = client.chat(
-            model=model_name,
-            messages=[
-                {
-                    "role": "user",
-                    "content": "Describe what you see in this Minecraft screenshot in 2-3 sentences.",
-                    "images": [image_bytes],
-                }
-            ],
-        )
-
-        description = response["message"]["content"]
-        print(f"✓ LLM description received:")
-        print(f'  "{description}"')
-
-        # Save LLM response to outputs directory
-        try:
-            outputs_dir = os.path.join(
-                os.path.dirname(os.path.dirname(__file__)), "outputs"
-            )
-            os.makedirs(outputs_dir, exist_ok=True)
-            response_path = os.path.join(outputs_dir, "mineland_llm_response.txt")
-            with open(response_path, "w") as f:
-                f.write(f"Model: {model_name}\n")
-                f.write(
-                    f"Prompt: Describe what you see in this Minecraft screenshot in 2-3 sentences.\n"
-                )
-                f.write(f"\nResponse:\n{description}\n")
-            print(f"✓ LLM response saved to: {response_path}")
-        except Exception as e:
-            print(f"⚠ Could not save LLM response: {e}")
-
-        return True
-
-    except ImportError as e:
-        print(f"✗ Missing required package: {e}")
-        print("  Install with: pip install ollama Pillow")
-        return False
-    except Exception as e:
-        print(f"✗ Failed to get LLM description: {e}")
-        import traceback
-
-        traceback.print_exc()
-        return False
-
-
-def test_three_player_screenshots(env=None, reuse_env=False):
-    """Capture screenshots from all three player positions in a three-player world.
-
-    This test teleports an agent to each spawn position to capture screenshots.
-    It builds the custom terrain using Minecraft commands.
-
-    Args:
-        env: Optional existing MineLand environment to reuse. If None, creates new one.
-        reuse_env: If True, don't close the environment when done (for reuse).
-
-    Returns:
-        Tuple of (screenshots, env) where screenshots is list of (player_name, screenshot)
-        tuples. Returns (None, None) if failed.
-    """
-    xvfb_proc = None
-    created_env = False
-    try:
-        import mineland
-        import numpy as np
-        import time
-
-        # Import our world configuration and setup functions
-        from src.llm_hierarchical_modeler import (
-            get_player_spawn_info,
-            generate_world_commands,
-        )
-
-        # Get the spawn info
-        spawn_info = get_player_spawn_info()
-
-        print(f"  Number of spawn points: {len(spawn_info)}")
-        for info in spawn_info:
-            print(
-                f"    - {info['name']}: {info['coordinates']} ({info['description']})"
-            )
-
-        # Create environment if not provided
-        if env is None:
-            # Start Xvfb if not already running (required for RGB capture)
-            xvfb_proc = start_xvfb()
-
-            print(
-                "  Starting MineLand with 1 agent (will teleport to each position)..."
-            )
-            print("  Note: First run downloads Minecraft (~1-2 minutes)")
-            print(f"  Timeout: {MINELAND_TIMEOUT}s")
-
-            # Set up a timeout for the MineLand initialization
-            if hasattr(signal, "SIGALRM"):
-                old_handler = signal.signal(signal.SIGALRM, timeout_handler)
-                signal.alarm(MINELAND_TIMEOUT)
-
-            try:
-                env = mineland.make(
-                    task_id="playground",
-                    agents_count=1,
-                    agents_config=[{"name": "observer"}],
-                    headless=False,  # Required for RGB capture
-                    image_size=(180, 320),  # (height, width)
-                )
-                created_env = True
-
-                print("  ✓ MineLand environment created")
-                print("  Resetting environment...")
-                obs = env.reset()
-
-            finally:
-                if hasattr(signal, "SIGALRM"):
-                    signal.alarm(0)
-                    signal.signal(signal.SIGALRM, old_handler)
-        else:
-            print("  Reusing existing MineLand environment")
-            # Just take a step to ensure we have an observation
-            action = mineland.Action.no_op(1)
-            obs, _, _, _, _ = env.step(action)
 
         # Access server manager to execute commands
         server_manager = None
@@ -575,75 +378,56 @@ def test_three_player_screenshots(env=None, reuse_env=False):
             for i, cmd in enumerate(world_commands[:MAX_TEST_WORLD_COMMANDS]):
                 server_manager.execute(cmd)
                 if i % 10 == 0:
-                    time.sleep(0.1)
+                    time.sleep(0.1)  # Allow server to process commands
             print(
                 f"  ✓ Executed {min(MAX_TEST_WORLD_COMMANDS, len(world_commands))} "
                 "world build commands"
             )
+
+            # Teleport players to their spawn positions
+            print("  Teleporting players to spawn positions...")
+            for cmd in generate_teleport_commands():
+                server_manager.execute(cmd)
             time.sleep(2)
 
         # Take initial warmup steps
         print(f"  Taking {NUM_WARMUP_STEPS} warmup steps...")
         for step in range(NUM_WARMUP_STEPS):
-            action = mineland.Action.no_op(1)
+            action = mineland.Action.no_op(AGENTS_COUNT)
             obs, code_info, event, done, task_info = env.step(action)
 
-        # Capture screenshots from each spawn position
-        screenshots = []
+        # Collect screenshots from 2 timesteps
+        all_screenshots = {"step1": {}, "step2": {}}
 
-        for spawn in spawn_info:
-            name = spawn["name"]
-            x, y, z = spawn["coordinates"]
+        for step_num in range(1, 3):
+            print(f"  Capturing screenshots for step {step_num}...")
 
-            # Teleport to spawn position
-            if server_manager is not None:
-                print(f"  Teleporting to {name} position ({x}, {y}, {z})...")
-                server_manager.execute(f"tp observer {x} {y} {z}")
-                time.sleep(1)  # Wait for teleport
+            # Take a step with no-op actions for stability
+            action = mineland.Action.no_op(AGENTS_COUNT)
+            obs, code_info, event, done, task_info = env.step(action)
 
-            # Take a few steps to update the view
-            for _ in range(5):
-                action = mineland.Action.no_op(1)
-                obs, code_info, event, done, task_info = env.step(action)
-
-            # Extract screenshot
-            if isinstance(obs, list) and len(obs) > 0:
-                agent_obs = obs[0]
-                if hasattr(agent_obs, "rgb"):
-                    screenshot = agent_obs.rgb
-                elif isinstance(agent_obs, dict) and "rgb" in agent_obs:
-                    screenshot = agent_obs["rgb"]
-                else:
-                    print(f"  ⚠ Could not get RGB for {name}")
-                    continue
-
-                # Check if screenshot is valid
-                if screenshot is None or screenshot.size == 0:
-                    print(f"  ⚠ Empty screenshot for {name}")
-                    continue
-
-                # Convert from CHW to HWC format if needed
-                if len(screenshot.shape) == 3 and screenshot.shape[0] == 3:
-                    screenshot = np.transpose(screenshot, (1, 2, 0))
-
-                # Convert to uint8 if needed
-                if screenshot.dtype != np.uint8:
-                    screenshot = (screenshot * 255).astype(np.uint8)
-
-                screenshots.append((name, screenshot))
-                print(f"  ✓ Captured screenshot for {name}: shape={screenshot.shape}")
+            # Extract screenshots for all agents
+            if isinstance(obs, list) and len(obs) >= AGENTS_COUNT:
+                for i, (name, agent_obs) in enumerate(zip(player_names, obs)):
+                    screenshot = extract_screenshot(agent_obs, name)
+                    if screenshot is not None:
+                        all_screenshots[f"step{step_num}"][name] = screenshot
+                        print(f"    ✓ {name} step {step_num}: shape={screenshot.shape}")
+                    else:
+                        print(f"    ⚠ Failed to capture {name} step {step_num}")
             else:
-                print(f"  ⚠ No observation for {name}")
+                print(
+                    f"  ⚠ Expected {AGENTS_COUNT} observations, got: {len(obs) if isinstance(obs, list) else type(obs)}"
+                )
 
-        if len(screenshots) == 0:
-            print("✗ No screenshots captured")
-            if not reuse_env and env is not None:
-                env.close()
-            if xvfb_proc is not None:
-                xvfb_proc.terminate()
-            return (None, None)
+        # Verify we got all 6 screenshots
+        total_screenshots = sum(len(v) for v in all_screenshots.values())
+        if total_screenshots < 6:
+            print(f"✗ Only captured {total_screenshots}/6 screenshots")
+        else:
+            print("✓ Captured all 6 screenshots successfully")
 
-        # Save screenshots to outputs directory
+        # Save individual screenshots to outputs directory
         try:
             from PIL import Image
 
@@ -652,72 +436,241 @@ def test_three_player_screenshots(env=None, reuse_env=False):
             )
             os.makedirs(outputs_dir, exist_ok=True)
 
-            for name, screenshot in screenshots:
-                screenshot_path = os.path.join(
-                    outputs_dir, f"mineland_three_player_{name}.png"
-                )
-                img = Image.fromarray(screenshot)
-                img.save(screenshot_path)
-                print(f"  ✓ Saved {name} screenshot to: {screenshot_path}")
+            for step_key, step_screenshots in all_screenshots.items():
+                for name, screenshot in step_screenshots.items():
+                    screenshot_path = os.path.join(
+                        outputs_dir, f"mineland_{name}_{step_key}.png"
+                    )
+                    img = Image.fromarray(screenshot)
+                    img.save(screenshot_path)
+                    print(f"  ✓ Saved {name} {step_key} to: {screenshot_path}")
         except Exception as e:
-            print(f"  ⚠ Could not save screenshots: {e}")
+            print(f"  ⚠ Could not save individual screenshots: {e}")
 
-        # Only close if we created the env and not reusing
-        if not reuse_env:
-            env.close()
-            if xvfb_proc is not None:
-                xvfb_proc.terminate()
-            return (screenshots, None)
-        else:
-            return (screenshots, env)
+        env.close()
+        if xvfb_proc is not None:
+            xvfb_proc.terminate()
+
+        return all_screenshots
 
     except TimeoutError:
         print(f"✗ MineLand initialization timed out after {MINELAND_TIMEOUT} seconds")
-        if env is not None and created_env:
+        if env is not None:
             try:
                 env.close()
             except Exception:
                 pass
         if xvfb_proc is not None:
             xvfb_proc.terminate()
-        return (None, None)
+        return None
     except Exception as e:
-        print(f"✗ Failed to capture three-player screenshots: {e}")
+        print(f"✗ Failed to create three-player world: {e}")
         import traceback
 
         traceback.print_exc()
-        if env is not None and created_env:
+        if env is not None:
             try:
                 env.close()
             except Exception:
                 pass
         if xvfb_proc is not None:
             xvfb_proc.terminate()
-        return (None, None)
+        return None
 
 
-def test_three_player_llm_descriptions(screenshots):
-    """Get detailed LLM descriptions for each player's view.
-
-    Sends each player's screenshot to the vision LLM with a prompt asking
-    for detailed spatial information about what they can see.
+def create_six_image_grid_pdf(all_screenshots, llm_prompt, llm_response, output_path):
+    """Create a PDF with 6 screenshots in a 2x3 grid with LLM caption.
 
     Args:
-        screenshots: List of (player_name, screenshot) tuples
+        all_screenshots: Dict with 'step1' and 'step2' keys, each containing
+                        player name -> screenshot mappings
+        llm_prompt: The prompt sent to the LLM
+        llm_response: The LLM's response
+        output_path: Path to save the PDF
 
     Returns:
-        List of (player_name, description) tuples, or None if failed.
+        True if successful, False otherwise
+    """
+    try:
+        from PIL import Image
+        from reportlab.lib.pagesizes import letter, landscape
+        from reportlab.platypus import (
+            SimpleDocTemplate,
+            Image as RLImage,
+            Paragraph,
+            Spacer,
+            Table,
+            TableStyle,
+        )
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import inch
+        from reportlab.lib import colors
+        import tempfile
+
+        print("  Creating PDF with 2×3 grid of screenshots...")
+
+        # Get player names in order
+        player_names = ["robot", "human_a", "human_b"]
+
+        # Create temporary image files for the grid
+        temp_files = []
+        grid_images = []
+
+        # Row 1: Step 1 images (robot, human_a, human_b)
+        # Row 2: Step 2 images (robot, human_a, human_b)
+        for step_key in ["step1", "step2"]:
+            row_images = []
+            for name in player_names:
+                if name in all_screenshots.get(step_key, {}):
+                    screenshot = all_screenshots[step_key][name]
+                    # Save to temp file
+                    temp_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                    temp_files.append(temp_file.name)
+                    img = Image.fromarray(screenshot)
+                    img.save(temp_file.name)
+                    row_images.append(temp_file.name)
+                else:
+                    row_images.append(None)
+            grid_images.append(row_images)
+
+        # Create PDF
+        doc = SimpleDocTemplate(
+            output_path,
+            pagesize=landscape(letter),
+            leftMargin=0.5 * inch,
+            rightMargin=0.5 * inch,
+            topMargin=0.5 * inch,
+            bottomMargin=0.5 * inch,
+        )
+
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle(
+            "Title",
+            parent=styles["Heading1"],
+            fontSize=14,
+            alignment=1,  # Center
+        )
+        caption_style = ParagraphStyle(
+            "Caption",
+            parent=styles["Normal"],
+            fontSize=8,
+            leading=10,
+        )
+
+        story = []
+
+        # Title
+        story.append(
+            Paragraph(
+                "Three-Player Minecraft World - 6 Views (2 Timesteps × 3 Players)",
+                title_style,
+            )
+        )
+        story.append(Spacer(1, 0.2 * inch))
+
+        # Create table with images
+        # Each image should be about 3 inches wide to fit 3 across in landscape
+        # MineLand image_size=(180, 320) means 320 width x 180 height
+        # Aspect ratio = 320/180 ≈ 1.78
+        img_width = 2.8 * inch
+        img_height = img_width / (320 / 180)  # Correct aspect ratio
+
+        table_data = []
+
+        # Header row
+        table_data.append(
+            [
+                Paragraph("<b>Robot (0, 70, 0)</b>", caption_style),
+                Paragraph("<b>Human A (-60, 70, 0)</b>", caption_style),
+                Paragraph("<b>Human B (60, 70, 0)</b>", caption_style),
+            ]
+        )
+
+        # Image rows
+        for step_idx, row_images in enumerate(grid_images):
+            row = []
+            for img_path in row_images:
+                if img_path:
+                    row.append(RLImage(img_path, width=img_width, height=img_height))
+                else:
+                    row.append(Paragraph("(Missing)", caption_style))
+            table_data.append(row)
+            # Add step label
+            table_data.append(
+                [
+                    Paragraph(f"<i>Step {step_idx + 1}</i>", caption_style),
+                    Paragraph(f"<i>Step {step_idx + 1}</i>", caption_style),
+                    Paragraph(f"<i>Step {step_idx + 1}</i>", caption_style),
+                ]
+            )
+
+        table = Table(table_data, colWidths=[img_width + 0.2 * inch] * 3)
+        table.setStyle(
+            TableStyle(
+                [
+                    ("ALIGN", (0, 0), (-1, -1), "CENTER"),
+                    ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                    ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                    ("BACKGROUND", (0, 0), (-1, 0), colors.lightgrey),
+                ]
+            )
+        )
+
+        story.append(table)
+        story.append(Spacer(1, 0.3 * inch))
+
+        # LLM Prompt section
+        story.append(Paragraph("<b>LLM Prompt:</b>", styles["Heading3"]))
+        # Wrap prompt text
+        prompt_text = llm_prompt.replace("\n", "<br/>")
+        story.append(Paragraph(prompt_text, caption_style))
+        story.append(Spacer(1, 0.2 * inch))
+
+        # LLM Response section
+        story.append(Paragraph("<b>LLM Response:</b>", styles["Heading3"]))
+        # Wrap response text
+        response_text = llm_response.replace("\n", "<br/>")
+        story.append(Paragraph(response_text, caption_style))
+
+        # Build PDF
+        doc.build(story)
+
+        # Cleanup temp files
+        for temp_file in temp_files:
+            try:
+                os.unlink(temp_file)
+            except Exception:
+                pass
+
+        print(f"  ✓ PDF saved to: {output_path}")
+        return True
+
+    except ImportError as e:
+        print(f"  ⚠ Could not create PDF (missing reportlab): {e}")
+        print("    Install with: pip install reportlab")
+        return False
+    except Exception as e:
+        print(f"  ⚠ Failed to create PDF: {e}")
+        import traceback
+
+        traceback.print_exc()
+        return False
+
+
+def test_six_image_llm_description(all_screenshots):
+    """Send all 6 screenshots to the LLM in a single call for detailed descriptions.
+
+    Args:
+        all_screenshots: Dict with 'step1' and 'step2' keys, each containing
+                        player name -> screenshot mappings
+
+    Returns:
+        Tuple of (prompt, response, pdf_created) or None if failed
     """
     try:
         import ollama
         from PIL import Image
         import numpy as np
-
-        # Import our world configuration for context
-        from src.llm_hierarchical_modeler import (
-            create_three_player_world_config,
-            get_player_spawn_info,
-        )
 
         ollama_host = os.environ.get("OLLAMA_HOST", DEFAULT_OLLAMA_HOST)
         model_name = os.environ.get("OLLAMA_VISION_MODEL", DEFAULT_VISION_MODEL)
@@ -737,107 +690,92 @@ def test_three_player_llm_descriptions(screenshots):
             print(f"  Pull it with: docker exec ollama ollama pull {model_name}")
             return None
 
-        # Get spawn info for context
-        config = create_three_player_world_config()
-        spawn_info = get_player_spawn_info(config)
-        spawn_info_map = {info["name"]: info for info in spawn_info}
+        print(f"  Sending all 6 screenshots to {model_name}...")
 
-        descriptions = []
+        # Collect all 6 images in order: robot_s1, human_a_s1, human_b_s1, robot_s2, human_a_s2, human_b_s2
+        player_names = ["robot", "human_a", "human_b"]
+        image_bytes_list = []
 
-        for player_name, screenshot in screenshots:
-            # Get player-specific context
-            player_info = spawn_info_map.get(player_name, {})
-            coords = player_info.get("coordinates", (0, 0, 0))
-            location_desc = player_info.get("description", "unknown location")
-            resources = player_info.get("nearby_resources", {})
-            resource_desc = resources.get("description", "")
+        for step_key in ["step1", "step2"]:
+            for name in player_names:
+                if name in all_screenshots.get(step_key, {}):
+                    screenshot = all_screenshots[step_key][name]
+                    img = Image.fromarray(screenshot.astype("uint8"), "RGB")
+                    buffer = io.BytesIO()
+                    img.save(buffer, format="PNG")
+                    image_bytes_list.append(buffer.getvalue())
+                else:
+                    print(f"  ⚠ Missing {name} {step_key}")
 
-            # Build context-aware prompt using the template
-            prompt = THREE_PLAYER_DESCRIPTION_PROMPT.format(
-                player_name=player_name,
-                coords=coords,
-                location_desc=location_desc,
-                resource_desc=resource_desc,
-            )
+        if len(image_bytes_list) < 6:
+            print(f"  ⚠ Only have {len(image_bytes_list)}/6 images")
 
-            print(f"  Sending {player_name} screenshot to {model_name}...")
+        prompt = SIX_IMAGE_DESCRIPTION_PROMPT
 
-            # Convert numpy array to PIL Image, then to bytes
-            if isinstance(screenshot, np.ndarray):
-                img = Image.fromarray(screenshot.astype("uint8"), "RGB")
-            else:
-                img = screenshot
+        response = client.chat(
+            model=model_name,
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt,
+                    "images": image_bytes_list,
+                }
+            ],
+        )
 
-            buffer = io.BytesIO()
-            img.save(buffer, format="PNG")
-            image_bytes = buffer.getvalue()
+        llm_response = response["message"]["content"]
+        print(f"✓ LLM description received ({len(llm_response)} chars)")
 
-            response = client.chat(
-                model=model_name,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": prompt,
-                        "images": [image_bytes],
-                    }
-                ],
-            )
-
-            description = response["message"]["content"]
-            descriptions.append((player_name, description))
-
-            print(f"  ✓ {player_name} description received ({len(description)} chars)")
-
-        # Save all descriptions to outputs directory
+        # Save text response to outputs directory
         try:
             outputs_dir = os.path.join(
                 os.path.dirname(os.path.dirname(__file__)), "outputs"
             )
             os.makedirs(outputs_dir, exist_ok=True)
             response_path = os.path.join(
-                outputs_dir, "mineland_three_player_descriptions.txt"
+                outputs_dir, "mineland_six_view_description.txt"
             )
 
             with open(response_path, "w") as f:
-                f.write("Three-Player World LLM Descriptions\n")
+                f.write("Six-View Three-Player World LLM Description\n")
                 f.write(f"Model: {model_name}\n")
                 f.write("=" * 60 + "\n\n")
+                f.write("PROMPT:\n")
+                f.write("-" * 40 + "\n")
+                f.write(prompt + "\n\n")
+                f.write("RESPONSE:\n")
+                f.write("-" * 40 + "\n")
+                f.write(llm_response + "\n")
 
-                for player_name, description in descriptions:
-                    player_info = spawn_info_map.get(player_name, {})
-                    f.write(f"Player: {player_name}\n")
-                    f.write(f"Role: {player_info.get('role', 'unknown')}\n")
-                    f.write(
-                        f"Coordinates: {player_info.get('coordinates', 'unknown')}\n"
-                    )
-                    f.write(
-                        f"Expected Location: {player_info.get('description', 'unknown')}\n"
-                    )
-                    f.write("-" * 40 + "\n")
-                    f.write(f"{description}\n")
-                    f.write("\n" + "=" * 60 + "\n\n")
-
-            print(f"  ✓ All descriptions saved to: {response_path}")
+            print(f"  ✓ Text response saved to: {response_path}")
         except Exception as e:
-            print(f"  ⚠ Could not save descriptions: {e}")
+            print(f"  ⚠ Could not save text response: {e}")
 
-        # Print descriptions
+        # Create PDF with 2×3 grid and caption
+        pdf_path = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)),
+            "outputs",
+            "mineland_six_views.pdf",
+        )
+        pdf_created = create_six_image_grid_pdf(
+            all_screenshots, prompt, llm_response, pdf_path
+        )
+
+        # Print response
         print("\n" + "=" * 60)
-        print("Player View Descriptions:")
+        print("LLM Description of All 6 Views:")
         print("=" * 60)
-        for player_name, description in descriptions:
-            print(f"\n[{player_name.upper()}]")
-            print(description)
-            print()
+        print(llm_response)
+        print()
 
-        return descriptions
+        return (prompt, llm_response, pdf_created)
 
     except ImportError as e:
         print(f"✗ Missing required package: {e}")
-        print("  Install with: pip install ollama Pillow")
+        print("  Install with: pip install ollama Pillow reportlab")
         return None
     except Exception as e:
-        print(f"✗ Failed to get LLM descriptions: {e}")
+        print(f"✗ Failed to get LLM description: {e}")
         import traceback
 
         traceback.print_exc()
@@ -875,9 +813,9 @@ def run_basic_tests():
 
 
 def run_integration_tests():
-    """Run full integration tests including MineLand environment and Ollama vision."""
+    """Run full integration tests with 3-player MineLand and Ollama vision."""
     print("=" * 60)
-    print("MineLand & Ollama Integration Test")
+    print("MineLand & Ollama Integration Test (3-Player)")
     print("=" * 60)
     print()
 
@@ -896,45 +834,25 @@ def run_integration_tests():
     results.append(ollama_ok)
     print()
 
-    print("4. Testing MineLand screenshot capture...")
-    screenshot = test_mineland_screenshot()
-    results.append(screenshot is not None)
+    # Main test: 3-player world with 6 screenshots
+    print("4. Creating 3-player MineLand world and capturing 6 screenshots...")
+    all_screenshots = test_three_player_world()
+
+    # Check we got 6 screenshots
+    total_screenshots = 0
+    if all_screenshots:
+        total_screenshots = sum(len(v) for v in all_screenshots.values())
+    screenshots_ok = total_screenshots == 6
+    results.append(screenshots_ok)
     print()
 
-    if screenshot is not None and ollama_ok:
-        print("5. Testing vision LLM description...")
-        results.append(test_vision_llm_description(screenshot))
+    if screenshots_ok and ollama_ok:
+        print("5. Sending 6 screenshots to vision LLM for detailed description...")
+        llm_result = test_six_image_llm_description(all_screenshots)
+        results.append(llm_result is not None)
         print()
     else:
-        print("5. Skipping vision LLM test (prerequisites failed)")
-        results.append(False)
-        print()
-
-    # Three-player world test with detailed spatial descriptions
-    print("6. Testing three-player world screenshots...")
-    three_player_result = test_three_player_screenshots()
-    three_player_screenshots = three_player_result[0] if three_player_result else None
-    results.append(
-        three_player_screenshots is not None and len(three_player_screenshots) == 3
-    )
-    print()
-
-    if (
-        three_player_screenshots is not None
-        and len(three_player_screenshots) == 3
-        and ollama_ok
-    ):
-        print("7. Testing three-player detailed LLM descriptions...")
-        three_player_descriptions = test_three_player_llm_descriptions(
-            three_player_screenshots
-        )
-        results.append(
-            three_player_descriptions is not None
-            and len(three_player_descriptions) == 3
-        )
-        print()
-    else:
-        print("7. Skipping three-player LLM descriptions (prerequisites failed)")
+        print("5. Skipping LLM description (prerequisites failed)")
         results.append(False)
         print()
 
