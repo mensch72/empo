@@ -1,3 +1,150 @@
+"""
+MultiGrid Environment - Multi-agent gridworld simulation.
+
+This module provides a multi-agent extension of the MiniGrid environment with
+support for various object types, agent interactions, and both standard RL
+rollouts and model-based planning through DAG computation.
+
+================================================================================
+STATE REPRESENTATION ARCHITECTURE
+================================================================================
+
+This module provides THREE levels of state representation, each optimized for
+different use cases:
+
+1. FULL STATE (get_state/set_state)
+   - Complete grid serialization including all 90 cells
+   - Highest fidelity, but slowest due to serialization overhead
+   - Use for: debugging, visualization, saving/loading checkpoints
+
+2. COMPACT STATE (get_compact_state/set_compact_state)
+   - Only stores mutable/mobile objects (agents, blocks, doors, magic walls)
+   - 4x faster get, 2x faster set compared to full state
+   - Format: (step_count, agent_states, mobile_objects, mutable_objects)
+   - Use for: hashing states in DAG computation
+
+3. NATIVE COMPACT STATE (transition_probabilities_native)
+   - Works directly on compact state tuples without grid synchronization
+   - 7x faster than full transition_probabilities
+   - Use for: high-performance DAG computation and backward induction
+
+================================================================================
+USAGE GUIDE
+================================================================================
+
+--- STANDARD ROLLOUTS (RL training, episode simulation) ---
+
+For standard rollouts where you step through the environment sequentially,
+use the normal gym API:
+
+    env = SmallOneOrTwoChambersMapEnv()
+    obs, info = env.reset()
+    
+    for step in range(max_steps):
+        actions = [agent_policy(obs[i]) for i in range(num_agents)]
+        obs, rewards, terminated, truncated, info = env.step(actions)
+        
+        if any(terminated) or any(truncated):
+            break
+    
+    # Render episode as movie
+    env.render_movie("episode.mp4")
+
+The standard API uses full state representation internally.
+
+--- DAG COMPUTATION AND BACKWARD INDUCTION ---
+
+For model-based planning where you need to enumerate all reachable states
+and compute value functions, use the optimized compact state methods:
+
+    from empo.world_model import WorldModel
+    
+    env = SmallOneOrTwoChambersMapEnv()
+    env.reset()
+    
+    # Step 1: Compute DAG with cached transitions (uses compact states internally)
+    states, state_to_idx, successors, transitions = env.get_dag(
+        return_probabilities=True
+    )
+    # states: list of compact state tuples
+    # transitions[i]: list of (action, probs, succ_indices) for state i
+    
+    # Step 2: Backward induction using cached transitions
+    V = [0.0] * len(states)  # Value function
+    policy = [None] * len(states)  # Optimal actions
+    
+    # Iterate states in reverse topological order (last to first)
+    for state_idx in range(len(states) - 1, -1, -1):
+        state = states[state_idx]
+        
+        # Compute reward for this state
+        env.set_compact_state(state)
+        reward = compute_reward(env)
+        
+        # Find best action using Bellman equation
+        best_value = reward
+        best_action = None
+        
+        for action, probs, succ_indices in transitions[state_idx]:
+            # Expected value under this action
+            expected_future = sum(
+                p * V[succ_idx] for p, succ_idx in zip(probs, succ_indices)
+            )
+            value = reward + gamma * expected_future
+            
+            if value > best_value:
+                best_value = value
+                best_action = action
+        
+        V[state_idx] = best_value
+        policy[state_idx] = best_action
+
+--- HIGHEST PERFORMANCE: NATIVE COMPACT MODE ---
+
+For maximum performance when you need to call transition_probabilities many
+times outside of get_dag (e.g., custom algorithms), use native compact mode:
+
+    env.reset()
+    compact_state = env.get_compact_state()
+    
+    # Get transitions without grid serialization overhead
+    # Returns list of (probability, successor_compact_state) tuples
+    result = env.transition_probabilities_native(compact_state, actions)
+    
+    # Process results
+    for prob, succ_compact_state in result:
+        # succ_compact_state is already a compact state tuple
+        # No conversion needed
+        ...
+
+This is 7.1x faster than the full transition_probabilities() method.
+
+================================================================================
+COMPACT STATE FORMAT
+================================================================================
+
+Compact state is a tuple: (step_count, agent_states, mobile_objects, mutable_objects)
+
+- step_count: int
+  Current step number (0 to max_steps-1)
+
+- agent_states: tuple of tuples
+  For each agent: (pos_x, pos_y, dir, terminated, started, paused, 
+                   on_unsteady_ground, carrying_type, carrying_color)
+
+- mobile_objects: tuple of tuples  
+  For blocks/rocks: ('block'/'rock', x, y, color)
+
+- mutable_objects: tuple of tuples
+  For doors: ('door', x, y, is_open, is_locked)
+  For boxes: ('box', x, y, contains_type, contains_color)
+  For magic walls: ('magicwall', x, y, is_magic, magic_side, entry_prob, solidify_prob)
+
+Compact states are hashable and can be used as dictionary keys or set members.
+
+================================================================================
+"""
+
 import math
 import gymnasium as gym
 from enum import IntEnum
