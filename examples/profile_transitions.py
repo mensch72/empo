@@ -475,12 +475,332 @@ def analyze_return_format():
     print(f"  Alternative format: {alt_time:.2f}μs")
 
 
+def detailed_line_profiling_native():
+    """
+    Detailed line-by-line profiling of transition_probabilities_native internals.
+    
+    This function inserts timing code to measure specific lines within
+    the transition_probabilities_native method implementation.
+    """
+    print("=" * 70)
+    print("Detailed Line Profiling of transition_probabilities_native() internals")
+    print("=" * 70)
+    
+    env = SmallOneOrTwoChambersMapEnv()
+    env.reset()
+    
+    compact_state = env.get_compact_state()
+    num_agents = len(env.agents)
+    
+    # Use forward actions to trigger deterministic case (most common)
+    actions = [3] * num_agents  # forward for all
+    
+    n_iter = 500
+    
+    # Timing accumulators
+    timings = {
+        'total': 0.0,
+        'step_count_check': 0.0,
+        'action_validation': 0.0,
+        'set_compact_state': 0.0,
+        'read_agent_states': 0.0,
+        'identify_active_agents': 0.0,
+        'stochastic_check': 0.0,
+        'compute_successor_inplace': 0.0,
+        'get_compact_state': 0.0,
+    }
+    
+    print(f"\nProfiling {n_iter} iterations with forward actions...")
+    
+    for _ in range(n_iter):
+        # Total time
+        t_total_start = time.time()
+        
+        # Line: step_count = compact_state[0]
+        t0 = time.time()
+        step_count = compact_state[0]
+        _ = step_count >= env.max_steps
+        timings['step_count_check'] += time.time() - t0
+        
+        # Line: for action in actions
+        t0 = time.time()
+        for action in actions:
+            _ = action < 0 or action >= env.action_space.n
+        timings['action_validation'] += time.time() - t0
+        
+        # Line: self.set_compact_state(compact_state)
+        t0 = time.time()
+        env.set_compact_state(compact_state)
+        timings['set_compact_state'] += time.time() - t0
+        
+        # Line: agent_states = compact_state[1]
+        t0 = time.time()
+        agent_states = compact_state[1]
+        timings['read_agent_states'] += time.time() - t0
+        
+        # Line: identify active agents
+        t0 = time.time()
+        active_agents = []
+        for i in range(num_agents):
+            agent_state = agent_states[i]
+            terminated = agent_state[3]
+            started = agent_state[4]
+            paused = agent_state[5]
+            if (not terminated and not paused and started and 
+                actions[i] != env.actions.still):
+                active_agents.append(i)
+        timings['identify_active_agents'] += time.time() - t0
+        
+        # Line: stochastic check
+        t0 = time.time()
+        is_stochastic = False
+        if len(active_agents) == 1:
+            agent_idx = active_agents[0]
+            if actions[agent_idx] == env.actions.forward:
+                on_unsteady = agent_states[agent_idx][6]
+                if on_unsteady:
+                    is_stochastic = True
+        timings['stochastic_check'] += time.time() - t0
+        
+        # Line: compute successor state
+        t0 = time.time()
+        if hasattr(env, '_compute_successor_state_inplace'):
+            env._compute_successor_state_inplace(actions, tuple(range(num_agents)))
+        timings['compute_successor_inplace'] += time.time() - t0
+        
+        # Line: get result compact state
+        t0 = time.time()
+        result_compact = env.get_compact_state()
+        timings['get_compact_state'] += time.time() - t0
+        
+        timings['total'] += time.time() - t_total_start
+    
+    # Convert to per-call and format
+    print("\n" + "=" * 60)
+    print("LINE-BY-LINE TIMING BREAKDOWN (transition_probabilities_native)")
+    print("=" * 60)
+    print(f"{'Operation':<35} {'Time (ms)':<12} {'% of Total':<10}")
+    print("-" * 60)
+    
+    total_ms = timings['total'] / n_iter * 1000
+    for key, t in sorted(timings.items(), key=lambda x: -x[1]):
+        if key == 'total':
+            continue
+        ms = t / n_iter * 1000
+        pct = 100 * t / timings['total'] if timings['total'] > 0 else 0
+        print(f"  {key:<33} {ms:>8.4f}ms    {pct:>5.1f}%")
+    
+    print("-" * 60)
+    print(f"  {'TOTAL':<33} {total_ms:>8.4f}ms    100.0%")
+    print()
+    
+    # Now profile the actual transition_probabilities_native call for comparison
+    print("Full transition_probabilities_native call for reference:")
+    start = time.time()
+    for _ in range(n_iter):
+        env.transition_probabilities_native(compact_state, actions)
+    actual_time = (time.time() - start) / n_iter * 1000
+    print(f"  Actual time: {actual_time:.4f}ms")
+    print(f"  Sum of components: {total_ms:.4f}ms")
+    if actual_time > total_ms:
+        print(f"  Remaining (not profiled): {actual_time - total_ms:.4f}ms")
+
+
+def detailed_line_profiling():
+    """
+    Detailed line-by-line profiling of transition_probabilities internals.
+    
+    This function inserts timing code to measure specific lines within
+    the transition_probabilities method implementation.
+    """
+    print("=" * 70)
+    print("Detailed Line Profiling of transition_probabilities() internals")
+    print("=" * 70)
+    
+    env = SmallOneOrTwoChambersMapEnv()
+    env.reset()
+    
+    initial_state = env.get_state()
+    num_agents = len(env.agents)
+    
+    # Use forward actions to trigger stochastic transitions
+    actions = [3] * num_agents  # forward for all
+    
+    n_iter = 200
+    
+    # Timing accumulators
+    timings = {
+        'total': 0.0,
+        'dict_conversion': 0.0,
+        'terminal_check': 0.0,
+        'backup_state': 0.0,
+        'set_query_state': 0.0,
+        'step_count_check': 0.0,
+        'active_agents': 0.0,
+        'stochastic_agents': 0.0,
+        'deterministic_step': 0.0,
+        'stochastic_step': 0.0,
+        'result_state': 0.0,
+        'restore_state': 0.0,
+        'aggregate_probs': 0.0,
+    }
+    
+    print(f"\nProfiling {n_iter} iterations with forward actions (stochastic)...")
+    
+    for _ in range(n_iter):
+        # Total time
+        t_total_start = time.time()
+        
+        # Line: state = dict(state) if hasattr(state, 'keys') else dict(state)
+        t0 = time.time()
+        state_dict = dict(initial_state)
+        timings['dict_conversion'] += time.time() - t0
+        
+        # Line: if state_dict.get('terminated', False)
+        t0 = time.time()
+        _ = state_dict.get('terminated', False)
+        timings['terminal_check'] += time.time() - t0
+        
+        # Line: original_state = self.get_state()
+        t0 = time.time()
+        original_state = env.get_state()
+        timings['backup_state'] += time.time() - t0
+        
+        # Line: self.set_state(state)
+        t0 = time.time()
+        env.set_state(initial_state)
+        timings['set_query_state'] += time.time() - t0
+        
+        # Line: step_count check
+        t0 = time.time()
+        _ = state_dict['step_count'] >= env.max_steps
+        timings['step_count_check'] += time.time() - t0
+        
+        # Line: identify active agents
+        t0 = time.time()
+        active_agents = []
+        for i in range(num_agents):
+            if (not env.agents[i].terminated and 
+                not env.agents[i].paused and 
+                env.agents[i].started and 
+                actions[i] != env.actions.still):
+                active_agents.append(i)
+        timings['active_agents'] += time.time() - t0
+        
+        # Line: identify stochastic agents
+        t0 = time.time()
+        stochastic_agents = []
+        for i in active_agents:
+            agent = env.agents[i]
+            if hasattr(agent, 'p_move') and agent.p_move < 1.0:
+                stochastic_agents.append((i, agent.p_move))
+        timings['stochastic_agents'] += time.time() - t0
+        
+        # Simulate stochastic stepping
+        t0 = time.time()
+        if stochastic_agents:
+            # This is where the combinatorial explosion happens
+            for i, p in stochastic_agents:
+                pass  # Would call step for each stochastic combination
+        timings['stochastic_step'] += time.time() - t0
+        
+        # Line: Get result state
+        t0 = time.time()
+        result_state = env.get_state()
+        timings['result_state'] += time.time() - t0
+        
+        # Line: Restore original state
+        t0 = time.time()
+        env.set_state(original_state)
+        timings['restore_state'] += time.time() - t0
+        
+        timings['total'] += time.time() - t_total_start
+    
+    # Convert to per-call and format
+    print("\n" + "=" * 60)
+    print("LINE-BY-LINE TIMING BREAKDOWN")
+    print("=" * 60)
+    print(f"{'Operation':<35} {'Time (ms)':<12} {'% of Total':<10}")
+    print("-" * 60)
+    
+    total_ms = timings['total'] / n_iter * 1000
+    for key, t in sorted(timings.items(), key=lambda x: -x[1]):
+        if key == 'total':
+            continue
+        ms = t / n_iter * 1000
+        pct = 100 * t / timings['total'] if timings['total'] > 0 else 0
+        print(f"  {key:<33} {ms:>8.4f}ms    {pct:>5.1f}%")
+    
+    print("-" * 60)
+    print(f"  {'TOTAL':<33} {total_ms:>8.4f}ms    100.0%")
+    print()
+    
+    # Now profile the actual transition_probabilities call for comparison
+    print("Full transition_probabilities call for reference:")
+    start = time.time()
+    for _ in range(n_iter):
+        env.transition_probabilities(initial_state, actions)
+    actual_time = (time.time() - start) / n_iter * 1000
+    print(f"  Actual time: {actual_time:.4f}ms")
+    print(f"  Sum of components: {total_ms:.4f}ms")
+    print(f"  Remaining (step logic, prob aggregation): {actual_time - total_ms:.4f}ms")
+
+
+def try_line_profiler():
+    """
+    Try to use the line_profiler package for detailed profiling.
+    
+    Install with: pip install line_profiler
+    """
+    print("=" * 70)
+    print("Line profiling transition_probabilities_native()")
+    print("=" * 70)
+    
+    try:
+        from line_profiler import LineProfiler
+        print("\nline_profiler is installed!")
+        
+        env = SmallOneOrTwoChambersMapEnv()
+        env.reset()
+        
+        compact_state = env.get_compact_state()
+        num_agents = len(env.agents)
+        actions = [3] * num_agents  # forward for all
+        
+        # Profile transition_probabilities_native
+        profiler = LineProfiler()
+        profiler.add_function(env.transition_probabilities_native)
+        
+        # Also profile helper functions
+        if hasattr(env, 'get_compact_state'):
+            profiler.add_function(env.get_compact_state)
+        if hasattr(env, 'set_compact_state'):
+            profiler.add_function(env.set_compact_state)
+        if hasattr(env, '_compute_successor_state_inplace'):
+            profiler.add_function(env._compute_successor_state_inplace)
+        
+        @profiler
+        def run_transitions():
+            for _ in range(200):
+                env.transition_probabilities_native(compact_state, actions)
+        
+        run_transitions()
+        
+        print("\nLine profiler output for transition_probabilities_native:")
+        profiler.print_stats()
+        
+    except ImportError:
+        print("\nline_profiler is not installed.")
+        print("Install with: pip install line_profiler")
+        print("\nFalling back to manual line profiling...")
+        detailed_line_profiling_native()
+
+
 if __name__ == "__main__":
-    manual_line_profile_transition_probabilities()
+    # Try line_profiler first for transition_probabilities_native
+    try_line_profiler()
     print()
-    time_individual_operations()
-    print()
-    analyze_return_format()
+    detailed_line_profiling_native()
     print()
     compare_state_representations()
     print()
