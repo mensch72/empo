@@ -163,6 +163,7 @@ Each cell in the grid can contain:
     - Single agent index (e.g., `0`): Only that specific agent can push
     - List of agent indices (e.g., `[0, 2]`): Only those agents can push
   - If agent cannot push a rock, forward action is blocked
+  - **Default behavior (when using `map` parameter)**: Only grey agents (representing robots) can push rocks. This can be changed via the `can_push_rocks` parameter.
 - **Push Mechanics**:
   - Same as blocks: agent must face the rock, uses forward action
   - Rock(s) move one cell in the direction the agent is facing

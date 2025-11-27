@@ -252,6 +252,74 @@ class OneOrThreeChambersEnv(MultiGridEnv):
         return super().reset()
 
 
+# Map-based implementation using the new map parameter
+# The map uses two-character codes:
+# - We: grey wall
+# - ..: empty cell
+# - Ar: red agent (human)
+# - Ag: green agent (robot)
+# - Ro: rock
+# - Bl: block
+
+ONE_OR_THREE_CHAMBERS_MAP = """
+WeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWe
+We................WeArArArArArArArWe..................We
+We................WeArArArArArArArWe..................We
+We................WeWeWeWeArWeWeWeWe..................We
+We................We....AgRoAg....We..................We
+We................We..WeWeWeWeWe..WeWeWe..............We
+We....................We....WeWe......We..............We
+We................WeWeWe....We....Bl......We..........We
+We................We............We..WeWeWeWeWeWeWeWeWeWe
+We................We............We....................We
+We................We............We....................We
+We................We............We....................We
+We................We............We....................We
+We................We............We....................We
+We................We............We....................We
+WeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWe
+"""
+
+
+class OneOrThreeChambersMapEnv(MultiGridEnv):
+    """
+    A multi-chamber environment with humans and robots, implemented using the map parameter.
+    
+    This is an alternative implementation of OneOrThreeChambersEnv that uses the
+    new map specification format instead of manually placing objects.
+    
+    Layout (28 columns x 16 rows) - exact layout from ASCII map:
+    - Walls around the perimeter
+    - Three main chambers separated by internal walls
+    - Left chamber: large empty open space
+    - Center chamber: contains human agents (top) and robot agents with rock (middle)
+    - Right chamber: contains a block
+    
+    Agents:
+    - 15 human agents (red): 7 in row 1, 7 in row 2, 1 in row 3
+    - 2 robot agents (green): row 4, columns 12 and 14
+    
+    Objects:
+    - 1 rock between the robots (column 13, row 4)
+    - 1 block in the right chamber (column 17, row 7)
+    """
+    
+    def __init__(self):
+        """
+        Initialize the One or Three Chambers environment using the map parameter.
+        """
+        super().__init__(
+            map=ONE_OR_THREE_CHAMBERS_MAP,
+            max_steps=1000,
+            partial_obs=False,
+            objects_set=World
+        )
+        
+        # Track counts for compatibility with the original implementation
+        self.num_humans = sum(1 for a in self.agents if a.color == 'red')
+        self.num_robots = sum(1 for a in self.agents if a.color == 'green')
+
+
 if __name__ == "__main__":
     # Simple test to verify the environment works
     env = OneOrThreeChambersEnv()
@@ -269,3 +337,21 @@ if __name__ == "__main__":
         print(f"Step {step + 1}: done={done}")
     
     print("Test completed successfully!")
+    
+    # Also test the map-based implementation
+    print("\n--- Testing Map-based Implementation ---")
+    env_map = OneOrThreeChambersMapEnv()
+    obs = env_map.reset()
+    print(f"Map-based environment created successfully!")
+    print(f"Grid size: {env_map.width} x {env_map.height}")
+    print(f"Number of agents: {len(env_map.agents)}")
+    print(f"  - Humans (red): {env_map.num_humans}")
+    print(f"  - Robots (green): {env_map.num_robots}")
+    
+    # Test a few random steps
+    for step in range(5):
+        actions = [env_map.action_space.sample() for _ in range(len(env_map.agents))]
+        obs, rewards, done, info = env_map.step(actions)
+        print(f"Step {step + 1}: done={done}")
+    
+    print("Map-based test completed successfully!")
