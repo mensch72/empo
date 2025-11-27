@@ -1429,6 +1429,14 @@ class MultiGridEnv(WorldModel):
 
     # Enumeration of possible actions
 
+    # Orientation codes mapping to direction indices
+    ORIENTATION_TO_DIR = {
+        'e': 0,  # east/right
+        's': 1,  # south/down
+        'w': 2,  # west/left
+        'n': 3,  # north/up
+    }
+
     def __init__(
             self,
             grid_size=None,
@@ -1442,11 +1450,27 @@ class MultiGridEnv(WorldModel):
             agent_view_size=7,
             actions_set=Actions,
             objects_set = World,
-            map=None
+            map=None,
+            orientations=None,
+            can_push_rocks='e'
     ):
         # Store map specification for use in _gen_grid
         self._map_spec = map
         self._map_parsed = None
+        
+        # Initialize RNG early so we can use it for random orientations
+        # This is done before reset() to allow random orientations to be drawn in __init__
+        self.np_random, _ = seeding.np_random(seed)
+        
+        # Parse can_push_rocks color codes to color names
+        if can_push_rocks is not None:
+            self._can_push_rocks_colors = set()
+            for code in can_push_rocks:
+                if code not in MAP_COLOR_CODES:
+                    raise ValueError(f"Invalid color code '{code}' in can_push_rocks. Must be one of: r, g, b, p, y, e")
+                self._can_push_rocks_colors.add(MAP_COLOR_CODES[code])
+        else:
+            self._can_push_rocks_colors = None
         
         # If map is provided, parse it to get dimensions and agents
         if map is not None:
@@ -1464,6 +1488,19 @@ class MultiGridEnv(WorldModel):
                     color = agent_params.get('color', 'red')
                     color_idx = objects_set.COLOR_TO_IDX.get(color, 0)
                     agents.append(Agent(objects_set, color_idx))
+            
+            # Handle orientations: if None, generate random orientations
+            if orientations is None:
+                self._agent_orientations = [self.np_random.integers(0, 4) for _ in range(len(map_agents))]
+            else:
+                # Parse orientation codes to direction indices
+                self._agent_orientations = []
+                for orient in orientations:
+                    if orient not in self.ORIENTATION_TO_DIR:
+                        raise ValueError(f"Invalid orientation '{orient}'. Must be one of: w, n, e, s")
+                    self._agent_orientations.append(self.ORIENTATION_TO_DIR[orient])
+        else:
+            self._agent_orientations = None
         
         self.agents = agents
 
@@ -1515,8 +1552,7 @@ class MultiGridEnv(WorldModel):
         self.max_steps = max_steps
         self.see_through_walls = see_through_walls
 
-        # Initialize the RNG
-        self.seed(seed=seed)
+        # RNG already initialized earlier for random orientations, no need to call seed() again
 
         # Initialize the state
         self.reset()
@@ -1646,21 +1682,40 @@ class MultiGridEnv(WorldModel):
         # Create the grid
         self.grid = Grid(map_width, map_height)
         
+        # Determine which agents can push rocks based on _can_push_rocks_colors
+        # We use agent.index (which is the color index) rather than the position in agents list
+        # Using a set to avoid duplicates when multiple agents have the same color
+        pushable_by_agents = None
+        if hasattr(self, '_can_push_rocks_colors') and self._can_push_rocks_colors is not None:
+            pushable_by_indices = set()
+            for agent in self.agents:
+                if agent.color in self._can_push_rocks_colors:
+                    pushable_by_indices.add(agent.index)
+            pushable_by_agents = list(pushable_by_indices) if pushable_by_indices else []
+        
         # Place objects from the map
         for y in range(map_height):
             for x in range(map_width):
                 cell_spec = cells[y][x]
                 if cell_spec is not None and cell_spec[0] != 'agent':
-                    obj = create_object_from_spec(cell_spec, self.objects)
+                    # For rocks, set pushable_by based on can_push_rocks parameter
+                    if cell_spec[0] == 'rock' and pushable_by_agents is not None:
+                        obj = Rock(self.objects, pushable_by=pushable_by_agents)
+                    else:
+                        obj = create_object_from_spec(cell_spec, self.objects)
                     if obj is not None:
                         self.grid.set(x, y, obj)
         
-        # Place agents
+        # Place agents with their orientations
         for agent_idx, (x, y, agent_params) in enumerate(map_agents):
             if agent_idx < len(self.agents):
                 agent = self.agents[agent_idx]
                 agent.pos = np.array([x, y])
-                agent.dir = 0  # Default facing right
+                # Use stored orientation if available, otherwise default to 0 (east)
+                if self._agent_orientations is not None and agent_idx < len(self._agent_orientations):
+                    agent.dir = self._agent_orientations[agent_idx]
+                else:
+                    agent.dir = 0  # Default facing right/east
                 self.grid.set(x, y, agent)
 
     def _handle_pickup(self, i, rewards, fwd_pos, fwd_cell):

@@ -291,13 +291,14 @@ def test_environment_step():
         map=test_map,
         max_steps=100,
         partial_obs=False,
-        objects_set=World
+        objects_set=World,
+        orientations=['e']  # Explicitly set orientation to east for predictable test
     )
     
     # Take a step
     obs, rewards, done, info = env.step([3])  # forward
     
-    # Agent should have moved
+    # Agent should have moved east (from [2,2] to [3,2])
     assert np.array_equal(env.agents[0].pos, [3, 2])
 
 
@@ -315,7 +316,8 @@ def test_environment_reset():
         map=test_map,
         max_steps=100,
         partial_obs=False,
-        objects_set=World
+        objects_set=World,
+        orientations=['e']  # Explicitly set orientation for predictable test
     )
     
     # Take some steps
@@ -382,6 +384,97 @@ def test_one_or_three_chambers_map_env():
     
     assert orig_block == map_block, f"Block position mismatch: {orig_block} vs {map_block}"
     assert orig_rock == map_rock, f"Rock position mismatch: {orig_rock} vs {map_rock}"
+
+
+def test_orientations_parameter():
+    """Test that orientations parameter sets agent directions correctly."""
+    test_map = """
+    We We We We We We We
+    We .. Ar .. Ag .. We
+    We .. .. .. .. .. We
+    We We We We We We We
+    """
+    
+    # Test with explicit orientations
+    env = MultiGridEnv(
+        map=test_map,
+        max_steps=100,
+        partial_obs=False,
+        objects_set=World,
+        orientations=['n', 's']  # north and south
+    )
+    
+    # Check orientations: n=3 (north/up), s=1 (south/down)
+    assert env.agents[0].dir == 3, f"Expected dir=3 (north), got {env.agents[0].dir}"
+    assert env.agents[1].dir == 1, f"Expected dir=1 (south), got {env.agents[1].dir}"
+    
+    # Test with all orientations
+    env2 = MultiGridEnv(
+        map=test_map,
+        max_steps=100,
+        partial_obs=False,
+        objects_set=World,
+        orientations=['e', 'w']  # east and west
+    )
+    
+    assert env2.agents[0].dir == 0, f"Expected dir=0 (east), got {env2.agents[0].dir}"
+    assert env2.agents[1].dir == 2, f"Expected dir=2 (west), got {env2.agents[1].dir}"
+
+
+def test_can_push_rocks_parameter():
+    """Test that can_push_rocks parameter controls which agents can push rocks."""
+    test_map = """
+    We We We We We We We
+    We .. Ar Ro .. .. We
+    We .. Ae Ro .. .. We
+    We We We We We We We
+    """
+    
+    # Default: only grey (e) agents can push rocks
+    env = MultiGridEnv(
+        map=test_map,
+        max_steps=100,
+        partial_obs=False,
+        objects_set=World,
+        orientations=['e', 'e']  # Both facing east
+    )
+    
+    # Check that rocks have pushable_by set to grey agent index only
+    rock1 = env.grid.get(3, 1)
+    rock2 = env.grid.get(3, 2)
+    
+    assert rock1 is not None and rock1.type == 'rock'
+    assert rock2 is not None and rock2.type == 'rock'
+    
+    # Grey agent (index 1) should be able to push, red agent (index 0) should not
+    assert not rock1.can_be_pushed_by(env.agents[0]), "Red agent should not push rocks by default"
+    assert rock1.can_be_pushed_by(env.agents[1]), "Grey agent should be able to push rocks"
+
+
+def test_can_push_rocks_multiple_colors():
+    """Test that can_push_rocks with multiple color codes works."""
+    test_map = """
+    We We We We We We We
+    We .. Ar Ro .. .. We
+    We .. Ag Ro .. .. We
+    We We We We We We We
+    """
+    
+    # Both red and green agents can push rocks
+    env = MultiGridEnv(
+        map=test_map,
+        max_steps=100,
+        partial_obs=False,
+        objects_set=World,
+        orientations=['e', 'e'],
+        can_push_rocks='rg'  # red and green
+    )
+    
+    rock1 = env.grid.get(3, 1)
+    
+    # Both agents should be able to push
+    assert rock1.can_be_pushed_by(env.agents[0]), "Red agent should push rocks when 'r' in can_push_rocks"
+    assert rock1.can_be_pushed_by(env.agents[1]), "Green agent should push rocks when 'g' in can_push_rocks"
 
 
 if __name__ == '__main__':
