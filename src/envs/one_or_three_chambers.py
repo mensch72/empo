@@ -282,7 +282,7 @@ WeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWe
 
 SMALL_ONE_OR_THREE_CHAMBERS_MAP = """
 We We We We We .. .. .. .. .. 
-We .. We Ay We .. .. .. .. ..
+We .. We .. We .. .. .. .. ..
 We .. We Ay We We We .. .. ..
 We Ae Ro .. .. .. We .. .. ..
 We .. We We We .. We We We ..
@@ -362,16 +362,16 @@ class SmallOneOrTwoChambersMapEnv(MultiGridEnv):
     This is a simplified environment designed to have a tractable state space
     for computing the full DAG and performing backward induction.
     
-    Layout (10 columns x 10 rows):
+    Layout (10 columns x 9 rows):
     - Walls creating chamber structure
-    - 2 human agents (yellow) in upper left area
+    - 1 human agent (yellow) in upper left area
     - 1 robot agent (grey) in left side
     - 1 rock and 1 block as obstacles
     
-    The environment uses a 9-step timeout to keep the state space finite.
-    Each agent has 4 actions: still, left, right, forward (4^3 = 64 combinations).
+    The environment uses an 8-step timeout to keep the state space finite.
+    Each agent has 4 actions: still, left, right, forward (4^2 = 16 combinations).
     
-    Target cell for reward: (7, 3) - the robot receives reward 1 when reaching this cell.
+    Target cell for reward: (3, 7) - the robot receives reward 1 when reaching this cell.
     """
     
     def __init__(self):
@@ -380,7 +380,7 @@ class SmallOneOrTwoChambersMapEnv(MultiGridEnv):
         """
         super().__init__(
             map=SMALL_ONE_OR_THREE_CHAMBERS_MAP,
-            max_steps=9,
+            max_steps=8,
             partial_obs=False,
             objects_set=World,
             actions_set=SmallActions

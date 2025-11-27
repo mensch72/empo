@@ -14,6 +14,7 @@ The reward function gives +1 when the robot is in cell (3, 7), 0 otherwise.
 
 import sys
 import os
+import time
 
 # Add paths for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
@@ -25,13 +26,12 @@ import matplotlib.animation as animation
 from itertools import product
 
 from envs.one_or_three_chambers import SmallOneOrTwoChambersMapEnv
-from empo.env_utils import get_dag
 
 
 # Target cell where the robot receives a reward of 1
 # In the map, this is position (3, 7) - column 3, row 7:
 # We We We We We .. .. .. .. ..    <- row 0
-# We .. We Ay We .. .. .. .. ..    <- row 1
+# We .. We .. We .. .. .. .. ..    <- row 1 (removed upper human)
 # We .. We Ay We We We .. .. ..    <- row 2
 # We Ae Ro .. .. .. We .. .. ..    <- row 3
 # We .. We We We .. We We We ..    <- row 4
@@ -82,7 +82,7 @@ def compute_reward(env, state):
     return 0.0
 
 
-def compute_value_functions_and_policy(env, states, state_to_idx, successors):
+def compute_value_functions_and_policy(env, states, state_to_idx, successors, transitions=None):
     """
     Compute value functions and optimal policy using backward induction.
     
@@ -105,6 +105,8 @@ def compute_value_functions_and_policy(env, states, state_to_idx, successors):
         states: List of states in topological order (from get_dag)
         state_to_idx: Dictionary mapping states to indices
         successors: List of successor indices for each state
+        transitions: Optional cached transitions from get_dag(return_probabilities=True).
+            Each element is a list of (action, probs, succ_indices) tuples.
         
     Returns:
         tuple: (value_function, optimal_policy)
@@ -135,9 +137,11 @@ def compute_value_functions_and_policy(env, states, state_to_idx, successors):
     
     human_indices = [i for i in range(num_agents) if i != robot_idx]
     num_humans = len(human_indices)
+    num_human_actions = num_actions ** num_humans
     
     print(f"Robot agent index: {robot_idx}")
     print(f"Human agent indices: {human_indices}")
+    print(f"Using cached transitions: {transitions is not None}")
     
     # Initialize value function (will be computed backwards)
     value_function = {}
@@ -155,22 +159,13 @@ def compute_value_functions_and_policy(env, states, state_to_idx, successors):
     
     print(f"\nInitialized {len(value_function)} terminal states")
     
-    # Pre-compute all action combinations
+    # Pre-compute action set
     action_set = list(range(num_actions))
-    all_action_combinations = list(product(action_set, repeat=num_agents))
-    num_human_actions = num_actions ** num_humans
-    
-    # Group action combinations by robot action for efficiency
-    robot_action_groups = {}
-    for actions in all_action_combinations:
-        r_action = actions[robot_idx]
-        if r_action not in robot_action_groups:
-            robot_action_groups[r_action] = []
-        robot_action_groups[r_action].append(actions)
     
     # Backward induction: process states from last to first
     print("\nPerforming backward induction...")
     processed_count = 0
+    start_time = time.time()
     
     for state_idx in reversed(range(num_states)):
         if state_idx in value_function:
@@ -187,46 +182,72 @@ def compute_value_functions_and_policy(env, states, state_to_idx, successors):
         best_value = float('-inf')
         best_action = env.actions.still
         
-        for robot_action in action_set:
-            # Get all action combinations for this robot action
-            if robot_action not in robot_action_groups:
-                continue
-            action_combos = robot_action_groups[robot_action]
+        if transitions is not None:
+            # Use cached transitions - group by robot action
+            robot_action_values = {}
+            robot_action_counts = {}
             
-            # Compute expected value under random human actions
-            expected_value = 0.0
-            valid_transitions = 0
-            
-            for actions in action_combos:
-                # Get transition probabilities (cached internally by environment)
-                env.set_state(state)
-                transitions = env.transition_probabilities(state, list(actions))
+            for action, probs, succ_indices in transitions[state_idx]:
+                robot_action = action[robot_idx]
+                if robot_action not in robot_action_values:
+                    robot_action_values[robot_action] = 0.0
+                    robot_action_counts[robot_action] = 0
                 
-                if transitions is None:
-                    # Terminal state or invalid action
+                # Sum over transition probabilities
+                for prob, succ_idx in zip(probs, succ_indices):
+                    if succ_idx in value_function:
+                        robot_action_values[robot_action] += prob * value_function[succ_idx]
+                robot_action_counts[robot_action] += 1
+            
+            # Find best action (average over human actions)
+            for robot_action in robot_action_values:
+                if robot_action_counts[robot_action] > 0:
+                    expected_value = robot_action_values[robot_action] / num_human_actions
+                    if expected_value > best_value:
+                        best_value = expected_value
+                        best_action = robot_action
+        else:
+            # Compute transitions on-the-fly (slow path)
+            all_action_combinations = list(product(action_set, repeat=num_agents))
+            
+            # Group action combinations by robot action
+            robot_action_groups = {}
+            for actions in all_action_combinations:
+                r_action = actions[robot_idx]
+                if r_action not in robot_action_groups:
+                    robot_action_groups[r_action] = []
+                robot_action_groups[r_action].append(actions)
+            
+            for robot_action in action_set:
+                if robot_action not in robot_action_groups:
                     continue
+                action_combos = robot_action_groups[robot_action]
                 
-                # Accumulate expected value for this human action combination
-                # We sum over all transition outcomes weighted by their probabilities
-                for prob, successor_state in transitions:
-                    if successor_state in state_to_idx:
-                        succ_idx = state_to_idx[successor_state]
-                        if succ_idx in value_function:
-                            expected_value += prob * value_function[succ_idx]
-                            valid_transitions += 1
-            
-            if valid_transitions > 0:
-                # Divide by number of human action combinations to get the expected value
-                # under uniformly random human actions (each combo has prob 1/num_human_actions)
-                expected_value = expected_value / num_human_actions
+                expected_value = 0.0
+                valid_transitions = 0
                 
-                if expected_value > best_value:
-                    best_value = expected_value
-                    best_action = robot_action
+                for actions in action_combos:
+                    env.set_state(state)
+                    trans_result = env.transition_probabilities(state, list(actions))
+                    
+                    if trans_result is None:
+                        continue
+                    
+                    for prob, successor_state in trans_result:
+                        if successor_state in state_to_idx:
+                            succ_idx = state_to_idx[successor_state]
+                            if succ_idx in value_function:
+                                expected_value += prob * value_function[succ_idx]
+                                valid_transitions += 1
+                
+                if valid_transitions > 0:
+                    expected_value = expected_value / num_human_actions
+                    if expected_value > best_value:
+                        best_value = expected_value
+                        best_action = robot_action
         
         # Store value and optimal policy
         if best_value == float('-inf'):
-            # No valid transitions found, set to immediate reward only
             value_function[state_idx] = immediate_reward
             optimal_policy[state_idx] = env.actions.still
         else:
@@ -235,9 +256,11 @@ def compute_value_functions_and_policy(env, states, state_to_idx, successors):
         
         processed_count += 1
         if processed_count % 1000 == 0:
-            print(f"  Processed {processed_count}/{num_states} states...")
+            elapsed = time.time() - start_time
+            print(f"  Processed {processed_count}/{num_states} states... ({elapsed:.1f}s)")
     
-    print(f"  Processed {processed_count}/{num_states} states - Done!")
+    elapsed = time.time() - start_time
+    print(f"  Processed {processed_count}/{num_states} states - Done! ({elapsed:.1f}s)")
     
     return value_function, optimal_policy
 
@@ -398,22 +421,27 @@ def main():
         print(f"  Agent {i} ({agent.color}): pos={tuple(agent.pos)}")
     print()
     
-    # Compute DAG
-    print("Computing DAG structure...")
+    # Compute DAG with cached transitions
+    print("Computing DAG structure with transitions...")
     print("  This may take a while for large state spaces...")
-    states, state_to_idx, successors = get_dag(env)
+    dag_start = time.time()
+    states, state_to_idx, successors, transitions = env.get_dag(return_probabilities=True)
+    dag_time = time.time() - dag_start
     
     print(f"  Total reachable states: {len(states)}")
     terminal_count = sum(1 for succ_list in successors if len(succ_list) == 0)
     print(f"  Terminal states: {terminal_count}")
     total_edges = sum(len(succ_list) for succ_list in successors)
     print(f"  Total transitions: {total_edges}")
+    total_action_trans = sum(len(t) for t in transitions)
+    print(f"  Total action-transitions: {total_action_trans}")
+    print(f"  DAG computation time: {dag_time:.1f}s")
     print()
     
-    # Compute value functions and optimal policy
+    # Compute value functions and optimal policy using cached transitions
     print("Computing value functions and optimal policy...")
     value_function, optimal_policy = compute_value_functions_and_policy(
-        env, states, state_to_idx, successors
+        env, states, state_to_idx, successors, transitions
     )
     
     # Print initial state value
