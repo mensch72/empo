@@ -256,17 +256,17 @@ class OneOrThreeChambersEnv(MultiGridEnv):
 # The map uses two-character codes:
 # - We: grey wall
 # - ..: empty cell
-# - Ar: red agent (human)
-# - Ag: green agent (robot)
+# - Ay: yellow agent (human)
+# - Ae: grey agent (robot)
 # - Ro: rock
 # - Bl: block
 
 ONE_OR_THREE_CHAMBERS_MAP = """
 WeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWe
-We................WeArArArArArArArWe..................We
-We................WeArArArArArArArWe..................We
-We................WeWeWeWeArWeWeWeWe..................We
-We................We....AgRoAg....We..................We
+We................WeAyAyAyAyAyAyAyWe..................We
+We................WeAyAyAyAyAyAyAyWe..................We
+We................WeWeWeWeAyWeWeWeWe..................We
+We................We....AeRoAe....We..................We
 We................We..WeWeWeWeWe..WeWeWe..............We
 We....................We....WeWe......We..............We
 We................WeWeWe....We....Bl......We..........We
@@ -280,6 +280,17 @@ We................We............We....................We
 WeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWe
 """
 
+SMALL_ONE_OR_THREE_CHAMBERS_MAP = """
+We We We We We .. .. .. .. .. 
+We .. We Ay We .. .. .. .. ..
+We .. We Ay We We We .. .. ..
+We Ae Ro .. .. .. We .. .. ..
+We .. We We We .. We We We ..
+We .. .. .. We .. .. .. We We
+We .. .. We .. .. Bl .. .. We
+We .. .. .. We We .. We We We
+We We We We .. We We We .. ..
+"""
 
 class OneOrThreeChambersMapEnv(MultiGridEnv):
     """
@@ -316,9 +327,28 @@ class OneOrThreeChambersMapEnv(MultiGridEnv):
         )
         
         # Track counts for compatibility with the original implementation
-        self.num_humans = sum(1 for a in self.agents if a.color == 'red')
-        self.num_robots = sum(1 for a in self.agents if a.color == 'green')
+        self.num_humans = sum(1 for a in self.agents if a.color == 'yellow')
+        self.num_robots = sum(1 for a in self.agents if a.color == 'grey')
 
+class SmallOneOrThreeChambersMapEnv(MultiGridEnv):
+    """
+    A smaller version of the multi-chamber environment with humans and robots, implemented using the map parameter.
+    """
+    
+    def __init__(self):
+        """
+        Initialize the One or Three Chambers environment using the map parameter.
+        """
+        super().__init__(
+            map=SMALL_ONE_OR_THREE_CHAMBERS_MAP,
+            max_steps=1000,
+            partial_obs=False,
+            objects_set=World
+        )
+        
+        # Track counts for compatibility with the original implementation
+        self.num_humans = sum(1 for a in self.agents if a.color == 'yellow')
+        self.num_robots = sum(1 for a in self.agents if a.color == 'grey')
 
 # Small environment for DAG computation and backward induction
 # This is a simplified version with only 1 robot and 1 human

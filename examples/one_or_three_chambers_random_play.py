@@ -6,8 +6,8 @@ This script creates a video of 1000 steps of random play in the
 OneOrThreeChambersEnv environment.
 
 The environment layout is based on the ASCII map specification with:
-- 15 human agents (red)
-- 2 robot agents (green)
+- 15 human agents (yellow)
+- 2 robot agents (grey)
 - 1 rock (pushable)
 - 1 block
 
@@ -29,7 +29,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 
-from envs.one_or_three_chambers import OneOrThreeChambersEnv
+from envs.one_or_three_chambers import OneOrThreeChambersMapEnv
 
 
 def render_grid_to_array(env):
@@ -52,8 +52,8 @@ def create_random_play_video(output_path='one_or_three_chambers_random_play.mp4'
     print("=" * 70)
     print()
     print("Environment Layout:")
-    print("  - 15 human agents (red) in upper center chamber")
-    print("  - 2 robot agents (green) in middle")
+    print("  - 15 human agents (yellow) in upper center chamber")
+    print("  - 2 robot agents (grey) in middle")
     print("  - 1 rock between robots")
     print("  - 1 block in right chamber")
     print()
@@ -64,7 +64,7 @@ def create_random_play_video(output_path='one_or_three_chambers_random_play.mp4'
     print()
     
     # Create environment
-    env = OneOrThreeChambersEnv()
+    env = OneOrThreeChambersMapEnv()
     env.reset()
     
     print(f"Grid size: {env.width} x {env.height}")
