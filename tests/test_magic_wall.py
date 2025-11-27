@@ -172,9 +172,9 @@ def test_magic_wall_wrong_direction():
     """Test that agents cannot enter from non-magic sides."""
     env = SimpleMagicWallEnv(num_agents=1, agent_can_enter=[True])
     
-    # Place magic wall with magic side = right (0)
-    # Agent approaches from right side (which is not the magic side)
-    magic_wall = MagicWall(World, magic_side=0, entry_probability=1.0)
+    # Place magic wall with magic side = left (2)
+    # Agent approaches from right side (which is NOT the magic side)
+    magic_wall = MagicWall(World, magic_side=2, entry_probability=1.0)
     env.grid.set(3, 2, magic_wall)
     
     # Position agent to the right of the magic wall, facing left

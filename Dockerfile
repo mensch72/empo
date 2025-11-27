@@ -32,6 +32,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libxext6 \
     libxrender-dev \
     graphviz \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip
@@ -67,12 +68,11 @@ RUN echo "HIERARCHICAL_MODE is set to: $HIERARCHICAL_MODE"
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
-    echo "Installing Java, xvfb, xauth, and ffmpeg for MineLand..." && \
+    echo "Installing Java, xvfb, and xauth for MineLand..." && \
     apt-get update && apt-get install -y --no-install-recommends \
         openjdk-17-jdk \
         xvfb \
-        xauth \
-        ffmpeg ; \
+        xauth ; \
     fi
 # Install Node.js 18.x for MineLand (using NodeSource repository)
 RUN if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
