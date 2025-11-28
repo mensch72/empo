@@ -2576,6 +2576,7 @@ class MultiGridEnv(WorldModel):
         
         # Use cached objects - no grid scanning needed
         # Mobile objects use cur_pos which is updated when they're pushed
+        # Note: We only store (type, x, y) since color is immutable for blocks/rocks
         mobile_objects = []
         for initial_pos, obj in self._mobile_objects:
             if obj.cur_pos is not None:
@@ -2586,7 +2587,6 @@ class MultiGridEnv(WorldModel):
             mobile_objects.append((
                 obj.type,
                 x, y,
-                obj.color,
             ))
         
         # Mutable objects - their positions are fixed, just read their mutable state
@@ -2615,8 +2615,8 @@ class MultiGridEnv(WorldModel):
                     obj.active,
                 ))
         
-        # Sort mobile objects for deterministic ordering (type, x, y, color)
-        mobile_objects.sort(key=lambda obj: (obj[0], obj[1], obj[2], obj[3]))
+        # Sort mobile objects for deterministic ordering (type, x, y)
+        mobile_objects.sort(key=lambda obj: (obj[0], obj[1], obj[2]))
         
         return (
             self.step_count,
@@ -2689,10 +2689,10 @@ class MultiGridEnv(WorldModel):
                         self.grid.set(old_x, old_y, None)
             
             # Group cached objects by type for matching with state
-            # We match by type since get_state() groups mobile objects by (type, x, y, color).
+            # We match by type since get_state() groups mobile objects by (type, x, y).
             # Within each type, objects are sorted by position, so we assign in the same order.
-            # Note: Color is part of the state and will be set from the state, so even if
-            # we assign the "wrong" physical object, its color will be corrected.
+            # Since all blocks are identical and all rocks are identical (color is immutable),
+            # it doesn't matter which physical object gets which position.
             cached_by_type = {}
             for initial_pos, obj in self._mobile_objects:
                 if obj.type not in cached_by_type:
@@ -2702,19 +2702,18 @@ class MultiGridEnv(WorldModel):
             # Group mobile objects from state by type
             state_by_type = {}
             for mobile_obj in mobile_objects:
-                obj_type, x, y, color = mobile_obj
+                obj_type, x, y = mobile_obj
                 if obj_type not in state_by_type:
                     state_by_type[obj_type] = []
-                state_by_type[obj_type].append((x, y, color))
+                state_by_type[obj_type].append((x, y))
             
             # Place cached objects at new positions from state, matching by type
             for obj_type, positions in state_by_type.items():
                 if obj_type in cached_by_type:
                     cached_objs = cached_by_type[obj_type]
-                    for idx, (x, y, color) in enumerate(positions):
+                    for idx, (x, y) in enumerate(positions):
                         if idx < len(cached_objs):
                             obj = cached_objs[idx]
-                            obj.color = color
                             obj.cur_pos = np.array([x, y])
                             self.grid.set(x, y, obj)
         else:
@@ -2726,14 +2725,13 @@ class MultiGridEnv(WorldModel):
                         self.grid.set(i, j, None)
             
             for mobile_obj in mobile_objects:
-                obj_type, x, y, color = mobile_obj
+                obj_type, x, y = mobile_obj
                 if obj_type == 'block':
                     obj = Block(self.objects)
                 elif obj_type == 'rock':
                     obj = Rock(self.objects)
                 else:
                     continue
-                obj.color = color
                 obj.cur_pos = np.array([x, y])
                 self.grid.set(x, y, obj)
         
