@@ -147,26 +147,27 @@ def test_cross_push_conflict():
     # Print outcomes
     print("\n  Outcomes:")
     for i, (prob, succ_state) in enumerate(result):
-        state_dict = dict(succ_state)
-        agents_data = state_dict['agents']
-        agent0_data = dict(agents_data[0])
-        agent1_data = dict(agents_data[1])
+        # Compact state format: (step_count, agent_states, mobile_objects, mutable_objects)
+        step_count, agent_states, mobile_objects, mutable_objects = succ_state
+        agent0_state = agent_states[0]
+        agent1_state = agent_states[1]
+        # Agent state format: (pos_x, pos_y, dir, terminated, started, paused, on_unsteady, carrying_type, carrying_color)
+        agent0_pos = (agent0_state[0], agent0_state[1])
+        agent0_dir = agent0_state[2]
+        agent1_pos = (agent1_state[0], agent1_state[1])
+        agent1_dir = agent1_state[2]
         
-        # Check block position
-        grid_data = state_dict['grid']
+        # Check block position from mobile_objects
+        # mobile_objects format: (obj_type, x, y, color, pushable_by)
         block_pos = None
-        for idx, cell in enumerate(grid_data):
-            if cell is not None:
-                cell_dict = dict(cell)
-                if cell_dict.get('type') == 'block':
-                    y = idx // 9
-                    x = idx % 9
-                    block_pos = (x, y)
-                    break
+        for obj in mobile_objects:
+            if obj[0] == 'block':
+                block_pos = (obj[1], obj[2])
+                break
         
         print(f"    {i+1}. Prob={prob:.4f}: "
-              f"A0@{agent0_data['pos']} dir={agent0_data['dir']}, "
-              f"A1@{agent1_data['pos']} dir={agent1_data['dir']}, "
+              f"A0@{agent0_pos} dir={agent0_dir}, "
+              f"A1@{agent1_pos} dir={agent1_dir}, "
               f"Block@{block_pos}")
         
         # Verify that block never ends up at agent 1's original position

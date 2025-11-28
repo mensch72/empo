@@ -132,12 +132,16 @@ def test_unsteady_ground_probabilities():
     # Print all outcomes
     print("\n  Outcomes:")
     for i, (prob, succ_state) in enumerate(result):
-        state_dict = dict(succ_state)
-        agents_data = state_dict['agents']
-        agent0_data = dict(agents_data[0])
-        agent1_data = dict(agents_data[1])
+        # Compact state format: (step_count, agent_states, mobile_objects, mutable_objects)
+        step_count, agent_states, mobile_objects, mutable_objects = succ_state
+        agent0_state = agent_states[0]
+        agent1_state = agent_states[1]
+        # Agent state format: (pos_x, pos_y, dir, terminated, started, paused, on_unsteady, carrying_type, carrying_color)
+        agent0_pos = (agent0_state[0], agent0_state[1])
+        agent1_pos = (agent1_state[0], agent1_state[1])
+        agent1_dir = agent1_state[2]
         
-        print(f"    {i+1}. Prob={prob:.4f}: Agent0@{agent0_data['pos']}, Agent1@{agent1_data['pos']} dir={agent1_data['dir']}")
+        print(f"    {i+1}. Prob={prob:.4f}: Agent0@{agent0_pos}, Agent1@{agent1_pos} dir={agent1_dir}")
     
     # Since agent 1 is on unsteady ground, we expect outcomes based on:
     # - Agent 1 stumbling (3 outcomes: forward, left-forward, right-forward)
@@ -258,14 +262,19 @@ def test_two_stumbling_agents_same_target():
     
     print(f"\n  Outcomes breakdown:")
     for i, (prob, succ_state) in enumerate(result):
-        state_dict = dict(succ_state)
-        agents_data = state_dict['agents']
-        agent0_data = dict(agents_data[0])
-        agent1_data = dict(agents_data[1])
+        # Compact state format: (step_count, agent_states, mobile_objects, mutable_objects)
+        step_count, agent_states, mobile_objects, mutable_objects = succ_state
+        agent0_state = agent_states[0]
+        agent1_state = agent_states[1]
+        # Agent state format: (pos_x, pos_y, dir, terminated, started, paused, on_unsteady, carrying_type, carrying_color)
+        agent0_pos = (agent0_state[0], agent0_state[1])
+        agent0_dir = agent0_state[2]
+        agent1_pos = (agent1_state[0], agent1_state[1])
+        agent1_dir = agent1_state[2]
         
         print(f"    {i+1}. Prob={prob:.4f}: "
-              f"Agent0@{agent0_data['pos']} dir={agent0_data['dir']}, "
-              f"Agent1@{agent1_data['pos']} dir={agent1_data['dir']}")
+              f"Agent0@{agent0_pos} dir={agent0_dir}, "
+              f"Agent1@{agent1_pos} dir={agent1_dir}")
     
     # We expect up to 9 outcomes (3 x 3), but some may collapse to the same state
     if len(result) >= 3 and len(result) <= 9:
