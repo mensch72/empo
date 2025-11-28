@@ -2524,14 +2524,14 @@ class MultiGridEnv(WorldModel):
         
         The compact state only stores mutable/mobile objects:
         1. Immutable objects (walls) are not stored
-        2. Mobile objects (agents, pushed blocks/rocks) only store position + color
+        2. Mobile objects (blocks/rocks) only store type and position (color is immutable)
         3. Mutable immobile objects only store their mutable state (e.g., active for magic walls)
         4. Uses fixed ordering instead of serializing entire grid
         
         Format:
         - step_count: int
         - agent_states: tuple of (pos_x, pos_y, dir, terminated, started, paused, on_unsteady, carrying_type, carrying_color)
-        - mobile_objects: tuple of (obj_type, pos_x, pos_y, color) for blocks/rocks
+        - mobile_objects: tuple of (obj_type, pos_x, pos_y) for blocks/rocks
         - mutable_objects: tuple of (obj_type, x, y, mutable_state...) for doors/boxes/magic walls
         
         Returns:
