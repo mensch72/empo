@@ -2615,8 +2615,8 @@ class MultiGridEnv(WorldModel):
                     obj.active,
                 ))
         
-        # Sort mobile objects for deterministic ordering
-        mobile_objects.sort()
+        # Sort mobile objects for deterministic ordering (type, x, y, color)
+        mobile_objects.sort(key=lambda obj: (obj[0], obj[1], obj[2], obj[3]))
         
         return (
             self.step_count,
@@ -2689,6 +2689,10 @@ class MultiGridEnv(WorldModel):
                         self.grid.set(old_x, old_y, None)
             
             # Group cached objects by type for matching with state
+            # We match by type since get_state() groups mobile objects by (type, x, y, color).
+            # Within each type, objects are sorted by position, so we assign in the same order.
+            # Note: Color is part of the state and will be set from the state, so even if
+            # we assign the "wrong" physical object, its color will be corrected.
             cached_by_type = {}
             for initial_pos, obj in self._mobile_objects:
                 if obj.type not in cached_by_type:
