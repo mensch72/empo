@@ -21,6 +21,7 @@ matplotlib>=3.7.0
 tensorboard>=2.13.0
 wandb>=0.15.0
 graphviz>=0.20.0
+line_profiler>=4.0.0
 
 # MPI for distributed training (optional)
 mpi4py>=3.1.0

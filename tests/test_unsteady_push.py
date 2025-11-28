@@ -147,11 +147,14 @@ def test_transition_probabilities_with_push():
     # Print outcomes
     print("\n  Outcomes:")
     for i, (prob, succ_state) in enumerate(result):
-        state_dict = dict(succ_state)
-        agents_data = state_dict['agents']
-        agent_data = dict(agents_data[0])
+        # Compact state format: (step_count, agent_states, mobile_objects, mutable_objects)
+        step_count, agent_states, mobile_objects, mutable_objects = succ_state
+        agent_state = agent_states[0]
+        # Agent state format: (pos_x, pos_y, dir, terminated, started, paused, on_unsteady, carrying_type, carrying_color)
+        agent_pos = (agent_state[0], agent_state[1])
+        agent_dir = agent_state[2]
         
-        print(f"    {i+1}. Prob={prob:.4f}: Agent@{agent_data['pos']} dir={agent_data['dir']}")
+        print(f"    {i+1}. Prob={prob:.4f}: Agent@{agent_pos} dir={agent_dir}")
     
     # Should have 3 outcomes (forward, left-forward, right-forward)
     if len(result) == 3:

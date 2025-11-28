@@ -22,6 +22,16 @@ from gym_multigrid.multigrid import MultiGridEnv, Agent, World, Actions, Grid, W
 from gym_multigrid.envs import CollectGame4HEnv10x10N2
 
 
+def get_agent_positions_from_compact_state(compact_state):
+    """Extract agent positions from compact state format."""
+    step_count, agent_states, mobile_objects, mutable_objects = compact_state
+    positions = []
+    for agent_state in agent_states:
+        pos_x, pos_y, dir_, terminated, started, paused, on_unsteady, carrying_type, carrying_color = agent_state
+        positions.append((pos_x, pos_y, dir_))
+    return positions
+
+
 def test_conflict_block_efficiency():
     """
     Test that conflict block optimization is more efficient than full permutation.
@@ -73,36 +83,30 @@ def test_two_agents_competing_for_cell():
     # Place agent 1 at (3, 2) facing left (dir=2) -> moves to (2, 2)
     # Agent 2 stays still
     
-    initial_state = env.get_state()
-    state_dict = dict(initial_state)
-    
-    # Modify agent positions and directions
-    agents_data = list(state_dict['agents'])
+    # Clear old agent positions from grid
+    for agent in env.agents:
+        if agent.pos is not None:
+            cell = env.grid.get(*agent.pos)
+            if cell is agent:
+                env.grid.set(*agent.pos, None)
     
     # Agent 0: position (1, 2), direction 0 (right)
-    agent0_dict = dict(agents_data[0])
-    agent0_dict['pos'] = (1, 2)
-    agent0_dict['dir'] = 0  # facing right
-    agents_data[0] = tuple(sorted(agent0_dict.items()))
+    env.agents[0].pos = np.array([1, 2])
+    env.agents[0].dir = 0  # facing right
+    env.grid.set(1, 2, env.agents[0])
     
     # Agent 1: position (3, 2), direction 2 (left)
-    agent1_dict = dict(agents_data[1])
-    agent1_dict['pos'] = (3, 2)
-    agent1_dict['dir'] = 2  # facing left
-    agents_data[1] = tuple(sorted(agent1_dict.items()))
+    env.agents[1].pos = np.array([3, 2])
+    env.agents[1].dir = 2  # facing left
+    env.grid.set(3, 2, env.agents[1])
     
-    # Agent 2: keep as is, will use "still" action
+    # Agent 2: keep somewhere safe
+    env.agents[2].pos = np.array([5, 5])
+    env.agents[2].dir = 0
+    env.grid.set(5, 5, env.agents[2])
     
-    # Update state
-    modified_state = tuple(sorted([
-        ('grid', state_dict['grid']),
-        ('agents', tuple(agents_data)),
-        ('step_count', state_dict['step_count']),
-        ('rng_state', state_dict['rng_state']),
-    ]))
-    
-    # Set the manufactured state
-    env.set_state(modified_state)
+    # Get the modified state
+    modified_state = env.get_state()
     
     # Both agents 0 and 1 move forward to (2, 2), agent 2 stays still
     actions = [Actions.forward, Actions.forward, Actions.still]
@@ -149,40 +153,30 @@ def test_probability_values_with_conflicts():
     # Agent 1 at (6, 5) facing left (dir=2) 
     # Agent 2 at (5, 4) facing down (dir=1)
     
-    initial_state = env.get_state()
-    state_dict = dict(initial_state)
-    
-    # Modify agent positions and directions
-    agents_data = list(state_dict['agents'])
+    # Clear old agent positions from grid
+    for agent in env.agents:
+        if agent.pos is not None:
+            cell = env.grid.get(*agent.pos)
+            if cell is agent:
+                env.grid.set(*agent.pos, None)
     
     # Agent 0: position (4, 5), direction 0 (right)
-    agent0_dict = dict(agents_data[0])
-    agent0_dict['pos'] = (4, 5)
-    agent0_dict['dir'] = 0
-    agents_data[0] = tuple(sorted(agent0_dict.items()))
+    env.agents[0].pos = np.array([4, 5])
+    env.agents[0].dir = 0
+    env.grid.set(4, 5, env.agents[0])
     
     # Agent 1: position (6, 5), direction 2 (left)
-    agent1_dict = dict(agents_data[1])
-    agent1_dict['pos'] = (6, 5)
-    agent1_dict['dir'] = 2
-    agents_data[1] = tuple(sorted(agent1_dict.items()))
+    env.agents[1].pos = np.array([6, 5])
+    env.agents[1].dir = 2
+    env.grid.set(6, 5, env.agents[1])
     
     # Agent 2: position (5, 4), direction 1 (down)
-    agent2_dict = dict(agents_data[2])
-    agent2_dict['pos'] = (5, 4)
-    agent2_dict['dir'] = 1
-    agents_data[2] = tuple(sorted(agent2_dict.items()))
+    env.agents[2].pos = np.array([5, 4])
+    env.agents[2].dir = 1
+    env.grid.set(5, 4, env.agents[2])
     
-    # Update state
-    modified_state = tuple(sorted([
-        ('grid', state_dict['grid']),
-        ('agents', tuple(agents_data)),
-        ('step_count', state_dict['step_count']),
-        ('rng_state', state_dict['rng_state']),
-    ]))
-    
-    # Set the manufactured state
-    env.set_state(modified_state)
+    # Get the modified state
+    modified_state = env.get_state()
     
     # All agents move forward to (5, 5)
     actions = [Actions.forward, Actions.forward, Actions.forward]
@@ -225,39 +219,30 @@ def test_independent_agents_deterministic():
     env.reset()
     
     # Manufacture a state where agents are far apart and won't interfere
-    initial_state = env.get_state()
-    state_dict = dict(initial_state)
-    
-    # Modify agent positions to be far apart
-    agents_data = list(state_dict['agents'])
+    # Clear old agent positions from grid
+    for agent in env.agents:
+        if agent.pos is not None:
+            cell = env.grid.get(*agent.pos)
+            if cell is agent:
+                env.grid.set(*agent.pos, None)
     
     # Agent 0 at (2, 2), facing right
-    agent0_dict = dict(agents_data[0])
-    agent0_dict['pos'] = (2, 2)
-    agent0_dict['dir'] = 0
-    agents_data[0] = tuple(sorted(agent0_dict.items()))
+    env.agents[0].pos = np.array([2, 2])
+    env.agents[0].dir = 0
+    env.grid.set(2, 2, env.agents[0])
     
     # Agent 1 at (7, 7), facing up
-    agent1_dict = dict(agents_data[1])
-    agent1_dict['pos'] = (7, 7)
-    agent1_dict['dir'] = 3
-    agents_data[1] = tuple(sorted(agent1_dict.items()))
+    env.agents[1].pos = np.array([7, 7])
+    env.agents[1].dir = 3
+    env.grid.set(7, 7, env.agents[1])
     
     # Agent 2 at (2, 7), facing down
-    agent2_dict = dict(agents_data[2])
-    agent2_dict['pos'] = (2, 7)
-    agent2_dict['dir'] = 1
-    agents_data[2] = tuple(sorted(agent2_dict.items()))
+    env.agents[2].pos = np.array([2, 7])
+    env.agents[2].dir = 1
+    env.grid.set(2, 7, env.agents[2])
     
-    # Update state
-    modified_state = tuple(sorted([
-        ('grid', state_dict['grid']),
-        ('agents', tuple(agents_data)),
-        ('step_count', state_dict['step_count']),
-        ('rng_state', state_dict['rng_state']),
-    ]))
-    
-    env.set_state(modified_state)
+    # Get the modified state
+    modified_state = env.get_state()
     
     # All agents move forward to different cells (no conflicts)
     actions = [Actions.forward, Actions.forward, Actions.forward]
@@ -285,10 +270,6 @@ def test_two_conflict_blocks():
     print("Test: Two separate conflict blocks (2×2)...")
     
     # Create a custom environment with 4 agents to test 2 blocks of 2
-    import sys
-    sys.path.insert(0, str(Path(__file__).parent.parent / "vendor" / "multigrid"))
-    from gym_multigrid.multigrid import MultiGridEnv, Agent, World, Grid, Wall
-    
     class FourAgentEnv(MultiGridEnv):
         def __init__(self):
             agents = [Agent(World, i+1, view_size=7) for i in range(4)]
@@ -317,47 +298,37 @@ def test_two_conflict_blocks():
     # Block 1: Agents 0,1 compete for cell (3, 3)
     # Block 2: Agents 2,3 compete for cell (6, 6)
     
-    initial_state = env.get_state()
-    state_dict = dict(initial_state)
-    
-    # Modify agent positions
-    agents_data = list(state_dict['agents'])
+    # Clear old agent positions from grid
+    for agent in env.agents:
+        if agent.pos is not None:
+            cell = env.grid.get(*agent.pos)
+            if cell is agent:
+                env.grid.set(*agent.pos, None)
     
     # Block 1: Agents 0,1 compete for (3, 3)
     # Agent 0 at (2, 3) facing right - will move to (3, 3)
-    agent0_dict = dict(agents_data[0])
-    agent0_dict['pos'] = (2, 3)
-    agent0_dict['dir'] = 0
-    agents_data[0] = tuple(sorted(agent0_dict.items()))
+    env.agents[0].pos = np.array([2, 3])
+    env.agents[0].dir = 0
+    env.grid.set(2, 3, env.agents[0])
     
     # Agent 1 at (4, 3) facing left - will move to (3, 3)
-    agent1_dict = dict(agents_data[1])
-    agent1_dict['pos'] = (4, 3)
-    agent1_dict['dir'] = 2
-    agents_data[1] = tuple(sorted(agent1_dict.items()))
+    env.agents[1].pos = np.array([4, 3])
+    env.agents[1].dir = 2
+    env.grid.set(4, 3, env.agents[1])
     
     # Block 2: Agents 2,3 compete for (6, 6)
     # Agent 2 at (5, 6) facing right - will move to (6, 6)
-    agent2_dict = dict(agents_data[2])
-    agent2_dict['pos'] = (5, 6)
-    agent2_dict['dir'] = 0
-    agents_data[2] = tuple(sorted(agent2_dict.items()))
+    env.agents[2].pos = np.array([5, 6])
+    env.agents[2].dir = 0
+    env.grid.set(5, 6, env.agents[2])
     
     # Agent 3 at (7, 6) facing left - will move to (6, 6)
-    agent3_dict = dict(agents_data[3])
-    agent3_dict['pos'] = (7, 6)
-    agent3_dict['dir'] = 2
-    agents_data[3] = tuple(sorted(agent3_dict.items()))
+    env.agents[3].pos = np.array([7, 6])
+    env.agents[3].dir = 2
+    env.grid.set(7, 6, env.agents[3])
     
-    # Update state
-    modified_state = tuple(sorted([
-        ('grid', state_dict['grid']),
-        ('agents', tuple(agents_data)),
-        ('step_count', state_dict['step_count']),
-        ('rng_state', state_dict['rng_state']),
-    ]))
-    
-    env.set_state(modified_state)
+    # Get the modified state
+    modified_state = env.get_state()
     
     # All 4 agents move forward, creating 2 separate conflicts
     actions = [Actions.forward, Actions.forward, Actions.forward, Actions.forward]
@@ -402,12 +373,12 @@ def main():
     ]
     
     results = []
-    for test in tests:
+    for test_fn in tests:
         try:
-            result = test()
+            result = test_fn()
             results.append(result)
         except Exception as e:
-            print(f"  ✗ Test failed with exception: {e}")
+            print(f"  ✗ Test raised exception: {e}")
             import traceback
             traceback.print_exc()
             results.append(False)
@@ -417,6 +388,10 @@ def main():
     passed = sum(results)
     total = len(results)
     print(f"Results: {passed}/{total} tests passed")
+    if passed == total:
+        print("All tests PASSED!")
+    else:
+        print(f"{total - passed} test(s) FAILED")
     print("=" * 70)
     
     return all(results)
