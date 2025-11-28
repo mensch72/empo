@@ -202,7 +202,7 @@ class WorldModel(gym.Env):
         # Subclasses should override to provide actual rewards
         return new_state, 0.0, terminated, False, {}
     
-    def get_dag(self) -> Tuple[List[Any], Dict[Any, int], List[List[int]]]:
+    def get_dag(self, return_probabilities: bool = False):
         """
         Efficiently compute the DAG structure of an acyclic finite environment.
         
@@ -219,6 +219,13 @@ class WorldModel(gym.Env):
         
         Space Complexity: O(|S| + |T|) for storing states, edges, and auxiliary structures.
         
+        Args:
+            return_probabilities: If True, also return transition probabilities as a
+                fourth item. Each element is a list of (action, probs, succ_indices)
+                tuples for that state, where action is the action tuple, probs is a
+                list of transition probabilities, and succ_indices is a list of
+                successor state indices (parallel lists).
+        
         Returns:
             A tuple containing:
             1. states (List): List of all reachable states in topological order
@@ -227,6 +234,9 @@ class WorldModel(gym.Env):
                the states list
             3. successors (List[List[int]]): List where successors[i] contains the
                indices of all possible successor states of states[i]
+            4. (optional) transitions (List[List[Tuple]]): If return_probabilities=True,
+               a list where transitions[i] contains (action, probs, succ_indices) tuples
+               for each action combination from states[i]
         
         Example:
             >>> states, state_to_idx, successors = env.get_dag()
@@ -234,6 +244,10 @@ class WorldModel(gym.Env):
             >>> # state_to_idx[states[i]] == i
             >>> # successors[i] are indices of states reachable from states[i]
             >>> # For any edge i -> j in the DAG: i < j (topological ordering)
+            
+            >>> # With probabilities:
+            >>> states, state_to_idx, successors, transitions = env.get_dag(return_probabilities=True)
+            >>> # transitions[i] = [(action, probs, succ_indices), ...]
         """
         # Reset environment to get root state
         self.reset()
@@ -244,10 +258,15 @@ class WorldModel(gym.Env):
         temp_state_to_idx = {}  # Temporary mapping
         edges = {}  # edges[i] = set of successor indices (temporary)
         
+        # Store transition probabilities if requested
+        temp_transitions = {} if return_probabilities else None
+        
         queue = deque([root_state])
         temp_state_to_idx[root_state] = 0
         discovered_states.append(root_state)
         edges[0] = set()
+        if return_probabilities:
+            temp_transitions[0] = []
         
         while queue:
             current_state = queue.popleft()
@@ -272,16 +291,26 @@ class WorldModel(gym.Env):
                 for _ in range(num_agents):
                     actions.append(temp % num_actions)
                     temp //= num_actions
+                actions_tuple = tuple(actions)
                 
                 # Get transition probabilities for this action combination
-                transitions = self.transition_probabilities(current_state, actions)
+                trans_result = self.transition_probabilities(current_state, actions)
                 
                 # If None, state is terminal or actions are invalid
-                if transitions is None:
+                if trans_result is None:
                     continue
                 
+                # If storing probabilities, collect them
+                if return_probabilities:
+                    probs = []
+                    succ_states = []
+                    for prob, successor_state in trans_result:
+                        probs.append(prob)
+                        succ_states.append(successor_state)
+                    temp_transitions[current_idx].append((actions_tuple, probs, succ_states))
+                
                 # Process all successor states from these transitions
-                for prob, successor_state in transitions:
+                for prob, successor_state in trans_result:
                     # Skip if we've already seen this successor from current state
                     if successor_state in seen_successors:
                         continue
@@ -293,6 +322,8 @@ class WorldModel(gym.Env):
                         temp_state_to_idx[successor_state] = len(discovered_states)
                         discovered_states.append(successor_state)
                         edges[len(discovered_states) - 1] = set()
+                        if return_probabilities:
+                            temp_transitions[len(discovered_states) - 1] = []
                         queue.append(successor_state)
                     
                     # Add edge from current to successor
@@ -350,7 +381,19 @@ class WorldModel(gym.Env):
                 new_succ_idx = old_to_new[old_succ_idx]
                 successors[new_idx].append(new_succ_idx)
         
-        return states, state_to_idx, successors
+        if not return_probabilities:
+            return states, state_to_idx, successors
+        
+        # PHASE 4: Convert transitions to use new indices
+        transitions = [[] for _ in range(num_states)]
+        for old_idx in range(num_states):
+            new_idx = old_to_new[old_idx]
+            for action, probs, succ_states in temp_transitions[old_idx]:
+                # Convert successor states to new indices
+                succ_indices = [state_to_idx[s] for s in succ_states]
+                transitions[new_idx].append((action, probs, succ_indices))
+        
+        return states, state_to_idx, successors, transitions
     
     def plot_dag(
         self,

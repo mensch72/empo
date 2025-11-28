@@ -59,32 +59,51 @@ def test_block_creation():
 
 
 def test_rock_creation():
-    """Test that rocks can be created with pushable_by attribute."""
-    env = SimpleBlockRockEnv(num_agents=2)
+    """Test that rocks can be created and can_push_rocks works via agent attribute."""
+    # Create agents with different can_push_rocks settings
+    agent_can_push = Agent(World, 0, can_push_rocks=True)
+    agent_cannot_push = Agent(World, 1, can_push_rocks=False)
     
-    # Create rocks with different pushable_by settings
-    rock1 = Rock(World, pushable_by=None)  # Pushable by all
-    rock2 = Rock(World, pushable_by=0)     # Pushable by agent 0
-    rock3 = Rock(World, pushable_by=[0, 1])  # Pushable by agents 0 and 1
+    class RockTestEnv(MultiGridEnv):
+        def __init__(self, agents):
+            super().__init__(
+                width=10,
+                height=10,
+                max_steps=100,
+                agents=agents,
+                partial_obs=False,
+                objects_set=World
+            )
+        
+        def _gen_grid(self, width, height):
+            self.grid = Grid(width, height)
+            for i in range(width):
+                self.grid.set(i, 0, Wall(World))
+                self.grid.set(i, height-1, Wall(World))
+            for j in range(height):
+                self.grid.set(0, j, Wall(World))
+                self.grid.set(width-1, j, Wall(World))
+            
+            for idx, agent in enumerate(self.agents):
+                agent.pos = np.array([2, 2 + idx * 2])
+                agent.dir = 0
+                self.grid.set(2, 2 + idx * 2, agent)
     
-    env.grid.set(5, 5, rock1)
-    env.grid.set(5, 6, rock2)
-    env.grid.set(5, 7, rock3)
+    env = RockTestEnv([agent_can_push, agent_cannot_push])
+    env.reset()
     
-    # Verify rocks exist
-    assert env.grid.get(5, 5).type == 'rock'
-    assert env.grid.get(5, 6).type == 'rock'
-    assert env.grid.get(5, 7).type == 'rock'
+    # Create a rock (no more pushable_by parameter)
+    rock = Rock(World)
+    env.grid.set(5, 5, rock)
     
-    # Verify pushable_by
-    assert env.grid.get(5, 5).can_be_pushed_by(env.agents[0])
-    assert env.grid.get(5, 5).can_be_pushed_by(env.agents[1])
+    # Verify rock exists
+    cell = env.grid.get(5, 5)
+    assert cell is not None
+    assert cell.type == 'rock'
     
-    assert env.grid.get(5, 6).can_be_pushed_by(env.agents[0])
-    assert not env.grid.get(5, 6).can_be_pushed_by(env.agents[1])
-    
-    assert env.grid.get(5, 7).can_be_pushed_by(env.agents[0])
-    assert env.grid.get(5, 7).can_be_pushed_by(env.agents[1])
+    # Verify pushing permissions via agent.can_push_rocks
+    assert rock.can_be_pushed_by(agent_can_push)
+    assert not rock.can_be_pushed_by(agent_cannot_push)
 
 
 def test_block_pushing():
@@ -144,34 +163,62 @@ def test_blocked_push():
 
 
 def test_rock_permission_pushing():
-    """Test that only authorized agents can push rocks."""
-    env = SimpleBlockRockEnv(num_agents=2)
+    """Test that only agents with can_push_rocks=True can push rocks."""
+    # Create one agent that can push rocks, one that cannot
+    agent_can_push = Agent(World, 0, can_push_rocks=True)
+    agent_cannot_push = Agent(World, 1, can_push_rocks=False)
     
-    # Place rocks with different permissions
-    rock1 = Rock(World, pushable_by=0)  # Only agent 0
-    rock2 = Rock(World, pushable_by=1)  # Only agent 1
+    class RockPushTestEnv(MultiGridEnv):
+        def __init__(self, agents):
+            super().__init__(
+                width=10,
+                height=10,
+                max_steps=100,
+                agents=agents,
+                partial_obs=False,
+                objects_set=World
+            )
+        
+        def _gen_grid(self, width, height):
+            self.grid = Grid(width, height)
+            for i in range(width):
+                self.grid.set(i, 0, Wall(World))
+                self.grid.set(i, height-1, Wall(World))
+            for j in range(height):
+                self.grid.set(0, j, Wall(World))
+                self.grid.set(width-1, j, Wall(World))
+            
+            for idx, agent in enumerate(self.agents):
+                agent.pos = np.array([2, 2 + idx * 2])
+                agent.dir = 0  # facing right
+                self.grid.set(2, 2 + idx * 2, agent)
     
-    env.grid.set(3, 2, rock1)
-    env.grid.set(3, 4, rock2)
+    env = RockPushTestEnv([agent_can_push, agent_cannot_push])
+    env.reset()
     
-    # Agent 0 pushes rock1 (should succeed)
+    # Place rocks
+    rock1 = Rock(World)
+    rock2 = Rock(World)
+    env.grid.set(3, 2, rock1)  # In front of agent 0 (can push)
+    env.grid.set(3, 4, rock2)  # In front of agent 1 (cannot push)
+    
+    # Agent 0 pushes rock (should succeed)
     actions = [3, 0]  # agent 0 forward, agent 1 still
     obs, rewards, done, info = env.step(actions)
     assert np.array_equal(env.agents[0].pos, [3, 2])
     assert env.grid.get(4, 2).type == 'rock'
     
-    # Agent 0 tries to push rock2 (should fail)
-    # First turn agent 0 to face down, then try to push rock2
-    # Reset environment first
-    env = SimpleBlockRockEnv(num_agents=2)
-    rock2_new = Rock(World, pushable_by=1)
+    # Agent 1 tries to push rock (should fail)
+    env = RockPushTestEnv([agent_can_push, agent_cannot_push])
+    env.reset()
+    rock2_new = Rock(World)
     env.grid.set(3, 4, rock2_new)
     
-    # Agent 1 pushes rock2 (should succeed)
     actions = [0, 3]  # agent 0 still, agent 1 forward
     obs, rewards, done, info = env.step(actions)
-    assert np.array_equal(env.agents[1].pos, [3, 4])
-    assert env.grid.get(4, 4).type == 'rock'
+    # Agent 1 cannot push, so rock stays in place and agent doesn't move
+    assert np.array_equal(env.agents[1].pos, [2, 4])
+    assert env.grid.get(3, 4).type == 'rock'
 
 
 def test_state_serialization_with_blocks_rocks():
@@ -180,7 +227,7 @@ def test_state_serialization_with_blocks_rocks():
     
     # Place objects
     env.grid.set(3, 2, Block(World))
-    rock = Rock(World, pushable_by=0)
+    rock = Rock(World)
     env.grid.set(5, 5, rock)
     
     # Serialize state
@@ -201,7 +248,6 @@ def test_state_serialization_with_blocks_rocks():
     assert block_cell.type == 'block'
     assert rock_cell is not None
     assert rock_cell.type == 'rock'
-    assert rock_cell.pushable_by == 0
 
 
 def test_transition_probabilities_with_pushing():

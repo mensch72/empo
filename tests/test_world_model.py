@@ -118,8 +118,9 @@ def test_initial_state_method():
     env.reset()
     expected_init_state = env.get_state()
     # Note: Due to RNG state, we can't directly compare, but we can verify step_count is 0
-    init_state_dict = dict(init_state)
-    assert init_state_dict['step_count'] == 0, "Initial state should have step_count of 0"
+    # Compact state format: (step_count, agent_states, mobile_objects, mutable_objects)
+    step_count = init_state[0]
+    assert step_count == 0, "Initial state should have step_count of 0"
 
 
 def test_is_terminal_method():

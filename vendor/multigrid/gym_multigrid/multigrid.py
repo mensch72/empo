@@ -334,9 +334,10 @@ class MagicWall(WorldObj):
     from one specific direction.
     
     Attributes:
-        magic_side: Direction from which the wall can be entered (0=right, 1=down, 2=left, 3=up)
-        entry_probability: Probability (0.0 to 1.0) that an authorized agent successfully enters
-        solidify_probability: Probability (0.0 to 1.0) that a failed entry attempt turns this into a normal wall
+        magic_side: Direction from which the wall can be entered (0=right, 1=down, 2=left, 3=up) [immutable]
+        entry_probability: Probability (0.0 to 1.0) that an authorized agent successfully enters [immutable]
+        solidify_probability: Probability (0.0 to 1.0) that a failed entry attempt deactivates this wall [immutable]
+        active: Whether this wall still functions as a magic wall (True) or has solidified into a regular wall (False) [mutable]
     """
     
     def __init__(self, world, magic_side, entry_probability, solidify_probability=0.0, color='grey'):
@@ -355,6 +356,7 @@ class MagicWall(WorldObj):
         self.magic_side = magic_side
         self.entry_probability = entry_probability
         self.solidify_probability = solidify_probability
+        self.active = True  # Mutable: whether wall is still magic (True) or solidified (False)
     
     def see_behind(self):
         return False
@@ -379,9 +381,14 @@ class MagicWall(WorldObj):
                    self.magic_side, entry_prob_encoded, solidify_prob_encoded, 0)
     
     def render(self, img):
-        """Render magic wall like a normal wall with a dashed blue line near its magic side."""
+        """Render magic wall like a normal wall with a dashed blue line near its magic side.
+        If not active (solidified), render as a plain wall without the blue line."""
         # Render base wall
         fill_coords(img, point_in_rect(0, 1, 0, 1), COLORS[self.color])
+        
+        # Only add blue line if wall is still active/magic
+        if not self.active:
+            return
         
         # Add dashed blue line parallel to magic side
         blue_color = COLORS['blue']
@@ -596,10 +603,8 @@ class Block(WorldObj):
 
 
 class Rock(WorldObj):
-    def __init__(self, world, pushable_by=None):
+    def __init__(self, world):
         super(Rock, self).__init__(world, 'rock', 'grey')
-        # pushable_by can be an agent index, a list of indices, or None (pushable by all)
-        self.pushable_by = pushable_by
 
     def can_overlap(self):
         return False
@@ -615,13 +620,9 @@ class Rock(WorldObj):
             agent: The Agent object attempting to push this rock
             
         Returns:
-            bool: True if the agent is authorized to push this rock, False otherwise
+            bool: True if the agent has can_push_rocks=True, False otherwise
         """
-        if self.pushable_by is None:
-            return True
-        if isinstance(self.pushable_by, list):
-            return agent.index in self.pushable_by
-        return agent.index == self.pushable_by
+        return getattr(agent, 'can_push_rocks', False)
 
     def render(self, img):
         # Medium grey irregular rock shape
@@ -638,7 +639,7 @@ class Rock(WorldObj):
 
 
 class Agent(WorldObj):
-    def __init__(self, world, index=0, view_size=7, can_enter_magic_walls=False):
+    def __init__(self, world, index=0, view_size=7, can_enter_magic_walls=False, can_push_rocks=False):
         super(Agent, self).__init__(world, 'agent', world.IDX_TO_COLOR[index])
         self.pos = None
         self.dir = None
@@ -650,6 +651,7 @@ class Agent(WorldObj):
         self.paused = False
         self.on_unsteady_ground = False  # Track if agent is on unsteady ground
         self.can_enter_magic_walls = can_enter_magic_walls  # Can attempt to enter magic walls
+        self.can_push_rocks = can_push_rocks  # Can push rocks (immutable)
 
     def render(self, img):
         c = COLORS[self.color]
@@ -829,14 +831,20 @@ class Grid:
         return deepcopy(self)
 
     def set(self, i, j, v):
-        assert i >= 0 and i < self.width
-        assert j >= 0 and j < self.height
+        # Removed assertion checks for performance - bounds checking done at higher level
         self.grid[j * self.width + i] = v
 
     def get(self, i, j):
-        assert i >= 0 and i < self.width
-        assert j >= 0 and j < self.height
+        # Removed assertion checks for performance - bounds checking done at higher level
         return self.grid[j * self.width + i]
+    
+    def get_unsafe(self, i, j):
+        """Fast grid access without bounds checking. Use only when bounds are guaranteed."""
+        return self.grid[j * self.width + i]
+    
+    def set_unsafe(self, i, j, v):
+        """Fast grid set without bounds checking. Use only when bounds are guaranteed."""
+        self.grid[j * self.width + i] = v
 
     def horz_wall(self, world, x, y, length=None, obj_type=Wall):
         if length is None:
@@ -1375,7 +1383,7 @@ def create_object_from_spec(cell_spec, objects_set):
     elif obj_type == 'block':
         return Block(objects_set)
     elif obj_type == 'rock':
-        return Rock(objects_set, pushable_by=params.get('pushable_by'))
+        return Rock(objects_set)
     elif obj_type == 'lava':
         return Lava(objects_set)
     elif obj_type == 'switch':
@@ -1487,7 +1495,13 @@ class MultiGridEnv(WorldModel):
                 for x, y, agent_params in map_agents:
                     color = agent_params.get('color', 'red')
                     color_idx = objects_set.COLOR_TO_IDX.get(color, 0)
-                    agents.append(Agent(objects_set, color_idx))
+                    # Determine if this agent can push rocks based on color
+                    agent_can_push_rocks = (
+                        hasattr(self, '_can_push_rocks_colors') and 
+                        self._can_push_rocks_colors is not None and
+                        color in self._can_push_rocks_colors
+                    )
+                    agents.append(Agent(objects_set, color_idx, can_push_rocks=agent_can_push_rocks))
             
             # Handle orientations: if None, generate random orientations
             if orientations is None:
@@ -1582,6 +1596,10 @@ class MultiGridEnv(WorldModel):
         
         # Track cells where stumbling occurred in the current step (for visual feedback)
         self.stumbled_cells = set()
+        
+        # Build cache of mobile objects (blocks, rocks) and mutable objects (doors, boxes, magic walls)
+        # This avoids full grid scans in get_state()
+        self._build_object_cache()
 
         # Return first observation
         if self.partial_obs:
@@ -1590,6 +1608,38 @@ class MultiGridEnv(WorldModel):
             obs = [self.grid.encode_for_agents(self.objects, self.agents[i].pos) for i in range(len(self.agents))]
         obs=[self.objects.normalize_obs*ob for ob in obs]
         return obs
+    
+    def _build_object_cache(self):
+        """
+        Build cache of mobile and mutable objects to avoid full grid scans in get_state().
+        
+        Mobile objects: blocks and rocks (can be pushed)
+        Mutable objects: doors, boxes, magic walls (have mutable state)
+        
+        This cache stores references to the objects themselves, not their positions.
+        Positions are read from the grid when get_state() is called.
+        """
+        self._mobile_objects = []  # List of (initial_pos, obj) tuples for sorting
+        self._mutable_objects = []  # List of (pos, obj) tuples - position is immutable for these
+        
+        for j in range(self.grid.height):
+            for i in range(self.grid.width):
+                cell = self.grid.get(i, j)
+                if cell is None:
+                    continue
+                
+                obj_type = cell.type
+                
+                # Mobile objects: blocks and rocks
+                if obj_type in ('block', 'rock'):
+                    self._mobile_objects.append(((i, j), cell))
+                
+                # Mutable objects: doors, boxes, magic walls
+                elif obj_type in ('door', 'box', 'magicwall'):
+                    self._mutable_objects.append(((i, j), cell))
+        
+        # Sort mobile objects by initial position for deterministic ordering
+        self._mobile_objects.sort(key=lambda x: x[0])
 
     def seed(self, seed=1337):
         # Seed the random number generator
@@ -1682,27 +1732,12 @@ class MultiGridEnv(WorldModel):
         # Create the grid
         self.grid = Grid(map_width, map_height)
         
-        # Determine which agents can push rocks based on _can_push_rocks_colors
-        # We use agent.index (which is the color index) rather than the position in agents list
-        # Using a set to avoid duplicates when multiple agents have the same color
-        pushable_by_agents = None
-        if hasattr(self, '_can_push_rocks_colors') and self._can_push_rocks_colors is not None:
-            pushable_by_indices = set()
-            for agent in self.agents:
-                if agent.color in self._can_push_rocks_colors:
-                    pushable_by_indices.add(agent.index)
-            pushable_by_agents = list(pushable_by_indices) if pushable_by_indices else []
-        
-        # Place objects from the map
+        # Place objects from the map (rocks are now simpler - just use create_object_from_spec)
         for y in range(map_height):
             for x in range(map_width):
                 cell_spec = cells[y][x]
                 if cell_spec is not None and cell_spec[0] != 'agent':
-                    # For rocks, set pushable_by based on can_push_rocks parameter
-                    if cell_spec[0] == 'rock' and pushable_by_agents is not None:
-                        obj = Rock(self.objects, pushable_by=pushable_by_agents)
-                    else:
-                        obj = create_object_from_spec(cell_spec, self.objects)
+                    obj = create_object_from_spec(cell_spec, self.objects)
                     if obj is not None:
                         self.grid.set(x, y, obj)
         
@@ -2236,11 +2271,10 @@ class MultiGridEnv(WorldModel):
                 self._move_agent_to_cell(i, fwd_pos, fwd_cell)
                 self._handle_special_moves(i, rewards, fwd_pos, fwd_cell)
             else:
-                # Entry fails - check if magic wall should solidify into a normal wall
+                # Entry fails - check if magic wall should solidify (deactivate)
                 if self.np_random.random() < fwd_cell.solidify_probability:
-                    # Replace magic wall with a normal wall
-                    normal_wall = Wall(self.objects, fwd_cell.color)
-                    self.grid.set(*fwd_pos, normal_wall)
+                    # Deactivate the magic wall (it now acts as a normal wall)
+                    fwd_cell.active = False
         
         return done
     
@@ -2297,7 +2331,8 @@ class MultiGridEnv(WorldModel):
                 self.agents[i].can_enter_magic_walls):
                 fwd_pos = self.agents[i].front_pos
                 fwd_cell = self.grid.get(*fwd_pos)
-                if fwd_cell is not None and fwd_cell.type == 'magicwall':
+                # Check if it's an active magic wall (not solidified)
+                if fwd_cell is not None and fwd_cell.type == 'magicwall' and fwd_cell.active:
                     # Check if agent is approaching from the magic side
                     # Agent's direction is where they're facing, magic_side is where wall can be entered from
                     # If agent faces right (dir=0), they approach from left (opposite of right=0 is left=2)
@@ -2485,287 +2520,234 @@ class MultiGridEnv(WorldModel):
 
     def get_state(self):
         """
-        Get the complete state of the environment.
+        Get the current state of the environment as a compact representation.
         
-        Returns a hashable dictionary containing everything needed to predict
-        the consequences of possible actions:
-        - Grid state (all objects and their properties)
-        - Agent states (positions, directions, carrying items, status flags)
-        - Step count (for timeout tracking)
-        - Random number generator state
+        The compact state only stores mutable/mobile objects:
+        1. Immutable objects (walls) are not stored
+        2. Mobile objects (agents, pushed blocks/rocks) only store position + color
+        3. Mutable immobile objects only store their mutable state (e.g., active for magic walls)
+        4. Uses fixed ordering instead of serializing entire grid
+        
+        Format:
+        - step_count: int
+        - agent_states: tuple of (pos_x, pos_y, dir, terminated, started, paused, on_unsteady, carrying_type, carrying_color)
+        - mobile_objects: tuple of (obj_type, pos_x, pos_y, color) for blocks/rocks
+        - mutable_objects: tuple of (obj_type, x, y, mutable_state...) for doors/boxes/magic walls
         
         Returns:
-            tuple: A hashable representation of the complete environment state
+            tuple: A hashable compact state representation
         """
-        # Serialize grid state
-        grid_state = []
-        for j in range(self.grid.height):
-            for i in range(self.grid.width):
-                cell = self.grid.get(i, j)
-                if cell is None:
-                    grid_state.append(None)
-                else:
-                    # Serialize object with all its properties
-                    obj_data = {
-                        'type': cell.type,
-                        'color': cell.color,
-                        'init_pos': tuple(cell.init_pos) if cell.init_pos is not None else None,
-                        'cur_pos': tuple(cell.cur_pos) if cell.cur_pos is not None else None,
-                    }
-                    
-                    # Add type-specific properties
-                    if hasattr(cell, 'is_open'):
-                        obj_data['is_open'] = cell.is_open
-                    if hasattr(cell, 'is_locked'):
-                        obj_data['is_locked'] = cell.is_locked
-                    if hasattr(cell, 'contains'):
-                        # Recursively serialize contained objects
-                        if cell.contains is not None:
-                            obj_data['contains'] = self._serialize_object(cell.contains)
-                        else:
-                            obj_data['contains'] = None
-                    if hasattr(cell, 'index'):
-                        obj_data['index'] = cell.index
-                    if hasattr(cell, 'reward'):
-                        obj_data['reward'] = cell.reward
-                    if hasattr(cell, 'target_type'):
-                        obj_data['target_type'] = cell.target_type
-                    if hasattr(cell, 'pushable_by'):
-                        # For rocks, serialize the pushable_by attribute
-                        obj_data['pushable_by'] = cell.pushable_by
-                    if isinstance(cell, Agent):
-                        # For agents in grid, just store basic info (detailed agent state below)
-                        obj_data['agent_index'] = cell.index
-                    
-                    grid_state.append(tuple(sorted(obj_data.items())))
+        # Rebuild cache if not present (e.g., objects were added after reset)
+        if not hasattr(self, '_mobile_objects') or not hasattr(self, '_mutable_objects'):
+            self._build_object_cache()
         
-        # Serialize agent states
-        agents_state = []
+        # Agent states - fixed order by agent index
+        agent_states = []
         for agent in self.agents:
-            agent_data = {
-                'pos': tuple(agent.pos) if agent.pos is not None else None,
-                'dir': agent.dir,
-                'index': agent.index,
-                'view_size': agent.view_size,
-                'terminated': agent.terminated,
-                'started': agent.started,
-                'paused': agent.paused,
-                'on_unsteady_ground': agent.on_unsteady_ground,
-                'carrying': self._serialize_object(agent.carrying) if agent.carrying is not None else None,
-            }
-            agents_state.append(tuple(sorted(agent_data.items())))
+            carrying_type = agent.carrying.type if agent.carrying else None
+            carrying_color = agent.carrying.color if agent.carrying else None
+            agent_states.append((
+                int(agent.pos[0]) if agent.pos is not None else None,
+                int(agent.pos[1]) if agent.pos is not None else None,
+                agent.dir,
+                agent.terminated,
+                agent.started,
+                agent.paused,
+                agent.on_unsteady_ground,
+                carrying_type,
+                carrying_color,
+            ))
         
-        # Get RNG state - serialize in a way that works across numpy versions
-        rng_state = self.np_random.bit_generator.state
+        # For environments with no mobile/mutable objects in cache, do a quick grid scan
+        # This handles cases where objects are added after reset()
+        if len(self._mobile_objects) == 0 and len(self._mutable_objects) == 0:
+            # Quick check if there are any objects we should track
+            has_trackable = False
+            for j in range(self.grid.height):
+                for i in range(self.grid.width):
+                    cell = self.grid.get(i, j)
+                    if cell is not None and cell.type in ('block', 'rock', 'door', 'box', 'magicwall'):
+                        has_trackable = True
+                        break
+                if has_trackable:
+                    break
+            if has_trackable:
+                self._build_object_cache()
         
-        # Serialize RNG state in a version-agnostic way
-        if isinstance(rng_state['state'], dict):
-            # New numpy format (PCG64, etc.)
-            rng_state_tuple = (
-                rng_state['bit_generator'],
-                tuple(sorted(rng_state['state'].items())),  # Serialize as tuple of items
-                rng_state.get('has_uint32', 0),
-                rng_state.get('uinteger', 0),
-            )
-        else:
-            # Old numpy format (MT19937)
-            rng_state_tuple = (
-                rng_state['bit_generator'],
-                tuple(rng_state['state']['key']),
-                rng_state['state']['pos'],
-                rng_state.get('has_gauss', 0),
-                rng_state.get('gauss', 0.0),
-            )
-        
-        # Create complete state tuple
-        state = (
-            ('grid', tuple(grid_state)),
-            ('agents', tuple(agents_state)),
-            ('step_count', self.step_count),
-            ('rng_state', rng_state_tuple),
-        )
-        
-        return state
-    
-    def _serialize_object(self, obj):
-        """Helper method to serialize a WorldObj into a hashable structure."""
-        if obj is None:
-            return None
-        
-        obj_data = {
-            'type': obj.type,
-            'color': obj.color,
-            'init_pos': tuple(obj.init_pos) if obj.init_pos is not None else None,
-            'cur_pos': tuple(obj.cur_pos) if obj.cur_pos is not None else None,
-        }
-        
-        # Add type-specific properties
-        if hasattr(obj, 'is_open'):
-            obj_data['is_open'] = obj.is_open
-        if hasattr(obj, 'is_locked'):
-            obj_data['is_locked'] = obj.is_locked
-        if hasattr(obj, 'index'):
-            obj_data['index'] = obj.index
-        if hasattr(obj, 'reward'):
-            obj_data['reward'] = obj.reward
-        if hasattr(obj, 'target_type'):
-            obj_data['target_type'] = obj.target_type
-        if hasattr(obj, 'contains'):
-            if obj.contains is not None:
-                obj_data['contains'] = self._serialize_object(obj.contains)
+        # Use cached objects - no grid scanning needed
+        # Mobile objects use cur_pos which is updated when they're pushed
+        mobile_objects = []
+        for initial_pos, obj in self._mobile_objects:
+            if obj.cur_pos is not None:
+                x, y = int(obj.cur_pos[0]), int(obj.cur_pos[1])
             else:
-                obj_data['contains'] = None
-        if hasattr(obj, 'pushable_by'):
-            # For rocks, serialize the pushable_by attribute
-            obj_data['pushable_by'] = obj.pushable_by
-        if hasattr(obj, 'stumble_probability'):
-            # For unsteady ground, serialize the stumble probability
-            obj_data['stumble_probability'] = obj.stumble_probability
+                # Fallback to initial position if cur_pos not set
+                x, y = initial_pos
+            mobile_objects.append((
+                obj.type,
+                x, y,
+                obj.color,
+            ))
         
-        return tuple(sorted(obj_data.items()))
+        # Mutable objects - their positions are fixed, just read their mutable state
+        mutable_objects = []
+        for (x, y), obj in self._mutable_objects:
+            if obj.type == 'door':
+                mutable_objects.append((
+                    'door',
+                    x, y,
+                    obj.is_open,
+                    obj.is_locked,
+                ))
+            elif obj.type == 'box':
+                contains_type = obj.contains.type if obj.contains else None
+                contains_color = obj.contains.color if obj.contains else None
+                mutable_objects.append((
+                    'box',
+                    x, y,
+                    contains_type,
+                    contains_color,
+                ))
+            elif obj.type == 'magicwall':
+                mutable_objects.append((
+                    'magicwall',
+                    x, y,
+                    obj.active,
+                ))
+        
+        # Sort mobile objects for deterministic ordering
+        mobile_objects.sort()
+        
+        return (
+            self.step_count,
+            tuple(agent_states),
+            tuple(mobile_objects),
+            tuple(mutable_objects),
+        )
     
     def set_state(self, state):
         """
-        Set the environment to a specific state.
+        Set the environment to a compact state.
+        
+        Note: This requires that the immutable grid structure is already correct.
+        Only use this for states that came from the same environment instance
+        or an identical environment setup.
         
         Args:
-            state: A state tuple as returned by get_state()
+            state: A compact state tuple as returned by get_state()
         """
-        # Convert state tuple back to dict for easier access
-        state_dict = dict(state)
+        step_count, agent_states, mobile_objects, mutable_objects = state
         
-        # Restore step count
-        self.step_count = state_dict['step_count']
-        
-        # Restore RNG state - handle different formats
-        rng_info = state_dict['rng_state']
-        bit_generator_name = rng_info[0]
-        
-        # Reconstruct the RNG state dict based on format
-        if isinstance(rng_info[1], tuple) and len(rng_info[1]) > 0 and isinstance(rng_info[1][0], tuple):
-            # New format with dict serialized as tuple of items
-            state_dict_items = dict(rng_info[1])
-            rng_state = {
-                'bit_generator': bit_generator_name,
-                'state': state_dict_items,
-                'has_uint32': rng_info[2],
-                'uinteger': rng_info[3],
-            }
-        else:
-            # Old format or fallback
-            rng_state = {
-                'bit_generator': bit_generator_name,
-                'state': {
-                    'key': np.array(rng_info[1], dtype=np.uint32),
-                    'pos': rng_info[2],
-                },
-                'has_gauss': rng_info[3],
-                'gauss': rng_info[4],
-            }
-        
-        self.np_random.bit_generator.state = rng_state
-        
-        # Restore grid
-        grid_data = state_dict['grid']
-        idx = 0
-        for j in range(self.grid.height):
-            for i in range(self.grid.width):
-                cell_data = grid_data[idx]
-                idx += 1
-                
-                if cell_data is None:
-                    self.grid.set(i, j, None)
-                else:
-                    obj = self._deserialize_object(dict(cell_data))
-                    self.grid.set(i, j, obj)
+        self.step_count = step_count
         
         # Restore agent states
-        agents_data = state_dict['agents']
-        for agent_idx, agent_state in enumerate(agents_data):
-            agent_dict = dict(agent_state)
+        for agent_idx, agent_state in enumerate(agent_states):
             agent = self.agents[agent_idx]
+            pos_x, pos_y, dir_, terminated, started, paused, on_unsteady, carrying_type, carrying_color = agent_state
             
-            agent.pos = np.array(agent_dict['pos']) if agent_dict['pos'] is not None else None
-            agent.dir = agent_dict['dir']
-            agent.terminated = agent_dict['terminated']
-            agent.started = agent_dict['started']
-            agent.paused = agent_dict['paused']
-            agent.on_unsteady_ground = agent_dict.get('on_unsteady_ground', False)
+            # Remove agent from old position in grid
+            if agent.pos is not None:
+                old_cell = self.grid.get(*agent.pos)
+                if old_cell is agent:
+                    self.grid.set(*agent.pos, None)
             
-            if agent_dict['carrying'] is not None:
-                agent.carrying = self._deserialize_object(dict(agent_dict['carrying']))
+            # Update agent state
+            agent.pos = np.array([pos_x, pos_y]) if pos_x is not None else None
+            agent.dir = dir_
+            agent.terminated = terminated
+            agent.started = started
+            agent.paused = paused
+            agent.on_unsteady_ground = on_unsteady
+            
+            # Restore carrying state
+            if carrying_type is not None:
+                if carrying_type == 'ball':
+                    agent.carrying = Ball(self.objects, color=carrying_color)
+                elif carrying_type == 'key':
+                    agent.carrying = Key(self.objects, color=carrying_color)
+                elif carrying_type == 'box':
+                    agent.carrying = Box(self.objects, color=carrying_color)
+                else:
+                    agent.carrying = None
             else:
                 agent.carrying = None
-    
-    def _deserialize_object(self, obj_data):
-        """Helper method to deserialize a WorldObj from a dictionary."""
-        obj_type = obj_data['type']
-        color = obj_data['color']
+            
+            # Place agent in grid at new position
+            if agent.pos is not None:
+                self.grid.set(*agent.pos, agent)
         
-        # Create appropriate object based on type
-        if obj_type == 'wall':
-            obj = Wall(self.objects, color)
-        elif obj_type == 'floor':
-            obj = Floor(self.objects, color)
-        elif obj_type == 'lava':
-            obj = Lava(self.objects)
-        elif obj_type == 'door':
-            obj = Door(self.objects, color, 
-                      is_open=obj_data.get('is_open', False),
-                      is_locked=obj_data.get('is_locked', False))
-        elif obj_type == 'key':
-            obj = Key(self.objects, color)
-        elif obj_type == 'ball':
-            obj = Ball(self.objects, 
-                      index=obj_data.get('index', 0),
-                      reward=obj_data.get('reward', 1))
-        elif obj_type == 'box':
-            contains = None
-            if 'contains' in obj_data and obj_data['contains'] is not None:
-                contains = self._deserialize_object(dict(obj_data['contains']))
-            obj = Box(self.objects, color, contains=contains)
-        elif obj_type == 'goal':
-            obj = Goal(self.objects, 
-                      index=obj_data.get('index', 0),
-                      reward=obj_data.get('reward', 1),
-                      color=self.objects.COLOR_TO_IDX.get(color))
-        elif obj_type == 'objgoal':
-            obj = ObjectGoal(self.objects,
-                           index=obj_data.get('index', 0),
-                           target_type=obj_data.get('target_type', 'ball'),
-                           reward=obj_data.get('reward', 1),
-                           color=self.objects.COLOR_TO_IDX.get(color))
-        elif obj_type == 'switch':
-            obj = Switch(self.objects)
-        elif obj_type == 'block':
-            obj = Block(self.objects)
-        elif obj_type == 'rock':
-            obj = Rock(self.objects, pushable_by=obj_data.get('pushable_by'))
-        elif obj_type == 'unsteadyground':
-            obj = UnsteadyGround(self.objects, 
-                               stumble_probability=obj_data.get('stumble_probability', 0.5),
-                               color=color)
-        elif obj_type == 'agent':
-            # For agents in the grid, find the agent by its index attribute (color)
-            agent_color_idx = obj_data.get('agent_index', 0)
-            # Find the agent in self.agents that has this color index
-            obj = None
-            for agent in self.agents:
-                if agent.index == agent_color_idx:
-                    obj = agent
-                    break
-            if obj is None:
-                raise ValueError(f"Could not find agent with index {agent_color_idx}")
+        # Restore mobile objects (blocks, rocks)
+        # Use cached objects - clear from current positions and move to new positions
+        # This avoids scanning the entire grid
+        if hasattr(self, '_mobile_objects') and self._mobile_objects:
+            # Clear cached mobile objects from their current positions
+            for initial_pos, obj in self._mobile_objects:
+                if obj.cur_pos is not None:
+                    old_x, old_y = int(obj.cur_pos[0]), int(obj.cur_pos[1])
+                    cell = self.grid.get(old_x, old_y)
+                    if cell is obj:
+                        self.grid.set(old_x, old_y, None)
+            
+            # Place cached objects at new positions from state
+            obj_idx = 0
+            for mobile_obj in mobile_objects:
+                obj_type, x, y, color = mobile_obj
+                if obj_idx < len(self._mobile_objects):
+                    _, obj = self._mobile_objects[obj_idx]
+                    obj.color = color
+                    obj.cur_pos = np.array([x, y])
+                    self.grid.set(x, y, obj)
+                    obj_idx += 1
         else:
-            raise ValueError(f"Unknown object type: {obj_type}")
+            # Fallback: scan grid if no cache (shouldn't happen after reset)
+            for j in range(self.grid.height):
+                for i in range(self.grid.width):
+                    cell = self.grid.get(i, j)
+                    if cell is not None and cell.type in ('block', 'rock'):
+                        self.grid.set(i, j, None)
+            
+            for mobile_obj in mobile_objects:
+                obj_type, x, y, color = mobile_obj
+                if obj_type == 'block':
+                    obj = Block(self.objects)
+                elif obj_type == 'rock':
+                    obj = Rock(self.objects)
+                else:
+                    continue
+                obj.color = color
+                obj.cur_pos = np.array([x, y])
+                self.grid.set(x, y, obj)
         
-        # Restore position information
-        if obj_data['init_pos'] is not None:
-            obj.init_pos = np.array(obj_data['init_pos'])
-        if obj_data['cur_pos'] is not None:
-            obj.cur_pos = np.array(obj_data['cur_pos'])
-        
-        return obj
+        # Restore mutable objects (doors, boxes, magic walls)
+        for mutable_obj in mutable_objects:
+            obj_type = mutable_obj[0]
+            x, y = mutable_obj[1], mutable_obj[2]
+            cell = self.grid.get(x, y)
+            
+            if obj_type == 'door':
+                if cell is not None and cell.type == 'door':
+                    cell.is_open = mutable_obj[3]
+                    cell.is_locked = mutable_obj[4]
+            
+            elif obj_type == 'box':
+                if cell is not None and cell.type == 'box':
+                    contains_type = mutable_obj[3]
+                    contains_color = mutable_obj[4]
+                    if contains_type is not None:
+                        if contains_type == 'ball':
+                            cell.contains = Ball(self.objects, color=contains_color)
+                        elif contains_type == 'key':
+                            cell.contains = Key(self.objects, color=contains_color)
+                        else:
+                            cell.contains = None
+                    else:
+                        cell.contains = None
+            
+            elif obj_type == 'magicwall':
+                # Just update the 'active' attribute on the existing magic wall object
+                active = mutable_obj[3]
+                if cell is not None and cell.type == 'magicwall':
+                    cell.active = active
     
     def transition_probabilities(self, state, actions):
         """
@@ -2822,9 +2804,9 @@ class MultiGridEnv(WorldModel):
                   possible transitions. Returns None if the state is terminal
                   or if any action is not feasible in the given state.
         """
-        # Check if we're in a terminal state
-        state_dict = dict(state)
-        if state_dict['step_count'] >= self.max_steps:
+        # Check if we're in a terminal state (state[0] is step_count in compact format)
+        step_count = state[0]
+        if step_count >= self.max_steps:
             return None
         
         # Check if all actions are valid
@@ -2832,26 +2814,22 @@ class MultiGridEnv(WorldModel):
             if action < 0 or action >= self.action_space.n:
                 return None
         
-        # Save current state to restore later
-        original_state = self.get_state()
+        # Set to query state
+        self.set_state(state)
         
-        try:
-            # Restore to the query state
-            self.set_state(state)
-            
-            num_agents = len(self.agents)
-            
-            # Identify which agents will actually act
-            active_agents = []
-            inactive_agents = []
-            for i in range(num_agents):
-                if (not self.agents[i].terminated and 
-                    not self.agents[i].paused and 
-                    self.agents[i].started and 
-                    actions[i] != self.actions.still):
-                    active_agents.append(i)
-                else:
-                    inactive_agents.append(i)
+        num_agents = len(self.agents)
+        
+        # Identify which agents will actually act
+        active_agents = []
+        inactive_agents = []
+        for i in range(num_agents):
+            if (not self.agents[i].terminated and 
+                not self.agents[i].paused and 
+                self.agents[i].started and 
+                actions[i] != self.actions.still):
+                active_agents.append(i)
+            else:
+                inactive_agents.append(i)
             
             # OPTIMIZATION 1: If ≤1 agents active, check if transition is deterministic
             # (only deterministic if the agent is NOT on unsteady ground attempting forward
@@ -2867,7 +2845,8 @@ class MultiGridEnv(WorldModel):
                         elif self.agents[agent_idx].can_enter_magic_walls:
                             fwd_pos = self.agents[agent_idx].front_pos
                             fwd_cell = self.grid.get(*fwd_pos)
-                            if fwd_cell is not None and fwd_cell.type == 'magicwall':
+                            # Check if it's an active magic wall (not solidified)
+                            if fwd_cell is not None and fwd_cell.type == 'magicwall' and fwd_cell.active:
                                 approach_dir = (self.agents[agent_idx].dir + 2) % 4
                                 if approach_dir == fwd_cell.magic_side:
                                     is_stochastic = True
@@ -2907,7 +2886,7 @@ class MultiGridEnv(WorldModel):
             # Unsteady and magic wall agents are excluded because they're handled separately
             # This is MORE efficient than permuting all active agents
             # Instead of k! permutations, we compute the Cartesian product of conflict blocks
-            conflict_blocks = self._identify_conflict_blocks(state, actions, normal_active_agents)
+            conflict_blocks = self._identify_conflict_blocks(actions, normal_active_agents)
             
             # If no conflicts and no stochastic agents, result is deterministic
             if (all(len(block) == 1 for block in conflict_blocks) and 
@@ -3045,12 +3024,8 @@ class MultiGridEnv(WorldModel):
             result.sort(key=lambda x: x[0], reverse=True)
             
             return result
-            
-        finally:
-            # Always restore original state
-            self.set_state(original_state)
     
-    def _identify_conflict_blocks(self, state, actions, active_agents):
+    def _identify_conflict_blocks(self, actions, active_agents):
         """
         Partition active agents into conflict blocks where agents compete for resources.
         
@@ -3059,8 +3034,10 @@ class MultiGridEnv(WorldModel):
         - Try to pick up the same object
         - Interact with each other directly
         
+        Note: This method assumes the environment is already set to the relevant state
+        (i.e., the caller has already called set_state() before calling this method).
+        
         Args:
-            state: Current state tuple
             actions: List of action indices
             active_agents: List of active agent indices
             
@@ -3073,8 +3050,7 @@ class MultiGridEnv(WorldModel):
         RESOURCE_PICKUP = 'pickup'
         RESOURCE_DROP_AGENT = 'drop_agent'
         
-        # Restore to the query state to inspect agent positions and targets
-        self.set_state(state)
+        # Grid is already set up from set_state() call in transition_probabilities
         
         # Track which resource each agent targets
         agent_targets = {}  # agent_idx -> resource identifier
@@ -3104,7 +3080,7 @@ class MultiGridEnv(WorldModel):
                     target_pos = tuple(agent.front_pos)
                     agent_targets[agent_idx] = (RESOURCE_CELL, target_pos)
             
-            elif action == self.actions.pickup:
+            elif hasattr(self.actions, 'pickup') and action == self.actions.pickup:
                 # Target is the object at the forward position
                 fwd_pos = agent.front_pos
                 fwd_cell = self.grid.get(*fwd_pos)
@@ -3115,7 +3091,7 @@ class MultiGridEnv(WorldModel):
                     # No valid target, agent acts independently
                     agent_targets[agent_idx] = (RESOURCE_INDEPENDENT, agent_idx)
             
-            elif action == self.actions.drop:
+            elif hasattr(self.actions, 'drop') and action == self.actions.drop:
                 # Check if dropping on another agent or specific location
                 fwd_pos = agent.front_pos
                 fwd_cell = self.grid.get(*fwd_pos)
@@ -3361,12 +3337,11 @@ class MultiGridEnv(WorldModel):
                     self._move_agent_to_cell(i, fwd_pos, fwd_cell)
                     self._handle_special_moves(i, rewards, fwd_pos, fwd_cell)
                 elif outcome == 'solidify':
-                    # Entry failed and magic wall solidifies into a normal wall
+                    # Entry failed and magic wall solidifies (deactivates)
                     fwd_pos = self.agents[i].front_pos
                     fwd_cell = self.grid.get(*fwd_pos)
                     if fwd_cell and fwd_cell.type == 'magicwall':
-                        normal_wall = Wall(self.objects, fwd_cell.color)
-                        self.grid.set(*fwd_pos, normal_wall)
+                        fwd_cell.active = False
                 # If outcome is 'fail', agent stays in place and wall stays magic (no action)
         
         # Check if max steps reached

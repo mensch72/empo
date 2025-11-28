@@ -439,15 +439,19 @@ def test_can_push_rocks_parameter():
         orientations=['e', 'e']  # Both facing east
     )
     
-    # Check that rocks have pushable_by set to grey agent index only
+    # Check that rocks exist
     rock1 = env.grid.get(3, 1)
     rock2 = env.grid.get(3, 2)
     
     assert rock1 is not None and rock1.type == 'rock'
     assert rock2 is not None and rock2.type == 'rock'
     
-    # Grey agent (index 1) should be able to push, red agent (index 0) should not
-    assert not rock1.can_be_pushed_by(env.agents[0]), "Red agent should not push rocks by default"
+    # Grey agent (index 1) should have can_push_rocks=True, red agent (index 0) should not
+    assert not env.agents[0].can_push_rocks, "Red agent should not have can_push_rocks"
+    assert env.agents[1].can_push_rocks, "Grey agent should have can_push_rocks"
+    
+    # Verify this affects rock pushing
+    assert not rock1.can_be_pushed_by(env.agents[0]), "Red agent should not push rocks"
     assert rock1.can_be_pushed_by(env.agents[1]), "Grey agent should be able to push rocks"
 
 
