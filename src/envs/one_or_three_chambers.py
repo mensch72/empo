@@ -43,7 +43,7 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'vendor', 'multigrid'))
 
 import numpy as np
-from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, Wall, Block, Rock, World
+from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, Wall, Block, Rock, World, SmallActions
 
 
 class OneOrThreeChambersEnv(MultiGridEnv):
@@ -222,7 +222,7 @@ class OneOrThreeChambersEnv(MultiGridEnv):
         
         # === PLACE ROCK ===
         # O@13 at row 4
-        rock = Rock(World, pushable_by=None)  # Pushable by all agents
+        rock = Rock(World)  # Pushable by agents with can_push_rocks=True
         self.grid.set(13, 4, rock)
         
         # === PLACE BLOCK ===
@@ -282,7 +282,7 @@ WeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWe
 
 SMALL_ONE_OR_THREE_CHAMBERS_MAP = """
 We We We We We .. .. .. .. .. 
-We .. We Ay We .. .. .. .. ..
+We .. We .. We .. .. .. .. ..
 We .. We Ay We We We .. .. ..
 We Ae Ro .. .. .. We .. .. ..
 We .. We We We .. We We We ..
@@ -349,6 +349,47 @@ class SmallOneOrThreeChambersMapEnv(MultiGridEnv):
         # Track counts for compatibility with the original implementation
         self.num_humans = sum(1 for a in self.agents if a.color == 'yellow')
         self.num_robots = sum(1 for a in self.agents if a.color == 'grey')
+
+# Small environment for DAG computation and backward induction
+# This uses SMALL_ONE_OR_THREE_CHAMBERS_MAP with 1 robot (grey) and 2 humans (yellow)
+# Target cell for reward is (7, 3)
+
+
+class SmallOneOrTwoChambersMapEnv(MultiGridEnv):
+    """
+    A small multi-chamber environment for DAG computation and backward induction.
+    
+    This is a simplified environment designed to have a tractable state space
+    for computing the full DAG and performing backward induction.
+    
+    Layout (10 columns x 9 rows):
+    - Walls creating chamber structure
+    - 1 human agent (yellow) in upper left area
+    - 1 robot agent (grey) in left side
+    - 1 rock and 1 block as obstacles
+    
+    The environment uses an 8-step timeout to keep the state space finite.
+    Each agent has 4 actions: still, left, right, forward (4^2 = 16 combinations).
+    
+    Target cell for reward: (3, 7) - the robot receives reward 1 when reaching this cell.
+    """
+    
+    def __init__(self):
+        """
+        Initialize the Small One or Two Chambers environment.
+        """
+        super().__init__(
+            map=SMALL_ONE_OR_THREE_CHAMBERS_MAP,
+            max_steps=8,
+            partial_obs=False,
+            objects_set=World,
+            actions_set=SmallActions
+        )
+        
+        # Track counts for compatibility
+        self.num_humans = sum(1 for a in self.agents if a.color == 'yellow')
+        self.num_robots = sum(1 for a in self.agents if a.color == 'grey')
+
 
 if __name__ == "__main__":
     # Simple test to verify the environment works

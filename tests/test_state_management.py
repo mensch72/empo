@@ -335,18 +335,14 @@ def test_state_includes_time_left():
         env.step(actions)
     
     state = env.get_state()
-    state_dict = dict(state)
+    # Compact state format: (step_count, agent_states, mobile_objects, mutable_objects)
+    step_count = state[0]
     
-    if 'step_count' in state_dict:
-        step_count = state_dict['step_count']
-        if step_count == 5:
-            print(f"  ✓ State includes step_count: {step_count}")
-            return True
-        else:
-            print(f"  ✗ Step count should be 5, got {step_count}")
-            return False
+    if step_count == 5:
+        print(f"  ✓ State includes step_count: {step_count}")
+        return True
     else:
-        print(f"  ✗ State does not include 'step_count'")
+        print(f"  ✗ Step count should be 5, got {step_count}")
         return False
 
 
