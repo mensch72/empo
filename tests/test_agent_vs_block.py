@@ -170,7 +170,7 @@ def test_agent_vs_pushed_block():
         agent1_dir = agent1_state[2]
         
         # Check block position from mobile_objects
-        # mobile_objects format: (obj_type, x, y, color, pushable_by)
+        # mobile_objects format: (obj_type, x, y, color)
         block_pos = None
         for obj in mobile_objects:
             if obj[0] == 'block':

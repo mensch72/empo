@@ -222,7 +222,7 @@ class OneOrThreeChambersEnv(MultiGridEnv):
         
         # === PLACE ROCK ===
         # O@13 at row 4
-        rock = Rock(World, pushable_by=None)  # Pushable by all agents
+        rock = Rock(World)  # Pushable by agents with can_push_rocks=True
         self.grid.set(13, 4, rock)
         
         # === PLACE BLOCK ===

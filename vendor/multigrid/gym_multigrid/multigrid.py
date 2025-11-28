@@ -334,9 +334,10 @@ class MagicWall(WorldObj):
     from one specific direction.
     
     Attributes:
-        magic_side: Direction from which the wall can be entered (0=right, 1=down, 2=left, 3=up)
-        entry_probability: Probability (0.0 to 1.0) that an authorized agent successfully enters
-        solidify_probability: Probability (0.0 to 1.0) that a failed entry attempt turns this into a normal wall
+        magic_side: Direction from which the wall can be entered (0=right, 1=down, 2=left, 3=up) [immutable]
+        entry_probability: Probability (0.0 to 1.0) that an authorized agent successfully enters [immutable]
+        solidify_probability: Probability (0.0 to 1.0) that a failed entry attempt deactivates this wall [immutable]
+        active: Whether this wall still functions as a magic wall (True) or has solidified into a regular wall (False) [mutable]
     """
     
     def __init__(self, world, magic_side, entry_probability, solidify_probability=0.0, color='grey'):
@@ -355,6 +356,7 @@ class MagicWall(WorldObj):
         self.magic_side = magic_side
         self.entry_probability = entry_probability
         self.solidify_probability = solidify_probability
+        self.active = True  # Mutable: whether wall is still magic (True) or solidified (False)
     
     def see_behind(self):
         return False
@@ -379,9 +381,14 @@ class MagicWall(WorldObj):
                    self.magic_side, entry_prob_encoded, solidify_prob_encoded, 0)
     
     def render(self, img):
-        """Render magic wall like a normal wall with a dashed blue line near its magic side."""
+        """Render magic wall like a normal wall with a dashed blue line near its magic side.
+        If not active (solidified), render as a plain wall without the blue line."""
         # Render base wall
         fill_coords(img, point_in_rect(0, 1, 0, 1), COLORS[self.color])
+        
+        # Only add blue line if wall is still active/magic
+        if not self.active:
+            return
         
         # Add dashed blue line parallel to magic side
         blue_color = COLORS['blue']
@@ -596,10 +603,8 @@ class Block(WorldObj):
 
 
 class Rock(WorldObj):
-    def __init__(self, world, pushable_by=None):
+    def __init__(self, world):
         super(Rock, self).__init__(world, 'rock', 'grey')
-        # pushable_by can be an agent index, a list of indices, or None (pushable by all)
-        self.pushable_by = pushable_by
 
     def can_overlap(self):
         return False
@@ -615,13 +620,9 @@ class Rock(WorldObj):
             agent: The Agent object attempting to push this rock
             
         Returns:
-            bool: True if the agent is authorized to push this rock, False otherwise
+            bool: True if the agent has can_push_rocks=True, False otherwise
         """
-        if self.pushable_by is None:
-            return True
-        if isinstance(self.pushable_by, list):
-            return agent.index in self.pushable_by
-        return agent.index == self.pushable_by
+        return getattr(agent, 'can_push_rocks', False)
 
     def render(self, img):
         # Medium grey irregular rock shape
@@ -638,7 +639,7 @@ class Rock(WorldObj):
 
 
 class Agent(WorldObj):
-    def __init__(self, world, index=0, view_size=7, can_enter_magic_walls=False):
+    def __init__(self, world, index=0, view_size=7, can_enter_magic_walls=False, can_push_rocks=False):
         super(Agent, self).__init__(world, 'agent', world.IDX_TO_COLOR[index])
         self.pos = None
         self.dir = None
@@ -650,6 +651,7 @@ class Agent(WorldObj):
         self.paused = False
         self.on_unsteady_ground = False  # Track if agent is on unsteady ground
         self.can_enter_magic_walls = can_enter_magic_walls  # Can attempt to enter magic walls
+        self.can_push_rocks = can_push_rocks  # Can push rocks (immutable)
 
     def render(self, img):
         c = COLORS[self.color]
@@ -1375,7 +1377,7 @@ def create_object_from_spec(cell_spec, objects_set):
     elif obj_type == 'block':
         return Block(objects_set)
     elif obj_type == 'rock':
-        return Rock(objects_set, pushable_by=params.get('pushable_by'))
+        return Rock(objects_set)
     elif obj_type == 'lava':
         return Lava(objects_set)
     elif obj_type == 'switch':
@@ -1487,7 +1489,13 @@ class MultiGridEnv(WorldModel):
                 for x, y, agent_params in map_agents:
                     color = agent_params.get('color', 'red')
                     color_idx = objects_set.COLOR_TO_IDX.get(color, 0)
-                    agents.append(Agent(objects_set, color_idx))
+                    # Determine if this agent can push rocks based on color
+                    agent_can_push_rocks = (
+                        hasattr(self, '_can_push_rocks_colors') and 
+                        self._can_push_rocks_colors is not None and
+                        color in self._can_push_rocks_colors
+                    )
+                    agents.append(Agent(objects_set, color_idx, can_push_rocks=agent_can_push_rocks))
             
             # Handle orientations: if None, generate random orientations
             if orientations is None:
@@ -1682,27 +1690,12 @@ class MultiGridEnv(WorldModel):
         # Create the grid
         self.grid = Grid(map_width, map_height)
         
-        # Determine which agents can push rocks based on _can_push_rocks_colors
-        # We use agent.index (which is the color index) rather than the position in agents list
-        # Using a set to avoid duplicates when multiple agents have the same color
-        pushable_by_agents = None
-        if hasattr(self, '_can_push_rocks_colors') and self._can_push_rocks_colors is not None:
-            pushable_by_indices = set()
-            for agent in self.agents:
-                if agent.color in self._can_push_rocks_colors:
-                    pushable_by_indices.add(agent.index)
-            pushable_by_agents = list(pushable_by_indices) if pushable_by_indices else []
-        
-        # Place objects from the map
+        # Place objects from the map (rocks are now simpler - just use create_object_from_spec)
         for y in range(map_height):
             for x in range(map_width):
                 cell_spec = cells[y][x]
                 if cell_spec is not None and cell_spec[0] != 'agent':
-                    # For rocks, set pushable_by based on can_push_rocks parameter
-                    if cell_spec[0] == 'rock' and pushable_by_agents is not None:
-                        obj = Rock(self.objects, pushable_by=pushable_by_agents)
-                    else:
-                        obj = create_object_from_spec(cell_spec, self.objects)
+                    obj = create_object_from_spec(cell_spec, self.objects)
                     if obj is not None:
                         self.grid.set(x, y, obj)
         
@@ -2236,11 +2229,10 @@ class MultiGridEnv(WorldModel):
                 self._move_agent_to_cell(i, fwd_pos, fwd_cell)
                 self._handle_special_moves(i, rewards, fwd_pos, fwd_cell)
             else:
-                # Entry fails - check if magic wall should solidify into a normal wall
+                # Entry fails - check if magic wall should solidify (deactivate)
                 if self.np_random.random() < fwd_cell.solidify_probability:
-                    # Replace magic wall with a normal wall
-                    normal_wall = Wall(self.objects, fwd_cell.color)
-                    self.grid.set(*fwd_pos, normal_wall)
+                    # Deactivate the magic wall (it now acts as a normal wall)
+                    fwd_cell.active = False
         
         return done
     
@@ -2297,7 +2289,8 @@ class MultiGridEnv(WorldModel):
                 self.agents[i].can_enter_magic_walls):
                 fwd_pos = self.agents[i].front_pos
                 fwd_cell = self.grid.get(*fwd_pos)
-                if fwd_cell is not None and fwd_cell.type == 'magicwall':
+                # Check if it's an active magic wall (not solidified)
+                if fwd_cell is not None and fwd_cell.type == 'magicwall' and fwd_cell.active:
                     # Check if agent is approaching from the magic side
                     # Agent's direction is where they're facing, magic_side is where wall can be entered from
                     # If agent faces right (dir=0), they approach from left (opposite of right=0 is left=2)
@@ -2489,15 +2482,15 @@ class MultiGridEnv(WorldModel):
         
         The compact state only stores mutable/mobile objects:
         1. Immutable objects (walls) are not stored
-        2. Mobile objects (agents, pushed blocks/rocks) only store position + state
-        3. Mutable immobile objects only store their state, not position
+        2. Mobile objects (agents, pushed blocks/rocks) only store position + color
+        3. Mutable immobile objects only store their mutable state (e.g., active for magic walls)
         4. Uses fixed ordering instead of serializing entire grid
         
         Format:
         - step_count: int
         - agent_states: tuple of (pos_x, pos_y, dir, terminated, started, paused, on_unsteady, carrying_type, carrying_color)
-        - mobile_objects: tuple of (obj_type, pos_x, pos_y, color)
-        - mutable_objects: tuple of (obj_type, x, y, state_info...) for doors/boxes/magic walls
+        - mobile_objects: tuple of (obj_type, pos_x, pos_y, color) for blocks/rocks
+        - mutable_objects: tuple of (obj_type, x, y, mutable_state...) for doors/boxes/magic walls
         
         Returns:
             tuple: A hashable compact state representation
@@ -2533,17 +2526,12 @@ class MultiGridEnv(WorldModel):
                 obj_type = cell.type
                 
                 # Mobile objects: blocks and rocks can be pushed
+                # Note: pushable_by is now an agent attribute, not a rock attribute
                 if obj_type in ('block', 'rock'):
-                    # For rocks, also store pushable_by attribute
-                    pushable_by = getattr(cell, 'pushable_by', None) if obj_type == 'rock' else None
-                    # Convert list to tuple for hashability
-                    if isinstance(pushable_by, list):
-                        pushable_by = tuple(pushable_by)
                     mobile_objects.append((
                         obj_type,
                         i, j,  # current position
                         cell.color,
-                        pushable_by,  # None for blocks, agent index or tuple for rocks
                     ))
                 
                 # Mutable immobile objects: doors can open/close
@@ -2566,26 +2554,14 @@ class MultiGridEnv(WorldModel):
                         contains_color,
                     ))
                 
-                # Magic walls can solidify into regular walls
-                # Store 1 if still magic, 0 if would be wall (but we track the original position)
+                # Magic walls can be deactivated (solidified)
+                # Only store the mutable 'active' attribute, not immutable magic_side/probabilities
                 elif obj_type == 'magicwall':
                     mutable_objects.append((
                         'magicwall',
                         i, j,
-                        1,  # 1 = still a magic wall
-                        cell.magic_side,
-                        cell.entry_probability,
-                        cell.solidify_probability,
+                        cell.active,  # True if still magic, False if solidified
                     ))
-                
-                # Regular walls at magic wall positions mean the magic wall solidified
-                # We need to track this only if we know this was originally a magic wall
-                # For simplicity, we'll track wall positions that could be solidified magic walls
-                # by checking if there's a wall where init_pos matches a known magic wall position
-                elif obj_type == 'wall':
-                    # Check if this wall might be a solidified magic wall
-                    # We include walls with specific markers (we can't easily tell, so skip for now)
-                    pass
         
         # Sort mobile objects for deterministic ordering
         mobile_objects.sort()
@@ -2658,11 +2634,11 @@ class MultiGridEnv(WorldModel):
         
         # Then place them at their new positions
         for mobile_obj in mobile_objects:
-            obj_type, x, y, color, pushable_by = mobile_obj
+            obj_type, x, y, color = mobile_obj
             if obj_type == 'block':
                 obj = Block(self.objects)
             elif obj_type == 'rock':
-                obj = Rock(self.objects, pushable_by=pushable_by)
+                obj = Rock(self.objects)
             else:
                 continue
             obj.color = color
@@ -2695,23 +2671,10 @@ class MultiGridEnv(WorldModel):
                         cell.contains = None
             
             elif obj_type == 'magicwall':
-                is_magic = mutable_obj[3]
-                if is_magic == 1:
-                    # Should still be a magic wall
-                    if cell is None or cell.type != 'magicwall':
-                        # Restore magic wall
-                        magic_side = mutable_obj[4]
-                        entry_prob = mutable_obj[5]
-                        solidify_prob = mutable_obj[6]
-                        magic_wall = MagicWall(self.objects, magic_side, entry_prob, solidify_prob)
-                        magic_wall.cur_pos = np.array([x, y])
-                        self.grid.set(x, y, magic_wall)
-                else:
-                    # Magic wall solidified into regular wall
-                    if cell is None or cell.type != 'wall':
-                        wall = Wall(self.objects)
-                        wall.cur_pos = np.array([x, y])
-                        self.grid.set(x, y, wall)
+                # Just update the 'active' attribute on the existing magic wall object
+                active = mutable_obj[3]
+                if cell is not None and cell.type == 'magicwall':
+                    cell.active = active
     
     def transition_probabilities(self, state, actions):
         """
@@ -2809,7 +2772,8 @@ class MultiGridEnv(WorldModel):
                         elif self.agents[agent_idx].can_enter_magic_walls:
                             fwd_pos = self.agents[agent_idx].front_pos
                             fwd_cell = self.grid.get(*fwd_pos)
-                            if fwd_cell is not None and fwd_cell.type == 'magicwall':
+                            # Check if it's an active magic wall (not solidified)
+                            if fwd_cell is not None and fwd_cell.type == 'magicwall' and fwd_cell.active:
                                 approach_dir = (self.agents[agent_idx].dir + 2) % 4
                                 if approach_dir == fwd_cell.magic_side:
                                     is_stochastic = True
@@ -3300,12 +3264,11 @@ class MultiGridEnv(WorldModel):
                     self._move_agent_to_cell(i, fwd_pos, fwd_cell)
                     self._handle_special_moves(i, rewards, fwd_pos, fwd_cell)
                 elif outcome == 'solidify':
-                    # Entry failed and magic wall solidifies into a normal wall
+                    # Entry failed and magic wall solidifies (deactivates)
                     fwd_pos = self.agents[i].front_pos
                     fwd_cell = self.grid.get(*fwd_pos)
                     if fwd_cell and fwd_cell.type == 'magicwall':
-                        normal_wall = Wall(self.objects, fwd_cell.color)
-                        self.grid.set(*fwd_pos, normal_wall)
+                        fwd_cell.active = False
                 # If outcome is 'fail', agent stays in place and wall stays magic (no action)
         
         # Check if max steps reached
