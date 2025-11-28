@@ -103,19 +103,19 @@ def main():
     
     # Create environment
     print("Creating SmallOneOrThreeChambersMapEnv...")
-    env = SmallOneOrThreeChambersMapEnv()
-    env.max_steps = 3  # Set to small value for quick testing
-    env.reset()
+    world_model = SmallOneOrThreeChambersMapEnv()
+    world_model.max_steps = 1  # Set to small value for quick testing
+    world_model.reset()
     
     print(f"Environment created successfully!")
-    print(f"Grid size: {env.width} x {env.height}")
-    print(f"Number of agents: {len(env.agents)}")
-    print(f"Max steps: {env.max_steps}")
+    print(f"Grid size: {world_model.width} x {world_model.height}")
+    print(f"Number of agents: {len(world_model.agents)}")
+    print(f"Max steps: {world_model.max_steps}")
     print()
     
     # Identify human agents
     human_agent_indices = []
-    for i, agent in enumerate(env.agents):
+    for i, agent in enumerate(world_model.agents):
         if agent.color == 'yellow':  # Human agents are yellow
             human_agent_indices.append(i)
             print(f"Human agent {i}: pos={tuple(agent.pos)}")
@@ -125,27 +125,16 @@ def main():
     
     # Create goal generator
     print("Creating EmptyCellGoalGenerator...")
-    goal_generator = EmptyCellGoalGenerator(env)
+    goal_generator = EmptyCellGoalGenerator(world_model)
     print()
-    
-    # Test goal generation for initial state
-    print("Testing goal generation for initial state...")
-    initial_state = env.get_state()
-    goal_count = 0
-    for goal, weight in goal_generator.generate(initial_state, human_agent_indices[0]):
-        if goal_count < 5:  # Show first 5 goals
-            print(f"  Goal {goal_count + 1}: {goal} (weight: {weight:.4f})")
-        goal_count += 1
-    print(f"  ... and {goal_count - 5} more goals")
-    print()
-    
+        
     # Compute human policy prior
     print("Computing human policy prior using backward induction...")
     print("This may take a while for large state spaces...")
     
     try:
         human_policy_prior = compute_human_policy_prior(
-            world_model=env,
+            world_model=world_model,
             human_agent_indices=human_agent_indices,
             possible_goal_generator=goal_generator
             # Using default values for believed_others_policy, beta=1, gamma=1
@@ -158,8 +147,9 @@ def main():
         
         # Test the policy prior
         print("Testing policy prior for initial state...")
-        initial_state = env.get_state()
-        
+        world_model.reset()
+        initial_state = world_model.get_state()
+
         if len(human_agent_indices) > 0:
             first_human_idx = human_agent_indices[0]
             
@@ -173,13 +163,13 @@ def main():
                 action_probs = human_policy_prior(initial_state, first_human_idx, first_goal)
                 print(f"Action probabilities for human {first_human_idx} with goal {first_goal}:")
                 for action_idx, prob in enumerate(action_probs):
-                    action_name = env.actions.available[action_idx] if action_idx < len(env.actions.available) else f"action_{action_idx}"
+                    action_name = world_model.actions.available[action_idx] if action_idx < len(world_model.actions.available) else f"action_{action_idx}"
                     print(f"  {action_name}: {prob:.4f}")
                 print()
                 
                 # Test sampling
                 sampled_action = human_policy_prior.sample(initial_state, first_human_idx, first_goal)
-                sampled_action_name = env.actions.available[sampled_action] if sampled_action < len(env.actions.available) else f"action_{sampled_action}"
+                sampled_action_name = world_model.actions.available[sampled_action] if sampled_action < len(world_model.actions.available) else f"action_{sampled_action}"
                 print(f"Sampled action: {sampled_action_name}")
         
         print()
