@@ -2534,10 +2534,13 @@ class MultiGridEnv(WorldModel):
                 
                 # Mobile objects: blocks and rocks can be pushed
                 if obj_type in ('block', 'rock'):
+                    # For rocks, also store pushable_by attribute
+                    pushable_by = getattr(cell, 'pushable_by', None) if obj_type == 'rock' else None
                     mobile_objects.append((
                         obj_type,
                         i, j,  # current position
                         cell.color,
+                        pushable_by,  # None for blocks, agent index or list for rocks
                     ))
                 
                 # Mutable immobile objects: doors can open/close
@@ -2652,11 +2655,11 @@ class MultiGridEnv(WorldModel):
         
         # Then place them at their new positions
         for mobile_obj in mobile_objects:
-            obj_type, x, y, color = mobile_obj
+            obj_type, x, y, color, pushable_by = mobile_obj
             if obj_type == 'block':
                 obj = Block(self.objects)
             elif obj_type == 'rock':
-                obj = Rock(self.objects)
+                obj = Rock(self.objects, pushable_by=pushable_by)
             else:
                 continue
             obj.color = color

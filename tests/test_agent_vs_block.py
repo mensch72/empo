@@ -157,40 +157,43 @@ def test_agent_vs_pushed_block():
     print("Outcomes:")
     conflict_handled_correctly = True
     for i, (prob, succ_state) in enumerate(result):
-        state_dict = dict(succ_state)
-        agents_data = state_dict['agents']
-        agent0_data = dict(agents_data[0])
-        agent1_data = dict(agents_data[1])
+        # Compact state format: (step_count, agent_states, mobile_objects, mutable_objects)
+        step_count, agent_states, mobile_objects, mutable_objects = succ_state
         
-        # Check block position
-        grid_data = state_dict['grid']
+        # Agent states format: (pos_x, pos_y, dir, terminated, started, paused, on_unsteady, carrying_type, carrying_color)
+        agent0_state = agent_states[0]
+        agent1_state = agent_states[1]
+        
+        agent0_pos = (agent0_state[0], agent0_state[1])
+        agent0_dir = agent0_state[2]
+        agent1_pos = (agent1_state[0], agent1_state[1])
+        agent1_dir = agent1_state[2]
+        
+        # Check block position from mobile_objects
+        # mobile_objects format: (obj_type, x, y, color, pushable_by)
         block_pos = None
-        for idx, cell in enumerate(grid_data):
-            if cell is not None:
-                cell_dict = dict(cell)
-                if cell_dict.get('type') == 'block':
-                    y = idx // 8
-                    x = idx % 8
-                    block_pos = (x, y)
-                    break
+        for obj in mobile_objects:
+            if obj[0] == 'block':
+                block_pos = (obj[1], obj[2])
+                break
         
-        a0_moved = tuple(agent0_data['pos']) != (2, 2)
-        a1_moved = tuple(agent1_data['pos']) != (5, 2)
+        a0_moved = agent0_pos != (2, 2)
+        a1_moved = agent1_pos != (5, 2)
         block_moved = block_pos != (4, 2)
         
         print(f"  {i+1}. Prob={prob:.4f}: "
-              f"A0@{agent0_data['pos']} dir={agent0_data['dir']} {'MOVED' if a0_moved else 'STAYED'}, "
-              f"A1@{agent1_data['pos']} dir={agent1_data['dir']} {'MOVED' if a1_moved else 'STAYED'}, "
+              f"A0@{agent0_pos} dir={agent0_dir} {'MOVED' if a0_moved else 'STAYED'}, "
+              f"A1@{agent1_pos} dir={agent1_dir} {'MOVED' if a1_moved else 'STAYED'}, "
               f"Block@{block_pos} {'MOVED' if block_moved else 'STAYED'}")
         
         # Check for the conflict case: both don't stumble
         # Agent 0 dir should be 0 (no turn), Agent 1 dir should be 2 (no turn)
-        if agent0_data['dir'] == 0 and agent1_data['dir'] == 2:
+        if agent0_dir == 0 and agent1_dir == 2:
             print(f"     -> This is the NO-STUMBLE case for both agents")
             # Check if both were blocked
-            if tuple(agent0_data['pos']) == (2, 2) and tuple(agent1_data['pos']) == (5, 2) and block_pos == (4, 2):
+            if agent0_pos == (2, 2) and agent1_pos == (5, 2) and block_pos == (4, 2):
                 print(f"     -> ✓ CORRECT: Both agents blocked, block stayed")
-            elif tuple(agent0_data['pos']) == (3, 2):
+            elif agent0_pos == (3, 2):
                 print(f"     -> ✗ ERROR: Agent 0 moved to (3,2)")
                 conflict_handled_correctly = False
             elif block_pos == (3, 2):
