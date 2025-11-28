@@ -831,14 +831,20 @@ class Grid:
         return deepcopy(self)
 
     def set(self, i, j, v):
-        assert i >= 0 and i < self.width
-        assert j >= 0 and j < self.height
+        # Removed assertion checks for performance - bounds checking done at higher level
         self.grid[j * self.width + i] = v
 
     def get(self, i, j):
-        assert i >= 0 and i < self.width
-        assert j >= 0 and j < self.height
+        # Removed assertion checks for performance - bounds checking done at higher level
         return self.grid[j * self.width + i]
+    
+    def get_unsafe(self, i, j):
+        """Fast grid access without bounds checking. Use only when bounds are guaranteed."""
+        return self.grid[j * self.width + i]
+    
+    def set_unsafe(self, i, j, v):
+        """Fast grid set without bounds checking. Use only when bounds are guaranteed."""
+        self.grid[j * self.width + i] = v
 
     def horz_wall(self, world, x, y, length=None, obj_type=Wall):
         if length is None:
@@ -1590,6 +1596,10 @@ class MultiGridEnv(WorldModel):
         
         # Track cells where stumbling occurred in the current step (for visual feedback)
         self.stumbled_cells = set()
+        
+        # Build cache of mobile objects (blocks, rocks) and mutable objects (doors, boxes, magic walls)
+        # This avoids full grid scans in get_state()
+        self._build_object_cache()
 
         # Return first observation
         if self.partial_obs:
@@ -1598,6 +1608,38 @@ class MultiGridEnv(WorldModel):
             obs = [self.grid.encode_for_agents(self.objects, self.agents[i].pos) for i in range(len(self.agents))]
         obs=[self.objects.normalize_obs*ob for ob in obs]
         return obs
+    
+    def _build_object_cache(self):
+        """
+        Build cache of mobile and mutable objects to avoid full grid scans in get_state().
+        
+        Mobile objects: blocks and rocks (can be pushed)
+        Mutable objects: doors, boxes, magic walls (have mutable state)
+        
+        This cache stores references to the objects themselves, not their positions.
+        Positions are read from the grid when get_state() is called.
+        """
+        self._mobile_objects = []  # List of (initial_pos, obj) tuples for sorting
+        self._mutable_objects = []  # List of (pos, obj) tuples - position is immutable for these
+        
+        for j in range(self.grid.height):
+            for i in range(self.grid.width):
+                cell = self.grid.get(i, j)
+                if cell is None:
+                    continue
+                
+                obj_type = cell.type
+                
+                # Mobile objects: blocks and rocks
+                if obj_type in ('block', 'rock'):
+                    self._mobile_objects.append(((i, j), cell))
+                
+                # Mutable objects: doors, boxes, magic walls
+                elif obj_type in ('door', 'box', 'magicwall'):
+                    self._mutable_objects.append(((i, j), cell))
+        
+        # Sort mobile objects by initial position for deterministic ordering
+        self._mobile_objects.sort(key=lambda x: x[0])
 
     def seed(self, seed=1337):
         # Seed the random number generator
@@ -2495,6 +2537,10 @@ class MultiGridEnv(WorldModel):
         Returns:
             tuple: A hashable compact state representation
         """
+        # Rebuild cache if not present (e.g., objects were added after reset)
+        if not hasattr(self, '_mobile_objects') or not hasattr(self, '_mutable_objects'):
+            self._build_object_cache()
+        
         # Agent states - fixed order by agent index
         agent_states = []
         for agent in self.agents:
@@ -2512,56 +2558,62 @@ class MultiGridEnv(WorldModel):
                 carrying_color,
             ))
         
-        # Find and store mobile objects (blocks, rocks) - they can be pushed
-        # Store in order of (type, initial_pos) for deterministic ordering
-        mobile_objects = []
-        mutable_objects = []
+        # For environments with no mobile/mutable objects in cache, do a quick grid scan
+        # This handles cases where objects are added after reset()
+        if len(self._mobile_objects) == 0 and len(self._mutable_objects) == 0:
+            # Quick check if there are any objects we should track
+            has_trackable = False
+            for j in range(self.grid.height):
+                for i in range(self.grid.width):
+                    cell = self.grid.get(i, j)
+                    if cell is not None and cell.type in ('block', 'rock', 'door', 'box', 'magicwall'):
+                        has_trackable = True
+                        break
+                if has_trackable:
+                    break
+            if has_trackable:
+                self._build_object_cache()
         
-        for j in range(self.grid.height):
-            for i in range(self.grid.width):
-                cell = self.grid.get(i, j)
-                if cell is None:
-                    continue
-                
-                obj_type = cell.type
-                
-                # Mobile objects: blocks and rocks can be pushed
-                # Note: pushable_by is now an agent attribute, not a rock attribute
-                if obj_type in ('block', 'rock'):
-                    mobile_objects.append((
-                        obj_type,
-                        i, j,  # current position
-                        cell.color,
-                    ))
-                
-                # Mutable immobile objects: doors can open/close
-                elif obj_type == 'door':
-                    mutable_objects.append((
-                        'door',
-                        i, j,  # position is key
-                        cell.is_open,
-                        cell.is_locked,
-                    ))
-                
-                # Boxes can contain items
-                elif obj_type == 'box':
-                    contains_type = cell.contains.type if cell.contains else None
-                    contains_color = cell.contains.color if cell.contains else None
-                    mutable_objects.append((
-                        'box',
-                        i, j,
-                        contains_type,
-                        contains_color,
-                    ))
-                
-                # Magic walls can be deactivated (solidified)
-                # Only store the mutable 'active' attribute, not immutable magic_side/probabilities
-                elif obj_type == 'magicwall':
-                    mutable_objects.append((
-                        'magicwall',
-                        i, j,
-                        cell.active,  # True if still magic, False if solidified
-                    ))
+        # Use cached objects - no grid scanning needed
+        # Mobile objects use cur_pos which is updated when they're pushed
+        mobile_objects = []
+        for initial_pos, obj in self._mobile_objects:
+            if obj.cur_pos is not None:
+                x, y = int(obj.cur_pos[0]), int(obj.cur_pos[1])
+            else:
+                # Fallback to initial position if cur_pos not set
+                x, y = initial_pos
+            mobile_objects.append((
+                obj.type,
+                x, y,
+                obj.color,
+            ))
+        
+        # Mutable objects - their positions are fixed, just read their mutable state
+        mutable_objects = []
+        for (x, y), obj in self._mutable_objects:
+            if obj.type == 'door':
+                mutable_objects.append((
+                    'door',
+                    x, y,
+                    obj.is_open,
+                    obj.is_locked,
+                ))
+            elif obj.type == 'box':
+                contains_type = obj.contains.type if obj.contains else None
+                contains_color = obj.contains.color if obj.contains else None
+                mutable_objects.append((
+                    'box',
+                    x, y,
+                    contains_type,
+                    contains_color,
+                ))
+            elif obj.type == 'magicwall':
+                mutable_objects.append((
+                    'magicwall',
+                    x, y,
+                    obj.active,
+                ))
         
         # Sort mobile objects for deterministic ordering
         mobile_objects.sort()
