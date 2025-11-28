@@ -2688,16 +2688,31 @@ class MultiGridEnv(WorldModel):
                     if cell is obj:
                         self.grid.set(old_x, old_y, None)
             
-            # Place cached objects at new positions from state
-            obj_idx = 0
+            # Group cached objects by type for matching with state
+            cached_by_type = {}
+            for initial_pos, obj in self._mobile_objects:
+                if obj.type not in cached_by_type:
+                    cached_by_type[obj.type] = []
+                cached_by_type[obj.type].append(obj)
+            
+            # Group mobile objects from state by type
+            state_by_type = {}
             for mobile_obj in mobile_objects:
                 obj_type, x, y, color = mobile_obj
-                if obj_idx < len(self._mobile_objects):
-                    _, obj = self._mobile_objects[obj_idx]
-                    obj.color = color
-                    obj.cur_pos = np.array([x, y])
-                    self.grid.set(x, y, obj)
-                    obj_idx += 1
+                if obj_type not in state_by_type:
+                    state_by_type[obj_type] = []
+                state_by_type[obj_type].append((x, y, color))
+            
+            # Place cached objects at new positions from state, matching by type
+            for obj_type, positions in state_by_type.items():
+                if obj_type in cached_by_type:
+                    cached_objs = cached_by_type[obj_type]
+                    for idx, (x, y, color) in enumerate(positions):
+                        if idx < len(cached_objs):
+                            obj = cached_objs[idx]
+                            obj.color = color
+                            obj.cur_pos = np.array([x, y])
+                            self.grid.set(x, y, obj)
         else:
             # Fallback: scan grid if no cache (shouldn't happen after reset)
             for j in range(self.grid.height):
