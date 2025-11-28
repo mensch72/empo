@@ -1,150 +1,3 @@
-"""
-MultiGrid Environment - Multi-agent gridworld simulation.
-
-This module provides a multi-agent extension of the MiniGrid environment with
-support for various object types, agent interactions, and both standard RL
-rollouts and model-based planning through DAG computation.
-
-================================================================================
-STATE REPRESENTATION ARCHITECTURE
-================================================================================
-
-This module provides THREE levels of state representation, each optimized for
-different use cases:
-
-1. FULL STATE (get_state/set_state)
-   - Complete grid serialization including all 90 cells
-   - Highest fidelity, but slowest due to serialization overhead
-   - Use for: debugging, visualization, saving/loading checkpoints
-
-2. COMPACT STATE (get_compact_state/set_compact_state)
-   - Only stores mutable/mobile objects (agents, blocks, doors, magic walls)
-   - 4x faster get, 2x faster set compared to full state
-   - Format: (step_count, agent_states, mobile_objects, mutable_objects)
-   - Use for: hashing states in DAG computation
-
-3. NATIVE COMPACT STATE (transition_probabilities_native)
-   - Works directly on compact state tuples without grid synchronization
-   - 7x faster than full transition_probabilities
-   - Use for: high-performance DAG computation and backward induction
-
-================================================================================
-USAGE GUIDE
-================================================================================
-
---- STANDARD ROLLOUTS (RL training, episode simulation) ---
-
-For standard rollouts where you step through the environment sequentially,
-use the normal gym API:
-
-    env = SmallOneOrTwoChambersMapEnv()
-    obs, info = env.reset()
-    
-    for step in range(max_steps):
-        actions = [agent_policy(obs[i]) for i in range(num_agents)]
-        obs, rewards, terminated, truncated, info = env.step(actions)
-        
-        if any(terminated) or any(truncated):
-            break
-    
-    # Render episode as movie
-    env.render_movie("episode.mp4")
-
-The standard API uses full state representation internally.
-
---- DAG COMPUTATION AND BACKWARD INDUCTION ---
-
-For model-based planning where you need to enumerate all reachable states
-and compute value functions, use the optimized compact state methods:
-
-    from empo.world_model import WorldModel
-    
-    env = SmallOneOrTwoChambersMapEnv()
-    env.reset()
-    
-    # Step 1: Compute DAG with cached transitions (uses compact states internally)
-    states, state_to_idx, successors, transitions = env.get_dag(
-        return_probabilities=True
-    )
-    # states: list of compact state tuples
-    # transitions[i]: list of (action, probs, succ_indices) for state i
-    
-    # Step 2: Backward induction using cached transitions
-    V = [0.0] * len(states)  # Value function
-    policy = [None] * len(states)  # Optimal actions
-    
-    # Iterate states in reverse topological order (last to first)
-    for state_idx in range(len(states) - 1, -1, -1):
-        state = states[state_idx]
-        
-        # Compute reward for this state
-        env.set_compact_state(state)
-        reward = compute_reward(env)
-        
-        # Find best action using Bellman equation
-        best_value = reward
-        best_action = None
-        
-        for action, probs, succ_indices in transitions[state_idx]:
-            # Expected value under this action
-            expected_future = sum(
-                p * V[succ_idx] for p, succ_idx in zip(probs, succ_indices)
-            )
-            value = reward + gamma * expected_future
-            
-            if value > best_value:
-                best_value = value
-                best_action = action
-        
-        V[state_idx] = best_value
-        policy[state_idx] = best_action
-
---- HIGHEST PERFORMANCE: NATIVE COMPACT MODE ---
-
-For maximum performance when you need to call transition_probabilities many
-times outside of get_dag (e.g., custom algorithms), use native compact mode:
-
-    env.reset()
-    compact_state = env.get_compact_state()
-    
-    # Get transitions without grid serialization overhead
-    # Returns list of (probability, successor_compact_state) tuples
-    result = env.transition_probabilities_native(compact_state, actions)
-    
-    # Process results
-    for prob, succ_compact_state in result:
-        # succ_compact_state is already a compact state tuple
-        # No conversion needed
-        ...
-
-This is 7.1x faster than the full transition_probabilities() method.
-
-================================================================================
-COMPACT STATE FORMAT
-================================================================================
-
-Compact state is a tuple: (step_count, agent_states, mobile_objects, mutable_objects)
-
-- step_count: int
-  Current step number (0 to max_steps-1)
-
-- agent_states: tuple of tuples
-  For each agent: (pos_x, pos_y, dir, terminated, started, paused, 
-                   on_unsteady_ground, carrying_type, carrying_color)
-
-- mobile_objects: tuple of tuples  
-  For blocks/rocks: ('block'/'rock', x, y, color)
-
-- mutable_objects: tuple of tuples
-  For doors: ('door', x, y, is_open, is_locked)
-  For boxes: ('box', x, y, contains_type, contains_color)
-  For magic walls: ('magicwall', x, y, is_magic, magic_side, entry_prob, solidify_prob)
-
-Compact states are hashable and can be used as dictionary keys or set members.
-
-================================================================================
-"""
-
 import math
 import gymnasium as gym
 from enum import IntEnum
@@ -1703,59 +1556,6 @@ class MultiGridEnv(WorldModel):
 
         # Initialize the state
         self.reset()
-        
-        # Native compact mode: when enabled, env.state stores the compact state directly
-        # and get_state/set_state just return/overwrite it without serialization
-        self._native_compact_mode = False
-        self._cached_compact_state = None
-
-    def enable_native_compact_mode(self):
-        """
-        Enable native compact mode where state is stored directly as compact representation.
-        
-        In this mode:
-        - get_state() returns env.state (the cached compact state) directly
-        - set_state() overwrites env.state and syncs grid from it
-        - No serialization/deserialization overhead for get_state()
-        
-        Call sync_compact_state() after any grid modifications to update the cached state.
-        """
-        self._native_compact_mode = True
-        self._cached_compact_state = self.get_compact_state()
-    
-    def disable_native_compact_mode(self):
-        """Disable native compact mode and return to full state serialization."""
-        self._native_compact_mode = False
-        self._cached_compact_state = None
-    
-    def sync_compact_state(self):
-        """
-        Sync the cached compact state with the current grid state.
-        
-        Call this after any grid modifications when in native compact mode.
-        """
-        if self._native_compact_mode:
-            self._cached_compact_state = self.get_compact_state()
-    
-    def get_native_state(self):
-        """
-        Get state in native compact mode (returns cached state directly).
-        
-        This is O(1) when in native compact mode vs O(grid_size) for get_state().
-        """
-        if self._native_compact_mode and self._cached_compact_state is not None:
-            return self._cached_compact_state
-        return self.get_compact_state()
-    
-    def set_native_state(self, compact_state):
-        """
-        Set state in native compact mode (stores state and syncs grid).
-        
-        Args:
-            compact_state: A compact state tuple
-        """
-        self._cached_compact_state = compact_state
-        self.set_compact_state(compact_state)
 
     def reset(self):
 
@@ -2685,305 +2485,9 @@ class MultiGridEnv(WorldModel):
 
     def get_state(self):
         """
-        Get the complete state of the environment.
+        Get the current state of the environment as a compact representation.
         
-        Returns a hashable dictionary containing everything needed to predict
-        the consequences of possible actions:
-        - Grid state (all objects and their properties)
-        - Agent states (positions, directions, carrying items, status flags)
-        - Step count (for timeout tracking)
-        - Random number generator state
-        
-        Returns:
-            tuple: A hashable representation of the complete environment state
-        """
-        # Serialize grid state
-        grid_state = []
-        for j in range(self.grid.height):
-            for i in range(self.grid.width):
-                cell = self.grid.get(i, j)
-                if cell is None:
-                    grid_state.append(None)
-                else:
-                    # Serialize object with all its properties
-                    obj_data = {
-                        'type': cell.type,
-                        'color': cell.color,
-                        'init_pos': tuple(cell.init_pos) if cell.init_pos is not None else None,
-                        'cur_pos': tuple(cell.cur_pos) if cell.cur_pos is not None else None,
-                    }
-                    
-                    # Add type-specific properties
-                    if hasattr(cell, 'is_open'):
-                        obj_data['is_open'] = cell.is_open
-                    if hasattr(cell, 'is_locked'):
-                        obj_data['is_locked'] = cell.is_locked
-                    if hasattr(cell, 'contains'):
-                        # Recursively serialize contained objects
-                        if cell.contains is not None:
-                            obj_data['contains'] = self._serialize_object(cell.contains)
-                        else:
-                            obj_data['contains'] = None
-                    if hasattr(cell, 'index'):
-                        obj_data['index'] = cell.index
-                    if hasattr(cell, 'reward'):
-                        obj_data['reward'] = cell.reward
-                    if hasattr(cell, 'target_type'):
-                        obj_data['target_type'] = cell.target_type
-                    if hasattr(cell, 'pushable_by'):
-                        # For rocks, serialize the pushable_by attribute
-                        # Convert list to tuple for hashability
-                        if isinstance(cell.pushable_by, list):
-                            obj_data['pushable_by'] = tuple(cell.pushable_by)
-                        else:
-                            obj_data['pushable_by'] = cell.pushable_by
-                    if isinstance(cell, Agent):
-                        # For agents in grid, just store basic info (detailed agent state below)
-                        obj_data['agent_index'] = cell.index
-                    
-                    grid_state.append(tuple(sorted(obj_data.items())))
-        
-        # Serialize agent states
-        agents_state = []
-        for agent in self.agents:
-            agent_data = {
-                'pos': tuple(agent.pos) if agent.pos is not None else None,
-                'dir': agent.dir,
-                'index': agent.index,
-                'view_size': agent.view_size,
-                'terminated': agent.terminated,
-                'started': agent.started,
-                'paused': agent.paused,
-                'on_unsteady_ground': agent.on_unsteady_ground,
-                'carrying': self._serialize_object(agent.carrying) if agent.carrying is not None else None,
-            }
-            agents_state.append(tuple(sorted(agent_data.items())))
-        
-        # Get RNG state - serialize in a way that works across numpy versions
-        rng_state = self.np_random.bit_generator.state
-        
-        # Serialize RNG state in a version-agnostic way
-        if isinstance(rng_state['state'], dict):
-            # New numpy format (PCG64, etc.)
-            rng_state_tuple = (
-                rng_state['bit_generator'],
-                tuple(sorted(rng_state['state'].items())),  # Serialize as tuple of items
-                rng_state.get('has_uint32', 0),
-                rng_state.get('uinteger', 0),
-            )
-        else:
-            # Old numpy format (MT19937)
-            rng_state_tuple = (
-                rng_state['bit_generator'],
-                tuple(rng_state['state']['key']),
-                rng_state['state']['pos'],
-                rng_state.get('has_gauss', 0),
-                rng_state.get('gauss', 0.0),
-            )
-        
-        # Create complete state tuple
-        state = (
-            ('grid', tuple(grid_state)),
-            ('agents', tuple(agents_state)),
-            ('step_count', self.step_count),
-            ('rng_state', rng_state_tuple),
-        )
-        
-        return state
-    
-    def _serialize_object(self, obj):
-        """Helper method to serialize a WorldObj into a hashable structure."""
-        if obj is None:
-            return None
-        
-        obj_data = {
-            'type': obj.type,
-            'color': obj.color,
-            'init_pos': tuple(obj.init_pos) if obj.init_pos is not None else None,
-            'cur_pos': tuple(obj.cur_pos) if obj.cur_pos is not None else None,
-        }
-        
-        # Add type-specific properties
-        if hasattr(obj, 'is_open'):
-            obj_data['is_open'] = obj.is_open
-        if hasattr(obj, 'is_locked'):
-            obj_data['is_locked'] = obj.is_locked
-        if hasattr(obj, 'index'):
-            obj_data['index'] = obj.index
-        if hasattr(obj, 'reward'):
-            obj_data['reward'] = obj.reward
-        if hasattr(obj, 'target_type'):
-            obj_data['target_type'] = obj.target_type
-        if hasattr(obj, 'contains'):
-            if obj.contains is not None:
-                obj_data['contains'] = self._serialize_object(obj.contains)
-            else:
-                obj_data['contains'] = None
-        if hasattr(obj, 'pushable_by'):
-            # For rocks, serialize the pushable_by attribute
-            # Convert list to tuple for hashability
-            if isinstance(obj.pushable_by, list):
-                obj_data['pushable_by'] = tuple(obj.pushable_by)
-            else:
-                obj_data['pushable_by'] = obj.pushable_by
-        if hasattr(obj, 'stumble_probability'):
-            # For unsteady ground, serialize the stumble probability
-            obj_data['stumble_probability'] = obj.stumble_probability
-        
-        return tuple(sorted(obj_data.items()))
-    
-    def set_state(self, state):
-        """
-        Set the environment to a specific state.
-        
-        Args:
-            state: A state tuple as returned by get_state()
-        """
-        # Convert state tuple back to dict for easier access
-        state_dict = dict(state)
-        
-        # Restore step count
-        self.step_count = state_dict['step_count']
-        
-        # Restore RNG state - handle different formats
-        rng_info = state_dict['rng_state']
-        bit_generator_name = rng_info[0]
-        
-        # Reconstruct the RNG state dict based on format
-        if isinstance(rng_info[1], tuple) and len(rng_info[1]) > 0 and isinstance(rng_info[1][0], tuple):
-            # New format with dict serialized as tuple of items
-            state_dict_items = dict(rng_info[1])
-            rng_state = {
-                'bit_generator': bit_generator_name,
-                'state': state_dict_items,
-                'has_uint32': rng_info[2],
-                'uinteger': rng_info[3],
-            }
-        else:
-            # Old format or fallback
-            rng_state = {
-                'bit_generator': bit_generator_name,
-                'state': {
-                    'key': np.array(rng_info[1], dtype=np.uint32),
-                    'pos': rng_info[2],
-                },
-                'has_gauss': rng_info[3],
-                'gauss': rng_info[4],
-            }
-        
-        self.np_random.bit_generator.state = rng_state
-        
-        # Restore grid
-        grid_data = state_dict['grid']
-        idx = 0
-        for j in range(self.grid.height):
-            for i in range(self.grid.width):
-                cell_data = grid_data[idx]
-                idx += 1
-                
-                if cell_data is None:
-                    self.grid.set(i, j, None)
-                else:
-                    obj = self._deserialize_object(dict(cell_data))
-                    self.grid.set(i, j, obj)
-        
-        # Restore agent states
-        agents_data = state_dict['agents']
-        for agent_idx, agent_state in enumerate(agents_data):
-            agent_dict = dict(agent_state)
-            agent = self.agents[agent_idx]
-            
-            agent.pos = np.array(agent_dict['pos']) if agent_dict['pos'] is not None else None
-            agent.dir = agent_dict['dir']
-            agent.terminated = agent_dict['terminated']
-            agent.started = agent_dict['started']
-            agent.paused = agent_dict['paused']
-            agent.on_unsteady_ground = agent_dict.get('on_unsteady_ground', False)
-            
-            if agent_dict['carrying'] is not None:
-                agent.carrying = self._deserialize_object(dict(agent_dict['carrying']))
-            else:
-                agent.carrying = None
-    
-    def _deserialize_object(self, obj_data):
-        """Helper method to deserialize a WorldObj from a dictionary."""
-        obj_type = obj_data['type']
-        color = obj_data['color']
-        
-        # Create appropriate object based on type
-        if obj_type == 'wall':
-            obj = Wall(self.objects, color)
-        elif obj_type == 'floor':
-            obj = Floor(self.objects, color)
-        elif obj_type == 'lava':
-            obj = Lava(self.objects)
-        elif obj_type == 'door':
-            obj = Door(self.objects, color, 
-                      is_open=obj_data.get('is_open', False),
-                      is_locked=obj_data.get('is_locked', False))
-        elif obj_type == 'key':
-            obj = Key(self.objects, color)
-        elif obj_type == 'ball':
-            obj = Ball(self.objects, 
-                      index=obj_data.get('index', 0),
-                      reward=obj_data.get('reward', 1))
-        elif obj_type == 'box':
-            contains = None
-            if 'contains' in obj_data and obj_data['contains'] is not None:
-                contains = self._deserialize_object(dict(obj_data['contains']))
-            obj = Box(self.objects, color, contains=contains)
-        elif obj_type == 'goal':
-            obj = Goal(self.objects, 
-                      index=obj_data.get('index', 0),
-                      reward=obj_data.get('reward', 1),
-                      color=self.objects.COLOR_TO_IDX.get(color))
-        elif obj_type == 'objgoal':
-            obj = ObjectGoal(self.objects,
-                           index=obj_data.get('index', 0),
-                           target_type=obj_data.get('target_type', 'ball'),
-                           reward=obj_data.get('reward', 1),
-                           color=self.objects.COLOR_TO_IDX.get(color))
-        elif obj_type == 'switch':
-            obj = Switch(self.objects)
-        elif obj_type == 'block':
-            obj = Block(self.objects)
-        elif obj_type == 'rock':
-            # Convert tuple back to list for pushable_by if needed
-            pushable_by = obj_data.get('pushable_by')
-            if isinstance(pushable_by, tuple):
-                pushable_by = list(pushable_by)
-            obj = Rock(self.objects, pushable_by=pushable_by)
-        elif obj_type == 'unsteadyground':
-            obj = UnsteadyGround(self.objects, 
-                               stumble_probability=obj_data.get('stumble_probability', 0.5),
-                               color=color)
-        elif obj_type == 'agent':
-            # For agents in the grid, find the agent by its index attribute (color)
-            agent_color_idx = obj_data.get('agent_index', 0)
-            # Find the agent in self.agents that has this color index
-            obj = None
-            for agent in self.agents:
-                if agent.index == agent_color_idx:
-                    obj = agent
-                    break
-            if obj is None:
-                raise ValueError(f"Could not find agent with index {agent_color_idx}")
-        else:
-            raise ValueError(f"Unknown object type: {obj_type}")
-        
-        # Restore position information
-        if obj_data['init_pos'] is not None:
-            obj.init_pos = np.array(obj_data['init_pos'])
-        if obj_data['cur_pos'] is not None:
-            obj.cur_pos = np.array(obj_data['cur_pos'])
-        
-        return obj
-    
-    def get_compact_state(self):
-        """
-        Get a compact state representation that only stores mutable/mobile object states.
-        
-        This is more efficient than get_state() because:
+        The compact state only stores mutable/mobile objects:
         1. Immutable objects (walls) are not stored
         2. Mobile objects (agents, pushed blocks/rocks) only store position + state
         3. Mutable immobile objects only store their state, not position
@@ -3087,7 +2591,7 @@ class MultiGridEnv(WorldModel):
             tuple(mutable_objects),
         )
     
-    def set_compact_state(self, compact_state):
+    def set_state(self, state):
         """
         Set the environment to a compact state.
         
@@ -3096,9 +2600,9 @@ class MultiGridEnv(WorldModel):
         or an identical environment setup.
         
         Args:
-            compact_state: A compact state tuple as returned by get_compact_state()
+            state: A compact state tuple as returned by get_state()
         """
-        step_count, agent_states, mobile_objects, mutable_objects = compact_state
+        step_count, agent_states, mobile_objects, mutable_objects = state
         
         self.step_count = step_count
         
@@ -3203,272 +2707,6 @@ class MultiGridEnv(WorldModel):
                         wall.cur_pos = np.array([x, y])
                         self.grid.set(x, y, wall)
     
-    def transition_probabilities_compact(self, compact_state, actions, restore_state=True):
-        """
-        Optimized version of transition_probabilities using compact state representation.
-        
-        This version is faster because:
-        1. Uses compact state for saving/restoring (4x faster get, 2x faster set)
-        2. Can skip state restoration if caller will set another state anyway
-        
-        Args:
-            compact_state: A compact state tuple as returned by get_compact_state()
-            actions: List of action indices, one per agent
-            restore_state: If True, restore original state after computation.
-                          Set to False if caller will immediately set another state.
-            
-        Returns:
-            list: List of (probability, successor_compact_state) tuples.
-                  Returns None if the state is terminal or actions invalid.
-        """
-        step_count = compact_state[0]
-        if step_count >= self.max_steps:
-            return None
-        
-        for action in actions:
-            if action < 0 or action >= self.action_space.n:
-                return None
-        
-        # Save current state using compact representation
-        if restore_state:
-            original_compact = self.get_compact_state()
-        
-        try:
-            # Set to query state using compact representation
-            self.set_compact_state(compact_state)
-            
-            num_agents = len(self.agents)
-            
-            # Identify active agents
-            active_agents = []
-            for i in range(num_agents):
-                if (not self.agents[i].terminated and 
-                    not self.agents[i].paused and 
-                    self.agents[i].started and 
-                    actions[i] != self.actions.still):
-                    active_agents.append(i)
-            
-            # OPTIMIZATION: If ≤1 agents active and no stochastic elements
-            if len(active_agents) <= 1:
-                is_stochastic = False
-                if len(active_agents) == 1:
-                    agent_idx = active_agents[0]
-                    if actions[agent_idx] == self.actions.forward:
-                        if self.agents[agent_idx].on_unsteady_ground:
-                            is_stochastic = True
-                        elif self.agents[agent_idx].can_enter_magic_walls:
-                            fwd_pos = self.agents[agent_idx].front_pos
-                            fwd_cell = self.grid.get(*fwd_pos)
-                            if fwd_cell is not None and fwd_cell.type == 'magicwall':
-                                approach_dir = (self.agents[agent_idx].dir + 2) % 4
-                                if approach_dir == fwd_cell.magic_side:
-                                    is_stochastic = True
-                
-                if not is_stochastic:
-                    # Deterministic case - compute single successor
-                    self._compute_successor_state_inplace(actions, tuple(range(num_agents)))
-                    result_compact = self.get_compact_state()
-                    return [(1.0, result_compact)]
-            
-            # Check if all actions are rotations (commutative)
-            n_non_rotations = sum(
-                actions[i] not in [self.actions.left, self.actions.right] 
-                for i in active_agents
-            )
-            if n_non_rotations < 2:
-                has_stochastic = any(
-                    actions[i] == self.actions.forward and (
-                        self.agents[i].on_unsteady_ground or
-                        (self.agents[i].can_enter_magic_walls and
-                         self.grid.get(*self.agents[i].front_pos) is not None and
-                         self.grid.get(*self.agents[i].front_pos).type == 'magicwall' and
-                         (self.agents[i].dir + 2) % 4 == self.grid.get(*self.agents[i].front_pos).magic_side)
-                    )
-                    for i in active_agents
-                )
-                if not has_stochastic:
-                    self._compute_successor_state_inplace(actions, tuple(range(num_agents)))
-                    result_compact = self.get_compact_state()
-                    return [(1.0, result_compact)]
-            
-            # For complex cases, fall back to full transition_probabilities logic
-            # but use compact states for results
-            self.set_compact_state(compact_state)  # Reset to query state
-            
-            # Get results from full version, then convert to compact
-            full_result = self.transition_probabilities(
-                self.get_state(), actions
-            )
-            
-            if full_result is None:
-                return None
-            
-            # Convert results to compact states
-            compact_result = []
-            for prob, full_succ_state in full_result:
-                self.set_state(full_succ_state)
-                compact_succ = self.get_compact_state()
-                compact_result.append((prob, compact_succ))
-            
-            return compact_result
-            
-        finally:
-            if restore_state:
-                self.set_compact_state(original_compact)
-    
-    def _compute_successor_state_inplace(self, actions, ordering):
-        """
-        Compute successor state in-place without saving/restoring.
-        
-        This modifies the environment state directly. Caller is responsible
-        for saving/restoring state if needed.
-        """
-        self.step_count += 1
-        
-        rewards = np.zeros(len(actions))
-        
-        for i in ordering:
-            if (self.agents[i].terminated or 
-                self.agents[i].paused or 
-                not self.agents[i].started or 
-                actions[i] == self.actions.still):
-                continue
-            
-            self._execute_single_agent_action(i, actions[i], rewards)
-    
-    def transition_probabilities_native(self, compact_state, actions):
-        """
-        Compute transition probabilities using native compact state representation.
-        
-        This is the fastest version because:
-        1. No serialization/deserialization of full grid state
-        2. Compact state is stored directly in env._cached_compact_state
-        3. get_native_state() is O(1) when in native compact mode
-        
-        Args:
-            compact_state: A compact state tuple as returned by get_compact_state()
-            actions: List of action indices, one per agent
-            
-        Returns:
-            list: List of (probability, successor_compact_state) tuples.
-                  Returns None if the state is terminal or actions invalid.
-        """
-        step_count = compact_state[0]
-        if step_count >= self.max_steps:
-            return None
-        
-        for action in actions:
-            if action < 0 or action >= self.action_space.n:
-                return None
-        
-        # Set to query state
-        self.set_compact_state(compact_state)
-        
-        num_agents = len(self.agents)
-        
-        # Identify active agents from compact state directly
-        agent_states = compact_state[1]
-        active_agents = []
-        for i in range(num_agents):
-            agent_state = agent_states[i]
-            terminated = agent_state[3]
-            started = agent_state[4]
-            paused = agent_state[5]
-            if (not terminated and not paused and started and 
-                actions[i] != self.actions.still):
-                active_agents.append(i)
-        
-        # OPTIMIZATION: If ≤1 agents active and no stochastic elements
-        if len(active_agents) <= 1:
-            is_stochastic = False
-            if len(active_agents) == 1:
-                agent_idx = active_agents[0]
-                if actions[agent_idx] == self.actions.forward:
-                    on_unsteady = agent_states[agent_idx][6]
-                    if on_unsteady:
-                        is_stochastic = True
-                    elif self.agents[agent_idx].can_enter_magic_walls:
-                        fwd_pos = self.agents[agent_idx].front_pos
-                        fwd_cell = self.grid.get(*fwd_pos)
-                        if fwd_cell is not None and fwd_cell.type == 'magicwall':
-                            approach_dir = (self.agents[agent_idx].dir + 2) % 4
-                            if approach_dir == fwd_cell.magic_side:
-                                is_stochastic = True
-            
-            if not is_stochastic:
-                # Deterministic case - compute single successor
-                self._compute_successor_state_inplace(actions, tuple(range(num_agents)))
-                result_compact = self.get_compact_state()
-                return [(1.0, result_compact)]
-        
-        # Check if all actions are rotations (commutative)
-        n_non_rotations = sum(
-            actions[i] not in [self.actions.left, self.actions.right] 
-            for i in active_agents
-        )
-        if n_non_rotations < 2:
-            has_stochastic = any(
-                actions[i] == self.actions.forward and (
-                    agent_states[i][6] or  # on_unsteady_ground
-                    (self.agents[i].can_enter_magic_walls and
-                     self.grid.get(*self.agents[i].front_pos) is not None and
-                     self.grid.get(*self.agents[i].front_pos).type == 'magicwall' and
-                     (self.agents[i].dir + 2) % 4 == self.grid.get(*self.agents[i].front_pos).magic_side)
-                )
-                for i in active_agents
-            )
-            if not has_stochastic:
-                self._compute_successor_state_inplace(actions, tuple(range(num_agents)))
-                result_compact = self.get_compact_state()
-                return [(1.0, result_compact)]
-        
-        # For complex cases with multiple active agents, use conflict block partitioning
-        # Reset to query state
-        self.set_compact_state(compact_state)
-        
-        # Use the full implementation but return compact states
-        conflict_blocks = self._identify_conflict_blocks(active_agents, actions)
-        
-        # Compute all possible orderings from conflict blocks
-        from itertools import product
-        block_orderings = [list(range(len(block))) for block in conflict_blocks]
-        
-        results = {}
-        total_orderings = 1
-        for block in conflict_blocks:
-            total_orderings *= len(block)
-        
-        prob_per_ordering = 1.0 / total_orderings
-        
-        for ordering_combo in product(*[range(len(block)) for block in conflict_blocks]):
-            # Reset to query state
-            self.set_compact_state(compact_state)
-            
-            # Build full ordering
-            full_ordering = []
-            for block_idx, pos_in_block in enumerate(ordering_combo):
-                block = conflict_blocks[block_idx]
-                # Rotate the block to put pos_in_block first
-                rotated = block[pos_in_block:] + block[:pos_in_block]
-                full_ordering.extend(rotated)
-            
-            # Add inactive agents
-            for i in range(num_agents):
-                if i not in active_agents:
-                    full_ordering.append(i)
-            
-            # Compute successor
-            self._compute_successor_state_inplace(actions, tuple(full_ordering))
-            result_compact = self.get_compact_state()
-            
-            # Aggregate by result state
-            if result_compact in results:
-                results[result_compact] += prob_per_ordering
-            else:
-                results[result_compact] = prob_per_ordering
-        
-        return [(prob, state) for state, prob in results.items()]
-
     def transition_probabilities(self, state, actions):
         """
         Given a state and vector of actions, return possible transitions with exact probabilities.
@@ -3524,9 +2762,9 @@ class MultiGridEnv(WorldModel):
                   possible transitions. Returns None if the state is terminal
                   or if any action is not feasible in the given state.
         """
-        # Check if we're in a terminal state
-        state_dict = dict(state)
-        if state_dict['step_count'] >= self.max_steps:
+        # Check if we're in a terminal state (state[0] is step_count in compact format)
+        step_count = state[0]
+        if step_count >= self.max_steps:
             return None
         
         # Check if all actions are valid
@@ -3534,26 +2772,22 @@ class MultiGridEnv(WorldModel):
             if action < 0 or action >= self.action_space.n:
                 return None
         
-        # Save current state to restore later
-        original_state = self.get_state()
+        # Set to query state
+        self.set_state(state)
         
-        try:
-            # Restore to the query state
-            self.set_state(state)
-            
-            num_agents = len(self.agents)
-            
-            # Identify which agents will actually act
-            active_agents = []
-            inactive_agents = []
-            for i in range(num_agents):
-                if (not self.agents[i].terminated and 
-                    not self.agents[i].paused and 
-                    self.agents[i].started and 
-                    actions[i] != self.actions.still):
-                    active_agents.append(i)
-                else:
-                    inactive_agents.append(i)
+        num_agents = len(self.agents)
+        
+        # Identify which agents will actually act
+        active_agents = []
+        inactive_agents = []
+        for i in range(num_agents):
+            if (not self.agents[i].terminated and 
+                not self.agents[i].paused and 
+                self.agents[i].started and 
+                actions[i] != self.actions.still):
+                active_agents.append(i)
+            else:
+                inactive_agents.append(i)
             
             # OPTIMIZATION 1: If ≤1 agents active, check if transition is deterministic
             # (only deterministic if the agent is NOT on unsteady ground attempting forward
@@ -3609,7 +2843,7 @@ class MultiGridEnv(WorldModel):
             # Unsteady and magic wall agents are excluded because they're handled separately
             # This is MORE efficient than permuting all active agents
             # Instead of k! permutations, we compute the Cartesian product of conflict blocks
-            conflict_blocks = self._identify_conflict_blocks(state, actions, normal_active_agents)
+            conflict_blocks = self._identify_conflict_blocks(actions, normal_active_agents)
             
             # If no conflicts and no stochastic agents, result is deterministic
             if (all(len(block) == 1 for block in conflict_blocks) and 
@@ -3747,12 +2981,8 @@ class MultiGridEnv(WorldModel):
             result.sort(key=lambda x: x[0], reverse=True)
             
             return result
-            
-        finally:
-            # Always restore original state
-            self.set_state(original_state)
     
-    def _identify_conflict_blocks(self, state, actions, active_agents):
+    def _identify_conflict_blocks(self, actions, active_agents):
         """
         Partition active agents into conflict blocks where agents compete for resources.
         
@@ -3761,8 +2991,9 @@ class MultiGridEnv(WorldModel):
         - Try to pick up the same object
         - Interact with each other directly
         
+        Note: Assumes set_state() has already been called with the relevant state.
+        
         Args:
-            state: Current state tuple
             actions: List of action indices
             active_agents: List of active agent indices
             
@@ -3775,8 +3006,7 @@ class MultiGridEnv(WorldModel):
         RESOURCE_PICKUP = 'pickup'
         RESOURCE_DROP_AGENT = 'drop_agent'
         
-        # Restore to the query state to inspect agent positions and targets
-        self.set_state(state)
+        # Grid is already set up from set_state() call in transition_probabilities
         
         # Track which resource each agent targets
         agent_targets = {}  # agent_idx -> resource identifier
