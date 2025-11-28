@@ -6,7 +6,8 @@ using empowerment-based objectives.
 """
 
 from empo.world_model import WorldModel
+from empo.possible_goal import PossibleGoal
 
 __version__ = "0.1.0"
 
-__all__ = ["WorldModel"]
+__all__ = ["WorldModel", "PossibleGoal"]
