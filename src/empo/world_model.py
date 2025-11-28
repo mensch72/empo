@@ -285,16 +285,16 @@ class WorldModel(gym.Env):
             total_combinations = num_actions ** num_agents
             
             for combo_idx in range(total_combinations):
-                # Convert combo_idx to action tuple
-                actions = []
+                # Convert combo_idx to action profile tuple
+                action_profile = []
                 temp = combo_idx
                 for _ in range(num_agents):
-                    actions.append(temp % num_actions)
+                    action_profile.append(temp % num_actions)
                     temp //= num_actions
-                actions_tuple = tuple(actions)
+                action_profile_tuple = tuple(action_profile)
                 
                 # Get transition probabilities for this action combination
-                trans_result = self.transition_probabilities(current_state, actions)
+                trans_result = self.transition_probabilities(current_state, action_profile)
                 
                 # If None, state is terminal or actions are invalid
                 if trans_result is None:
@@ -307,7 +307,7 @@ class WorldModel(gym.Env):
                     for prob, successor_state in trans_result:
                         probs.append(prob)
                         succ_states.append(successor_state)
-                    temp_transitions[current_idx].append((actions_tuple, probs, succ_states))
+                    temp_transitions[current_idx].append((action_profile_tuple, probs, succ_states))
                 
                 # Process all successor states from these transitions
                 for prob, successor_state in trans_result:
@@ -388,10 +388,10 @@ class WorldModel(gym.Env):
         transitions = [[] for _ in range(num_states)]
         for old_idx in range(num_states):
             new_idx = old_to_new[old_idx]
-            for action, probs, succ_states in temp_transitions[old_idx]:
+            for action_profile, probs, succ_states in temp_transitions[old_idx]:
                 # Convert successor states to new indices
                 succ_indices = [state_to_idx[s] for s in succ_states]
-                transitions[new_idx].append((action, probs, succ_indices))
+                transitions[new_idx].append((action_profile, probs, succ_indices))
         
         return states, state_to_idx, successors, transitions
     
