@@ -10,11 +10,14 @@ This script demonstrates backward induction on the SmallOneOrTwoChambersMapEnv:
 5. Produces a movie of an episode showing optimal robot play vs random humans
 
 The reward function gives +1 when the robot is in cell (3, 7), 0 otherwise.
+
+Run with --profile to enable line-by-line profiling of multigrid.py.
 """
 
 import sys
 import os
 import time
+import argparse
 
 # Add paths for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
@@ -26,6 +29,108 @@ import matplotlib.animation as animation
 from itertools import product
 
 from envs.one_or_three_chambers import SmallOneOrTwoChambersMapEnv
+
+# Line profiler global
+line_profiler = None
+
+
+def setup_line_profiler():
+    """Set up line profiler for all methods in multigrid.py."""
+    global line_profiler
+    try:
+        from line_profiler import LineProfiler
+        line_profiler = LineProfiler()
+        
+        # Import the multigrid module
+        import gym_multigrid.multigrid as multigrid_module
+        
+        # Get the multigrid.py file path - only profile functions defined in this file
+        multigrid_path = os.path.abspath(multigrid_module.__file__)
+        print(f"Profiling methods from: {multigrid_path}")
+        
+        # Get all classes defined in multigrid.py (not imported ones)
+        classes_to_profile = []
+        for name in dir(multigrid_module):
+            obj = getattr(multigrid_module, name)
+            if isinstance(obj, type):
+                # Check if the class is actually defined in multigrid.py
+                try:
+                    if hasattr(obj, '__module__') and 'multigrid' in obj.__module__:
+                        classes_to_profile.append(obj)
+                except:
+                    pass
+        
+        print(f"Found {len(classes_to_profile)} classes to profile")
+        
+        methods_added = 0
+        for cls in classes_to_profile:
+            for attr_name in dir(cls):
+                # Skip most dunder methods but keep important ones
+                if attr_name.startswith('__') and attr_name not in ['__init__', '__call__', '__getitem__', '__setitem__', '__len__']:
+                    continue
+                try:
+                    attr = getattr(cls, attr_name)
+                    if callable(attr):
+                        # Check if this function is defined in multigrid.py
+                        func = None
+                        if hasattr(attr, '__func__'):
+                            func = attr.__func__
+                        elif hasattr(attr, '__code__'):
+                            func = attr
+                        
+                        if func and hasattr(func, '__code__'):
+                            code_file = os.path.abspath(func.__code__.co_filename)
+                            if code_file == multigrid_path:
+                                line_profiler.add_function(func)
+                                methods_added += 1
+                except (AttributeError, TypeError):
+                    pass
+        
+        # Also add module-level functions from multigrid.py
+        for name in dir(multigrid_module):
+            obj = getattr(multigrid_module, name)
+            if callable(obj) and hasattr(obj, '__code__'):
+                code_file = os.path.abspath(obj.__code__.co_filename)
+                if code_file == multigrid_path:
+                    try:
+                        line_profiler.add_function(obj)
+                        methods_added += 1
+                    except:
+                        pass
+        
+        print(f"Added {methods_added} methods to line profiler")
+        return True
+    except ImportError:
+        print("Error: line_profiler not installed. Run 'pip install line_profiler'")
+        return False
+    except Exception as e:
+        print(f"Error setting up line profiler: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def print_line_profiler_stats():
+    """Print the line profiler statistics."""
+    global line_profiler
+    if line_profiler is None:
+        return
+    
+    print("\n" + "=" * 80)
+    print("LINE-BY-LINE PROFILING RESULTS FOR multigrid.py")
+    print("=" * 80)
+    
+    # Print stats to stdout
+    line_profiler.print_stats()
+    
+    # Also save to file
+    output_dir = os.path.join(os.path.dirname(__file__), '..', 'outputs')
+    os.makedirs(output_dir, exist_ok=True)
+    profile_path = os.path.join(output_dir, 'line_profile_multigrid.txt')
+    
+    with open(profile_path, 'w') as f:
+        line_profiler.print_stats(stream=f)
+    print(f"\nLine profile saved to: {os.path.abspath(profile_path)}")
 
 
 # Target cell where the robot receives a reward of 1
@@ -392,8 +497,17 @@ def create_episode_movie(frames, output_path):
     plt.close()
 
 
-def main():
+def main(enable_profiling=False):
     """Main function to run the backward induction example."""
+    global line_profiler
+    
+    # Set up line profiler if requested
+    if enable_profiling:
+        print("Setting up line profiler...")
+        if not setup_line_profiler():
+            print("Continuing without profiling...")
+            enable_profiling = False
+    
     print("=" * 70)
     print("Bellman Backward Induction Example")
     print("=" * 70)
@@ -402,6 +516,8 @@ def main():
     print(f"  - Target cell: {TARGET_CELL} (robot receives reward=1 here)")
     print("  - Robot follows optimal policy computed via Bellman equation")
     print("  - Humans move randomly")
+    if enable_profiling:
+        print("  - LINE PROFILING ENABLED")
     print()
     
     # Create output directory
@@ -420,6 +536,11 @@ def main():
     for i, agent in enumerate(env.agents):
         print(f"  Agent {i} ({agent.color}): pos={tuple(agent.pos)}")
     print()
+    
+    # Enable profiler before DAG computation
+    if enable_profiling and line_profiler is not None:
+        print("Enabling line profiler...")
+        line_profiler.enable()
     
     # Compute DAG with cached transitions
     print("Computing DAG structure with transitions...")
@@ -444,6 +565,10 @@ def main():
         env, states, state_to_idx, successors, transitions
     )
     
+    # Disable profiler 
+    if enable_profiling and line_profiler is not None:
+        line_profiler.disable()
+    
     # Print initial state value
     env.reset()
     initial_state = env.get_state()
@@ -452,6 +577,10 @@ def main():
         print(f"\nInitial state value: {value_function[initial_idx]:.4f}")
         print(f"Optimal initial action: {env.actions.available[optimal_policy[initial_idx]]}")
     print()
+    
+    # Print profiling results
+    if enable_profiling:
+        print_line_profiler_stats()
     
     # Run episode with optimal policy
     frames = run_episode_with_optimal_policy(env, states, state_to_idx, optimal_policy)
@@ -469,4 +598,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description='Bellman backward induction example')
+    parser.add_argument('--profile', action='store_true', 
+                        help='Enable line-by-line profiling of multigrid.py')
+    args = parser.parse_args()
+    main(enable_profiling=args.profile)
