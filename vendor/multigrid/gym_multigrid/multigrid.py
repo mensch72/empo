@@ -2536,11 +2536,14 @@ class MultiGridEnv(WorldModel):
                 if obj_type in ('block', 'rock'):
                     # For rocks, also store pushable_by attribute
                     pushable_by = getattr(cell, 'pushable_by', None) if obj_type == 'rock' else None
+                    # Convert list to tuple for hashability
+                    if isinstance(pushable_by, list):
+                        pushable_by = tuple(pushable_by)
                     mobile_objects.append((
                         obj_type,
                         i, j,  # current position
                         cell.color,
-                        pushable_by,  # None for blocks, agent index or list for rocks
+                        pushable_by,  # None for blocks, agent index or tuple for rocks
                     ))
                 
                 # Mutable immobile objects: doors can open/close
