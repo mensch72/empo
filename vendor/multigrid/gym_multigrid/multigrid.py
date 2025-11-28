@@ -2677,25 +2677,46 @@ class MultiGridEnv(WorldModel):
                 self.grid.set(*agent.pos, agent)
         
         # Restore mobile objects (blocks, rocks)
-        # First, clear all existing blocks/rocks
-        for j in range(self.grid.height):
-            for i in range(self.grid.width):
-                cell = self.grid.get(i, j)
-                if cell is not None and cell.type in ('block', 'rock'):
-                    self.grid.set(i, j, None)
-        
-        # Then place them at their new positions
-        for mobile_obj in mobile_objects:
-            obj_type, x, y, color = mobile_obj
-            if obj_type == 'block':
-                obj = Block(self.objects)
-            elif obj_type == 'rock':
-                obj = Rock(self.objects)
-            else:
-                continue
-            obj.color = color
-            obj.cur_pos = np.array([x, y])
-            self.grid.set(x, y, obj)
+        # Use cached objects - clear from current positions and move to new positions
+        # This avoids scanning the entire grid
+        if hasattr(self, '_mobile_objects') and self._mobile_objects:
+            # Clear cached mobile objects from their current positions
+            for initial_pos, obj in self._mobile_objects:
+                if obj.cur_pos is not None:
+                    old_x, old_y = int(obj.cur_pos[0]), int(obj.cur_pos[1])
+                    cell = self.grid.get(old_x, old_y)
+                    if cell is obj:
+                        self.grid.set(old_x, old_y, None)
+            
+            # Place cached objects at new positions from state
+            obj_idx = 0
+            for mobile_obj in mobile_objects:
+                obj_type, x, y, color = mobile_obj
+                if obj_idx < len(self._mobile_objects):
+                    _, obj = self._mobile_objects[obj_idx]
+                    obj.color = color
+                    obj.cur_pos = np.array([x, y])
+                    self.grid.set(x, y, obj)
+                    obj_idx += 1
+        else:
+            # Fallback: scan grid if no cache (shouldn't happen after reset)
+            for j in range(self.grid.height):
+                for i in range(self.grid.width):
+                    cell = self.grid.get(i, j)
+                    if cell is not None and cell.type in ('block', 'rock'):
+                        self.grid.set(i, j, None)
+            
+            for mobile_obj in mobile_objects:
+                obj_type, x, y, color = mobile_obj
+                if obj_type == 'block':
+                    obj = Block(self.objects)
+                elif obj_type == 'rock':
+                    obj = Rock(self.objects)
+                else:
+                    continue
+                obj.color = color
+                obj.cur_pos = np.array([x, y])
+                self.grid.set(x, y, obj)
         
         # Restore mutable objects (doors, boxes, magic walls)
         for mutable_obj in mutable_objects:
