@@ -2495,9 +2495,9 @@ class MultiGridEnv(WorldModel):
         
         Format:
         - step_count: int
-        - agents: tuple of (pos_x, pos_y, dir, terminated, started, paused, on_unsteady, carrying_type)
-        - mobile_objects: tuple of (obj_type, pos_x, pos_y, additional_state...)
-        - mutable_objects: tuple of (grid_idx, state_info...) for doors/boxes/etc
+        - agent_states: tuple of (pos_x, pos_y, dir, terminated, started, paused, on_unsteady, carrying_type, carrying_color)
+        - mobile_objects: tuple of (obj_type, pos_x, pos_y, color)
+        - mutable_objects: tuple of (obj_type, x, y, state_info...) for doors/boxes/magic walls
         
         Returns:
             tuple: A hashable compact state representation
@@ -2991,7 +2991,8 @@ class MultiGridEnv(WorldModel):
         - Try to pick up the same object
         - Interact with each other directly
         
-        Note: Assumes set_state() has already been called with the relevant state.
+        Note: This method assumes the environment is already set to the relevant state
+        (i.e., the caller has already called set_state() before calling this method).
         
         Args:
             actions: List of action indices
