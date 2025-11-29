@@ -2,6 +2,7 @@
 
 import sys
 import os
+import pickle
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
@@ -29,11 +30,9 @@ print(f"Root state: {root_state}")
 print(f"Num agents: {len(env.agents)}")
 print(f"Num actions: {env.action_space.n}")
 
-# Initialize worker globals (simulating what _init_dag_worker does)
-env_class = env.__class__
-env_args = env._get_construction_args()
-env_kwargs = env._get_construction_kwargs()
-_init_dag_worker(env_class, env_args, env_kwargs)
+# Initialize worker globals using pickle (as the parallel version does)
+env_pickle = pickle.dumps(env)
+_init_dag_worker(env_pickle)
 
 total_combinations = env.action_space.n ** len(env.agents)
 print(f"\nTotal action combinations: {total_combinations}")

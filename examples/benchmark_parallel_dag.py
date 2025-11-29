@@ -116,7 +116,7 @@ We We We We We We We We We
         partial_obs=False
     )
     benchmark_environment("Larger Grid (9x8, max_steps=6)", env2,
-                         num_workers_list=[1, 2, 4, max_workers])
+                         num_workers_list=[1, max_workers])
     
     # Test 3: Multiple agents (exponentially more action combinations)
     env3 = MultiGridEnv(
@@ -130,7 +130,7 @@ We We We We We We We
 ''',
         objects_set=World,
         orientations=['e', 'n'],
-        max_steps=5,
+        max_steps=7,
         partial_obs=False
     )
     benchmark_environment("Multi-Agent (2 agents, max_steps=5)", env3,

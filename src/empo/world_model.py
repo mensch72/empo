@@ -11,6 +11,7 @@ from collections import deque
 from typing import List, Dict, Tuple, Any, Optional
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing as mp
+import pickle
 import os
 
 import gymnasium as gym
@@ -23,14 +24,17 @@ _worker_num_agents = None
 _worker_num_actions = None
 
 
-def _init_dag_worker(env_class, env_args, env_kwargs):
+def _init_dag_worker(env_pickle):
     """
     Initialize worker process for parallel DAG computation.
-    Creates a fresh environment instance in each worker.
+    Deserializes the environment to create an identical copy in each worker.
+    
+    This approach preserves ALL attributes of the environment, including
+    immutable agent properties like can_enter_magic_walls and can_push_rocks.
     """
     global _worker_env, _worker_num_agents, _worker_num_actions
-    # Create fresh environment instance in this worker
-    _worker_env = env_class(*env_args, **env_kwargs)
+    # Deserialize environment - this creates a complete copy with all attributes
+    _worker_env = pickle.loads(env_pickle)
     _worker_num_agents = len(_worker_env.agents)
     _worker_num_actions = _worker_env.action_space.n
 
@@ -364,21 +368,17 @@ class WorldModel(gym.Env):
         if return_probabilities:
             temp_transitions[0] = []
         
+        # Get action space info once before the loop
+        num_agents = len(self.agents)
+        num_actions = self.action_space.n
+        total_combinations = num_actions ** num_agents
+        
         while queue:
             current_state = queue.popleft()
             current_idx = temp_state_to_idx[current_state]
             
-            # Restore environment to current state to explore transitions
-            self.set_state(current_state)
-            num_agents = len(self.agents)
-            num_actions = self.action_space.n
-            
             # Track unique successor states for this current state
             seen_successors = set()
-            
-            # Generate all action combinations efficiently
-            # For n agents with k actions each: k^n combinations
-            total_combinations = num_actions ** num_agents
             
             for combo_idx in range(total_combinations):
                 # Convert combo_idx to action profile tuple
@@ -426,7 +426,10 @@ class WorldModel(gym.Env):
                     successor_idx = temp_state_to_idx[successor_state]
                     edges[current_idx].add(successor_idx)
         
-        # PHASE 2: Topological sort using Kahn's algorithm
+        # PHASE 2: Topological sort using Kahn's algorithm with deterministic ordering
+        # We use a heap sorted by state tuples to ensure identical ordering regardless
+        # of discovery order (which differs between sequential and parallel versions)
+        import heapq
         num_states = len(discovered_states)
         
         # Compute in-degree for each state
@@ -435,24 +438,25 @@ class WorldModel(gym.Env):
             for successor_idx in edges[state_idx]:
                 in_degree[successor_idx] += 1
         
-        # Initialize queue with all states that have in-degree 0
-        topo_queue = deque()
+        # Initialize heap with all states that have in-degree 0, sorted by state tuple
+        # We use (state_tuple, idx) as heap entries for deterministic ordering
+        topo_heap = []
         for i in range(num_states):
             if in_degree[i] == 0:
-                topo_queue.append(i)
+                heapq.heappush(topo_heap, (discovered_states[i], i))
         
         # Topologically sorted order (indices in discovered_states)
         topo_order = []
         
-        while topo_queue:
-            current_idx = topo_queue.popleft()
+        while topo_heap:
+            _, current_idx = heapq.heappop(topo_heap)
             topo_order.append(current_idx)
             
             # Reduce in-degree of successors
             for successor_idx in edges[current_idx]:
                 in_degree[successor_idx] -= 1
                 if in_degree[successor_idx] == 0:
-                    topo_queue.append(successor_idx)
+                    heapq.heappush(topo_heap, (discovered_states[successor_idx], successor_idx))
         
         # Verify we got all states (no cycles)
         if len(topo_order) != num_states:
@@ -510,17 +514,14 @@ class WorldModel(gym.Env):
         if num_workers is None:
             num_workers = mp.cpu_count()
         
-        # Get environment construction parameters for workers
-        env_class = self.__class__
-        env_args = self._get_construction_args()
-        env_kwargs = self._get_construction_kwargs()
+        # Serialize the entire environment for workers
+        # This preserves ALL attributes including immutable agent properties
+        # like can_enter_magic_walls and can_push_rocks
+        self.reset()  # Ensure consistent initial state
+        env_pickle = pickle.dumps(self)
         
-        # Use spawn context - each worker gets fresh environment
+        # Use spawn context - each worker gets its own deserialized copy
         ctx = mp.get_context('spawn')
-        
-        # Reset environment to get consistent initial state
-        # (workers create fresh envs which also start at initial state)
-        self.reset()
         
         # BFS to discover all states
         initial_state = self.get_state()
@@ -533,7 +534,7 @@ class WorldModel(gym.Env):
         
         with ProcessPoolExecutor(max_workers=num_workers, mp_context=ctx,
                                  initializer=_init_dag_worker,
-                                 initargs=(env_class, env_args, env_kwargs)) as executor:
+                                 initargs=(env_pickle,)) as executor:
             while current_wave:
                 # Process all states in current wave in parallel
                 futures = {executor.submit(_process_state_actions, state): state 
@@ -562,7 +563,11 @@ class WorldModel(gym.Env):
                 
                 current_wave = next_wave
         
-        # PHASE 2: Topological sort using Kahn's algorithm
+        # PHASE 2: Topological sort using Kahn's algorithm with deterministic ordering
+        # We use a heap sorted by state tuples to ensure identical ordering regardless
+        # of discovery order (which differs between sequential and parallel versions)
+        import heapq
+        
         # First, build edges using indices
         discovered_states = list(visited)
         num_states = len(discovered_states)
@@ -582,24 +587,25 @@ class WorldModel(gym.Env):
             for successor_idx in indexed_edges[state_idx]:
                 in_degree[successor_idx] += 1
         
-        # Initialize queue with all states that have in-degree 0
-        topo_queue = deque()
+        # Initialize heap with all states that have in-degree 0, sorted by state tuple
+        # We use (state_tuple, idx) as heap entries for deterministic ordering
+        topo_heap = []
         for i in range(num_states):
             if in_degree[i] == 0:
-                topo_queue.append(i)
+                heapq.heappush(topo_heap, (discovered_states[i], i))
         
         # Topologically sorted order
         topo_order = []
         
-        while topo_queue:
-            current_idx = topo_queue.popleft()
+        while topo_heap:
+            _, current_idx = heapq.heappop(topo_heap)
             topo_order.append(current_idx)
             
             # Reduce in-degree of successors
             for successor_idx in indexed_edges[current_idx]:
                 in_degree[successor_idx] -= 1
                 if in_degree[successor_idx] == 0:
-                    topo_queue.append(successor_idx)
+                    heapq.heappush(topo_heap, (discovered_states[successor_idx], successor_idx))
         
         # Verify we got all states (no cycles)
         if len(topo_order) != num_states:

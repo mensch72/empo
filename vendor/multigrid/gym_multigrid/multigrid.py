@@ -2273,6 +2273,9 @@ class MultiGridEnv(WorldModel):
         These agents are processed last, and entry succeeds with the magic wall's probability.
         If entry fails, the magic wall may solidify into a normal wall based on solidify_probability.
         
+        NOTE: This function uses np_random for stochastic outcomes and should ONLY be called 
+        from step(), never from transition_probabilities() or its helpers!
+        
         Args:
             magic_wall_agents: List of agent indices attempting to enter magic walls
             rewards: Rewards array to update
@@ -2674,13 +2677,12 @@ class MultiGridEnv(WorldModel):
         
         self.step_count = step_count
         
-        # Restore agent states
-        # Note: on_unsteady_ground is derived from position + terrain_grid, not stored in state
-        for agent_idx, agent_state in enumerate(agent_states):
-            agent = self.agents[agent_idx]
-            pos_x, pos_y, dir_, terminated, started, paused, carrying_type, carrying_color = agent_state
-            
-            # Remove agent from old position in grid (restore terrain if any)
+        # Restore agent states in TWO PASSES to handle agents swapping positions correctly.
+        # If we remove and place in the same pass, an agent moving to another agent's old 
+        # position may see the other agent instead of the terrain.
+        
+        # PASS 1: Remove ALL agents from their current positions, restoring terrain
+        for agent_idx, agent in enumerate(self.agents):
             if agent.pos is not None:
                 old_cell = self.grid.get(*agent.pos)
                 if old_cell is agent:
@@ -2688,6 +2690,11 @@ class MultiGridEnv(WorldModel):
                     old_terrain = self.terrain_grid.get(*agent.pos)
                     self.grid.set(*agent.pos, old_terrain)  # None is fine
                     self.terrain_grid.set(*agent.pos, None)
+        
+        # PASS 2: Update agent states and place them at new positions
+        for agent_idx, agent_state in enumerate(agent_states):
+            agent = self.agents[agent_idx]
+            pos_x, pos_y, dir_, terminated, started, paused, carrying_type, carrying_color = agent_state
             
             # Update agent state
             agent.pos = np.array([pos_x, pos_y]) if pos_x is not None else None
