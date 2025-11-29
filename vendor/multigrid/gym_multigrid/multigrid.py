@@ -2549,7 +2549,7 @@ class MultiGridEnv(WorldModel):
             agent_states.append((
                 int(agent.pos[0]) if agent.pos is not None else None,
                 int(agent.pos[1]) if agent.pos is not None else None,
-                agent.dir,
+                int(agent.dir) if agent.dir is not None else None,
                 agent.terminated,
                 agent.started,
                 agent.paused,

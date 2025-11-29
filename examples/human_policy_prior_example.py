@@ -191,7 +191,7 @@ def main():
     # Create environment
     print("Creating SmallOneOrThreeChambersMapEnv...")
     world_model = SmallOneOrThreeChambersMapEnv()
-    world_model.max_steps = 6  # Set to small value for quick testing
+    world_model.max_steps = 3  # Set to 3 for quick testing
     world_model.reset()
     
     print(f"Environment created successfully!")
@@ -229,7 +229,9 @@ def main():
         human_policy_prior = compute_human_policy_prior(
             world_model=world_model,
             human_agent_indices=human_agent_indices,
-            possible_goal_generator=goal_generator
+            possible_goal_generator=goal_generator,
+            parallel=False, #True,
+            level_fct=lambda state: state[0]  # Use step_count for fast level computation
             # Using default values for believed_others_policy, beta=1, gamma=1
         )
         
