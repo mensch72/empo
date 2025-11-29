@@ -5,7 +5,6 @@ Debug script to trace exact state transitions and understand value function comp
 
 import sys
 import os
-import numpy as np
 
 # Add paths for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
