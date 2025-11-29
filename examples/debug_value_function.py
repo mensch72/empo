@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'mult
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from gym_multigrid.multigrid import MultiGridEnv, World
-from empo.possible_goal import PossibleGoal, PossibleGoalGenerator
+from empo.possible_goal import PossibleGoal
 from empo.backward_induction import compute_human_policy_prior
 
 # Define the environment map with unsteady ground on the right
