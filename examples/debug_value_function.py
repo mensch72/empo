@@ -192,7 +192,6 @@ def main():
         trans_list = transitions[state_idx]
         
         # Group by action
-        num_actions = 8
         action_transitions = {}
         for action_profile_tuple, probs, next_indices in trans_list:
             action = action_profile_tuple[0]  # Single agent
