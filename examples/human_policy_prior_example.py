@@ -47,7 +47,7 @@ class ReachCellGoal(PossibleGoal):
         step_count, agent_states, mobile_objects, mutable_objects = state
         
         # Check if the specific human agent is at the target position
-        # agent_states format: (pos_x, pos_y, dir, terminated, started, paused, on_unsteady, carrying_type, carrying_color)
+        # agent_states format: (pos_x, pos_y, dir, terminated, started, paused, carrying_type, carrying_color)
         if self.human_agent_index < len(agent_states):
             agent_state = agent_states[self.human_agent_index]
             pos_x, pos_y = agent_state[0], agent_state[1]
