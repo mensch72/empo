@@ -1466,6 +1466,12 @@ class MultiGridEnv(WorldModel):
         self._map_spec = map
         self._map_parsed = None
         
+        # Store original parameters for environment reconstruction
+        self._init_grid_size = grid_size
+        self._init_seed = seed
+        self._init_orientations = orientations
+        self._init_can_push_rocks = can_push_rocks
+        
         # Initialize RNG early so we can use it for random orientations
         # This is done before reset() to allow random orientations to be drawn in __init__
         self.np_random, _ = seeding.np_random(seed)
@@ -1570,6 +1576,30 @@ class MultiGridEnv(WorldModel):
 
         # Initialize the state
         self.reset()
+    
+    def _get_construction_args(self) -> tuple:
+        """Get positional arguments for reconstructing this environment."""
+        return ()
+    
+    def _get_construction_kwargs(self) -> dict:
+        """Get keyword arguments for reconstructing this environment."""
+        # Store original __init__ parameters for reconstruction in workers
+        return {
+            'grid_size': getattr(self, '_init_grid_size', None),
+            'width': self.width,
+            'height': self.height,
+            'max_steps': self.max_steps,
+            'see_through_walls': self.see_through_walls,
+            'seed': getattr(self, '_init_seed', 2),
+            'agents': None,  # Will be reconstructed from map
+            'partial_obs': self.partial_obs,
+            'agent_view_size': getattr(self, 'observation_space', None).shape[0] if hasattr(self, 'observation_space') and self.partial_obs else 7,
+            'actions_set': self.actions,
+            'objects_set': self.objects,
+            'map': self._map_spec,
+            'orientations': getattr(self, '_init_orientations', None),
+            'can_push_rocks': getattr(self, '_init_can_push_rocks', 'e')
+        }
 
     def reset(self):
 
@@ -1855,11 +1885,12 @@ class MultiGridEnv(WorldModel):
         # Update agent position
         self.agents[agent_idx].pos = np.array(target_pos) if not isinstance(target_pos, np.ndarray) else target_pos
         
-        # Track if the agent is now on unsteady ground
-        if target_cell is not None and target_cell.type == 'unsteadyground':
-            self.agents[agent_idx].on_unsteady_ground = True
+        # Save overlappable terrain at new position so it persists under the agent
+        # and can be restored when the agent leaves
+        if target_cell is not None and target_cell.can_overlap():
+            self.terrain_grid.set(*self.agents[agent_idx].pos, target_cell)
         else:
-            self.agents[agent_idx].on_unsteady_ground = False
+            self.terrain_grid.set(*self.agents[agent_idx].pos, None)
         
         # Set new position
         self.grid.set(*self.agents[agent_idx].pos, self.agents[agent_idx])
@@ -2530,9 +2561,12 @@ class MultiGridEnv(WorldModel):
         
         Format:
         - step_count: int
-        - agent_states: tuple of (pos_x, pos_y, dir, terminated, started, paused, on_unsteady, carrying_type, carrying_color)
+        - agent_states: tuple of (pos_x, pos_y, dir, terminated, started, paused, carrying_type, carrying_color)
         - mobile_objects: tuple of (obj_type, pos_x, pos_y) for blocks/rocks
         - mutable_objects: tuple of (obj_type, x, y, mutable_state...) for doors/boxes/magic walls
+        
+        Note: on_unsteady_ground is NOT stored in the state - it is derived from the
+        agent's position and the terrain_grid when set_state() is called.
         
         Returns:
             tuple: A hashable compact state representation
@@ -2542,6 +2576,7 @@ class MultiGridEnv(WorldModel):
             self._build_object_cache()
         
         # Agent states - fixed order by agent index
+        # Note: on_unsteady_ground is NOT stored - it's derived from position + terrain_grid
         agent_states = []
         for agent in self.agents:
             carrying_type = agent.carrying.type if agent.carrying else None
@@ -2553,7 +2588,6 @@ class MultiGridEnv(WorldModel):
                 agent.terminated,
                 agent.started,
                 agent.paused,
-                agent.on_unsteady_ground,
                 carrying_type,
                 carrying_color,
             ))
@@ -2641,15 +2675,19 @@ class MultiGridEnv(WorldModel):
         self.step_count = step_count
         
         # Restore agent states
+        # Note: on_unsteady_ground is derived from position + terrain_grid, not stored in state
         for agent_idx, agent_state in enumerate(agent_states):
             agent = self.agents[agent_idx]
-            pos_x, pos_y, dir_, terminated, started, paused, on_unsteady, carrying_type, carrying_color = agent_state
+            pos_x, pos_y, dir_, terminated, started, paused, carrying_type, carrying_color = agent_state
             
-            # Remove agent from old position in grid
+            # Remove agent from old position in grid (restore terrain if any)
             if agent.pos is not None:
                 old_cell = self.grid.get(*agent.pos)
                 if old_cell is agent:
-                    self.grid.set(*agent.pos, None)
+                    # Restore terrain at old position
+                    old_terrain = self.terrain_grid.get(*agent.pos)
+                    self.grid.set(*agent.pos, old_terrain)  # None is fine
+                    self.terrain_grid.set(*agent.pos, None)
             
             # Update agent state
             agent.pos = np.array([pos_x, pos_y]) if pos_x is not None else None
@@ -2657,7 +2695,6 @@ class MultiGridEnv(WorldModel):
             agent.terminated = terminated
             agent.started = started
             agent.paused = paused
-            agent.on_unsteady_ground = on_unsteady
             
             # Restore carrying state
             if carrying_type is not None:
@@ -2672,8 +2709,17 @@ class MultiGridEnv(WorldModel):
             else:
                 agent.carrying = None
             
-            # Place agent in grid at new position
+            # Place agent in grid at new position, saving terrain if present
             if agent.pos is not None:
+                current_cell = self.grid.get(*agent.pos)
+                # Save terrain (overlappable objects like unsteady ground, magic walls)
+                if current_cell is not None and current_cell.can_overlap():
+                    self.terrain_grid.set(*agent.pos, current_cell)
+                    # Derive on_unsteady_ground from the terrain
+                    agent.on_unsteady_ground = (current_cell.type == 'unsteadyground')
+                else:
+                    self.terrain_grid.set(*agent.pos, None)
+                    agent.on_unsteady_ground = False
                 self.grid.set(*agent.pos, agent)
         
         # Restore mobile objects (blocks, rocks)
@@ -2831,9 +2877,23 @@ class MultiGridEnv(WorldModel):
             if action < 0 or action >= self.action_space.n:
                 return None
         
+        # Save original state to restore at the end
+        original_state = self.get_state()
+        
         # Set to query state
         self.set_state(state)
         
+        try:
+            return self._transition_probabilities_impl(state, actions)
+        finally:
+            # Always restore the original state
+            self.set_state(original_state)
+    
+    def _transition_probabilities_impl(self, state, actions):
+        """
+        Internal implementation of transition_probabilities.
+        Called after state is set, original state will be restored by caller.
+        """
         num_agents = len(self.agents)
         
         # Identify which agents will actually act
@@ -2847,200 +2907,207 @@ class MultiGridEnv(WorldModel):
                 active_agents.append(i)
             else:
                 inactive_agents.append(i)
+        
+        # OPTIMIZATION 1: If ≤1 agents active, check if transition is deterministic
+        # (only deterministic if the agent is NOT on unsteady ground attempting forward
+        # and NOT attempting to enter a magic wall)
+        if len(active_agents) <= 1:
+            # Check if the single agent is on unsteady ground or attempting magic wall entry
+            is_stochastic = False
+            if len(active_agents) == 1:
+                agent_idx = active_agents[0]
+                if actions[agent_idx] == self.actions.forward:
+                    if self.agents[agent_idx].on_unsteady_ground:
+                        is_stochastic = True
+                    elif self.agents[agent_idx].can_enter_magic_walls:
+                        fwd_pos = self.agents[agent_idx].front_pos
+                        fwd_cell = self.grid.get(*fwd_pos)
+                        # Check if it's an active magic wall (not solidified)
+                        if fwd_cell is not None and fwd_cell.type == 'magicwall' and fwd_cell.active:
+                            approach_dir = (self.agents[agent_idx].dir + 2) % 4
+                            if approach_dir == fwd_cell.magic_side:
+                                is_stochastic = True
             
-            # OPTIMIZATION 1: If ≤1 agents active, check if transition is deterministic
-            # (only deterministic if the agent is NOT on unsteady ground attempting forward
-            # and NOT attempting to enter a magic wall)
-            if len(active_agents) <= 1:
-                # Check if the single agent is on unsteady ground or attempting magic wall entry
-                is_stochastic = False
-                if len(active_agents) == 1:
-                    agent_idx = active_agents[0]
-                    if actions[agent_idx] == self.actions.forward:
-                        if self.agents[agent_idx].on_unsteady_ground:
-                            is_stochastic = True
-                        elif self.agents[agent_idx].can_enter_magic_walls:
-                            fwd_pos = self.agents[agent_idx].front_pos
-                            fwd_cell = self.grid.get(*fwd_pos)
-                            # Check if it's an active magic wall (not solidified)
-                            if fwd_cell is not None and fwd_cell.type == 'magicwall' and fwd_cell.active:
-                                approach_dir = (self.agents[agent_idx].dir + 2) % 4
-                                if approach_dir == fwd_cell.magic_side:
-                                    is_stochastic = True
-                
-                if not is_stochastic:
-                    # Only one or zero agents acting and not stochastic - order doesn't matter
-                    successor_state = self._compute_successor_state(state, actions, tuple(range(num_agents)))
-                    return [(1.0, successor_state)]
-            
-            # OPTIMIZATION 2: Check if all but at most one actions are rotations (left/right)
-            # Rotations never interfere with each other, so order doesn't matter
-            n_non_rotations = sum(
-                actions[i] not in [self.actions.left, self.actions.right] 
-                for i in active_agents
-            )
-            if n_non_rotations < 2:
-                # Check if any agents are on unsteady ground or attempting magic wall entry
-                has_stochastic = any(
-                    actions[i] == self.actions.forward and (
-                        self.agents[i].on_unsteady_ground or
-                        (self.agents[i].can_enter_magic_walls and
-                         self.grid.get(*self.agents[i].front_pos) is not None and
-                         self.grid.get(*self.agents[i].front_pos).type == 'magicwall' and
-                         (self.agents[i].dir + 2) % 4 == self.grid.get(*self.agents[i].front_pos).magic_side)
-                    )
-                    for i in active_agents
-                )
-                if not has_stochastic:
-                    # Rotations are commutative and no stochastic agents - result is deterministic
-                    successor_state = self._compute_successor_state(state, actions, tuple(range(num_agents)))
-                    return [(1.0, successor_state)]
-            
-            # Use helper to categorize agents
-            normal_active_agents, unsteady_forward_agents, magic_wall_agents = self._categorize_agents(actions, active_agents)
-            
-            # OPTIMIZATION 3: Partition ONLY normal (non-stochastic) agents into conflict blocks
-            # Unsteady and magic wall agents are excluded because they're handled separately
-            # This is MORE efficient than permuting all active agents
-            # Instead of k! permutations, we compute the Cartesian product of conflict blocks
-            conflict_blocks = self._identify_conflict_blocks(actions, normal_active_agents)
-            
-            # If no conflicts and no stochastic agents, result is deterministic
-            if (all(len(block) == 1 for block in conflict_blocks) and 
-                len(unsteady_forward_agents) == 0 and 
-                len(magic_wall_agents) == 0):
+            if not is_stochastic:
+                # Only one or zero agents acting and not stochastic - order doesn't matter
                 successor_state = self._compute_successor_state(state, actions, tuple(range(num_agents)))
                 return [(1.0, successor_state)]
-            
-            # OPTIMIZATION 4: Compute outcomes via Cartesian product of conflict blocks, unsteady blocks, and magic wall blocks
-            # Each outcome has probability = 1 / product(block_sizes)
-            
-            # Build list of all blocks (conflict blocks + unsteady agent blocks + magic wall blocks)
-            all_blocks = []
-            
-            # Add conflict blocks
-            for block in conflict_blocks:
-                all_blocks.append(('conflict', block))
-            
-            # Add unsteady agent blocks (one per unsteady-forward agent)
-            # Each block has 3 outcomes with probabilities
-            for agent_idx in unsteady_forward_agents:
-                # Get the stumble probability from the unsteady ground cell
+        
+        # OPTIMIZATION 2: Check if all but at most one actions are rotations (left/right)
+        # Rotations never interfere with each other, so order doesn't matter
+        n_non_rotations = sum(
+            actions[i] not in [self.actions.left, self.actions.right] 
+            for i in active_agents
+        )
+        if n_non_rotations < 2:
+            # Check if any agents are on unsteady ground or attempting magic wall entry
+            has_stochastic = any(
+                actions[i] == self.actions.forward and (
+                    self.agents[i].on_unsteady_ground or
+                    (self.agents[i].can_enter_magic_walls and
+                     self.grid.get(*self.agents[i].front_pos) is not None and
+                     self.grid.get(*self.agents[i].front_pos).type == 'magicwall' and
+                     (self.agents[i].dir + 2) % 4 == self.grid.get(*self.agents[i].front_pos).magic_side)
+                )
+                for i in active_agents
+            )
+            if not has_stochastic:
+                # Rotations are commutative and no stochastic agents - result is deterministic
+                successor_state = self._compute_successor_state(state, actions, tuple(range(num_agents)))
+                return [(1.0, successor_state)]
+        
+        # Use helper to categorize agents
+        normal_active_agents, unsteady_forward_agents, magic_wall_agents = self._categorize_agents(actions, active_agents)
+        
+        # OPTIMIZATION 3: Partition ONLY normal (non-stochastic) agents into conflict blocks
+        # Unsteady and magic wall agents are excluded because they're handled separately
+        # This is MORE efficient than permuting all active agents
+        # Instead of k! permutations, we compute the Cartesian product of conflict blocks
+        conflict_blocks = self._identify_conflict_blocks(actions, normal_active_agents)
+        
+        # If no conflicts and no stochastic agents, result is deterministic
+        if (all(len(block) == 1 for block in conflict_blocks) and 
+            len(unsteady_forward_agents) == 0 and 
+            len(magic_wall_agents) == 0):
+            successor_state = self._compute_successor_state(state, actions, tuple(range(num_agents)))
+            return [(1.0, successor_state)]
+        
+        # OPTIMIZATION 4: Compute outcomes via Cartesian product of conflict blocks, unsteady blocks, and magic wall blocks
+        # Each outcome has probability = 1 / product(block_sizes)
+        
+        # Build list of all blocks (conflict blocks + unsteady agent blocks + magic wall blocks)
+        all_blocks = []
+        
+        # Add conflict blocks
+        for block in conflict_blocks:
+            all_blocks.append(('conflict', block))
+        
+        # Add unsteady agent blocks (one per unsteady-forward agent)
+        # Each block has 3 outcomes with probabilities
+        for agent_idx in unsteady_forward_agents:
+            # Get the stumble probability from the unsteady ground cell
+            # Check terrain_grid first (where terrain is saved when agent stands on it)
+            # Fall back to main grid if terrain_grid doesn't have it
+            terrain_cell = self.terrain_grid.get(*self.agents[agent_idx].pos)
+            if terrain_cell and terrain_cell.type == 'unsteadyground':
+                stumble_prob = terrain_cell.stumble_probability
+            else:
+                # Fallback: check main grid (shouldn't normally happen if terrain_grid is maintained)
                 current_cell = self.grid.get(*self.agents[agent_idx].pos)
                 if current_cell and current_cell.type == 'unsteadyground':
                     stumble_prob = current_cell.stumble_probability
                 else:
                     stumble_prob = 0.5  # Default fallback
-                # Block elements are (probability, outcome) pairs
-                # If stumbles, 50% chance of left-forward, 50% chance of right-forward
-                outcomes = [
-                    (1.0 - stumble_prob, 'forward'),
-                    (stumble_prob * 0.5, 'left-forward'),
-                    (stumble_prob * 0.5, 'right-forward')
-                ]
-                all_blocks.append(('unsteady', agent_idx, outcomes))
+            # Block elements are (probability, outcome) pairs
+            # If stumbles, 50% chance of left-forward, 50% chance of right-forward
+            outcomes = [
+                (1.0 - stumble_prob, 'forward'),
+                (stumble_prob * 0.5, 'left-forward'),
+                (stumble_prob * 0.5, 'right-forward')
+            ]
+            all_blocks.append(('unsteady', agent_idx, outcomes))
+        
+        # Add magic wall agent blocks (one per magic-wall-entry agent)
+        # Each block has 3 outcomes with probabilities: succeed, fail (stays magic), solidify (turns to wall)
+        for agent_idx in magic_wall_agents:
+            fwd_pos = self.agents[agent_idx].front_pos
+            fwd_cell = self.grid.get(*fwd_pos)
+            entry_prob = fwd_cell.entry_probability if fwd_cell else 0.5
+            solidify_prob = fwd_cell.solidify_probability if fwd_cell else 0.0
+            # Block elements are (probability, outcome) pairs
+            # On failure, there's a chance to solidify into a normal wall
+            fail_prob = 1.0 - entry_prob
+            outcomes = [
+                (entry_prob, 'succeed'),
+                (fail_prob * (1.0 - solidify_prob), 'fail'),
+                (fail_prob * solidify_prob, 'solidify')
+            ]
+            all_blocks.append(('magicwall', agent_idx, outcomes))
+        
+        # Generate all possible outcome combinations
+        # For conflict blocks: winner index (which agent wins) - uniform probability
+        # For unsteady blocks: outcome index into (probability, outcome) pairs
+        # For magic wall blocks: outcome index into (probability, outcome) pairs
+        
+        def get_block_size(block):
+            if block[0] == 'conflict':
+                return len(block[1])
+            elif block[0] in ['unsteady', 'magicwall']:
+                return len(block[2])  # Number of (probability, outcome) pairs
+            else:
+                return 1
+        
+        block_sizes = [get_block_size(block) for block in all_blocks]
+        
+        # Compute successor state for each outcome
+        successor_states = {}
+        
+        # Generate cartesian product of all block outcomes
+        block_ranges = [range(get_block_size(block)) for block in all_blocks]
+        
+        for outcome_indices in product(*block_ranges):
+            # outcome_indices[i] tells us which outcome for block i
             
-            # Add magic wall agent blocks (one per magic-wall-entry agent)
-            # Each block has 3 outcomes with probabilities: succeed, fail (stays magic), solidify (turns to wall)
-            for agent_idx in magic_wall_agents:
-                fwd_pos = self.agents[agent_idx].front_pos
-                fwd_cell = self.grid.get(*fwd_pos)
-                entry_prob = fwd_cell.entry_probability if fwd_cell else 0.5
-                solidify_prob = fwd_cell.solidify_probability if fwd_cell else 0.0
-                # Block elements are (probability, outcome) pairs
-                # On failure, there's a chance to solidify into a normal wall
-                fail_prob = 1.0 - entry_prob
-                outcomes = [
-                    (entry_prob, 'succeed'),
-                    (fail_prob * (1.0 - solidify_prob), 'fail'),
-                    (fail_prob * solidify_prob, 'solidify')
-                ]
-                all_blocks.append(('magicwall', agent_idx, outcomes))
-            
-            # Generate all possible outcome combinations
-            # For conflict blocks: winner index (which agent wins) - uniform probability
-            # For unsteady blocks: outcome index into (probability, outcome) pairs
-            # For magic wall blocks: outcome index into (probability, outcome) pairs
-            
-            def get_block_size(block):
+            # Compute probability for this outcome combination
+            outcome_probability = 1.0
+            for i, block in enumerate(all_blocks):
+                outcome_idx = outcome_indices[i]
                 if block[0] == 'conflict':
-                    return len(block[1])
+                    # Uniform probability over conflict block members
+                    outcome_probability *= 1.0 / len(block[1])
                 elif block[0] in ['unsteady', 'magicwall']:
-                    return len(block[2])  # Number of (probability, outcome) pairs
-                else:
-                    return 1
+                    # Use the probability from the (probability, outcome) pair
+                    prob, _ = block[2][outcome_idx]
+                    outcome_probability *= prob
             
-            block_sizes = [get_block_size(block) for block in all_blocks]
+            # Process conflict blocks to determine winners
+            conflict_winners = []
+            conflict_block_idx = 0
+            for i, block in enumerate(all_blocks):
+                if block[0] == 'conflict':
+                    winner_idx = outcome_indices[i]
+                    conflict_winners.append((conflict_block_idx, block[1][winner_idx]))
+                    conflict_block_idx += 1
             
-            # Compute successor state for each outcome
-            successor_states = {}
-            
-            # Generate cartesian product of all block outcomes
-            block_ranges = [range(get_block_size(block)) for block in all_blocks]
-            
-            for outcome_indices in product(*block_ranges):
-                # outcome_indices[i] tells us which outcome for block i
-                
-                # Compute probability for this outcome combination
-                outcome_probability = 1.0
-                for i, block in enumerate(all_blocks):
+            # Process unsteady blocks to determine modified actions
+            modified_actions = list(actions)
+            for i, block in enumerate(all_blocks):
+                if block[0] == 'unsteady':
+                    agent_idx = block[1]
                     outcome_idx = outcome_indices[i]
-                    if block[0] == 'conflict':
-                        # Uniform probability over conflict block members
-                        outcome_probability *= 1.0 / len(block[1])
-                    elif block[0] in ['unsteady', 'magicwall']:
-                        # Use the probability from the (probability, outcome) pair
-                        prob, _ = block[2][outcome_idx]
-                        outcome_probability *= prob
-                
-                # Process conflict blocks to determine winners
-                conflict_winners = []
-                conflict_block_idx = 0
-                for i, block in enumerate(all_blocks):
-                    if block[0] == 'conflict':
-                        winner_idx = outcome_indices[i]
-                        conflict_winners.append((conflict_block_idx, block[1][winner_idx]))
-                        conflict_block_idx += 1
-                
-                # Process unsteady blocks to determine modified actions
-                modified_actions = list(actions)
-                for i, block in enumerate(all_blocks):
-                    if block[0] == 'unsteady':
-                        agent_idx = block[1]
-                        outcome_idx = outcome_indices[i]
-                        _, outcome_type = block[2][outcome_idx]  # Extract outcome from (probability, outcome) pair
-                        
-                        # Modify actions based on outcome
-                        # We'll encode the outcome in the action temporarily
-                        modified_actions[agent_idx] = (actions[agent_idx], outcome_type)
-                
-                # Process magic wall blocks to determine outcomes
-                magic_wall_outcomes = {}
-                for i, block in enumerate(all_blocks):
-                    if block[0] == 'magicwall':
-                        agent_idx = block[1]
-                        outcome_idx = outcome_indices[i]
-                        _, outcome_type = block[2][outcome_idx]  # Extract outcome from (probability, outcome) pair
-                        magic_wall_outcomes[agent_idx] = outcome_type
-                
-                # Compute the successor state for this outcome
-                succ_state = self._compute_successor_state_with_unsteady(
-                    state, modified_actions, num_agents, active_agents, 
-                    conflict_blocks, conflict_winners, magic_wall_outcomes
-                )
-                
-                # Aggregate probabilities for identical successor states
-                if succ_state not in successor_states:
-                    successor_states[succ_state] = 0.0
-                successor_states[succ_state] += outcome_probability
+                    _, outcome_type = block[2][outcome_idx]  # Extract outcome from (probability, outcome) pair
+                    
+                    # Modify actions based on outcome
+                    # We'll encode the outcome in the action temporarily
+                    modified_actions[agent_idx] = (actions[agent_idx], outcome_type)
             
-            # Convert to result list
-            result = [(prob, state) for state, prob in successor_states.items()]
+            # Process magic wall blocks to determine outcomes
+            magic_wall_outcomes = {}
+            for i, block in enumerate(all_blocks):
+                if block[0] == 'magicwall':
+                    agent_idx = block[1]
+                    outcome_idx = outcome_indices[i]
+                    _, outcome_type = block[2][outcome_idx]  # Extract outcome from (probability, outcome) pair
+                    magic_wall_outcomes[agent_idx] = outcome_type
             
-            # Sort by probability (descending) for consistency
-            result.sort(key=lambda x: x[0], reverse=True)
+            # Compute the successor state for this outcome
+            succ_state = self._compute_successor_state_with_unsteady(
+                state, modified_actions, num_agents, active_agents, 
+                conflict_blocks, conflict_winners, magic_wall_outcomes
+            )
             
-            return result
+            # Aggregate probabilities for identical successor states
+            if succ_state not in successor_states:
+                successor_states[succ_state] = 0.0
+            successor_states[succ_state] += outcome_probability
+        
+        # Convert to result list
+        result = [(prob, state) for state, prob in successor_states.items()]
+        
+        # Sort by probability (descending) for consistency
+        result.sort(key=lambda x: x[0], reverse=True)
+        
+        return result
     
     def _identify_conflict_blocks(self, actions, active_agents):
         """
