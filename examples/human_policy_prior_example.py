@@ -4,12 +4,24 @@ Example script demonstrating compute_human_policy_prior() function.
 
 This script creates a small gridworld environment and computes human policy priors
 using backward induction. Each initially empty cell is treated as a possible goal.
+Includes line profiling of backward_induction.py, possible_goal.py, and multigrid.py.
 """
 
 import sys
 import os
+import time
 import numpy as np
 from typing import Iterator, Tuple
+
+# Add line profiling support
+try:
+    from line_profiler import LineProfiler
+    LINE_PROFILER_AVAILABLE = True
+except ImportError:
+    print("Warning: line_profiler not available. Install with: pip install line_profiler")
+    LINE_PROFILER_AVAILABLE = False
+
+LINE_PROFILER_AVAILABLE = False
 
 # Add paths for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
@@ -94,17 +106,92 @@ class EmptyCellGoalGenerator(PossibleGoalGenerator):
             yield goal, weight
 
 
+def setup_line_profiler():
+    """Setup line profiler for key modules."""
+    if not LINE_PROFILER_AVAILABLE:
+        return None
+    
+    profiler = LineProfiler()
+    
+    # Import modules to profile
+    import empo.backward_induction as backward_induction_module
+    import empo.possible_goal as possible_goal_module
+    
+    # Import multigrid with the correct path
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
+    import gym_multigrid.multigrid as multigrid_module
+    
+    # Add functions to profile from backward_induction.py
+    if hasattr(backward_induction_module, 'compute_human_policy_prior'):
+        profiler.add_function(backward_induction_module.compute_human_policy_prior)
+    
+    # Add methods to profile from possible_goal.py
+    # Note: Individual goal methods will be profiled when called
+    
+    # Add key methods from multigrid.py
+    if hasattr(multigrid_module, 'MultiGridEnv'):
+        profiler.add_function(multigrid_module.MultiGridEnv.get_state)
+        profiler.add_function(multigrid_module.MultiGridEnv.set_state)
+        profiler.add_function(multigrid_module.MultiGridEnv.transition_probabilities)
+        profiler.add_function(multigrid_module.MultiGridEnv.get_dag)
+        if hasattr(multigrid_module.MultiGridEnv, 'step'):
+            profiler.add_function(multigrid_module.MultiGridEnv.step)
+    
+    return profiler
+
+
+def save_profiler_results(profiler, output_path):
+    """Save line profiler results to a text file."""
+    if profiler is None:
+        return
+    
+    # Create outputs directory if it doesn't exist
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
+    # Capture profiler output
+    import io
+    from contextlib import redirect_stdout
+    
+    output = io.StringIO()
+    with redirect_stdout(output):
+        profiler.print_stats()
+    
+    # Write to file
+    with open(output_path, 'w') as f:
+        f.write("Line Profiling Results for Human Policy Prior Computation\n")
+        f.write("=" * 70 + "\n")
+        f.write(f"Generated on: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write("\n")
+        f.write("Profiled modules:\n")
+        f.write("- empo.backward_induction\n")
+        f.write("- empo.possible_goal\n")
+        f.write("- gym_multigrid.multigrid\n")
+        f.write("\n")
+        f.write("=" * 70 + "\n")
+        f.write(output.getvalue())
+    
+    print(f"Line profiling results saved to: {output_path}")
+
+
 def main():
     """Main function to demonstrate compute_human_policy_prior()."""
     print("=" * 70)
-    print("Human Policy Prior Computation Example")
+    print("Human Policy Prior Computation Example with Line Profiling")
     print("=" * 70)
+    print()
+    
+    # Setup line profiler
+    profiler = setup_line_profiler()
+    if profiler:
+        print("✓ Line profiler setup complete")
+    else:
+        print("✗ Line profiler not available")
     print()
     
     # Create environment
     print("Creating SmallOneOrThreeChambersMapEnv...")
     world_model = SmallOneOrThreeChambersMapEnv()
-    world_model.max_steps = 1  # Set to small value for quick testing
+    world_model.max_steps = 6  # Set to small value for quick testing
     world_model.reset()
     
     print(f"Environment created successfully!")
@@ -133,12 +220,23 @@ def main():
     print("This may take a while for large state spaces...")
     
     try:
+        t0 = time.time()
+        
+        if profiler:
+            # Run with line profiler
+            profiler.enable()
+        
         human_policy_prior = compute_human_policy_prior(
             world_model=world_model,
             human_agent_indices=human_agent_indices,
             possible_goal_generator=goal_generator
             # Using default values for believed_others_policy, beta=1, gamma=1
         )
+        
+        if profiler:
+            profiler.disable()
+            
+        print(f"(took {time.time()-t0} seconds)")
         
         print("✓ Human policy prior computed successfully!")
         print(f"Policy prior type: {type(human_policy_prior)}")
@@ -175,6 +273,13 @@ def main():
         print()
         print("=" * 70)
         print("Example completed successfully!")
+        
+        # Save profiling results
+        if profiler:
+            output_dir = os.path.join(os.path.dirname(__file__), '..', 'outputs')
+            profile_output_path = os.path.join(output_dir, 'human_policy_prior_line_profile.txt')
+            save_profiler_results(profiler, profile_output_path)
+        
         print("=" * 70)
         
     except Exception as e:
