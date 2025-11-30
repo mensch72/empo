@@ -217,34 +217,36 @@ While conflict block partitioning significantly optimizes the common case, worst
 
 ## Documentation Issues
 
-### DOC-001: README.md references outdated project structure
-**Priority:** Low  
+### ~~DOC-001: README.md references outdated project structure~~ (FIXED)
+**Status:** ✅ Resolved  
 **Description:**  
-Some sections of README.md describe the project structure but don't mention the new `src/empo/` and `src/envs/` modules, or the extensive multigrid modifications.
+README.md has been updated with a "Core Framework" section that documents all new `src/empo/` and `src/envs/` modules, the vendored MultiGrid modifications, and an updated project structure.
 
 ---
 
-### DOC-002: VENDOR.md doesn't list all modifications
-**Priority:** Medium  
+### ~~DOC-002: VENDOR.md doesn't list all modifications~~ (FIXED)
+**Status:** ✅ Resolved  
 **Description:**  
-VENDOR.md describes the general approach for vendoring multigrid but doesn't list the specific modifications made:
+VENDOR.md now includes a comprehensive "EMPO-Specific Modifications" section documenting:
+- WorldModel integration (get_state, set_state, transition_probabilities)
 - New object types (Block, Rock, UnsteadyGround, MagicWall)
-- State management methods (get_state, set_state)
-- Transition probability computation
+- New agent attributes (can_push_rocks, can_enter_magic_walls)
 - Map-based environment specification
-- Agent attributes (can_push_rocks, can_enter_magic_walls)
+- Object caching and helper methods
 
 ---
 
-### DOC-003: Missing examples for common use cases
-**Priority:** Medium  
-**Scope:** `examples/`  
+### ~~DOC-003: Missing examples for common use cases~~ (FIXED)
+**Status:** ✅ Resolved  
 **Description:**  
-The examples directory is minimal. Additional examples would help users:
-- How to define custom goals
-- How to use backward induction for planning
-- How to extend MultiGridEnv
-- How to add new object types
+The `examples/` directory now contains comprehensive examples covering all mentioned use cases:
+- `human_policy_prior_example.py` - How to define custom goals and use backward induction for planning
+- `dag_and_episode_example.py` - How to extend MultiGridEnv with custom environments  
+- `magic_wall_demo.py` - How to use new object types (MagicWall)
+- `blocks_rocks_animation.py` - Demonstrates Block/Rock objects
+- `unsteady_ground_animation.py` - Demonstrates UnsteadyGround
+- `state_management_demo.py` - How to use get_state/set_state
+- And many more examples for various features
 
 ---
 
