@@ -61,7 +61,7 @@ from itertools import product
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing as mp
 from collections import defaultdict
-from typing import Optional, Callable, List, Tuple, Dict, Any, Union, overload, Literal, TYPE_CHECKING
+from typing import Optional, Callable, List, Tuple, Dict, Any, Union, overload, Literal
 
 from empo.possible_goal import PossibleGoalGenerator, PossibleGoal
 from empo.human_policy_prior import TabularHumanPolicyPrior
@@ -280,7 +280,8 @@ def compute_human_policy_prior(
     parallel: bool = False, 
     num_workers: Optional[int] = None, 
     level_fct: Optional[Callable[[State], int]] = None, 
-    return_V_values: Literal[True] = ...
+    *, 
+    return_V_values: Literal[True]
 ) -> Tuple[TabularHumanPolicyPrior, Dict[State, Dict[int, Dict[PossibleGoal, float]]]]: ...
 
 
