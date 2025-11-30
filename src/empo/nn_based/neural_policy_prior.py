@@ -672,6 +672,115 @@ class NeuralHumanPolicyPrior(HumanPolicyPrior):
                 )
 
 
+def _state_to_tensors_static(
+    state,
+    grid_width: int,
+    grid_height: int,
+    num_agents: int,
+    num_object_types: int = 8,
+    max_steps: int = 100,
+    device: str = 'cpu'
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Convert a state tuple to tensor representation.
+    
+    Args:
+        state: State tuple (step_count, agent_states, mobile_objects, mutable_objects).
+        grid_width: Width of the grid.
+        grid_height: Height of the grid.
+        num_agents: Number of agents.
+        num_object_types: Number of object types for encoding.
+        max_steps: Maximum steps for normalization.
+        device: Torch device.
+    
+    Returns:
+        Tuple of (grid_tensor, step_count_tensor).
+    """
+    step_count, agent_states, mobile_objects, mutable_objects = state
+    
+    num_channels = num_object_types + num_agents
+    grid_tensor = torch.zeros(1, num_channels, grid_height, grid_width, device=device)
+    
+    # Encode agent positions
+    for i, agent_state in enumerate(agent_states):
+        if i < num_agents:
+            x, y = int(agent_state[0]), int(agent_state[1])
+            if 0 <= x < grid_width and 0 <= y < grid_height:
+                channel_idx = num_object_types + i
+                grid_tensor[0, channel_idx, y, x] = 1.0
+    
+    # Normalize step count
+    step_tensor = torch.tensor([[step_count / max_steps]], device=device, dtype=torch.float32)
+    
+    return grid_tensor, step_tensor
+
+
+def _agent_to_tensors_static(
+    state,
+    human_agent_index: int,
+    grid_width: int,
+    grid_height: int,
+    device: str = 'cpu'
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Extract agent tensors from state.
+    
+    Args:
+        state: State tuple.
+        human_agent_index: Index of the human agent.
+        grid_width: Width of the grid.
+        grid_height: Height of the grid.
+        device: Torch device.
+    
+    Returns:
+        Tuple of (position, direction_onehot, agent_idx).
+    """
+    _, agent_states, _, _ = state
+    agent_state = agent_states[human_agent_index]
+    
+    # Position normalized to [0, 1]
+    x = float(agent_state[0]) / grid_width
+    y = float(agent_state[1]) / grid_height
+    position = torch.tensor([[x, y]], device=device, dtype=torch.float32)
+    
+    # Direction as one-hot (4 directions)
+    direction = torch.zeros(1, 4, device=device, dtype=torch.float32)
+    dir_idx = int(agent_state[2]) % 4
+    direction[0, dir_idx] = 1.0
+    
+    # Agent index
+    agent_idx = torch.tensor([human_agent_index], device=device, dtype=torch.long)
+    
+    return position, direction, agent_idx
+
+
+def _goal_to_tensor_static(
+    goal: PossibleGoal,
+    grid_width: int,
+    grid_height: int,
+    device: str = 'cpu'
+) -> torch.Tensor:
+    """
+    Convert a goal to tensor representation.
+    
+    Args:
+        goal: A PossibleGoal instance (assumed to have target position attributes).
+        grid_width: Width of the grid.
+        grid_height: Height of the grid.
+        device: Torch device.
+    
+    Returns:
+        Goal coordinates tensor of shape (1, 4).
+    """
+    if hasattr(goal, 'target_pos'):
+        target = goal.target_pos
+        x = float(target[0]) / grid_width
+        y = float(target[1]) / grid_height
+        return torch.tensor([[x, y, x, y]], device=device, dtype=torch.float32)
+    else:
+        return torch.zeros(1, 4, device=device, dtype=torch.float32)
+
+
 def train_neural_policy_prior(
     world_model: Any,
     human_agent_indices: List[int],
@@ -679,26 +788,31 @@ def train_neural_policy_prior(
     num_episodes: int = 1000,
     steps_per_episode: int = 50,
     beta: float = 1.0,
-    gamma: float = 1.0,
+    gamma: float = 0.99,
     learning_rate: float = 1e-3,
     batch_size: int = 64,
     train_phi_network: bool = True,
+    epsilon: float = 0.3,
     device: str = 'cpu',
     verbose: bool = True
 ) -> NeuralHumanPolicyPrior:
     """
     Train neural networks to approximate the human policy prior.
     
-    This function trains the Q-network using TD-style updates on states
-    sampled from random rollouts. The training approximates the fixed-point
+    This function trains the Q-network using Monte Carlo returns on trajectories
+    collected from rollouts. The training approximates the fixed-point
     computation done by tabular backward induction.
     
     Training procedure:
-        1. Sample states by random rollouts in the environment
-        2. For each sampled state, sample goals from goal_sampler
-        3. Compute TD targets: Q_target = γ * E_{s'}[V(s')]
-        4. Train Q-network to minimize (Q_predicted - Q_target)²
+        1. For each episode, sample random goals for each human agent
+        2. Collect trajectory using epsilon-greedy exploration
+        3. Compute Monte Carlo returns: G_t = r_t + γ*G_{t+1}
+        4. Train Q-network to minimize MSE loss: L = (Q(s,a,g) - G_t)²
         5. Optionally train phi_network to match E_g[softmax(βQ)]
+    
+    Loss function:
+        Q-network: L_Q = E[(Q(s,a,g) - G_t)²] where G_t is Monte Carlo return
+        Phi-network: L_phi = KL(phi(s,h) || E_g[softmax(β*Q(s,h,g))])
     
     Args:
         world_model: The environment (must support get_state, set_state, step).
@@ -707,10 +821,11 @@ def train_neural_policy_prior(
         num_episodes: Number of training episodes.
         steps_per_episode: Steps per episode for state sampling.
         beta: Inverse temperature for Boltzmann policy.
-        gamma: Discount factor.
+        gamma: Discount factor for returns.
         learning_rate: Learning rate for optimization.
-        batch_size: Batch size for training.
+        batch_size: Not used in MC training (kept for API compatibility).
         train_phi_network: Whether to also train the marginal policy network.
+        epsilon: Exploration rate for epsilon-greedy policy.
         device: Torch device ('cpu' or 'cuda').
         verbose: Whether to print training progress.
     
@@ -722,120 +837,287 @@ def train_neural_policy_prior(
     grid_height = world_model.height
     num_agents = len(world_model.agents)
     num_actions = world_model.action_space.n
+    max_steps = getattr(world_model, 'max_steps', 100)
     
-    # Create networks
+    # Create Q-network with encoders
     state_encoder = StateEncoder(
         grid_width=grid_width,
         grid_height=grid_height,
-        num_agents=num_agents
+        num_agents=num_agents,
+        feature_dim=64
     ).to(device)
     
     agent_encoder = AgentEncoder(
         grid_width=grid_width,
         grid_height=grid_height,
-        num_agents=num_agents
+        num_agents=num_agents,
+        feature_dim=32
     ).to(device)
     
     goal_encoder = GoalEncoder(
         grid_width=grid_width,
-        grid_height=grid_height
+        grid_height=grid_height,
+        feature_dim=32
     ).to(device)
     
     q_network = QNetwork(
         state_encoder=state_encoder,
         agent_encoder=agent_encoder,
         goal_encoder=goal_encoder,
-        num_actions=num_actions
+        num_actions=num_actions,
+        hidden_dim=128
     ).to(device)
     
+    # Create phi network if requested
     phi_network = None
+    phi_optimizer = None
     if train_phi_network:
-        # Create separate state/agent encoders for phi (shared would also work)
         phi_state_encoder = StateEncoder(
             grid_width=grid_width,
             grid_height=grid_height,
-            num_agents=num_agents
+            num_agents=num_agents,
+            feature_dim=64
         ).to(device)
         
         phi_agent_encoder = AgentEncoder(
             grid_width=grid_width,
             grid_height=grid_height,
-            num_agents=num_agents
+            num_agents=num_agents,
+            feature_dim=32
         ).to(device)
         
         phi_network = PolicyPriorNetwork(
             state_encoder=phi_state_encoder,
             agent_encoder=phi_agent_encoder,
-            num_actions=num_actions
+            num_actions=num_actions,
+            hidden_dim=128
         ).to(device)
-    
-    # Optimizers
-    q_optimizer = torch.optim.Adam(q_network.parameters(), lr=learning_rate)
-    phi_optimizer = None
-    if phi_network:
         phi_optimizer = torch.optim.Adam(phi_network.parameters(), lr=learning_rate)
     
-    # Replay buffer for experience
-    replay_buffer: List[Dict[str, Any]] = []
-    max_buffer_size = 10000
+    # Q-network optimizer
+    q_optimizer = torch.optim.Adam(q_network.parameters(), lr=learning_rate)
+    
+    # Training statistics
+    q_losses = []
+    phi_losses = []
     
     # Training loop
     for episode in range(num_episodes):
-        # Reset environment and collect experiences
         world_model.reset()
         
-        for step in range(steps_per_episode):
-            state = world_model.get_state()
-            
-            # Sample goal for each human agent
-            for human_idx in human_agent_indices:
-                goal, goal_weight = goal_sampler.sample(state, human_idx)
-                
-                # Random action for exploration
-                action = np.random.randint(num_actions)
-                
-                # Take step (using random actions for all agents)
-                actions = [np.random.randint(num_actions) for _ in range(num_agents)]
-                world_model.set_state(state)  # Ensure we're at the right state
-                _, _, done, _ = world_model.step(actions)
-                next_state = world_model.get_state()
-                
-                # Store experience
-                experience = {
-                    'state': state,
-                    'next_state': next_state,
-                    'human_idx': human_idx,
-                    'goal': goal,
-                    'goal_weight': goal_weight,
-                    'action': action,
-                    'done': done,
-                }
-                
-                if len(replay_buffer) >= max_buffer_size:
-                    replay_buffer.pop(0)
-                replay_buffer.append(experience)
-                
-                if done:
-                    world_model.reset()
-                    break
+        # Sample a random goal for each human agent
+        initial_state = world_model.get_state()
+        human_goals = {}
+        for human_idx in human_agent_indices:
+            goal, _ = goal_sampler.sample(initial_state, human_idx)
+            human_goals[human_idx] = goal
         
-        # Training step
-        if len(replay_buffer) >= batch_size:
-            # Sample batch
-            indices = np.random.choice(len(replay_buffer), batch_size, replace=False)
-            batch = [replay_buffer[i] for i in indices]
+        # Collect trajectory
+        trajectories = {h_idx: [] for h_idx in human_agent_indices}
+        state = initial_state
+        
+        for step in range(steps_per_episode):
+            # Get actions for all agents
+            actions = []
             
-            # Prepare batch tensors (simplified - actual implementation would be more efficient)
-            # This is a placeholder for the actual batch preparation logic
+            for agent_idx in range(num_agents):
+                if agent_idx in human_agent_indices:
+                    # Human uses epsilon-greedy policy based on Q-network
+                    goal = human_goals[agent_idx]
+                    
+                    # Convert state to tensors
+                    grid_tensor, step_tensor = _state_to_tensors_static(
+                        state, grid_width, grid_height, num_agents,
+                        max_steps=max_steps, device=device
+                    )
+                    position, direction, agent_idx_t = _agent_to_tensors_static(
+                        state, agent_idx, grid_width, grid_height, device
+                    )
+                    goal_tensor = _goal_to_tensor_static(goal, grid_width, grid_height, device)
+                    
+                    with torch.no_grad():
+                        q_values = q_network(
+                            grid_tensor, step_tensor,
+                            position, direction, agent_idx_t,
+                            goal_tensor
+                        )
+                    
+                    # Epsilon-greedy action selection
+                    if np.random.random() < epsilon:
+                        action = np.random.randint(num_actions)
+                    else:
+                        policy = F.softmax(beta * q_values, dim=1)
+                        action = torch.multinomial(policy, 1).item()
+                    
+                    # Store transition
+                    trajectories[agent_idx].append({
+                        'state': state,
+                        'action': action,
+                        'goal': goal,
+                    })
+                else:
+                    # Non-human agents use random policy
+                    action = np.random.randint(num_actions)
+                
+                actions.append(action)
             
-            # Q-network update would go here
-            # For this minimal implementation, we skip the actual gradient computation
+            # Take step
+            _, _, done, _ = world_model.step(actions)
+            next_state = world_model.get_state()
             
-            if verbose and (episode + 1) % 100 == 0:
-                print(f"Episode {episode + 1}/{num_episodes}: Buffer size = {len(replay_buffer)}")
+            # Store rewards (goal achievement)
+            for human_idx in human_agent_indices:
+                goal = human_goals[human_idx]
+                reward = float(goal.is_achieved(next_state))
+                if trajectories[human_idx]:
+                    trajectories[human_idx][-1]['reward'] = reward
+                    trajectories[human_idx][-1]['next_state'] = next_state
+                    trajectories[human_idx][-1]['done'] = done or reward > 0
+            
+            if done:
+                break
+            
+            state = next_state
+        
+        # ====================================================================
+        # GRADIENT UPDATE: Train Q-network using Monte Carlo returns
+        # ====================================================================
+        episode_q_loss = 0.0
+        num_updates = 0
+        
+        for human_idx in human_agent_indices:
+            trajectory = trajectories[human_idx]
+            if len(trajectory) == 0:
+                continue
+            
+            # Compute Monte Carlo returns (backward pass)
+            returns = []
+            G = 0.0
+            for t in reversed(trajectory):
+                reward = t.get('reward', 0.0)
+                G = reward + gamma * G
+                returns.insert(0, G)
+            
+            # Compute Q-network loss and perform gradient update
+            q_optimizer.zero_grad()
+            total_loss = torch.tensor(0.0, device=device, requires_grad=True)
+            
+            for t, G_t in zip(trajectory, returns):
+                # Convert state to tensors
+                grid_tensor, step_tensor = _state_to_tensors_static(
+                    t['state'], grid_width, grid_height, num_agents,
+                    max_steps=max_steps, device=device
+                )
+                position, direction, agent_idx_t = _agent_to_tensors_static(
+                    t['state'], human_idx, grid_width, grid_height, device
+                )
+                goal_tensor = _goal_to_tensor_static(t['goal'], grid_width, grid_height, device)
+                
+                # Forward pass through Q-network
+                q_values = q_network(
+                    grid_tensor, step_tensor,
+                    position, direction, agent_idx_t,
+                    goal_tensor
+                )
+                
+                # Get Q-value for the action taken
+                q_value = q_values[0, t['action']]
+                
+                # Target is the Monte Carlo return
+                target = torch.tensor(G_t, device=device, dtype=torch.float32)
+                
+                # MSE loss: L = (Q(s,a,g) - G_t)²
+                loss = F.mse_loss(q_value, target)
+                total_loss = total_loss + loss
+            
+            # Average loss over trajectory
+            if len(trajectory) > 0:
+                avg_loss = total_loss / len(trajectory)
+                
+                # Backward pass and gradient update
+                avg_loss.backward()
+                q_optimizer.step()
+                
+                episode_q_loss += avg_loss.item()
+                num_updates += 1
+        
+        if num_updates > 0:
+            q_losses.append(episode_q_loss / num_updates)
+        
+        # ====================================================================
+        # GRADIENT UPDATE: Train phi-network (optional)
+        # ====================================================================
+        if phi_network is not None and phi_optimizer is not None:
+            episode_phi_loss = 0.0
+            phi_updates = 0
+            
+            for human_idx in human_agent_indices:
+                trajectory = trajectories[human_idx]
+                if len(trajectory) == 0:
+                    continue
+                
+                phi_optimizer.zero_grad()
+                total_phi_loss = torch.tensor(0.0, device=device, requires_grad=True)
+                
+                for t in trajectory:
+                    # Convert state to tensors
+                    grid_tensor, step_tensor = _state_to_tensors_static(
+                        t['state'], grid_width, grid_height, num_agents,
+                        max_steps=max_steps, device=device
+                    )
+                    position, direction, agent_idx_t = _agent_to_tensors_static(
+                        t['state'], human_idx, grid_width, grid_height, device
+                    )
+                    goal_tensor = _goal_to_tensor_static(t['goal'], grid_width, grid_height, device)
+                    
+                    # Get target policy from Q-network (detached)
+                    with torch.no_grad():
+                        q_values = q_network(
+                            grid_tensor, step_tensor,
+                            position, direction, agent_idx_t,
+                            goal_tensor
+                        )
+                        target_policy = F.softmax(beta * q_values, dim=1)
+                    
+                    # Get predicted policy from phi-network
+                    predicted_policy = phi_network(
+                        grid_tensor, step_tensor,
+                        position, direction, agent_idx_t
+                    )
+                    
+                    # KL divergence loss: KL(target || predicted)
+                    # Using cross-entropy since KL = H(p,q) - H(p) and H(p) is constant
+                    phi_loss = F.kl_div(
+                        predicted_policy.log(),
+                        target_policy,
+                        reduction='batchmean'
+                    )
+                    total_phi_loss = total_phi_loss + phi_loss
+                
+                if len(trajectory) > 0:
+                    avg_phi_loss = total_phi_loss / len(trajectory)
+                    avg_phi_loss.backward()
+                    phi_optimizer.step()
+                    
+                    episode_phi_loss += avg_phi_loss.item()
+                    phi_updates += 1
+            
+            if phi_updates > 0:
+                phi_losses.append(episode_phi_loss / phi_updates)
+        
+        # Logging
+        if verbose and (episode + 1) % 100 == 0:
+            avg_q_loss = np.mean(q_losses[-100:]) if q_losses else 0.0
+            avg_phi_loss = np.mean(phi_losses[-100:]) if phi_losses else 0.0
+            print(f"Episode {episode + 1}/{num_episodes}: "
+                  f"Q-Loss = {avg_q_loss:.4f}, Phi-Loss = {avg_phi_loss:.4f}")
     
     if verbose:
         print("Training complete!")
+        if q_losses:
+            print(f"  Final Q-Loss: {np.mean(q_losses[-100:]):.4f}")
+        if phi_losses:
+            print(f"  Final Phi-Loss: {np.mean(phi_losses[-100:]):.4f}")
     
     # Create and return the policy prior
     return NeuralHumanPolicyPrior(
