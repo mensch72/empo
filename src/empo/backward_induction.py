@@ -3,7 +3,7 @@ Backward Induction for Computing Human Policy Priors.
 
 This module implements backward induction on the state DAG to compute
 goal-conditioned policies for human agents. The algorithm computes
-optimal Boltzmann (softmax) policies that maximize expected goal achievement.
+consistent Boltzmann (softmax) policies that softly maximize expected goal achievement.
 
 Main function:
     compute_human_policy_prior: Compute tabular policy prior via backward induction.
