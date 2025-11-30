@@ -977,14 +977,39 @@ def train_neural_policy_prior(
             _, _, done, _ = world_model.step(actions)
             next_state = world_model.get_state()
             
-            # Store rewards (goal achievement)
+            # Store rewards with reward shaping for denser feedback
+            _, next_agent_states, _, _ = next_state
+            _, curr_agent_states, _, _ = state
+            
             for human_idx in human_agent_indices:
                 goal = human_goals[human_idx]
-                reward = float(goal.is_achieved(next_state))
+                goal_achieved = float(goal.is_achieved(next_state))
+                
+                # Reward shaping: give intermediate reward based on distance to goal
+                if goal_achieved > 0:
+                    # Goal reached - give large reward
+                    reward = 1.0
+                else:
+                    # Compute distance-based shaping reward
+                    if hasattr(goal, 'target_pos'):
+                        target = goal.target_pos
+                        # Current distance
+                        curr_pos = curr_agent_states[human_idx]
+                        curr_dist = abs(curr_pos[0] - target[0]) + abs(curr_pos[1] - target[1])
+                        # Next distance
+                        next_pos = next_agent_states[human_idx]
+                        next_dist = abs(next_pos[0] - target[0]) + abs(next_pos[1] - target[1])
+                        # Shaping reward: positive for getting closer, negative for getting farther
+                        # Scale by max possible distance to normalize
+                        max_dist = grid_width + grid_height
+                        reward = (curr_dist - next_dist) / max_dist * 0.1
+                    else:
+                        reward = 0.0
+                
                 if trajectories[human_idx]:
                     trajectories[human_idx][-1]['reward'] = reward
                     trajectories[human_idx][-1]['next_state'] = next_state
-                    trajectories[human_idx][-1]['done'] = done or reward > 0
+                    trajectories[human_idx][-1]['done'] = done or goal_achieved > 0
             
             if done:
                 break
@@ -992,7 +1017,8 @@ def train_neural_policy_prior(
             state = next_state
         
         # ====================================================================
-        # GRADIENT UPDATE: Train Q-network using Monte Carlo returns
+        # GRADIENT UPDATE: Train Q-network using TD(0) learning
+        # This is more stable than Monte Carlo for continuous control
         # ====================================================================
         episode_q_loss = 0.0
         num_updates = 0
@@ -1002,20 +1028,15 @@ def train_neural_policy_prior(
             if len(trajectory) == 0:
                 continue
             
-            # Compute Monte Carlo returns (backward pass)
-            returns = []
-            G = 0.0
-            for t in reversed(trajectory):
-                reward = t.get('reward', 0.0)
-                G = reward + gamma * G
-                returns.insert(0, G)
-            
-            # Compute Q-network loss and perform gradient update
+            # TD(0) update for each transition
             q_optimizer.zero_grad()
             losses = []
             
-            for t, G_t in zip(trajectory, returns):
-                # Convert state to tensors
+            for i, t in enumerate(trajectory):
+                reward = t.get('reward', 0.0)
+                done_flag = t.get('done', False)
+                
+                # Convert current state to tensors
                 grid_tensor, step_tensor = _state_to_tensors_static(
                     t['state'], grid_width, grid_height, num_agents,
                     max_steps=max_steps, device=device
@@ -1025,20 +1046,41 @@ def train_neural_policy_prior(
                 )
                 goal_tensor = _goal_to_tensor_static(t['goal'], grid_width, grid_height, device)
                 
-                # Forward pass through Q-network
+                # Forward pass through Q-network for current state
                 q_values = q_network(
                     grid_tensor, step_tensor,
                     position, direction, agent_idx_t,
                     goal_tensor
                 )
-                
-                # Get Q-value for the action taken
                 q_value = q_values[0, t['action']]
                 
-                # Target is the Monte Carlo return
-                target = torch.tensor(G_t, device=device, dtype=torch.float32)
+                # Compute TD target: r + γ * max_a' Q(s', a', g) or r if terminal
+                if done_flag or i == len(trajectory) - 1:
+                    # Terminal state - target is just the reward
+                    target = torch.tensor(reward, device=device, dtype=torch.float32)
+                else:
+                    # Non-terminal - use bootstrap
+                    next_state = t.get('next_state', t['state'])
+                    next_grid, next_step = _state_to_tensors_static(
+                        next_state, grid_width, grid_height, num_agents,
+                        max_steps=max_steps, device=device
+                    )
+                    next_pos, next_dir, next_idx = _agent_to_tensors_static(
+                        next_state, human_idx, grid_width, grid_height, device
+                    )
+                    
+                    with torch.no_grad():
+                        next_q_values = q_network(
+                            next_grid, next_step,
+                            next_pos, next_dir, next_idx,
+                            goal_tensor
+                        )
+                        # For Boltzmann policy: V(s') = sum_a π(a|s') Q(s',a)
+                        next_policy = F.softmax(beta * next_q_values, dim=1)
+                        next_v = (next_policy * next_q_values).sum()
+                        target = reward + gamma * next_v
                 
-                # MSE loss: L = (Q(s,a,g) - G_t)²
+                # MSE loss: L = (Q(s,a,g) - target)²
                 loss = F.mse_loss(q_value, target)
                 losses.append(loss)
             
@@ -1046,11 +1088,12 @@ def train_neural_policy_prior(
             if len(losses) > 0:
                 total_loss = torch.stack(losses).mean()
                 
-                # Backward pass and gradient update
+                # Gradient clipping for stability
                 total_loss.backward()
+                torch.nn.utils.clip_grad_norm_(q_network.parameters(), max_norm=1.0)
                 q_optimizer.step()
                 
-                episode_q_loss += avg_loss.item()
+                episode_q_loss += total_loss.item()
                 num_updates += 1
         
         if num_updates > 0:

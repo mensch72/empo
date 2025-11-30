@@ -323,16 +323,35 @@ def train_nn_policy_prior(
             _, _, done, _ = env.step(actions)
             next_state = env.get_state()
             
-            # Check rewards for each human
+            # Get agent states for reward shaping
+            _, next_agent_states, _, _ = next_state
+            _, curr_agent_states, _, _ = state
+            
+            # Check rewards for each human with reward shaping
             for h_idx in human_agent_indices:
                 goal = ReachCellGoal(env, h_idx, human_goals[h_idx])
-                reward = goal.is_achieved(next_state)
+                goal_achieved = goal.is_achieved(next_state)
+                
+                if goal_achieved:
+                    # Goal reached - give large reward
+                    reward = 1.0
+                else:
+                    # Distance-based shaping reward
+                    target = human_goals[h_idx]
+                    curr_pos = curr_agent_states[h_idx]
+                    curr_dist = abs(curr_pos[0] - target[0]) + abs(curr_pos[1] - target[1])
+                    next_pos = next_agent_states[h_idx]
+                    next_dist = abs(next_pos[0] - target[0]) + abs(next_pos[1] - target[1])
+                    # Reward for getting closer (scaled)
+                    max_dist = grid_width + grid_height
+                    reward = (curr_dist - next_dist) / max_dist * 0.1
+                
                 # Find the trajectory entry for this human at this step
                 for t in reversed(trajectory):
                     if t['human_idx'] == h_idx and 'reward' not in t:
                         t['reward'] = reward
                         t['next_state'] = next_state
-                        t['done'] = done or reward == 1
+                        t['done'] = done or goal_achieved == 1
                         break
             
             if done:
@@ -340,26 +359,21 @@ def train_nn_policy_prior(
             
             state = next_state
         
-        # Compute Monte Carlo returns and update
-        # Group trajectory by human
+        # TD(0) learning update for each human
         for h_idx in human_agent_indices:
             h_trajectory = [t for t in trajectory if t['human_idx'] == h_idx and 'reward' in t]
             
             if not h_trajectory:
                 continue
             
-            # Compute returns
-            G = 0
-            returns = []
-            for t in reversed(h_trajectory):
-                G = t['reward'] + gamma * G
-                returns.insert(0, G)
-            
-            # Update Q-network
             optimizer.zero_grad()
-            total_loss = 0
+            loss_list = []
             
-            for t, ret in zip(h_trajectory, returns):
+            for i, t in enumerate(h_trajectory):
+                reward = t['reward']
+                done_flag = t.get('done', False)
+                
+                # Current state Q-value
                 grid_tensor, step_tensor = state_to_grid_tensor(
                     t['state'], grid_width, grid_height, num_agents, device=device
                 )
@@ -373,16 +387,37 @@ def train_nn_policy_prior(
                     position, direction, agent_idx_t,
                     goal_coords
                 )
-                
                 q_value = q_values[0, t['action']]
-                target = torch.tensor(ret, device=device, dtype=torch.float32)
+                
+                # TD target
+                if done_flag or i == len(h_trajectory) - 1:
+                    target = torch.tensor(reward, device=device, dtype=torch.float32)
+                else:
+                    next_state = t['next_state']
+                    next_grid, next_step = state_to_grid_tensor(
+                        next_state, grid_width, grid_height, num_agents, device=device
+                    )
+                    next_pos, next_dir, next_idx = get_agent_tensors(
+                        next_state, t['human_idx'], grid_width, grid_height, device
+                    )
+                    
+                    with torch.no_grad():
+                        next_q = q_network(
+                            next_grid, next_step,
+                            next_pos, next_dir, next_idx,
+                            goal_coords
+                        )
+                        next_policy = F.softmax(beta * next_q, dim=1)
+                        next_v = (next_policy * next_q).sum()
+                        target = reward + gamma * next_v
                 
                 loss = F.mse_loss(q_value, target)
-                total_loss += loss
+                loss_list.append(loss)
             
-            if len(h_trajectory) > 0:
-                total_loss = total_loss / len(h_trajectory)
+            if len(loss_list) > 0:
+                total_loss = torch.stack(loss_list).mean()
                 total_loss.backward()
+                torch.nn.utils.clip_grad_norm_(q_network.parameters(), max_norm=1.0)
                 optimizer.step()
                 losses.append(total_loss.item())
         
