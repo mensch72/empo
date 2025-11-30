@@ -16,6 +16,7 @@ pettingzoo>=1.24.0
 # jax[cuda12_pip]>=0.4.20
 
 # Utilities
+cloudpickle>=3.0.0
 PyYAML>=6.0
 matplotlib>=3.7.0
 tensorboard>=2.13.0
