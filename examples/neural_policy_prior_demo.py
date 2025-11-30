@@ -262,11 +262,22 @@ def train_nn_policy_prior(
             for h_idx in human_agent_indices
         }
         
+        # Track which humans have reached their goals
+        humans_reached_goal = {h_idx: False for h_idx in human_agent_indices}
+        
         # Collect trajectory
         trajectory = []
         state = env.get_state()
         
         for step in range(env.max_steps):
+            # Check if humans are already at their goals at the START of this step
+            _, curr_agent_states, _, _ = state
+            for h_idx in human_agent_indices:
+                goal_pos = human_goals[h_idx]
+                curr_pos = curr_agent_states[h_idx]
+                if int(curr_pos[0]) == goal_pos[0] and int(curr_pos[1]) == goal_pos[1]:
+                    humans_reached_goal[h_idx] = True
+            
             # Get actions for all agents
             actions = []
             action_info = {}
@@ -309,14 +320,15 @@ def train_nn_policy_prior(
                 
                 actions.append(action)
             
-            # Store transition for each human
+            # Store transition for each human (only if they haven't reached goal yet)
             for h_idx in human_agent_indices:
-                goal = ReachCellGoal(env, h_idx, human_goals[h_idx])
+                # Only add transitions for humans still pursuing their goal
                 trajectory.append({
                     'state': state,
                     'action': action_info[h_idx]['action'],
                     'goal_pos': human_goals[h_idx],
-                    'human_idx': h_idx
+                    'human_idx': h_idx,
+                    'at_goal_before_action': humans_reached_goal[h_idx]
                 })
             
             # Take step
@@ -329,40 +341,55 @@ def train_nn_policy_prior(
             
             # Check rewards for each human with potential-based reward shaping
             for h_idx in human_agent_indices:
-                goal = ReachCellGoal(env, h_idx, human_goals[h_idx])
-                goal_achieved = goal.is_achieved(next_state)
-                
-                # Base reward: 1.0 when goal is reached
-                base_reward = float(goal_achieved)
-                
-                # Potential-based reward shaping (Ng et al. 1999):
-                # F(s,a,s') = γ * Φ(s') - Φ(s)
-                # This preserves the optimal policy.
-                # Φ(s) = -distance(agent, goal) / max_dist
                 target = human_goals[h_idx]
                 max_dist = grid_width + grid_height
                 
-                # Potential at current state
-                curr_pos = curr_agent_states[h_idx]
-                curr_dist = abs(curr_pos[0] - target[0]) + abs(curr_pos[1] - target[1])
-                phi_s = -curr_dist / max_dist
+                # Check if we were already at goal before taking action
+                was_at_goal = humans_reached_goal[h_idx]
                 
-                # Potential at next state
-                next_pos = next_agent_states[h_idx]
-                next_dist = abs(next_pos[0] - target[0]) + abs(next_pos[1] - target[1])
-                phi_s_prime = -next_dist / max_dist
+                # Check if we're at goal after action
+                goal = ReachCellGoal(env, h_idx, human_goals[h_idx])
+                goal_achieved_after = goal.is_achieved(next_state)
                 
-                # Shaping: γ * Φ(s') - Φ(s)
-                shaping_reward = gamma * phi_s_prime - phi_s
-                reward = base_reward + shaping_reward
+                if was_at_goal:
+                    # If we were already at goal, give reward 1.0 for staying
+                    # (or whatever the outcome of staying/moving is)
+                    reward = 1.0  # Reward for being at goal
+                    is_terminal = True
+                else:
+                    # Standard reward computation with shaping
+                    base_reward = float(goal_achieved_after)
+                    
+                    # Potential-based reward shaping (Ng et al. 1999):
+                    # F(s,a,s') = γ * Φ(s') - Φ(s)
+                    # Φ(s) = -distance(agent, goal) / max_dist
+                    
+                    # Potential at current state
+                    curr_pos = curr_agent_states[h_idx]
+                    curr_dist = abs(curr_pos[0] - target[0]) + abs(curr_pos[1] - target[1])
+                    phi_s = -curr_dist / max_dist
+                    
+                    # Potential at next state
+                    next_pos = next_agent_states[h_idx]
+                    next_dist = abs(next_pos[0] - target[0]) + abs(next_pos[1] - target[1])
+                    phi_s_prime = -next_dist / max_dist
+                    
+                    # Shaping: γ * Φ(s') - Φ(s)
+                    shaping_reward = gamma * phi_s_prime - phi_s
+                    reward = base_reward + shaping_reward
+                    is_terminal = goal_achieved_after == 1
                 
                 # Find the trajectory entry for this human at this step
                 for t in reversed(trajectory):
                     if t['human_idx'] == h_idx and 'reward' not in t:
                         t['reward'] = reward
                         t['next_state'] = next_state
-                        t['done'] = done or goal_achieved == 1
+                        t['done'] = done or is_terminal
                         break
+                
+                # Update goal reached status
+                if goal_achieved_after:
+                    humans_reached_goal[h_idx] = True
             
             if done:
                 break
@@ -382,6 +409,7 @@ def train_nn_policy_prior(
             for i, t in enumerate(h_trajectory):
                 reward = t['reward']
                 done_flag = t.get('done', False)
+                was_at_goal = t.get('at_goal_before_action', False)
                 
                 # Current state Q-value
                 grid_tensor, step_tensor = state_to_grid_tensor(
@@ -400,7 +428,12 @@ def train_nn_policy_prior(
                 q_value = q_values[0, t['action']]
                 
                 # TD target
-                if done_flag or i == len(h_trajectory) - 1:
+                if was_at_goal:
+                    # If we were at the goal, the Q-value should be 1.0
+                    # (since we already achieved the goal)
+                    target = torch.tensor(1.0, device=device, dtype=torch.float32)
+                elif done_flag or i == len(h_trajectory) - 1:
+                    # Terminal state - just use immediate reward
                     target = torch.tensor(reward, device=device, dtype=torch.float32)
                 else:
                     next_state = t['next_state']
@@ -453,8 +486,15 @@ def compute_value_for_goals(
     Compute V-value for each goal at the current state using the Q-network.
     
     V(s, g) = Σ_a π(a|s,g) * Q(s,a,g) where π = softmax(β*Q)
+    
+    If the agent is already at the goal, V(s,g) = 1.0 (goal achieved).
     """
     values = {}
+    
+    # Get agent position
+    _, agent_states, _, _ = state
+    agent_pos = agent_states[human_idx]
+    agent_x, agent_y = int(agent_pos[0]), int(agent_pos[1])
     
     grid_tensor, step_tensor = state_to_grid_tensor(
         state, grid_width, grid_height, num_agents, device=device
@@ -465,6 +505,11 @@ def compute_value_for_goals(
     
     with torch.no_grad():
         for goal_pos in goal_cells:
+            # If agent is already at this goal, value is 1.0
+            if agent_x == goal_pos[0] and agent_y == goal_pos[1]:
+                values[goal_pos] = 1.0
+                continue
+            
             goal_coords = get_goal_tensor(goal_pos, grid_width, grid_height, device)
             
             q_values = q_network(
@@ -560,6 +605,22 @@ def render_with_value_overlay(
         gy = actual_goal[1] * tile_size + tile_size // 2
         ax.plot(gx, gy, marker='*', markersize=20, color='blue', 
                 markeredgecolor='white', markeredgewidth=2)
+    
+    # Mark first human (agent index 0) with a cyan border/ring
+    # This helps identify which human's value function is being visualized
+    step_count, agent_states, _, _ = env.get_state()
+    if len(agent_states) > 0:
+        first_human_pos = agent_states[0]
+        hx = int(first_human_pos[0]) * tile_size + tile_size // 2
+        hy = int(first_human_pos[1]) * tile_size + tile_size // 2
+        # Draw a cyan ring around the first human
+        ring = plt.Circle((hx, hy), tile_size * 0.45, fill=False, 
+                          color='cyan', linewidth=3)
+        ax.add_patch(ring)
+        # Also add "H1" label
+        ax.text(hx, hy - tile_size * 0.3, 'H1', ha='center', va='center',
+                fontsize=9, fontweight='bold', color='cyan',
+                bbox=dict(boxstyle='round,pad=0.1', facecolor='black', alpha=0.7))
     
     ax.axis('off')
     ax.set_xlim(0, img.shape[1])

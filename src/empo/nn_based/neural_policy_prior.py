@@ -924,11 +924,23 @@ def train_neural_policy_prior(
             goal, _ = goal_sampler.sample(initial_state, human_idx)
             human_goals[human_idx] = goal
         
+        # Track which humans have reached their goals
+        humans_at_goal = {h_idx: False for h_idx in human_agent_indices}
+        
         # Collect trajectory
         trajectories = {h_idx: [] for h_idx in human_agent_indices}
         state = initial_state
         
         for step in range(steps_per_episode):
+            # Check if humans are at their goals at the START of this step
+            _, curr_agent_states, _, _ = state
+            for human_idx in human_agent_indices:
+                goal = human_goals[human_idx]
+                if hasattr(goal, 'target_pos'):
+                    curr_pos = curr_agent_states[human_idx]
+                    if int(curr_pos[0]) == goal.target_pos[0] and int(curr_pos[1]) == goal.target_pos[1]:
+                        humans_at_goal[human_idx] = True
+            
             # Get actions for all agents
             actions = []
             
@@ -962,11 +974,12 @@ def train_neural_policy_prior(
                         policy = F.softmax(beta * q_values, dim=1)
                         action = torch.multinomial(policy, 1).item()
                     
-                    # Store transition
+                    # Store transition with at_goal flag
                     trajectories[agent_idx].append({
                         'state': state,
                         'action': action,
                         'goal': goal,
+                        'at_goal_before_action': humans_at_goal[agent_idx],
                     })
                 else:
                     # Non-human agents use random policy
@@ -984,45 +997,56 @@ def train_neural_policy_prior(
             
             for human_idx in human_agent_indices:
                 goal = human_goals[human_idx]
+                was_at_goal = humans_at_goal[human_idx]
                 goal_achieved = float(goal.is_achieved(next_state))
                 
-                # Base reward: 1.0 when goal is reached, 0 otherwise
-                base_reward = goal_achieved
-                
-                # Potential-based reward shaping (Ng et al. 1999):
-                # F(s,a,s') = γ * Φ(s') - Φ(s)
-                # This preserves the optimal policy while providing denser feedback.
-                # We use Φ(s) = -distance(agent, goal) / max_dist as potential function
-                # which is maximal (0) when agent is at the goal.
-                shaping_reward = 0.0
-                if hasattr(goal, 'target_pos'):
-                    target = goal.target_pos
-                    max_dist = grid_width + grid_height
-                    
-                    # Potential at current state: Φ(s) = -d(s)/max_dist
-                    curr_pos = curr_agent_states[human_idx]
-                    curr_dist = abs(curr_pos[0] - target[0]) + abs(curr_pos[1] - target[1])
-                    phi_s = -curr_dist / max_dist
-                    
-                    # Potential at next state: Φ(s') = -d(s')/max_dist  
-                    next_pos = next_agent_states[human_idx]
-                    next_dist = abs(next_pos[0] - target[0]) + abs(next_pos[1] - target[1])
-                    phi_s_prime = -next_dist / max_dist
-                    
-                    # Shaping: γ * Φ(s') - Φ(s) = γ * (-d(s')/max) - (-d(s)/max)
-                    #        = (d(s) - γ*d(s')) / max_dist
-                    shaping_reward = gamma * phi_s_prime - phi_s
-
-                    # TODO: generalize this for other goal types, especially for rectangular goals
+                if was_at_goal:
+                    # If already at goal, give reward 1.0 (goal achieved)
+                    reward = 1.0
+                    is_terminal = True
                 else:
-                    print("Warning: Goal does not have target_pos attribute for shaping reward.")
+                    # Base reward: 1.0 when goal is reached, 0 otherwise
+                    base_reward = goal_achieved
+                    
+                    # Potential-based reward shaping (Ng et al. 1999):
+                    # F(s,a,s') = γ * Φ(s') - Φ(s)
+                    # This preserves the optimal policy while providing denser feedback.
+                    # We use Φ(s) = -distance(agent, goal) / max_dist as potential function
+                    # which is maximal (0) when agent is at the goal.
+                    shaping_reward = 0.0
+                    if hasattr(goal, 'target_pos'):
+                        target = goal.target_pos
+                        max_dist = grid_width + grid_height
+                        
+                        # Potential at current state: Φ(s) = -d(s)/max_dist
+                        curr_pos = curr_agent_states[human_idx]
+                        curr_dist = abs(curr_pos[0] - target[0]) + abs(curr_pos[1] - target[1])
+                        phi_s = -curr_dist / max_dist
+                        
+                        # Potential at next state: Φ(s') = -d(s')/max_dist  
+                        next_pos = next_agent_states[human_idx]
+                        next_dist = abs(next_pos[0] - target[0]) + abs(next_pos[1] - target[1])
+                        phi_s_prime = -next_dist / max_dist
+                        
+                        # Shaping: γ * Φ(s') - Φ(s) = γ * (-d(s')/max) - (-d(s)/max)
+                        #        = (d(s) - γ*d(s')) / max_dist
+                        shaping_reward = gamma * phi_s_prime - phi_s
 
-                reward = base_reward + shaping_reward
+                        # TODO: generalize this for other goal types, especially for rectangular goals
+                    else:
+                        print("Warning: Goal does not have target_pos attribute for shaping reward.")
+
+                    reward = base_reward + shaping_reward
+                    is_terminal = goal_achieved > 0
+                
+                # Update goal reached status
+                if goal_achieved > 0:
+                    humans_at_goal[human_idx] = True
                 
                 if trajectories[human_idx]:
                     trajectories[human_idx][-1]['reward'] = reward
                     trajectories[human_idx][-1]['next_state'] = next_state
-                    trajectories[human_idx][-1]['done'] = done or goal_achieved > 0 # i.e., each human considers the episode as done if their individual goal is achieved!
+                    trajectories[human_idx][-1]['done'] = done or is_terminal
             
             if done:
                 break
@@ -1048,6 +1072,7 @@ def train_neural_policy_prior(
             for i, t in enumerate(trajectory):
                 reward = t.get('reward', 0.0)
                 done_flag = t.get('done', False)
+                was_at_goal = t.get('at_goal_before_action', False)
                 
                 # Convert current state to tensors
                 grid_tensor, step_tensor = _state_to_tensors_static(
@@ -1067,8 +1092,11 @@ def train_neural_policy_prior(
                 )
                 q_value = q_values[0, t['action']]
                 
-                # Compute TD target: r + γ * max_a' Q(s', a', g) or r if terminal
-                if done_flag or i == len(trajectory) - 1:
+                # Compute TD target
+                if was_at_goal:
+                    # If at goal, Q-value should be 1.0 (goal already achieved)
+                    target = torch.tensor(1.0, device=device, dtype=torch.float32)
+                elif done_flag or i == len(trajectory) - 1:
                     # Terminal state - target is just the reward
                     target = torch.tensor(reward, device=device, dtype=torch.float32)
                 else:
