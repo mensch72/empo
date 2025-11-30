@@ -22,10 +22,10 @@ def test_import_empo():
         assert empo.__version__ == "0.1.0"
         print("✓ empo package imports correctly")
         return True
-    except ImportError as e:
+    except ImportError:
         # Dependencies not installed - skip this test gracefully
         # The Docker build will catch real import issues
-        print(f"⚠ Skipping empo import test (missing dependency: {e})")
+        print("⚠ Skipping empo import test (missing dependencies - run in Docker for full validation)")
         return True  # Don't fail when dependencies aren't installed
     except Exception as e:
         print(f"✗ Failed to import empo: {e}")
