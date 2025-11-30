@@ -1,5 +1,5 @@
 """
-empo - Empowerment-based Policy Modeling for Multi-Agent Systems
+empo - Empowerment-based AI agents for multi-agent environments
 
 A framework for multi-agent reinforcement learning that provides:
 
