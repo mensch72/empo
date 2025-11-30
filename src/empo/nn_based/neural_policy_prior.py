@@ -164,6 +164,7 @@ class GoalEncoder(nn.Module):
         super().__init__()
         self.grid_width = grid_width
         self.grid_height = grid_height
+        self.feature_dim = feature_dim
         
         # MLP for goal encoding (2 coords for point, or 4 for rectangle)
         self.fc = nn.Sequential(
@@ -216,6 +217,7 @@ class AgentEncoder(nn.Module):
         super().__init__()
         self.grid_width = grid_width
         self.grid_height = grid_height
+        self.feature_dim = feature_dim
         
         # Agent index embedding
         self.agent_embedding = nn.Embedding(num_agents, 16)
@@ -287,17 +289,10 @@ class QNetwork(nn.Module):
         self.goal_encoder = goal_encoder
         self.num_actions = num_actions
         
-        # Combined feature dimension
+        # Combined feature dimension from encoder outputs
         combined_dim = (state_encoder.feature_dim + 
-                       agent_encoder.fc[-2].out_features +  # Get actual output dim
-                       goal_encoder.fc[-2].out_features)
-        
-        # Actually compute the feature dims from the encoder architectures
-        # State: 128, Agent: 32, Goal: 32 by default
-        state_dim = state_encoder.feature_dim
-        agent_dim = 32  # As defined in AgentEncoder
-        goal_dim = 32   # As defined in GoalEncoder
-        combined_dim = state_dim + agent_dim + goal_dim
+                       agent_encoder.feature_dim +
+                       goal_encoder.feature_dim)
         
         # Q-value head
         self.q_head = nn.Sequential(
@@ -394,10 +389,8 @@ class PolicyPriorNetwork(nn.Module):
         self.agent_encoder = agent_encoder
         self.num_actions = num_actions
         
-        # Combined feature dimension (state + agent)
-        state_dim = state_encoder.feature_dim
-        agent_dim = 32  # As defined in AgentEncoder
-        combined_dim = state_dim + agent_dim
+        # Combined feature dimension from encoder outputs
+        combined_dim = state_encoder.feature_dim + agent_encoder.feature_dim
         
         # Policy head (outputs logits)
         self.policy_head = nn.Sequential(
