@@ -6,20 +6,16 @@ This document lists known bugs, limitations, and potential improvements identifi
 
 ## Bugs
 
-### BUG-002: Custom believed_others_policy not supported in parallel mode
-**Severity:** Low  
-**Location:** `src/empo/backward_induction.py:292-293`  
+### ~~BUG-002: Custom believed_others_policy not supported in parallel mode~~ (FIXED)
+**Status:** ✅ Resolved  
+**Location:** `src/empo/backward_induction.py`  
 **Description:**  
-Custom `believed_others_policy` functions cannot be used with `parallel=True` due to pickling constraints.
+Custom `believed_others_policy` functions could not be used with `parallel=True` due to pickling constraints with standard pickle.
 
-**Current behavior:**  
-```python
-elif parallel:
-    raise NotImplementedError("Custom believed_others_policy not supported in parallel mode yet")
-```
+**Fix:**  
+Implemented cloudpickle-based serialization for custom `believed_others_policy` functions. Cloudpickle can serialize lambdas, closures, and other function types that standard pickle cannot handle. The serialized function is passed to worker processes via module-level globals and deserialized in each worker before use.
 
-**Suggested fix:**  
-Document this limitation clearly or implement cloudpickle-based serialization.
+See `docs/PARALLELIZATION.md` for detailed documentation of the pickling and data passing strategies used in all parallelizations.
 
 ---
 
