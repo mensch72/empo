@@ -985,26 +985,34 @@ def train_neural_policy_prior(
                 goal = human_goals[human_idx]
                 goal_achieved = float(goal.is_achieved(next_state))
                 
-                # Reward shaping: give intermediate reward based on distance to goal
-                if goal_achieved > 0:
-                    # Goal reached - give large reward
-                    reward = 1.0
-                else:
-                    # Compute distance-based shaping reward
-                    if hasattr(goal, 'target_pos'):
-                        target = goal.target_pos
-                        # Current distance
-                        curr_pos = curr_agent_states[human_idx]
-                        curr_dist = abs(curr_pos[0] - target[0]) + abs(curr_pos[1] - target[1])
-                        # Next distance
-                        next_pos = next_agent_states[human_idx]
-                        next_dist = abs(next_pos[0] - target[0]) + abs(next_pos[1] - target[1])
-                        # Shaping reward: positive for getting closer, negative for getting farther
-                        # Scale by max possible distance to normalize
-                        max_dist = grid_width + grid_height
-                        reward = (curr_dist - next_dist) / max_dist * 0.1
-                    else:
-                        reward = 0.0
+                # Base reward: 1.0 when goal is reached, 0 otherwise
+                base_reward = goal_achieved
+                
+                # Potential-based reward shaping (Ng et al. 1999):
+                # F(s,a,s') = γ * Φ(s') - Φ(s)
+                # This preserves the optimal policy while providing denser feedback.
+                # We use Φ(s) = -distance(agent, goal) / max_dist as potential function
+                # which is maximal (0) when agent is at the goal.
+                shaping_reward = 0.0
+                if hasattr(goal, 'target_pos'):
+                    target = goal.target_pos
+                    max_dist = grid_width + grid_height
+                    
+                    # Potential at current state: Φ(s) = -d(s)/max_dist
+                    curr_pos = curr_agent_states[human_idx]
+                    curr_dist = abs(curr_pos[0] - target[0]) + abs(curr_pos[1] - target[1])
+                    phi_s = -curr_dist / max_dist
+                    
+                    # Potential at next state: Φ(s') = -d(s')/max_dist  
+                    next_pos = next_agent_states[human_idx]
+                    next_dist = abs(next_pos[0] - target[0]) + abs(next_pos[1] - target[1])
+                    phi_s_prime = -next_dist / max_dist
+                    
+                    # Shaping: γ * Φ(s') - Φ(s) = γ * (-d(s')/max) - (-d(s)/max)
+                    #        = (d(s) - γ*d(s')) / max_dist
+                    shaping_reward = gamma * phi_s_prime - phi_s
+                
+                reward = base_reward + shaping_reward
                 
                 if trajectories[human_idx]:
                     trajectories[human_idx][-1]['reward'] = reward

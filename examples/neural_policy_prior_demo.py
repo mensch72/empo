@@ -327,24 +327,34 @@ def train_nn_policy_prior(
             _, next_agent_states, _, _ = next_state
             _, curr_agent_states, _, _ = state
             
-            # Check rewards for each human with reward shaping
+            # Check rewards for each human with potential-based reward shaping
             for h_idx in human_agent_indices:
                 goal = ReachCellGoal(env, h_idx, human_goals[h_idx])
                 goal_achieved = goal.is_achieved(next_state)
                 
-                if goal_achieved:
-                    # Goal reached - give large reward
-                    reward = 1.0
-                else:
-                    # Distance-based shaping reward
-                    target = human_goals[h_idx]
-                    curr_pos = curr_agent_states[h_idx]
-                    curr_dist = abs(curr_pos[0] - target[0]) + abs(curr_pos[1] - target[1])
-                    next_pos = next_agent_states[h_idx]
-                    next_dist = abs(next_pos[0] - target[0]) + abs(next_pos[1] - target[1])
-                    # Reward for getting closer (scaled)
-                    max_dist = grid_width + grid_height
-                    reward = (curr_dist - next_dist) / max_dist * 0.1
+                # Base reward: 1.0 when goal is reached
+                base_reward = float(goal_achieved)
+                
+                # Potential-based reward shaping (Ng et al. 1999):
+                # F(s,a,s') = γ * Φ(s') - Φ(s)
+                # This preserves the optimal policy.
+                # Φ(s) = -distance(agent, goal) / max_dist
+                target = human_goals[h_idx]
+                max_dist = grid_width + grid_height
+                
+                # Potential at current state
+                curr_pos = curr_agent_states[h_idx]
+                curr_dist = abs(curr_pos[0] - target[0]) + abs(curr_pos[1] - target[1])
+                phi_s = -curr_dist / max_dist
+                
+                # Potential at next state
+                next_pos = next_agent_states[h_idx]
+                next_dist = abs(next_pos[0] - target[0]) + abs(next_pos[1] - target[1])
+                phi_s_prime = -next_dist / max_dist
+                
+                # Shaping: γ * Φ(s') - Φ(s)
+                shaping_reward = gamma * phi_s_prime - phi_s
+                reward = base_reward + shaping_reward
                 
                 # Find the trajectory entry for this human at this step
                 for t in reversed(trajectory):
