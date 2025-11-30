@@ -23,14 +23,14 @@ Document this limitation clearly or implement cloudpickle-based serialization.
 
 ---
 
-### BUG-003: TabularHumanPolicyPrior marginal computation may fail
-**Severity:** Low  
+### ~~BUG-003: TabularHumanPolicyPrior marginal computation may fail~~ (FIXED)
+**Status:** ✅ Resolved  
 **Location:** `src/empo/human_policy_prior.py`  
 **Description:**  
 When computing marginal distribution without a goal, the initial `total = None` pattern could return `None` if no goals are generated (empty generator).
 
-**Suggested fix:**  
-Initialize with zeros or add explicit check for empty generator case.
+**Fix:**  
+Changed to initialize `total` as a zero array with proper size from `world_model.action_space.n`.
 
 ---
 
