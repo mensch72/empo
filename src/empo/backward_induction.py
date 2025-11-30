@@ -62,6 +62,8 @@ import multiprocessing as mp
 from collections import defaultdict
 from typing import Optional, Callable, List, Tuple, Dict, Any
 
+import cloudpickle
+
 from empo.possible_goal import PossibleGoalGenerator
 from empo.human_policy_prior import TabularHumanPolicyPrior
 from empo.world_model import WorldModel
@@ -75,14 +77,16 @@ _shared_states = None
 _shared_transitions = None
 _shared_V_values = None
 _shared_params = None  # (human_agent_indices, possible_goal_generator, num_agents, num_actions, action_powers, beta, gamma)
+_shared_believed_others_policy_pickle = None  # cloudpickle'd believed_others_policy function
 
-def _init_shared_data(states, transitions, V_values, params):
+def _init_shared_data(states, transitions, V_values, params, believed_others_policy_pickle=None):
     """Initialize shared data for worker processes."""
-    global _shared_states, _shared_transitions, _shared_V_values, _shared_params
+    global _shared_states, _shared_transitions, _shared_V_values, _shared_params, _shared_believed_others_policy_pickle
     _shared_states = states
     _shared_transitions = transitions
     _shared_V_values = V_values
     _shared_params = params
+    _shared_believed_others_policy_pickle = believed_others_policy_pickle
 
 def default_believed_others_policy(state, agent_index, action, num_agents, num_actions):
     """Default believed others policy - uniform distribution."""
@@ -159,9 +163,13 @@ def process_state_batch(state_indices):
     v_results = {}  # V-values
     p_results = {}  # Policies (keyed by state, not state_index)
     
-    # Create believed others policy function
-    believed_others_policy = lambda state, agent_index, action: default_believed_others_policy(
-        state, agent_index, action, num_agents, num_actions)
+    # Deserialize believed_others_policy if custom one was provided via cloudpickle
+    if _shared_believed_others_policy_pickle is not None:
+        believed_others_policy = cloudpickle.loads(_shared_believed_others_policy_pickle)
+    else:
+        # Create default believed others policy function
+        believed_others_policy = lambda state, agent_index, action: default_believed_others_policy(
+            state, agent_index, action, num_agents, num_actions)
     
     for state_index in state_indices:
         state = states[state_index]
@@ -314,8 +322,12 @@ def compute_human_policy_prior(
         # Create wrapper for sequential execution (parallel uses default directly)
         believed_others_policy = lambda state, agent_index, action: default_believed_others_policy(
             state, agent_index, action, num_agents, num_actions)
-    elif parallel:
-        raise NotImplementedError("Custom believed_others_policy not supported in parallel mode yet")
+        believed_others_policy_pickle = None  # No need to pickle the default
+    else:
+        # Serialize custom believed_others_policy using cloudpickle for parallel mode
+        # cloudpickle can serialize lambdas, closures, and other functions that
+        # standard pickle cannot handle
+        believed_others_policy_pickle = cloudpickle.dumps(believed_others_policy)
 
     # Precompute powers for action profile indexing
     action_powers = num_actions ** np.arange(num_agents)
@@ -418,7 +430,8 @@ def compute_human_policy_prior(
                     prof_states_parallel += len(level)
                 
                 # Re-initialize shared data so new workers see updated V_values from previous levels
-                _init_shared_data(states, transitions, V_values, params)
+                # Also pass the cloudpickle'd believed_others_policy for custom policy support
+                _init_shared_data(states, transitions, V_values, params, believed_others_policy_pickle)
                 
                 # Only pass state indices - workers access shared data via globals
                 batches = split_into_batches(level, num_workers)
