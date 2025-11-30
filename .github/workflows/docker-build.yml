@@ -68,10 +68,16 @@ jobs:
       with:
         context: .
         push: false
-        tags: ${{ steps.meta.outputs.tags }}
+        load: true
+        tags: empo:test
         labels: ${{ steps.meta.outputs.labels }}
+        build-args: DEV_MODE=true
         cache-from: type=gha
         cache-to: type=gha,mode=max
+    
+    - name: Run tests in Docker
+      run: |
+        docker run --rm empo:test pytest tests/ -v --ignore=tests/test_mineland_installation.py
     
     - name: Push Docker image
       if: github.event_name != 'pull_request'

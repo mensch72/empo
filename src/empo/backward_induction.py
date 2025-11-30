@@ -65,11 +65,7 @@ from typing import Optional, Callable, List, Tuple, Dict, Any, Union, overload, 
 
 import cloudpickle
 
-<<<<<<< HEAD
 from empo.possible_goal import PossibleGoalGenerator, PossibleGoal
-=======
-from empo.possible_goal import PossibleGoalGenerator
->>>>>>> origin/main
 from empo.human_policy_prior import TabularHumanPolicyPrior
 from empo.world_model import WorldModel
 
@@ -85,7 +81,6 @@ PROFILE_PARALLEL = os.environ.get('PROFILE_PARALLEL', '').lower() in ('1', 'true
 
 # Module-level globals for shared memory in forked processes
 # These are set before spawning workers and inherited copy-on-write
-<<<<<<< HEAD
 _shared_states: Optional[List[State]] = None
 _shared_transitions: Optional[List[List[TransitionData]]] = None
 _shared_V_values: Optional[VValues] = None
@@ -100,15 +95,6 @@ def _init_shared_data(
     params: Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], float, float],
     believed_others_policy_pickle: Optional[bytes] = None
 ) -> None:
-=======
-_shared_states = None
-_shared_transitions = None
-_shared_V_values = None
-_shared_params = None  # (human_agent_indices, possible_goal_generator, num_agents, num_actions, action_powers, beta, gamma)
-_shared_believed_others_policy_pickle = None  # cloudpickle'd believed_others_policy function
-
-def _init_shared_data(states, transitions, V_values, params, believed_others_policy_pickle=None):
->>>>>>> origin/main
     """Initialize shared data for worker processes."""
     global _shared_states, _shared_transitions, _shared_V_values, _shared_params, _shared_believed_others_policy_pickle
     _shared_states = states
@@ -116,6 +102,7 @@ def _init_shared_data(states, transitions, V_values, params, believed_others_pol
     _shared_V_values = V_values
     _shared_params = params
     _shared_believed_others_policy_pickle = believed_others_policy_pickle
+
 
 def default_believed_others_policy(
     state: State, 
@@ -131,7 +118,6 @@ def default_believed_others_policy(
     return [(uniform_p, list(action_profile)) for action_profile in product(*[
         [-1] if idx == agent_index else all_actions
         for idx in range(num_agents)])]
-
 
 def compute_dependency_levels_general(successors: List[List[int]]) -> List[List[int]]:
     """Compute dependency levels using general topological approach."""
@@ -405,11 +391,7 @@ def compute_human_policy_prior(
         # Create wrapper for sequential execution (parallel uses default directly)
         believed_others_policy = lambda state, agent_index, action: default_believed_others_policy(
             state, agent_index, action, num_agents, num_actions)
-<<<<<<< HEAD
         believed_others_policy_pickle: Optional[bytes] = None  # No need to pickle the default
-=======
-        believed_others_policy_pickle = None  # No need to pickle the default
->>>>>>> origin/main
     else:
         # Serialize custom believed_others_policy using cloudpickle for parallel mode
         # cloudpickle can serialize lambdas, closures, and other functions that
