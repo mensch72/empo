@@ -1,13 +1,61 @@
 """
-empo - Empowerment-based AI agents for MARL
+empo - Empowerment-based Policy Modeling for Multi-Agent Systems
 
-A framework for training multi-agent reinforcement learning agents
-using empowerment-based objectives.
+A framework for multi-agent reinforcement learning that provides:
+
+1. **World Model Abstraction** (`WorldModel`):
+   - Abstract base class for gymnasium environments with explicit state management
+   - Provides `get_state()`, `set_state()`, and `transition_probabilities()` methods
+   - Supports DAG computation for finite state spaces
+   - Used by the vendored MultiGrid environment
+
+2. **Human Policy Prior Modeling** (`HumanPolicyPrior`, `TabularHumanPolicyPrior`):
+   - Abstract and tabular implementations for modeling human behavior
+   - Computes goal-conditioned policy distributions
+   - Supports marginalization over possible goals
+
+3. **Possible Goal Specification** (`PossibleGoal`, `PossibleGoalGenerator`, `PossibleGoalSampler`):
+   - Abstract classes for defining and enumerating possible goals
+   - Supports exact enumeration and stochastic sampling
+
+4. **Backward Induction** (`compute_human_policy_prior`):
+   - Computes optimal human policies via backward induction on the state DAG
+   - Supports parallel computation for large state spaces
+   - Uses Boltzmann (softmax) policies with configurable temperature
+
+This package works with the vendored MultiGrid environment in `vendor/multigrid/`
+which has been extended with:
+- Explicit state management (get_state, set_state)
+- Transition probability computation
+- New object types: Block, Rock, UnsteadyGround, MagicWall
+- Map-based environment specification
+
+Example usage:
+    >>> from empo import WorldModel, PossibleGoal
+    >>> from src.envs import SmallOneOrTwoChambersMapEnv
+    >>> 
+    >>> env = SmallOneOrTwoChambersMapEnv()
+    >>> state = env.get_state()
+    >>> transitions = env.transition_probabilities(state, [0, 0])
 """
 
 from empo.world_model import WorldModel
-from empo.possible_goal import PossibleGoal
+from empo.possible_goal import PossibleGoal, PossibleGoalGenerator, PossibleGoalSampler
+from empo.human_policy_prior import HumanPolicyPrior, TabularHumanPolicyPrior
+from empo.backward_induction import compute_human_policy_prior
 
 __version__ = "0.1.0"
 
-__all__ = ["WorldModel", "PossibleGoal"]
+__all__ = [
+    # World Model
+    "WorldModel",
+    # Possible Goals
+    "PossibleGoal",
+    "PossibleGoalGenerator", 
+    "PossibleGoalSampler",
+    # Human Policy Prior
+    "HumanPolicyPrior",
+    "TabularHumanPolicyPrior",
+    # Backward Induction
+    "compute_human_policy_prior",
+]

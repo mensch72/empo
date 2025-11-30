@@ -1,35 +1,183 @@
-# ABC for potential goals of humans. A possible goal is encoded by a 1-0 reward function taking a world state and returning 1 if the goal is achieved in that state and 0 otherwise.
+"""
+Possible Goal Abstractions for Human Behavior Modeling.
+
+This module provides abstract base classes for defining and working with
+possible goals that human agents might have. Goals are encoded as 0/1 reward
+functions that indicate goal achievement.
+
+Classes:
+    PossibleGoal: Abstract base class for a single possible goal.
+    PossibleGoalSampler: Abstract base class for stochastic goal sampling (for Monte Carlo methods).
+    PossibleGoalGenerator: Abstract base class for deterministic goal enumeration.
+
+Functions:
+    approx_integral_over_possible_goals: Monte Carlo integration over goal space.
+
+The goal abstraction is central to the human policy prior computation, where
+we assume humans are goal-directed agents whose behavior can be modeled as
+optimizing for possible goals with some uncertainty.
+
+Example usage:
+    >>> class ReachCell(PossibleGoal):
+    ...     def __init__(self, world_model, target_pos):
+    ...         super().__init__(world_model)
+    ...         self.target_pos = target_pos
+    ...     
+    ...     def is_achieved(self, state) -> int:
+    ...         # Check if agent is at target position
+    ...         agent_states = state[1]  # (step_count, agent_states, mobile_objects, mutable_objects)
+    ...         agent_pos = (agent_states[0][0], agent_states[0][1])
+    ...         return 1 if agent_pos == self.target_pos else 0
+    ...     
+    ...     def __hash__(self):
+    ...         return hash(self.target_pos)
+    ...     
+    ...     def __eq__(self, other):
+    ...         return isinstance(other, ReachCell) and self.target_pos == other.target_pos
+"""
 
 from abc import ABC, abstractmethod
-from empo.world_model import WorldModel
+from typing import Tuple, Iterator, Callable, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from empo.world_model import WorldModel
+
 
 class PossibleGoal(ABC):
+    """
+    Abstract base class for a possible goal of a human agent.
+    
+    A goal is encoded as a 0/1 reward function that returns 1 when the goal
+    is achieved in a given state and 0 otherwise. Goals must be hashable
+    to be used as dictionary keys in the backward induction algorithm.
+    
+    Subclasses MUST implement:
+        - is_achieved(state): Returns 1 if goal achieved, 0 otherwise
+        - __hash__(): Returns hash for use as dict key
+        - __eq__(other): Equality comparison
+    
+    Attributes:
+        world_model: Reference to the world model (environment) this goal applies to.
+    
+    Note:
+        Goals should be immutable after creation to ensure consistent hashing.
+    """
 
     world_model: 'WorldModel'
+    
     def __init__(self, world_model: 'WorldModel'):
+        """
+        Initialize the possible goal.
+        
+        Args:
+            world_model: The world model (environment) this goal applies to.
+        """
         self.world_model = world_model
 
     @abstractmethod
     def is_achieved(self, state) -> int:
-        """Returns whether the goal is achieved in the given world state."""
+        """
+        Check if this goal is achieved in the given state.
+        
+        Args:
+            state: A hashable state tuple as returned by world_model.get_state().
+                   Format is typically: (step_count, agent_states, mobile_objects, mutable_objects)
+        
+        Returns:
+            int: 1 if the goal is achieved in this state, 0 otherwise.
+        """
+        pass
+    
+    @abstractmethod
+    def __hash__(self) -> int:
+        """Return hash for use as dictionary key."""
+        pass
+    
+    @abstractmethod
+    def __eq__(self, other) -> bool:
+        """Check equality with another goal."""
         pass
 
-# Another ABC for a goal sampler over possible goals for a human agent in a given world state, to be used in stochastic approximation of integrals over goals, e.g. by means of importance sampling. It samples a goal and returns an aggregation weight for that goal. The aggregation weight is used to weight the contribution of that goal in the approximation of the integral.
 
 class PossibleGoalSampler(ABC):
+    """
+    Abstract base class for stochastic sampling of possible goals.
+    
+    Used for Monte Carlo approximation of integrals over goal space.
+    Each sample returns a goal along with an importance weight for
+    weighted averaging.
+    
+    This is useful when the goal space is too large for exact enumeration.
+    
+    Attributes:
+        world_model: Reference to the world model this sampler applies to.
+    """
 
     world_model: 'WorldModel'
+    
     def __init__(self, world_model: 'WorldModel'):
+        """
+        Initialize the goal sampler.
+        
+        Args:
+            world_model: The world model this sampler applies to.
+        """
         self.world_model = world_model
 
     @abstractmethod
-    def sample(self, state, human_agent_index: int) -> ('PossibleGoal', float):
-        """Samples a possible goal for the human agent with the given index in the given world state, and returns it along with an aggregation weight."""
+    def sample(self, state, human_agent_index: int) -> Tuple['PossibleGoal', float]:
+        """
+        Sample a possible goal for a human agent in the given state.
+        
+        The returned weight is used for importance sampling. If sampling
+        uniformly from all goals, the weight should be 1.0 for all samples.
+        
+        Args:
+            state: Current world state (hashable tuple from get_state()).
+            human_agent_index: Index of the human agent whose goal to sample.
+        
+        Returns:
+            Tuple of (goal, weight) where:
+                - goal: A PossibleGoal instance
+                - weight: Importance weight for this sample (float > 0)
+        """
         pass
 
-# A function for stochastic approximation of integrals over possible goals for a human agent in a given world state. It takes a world state, the index of a human agent, a goal sampler, a function accepting a possible goal and returning a float, and a sample size, and returns the stochastic approximation of the integral of that function over possible goals for that human agent in that world state.
 
-def approx_integral_over_possible_goals(state, human_agent_index: int, sampler: PossibleGoalSampler, func, sample_size: int) -> float:
+def approx_integral_over_possible_goals(
+    state, 
+    human_agent_index: int, 
+    sampler: PossibleGoalSampler, 
+    func: Callable[['PossibleGoal'], float], 
+    sample_size: int
+) -> float:
+    """
+    Approximate an integral over possible goals using Monte Carlo sampling.
+    
+    Computes the weighted average of func(goal) over goals sampled from the
+    sampler. Uses importance sampling with the weights returned by the sampler.
+    
+    The approximation converges to the true integral as sample_size increases,
+    assuming the sampler has support over all goals and the weights are
+    valid importance weights.
+    
+    Args:
+        state: Current world state.
+        human_agent_index: Index of the human agent.
+        sampler: A PossibleGoalSampler for drawing goal samples.
+        func: A function that takes a PossibleGoal and returns a float.
+        sample_size: Number of Monte Carlo samples to draw.
+    
+    Returns:
+        float: Monte Carlo estimate of the integral.
+    
+    Example:
+        >>> def goal_value(goal):
+        ...     return policy_prior(state, agent_idx, goal).max()
+        >>> expected_value = approx_integral_over_possible_goals(
+        ...     state, 0, uniform_sampler, goal_value, 1000
+        ... )
+    """
     total = 0.0
     for _ in range(sample_size):
         possible_goal, weight = sampler.sample(state, human_agent_index)
@@ -37,15 +185,55 @@ def approx_integral_over_possible_goals(state, human_agent_index: int, sampler: 
     return total / sample_size
 
 
-# Another class for looping over all possible goals for a human agent in a given world state, to be used in exact computation of integrals over goals, acting as a proper python generator rather than returning a list.
-
 class PossibleGoalGenerator(ABC):
+    """
+    Abstract base class for deterministic enumeration of possible goals.
+    
+    Used for exact computation of integrals over goal space when the
+    number of possible goals is finite and small enough to enumerate.
+    
+    This is a Python generator that yields (goal, weight) pairs.
+    The weights should sum to 1.0 for proper probability weighting,
+    or all be 1.0 for uniform weighting.
+    
+    Attributes:
+        world_model: Reference to the world model this generator applies to.
+    
+    Example implementation:
+        >>> class AllCellsGenerator(PossibleGoalGenerator):
+        ...     def generate(self, state, human_agent_index: int):
+        ...         for x in range(self.world_model.width):
+        ...             for y in range(self.world_model.height):
+        ...                 goal = ReachCell(self.world_model, (x, y))
+        ...                 weight = 1.0 / (self.world_model.width * self.world_model.height)
+        ...                 yield goal, weight
+    """
 
     world_model: 'WorldModel'
+    
     def __init__(self, world_model: 'WorldModel'):
+        """
+        Initialize the goal generator.
+        
+        Args:
+            world_model: The world model this generator applies to.
+        """
         self.world_model = world_model
 
     @abstractmethod
-    def generate(self, state, human_agent_index: int):
-        """Yields all pairs of (possible goal, aggregation weight) for the human agent with the given index in the given world state."""
+    def generate(self, state, human_agent_index: int) -> Iterator[Tuple['PossibleGoal', float]]:
+        """
+        Generate all possible goals for a human agent in the given state.
+        
+        This is a generator that yields (goal, weight) pairs. The weights
+        can represent prior probabilities over goals, or all be 1.0 for
+        uniform weighting.
+        
+        Args:
+            state: Current world state (hashable tuple from get_state()).
+            human_agent_index: Index of the human agent whose goals to generate.
+        
+        Yields:
+            Tuple[PossibleGoal, float]: Pairs of (goal, aggregation_weight).
+        """
         pass
