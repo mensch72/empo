@@ -58,6 +58,7 @@ class TabularHumanPolicyPrior(HumanPolicyPrior):
             return self.values[state][human_agent_index][possible_goal]
         else:
             vs = self.values[state][human_agent_index]
+            total = 0
             for possible_goal, weight in self.possible_goal_generator.generate(state, human_agent_index):
                 total += vs[possible_goal] * weight
             return total
