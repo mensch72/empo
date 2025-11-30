@@ -8,7 +8,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from gym_multigrid.multigrid import MultiGridEnv, World
 from empo.world_model import _init_dag_worker, _process_state_actions
-import empo.world_model as wm
 
 env = MultiGridEnv(
     map='''
