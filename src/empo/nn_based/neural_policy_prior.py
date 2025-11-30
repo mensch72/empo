@@ -956,7 +956,8 @@ def train_neural_policy_prior(
                     
                     # Epsilon-greedy action selection
                     if np.random.random() < epsilon:
-                        action = np.random.randint(num_actions)
+                        action = np.random.choice(range(num_actions),p=[0.02,0.19,0.19,0.6])
+#                        action = np.random.randint(num_actions)
                     else:
                         policy = F.softmax(beta * q_values, dim=1)
                         action = torch.multinomial(policy, 1).item()
@@ -1011,13 +1012,17 @@ def train_neural_policy_prior(
                     # Shaping: γ * Φ(s') - Φ(s) = γ * (-d(s')/max) - (-d(s)/max)
                     #        = (d(s) - γ*d(s')) / max_dist
                     shaping_reward = gamma * phi_s_prime - phi_s
-                
+
+                    # TODO: generalize this for other goal types, especially for rectangular goals
+                else:
+                    print("Warning: Goal does not have target_pos attribute for shaping reward.")
+
                 reward = base_reward + shaping_reward
                 
                 if trajectories[human_idx]:
                     trajectories[human_idx][-1]['reward'] = reward
                     trajectories[human_idx][-1]['next_state'] = next_state
-                    trajectories[human_idx][-1]['done'] = done or goal_achieved > 0
+                    trajectories[human_idx][-1]['done'] = done or goal_achieved > 0 # i.e., each human considers the episode as done if their individual goal is achieved!
             
             if done:
                 break
