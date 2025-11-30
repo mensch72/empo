@@ -217,7 +217,7 @@ class TabularHumanPolicyPrior(HumanPolicyPrior):
         else:
             # Compute marginal by averaging over goals weighted by their prior
             vs = self.values[state][human_agent_index]
-            num_actions = self.world_model.action_space.n
+            num_actions: int = self.world_model.action_space.n  # type: ignore[attr-defined]
             total = np.zeros(num_actions)
             for goal, weight in self.possible_goal_generator.generate(state, human_agent_index):
                 total += vs[goal] * weight
