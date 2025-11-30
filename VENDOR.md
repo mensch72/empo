@@ -27,7 +27,103 @@ Unlike traditional pip installation, the vendored Multigrid is imported via **PY
 - **No container rebuild needed** when you modify the source code
 - Changes are immediately reflected when you restart Python or re-import the module
 
-### Making Local Modifications
+## EMPO-Specific Modifications
+
+The vendored Multigrid has been extensively modified for the EMPO framework. Key changes:
+
+### 1. WorldModel Integration (`multigrid.py`)
+
+The `MultiGridEnv` class now inherits from `empo.WorldModel` providing:
+
+- **`get_state()`**: Returns compact hashable state tuple containing:
+  - Step count
+  - Agent states (position, direction, terminated, started, paused, carrying)
+  - Mobile objects (blocks, rocks) with positions
+  - Mutable objects (doors, boxes, magic walls) with their mutable state
+
+- **`set_state(state)`**: Restores environment to any previously observed state
+
+- **`transition_probabilities(state, actions)`**: Computes exact transition probabilities using conflict block partitioning algorithm (see `PROBABILISTIC_TRANSITIONS.md`)
+
+### 2. New Object Types
+
+| Object | File Location | Description |
+|--------|---------------|-------------|
+| **Block** | `multigrid.py:589` | Pushable by any agent |
+| **Rock** | `multigrid.py:605` | Pushable only by authorized agents |
+| **UnsteadyGround** | `multigrid.py:262` | Agents may stumble with configurable probability |
+| **MagicWall** | `multigrid.py:331` | Probabilistic entry from one direction |
+
+### 3. New Agent Attributes
+
+```python
+class Agent(WorldObj):
+    def __init__(self, ..., can_enter_magic_walls=False, can_push_rocks=False):
+        ...
+        self.can_enter_magic_walls = can_enter_magic_walls  # Can attempt magic wall entry
+        self.can_push_rocks = can_push_rocks  # Can push rocks (immutable)
+        self.on_unsteady_ground = False  # Derived from position
+```
+
+### 4. Map-Based Environment Specification
+
+New map parsing system allows ASCII-based environment definition:
+
+```python
+MAP = """
+WeWeWeWeWe
+We..Ay..We
+WeRo....We
+We..Ae..We
+WeWeWeWeWe
+"""
+
+class MyEnv(MultiGridEnv):
+    def __init__(self):
+        super().__init__(
+            map=MAP,
+            max_steps=100,
+            can_push_rocks='e'  # Grey agents can push rocks
+        )
+```
+
+**Cell codes:**
+- `..` : Empty cell
+- `We` : Grey wall
+- `Ay/Ar/Ae` : Agent (yellow/red/grey)
+- `Ro` : Rock
+- `Bl` : Block
+- `Un` : Unsteady ground
+- `Mn/Ms/Me/Mw` : Magic wall (north/south/east/west entry side)
+
+### 5. Optimized Transition Computation
+
+The `transition_probabilities()` method uses a conflict block partitioning algorithm:
+
+1. **Identify active agents** - agents that will actually act
+2. **Early exit** for deterministic cases (≤1 agent or all rotations)
+3. **Partition into conflict blocks** - agents competing for same resource
+4. **Cartesian product** of block winners instead of k! permutations
+5. **Handle stochastic elements** - unsteady ground and magic walls
+
+See `vendor/multigrid/PROBABILISTIC_TRANSITIONS.md` for detailed documentation.
+
+### 6. Object Caching
+
+Added `_build_object_cache()` for O(1) state computation:
+- `_mobile_objects`: List of (position, object) for blocks/rocks
+- `_mutable_objects`: List of (position, object) for doors/boxes/magic walls
+
+### 7. Helper Methods
+
+- `_categorize_agents(actions)`: Categorize agents into normal/unsteady/magic-wall groups
+- `_execute_single_agent_action(agent_idx, action, rewards)`: Execute single action
+- `_process_unsteady_forward_agents(...)`: Handle stumbling stochasticity
+- `_identify_conflict_blocks(actions, active_agents)`: Partition agents by contested resource
+- `_compute_successor_state(state, actions, ordering)`: Deterministic successor computation
+- `_compute_successor_state_with_unsteady(...)`: Successor with stochastic outcomes
+
+## Making Local Modifications
 
 You can freely modify the source code in `vendor/multigrid/`. Changes take effect immediately without rebuilding the container.
 

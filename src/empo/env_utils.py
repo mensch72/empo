@@ -1,9 +1,36 @@
 """
-Utility functions for working with gym environments.
+Utility functions for working with gymnasium environments.
 
-Note: These functions are provided for backward compatibility.
-The preferred approach is to use the corresponding methods directly on
-WorldModel instances (env.get_dag() and env.plot_dag()).
+This module provides standalone utility functions for DAG computation and
+visualization that can work with any environment implementing the required
+interface. These functions are provided for backward compatibility and
+flexibility.
+
+**Preferred Approach:**
+For environments inheriting from WorldModel (including MultiGridEnv), use
+the instance methods directly:
+    - env.get_dag() instead of get_dag(env)
+    - env.plot_dag() instead of plot_dag(...)
+
+Functions:
+    get_dag: Compute the DAG structure of a finite, acyclic environment.
+    plot_dag: Visualize a state DAG using Graphviz.
+
+The DAG (Directed Acyclic Graph) representation is essential for:
+    - Backward induction algorithms
+    - State space analysis
+    - Transition probability computation
+    - Debugging and visualization
+
+Example usage:
+    >>> from empo.env_utils import get_dag, plot_dag
+    >>> 
+    >>> # Get DAG structure
+    >>> states, state_to_idx, successors = get_dag(env)
+    >>> print(f"Environment has {len(states)} reachable states")
+    >>> 
+    >>> # Visualize the DAG
+    >>> plot_dag(states, state_to_idx, successors, output_file="my_env_dag")
 """
 
 from collections import deque

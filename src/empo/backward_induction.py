@@ -1,3 +1,58 @@
+"""
+Backward Induction for Computing Human Policy Priors.
+
+This module implements backward induction on the state DAG to compute
+goal-conditioned policies for human agents. The algorithm computes
+consistent Boltzmann (softmax) policies that softly maximize expected goal achievement.
+
+Main function:
+    compute_human_policy_prior: Compute tabular policy prior via backward induction.
+
+The algorithm works by:
+1. Building the DAG of reachable states and transitions
+2. Processing states in reverse topological order (from terminal to initial)
+3. Computing Q-values as expected future values under believed other-agent policies
+4. Converting Q-values to Boltzmann policies with configurable temperature (beta)
+
+Key features:
+- Supports parallel computation for large state spaces
+- Handles multi-agent environments with configurable "believed others" policies
+- Returns both the policy prior and optionally the value function
+
+Mathematical background:
+    For each state s, agent i, and goal g:
+    
+    Q(s, a, g) = γ * E[V(s', g) | s, a, believed_others_policy]
+    
+    π(a | s, g) = exp(β * Q(s, a, g)) / Σ_a' exp(β * Q(s, a', g))
+    
+    V(s, g) = Σ_a π(a | s, g) * Q(s, a, g)
+
+Parameters:
+    beta: Inverse temperature (β). Higher = more deterministic, inf = argmax.
+    gamma: Discount factor (γ). Typically 1.0 for episodic tasks.
+
+Example usage:
+    >>> from empo.backward_induction import compute_human_policy_prior
+    >>> from empo.possible_goal import PossibleGoalGenerator
+    >>> 
+    >>> # Define goal generator (implementation-specific)
+    >>> goal_generator = MyGoalGenerator(env)
+    >>> 
+    >>> # Compute policy prior
+    >>> policy_prior = compute_human_policy_prior(
+    ...     world_model=env,
+    ...     human_agent_indices=[0, 1],  # agents 0 and 1 are humans
+    ...     possible_goal_generator=goal_generator,
+    ...     beta=10.0,  # high temperature = nearly optimal
+    ...     gamma=1.0,
+    ...     parallel=True
+    ... )
+    >>> 
+    >>> # Use the policy prior
+    >>> action_dist = policy_prior(state, agent_idx=0, goal=my_goal)
+"""
+
 import numpy as np
 import time
 import os
@@ -5,12 +60,13 @@ from itertools import product
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing as mp
 from collections import defaultdict
+from typing import Optional, Callable, List, Tuple, Dict, Any
 
 from empo.possible_goal import PossibleGoalGenerator
 from empo.human_policy_prior import TabularHumanPolicyPrior
 from empo.world_model import WorldModel
 
-DEBUG = False #True
+DEBUG = False  # Set to True for verbose debugging output
 PROFILE_PARALLEL = os.environ.get('PROFILE_PARALLEL', '').lower() in ('1', 'true', 'yes')
 
 # Module-level globals for shared memory in forked processes
@@ -162,12 +218,91 @@ def process_state_batch(state_indices):
     batch_time = time.perf_counter() - batch_start
     return v_results, p_results, batch_time
 
-def compute_human_policy_prior(world_model: WorldModel, human_agent_indices: list, possible_goal_generator: 'PossibleGoalGenerator', believed_others_policy = None, beta: float = 1, gamma: float = 1, parallel: bool = False, num_workers: int = None, level_fct = None, return_V_values: bool = False) -> dict:
+def compute_human_policy_prior(
+    world_model: WorldModel, 
+    human_agent_indices: List[int], 
+    possible_goal_generator: PossibleGoalGenerator, 
+    believed_others_policy: Optional[Callable] = None, 
+    beta: float = 1.0, 
+    gamma: float = 1.0, 
+    parallel: bool = False, 
+    num_workers: Optional[int] = None, 
+    level_fct: Optional[Callable] = None, 
+    return_V_values: bool = False
+) -> TabularHumanPolicyPrior:
+    """
+    Compute human policy prior via backward induction on the state DAG.
+    
+    This function builds the complete state DAG of the world model and computes
+    goal-conditioned Boltzmann policies for all human agents in all non-terminal
+    states. The result is a TabularHumanPolicyPrior that can be used to query
+    action distributions.
+    
+    Algorithm overview:
+        1. Build the DAG of reachable states using world_model.get_dag()
+        2. Compute dependency levels for topological ordering
+        3. Process states in reverse topological order:
+           - Terminal states: V(s, g) = is_achieved(g, s)
+           - Non-terminal states: 
+             * Q(s, a, g) = γ * E[V(s', g)] under believed_others_policy
+             * π(a|s,g) = softmax(β * Q(s, *, g))
+             * V(s, g) = Σ_a π(a|s,g) * Q(s, a, g)
+    
+    Args:
+        world_model: A WorldModel (or MultiGridEnv) with get_state(), set_state(),
+                    and transition_probabilities() methods.
+        human_agent_indices: List of agent indices to compute policies for.
+                            Other agents are modeled by believed_others_policy.
+        possible_goal_generator: Generator that yields (goal, weight) pairs for
+                                each state and agent. See PossibleGoalGenerator.
+        believed_others_policy: Function(state, agent_index, action) -> List[(prob, action_profile)]
+                               specifying beliefs about other agents' actions.
+                               If None, uses uniform distribution over all action profiles.
+        beta: Inverse temperature for Boltzmann policy. Higher = more deterministic.
+              Use float('inf') for pure argmax (greedy) policy.
+        gamma: Discount factor for future rewards. Typically 1.0 for episodic tasks.
+        parallel: If True, use multiprocessing for parallel computation.
+                 Requires 'fork' context (works on Linux, may not work on macOS/Windows).
+        num_workers: Number of parallel workers. If None, uses mp.cpu_count().
+        level_fct: Optional function(state) -> int that returns the "level" of a state
+                  for fast dependency computation. States at higher levels are processed
+                  first. If None, uses general topological sort (slower for large DAGs).
+        return_V_values: If True, also return the computed value function.
+    
+    Returns:
+        TabularHumanPolicyPrior: Policy prior that can be called as prior(state, agent, goal).
+        
+        If return_V_values=True, returns tuple (policy_prior, V_values_dict) where
+        V_values_dict maps state -> agent_idx -> goal -> float.
+    
+    Performance notes:
+        - State space must be finite and acyclic (DAG structure)
+        - Time complexity: O(|S| * |A|^n * |G|) where |S|=states, |A|=actions,
+          n=agents, |G|=goals per state
+        - Memory: O(|S| * n * |G|) for storing V-values and policies
+        - Parallel mode provides ~linear speedup for large state spaces
+    
+    Example:
+        >>> env = SmallOneOrTwoChambersMapEnv()
+        >>> 
+        >>> class ReachGoal(PossibleGoalGenerator):
+        ...     def generate(self, state, agent_idx):
+        ...         yield (MyGoal(env, target=(3, 7)), 1.0)
+        >>> 
+        >>> policy = compute_human_policy_prior(
+        ...     env, 
+        ...     human_agent_indices=[0], 
+        ...     possible_goal_generator=ReachGoal(env),
+        ...     beta=10.0
+        ... )
+        >>> 
+        >>> state = env.get_state()
+        >>> action_dist = policy(state, 0, my_goal)  # numpy array of probabilities
+    """
+    human_policy_priors = {}  # these will be a mixture of system-1 and system-2 policies
 
-    human_policy_priors = {} # these will be a mixture of system-1 and system-2 policies
-
-#    Q_vectors = {}
-    system2_policies = {} # these will be Boltzmann policies with fixed inverse temperature beta for now
+    # Q_vectors = {}
+    system2_policies = {}  # these will be Boltzmann policies with fixed inverse temperature beta for now
     # V_values will be indexed as V_values[state_index][agent_index][possible_goal]
     # Using nested lists for faster access on first two levels
 
