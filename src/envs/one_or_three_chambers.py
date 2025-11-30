@@ -282,7 +282,7 @@ WeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWe
 
 SMALL_ONE_OR_THREE_CHAMBERS_MAP = """
 We We We We We .. .. .. .. .. 
-We .. We .. We .. .. .. .. ..
+We .. We Ay We .. .. .. .. ..
 We .. We Ay We We We .. .. ..
 We Ae Ro .. .. .. We .. .. ..
 We .. We We We .. We We We ..
