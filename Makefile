@@ -116,7 +116,10 @@ example:
 # Development commands
 test:
 	@echo "Running tests..."
-	docker compose exec empo-dev pytest tests/ -v --ignore=tests/test_mineland_installation.py
+	docker compose exec empo-dev pytest tests/ -v \
+		--ignore=tests/test_mineland_installation.py \
+		--ignore=tests/debug_dag_by_timestep.py \
+		--ignore=tests/debug_dag_parallel.py
 
 lint:
 	@echo "Running linters..."

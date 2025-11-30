@@ -8,23 +8,31 @@ computation.
 
 from abc import abstractmethod
 from collections import deque
-from typing import List, Dict, Tuple, Any, Optional
+from typing import List, Dict, Tuple, Any, Optional, Set, Union, overload, Literal
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing as mp
 import pickle
 import os
+import heapq
 
 import gymnasium as gym
+from gymnasium import spaces
 import numpy as np
+
+# Type aliases for complex types
+State = Any  # State is typically a hashable tuple
+ActionProfile = Tuple[int, ...]
+TransitionResult = List[Tuple[float, State]]  # List of (probability, successor_state)
+TransitionData = Tuple[ActionProfile, List[float], List[State]]  # (action_profile, probs, successor_states)
 
 # Module-level globals for parallel DAG computation
 # Each worker creates its own environment instance to avoid shared state issues
-_worker_env = None  # Worker-local environment instance
-_worker_num_agents = None
-_worker_num_actions = None
+_worker_env: Optional['WorldModel'] = None  # Worker-local environment instance
+_worker_num_agents: Optional[int] = None
+_worker_num_actions: Optional[int] = None
 
 
-def _init_dag_worker(env_pickle):
+def _init_dag_worker(env_pickle: bytes) -> None:
     """
     Initialize worker process for parallel DAG computation.
     Deserializes the environment to create an identical copy in each worker.
@@ -35,11 +43,11 @@ def _init_dag_worker(env_pickle):
     global _worker_env, _worker_num_agents, _worker_num_actions
     # Deserialize environment - this creates a complete copy with all attributes
     _worker_env = pickle.loads(env_pickle)
-    _worker_num_agents = len(_worker_env.agents)
-    _worker_num_actions = _worker_env.action_space.n
+    _worker_num_agents = len(_worker_env.agents)  # type: ignore[union-attr, attr-defined]
+    _worker_num_actions = _worker_env.action_space.n  # type: ignore[union-attr, attr-defined]
 
 
-def _process_state_actions(state):
+def _process_state_actions(state: State) -> Tuple[State, Set[State], List[TransitionData]]:
     """
     Process all action combinations for a single state.
     Uses worker's own environment instance.
@@ -52,17 +60,21 @@ def _process_state_actions(state):
     """
     global _worker_env, _worker_num_agents, _worker_num_actions
     
+    assert _worker_env is not None
+    assert _worker_num_agents is not None
+    assert _worker_num_actions is not None
+    
     env = _worker_env
     num_agents = _worker_num_agents
     num_actions = _worker_num_actions
     total_action_combinations = num_actions ** num_agents
     
-    successor_states = set()
-    action_data = []
+    successor_states: Set[State] = set()
+    action_data: List[TransitionData] = []
     
     for combo_idx in range(total_action_combinations):
         # Convert combo_idx to action profile
-        action_profile = []
+        action_profile: List[int] = []
         temp = combo_idx
         for _ in range(num_agents):
             action_profile.append(temp % num_actions)
@@ -76,8 +88,8 @@ def _process_state_actions(state):
             continue
         
         # Collect successor states and probabilities
-        probs = []
-        succ_states = []
+        probs: List[float] = []
+        succ_states: List[State] = []
         for prob, successor_state in trans_result:
             probs.append(prob)
             succ_states.append(successor_state)
@@ -302,7 +314,22 @@ class WorldModel(gym.Env):
         # Subclasses should override to provide actual rewards
         return new_state, 0.0, terminated, False, {}
     
-    def get_dag(self, return_probabilities: bool = False):
+    @overload
+    def get_dag(
+        self, return_probabilities: Literal[False] = False
+    ) -> Tuple[List[State], Dict[State, int], List[List[int]]]: ...
+    
+    @overload
+    def get_dag(
+        self, return_probabilities: Literal[True]
+    ) -> Tuple[List[State], Dict[State, int], List[List[int]], List[List[Tuple[ActionProfile, List[float], List[int]]]]]: ...
+    
+    def get_dag(
+        self, return_probabilities: bool = False
+    ) -> Union[
+        Tuple[List[State], Dict[State, int], List[List[int]]],
+        Tuple[List[State], Dict[State, int], List[List[int]], List[List[Tuple[ActionProfile, List[float], List[int]]]]]
+    ]:
         """
         Efficiently compute the DAG structure of an acyclic finite environment.
         
@@ -354,23 +381,23 @@ class WorldModel(gym.Env):
         root_state = self.get_state()
         
         # PHASE 1: Discover all states and edges using BFS
-        discovered_states = []  # Temporary list during discovery
-        temp_state_to_idx = {}  # Temporary mapping
-        edges = {}  # edges[i] = set of successor indices (temporary)
+        discovered_states: List[State] = []  # Temporary list during discovery
+        temp_state_to_idx: Dict[State, int] = {}  # Temporary mapping
+        edges: Dict[int, Set[int]] = {}  # edges[i] = set of successor indices (temporary)
         
         # Store transition probabilities if requested
-        temp_transitions = {} if return_probabilities else None
+        temp_transitions: Optional[Dict[int, List[Tuple[ActionProfile, List[float], List[State]]]]] = {} if return_probabilities else None
         
-        queue = deque([root_state])
+        queue: deque[State] = deque([root_state])
         temp_state_to_idx[root_state] = 0
         discovered_states.append(root_state)
         edges[0] = set()
-        if return_probabilities:
+        if return_probabilities and temp_transitions is not None:
             temp_transitions[0] = []
         
         # Get action space info once before the loop
-        num_agents = len(self.agents)
-        num_actions = self.action_space.n
+        num_agents: int = len(self.agents)  # type: ignore[attr-defined]
+        num_actions: int = self.action_space.n  # type: ignore[attr-defined]
         total_combinations = num_actions ** num_agents
         
         while queue:
@@ -378,11 +405,11 @@ class WorldModel(gym.Env):
             current_idx = temp_state_to_idx[current_state]
             
             # Track unique successor states for this current state
-            seen_successors = set()
+            seen_successors: Set[State] = set()
             
             for combo_idx in range(total_combinations):
                 # Convert combo_idx to action profile tuple
-                action_profile = []
+                action_profile: List[int] = []
                 temp = combo_idx
                 for _ in range(num_agents):
                     action_profile.append(temp % num_actions)
@@ -397,9 +424,9 @@ class WorldModel(gym.Env):
                     continue
                 
                 # If storing probabilities, collect them
-                if return_probabilities:
-                    probs = []
-                    succ_states = []
+                if return_probabilities and temp_transitions is not None:
+                    probs: List[float] = []
+                    succ_states: List[State] = []
                     for prob, successor_state in trans_result:
                         probs.append(prob)
                         succ_states.append(successor_state)
@@ -418,7 +445,7 @@ class WorldModel(gym.Env):
                         temp_state_to_idx[successor_state] = len(discovered_states)
                         discovered_states.append(successor_state)
                         edges[len(discovered_states) - 1] = set()
-                        if return_probabilities:
+                        if return_probabilities and temp_transitions is not None:
                             temp_transitions[len(discovered_states) - 1] = []
                         queue.append(successor_state)
                     
@@ -429,24 +456,23 @@ class WorldModel(gym.Env):
         # PHASE 2: Topological sort using Kahn's algorithm with deterministic ordering
         # We use a heap sorted by state tuples to ensure identical ordering regardless
         # of discovery order (which differs between sequential and parallel versions)
-        import heapq
         num_states = len(discovered_states)
         
         # Compute in-degree for each state
-        in_degree = [0] * num_states
+        in_degree: List[int] = [0] * num_states
         for state_idx in range(num_states):
             for successor_idx in edges[state_idx]:
                 in_degree[successor_idx] += 1
         
         # Initialize heap with all states that have in-degree 0, sorted by state tuple
         # We use (state_tuple, idx) as heap entries for deterministic ordering
-        topo_heap = []
+        topo_heap: List[Tuple[State, int]] = []
         for i in range(num_states):
             if in_degree[i] == 0:
                 heapq.heappush(topo_heap, (discovered_states[i], i))
         
         # Topologically sorted order (indices in discovered_states)
-        topo_order = []
+        topo_order: List[int] = []
         
         while topo_heap:
             _, current_idx = heapq.heappop(topo_heap)
@@ -463,9 +489,9 @@ class WorldModel(gym.Env):
             raise ValueError("Environment contains cycles (not a DAG)")
         
         # PHASE 3: Build final output with new indices
-        states = []
-        state_to_idx = {}
-        old_to_new = {}  # Map old indices to new indices
+        states: List[State] = []
+        state_to_idx: Dict[State, int] = {}
+        old_to_new: Dict[int, int] = {}  # Map old indices to new indices
         
         for new_idx, old_idx in enumerate(topo_order):
             state = discovered_states[old_idx]
@@ -474,7 +500,7 @@ class WorldModel(gym.Env):
             old_to_new[old_idx] = new_idx
         
         # Build successors list with new indices
-        successors = [[] for _ in range(num_states)]
+        successors: List[List[int]] = [[] for _ in range(num_states)]
         for old_idx in range(num_states):
             new_idx = old_to_new[old_idx]
             for old_succ_idx in edges[old_idx]:
@@ -485,17 +511,33 @@ class WorldModel(gym.Env):
             return states, state_to_idx, successors
         
         # PHASE 4: Convert transitions to use new indices
-        transitions = [[] for _ in range(num_states)]
+        assert temp_transitions is not None
+        transitions: List[List[Tuple[ActionProfile, List[float], List[int]]]] = [[] for _ in range(num_states)]
         for old_idx in range(num_states):
             new_idx = old_to_new[old_idx]
-            for action_profile, probs, succ_states in temp_transitions[old_idx]:
+            for action_prof, trans_probs, trans_succ_states in temp_transitions[old_idx]:
                 # Convert successor states to new indices
-                succ_indices = [state_to_idx[s] for s in succ_states]
-                transitions[new_idx].append((action_profile, probs, succ_indices))
+                succ_indices = [state_to_idx[s] for s in trans_succ_states]
+                transitions[new_idx].append((action_prof, trans_probs, succ_indices))
         
         return states, state_to_idx, successors, transitions
     
-    def get_dag_parallel(self, return_probabilities: bool = False, num_workers: Optional[int] = None):
+    @overload
+    def get_dag_parallel(
+        self, return_probabilities: Literal[False] = False, num_workers: Optional[int] = None
+    ) -> Tuple[List[State], Dict[State, int], List[List[int]]]: ...
+    
+    @overload
+    def get_dag_parallel(
+        self, return_probabilities: Literal[True], num_workers: Optional[int] = None
+    ) -> Tuple[List[State], Dict[State, int], List[List[int]], List[List[Tuple[ActionProfile, List[float], List[int]]]]]: ...
+    
+    def get_dag_parallel(
+        self, return_probabilities: bool = False, num_workers: Optional[int] = None
+    ) -> Union[
+        Tuple[List[State], Dict[State, int], List[List[int]]],
+        Tuple[List[State], Dict[State, int], List[List[int]], List[List[Tuple[ActionProfile, List[float], List[int]]]]]
+    ]:
         """
         Parallel version of get_dag() using spawn-based multiprocessing.
         
@@ -525,12 +567,12 @@ class WorldModel(gym.Env):
         
         # BFS to discover all states
         initial_state = self.get_state()
-        visited = {initial_state}
-        edges = {}  # state -> list of successor states
-        temp_transitions = {}  # state -> list of (action_profile, probs, succ_states)
+        visited: Set[State] = {initial_state}
+        edges: Dict[State, List[State]] = {}  # state -> list of successor states
+        temp_transitions: Dict[State, List[TransitionData]] = {}  # state -> list of (action_profile, probs, succ_states)
         
         # Process states in waves for parallelization
-        current_wave = [initial_state]
+        current_wave: List[State] = [initial_state]
         
         with ProcessPoolExecutor(max_workers=num_workers, mp_context=ctx,
                                  initializer=_init_dag_worker,
@@ -540,7 +582,7 @@ class WorldModel(gym.Env):
                 futures = {executor.submit(_process_state_actions, state): state 
                            for state in current_wave}
                 
-                next_wave = []
+                next_wave: List[State] = []
                 
                 for future in futures:
                     state = futures[future]
@@ -566,15 +608,14 @@ class WorldModel(gym.Env):
         # PHASE 2: Topological sort using Kahn's algorithm with deterministic ordering
         # We use a heap sorted by state tuples to ensure identical ordering regardless
         # of discovery order (which differs between sequential and parallel versions)
-        import heapq
         
         # First, build edges using indices
-        discovered_states = list(visited)
+        discovered_states: List[State] = list(visited)
         num_states = len(discovered_states)
-        temp_state_to_idx = {state: idx for idx, state in enumerate(discovered_states)}
+        temp_state_to_idx: Dict[State, int] = {state: idx for idx, state in enumerate(discovered_states)}
         
         # Build edge list with indices
-        indexed_edges = [set() for _ in range(num_states)]
+        indexed_edges: List[Set[int]] = [set() for _ in range(num_states)]
         for state in edges:
             state_idx = temp_state_to_idx[state]
             for succ_state in edges[state]:
@@ -582,20 +623,20 @@ class WorldModel(gym.Env):
                 indexed_edges[state_idx].add(succ_idx)
         
         # Compute in-degree for each state
-        in_degree = [0] * num_states
+        in_degree: List[int] = [0] * num_states
         for state_idx in range(num_states):
             for successor_idx in indexed_edges[state_idx]:
                 in_degree[successor_idx] += 1
         
         # Initialize heap with all states that have in-degree 0, sorted by state tuple
         # We use (state_tuple, idx) as heap entries for deterministic ordering
-        topo_heap = []
+        topo_heap: List[Tuple[State, int]] = []
         for i in range(num_states):
             if in_degree[i] == 0:
                 heapq.heappush(topo_heap, (discovered_states[i], i))
         
         # Topologically sorted order
-        topo_order = []
+        topo_order: List[int] = []
         
         while topo_heap:
             _, current_idx = heapq.heappop(topo_heap)
@@ -612,9 +653,9 @@ class WorldModel(gym.Env):
             raise ValueError("Environment contains cycles (not a DAG)")
         
         # Build final output with new indices
-        states = []
-        state_to_idx = {}
-        old_to_new = {}  # Map old indices to new indices
+        states: List[State] = []
+        state_to_idx: Dict[State, int] = {}
+        old_to_new: Dict[int, int] = {}  # Map old indices to new indices
         
         for new_idx, old_idx in enumerate(topo_order):
             state = discovered_states[old_idx]
@@ -623,7 +664,7 @@ class WorldModel(gym.Env):
             old_to_new[old_idx] = new_idx
         
         # Build successors list with new indices
-        successors = [[] for _ in range(num_states)]
+        successors: List[List[int]] = [[] for _ in range(num_states)]
         for old_idx in range(num_states):
             new_idx = old_to_new[old_idx]
             for old_succ_idx in indexed_edges[old_idx]:
@@ -634,7 +675,7 @@ class WorldModel(gym.Env):
             return states, state_to_idx, successors
         
         # PHASE 3: Convert transitions to use new indices
-        transitions = [[] for _ in range(num_states)]
+        transitions: List[List[Tuple[ActionProfile, List[float], List[int]]]] = [[] for _ in range(num_states)]
         for state in temp_transitions:
             new_idx = state_to_idx[state]
             for action_profile, probs, succ_states in temp_transitions[state]:

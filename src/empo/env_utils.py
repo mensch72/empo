@@ -34,7 +34,7 @@ Example usage:
 """
 
 from collections import deque
-from typing import List, Dict, Tuple, Any, Optional
+from typing import List, Dict, Tuple, Any, Optional, Set
 
 
 def get_dag(env) -> Tuple[List[Any], Dict[Any, int], List[List[int]]]:
@@ -103,11 +103,11 @@ def _get_dag_standalone(env) -> Tuple[List[Any], Dict[Any, int], List[List[int]]
     root_state = env.get_state()
     
     # PHASE 1: Discover all states and edges using BFS
-    discovered_states = []  # Temporary list during discovery
-    temp_state_to_idx = {}  # Temporary mapping
-    edges = {}  # edges[i] = set of successor indices (temporary)
+    discovered_states: List[Any] = []  # Temporary list during discovery
+    temp_state_to_idx: Dict[Any, int] = {}  # Temporary mapping
+    edges: Dict[int, Set[int]] = {}  # edges[i] = set of successor indices (temporary)
     
-    queue = deque([root_state])
+    queue: deque[Any] = deque([root_state])
     temp_state_to_idx[root_state] = 0
     discovered_states.append(root_state)
     edges[0] = set()
@@ -118,11 +118,11 @@ def _get_dag_standalone(env) -> Tuple[List[Any], Dict[Any, int], List[List[int]]
         
         # Restore environment to current state to explore transitions
         env.set_state(current_state)
-        num_agents = len(env.agents)
-        num_actions = env.action_space.n
+        num_agents: int = len(env.agents)
+        num_actions: int = env.action_space.n
         
         # Track unique successor states for this current state
-        seen_successors = set()
+        seen_successors: Set[Any] = set()
         
         # Generate all action combinations efficiently
         # For n agents with k actions each: k^n combinations
@@ -166,19 +166,19 @@ def _get_dag_standalone(env) -> Tuple[List[Any], Dict[Any, int], List[List[int]]
     num_states = len(discovered_states)
     
     # Compute in-degree for each state
-    in_degree = [0] * num_states
+    in_degree: List[int] = [0] * num_states
     for state_idx in range(num_states):
         for successor_idx in edges[state_idx]:
             in_degree[successor_idx] += 1
     
     # Initialize queue with all states that have in-degree 0
-    topo_queue = deque()
+    topo_queue: deque[int] = deque()
     for i in range(num_states):
         if in_degree[i] == 0:
             topo_queue.append(i)
     
     # Topologically sorted order (indices in discovered_states)
-    topo_order = []
+    topo_order: List[int] = []
     
     while topo_queue:
         current_idx = topo_queue.popleft()
@@ -195,9 +195,9 @@ def _get_dag_standalone(env) -> Tuple[List[Any], Dict[Any, int], List[List[int]]
         raise ValueError("Environment contains cycles (not a DAG)")
     
     # PHASE 3: Build final output with new indices
-    states = []
-    state_to_idx = {}
-    old_to_new = {}  # Map old indices to new indices
+    states: List[Any] = []
+    state_to_idx: Dict[Any, int] = {}
+    old_to_new: Dict[int, int] = {}  # Map old indices to new indices
     
     for new_idx, old_idx in enumerate(topo_order):
         state = discovered_states[old_idx]
@@ -206,7 +206,7 @@ def _get_dag_standalone(env) -> Tuple[List[Any], Dict[Any, int], List[List[int]]
         old_to_new[old_idx] = new_idx
     
     # Build successors list with new indices
-    successors = [[] for _ in range(num_states)]
+    successors: List[List[int]] = [[] for _ in range(num_states)]
     for old_idx in range(num_states):
         new_idx = old_to_new[old_idx]
         for old_succ_idx in edges[old_idx]:
