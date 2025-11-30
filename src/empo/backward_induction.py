@@ -103,7 +103,6 @@ def _init_shared_data(
     _shared_params = params
     _shared_believed_others_policy_pickle = believed_others_policy_pickle
 
-
 def default_believed_others_policy(
     state: State, 
     agent_index: int, 
@@ -172,6 +171,7 @@ def split_into_batches(items: List[int], num_batches: Optional[int]) -> List[Lis
             batches.append(batch)
     return batches
 
+
 def process_state_batch(
     state_indices: List[int]
 ) -> Tuple[Dict[int, Dict[int, Dict[PossibleGoal, float]]], 
@@ -237,7 +237,7 @@ def process_state_batch(
                         # Compute Q values
                         expected_Vs: npt.NDArray[np.floating[Any]] = np.zeros(num_actions)
                         for action in actions:
-                            v: float = 0.0
+                            v_accum: float = 0.0
                             for action_profile_prob, action_profile in believed_others_policy(state, agent_index, action):
                                 action_profile[agent_index] = action
                                 action_profile_index = int(np.dot(action_profile, action_powers))
@@ -248,9 +248,9 @@ def process_state_batch(
                                     V_values[next_state_indices[i]][agent_index].get(possible_goal, 0)
                                     for i in range(len(next_state_indices))
                                 ])
-                                v += action_profile_prob * float(np.dot(next_state_probabilities, v_values_array))
+                                v_accum += action_profile_prob * float(np.dot(next_state_probabilities, v_values_array))
                             
-                            expected_Vs[action] = v
+                            expected_Vs[action] = v_accum
                         
                         q = gamma * expected_Vs
                         p = np.exp(beta * q)
@@ -262,6 +262,7 @@ def process_state_batch(
     
     batch_time = time.perf_counter() - batch_start
     return v_results, p_results, batch_time
+
 
 @overload
 def compute_human_policy_prior(
@@ -390,7 +391,7 @@ def compute_human_policy_prior(
         # Create wrapper for sequential execution (parallel uses default directly)
         believed_others_policy = lambda state, agent_index, action: default_believed_others_policy(
             state, agent_index, action, num_agents, num_actions)
-        believed_others_policy_pickle = None  # No need to pickle the default
+        believed_others_policy_pickle: Optional[bytes] = None  # No need to pickle the default
     else:
         # Serialize custom believed_others_policy using cloudpickle for parallel mode
         # cloudpickle can serialize lambdas, closures, and other functions that
@@ -447,7 +448,7 @@ def compute_human_policy_prior(
             prof_merge_p_time = 0.0
             prof_seq_in_par_time = 0.0
             prof_total_parallel_time = 0.0
-            prof_batch_times = []  # Worker timing for each batch
+            prof_batch_times: List[float] = []  # Worker timing for each batch
         
         # Process each level sequentially, but parallelize within each level
         for level_idx, level in enumerate(dependency_levels):
@@ -625,7 +626,7 @@ def compute_sequential(
     states: List[State], 
     V_values: VValues, 
     system2_policies: PolicyDict, 
-    transitions: List[List[TransitionData]],
+    transitions: List[List[Tuple[Tuple[int, ...], List[float], List[int]]]],
     human_agent_indices: List[int], 
     possible_goal_generator: PossibleGoalGenerator,
     num_agents: int, 
