@@ -202,6 +202,68 @@ The `examples/` directory now contains comprehensive examples covering all menti
 
 ---
 
+## Redundant Code
+
+### RED-001: `env_utils.py` duplicates `WorldModel` methods
+**Priority:** Low  
+**Location:** `src/empo/env_utils.py`  
+**Description:**  
+The `env_utils.py` module provides standalone functions `get_dag()` and `plot_dag()` that duplicate the corresponding methods in `WorldModel`:
+- `env_utils.get_dag(env)` → delegates to `env.get_dag()` for WorldModel instances
+- `env_utils.plot_dag(...)` → identical to `WorldModel.plot_dag()`
+
+**Current usage:**
+- Examples: `dag_and_episode_example.py`, `dag_visualization_example.py` import from `env_utils`
+- Tests: `test_env_utils.py`, `test_world_model.py` test backward compatibility
+
+**Status:** Intentionally kept for backward compatibility. The docstring explicitly notes that instance methods are preferred:
+```python
+# Preferred Approach:
+# For environments inheriting from WorldModel (including MultiGridEnv), use
+# the instance methods directly:
+#     - env.get_dag() instead of get_dag(env)
+#     - env.plot_dag() instead of plot_dag(...)
+```
+
+**Recommendation:** Can be deprecated in a future version once all examples/tests are migrated.
+
+---
+
+### RED-002: Commented-out `Grid.decode()` method
+**Priority:** Low  
+**Location:** `vendor/multigrid/gym_multigrid/multigrid.py:1072-1091`  
+**Description:**  
+There is a commented-out static method `Grid.decode()` that was presumably used to decode grid arrays back into Grid objects. This dead code should either be removed or uncommented if needed.
+
+**Current state:**
+```python
+# @staticmethod
+# def decode(array):
+#     """
+#     Decode an array grid encoding back into a grid
+#     """
+#     ...
+```
+
+**Recommendation:** Remove if not needed, or uncomment and test if the functionality is required.
+
+---
+
+### RED-003: TODO comment for system-1 policy mixing
+**Priority:** Informational  
+**Location:** `src/empo/backward_induction.py:520`  
+**Description:**  
+There's a TODO comment indicating planned but unimplemented functionality:
+```python
+human_policy_priors = system2_policies # TODO: mix with system-1 policies!
+```
+
+This suggests the current implementation only uses "system-2" (deliberate/planning) policies, with planned support for "system-1" (intuitive/fast) policies not yet implemented.
+
+**Recommendation:** Either implement the feature or document it as future work.
+
+---
+
 ## Notes
 
 This list was generated during documentation review on 2024-11-30. Some items may have been addressed in subsequent updates. Please verify each issue before creating GitHub issues.
