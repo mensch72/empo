@@ -40,8 +40,11 @@ class MyEnv(WorldModel):
         self.position, self.direction = state
     
     def transition_probabilities(self, state, actions):
+        # Compute successor state based on action
         # Return list of (probability, successor_state) tuples
-        return [(1.0, new_state)]
+        next_pos = self._compute_next_position(state, actions)
+        next_state = (next_pos, state[1])  # position changes, direction stays
+        return [(1.0, next_state)]
 ```
 
 ---

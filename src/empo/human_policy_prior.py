@@ -211,6 +211,7 @@ class TabularHumanPolicyPrior(HumanPolicyPrior):
         
         Raises:
             KeyError: If state or agent_index not found in lookup table.
+            ValueError: If the goal generator produces no goals.
         """
         if possible_goal is not None:
             return self.values[state][human_agent_index][possible_goal]
@@ -221,7 +222,12 @@ class TabularHumanPolicyPrior(HumanPolicyPrior):
             for goal, weight in self.possible_goal_generator.generate(state, human_agent_index):
                 contribution = vs[goal] * weight
                 if total is None:
-                    total = contribution
+                    total = contribution.copy()  # Copy to avoid modifying stored array
                 else:
                     total = total + contribution
+            
+            if total is None:
+                raise ValueError(
+                    f"Goal generator produced no goals for state {state} and agent {human_agent_index}"
+                )
             return total
