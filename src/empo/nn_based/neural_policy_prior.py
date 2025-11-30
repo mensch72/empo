@@ -728,13 +728,19 @@ def _agent_to_tensors_static(
     Args:
         state: State tuple.
         human_agent_index: Index of the human agent.
-        grid_width: Width of the grid.
-        grid_height: Height of the grid.
+        grid_width: Width of the grid (must be > 0).
+        grid_height: Height of the grid (must be > 0).
         device: Torch device.
     
     Returns:
         Tuple of (position, direction_onehot, agent_idx).
+    
+    Raises:
+        ValueError: If grid_width or grid_height <= 0.
     """
+    if grid_width <= 0 or grid_height <= 0:
+        raise ValueError(f"Grid dimensions must be positive, got width={grid_width}, height={grid_height}")
+    
     _, agent_states, _, _ = state
     agent_state = agent_states[human_agent_index]
     
@@ -765,13 +771,19 @@ def _goal_to_tensor_static(
     
     Args:
         goal: A PossibleGoal instance (assumed to have target position attributes).
-        grid_width: Width of the grid.
-        grid_height: Height of the grid.
+        grid_width: Width of the grid (must be > 0).
+        grid_height: Height of the grid (must be > 0).
         device: Torch device.
     
     Returns:
         Goal coordinates tensor of shape (1, 4).
+    
+    Raises:
+        ValueError: If grid_width or grid_height <= 0.
     """
+    if grid_width <= 0 or grid_height <= 0:
+        raise ValueError(f"Grid dimensions must be positive, got width={grid_width}, height={grid_height}")
+    
     if hasattr(goal, 'target_pos'):
         target = goal.target_pos
         x = float(target[0]) / grid_width
@@ -1000,7 +1012,7 @@ def train_neural_policy_prior(
             
             # Compute Q-network loss and perform gradient update
             q_optimizer.zero_grad()
-            total_loss = torch.tensor(0.0, device=device, requires_grad=True)
+            losses = []
             
             for t, G_t in zip(trajectory, returns):
                 # Convert state to tensors
@@ -1028,14 +1040,14 @@ def train_neural_policy_prior(
                 
                 # MSE loss: L = (Q(s,a,g) - G_t)²
                 loss = F.mse_loss(q_value, target)
-                total_loss = total_loss + loss
+                losses.append(loss)
             
-            # Average loss over trajectory
-            if len(trajectory) > 0:
-                avg_loss = total_loss / len(trajectory)
+            # Average loss over trajectory and perform gradient update
+            if len(losses) > 0:
+                total_loss = torch.stack(losses).mean()
                 
                 # Backward pass and gradient update
-                avg_loss.backward()
+                total_loss.backward()
                 q_optimizer.step()
                 
                 episode_q_loss += avg_loss.item()
@@ -1057,7 +1069,7 @@ def train_neural_policy_prior(
                     continue
                 
                 phi_optimizer.zero_grad()
-                total_phi_loss = torch.tensor(0.0, device=device, requires_grad=True)
+                phi_losses_list = []
                 
                 for t in trajectory:
                     # Convert state to tensors
@@ -1092,10 +1104,10 @@ def train_neural_policy_prior(
                         target_policy,
                         reduction='batchmean'
                     )
-                    total_phi_loss = total_phi_loss + phi_loss
+                    phi_losses_list.append(phi_loss)
                 
-                if len(trajectory) > 0:
-                    avg_phi_loss = total_phi_loss / len(trajectory)
+                if len(phi_losses_list) > 0:
+                    avg_phi_loss = torch.stack(phi_losses_list).mean()
                     avg_phi_loss.backward()
                     phi_optimizer.step()
                     
