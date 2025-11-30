@@ -146,7 +146,8 @@ def state_to_grid_tensor(
                 channel_idx = num_object_types + i
                 grid_tensor[0, channel_idx, y, x] = 1.0
     
-    max_steps = 10
+    # Normalize step count (max_steps should match environment setting)
+    max_steps = 10  # Must match env.max_steps for proper normalization
     step_tensor = torch.tensor([[step_count / max_steps]], device=device, dtype=torch.float32)
     
     return grid_tensor, step_tensor
@@ -183,12 +184,17 @@ def get_goal_tensor(
     grid_height: int,
     device: str = 'cpu'
 ) -> torch.Tensor:
-    """Convert goal position to normalized tensor."""
+    """
+    Convert goal position to normalized tensor.
+    
+    The tensor has 4 values [x1, y1, x2, y2] to support both point goals
+    and rectangular region goals. For point goals, x1=x2 and y1=y2.
+    """
     return torch.tensor([[
         goal_pos[0] / grid_width,
         goal_pos[1] / grid_height,
-        goal_pos[0] / grid_width,
-        goal_pos[1] / grid_height
+        goal_pos[0] / grid_width,  # Same as x1 for point goals
+        goal_pos[1] / grid_height  # Same as y1 for point goals
     ]], device=device, dtype=torch.float32)
 
 
@@ -286,7 +292,8 @@ def train_nn_policy_prior(
                         )
                     
                     # Epsilon-greedy for exploration during training
-                    if random.random() < 0.3:
+                    epsilon = 0.3  # Exploration rate
+                    if random.random() < epsilon:
                         action = random.randint(0, num_actions - 1)
                     else:
                         policy = F.softmax(beta * q_values, dim=1)
