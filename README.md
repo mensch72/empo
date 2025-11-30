@@ -1,13 +1,41 @@
 # EMPO – Human Empowerment AI Agents
 
 A framework for studying the soft maximization of aggregate human power by AI agents in multigrid and other multi-agent model worlds related to [this paper](https://arxiv.org/html/2508.00159v2).
-Currently under construction.
+
+## Core Framework
+
+The EMPO framework provides:
+
+### World Model Abstraction (`src/empo/`)
+- **WorldModel**: Abstract base class for environments with explicit state management
+  - `get_state()` / `set_state()`: Hashable state representation and restoration
+  - `transition_probabilities()`: Exact probabilistic transition computation
+  - `get_dag()`: Compute the state-space DAG for finite environments
+
+### Human Behavior Modeling
+- **PossibleGoal**: Abstract class for goal specification (0/1 reward functions)
+- **PossibleGoalGenerator**: Enumerate possible human goals with weights
+- **HumanPolicyPrior**: Model human behavior as goal-directed policies
+
+### Policy Computation
+- **compute_human_policy_prior**: Backward induction to compute Boltzmann policies
+  - Supports parallel computation for large state spaces
+  - Configurable temperature (β) for policy stochasticity
+
+### Vendored MultiGrid (`vendor/multigrid/`)
+Extended multi-agent gridworld environment with:
+- State management and transition probability computation
+- New object types: Rock, Block, UnsteadyGround, MagicWall
+- Map-based environment specification
+- Agent-specific capabilities (can_push_rocks, can_enter_magic_walls)
+
+See [docs/API.md](docs/API.md) for complete API reference.
 
 ## Features
 
 - Unified Docker image for development and cluster deployment
-- Exact planning algorithms for simple enough world models (TODO: implement formulas from paper)
-- Multi-Agent Reinforcement Learning approach to approximate planning with complex world simulators (TODO: implement approach described in paper) 
+- Exact planning algorithms via backward induction on state DAGs
+- Multi-Agent Reinforcement Learning support (work in progress)
 - Easy local development with Docker Compose
 - Cluster-ready with Singularity/Apptainer support
 - GPU acceleration support (NVIDIA CUDA)
@@ -315,10 +343,26 @@ empo/
 ├── requirements-dev.txt       # Development dependencies
 ├── train.py                   # Main training script
 ├── src/
-│   └── empo/                  # Main package
-│       └── __init__.py
+│   ├── empo/                  # Core EMPO package
+│   │   ├── __init__.py        # Package exports
+│   │   ├── world_model.py     # WorldModel abstract base class
+│   │   ├── possible_goal.py   # Goal abstractions
+│   │   ├── human_policy_prior.py  # Human behavior modeling
+│   │   ├── backward_induction.py  # Policy computation
+│   │   ├── env_utils.py       # Environment utilities
+│   │   └── hierarchical/      # Hierarchical planning (WIP)
+│   ├── envs/                  # Custom environments
+│   │   └── one_or_three_chambers.py  # Multi-chamber gridworld
+│   └── llm_hierarchical_modeler/  # LLM-based Minecraft world generation
 ├── vendor/
-│   └── multigrid/             # Vendored Multigrid source (live editable)
+│   └── multigrid/             # Vendored Multigrid (extensively modified)
+│       ├── gym_multigrid/
+│       │   └── multigrid.py   # Core MultiGridEnv + state management
+│       └── PROBABILISTIC_TRANSITIONS.md
+├── docs/
+│   ├── API.md                 # API reference
+│   └── ISSUES.md              # Known issues and improvements
+├── tests/                     # Test suite
 ├── configs/
 │   └── default.yaml           # Example configuration
 ├── scripts/
