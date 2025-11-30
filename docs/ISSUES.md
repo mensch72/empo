@@ -6,22 +6,6 @@ This document lists known bugs, limitations, and potential improvements identifi
 
 ## Bugs
 
-### BUG-001: Parallel backward induction requires 'fork' context
-**Severity:** Medium  
-**Location:** `src/empo/backward_induction.py:274`  
-**Description:**  
-The parallel backward induction explicitly uses `mp.get_context('fork')` which only works on Linux. On macOS and Windows, this will either fail or fall back to 'spawn' which may not work correctly with the shared memory approach.
-
-**Current behavior:**  
-```python
-ctx = mp.get_context('fork')
-```
-
-**Suggested fix:**  
-Add platform detection and provide fallback or clear error message for unsupported platforms.
-
----
-
 ### BUG-002: Custom believed_others_policy not supported in parallel mode
 **Severity:** Low  
 **Location:** `src/empo/backward_induction.py:292-293`  
@@ -124,22 +108,6 @@ return obs, rewards, terminated, truncated, {}
 
 ---
 
-### IMP-006: Magic wall solidification is irreversible
-**Priority:** Low  
-**Location:** `vendor/multigrid/gym_multigrid/multigrid.py`  
-**Description:**  
-Once a magic wall solidifies (becomes a normal wall), it cannot be restored. This is documented behavior but may be surprising. Consider adding a method to reset magic walls.
-
----
-
-### IMP-007: Parallel DAG computation could use spawn context
-**Priority:** Low  
-**Location:** `src/empo/world_model.py:498-644`  
-**Description:**  
-The `get_dag_parallel()` method uses 'spawn' context which is more portable but requires pickling the entire environment. This could be optimized by serializing only essential state.
-
----
-
 ### IMP-008: Add progress callback for long-running computations
 **Priority:** Low  
 **Location:** `src/empo/backward_induction.py`  
@@ -181,14 +149,6 @@ Similar to UnsteadyGround, MagicWall's `entry_probability` and `solidify_probabi
 
 ---
 
-### IMP-011: Add visualization for transition probabilities
-**Priority:** Low  
-**Scope:** New feature  
-**Description:**  
-The DAG visualization shows states and edges but not transition probabilities. Adding probability labels to edges would help with debugging stochastic environments.
-
----
-
 ### IMP-012: Document agent color semantics
 **Priority:** Low  
 **Location:** Documentation  
@@ -204,14 +164,6 @@ The codebase uses colors to distinguish agent types (e.g., grey = robot, yellow 
 **Location:** `vendor/multigrid/gym_multigrid/multigrid.py`  
 **Description:**  
 The `_mobile_objects` and `_mutable_objects` caches are only built during reset(). If objects are added/removed during gameplay (e.g., boxes opened), the cache becomes stale. Current code handles this with fallback grid scans, but it's inefficient.
-
----
-
-### PERF-002: Transition probability computation is O(n!) worst case
-**Severity:** Informational  
-**Location:** `vendor/multigrid/gym_multigrid/multigrid.py:2822-3117`  
-**Description:**  
-While conflict block partitioning significantly optimizes the common case, worst-case complexity remains factorial in the number of agents when all agents conflict.
 
 ---
 
