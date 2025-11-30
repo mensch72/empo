@@ -793,6 +793,43 @@ def _goal_to_tensor_static(
         return torch.zeros(1, 4, device=device, dtype=torch.float32)
 
 
+class ReplayBuffer:
+    """
+    Experience replay buffer for storing transitions.
+    
+    Stores transitions as dictionaries and supports random sampling for
+    mini-batch training. This reduces variance and decorrelates samples
+    compared to online per-transition updates.
+    """
+    
+    def __init__(self, capacity: int = 10000):
+        """
+        Initialize replay buffer.
+        
+        Args:
+            capacity: Maximum number of transitions to store.
+        """
+        self.capacity = capacity
+        self.buffer = []
+        self.position = 0
+    
+    def push(self, transition: Dict[str, Any]):
+        """Add a transition to the buffer."""
+        if len(self.buffer) < self.capacity:
+            self.buffer.append(transition)
+        else:
+            self.buffer[self.position] = transition
+        self.position = (self.position + 1) % self.capacity
+    
+    def sample(self, batch_size: int) -> List[Dict[str, Any]]:
+        """Sample a random batch of transitions."""
+        indices = np.random.choice(len(self.buffer), size=min(batch_size, len(self.buffer)), replace=False)
+        return [self.buffer[i] for i in indices]
+    
+    def __len__(self) -> int:
+        return len(self.buffer)
+
+
 def train_neural_policy_prior(
     world_model: Any,
     human_agent_indices: List[int],
@@ -803,6 +840,8 @@ def train_neural_policy_prior(
     gamma: float = 0.99,
     learning_rate: float = 1e-3,
     batch_size: int = 64,
+    replay_buffer_size: int = 10000,
+    updates_per_episode: int = 4,
     train_phi_network: bool = True,
     epsilon: float = 0.3,
     device: str = 'cpu',
@@ -811,19 +850,19 @@ def train_neural_policy_prior(
     """
     Train neural networks to approximate the human policy prior.
     
-    This function trains the Q-network using Monte Carlo returns on trajectories
-    collected from rollouts. The training approximates the fixed-point
-    computation done by tabular backward induction.
+    This function trains the Q-network using TD learning with experience replay.
+    The training approximates the fixed-point computation done by tabular backward induction.
     
     Training procedure:
         1. For each episode, sample random goals for each human agent
         2. Collect trajectory using epsilon-greedy exploration
-        3. Compute Monte Carlo returns: G_t = r_t + γ*G_{t+1}
-        4. Train Q-network to minimize MSE loss: L = (Q(s,a,g) - G_t)²
+        3. Store transitions in replay buffer
+        4. Sample random mini-batches and train Q-network with TD(0):
+           L_Q = E[(Q(s,a,g) - (r + γ * V(s')))²]
         5. Optionally train phi_network to match E_g[softmax(βQ)]
     
     Loss function:
-        Q-network: L_Q = E[(Q(s,a,g) - G_t)²] where G_t is Monte Carlo return
+        Q-network: L_Q = E[(Q(s,a,g) - (r + γ*V(s')))²] with TD(0) targets
         Phi-network: L_phi = KL(phi(s,h) || E_g[softmax(β*Q(s,h,g))])
     
     Args:
@@ -835,7 +874,9 @@ def train_neural_policy_prior(
         beta: Inverse temperature for Boltzmann policy.
         gamma: Discount factor for returns.
         learning_rate: Learning rate for optimization.
-        batch_size: Not used in MC training (kept for API compatibility).
+        batch_size: Size of mini-batches for training.
+        replay_buffer_size: Maximum number of transitions to store.
+        updates_per_episode: Number of gradient updates per episode.
         train_phi_network: Whether to also train the marginal policy network.
         epsilon: Exploration rate for epsilon-greedy policy.
         device: Torch device ('cpu' or 'cuda').
@@ -908,6 +949,9 @@ def train_neural_policy_prior(
     
     # Q-network optimizer
     q_optimizer = torch.optim.Adam(q_network.parameters(), lr=learning_rate)
+    
+    # Experience replay buffer for batch learning
+    replay_buffer = ReplayBuffer(capacity=replay_buffer_size)
     
     # Training statistics
     q_losses = []
@@ -1062,107 +1106,123 @@ def train_neural_policy_prior(
             state = next_state
         
         # ====================================================================
-        # GRADIENT UPDATE: Train Q-network using TD(0) learning
-        # This is more stable than Monte Carlo for continuous control
+        # Add completed transitions to replay buffer
+        # ====================================================================
+        for human_idx in human_agent_indices:
+            trajectory = trajectories[human_idx]
+            for i, t in enumerate(trajectory):
+                # Only add transitions that have reward information
+                if 'reward' in t and 'next_state' in t:
+                    # Store transition with all necessary info for batch learning
+                    replay_buffer.push({
+                        'state': t['state'],
+                        'action': t['action'],
+                        'goal': t['goal'],
+                        'reward': t['reward'],
+                        'next_state': t['next_state'],
+                        'done': t.get('done', False),
+                        'human_idx': human_idx
+                    })
+        
+        # ====================================================================
+        # BATCH LEARNING: Train Q-network using mini-batches from replay buffer
+        # This reduces variance compared to per-transition updates
         # ====================================================================
         episode_q_loss = 0.0
         num_updates = 0
         
-        for human_idx in human_agent_indices:
-            trajectory = trajectories[human_idx]
-            if len(trajectory) == 0:
-                continue
-            
-            # TD(0) update for each transition
-            q_optimizer.zero_grad()
-            losses = []
-            
-            for i, t in enumerate(trajectory):
-                reward = t.get('reward', 0.0)
-                done_flag = t.get('done', False)
+        # Only train if we have enough samples
+        if len(replay_buffer) >= batch_size:
+            for _ in range(updates_per_episode):
+                # Sample random batch from replay buffer
+                batch = replay_buffer.sample(batch_size)
                 
-                # Convert current state to tensors
-                grid_tensor, step_tensor = _state_to_tensors_static(
-                    t['state'], grid_width, grid_height, num_agents,
-                    max_steps=max_steps, device=device
-                )
-                position, direction, agent_idx_t = _agent_to_tensors_static(
-                    t['state'], human_idx, grid_width, grid_height, device
-                )
-                goal_tensor = _goal_to_tensor_static(t['goal'], grid_width, grid_height, device)
+                q_optimizer.zero_grad()
                 
-                # Forward pass through Q-network for current state
-                q_values = q_network(
-                    grid_tensor, step_tensor,
-                    position, direction, agent_idx_t,
-                    goal_tensor
-                )
-                q_value = q_values[0, t['action']]
+                # Collect all losses for the batch
+                batch_losses = []
                 
-                # Compute TD target
-                # Note: We no longer collect transitions after agent reaches goal,
-                # so all transitions here are from before the goal was reached.
-                if done_flag or i == len(trajectory) - 1:
-                    # Terminal state (goal reached or episode ended) - target is just the reward
-                    # When goal is reached, reward includes base_reward=1.0 + shaping
-                    target = torch.tensor(reward, device=device, dtype=torch.float32)
-                else:
-                    # Non-terminal - use bootstrap
-                    next_state = t.get('next_state', t['state'])
-                    next_grid, next_step = _state_to_tensors_static(
-                        next_state, grid_width, grid_height, num_agents,
+                for t in batch:
+                    human_idx = t['human_idx']
+                    reward = t['reward']
+                    done_flag = t['done']
+                    
+                    # Convert current state to tensors
+                    grid_tensor, step_tensor = _state_to_tensors_static(
+                        t['state'], grid_width, grid_height, num_agents,
                         max_steps=max_steps, device=device
                     )
-                    next_pos, next_dir, next_idx = _agent_to_tensors_static(
-                        next_state, human_idx, grid_width, grid_height, device
+                    position, direction, agent_idx_t = _agent_to_tensors_static(
+                        t['state'], human_idx, grid_width, grid_height, device
                     )
+                    goal_tensor = _goal_to_tensor_static(t['goal'], grid_width, grid_height, device)
                     
-                    with torch.no_grad():
-                        next_q_values = q_network(
-                            next_grid, next_step,
-                            next_pos, next_dir, next_idx,
-                            goal_tensor
+                    # Forward pass through Q-network for current state
+                    q_values = q_network(
+                        grid_tensor, step_tensor,
+                        position, direction, agent_idx_t,
+                        goal_tensor
+                    )
+                    q_value = q_values[0, t['action']]
+                    
+                    # Compute TD target
+                    if done_flag:
+                        # Terminal state - target is just the reward
+                        target = torch.tensor(reward, device=device, dtype=torch.float32)
+                    else:
+                        # Non-terminal - bootstrap from next state
+                        next_grid, next_step = _state_to_tensors_static(
+                            t['next_state'], grid_width, grid_height, num_agents,
+                            max_steps=max_steps, device=device
                         )
-                        # For Boltzmann policy: V(s') = sum_a π(a|s') Q(s',a)
-                        next_policy = F.softmax(beta * next_q_values, dim=1)
-                        next_v = (next_policy * next_q_values).sum()
-                        target = reward + gamma * next_v
+                        next_pos, next_dir, next_idx = _agent_to_tensors_static(
+                            t['next_state'], human_idx, grid_width, grid_height, device
+                        )
+                        
+                        with torch.no_grad():
+                            next_q_values = q_network(
+                                next_grid, next_step,
+                                next_pos, next_dir, next_idx,
+                                goal_tensor
+                            )
+                            # For Boltzmann policy: V(s') = sum_a π(a|s') Q(s',a)
+                            next_policy = F.softmax(beta * next_q_values, dim=1)
+                            next_v = (next_policy * next_q_values).sum()
+                            target = reward + gamma * next_v
+                    
+                    # MSE loss: L = (Q(s,a,g) - target)²
+                    loss = F.mse_loss(q_value, target)
+                    batch_losses.append(loss)
                 
-                # MSE loss: L = (Q(s,a,g) - target)²
-                loss = F.mse_loss(q_value, target)
-                losses.append(loss)
-            
-            # Average loss over trajectory and perform gradient update
-            if len(losses) > 0:
-                total_loss = torch.stack(losses).mean()
-                
-                # Gradient clipping for stability
-                total_loss.backward()
-                torch.nn.utils.clip_grad_norm_(q_network.parameters(), max_norm=1.0)
-                q_optimizer.step()
-                
-                episode_q_loss += total_loss.item()
-                num_updates += 1
+                # Average loss over batch and perform gradient update
+                if len(batch_losses) > 0:
+                    total_loss = torch.stack(batch_losses).mean()
+                    total_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(q_network.parameters(), max_norm=1.0)
+                    q_optimizer.step()
+                    
+                    episode_q_loss += total_loss.item()
+                    num_updates += 1
         
         if num_updates > 0:
             q_losses.append(episode_q_loss / num_updates)
         
         # ====================================================================
-        # GRADIENT UPDATE: Train phi-network (optional)
+        # BATCH LEARNING: Train phi-network using mini-batches (optional)
         # ====================================================================
-        if phi_network is not None and phi_optimizer is not None:
+        if phi_network is not None and phi_optimizer is not None and len(replay_buffer) >= batch_size:
             episode_phi_loss = 0.0
             phi_updates = 0
             
-            for human_idx in human_agent_indices:
-                trajectory = trajectories[human_idx]
-                if len(trajectory) == 0:
-                    continue
+            for _ in range(updates_per_episode):
+                batch = replay_buffer.sample(batch_size)
                 
                 phi_optimizer.zero_grad()
                 phi_losses_list = []
                 
-                for t in trajectory:
+                for t in batch:
+                    human_idx = t['human_idx']
+                    
                     # Convert state to tensors
                     grid_tensor, step_tensor = _state_to_tensors_static(
                         t['state'], grid_width, grid_height, num_agents,
@@ -1188,8 +1248,7 @@ def train_neural_policy_prior(
                         position, direction, agent_idx_t
                     )
                     
-                    # KL divergence loss: KL(target || predicted)
-                    # Using cross-entropy since KL = H(p,q) - H(p) and H(p) is constant
+                    # KL divergence loss
                     phi_loss = F.kl_div(
                         predicted_policy.log(),
                         target_policy,
@@ -1213,10 +1272,12 @@ def train_neural_policy_prior(
             avg_q_loss = np.mean(q_losses[-100:]) if q_losses else 0.0
             avg_phi_loss = np.mean(phi_losses[-100:]) if phi_losses else 0.0
             print(f"Episode {episode + 1}/{num_episodes}: "
-                  f"Q-Loss = {avg_q_loss:.4f}, Phi-Loss = {avg_phi_loss:.4f}")
+                  f"Q-Loss = {avg_q_loss:.4f}, Phi-Loss = {avg_phi_loss:.4f}, "
+                  f"Buffer = {len(replay_buffer)}")
     
     if verbose:
         print("Training complete!")
+        print(f"  Replay buffer size: {len(replay_buffer)}")
         if q_losses:
             print(f"  Final Q-Loss: {np.mean(q_losses[-100:]):.4f}")
         if phi_losses:
