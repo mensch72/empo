@@ -50,9 +50,9 @@ from empo.nn_based import (
 
 EMPTY_5X5_MAP = """
 We We We We We We We
-We Ay .. .. .. Ay We
 We .. .. .. .. .. We
-We .. .. Ae .. .. We
+We .. .. .. Ay .. We
+We .. Ay Ae .. .. We
 We .. .. .. .. .. We
 We .. .. .. .. .. We
 We We We We We We We
@@ -719,16 +719,16 @@ def main():
     
     # Train neural network
     device = 'cpu'
-    beta = 5.0
+    beta = 20 #5.0
     
     t0 = time.time()
     q_network = train_nn_policy_prior(
         env=env,
         human_agent_indices=human_agent_indices,
         goal_cells=goal_cells,
-        num_episodes=500,
+        num_episodes=5000, #500,
         beta=beta,
-        gamma=0.99,
+        gamma=1, #0.99,
         learning_rate=1e-3,
         device=device,
         verbose=True
