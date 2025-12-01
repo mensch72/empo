@@ -60,6 +60,20 @@ We .. .. .. .. .. .. We
 We We We We We We We We
 """
 
+# Ready state layout: after robot programs buttons and steps aside
+# - Human (yellow) at (2, 3) - between the buttons, ready to use them
+# - Robot (grey) at (1, 5) - stepped out of the way
+# - Buttons already programmed
+READY_MAP = """
+We We We We We We We We
+We .. .. .. .. .. .. We
+We .. CB .. .. Ro .. We
+We .. Ay CB .. Ro We We
+We .. CB .. .. Ro .. We
+We Ae .. .. .. .. .. We
+We We We We We We We We
+"""
+
 
 class ControlButtonEnv(MultiGridEnv):
     """
@@ -67,7 +81,9 @@ class ControlButtonEnv(MultiGridEnv):
     
     Can be initialized in two modes:
     1. pre_programmed=False: Robot starts in position to program buttons (for prequel)
-    2. pre_programmed=True: Buttons are already programmed (for learning phase)
+    2. pre_programmed=True: Buttons are already programmed, agents in ready positions
+       - Human at (2,3) between buttons
+       - Robot at (1,5) stepped aside
     
     Button programming:
     - Upper (2, 2) -> left action
@@ -81,11 +97,13 @@ class ControlButtonEnv(MultiGridEnv):
         """
         Args:
             max_steps: Maximum steps per episode
-            pre_programmed: If True, buttons start pre-programmed
+            pre_programmed: If True, buttons start pre-programmed with agents in ready positions
         """
         self.pre_programmed = pre_programmed
+        # Use different maps based on mode
+        map_str = READY_MAP if pre_programmed else PREQUEL_MAP
         super().__init__(
-            map=PREQUEL_MAP,
+            map=map_str,
             max_steps=max_steps,
             partial_obs=False,
             objects_set=World,

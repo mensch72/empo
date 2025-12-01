@@ -591,7 +591,8 @@ def test_control_button_encode():
     cb.triggered_action = Actions.forward
     cb.enabled = False
     
-    encoding = cb.encode()
+    # encode() requires the world argument to access OBJECT_TO_IDX and COLOR_TO_IDX
+    encoding = cb.encode(World)
     
     # encoding should include: type, color, trigger_color, controlled_color, enabled, controlled_agent, triggered_action
     assert len(encoding) >= 5, "Encoding should include multiple attributes"
