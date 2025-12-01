@@ -11,14 +11,13 @@ The scenario:
 - 3 rocks that the robot (grey) can push
 - The human learns to use the control buttons to guide the robot to push rocks
 
-The human learns policies for 3 goals:
-- Goal 1: Get the robot to where Rock 1 started (5, 2)
-- Goal 2: Get the robot to where Rock 2 started (5, 3)
-- Goal 3: Get the robot to where Rock 3 started (5, 4)
+The human learns policies for 2 goals:
+- Goal 1: Get the robot to position (4, 1) - top position
+- Goal 2: Get the robot to position (4, 5) - bottom position
 
 Workflow:
-1. Prequel phase: Robot programs buttons and steps aside to (1,5), human moves to (2,3)
-2. Learning phase: Train neural network for human to reach rock positions via button control
+1. Prequel phase: Robot programs buttons and steps aside to (4,3) facing right, human moves to (2,3)
+2. Learning phase: Train neural network for human to reach goal positions via button control
 3. Rollout phase: Show prequel + human following learned policy
 
 This demonstrates human-robot control via programmable control interfaces.
@@ -35,7 +34,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 # Patch gym import for compatibility
 import gymnasium as gym
@@ -43,11 +41,7 @@ sys.modules['gym'] = gym
 
 from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, Wall, World, Actions, ControlButton, Rock
 from empo.possible_goal import PossibleGoal, PossibleGoalSampler
-from empo.nn_based import (
-    StateEncoder, AgentEncoder, GoalEncoder,
-    QNetwork, PolicyPriorNetwork,
-    train_neural_policy_prior,
-)
+from empo.nn_based import train_neural_policy_prior
 
 # Output directory for movies and images
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -75,15 +69,15 @@ We We We We We We We We
 
 # Ready state layout: after robot programs buttons and steps aside
 # - Human (yellow) at (2, 3) - between the buttons, ready to use them
-# - Robot (grey) at (1, 5) - stepped out of the way
+# - Robot (grey) at (4, 3) facing east - stepped aside
 # - Buttons already programmed
 READY_MAP = """
 We We We We We We We We
 We .. .. .. .. .. .. We
 We .. CB .. .. Ro .. We
-We .. Ay CB .. Ro We We
+We .. Ay CB Ae Ro We We
 We .. CB .. .. Ro .. We
-We Ae .. .. .. .. .. We
+We .. .. .. .. .. .. We
 We We We We We We We We
 """
 
@@ -96,7 +90,7 @@ class ControlButtonEnv(MultiGridEnv):
     1. pre_programmed=False: Robot starts in position to program buttons (for prequel)
     2. pre_programmed=True: Buttons are already programmed, agents in ready positions
        - Human at (2,3) between buttons
-       - Robot at (1,5) stepped aside
+       - Robot at (4,3) stepped aside, facing east
     
     Button programming:
     - Upper (2, 2) -> left action
@@ -223,110 +217,6 @@ class RockPositionGoalSampler(PossibleGoalSampler):
         target_pos = random.choice(self.rock_positions)
         goal = RobotAtRockGoal(self.world_model, self.robot_idx, target_pos)
         return goal, 1.0
-
-
-# ============================================================================
-# Helper functions for neural network learning
-# ============================================================================
-
-def state_to_grid_tensor(
-    state, 
-    grid_width: int, 
-    grid_height: int,
-    num_agents: int,
-    num_object_types: int = 12,
-    device: str = 'cpu'
-) -> tuple:
-    """Convert a multigrid state to tensor representation for the neural network."""
-    step_count, agent_states, mobile_objects, mutable_objects = state
-    
-    num_channels = num_object_types + num_agents
-    grid_tensor = torch.zeros(1, num_channels, grid_height, grid_width, device=device)
-    
-    # Encode agent positions
-    for i, agent_state in enumerate(agent_states):
-        if i < num_agents:
-            x, y = int(agent_state[0]), int(agent_state[1])
-            if 0 <= x < grid_width and 0 <= y < grid_height:
-                channel_idx = num_object_types + i
-                grid_tensor[0, channel_idx, y, x] = 1.0
-    
-    max_steps = 100
-    step_tensor = torch.tensor([[step_count / max_steps]], device=device, dtype=torch.float32)
-    
-    return grid_tensor, step_tensor
-
-
-def get_agent_tensors(
-    state,
-    agent_idx: int,
-    grid_width: int,
-    grid_height: int,
-    device: str = 'cpu'
-) -> tuple:
-    """Extract agent position, direction, and index tensors from state."""
-    _, agent_states, _, _ = state
-    agent_state = agent_states[agent_idx]
-    
-    position = torch.tensor([[
-        agent_state[0] / grid_width,
-        agent_state[1] / grid_height
-    ]], device=device, dtype=torch.float32)
-    
-    direction = torch.zeros(1, 4, device=device)
-    dir_idx = int(agent_state[2]) % 4
-    direction[0, dir_idx] = 1.0
-    
-    agent_idx_tensor = torch.tensor([agent_idx], device=device)
-    
-    return position, direction, agent_idx_tensor
-
-
-def get_goal_tensor(
-    goal_pos: tuple,
-    grid_width: int,
-    grid_height: int,
-    device: str = 'cpu'
-) -> torch.Tensor:
-    """Convert goal position to normalized tensor."""
-    return torch.tensor([[
-        goal_pos[0] / grid_width,
-        goal_pos[1] / grid_height,
-        goal_pos[0] / grid_width,
-        goal_pos[1] / grid_height
-    ]], device=device, dtype=torch.float32)
-
-
-def get_boltzmann_action(
-    q_network: QNetwork,
-    state,
-    human_idx: int,
-    goal_pos: tuple,
-    grid_width: int,
-    grid_height: int,
-    num_agents: int,
-    beta: float = 5.0,
-    device: str = 'cpu'
-) -> int:
-    """Sample an action from the learned Boltzmann policy."""
-    grid_tensor, step_tensor = state_to_grid_tensor(
-        state, grid_width, grid_height, num_agents, device=device
-    )
-    position, direction, agent_idx_t = get_agent_tensors(
-        state, human_idx, grid_width, grid_height, device
-    )
-    goal_coords = get_goal_tensor(goal_pos, grid_width, grid_height, device)
-    
-    with torch.no_grad():
-        q_values = q_network(
-            grid_tensor, step_tensor,
-            position, direction, agent_idx_t,
-            goal_coords
-        )
-        policy = F.softmax(beta * q_values, dim=1)
-        action = torch.multinomial(policy, 1).item()
-    
-    return action
 
 
 def create_movie(frames, output_path, fps=2):
@@ -778,31 +668,45 @@ def create_full_rollout_movie():
         
         print("  All buttons programmed!")
         
-        # ========== PREQUEL PHASE 2: ROBOT STEPS ASIDE TO (1, 5) ==========
-        print("\n=== PREQUEL: Robot steps aside to (1,5) ===")
+        # ========== PREQUEL PHASE 2: ROBOT STEPS ASIDE TO (4, 3) FACING EAST ==========
+        print("\n=== PREQUEL: Robot steps aside to (4,3) facing right ===")
         
-        # Robot now at (2, 3) facing east (dir=0). Need to go to (1, 5).
-        # Turn left twice to face west, move to (1,3), turn left to face south, move to (1,5)
+        # Robot now at (2, 3) facing east (dir=0). Need to go to (4, 3) facing east.
+        # Move forward twice to (4, 3), keep facing east
+        actions[robot_idx] = Actions.forward  # (2,3) -> blocked by button at (3,3)
+        env.step(actions)
+        # Need to go around: turn right (face south), go to (2,4), turn left (face east), go to (4,4), turn left (face north), go to (4,3), turn right (face east)
+        # Or simpler: stay at (2,3), turn to face east, let human control phase proceed
+        # Actually the robot needs to move. Let's do: go around the button
+        
+        # Turn right to face south
+        actions[robot_idx] = Actions.right  # east -> south
+        env.step(actions)
+        # Move forward to (2, 4)
+        actions[robot_idx] = Actions.forward
+        env.step(actions)
+        # Turn left to face east
+        actions[robot_idx] = Actions.left  # south -> east
+        env.step(actions)
+        # Move forward to (3, 4)
+        actions[robot_idx] = Actions.forward
+        env.step(actions)
+        # Move forward to (4, 4)
+        actions[robot_idx] = Actions.forward
+        env.step(actions)
+        # Turn left to face north
         actions[robot_idx] = Actions.left  # east -> north
         env.step(actions)
-        actions[robot_idx] = Actions.left  # north -> west
-        env.step(actions)
-        # Move west to (1, 3)
+        # Move forward to (4, 3)
         actions[robot_idx] = Actions.forward
         env.step(actions)
-        # Turn left to face south
-        actions[robot_idx] = Actions.left  # west -> south
-        env.step(actions)
-        # Move south to (1, 4)
-        actions[robot_idx] = Actions.forward
-        env.step(actions)
-        # Move south to (1, 5)
-        actions[robot_idx] = Actions.forward
+        # Turn right to face east
+        actions[robot_idx] = Actions.right  # north -> east
         env.step(actions)
         
         img = env.render(mode='rgb_array')
-        all_frames.append(('PREQUEL: Robot at (1,5)', img))
-        print(f"  Robot now at: {tuple(env.agents[robot_idx].pos)}")
+        all_frames.append(('PREQUEL: Robot at (4,3) facing right', img))
+        print(f"  Robot now at: {tuple(env.agents[robot_idx].pos)}, dir={env.agents[robot_idx].dir}")
         
         # ========== PREQUEL PHASE 3: HUMAN MOVES TO (2, 3) ==========
         print("\n=== PREQUEL: Human moves to (2,3) ===")
@@ -834,9 +738,9 @@ def create_full_rollout_movie():
         img = env.render(mode='rgb_array')
         all_frames.append(('PREQUEL: Human at (2,3) - READY!', img))
         print(f"  Human now at: {tuple(env.agents[human_idx].pos)}")
-        print(f"  Robot at: {tuple(env.agents[robot_idx].pos)}")
+        print(f"  Robot at: {tuple(env.agents[robot_idx].pos)}, dir={env.agents[robot_idx].dir}")
         print(f"\n  === READY STATE ACHIEVED ===")
-        print(f"  Human at (2,3) between buttons, Robot at (1,5) stepped aside")
+        print(f"  Human at (2,3) between buttons, Robot at (4,3) facing right")
         
         # ========== HUMAN CONTROL PHASE ==========
         print("\n=== CONTROL: Human uses buttons ===")
@@ -929,14 +833,14 @@ def create_full_rollout_movie():
 
 def train_and_rollout_with_learned_policy():
     """
-    Train a neural network for the human to learn to reach rock positions,
+    Train a neural network for the human to learn to reach goal positions,
     then demonstrate rollouts with prequel + learned policy.
     
     Uses train_neural_policy_prior() to train the policy, then neural_prior.sample()
     to get actions during rollouts.
     """
     print("=" * 70)
-    print("Neural Network Learning: Human learns to guide robot to rocks")
+    print("Neural Network Learning: Human learns to guide robot to goals")
     print("=" * 70)
     print()
     
@@ -959,22 +863,22 @@ def train_and_rollout_with_learned_policy():
     print(f"Environment ready state:")
     print(f"  Human (yellow) at: {tuple(env.agents[human_idx].pos)}")
     print(f"  Robot (grey) at: {tuple(env.agents[robot_idx].pos)}")
-    print(f"  Rock positions: {env.rock_positions}")
     print(f"  Action space: {env.action_space.n} actions")
     print()
     
-    # Goal cells are the 3 rock positions
-    goal_cells = env.rock_positions  # [(5, 2), (5, 3), (5, 4)]
+    # Two goals: robot at (4, 1) and (4, 5) - easier to learn
+    goal_cells = [(4, 1), (4, 5)]
     
     # Create goal sampler
     goal_sampler = RockPositionGoalSampler(env, robot_idx, goal_cells)
     
     print(f"Training neural network for {len(goal_cells)} goal positions...")
-    print("  Human learns to guide robot to each rock position via control buttons")
+    print(f"  Goals: {goal_cells}")
+    print("  Human learns to guide robot to goal positions via control buttons")
     print()
     
     device = 'cpu'
-    beta = 10.0
+    beta = 1000.0  # High beta for more deterministic human
     
     t0 = time.time()
     try:
@@ -983,14 +887,14 @@ def train_and_rollout_with_learned_policy():
             world_model=env,
             human_agent_indices=[human_idx],
             goal_sampler=goal_sampler,
-            num_episodes=500,  # Reduced for faster demo
-            steps_per_episode=50,  # Reduced for faster demo
+            num_episodes=2000,  # 4x increase
+            steps_per_episode=50,
             beta=beta,
             gamma=1.0,
             learning_rate=1e-3,
-            batch_size=32,
-            replay_buffer_size=5000,
-            updates_per_episode=2,
+            batch_size=128,  # Larger batch size
+            replay_buffer_size=10000,
+            updates_per_episode=4,
             train_phi_network=False,
             epsilon=0.3,
             device=device,

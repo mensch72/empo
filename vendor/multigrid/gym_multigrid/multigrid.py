@@ -603,8 +603,8 @@ class ControlButton(WorldObj):
         """Render the control button with state indication and action text label."""
         if self.enabled:
             if self.triggered_action is not None:
-                # Bright green when programmed
-                c = COLORS['green']
+                # Muted green when programmed (less bright for readable labels)
+                c = np.array([50, 120, 50])  # Darker green for better label contrast
                 fill_coords(img, point_in_rect(0, 1, 0, 1), c)
                 
                 # Get the action label text
@@ -3111,11 +3111,11 @@ class MultiGridEnv(WorldModel):
                         agent_x = int((agent.pos[0] + 0.5) * tile_size)
                         agent_y = int((agent.pos[1] + 0.5) * tile_size)
                         
-                        # Draw dashed line
+                        # Draw dashed line (muted color, thinner)
                         self._draw_dashed_line(img, btn_x, btn_y, agent_x, agent_y, 
-                                              color=(100, 255, 100), dash_len=4, gap_len=3)
+                                              color=(80, 160, 80), dash_len=3, gap_len=4, thickness=1)
     
-    def _draw_dashed_line(self, img, x1, y1, x2, y2, color=(255, 255, 255), dash_len=5, gap_len=3):
+    def _draw_dashed_line(self, img, x1, y1, x2, y2, color=(255, 255, 255), dash_len=5, gap_len=3, thickness=1):
         """Draw a dashed line on the image."""
         import math
         dx = x2 - x1
@@ -3142,9 +3142,9 @@ class MultiGridEnv(WorldModel):
             ey = int(y1 + dy * end)
             
             # Draw the dash segment with simple line algorithm
-            self._draw_line_segment(img, sx, sy, ex, ey, color)
+            self._draw_line_segment(img, sx, sy, ex, ey, color, thickness)
     
-    def _draw_line_segment(self, img, x1, y1, x2, y2, color):
+    def _draw_line_segment(self, img, x1, y1, x2, y2, color, thickness=1):
         """Draw a simple line segment on the image using Bresenham-like approach."""
         import math
         dx = abs(x2 - x1)
@@ -3157,12 +3157,15 @@ class MultiGridEnv(WorldModel):
         x, y = float(x1), float(y1)
         h, w = img.shape[:2]
         
+        # Thickness offset (for thickness=1, only center pixel)
+        half_t = thickness // 2
+        
         for _ in range(int(steps) + 1):
             px, py = int(x), int(y)
             if 0 <= px < w and 0 <= py < h:
-                # Draw a small dot for visibility
-                for ox in range(-1, 2):
-                    for oy in range(-1, 2):
+                # Draw pixels based on thickness
+                for ox in range(-half_t, half_t + 1):
+                    for oy in range(-half_t, half_t + 1):
                         if 0 <= px+ox < w and 0 <= py+oy < h:
                             img[py+oy, px+ox] = color
             x += x_inc
