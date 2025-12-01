@@ -513,7 +513,7 @@ def demonstrate_human_control_with_movie():
         env.step(actions)
         print(f"  Robot forced_next_action: {env.agents[robot_idx].forced_next_action}")
         img = env.render(mode='rgb_array')
-        frames.append(('Human triggers "fore" button', img))
+        frames.append(('Human triggers "forward" button', img))
         
         # Robot's next action is forced
         print("Robot executes forced 'forward' action...")
