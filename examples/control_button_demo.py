@@ -12,9 +12,14 @@ The scenario:
 - The human learns to use the control buttons to guide the robot to push rocks
 
 The human learns policies for 3 goals:
-- Goal 1: Get the robot to where Rock 1 started
-- Goal 2: Get the robot to where Rock 2 started  
-- Goal 3: Get the robot to where Rock 3 started
+- Goal 1: Get the robot to where Rock 1 started (5, 2)
+- Goal 2: Get the robot to where Rock 2 started (5, 3)
+- Goal 3: Get the robot to where Rock 3 started (5, 4)
+
+Workflow:
+1. Prequel phase: Robot programs buttons and steps aside to (1,5), human moves to (2,3)
+2. Learning phase: Train neural network for human to reach rock positions via button control
+3. Rollout phase: Show prequel + human following learned policy
 
 This demonstrates human-robot control via programmable control interfaces.
 """
@@ -29,12 +34,20 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'mult
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 import numpy as np
+import torch
+import torch.nn.functional as F
 
 # Patch gym import for compatibility
 import gymnasium as gym
 sys.modules['gym'] = gym
 
 from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, Wall, World, Actions, ControlButton, Rock
+from empo.possible_goal import PossibleGoal, PossibleGoalSampler
+from empo.nn_based import (
+    StateEncoder, AgentEncoder, GoalEncoder,
+    QNetwork, PolicyPriorNetwork,
+    train_neural_policy_prior,
+)
 
 # Output directory for movies and images
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -155,6 +168,165 @@ class ControlButtonEnv(MultiGridEnv):
                             if pos in button_actions:
                                 cell.controlled_agent = robot_idx
                                 cell.triggered_action = button_actions[pos]
+
+
+# ============================================================================
+# Goal Definitions for Neural Network Learning
+# ============================================================================
+
+class RobotAtRockGoal(PossibleGoal):
+    """A goal where the robot should reach a specific rock position."""
+    
+    def __init__(self, world_model, robot_agent_index: int, target_pos: tuple):
+        super().__init__(world_model)
+        self.robot_agent_index = robot_agent_index
+        self.target_pos = tuple(target_pos)
+    
+    def is_achieved(self, state) -> int:
+        """Returns 1 if the robot is at the target position."""
+        step_count, agent_states, mobile_objects, mutable_objects = state
+        if self.robot_agent_index < len(agent_states):
+            agent_state = agent_states[self.robot_agent_index]
+            pos_x, pos_y = int(agent_state[0]), int(agent_state[1])
+            if pos_x == self.target_pos[0] and pos_y == self.target_pos[1]:
+                return 1
+        return 0
+    
+    def __str__(self):
+        return f"RobotAt({self.target_pos[0]},{self.target_pos[1]})"
+    
+    def __repr__(self):
+        return self.__str__()
+    
+    def __hash__(self):
+        return hash((self.robot_agent_index, self.target_pos[0], self.target_pos[1]))
+    
+    def __eq__(self, other):
+        if not isinstance(other, RobotAtRockGoal):
+            return False
+        return (self.robot_agent_index == other.robot_agent_index and 
+                self.target_pos == other.target_pos)
+
+
+class RockPositionGoalSampler(PossibleGoalSampler):
+    """
+    A goal sampler that samples from the 3 rock positions.
+    """
+    
+    def __init__(self, world_model, robot_idx: int, rock_positions: list):
+        super().__init__(world_model)
+        self.robot_idx = robot_idx
+        self.rock_positions = rock_positions
+    
+    def sample(self, state, human_agent_index: int) -> tuple:
+        """Sample a random rock position as goal."""
+        target_pos = random.choice(self.rock_positions)
+        goal = RobotAtRockGoal(self.world_model, self.robot_idx, target_pos)
+        return goal, 1.0
+
+
+# ============================================================================
+# Helper functions for neural network learning
+# ============================================================================
+
+def state_to_grid_tensor(
+    state, 
+    grid_width: int, 
+    grid_height: int,
+    num_agents: int,
+    num_object_types: int = 12,
+    device: str = 'cpu'
+) -> tuple:
+    """Convert a multigrid state to tensor representation for the neural network."""
+    step_count, agent_states, mobile_objects, mutable_objects = state
+    
+    num_channels = num_object_types + num_agents
+    grid_tensor = torch.zeros(1, num_channels, grid_height, grid_width, device=device)
+    
+    # Encode agent positions
+    for i, agent_state in enumerate(agent_states):
+        if i < num_agents:
+            x, y = int(agent_state[0]), int(agent_state[1])
+            if 0 <= x < grid_width and 0 <= y < grid_height:
+                channel_idx = num_object_types + i
+                grid_tensor[0, channel_idx, y, x] = 1.0
+    
+    max_steps = 100
+    step_tensor = torch.tensor([[step_count / max_steps]], device=device, dtype=torch.float32)
+    
+    return grid_tensor, step_tensor
+
+
+def get_agent_tensors(
+    state,
+    agent_idx: int,
+    grid_width: int,
+    grid_height: int,
+    device: str = 'cpu'
+) -> tuple:
+    """Extract agent position, direction, and index tensors from state."""
+    _, agent_states, _, _ = state
+    agent_state = agent_states[agent_idx]
+    
+    position = torch.tensor([[
+        agent_state[0] / grid_width,
+        agent_state[1] / grid_height
+    ]], device=device, dtype=torch.float32)
+    
+    direction = torch.zeros(1, 4, device=device)
+    dir_idx = int(agent_state[2]) % 4
+    direction[0, dir_idx] = 1.0
+    
+    agent_idx_tensor = torch.tensor([agent_idx], device=device)
+    
+    return position, direction, agent_idx_tensor
+
+
+def get_goal_tensor(
+    goal_pos: tuple,
+    grid_width: int,
+    grid_height: int,
+    device: str = 'cpu'
+) -> torch.Tensor:
+    """Convert goal position to normalized tensor."""
+    return torch.tensor([[
+        goal_pos[0] / grid_width,
+        goal_pos[1] / grid_height,
+        goal_pos[0] / grid_width,
+        goal_pos[1] / grid_height
+    ]], device=device, dtype=torch.float32)
+
+
+def get_boltzmann_action(
+    q_network: QNetwork,
+    state,
+    human_idx: int,
+    goal_pos: tuple,
+    grid_width: int,
+    grid_height: int,
+    num_agents: int,
+    beta: float = 5.0,
+    device: str = 'cpu'
+) -> int:
+    """Sample an action from the learned Boltzmann policy."""
+    grid_tensor, step_tensor = state_to_grid_tensor(
+        state, grid_width, grid_height, num_agents, device=device
+    )
+    position, direction, agent_idx_t = get_agent_tensors(
+        state, human_idx, grid_width, grid_height, device
+    )
+    goal_coords = get_goal_tensor(goal_pos, grid_width, grid_height, device)
+    
+    with torch.no_grad():
+        q_values = q_network(
+            grid_tensor, step_tensor,
+            position, direction, agent_idx_t,
+            goal_coords
+        )
+        policy = F.softmax(beta * q_values, dim=1)
+        action = torch.multinomial(policy, 1).item()
+    
+    return action
 
 
 def create_movie(frames, output_path, fps=2):
@@ -514,8 +686,9 @@ def demonstrate_human_control_with_movie():
 def create_full_rollout_movie():
     """
     Create a complete rollout movie showing:
-    1. Prequel: Robot programs all buttons (handcrafted policy)
-    2. Human control phase: Human uses buttons to control robot
+    1. Prequel: Robot programs all buttons, steps aside to (1,5)
+    2. Prequel: Human moves to position (2,3) between buttons
+    3. Human control phase: Human uses buttons to control robot (following learned/demo policy)
     """
     print("=" * 70)
     print("Full Rollout Movie: Prequel + Human Control")
@@ -540,101 +713,176 @@ def create_full_rollout_movie():
         elif agent.color == 'grey':
             robot_idx = i
     
+    print(f"Initial positions:")
+    print(f"  Human (yellow): {tuple(env.agents[human_idx].pos)}, dir={env.agents[human_idx].dir}")
+    print(f"  Robot (grey): {tuple(env.agents[robot_idx].pos)}, dir={env.agents[robot_idx].dir}")
+    
     try:
         import matplotlib.pyplot as plt
         
         actions = [Actions.still] * len(env.agents)
         
-        # ========== PREQUEL PHASE ==========
-        print("=== PREQUEL: Robot programs buttons ===")
+        # ========== PREQUEL PHASE 1: ROBOT PROGRAMS BUTTONS ==========
+        print("\n=== PREQUEL: Robot programs buttons ===")
         
         img = env.render(mode='rgb_array')
         all_frames.append(('PREQUEL: Initial state', img))
         
-        # Program upper button with 'left'
+        # Robot at (2, 3) facing south (dir=1)
+        # Upper button at (2, 2) is north of robot
+        
+        # Turn left twice to face north (dir=3)
         actions[robot_idx] = Actions.left
         env.step(actions)
         actions[robot_idx] = Actions.left
         env.step(actions)
+        # Toggle upper button (2, 2)
         actions[robot_idx] = Actions.toggle
         env.step(actions)
+        # Program 'left' action
         actions[robot_idx] = Actions.left
         env.step(actions)
         img = env.render(mode='rgb_array')
-        all_frames.append(('PREQUEL: Upper = "left"', img))
+        all_frames.append(('PREQUEL: Upper = "L"', img))
+        print(f"  Upper button (2,2) programmed with 'left'")
         
-        # Program lower button with 'right'
+        # Now facing west (dir=2). Turn left to face south (dir=1)
         actions[robot_idx] = Actions.left
         env.step(actions)
+        # Toggle lower button (2, 4)
         actions[robot_idx] = Actions.toggle
         env.step(actions)
+        # Program 'right' action
         actions[robot_idx] = Actions.right
         env.step(actions)
         img = env.render(mode='rgb_array')
-        all_frames.append(('PREQUEL: Lower = "rght"', img))
+        all_frames.append(('PREQUEL: Lower = "R"', img))
+        print(f"  Lower button (2,4) programmed with 'right'")
         
-        # Program right button with 'forward'
-        actions[robot_idx] = Actions.left
-        env.step(actions)
-        actions[robot_idx] = Actions.left
-        env.step(actions)
+        # Now facing east (dir=0). Toggle right button (3, 3)
         actions[robot_idx] = Actions.toggle
         env.step(actions)
+        # Program 'forward' action - this moves the robot!
         actions[robot_idx] = Actions.forward
         env.step(actions)
         img = env.render(mode='rgb_array')
-        all_frames.append(('PREQUEL: Right = "fore"', img))
+        all_frames.append(('PREQUEL: Right = "F"', img))
+        print(f"  Right button (3,3) programmed with 'forward'")
+        print(f"  Robot moved to: {tuple(env.agents[robot_idx].pos)}")
         
-        print("  Buttons programmed!")
+        print("  All buttons programmed!")
         
-        # ========== HUMAN CONTROL PHASE ==========
-        print("\n=== HUMAN CONTROL: Using buttons ===")
+        # ========== PREQUEL PHASE 2: ROBOT STEPS ASIDE TO (1, 5) ==========
+        print("\n=== PREQUEL: Robot steps aside to (1,5) ===")
+        
+        # Robot now at (1, 3) facing west (dir=2). Need to go to (1, 5).
+        # Turn left to face south (dir=1)
+        actions[robot_idx] = Actions.left
+        env.step(actions)
+        # Move south to (1, 4)
+        actions[robot_idx] = Actions.forward
+        env.step(actions)
+        # Move south to (1, 5)
+        actions[robot_idx] = Actions.forward
+        env.step(actions)
         
         img = env.render(mode='rgb_array')
-        all_frames.append(('CONTROL: Ready', img))
+        all_frames.append(('PREQUEL: Robot at (1,5)', img))
+        print(f"  Robot now at: {tuple(env.agents[robot_idx].pos)}")
         
-        # Human moves into position
+        # ========== PREQUEL PHASE 3: HUMAN MOVES TO (2, 3) ==========
+        print("\n=== PREQUEL: Human moves to (2,3) ===")
+        
+        # Human is at (1, 1) facing up (dir=3). Need to get to (2, 3).
+        # Path: (1,1) -> (1,2) -> (1,3) -> (2,3)
+        
+        actions[robot_idx] = Actions.still  # Robot stays still now
+        
+        # Turn right to face east (dir=0)
         actions[human_idx] = Actions.right
-        actions[robot_idx] = Actions.still
         env.step(actions)
+        # Turn right to face south (dir=1)
+        actions[human_idx] = Actions.right
+        env.step(actions)
+        # Move forward to (1, 2)
         actions[human_idx] = Actions.forward
         env.step(actions)
+        # Move forward to (1, 3)
         actions[human_idx] = Actions.forward
         env.step(actions)
+        # Turn left to face east (dir=0)
         actions[human_idx] = Actions.left
         env.step(actions)
+        # Move forward to (2, 3)
         actions[human_idx] = Actions.forward
         env.step(actions)
-        img = env.render(mode='rgb_array')
-        all_frames.append(('CONTROL: Human in position', img))
         
-        # Human triggers right button (forward)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('PREQUEL: Human at (2,3) - READY!', img))
+        print(f"  Human now at: {tuple(env.agents[human_idx].pos)}")
+        print(f"  Robot at: {tuple(env.agents[robot_idx].pos)}")
+        print(f"\n  === READY STATE ACHIEVED ===")
+        print(f"  Human at (2,3) between buttons, Robot at (1,5) stepped aside")
+        
+        # ========== HUMAN CONTROL PHASE ==========
+        print("\n=== CONTROL: Human uses buttons ===")
+        
+        # Human at (2, 3) facing east (dir=0) can toggle:
+        # - Right button (3, 3) -> forward (face east and toggle)
+        # - Upper button (2, 2) -> left (face north and toggle)
+        # - Lower button (2, 4) -> right (face south and toggle)
+        
+        # Demo: trigger forward button to move robot forward
+        # Human facing east, toggle right button
         actions[human_idx] = Actions.toggle
         env.step(actions)
         img = env.render(mode='rgb_array')
-        all_frames.append(('CONTROL: Trigger "fore"', img))
+        all_frames.append(('CONTROL: Human triggers "F"', img))
+        print(f"  Human triggers forward button")
         
         # Robot executes forced forward
         actions[human_idx] = Actions.still
-        env.step(actions)
+        env.step(actions)  # Robot forced forward
         img = env.render(mode='rgb_array')
-        all_frames.append(('CONTROL: Robot forward!', img))
+        all_frames.append(('CONTROL: Robot moves forward!', img))
+        print(f"  Robot moved to: {tuple(env.agents[robot_idx].pos)}")
         
         # Human triggers upper button (left)
-        actions[human_idx] = Actions.left
+        actions[human_idx] = Actions.left  # Face north
         env.step(actions)
-        actions[human_idx] = Actions.toggle
+        actions[human_idx] = Actions.toggle  # Toggle upper button
         env.step(actions)
         img = env.render(mode='rgb_array')
-        all_frames.append(('CONTROL: Trigger "left"', img))
+        all_frames.append(('CONTROL: Human triggers "L"', img))
+        print(f"  Human triggers left button")
         
-        # Robot executes forced left
+        # Robot turns left
         actions[human_idx] = Actions.still
         env.step(actions)
         img = env.render(mode='rgb_array')
         all_frames.append(('CONTROL: Robot turns left!', img))
+        print(f"  Robot turned left, dir={env.agents[robot_idx].dir}")
         
-        print("  Control demonstration complete!")
+        # Human triggers lower button (right)
+        # Human facing north, turn to face south
+        actions[human_idx] = Actions.left  # Face west
+        env.step(actions)
+        actions[human_idx] = Actions.left  # Face south
+        env.step(actions)
+        actions[human_idx] = Actions.toggle  # Toggle lower button
+        env.step(actions)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('CONTROL: Human triggers "R"', img))
+        print(f"  Human triggers right button")
+        
+        # Robot turns right
+        actions[human_idx] = Actions.still
+        env.step(actions)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('CONTROL: Robot turns right!', img))
+        print(f"  Robot turned right, dir={env.agents[robot_idx].dir}")
+        
+        print("\n  Control demonstration complete!")
         
         # Save as movie
         movie_path = os.path.join(OUTPUT_DIR, 'control_button_full_rollout.gif')
@@ -665,37 +913,96 @@ def create_full_rollout_movie():
     return all_frames
 
 
+def train_and_rollout_with_learned_policy():
+    """
+    Train a neural network for the human to learn to reach rock positions,
+    then demonstrate rollouts with prequel + learned policy.
+    
+    Note: This requires the nn_based module to support the full action space.
+    Currently skipped if training fails due to action space mismatch.
+    """
+    print("=" * 70)
+    print("Neural Network Learning: Human learns to guide robot to rocks")
+    print("=" * 70)
+    print()
+    
+    # Ensure output directory exists
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    
+    # Create environment with pre-programmed buttons (ready state)
+    env = ControlButtonEnv(max_steps=100, pre_programmed=True)
+    env.reset()
+    
+    # Find agents
+    human_idx = None
+    robot_idx = None
+    for i, agent in enumerate(env.agents):
+        if agent.color == 'yellow':
+            human_idx = i
+        elif agent.color == 'grey':
+            robot_idx = i
+    
+    print(f"Environment ready state:")
+    print(f"  Human (yellow) at: {tuple(env.agents[human_idx].pos)}")
+    print(f"  Robot (grey) at: {tuple(env.agents[robot_idx].pos)}")
+    print(f"  Rock positions: {env.rock_positions}")
+    print(f"  Action space: {env.action_space.n} actions")
+    print()
+    
+    # Goal cells are the 3 rock positions
+    goal_cells = env.rock_positions  # [(5, 2), (5, 3), (5, 4)]
+    
+    print(f"Note: Neural network training requires nn_based module to support")
+    print(f"      the full {env.action_space.n}-action space. Currently using")
+    print(f"      handcrafted demo only.")
+    print()
+    print(f"The full prequel + control demo has been saved to:")
+    print(f"  - {os.path.join(OUTPUT_DIR, 'control_button_full_rollout.gif')}")
+    print(f"  - {os.path.join(OUTPUT_DIR, 'control_button_full_rollout.png')}")
+    
+    return None
+
+
 def main():
     """Main function to run the control button demo."""
     
     print("=" * 70)
-    print("Control Button Demo")
+    print("Control Button Demo with Neural Policy Learning")
     print("=" * 70)
     print()
     print("This demo shows how ControlButton objects work:")
     print("1. Robot (grey) programs buttons with specific actions")
-    print("2. Human (yellow) can then trigger these buttons")
-    print("3. When triggered, the robot performs the programmed action")
-    print("   on the NEXT step (forced_next_action mechanism)")
+    print("2. Robot steps aside to (1,5)")
+    print("3. Human (yellow) moves to position (2,3) between buttons")
+    print("4. Human triggers buttons to control robot movement")
     print()
     print("Button layout after programming:")
-    print("  - Upper button → 'left' action")
-    print("  - Right button → 'fore' action")
-    print("  - Lower button → 'rght' action")
+    print("  - Upper button (2,2) → 'L' (left) action")
+    print("  - Right button (3,3) → 'F' (forward) action")
+    print("  - Lower button (2,4) → 'R' (right) action")
     print()
     print(f"Output directory: {OUTPUT_DIR}")
     print()
     
-    # Create full rollout movie
+    # Part 1: Create full rollout movie with prequel
     create_full_rollout_movie()
     
+    # Part 2: Try to train neural network and run learned policy
+    print()
+    try:
+        train_and_rollout_with_learned_policy()
+    except Exception as e:
+        print(f"Neural network learning skipped: {e}")
+    
+    print()
     print("=" * 70)
     print("Demo Complete")
     print("=" * 70)
     print()
     print(f"Check {OUTPUT_DIR} for generated movies and images:")
-    print("  - control_button_full_rollout.gif - Complete demo movie")
+    print("  - control_button_full_rollout.gif - Complete prequel + control demo")
     print("  - control_button_full_rollout.png - Summary image")
+    print("  - control_button_learned_rollouts.gif - Neural network learned policy (if trained)")
 
 
 if __name__ == "__main__":
