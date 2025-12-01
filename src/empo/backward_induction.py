@@ -53,7 +53,7 @@ from typing import Optional, Callable, List, Tuple, Dict, Any, Union, overload, 
 
 import cloudpickle
 
-from empo.possible_goal import PossibleGoalGenerator, PossibleGoal
+from empo.possible_goal import PossibleGoal, PossibleGoalGenerator
 from empo.human_policy_prior import TabularHumanPolicyPrior
 from empo.world_model import WorldModel
 
