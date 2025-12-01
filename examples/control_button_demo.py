@@ -363,7 +363,7 @@ def demonstrate_prequel_with_movie():
         print(f"  Robot performed 'right' - button now programmed")
         
         img = env.render(mode='rgb_array')
-        frames.append(('Lower button: "rght" programmed', img))
+        frames.append(('Lower button: "right" programmed', img))
         
         # === Program right button (3, 3) with 'forward' ===
         print("\nProgramming right button (3,3) with 'forward'...")
