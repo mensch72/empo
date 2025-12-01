@@ -600,7 +600,7 @@ def main():
         human_agent_indices=human_agent_indices,
         goal_sampler=goal_sampler,
         num_episodes=5000,
-        steps_per_episode=env.max_steps,
+        steps_per_episode=env.max_steps,  # Match env's max_steps (10)
         beta=beta,
         gamma=1.0,  # No discounting for this simple goal-reaching task
         learning_rate=1e-3,

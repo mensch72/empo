@@ -793,6 +793,155 @@ def _goal_to_tensor_static(
         return torch.zeros(1, 4, device=device, dtype=torch.float32)
 
 
+def _batch_states_to_tensors(
+    transitions: List[Dict[str, Any]],
+    grid_width: int,
+    grid_height: int,
+    num_agents: int,
+    num_object_types: int = 8,
+    max_steps: int = 100,
+    device: str = 'cpu'
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Convert a batch of transitions to batched tensor representations.
+    
+    Args:
+        transitions: List of transition dictionaries with 'state', 'human_idx', 'goal' keys.
+        grid_width: Width of the grid.
+        grid_height: Height of the grid.
+        num_agents: Number of agents.
+        num_object_types: Number of object types for encoding.
+        max_steps: Maximum steps for normalization.
+        device: Torch device.
+    
+    Returns:
+        Tuple of batched tensors:
+            - grid_tensors: (batch, channels, H, W)
+            - step_tensors: (batch, 1)
+            - positions: (batch, 2)
+            - directions: (batch, 4)
+            - agent_indices: (batch,)
+            - goal_coords: (batch, 4)
+    """
+    batch_size = len(transitions)
+    num_channels = num_object_types + num_agents
+    
+    # Pre-allocate tensors
+    grid_tensors = torch.zeros(batch_size, num_channels, grid_height, grid_width, device=device)
+    step_tensors = torch.zeros(batch_size, 1, device=device)
+    positions = torch.zeros(batch_size, 2, device=device)
+    directions = torch.zeros(batch_size, 4, device=device)
+    agent_indices = torch.zeros(batch_size, dtype=torch.long, device=device)
+    goal_coords = torch.zeros(batch_size, 4, device=device)
+    
+    for i, t in enumerate(transitions):
+        state = t['state']
+        human_idx = t['human_idx']
+        goal = t['goal']
+        
+        step_count, agent_states, _, _ = state
+        
+        # Encode agent positions in grid
+        for j, agent_state in enumerate(agent_states):
+            if j < num_agents:
+                x, y = int(agent_state[0]), int(agent_state[1])
+                if 0 <= x < grid_width and 0 <= y < grid_height:
+                    channel_idx = num_object_types + j
+                    grid_tensors[i, channel_idx, y, x] = 1.0
+        
+        # Step count normalized
+        step_tensors[i, 0] = step_count / max_steps
+        
+        # Agent position and direction
+        agent_state = agent_states[human_idx]
+        positions[i, 0] = float(agent_state[0]) / grid_width
+        positions[i, 1] = float(agent_state[1]) / grid_height
+        dir_idx = int(agent_state[2]) % 4
+        directions[i, dir_idx] = 1.0
+        
+        # Agent index
+        agent_indices[i] = human_idx
+        
+        # Goal coordinates
+        if hasattr(goal, 'target_pos'):
+            target = goal.target_pos
+            goal_coords[i, 0] = float(target[0]) / grid_width
+            goal_coords[i, 1] = float(target[1]) / grid_height
+            goal_coords[i, 2] = float(target[0]) / grid_width
+            goal_coords[i, 3] = float(target[1]) / grid_height
+    
+    return grid_tensors, step_tensors, positions, directions, agent_indices, goal_coords
+
+
+def _batch_next_states_to_tensors(
+    transitions: List[Dict[str, Any]],
+    grid_width: int,
+    grid_height: int,
+    num_agents: int,
+    num_object_types: int = 8,
+    max_steps: int = 100,
+    device: str = 'cpu'
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Convert next states from a batch of transitions to batched tensor representations.
+    
+    Args:
+        transitions: List of transition dictionaries with 'next_state', 'human_idx' keys.
+        grid_width: Width of the grid.
+        grid_height: Height of the grid.
+        num_agents: Number of agents.
+        num_object_types: Number of object types for encoding.
+        max_steps: Maximum steps for normalization.
+        device: Torch device.
+    
+    Returns:
+        Tuple of batched tensors for next states:
+            - grid_tensors: (batch, channels, H, W)
+            - step_tensors: (batch, 1)
+            - positions: (batch, 2)
+            - directions: (batch, 4)
+            - agent_indices: (batch,)
+    """
+    batch_size = len(transitions)
+    num_channels = num_object_types + num_agents
+    
+    # Pre-allocate tensors
+    grid_tensors = torch.zeros(batch_size, num_channels, grid_height, grid_width, device=device)
+    step_tensors = torch.zeros(batch_size, 1, device=device)
+    positions = torch.zeros(batch_size, 2, device=device)
+    directions = torch.zeros(batch_size, 4, device=device)
+    agent_indices = torch.zeros(batch_size, dtype=torch.long, device=device)
+    
+    for i, t in enumerate(transitions):
+        state = t['next_state']
+        human_idx = t['human_idx']
+        
+        step_count, agent_states, _, _ = state
+        
+        # Encode agent positions in grid
+        for j, agent_state in enumerate(agent_states):
+            if j < num_agents:
+                x, y = int(agent_state[0]), int(agent_state[1])
+                if 0 <= x < grid_width and 0 <= y < grid_height:
+                    channel_idx = num_object_types + j
+                    grid_tensors[i, channel_idx, y, x] = 1.0
+        
+        # Step count normalized
+        step_tensors[i, 0] = step_count / max_steps
+        
+        # Agent position and direction
+        agent_state = agent_states[human_idx]
+        positions[i, 0] = float(agent_state[0]) / grid_width
+        positions[i, 1] = float(agent_state[1]) / grid_height
+        dir_idx = int(agent_state[2]) % 4
+        directions[i, dir_idx] = 1.0
+        
+        # Agent index
+        agent_indices[i] = human_idx
+    
+    return grid_tensors, step_tensors, positions, directions, agent_indices
+
+
 class ReplayBuffer:
     """
     Experience replay buffer for storing transitions.
@@ -1126,7 +1275,7 @@ def train_neural_policy_prior(
         
         # ====================================================================
         # BATCH LEARNING: Train Q-network using mini-batches from replay buffer
-        # This reduces variance compared to per-transition updates
+        # Uses proper vectorized batch processing for efficiency
         # ====================================================================
         episode_q_loss = 0.0
         num_updates = 0
@@ -1136,79 +1285,85 @@ def train_neural_policy_prior(
             for _ in range(updates_per_episode):
                 # Sample random batch from replay buffer
                 batch = replay_buffer.sample(batch_size)
+                actual_batch_size = len(batch)
                 
                 q_optimizer.zero_grad()
                 
-                # Collect all losses for the batch
-                batch_losses = []
+                # Convert batch to tensors using vectorized helper
+                (grid_tensors, step_tensors, positions, directions, 
+                 agent_indices, goal_coords) = _batch_states_to_tensors(
+                    batch, grid_width, grid_height, num_agents,
+                    max_steps=max_steps, device=device
+                )
                 
-                for t in batch:
-                    human_idx = t['human_idx']
-                    reward = t['reward']
-                    done_flag = t['done']
+                # Single batched forward pass for current states
+                q_values = q_network(
+                    grid_tensors, step_tensors,
+                    positions, directions, agent_indices,
+                    goal_coords
+                )  # Shape: (batch_size, num_actions)
+                
+                # Extract Q-values for the actions that were taken
+                actions = torch.tensor([t['action'] for t in batch], device=device, dtype=torch.long)
+                q_values_selected = q_values.gather(1, actions.unsqueeze(1)).squeeze(1)  # Shape: (batch_size,)
+                
+                # Compute TD targets
+                rewards = torch.tensor([t['reward'] for t in batch], device=device, dtype=torch.float32)
+                dones = torch.tensor([t['done'] for t in batch], device=device, dtype=torch.bool)
+                
+                # For non-terminal states, we need to bootstrap from next state
+                with torch.no_grad():
+                    # Get indices of non-terminal transitions
+                    non_terminal_mask = ~dones
+                    non_terminal_indices = non_terminal_mask.nonzero(as_tuple=True)[0]
                     
-                    # Convert current state to tensors
-                    grid_tensor, step_tensor = _state_to_tensors_static(
-                        t['state'], grid_width, grid_height, num_agents,
-                        max_steps=max_steps, device=device
-                    )
-                    position, direction, agent_idx_t = _agent_to_tensors_static(
-                        t['state'], human_idx, grid_width, grid_height, device
-                    )
-                    goal_tensor = _goal_to_tensor_static(t['goal'], grid_width, grid_height, device)
+                    # Initialize targets with rewards (correct for terminal states)
+                    targets = rewards.clone()
                     
-                    # Forward pass through Q-network for current state
-                    q_values = q_network(
-                        grid_tensor, step_tensor,
-                        position, direction, agent_idx_t,
-                        goal_tensor
-                    )
-                    q_value = q_values[0, t['action']]
-                    
-                    # Compute TD target
-                    if done_flag:
-                        # Terminal state - target is just the reward
-                        target = torch.tensor(reward, device=device, dtype=torch.float32)
-                    else:
-                        # Non-terminal - bootstrap from next state
-                        next_grid, next_step = _state_to_tensors_static(
-                            t['next_state'], grid_width, grid_height, num_agents,
+                    if len(non_terminal_indices) > 0:
+                        # Get non-terminal transitions
+                        non_terminal_batch = [batch[i] for i in non_terminal_indices.tolist()]
+                        
+                        # Convert next states to tensors
+                        (next_grids, next_steps, next_positions, next_directions,
+                         next_agent_indices) = _batch_next_states_to_tensors(
+                            non_terminal_batch, grid_width, grid_height, num_agents,
                             max_steps=max_steps, device=device
                         )
-                        next_pos, next_dir, next_idx = _agent_to_tensors_static(
-                            t['next_state'], human_idx, grid_width, grid_height, device
-                        )
                         
-                        with torch.no_grad():
-                            next_q_values = q_network(
-                                next_grid, next_step,
-                                next_pos, next_dir, next_idx,
-                                goal_tensor
-                            )
-                            # For Boltzmann policy: V(s') = sum_a π(a|s') Q(s',a)
-                            next_policy = F.softmax(beta * next_q_values, dim=1)
-                            next_v = (next_policy * next_q_values).sum()
-                            target = reward + gamma * next_v
-                    
-                    # MSE loss: L = (Q(s,a,g) - target)²
-                    loss = F.mse_loss(q_value, target)
-                    batch_losses.append(loss)
+                        # Get goal coords for non-terminal transitions
+                        non_terminal_goal_coords = goal_coords[non_terminal_indices]
+                        
+                        # Single batched forward pass for next states
+                        next_q_values = q_network(
+                            next_grids, next_steps,
+                            next_positions, next_directions, next_agent_indices,
+                            non_terminal_goal_coords
+                        )  # Shape: (num_non_terminal, num_actions)
+                        
+                        # Compute V(s') = sum_a π(a|s') Q(s',a) for Boltzmann policy
+                        next_policy = F.softmax(beta * next_q_values, dim=1)
+                        next_v = (next_policy * next_q_values).sum(dim=1)  # Shape: (num_non_terminal,)
+                        
+                        # Update targets for non-terminal states: r + γ * V(s')
+                        targets[non_terminal_indices] = rewards[non_terminal_indices] + gamma * next_v
                 
-                # Average loss over batch and perform gradient update
-                if len(batch_losses) > 0:
-                    total_loss = torch.stack(batch_losses).mean()
-                    total_loss.backward()
-                    torch.nn.utils.clip_grad_norm_(q_network.parameters(), max_norm=1.0)
-                    q_optimizer.step()
-                    
-                    episode_q_loss += total_loss.item()
-                    num_updates += 1
+                # Compute MSE loss over the batch
+                loss = F.mse_loss(q_values_selected, targets)
+                
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(q_network.parameters(), max_norm=1.0)
+                q_optimizer.step()
+                
+                episode_q_loss += loss.item()
+                num_updates += 1
         
         if num_updates > 0:
             q_losses.append(episode_q_loss / num_updates)
         
         # ====================================================================
         # BATCH LEARNING: Train phi-network using mini-batches (optional)
+        # Uses proper vectorized batch processing for efficiency
         # ====================================================================
         if phi_network is not None and phi_optimizer is not None and len(replay_buffer) >= batch_size:
             episode_phi_loss = 0.0
@@ -1218,51 +1373,41 @@ def train_neural_policy_prior(
                 batch = replay_buffer.sample(batch_size)
                 
                 phi_optimizer.zero_grad()
-                phi_losses_list = []
                 
-                for t in batch:
-                    human_idx = t['human_idx']
-                    
-                    # Convert state to tensors
-                    grid_tensor, step_tensor = _state_to_tensors_static(
-                        t['state'], grid_width, grid_height, num_agents,
-                        max_steps=max_steps, device=device
-                    )
-                    position, direction, agent_idx_t = _agent_to_tensors_static(
-                        t['state'], human_idx, grid_width, grid_height, device
-                    )
-                    goal_tensor = _goal_to_tensor_static(t['goal'], grid_width, grid_height, device)
-                    
-                    # Get target policy from Q-network (detached)
-                    with torch.no_grad():
-                        q_values = q_network(
-                            grid_tensor, step_tensor,
-                            position, direction, agent_idx_t,
-                            goal_tensor
-                        )
-                        target_policy = F.softmax(beta * q_values, dim=1)
-                    
-                    # Get predicted policy from phi-network
-                    predicted_policy = phi_network(
-                        grid_tensor, step_tensor,
-                        position, direction, agent_idx_t
-                    )
-                    
-                    # KL divergence loss
-                    phi_loss = F.kl_div(
-                        predicted_policy.log(),
-                        target_policy,
-                        reduction='batchmean'
-                    )
-                    phi_losses_list.append(phi_loss)
+                # Convert batch to tensors using vectorized helper
+                (grid_tensors, step_tensors, positions, directions, 
+                 agent_indices, goal_coords) = _batch_states_to_tensors(
+                    batch, grid_width, grid_height, num_agents,
+                    max_steps=max_steps, device=device
+                )
                 
-                if len(phi_losses_list) > 0:
-                    avg_phi_loss = torch.stack(phi_losses_list).mean()
-                    avg_phi_loss.backward()
-                    phi_optimizer.step()
-                    
-                    episode_phi_loss += avg_phi_loss.item()
-                    phi_updates += 1
+                # Get target policy from Q-network (detached) - single batched forward pass
+                with torch.no_grad():
+                    q_values = q_network(
+                        grid_tensors, step_tensors,
+                        positions, directions, agent_indices,
+                        goal_coords
+                    )
+                    target_policy = F.softmax(beta * q_values, dim=1)
+                
+                # Get predicted policy from phi-network - single batched forward pass
+                predicted_policy = phi_network(
+                    grid_tensors, step_tensors,
+                    positions, directions, agent_indices
+                )
+                
+                # KL divergence loss over the batch
+                phi_loss = F.kl_div(
+                    predicted_policy.log(),
+                    target_policy,
+                    reduction='batchmean'
+                )
+                
+                phi_loss.backward()
+                phi_optimizer.step()
+                
+                episode_phi_loss += phi_loss.item()
+                phi_updates += 1
             
             if phi_updates > 0:
                 phi_losses.append(episode_phi_loss / phi_updates)
