@@ -624,8 +624,12 @@ def create_full_rollout_movie():
         # Turn left twice to face north (dir=3)
         actions[robot_idx] = Actions.left
         env.step(actions)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('', img))
         actions[robot_idx] = Actions.left
         env.step(actions)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('', img))
         # Toggle upper button (2, 2)
         actions[robot_idx] = Actions.toggle
         env.step(actions)
@@ -639,9 +643,13 @@ def create_full_rollout_movie():
         # Now facing west (dir=2). Turn left to face south (dir=1)
         actions[robot_idx] = Actions.left
         env.step(actions)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('', img))
         # Toggle lower button (2, 4)
         actions[robot_idx] = Actions.toggle
         env.step(actions)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('', img))
         # Program 'right' action (robot now faces west again)
         actions[robot_idx] = Actions.right
         env.step(actions)
@@ -653,11 +661,17 @@ def create_full_rollout_movie():
         # Turn left twice: west -> south -> east
         actions[robot_idx] = Actions.left
         env.step(actions)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('', img))
         actions[robot_idx] = Actions.left
         env.step(actions)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('', img))
         # Toggle right button (3, 3)
         actions[robot_idx] = Actions.toggle
         env.step(actions)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('', img))
         # Program 'forward' action - robot stays in place (button blocks movement)
         actions[robot_idx] = Actions.forward
         env.step(actions)
@@ -675,6 +689,8 @@ def create_full_rollout_movie():
         # Move forward twice to (4, 3), keep facing east
         actions[robot_idx] = Actions.forward  # (2,3) -> blocked by button at (3,3)
         env.step(actions)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('', img))
         # Need to go around: turn right (face south), go to (2,4), turn left (face east), go to (4,4), turn left (face north), go to (4,3), turn right (face east)
         # Or simpler: stay at (2,3), turn to face east, let human control phase proceed
         # Actually the robot needs to move. Let's do: go around the button
@@ -682,24 +698,38 @@ def create_full_rollout_movie():
         # Turn right to face south
         actions[robot_idx] = Actions.right  # east -> south
         env.step(actions)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('', img))
         # Move forward to (2, 4)
         actions[robot_idx] = Actions.forward
         env.step(actions)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('', img))
         # Turn left to face east
         actions[robot_idx] = Actions.left  # south -> east
         env.step(actions)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('', img))
         # Move forward to (3, 4)
         actions[robot_idx] = Actions.forward
         env.step(actions)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('', img))
         # Move forward to (4, 4)
         actions[robot_idx] = Actions.forward
         env.step(actions)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('', img))
         # Turn left to face north
         actions[robot_idx] = Actions.left  # east -> north
         env.step(actions)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('', img))
         # Move forward to (4, 3)
         actions[robot_idx] = Actions.forward
         env.step(actions)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('', img))
         # Turn right to face east
         actions[robot_idx] = Actions.right  # north -> east
         env.step(actions)
@@ -719,18 +749,28 @@ def create_full_rollout_movie():
         # Turn right to face east (dir=0)
         actions[human_idx] = Actions.right
         env.step(actions)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('', img))
         # Turn right to face south (dir=1)
         actions[human_idx] = Actions.right
         env.step(actions)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('', img))
         # Move forward to (1, 2)
         actions[human_idx] = Actions.forward
         env.step(actions)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('', img))
         # Move forward to (1, 3)
         actions[human_idx] = Actions.forward
         env.step(actions)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('', img))
         # Turn left to face east (dir=0)
         actions[human_idx] = Actions.left
         env.step(actions)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('', img))
         # Move forward to (2, 3)
         actions[human_idx] = Actions.forward
         env.step(actions)
@@ -785,8 +825,12 @@ def create_full_rollout_movie():
         # Human facing north, turn to face south
         actions[human_idx] = Actions.left  # Face west
         env.step(actions)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('', img))
         actions[human_idx] = Actions.left  # Face south
         env.step(actions)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('', img))
         actions[human_idx] = Actions.toggle  # Toggle lower button
         env.step(actions)
         img = env.render(mode='rgb_array')
