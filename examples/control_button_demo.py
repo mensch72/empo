@@ -37,7 +37,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 import gymnasium as gym
 sys.modules['gym'] = gym
 
-from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, Wall, World, Actions, ControlButton, Rock
+from gym_multigrid.multigrid import MultiGridEnv, World, Actions
 from empo.possible_goal import PossibleGoal, PossibleGoalSampler
 from empo.nn_based import train_neural_policy_prior
 
