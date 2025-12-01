@@ -320,7 +320,7 @@ def get_boltzmann_action(
             # Greedy action
             action = torch.argmax(q_values, dim=1).item()
         else:
-            q_values -= torch.max(q_values, dim=1, keepdim=True)  # For numerical stability
+            q_values -= torch.max(q_values, dim=1, keepdim=True).values  # For numerical stability
             policy = F.softmax(beta * q_values, dim=1)
             action = torch.multinomial(policy, 1).item()
     
@@ -599,7 +599,7 @@ def main():
     # Train neural network using the module's function
     # Hyperparameters tuned for this demo (5x5 grid, 25 goal cells)
     device = 'cpu'
-    beta = np.inf  # Higher temperature for more deterministic policies
+    beta = 1000 #np.inf  # Higher temperature for more deterministic policies
     
     t0 = time.time()
     neural_prior = train_neural_policy_prior(

@@ -1453,7 +1453,7 @@ def train_neural_policy_prior(
                             # Greedy action
                             action = torch.argmax(q_values, dim=1).item()
                         else:
-                            q_values -= torch.max(q_values, dim=1, keepdim=True)  # For numerical stability
+                            q_values -= torch.max(q_values, dim=1, keepdim=True).values  # For numerical stability
                             policy = F.softmax(beta * q_values, dim=1)
                             action = torch.multinomial(policy, 1).item()
                     
