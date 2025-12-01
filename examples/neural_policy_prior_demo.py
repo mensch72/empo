@@ -590,18 +590,19 @@ def main():
     goal_sampler = ReachCellGoalSampler(env, goal_cells)
     
     # Train neural network using the module's function
+    # Hyperparameters tuned for this demo (5x5 grid, 25 goal cells, 10 steps)
     device = 'cpu'
-    beta = 20 #5.0
+    beta = 20.0  # Higher temperature for more deterministic policies
     
     t0 = time.time()
     neural_prior = train_neural_policy_prior(
         world_model=env,
         human_agent_indices=human_agent_indices,
         goal_sampler=goal_sampler,
-        num_episodes=5000, #500,
-        steps_per_episode=max_steps,
+        num_episodes=5000,
+        steps_per_episode=env.max_steps,
         beta=beta,
-        gamma=1, #0.99,
+        gamma=1.0,  # No discounting for this simple goal-reaching task
         learning_rate=1e-3,
         batch_size=64,
         replay_buffer_size=10000,
