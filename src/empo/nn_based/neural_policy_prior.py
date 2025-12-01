@@ -793,6 +793,155 @@ def _goal_to_tensor_static(
         return torch.zeros(1, 4, device=device, dtype=torch.float32)
 
 
+def _batch_states_to_tensors(
+    transitions: List[Dict[str, Any]],
+    grid_width: int,
+    grid_height: int,
+    num_agents: int,
+    num_object_types: int = 8,
+    max_steps: int = 100,
+    device: str = 'cpu'
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Convert a batch of transitions to batched tensor representations.
+    
+    Args:
+        transitions: List of transition dictionaries with 'state', 'human_idx', 'goal' keys.
+        grid_width: Width of the grid.
+        grid_height: Height of the grid.
+        num_agents: Number of agents.
+        num_object_types: Number of object types for encoding.
+        max_steps: Maximum steps for normalization.
+        device: Torch device.
+    
+    Returns:
+        Tuple of batched tensors:
+            - grid_tensors: (batch, channels, H, W)
+            - step_tensors: (batch, 1)
+            - positions: (batch, 2)
+            - directions: (batch, 4)
+            - agent_indices: (batch,)
+            - goal_coords: (batch, 4)
+    """
+    batch_size = len(transitions)
+    num_channels = num_object_types + num_agents
+    
+    # Pre-allocate tensors
+    grid_tensors = torch.zeros(batch_size, num_channels, grid_height, grid_width, device=device)
+    step_tensors = torch.zeros(batch_size, 1, device=device)
+    positions = torch.zeros(batch_size, 2, device=device)
+    directions = torch.zeros(batch_size, 4, device=device)
+    agent_indices = torch.zeros(batch_size, dtype=torch.long, device=device)
+    goal_coords = torch.zeros(batch_size, 4, device=device)
+    
+    for i, t in enumerate(transitions):
+        state = t['state']
+        human_idx = t['human_idx']
+        goal = t['goal']
+        
+        step_count, agent_states, _, _ = state
+        
+        # Encode agent positions in grid
+        for j, agent_state in enumerate(agent_states):
+            if j < num_agents:
+                x, y = int(agent_state[0]), int(agent_state[1])
+                if 0 <= x < grid_width and 0 <= y < grid_height:
+                    channel_idx = num_object_types + j
+                    grid_tensors[i, channel_idx, y, x] = 1.0
+        
+        # Step count normalized
+        step_tensors[i, 0] = step_count / max_steps
+        
+        # Agent position and direction
+        agent_state = agent_states[human_idx]
+        positions[i, 0] = float(agent_state[0]) / grid_width
+        positions[i, 1] = float(agent_state[1]) / grid_height
+        dir_idx = int(agent_state[2]) % 4
+        directions[i, dir_idx] = 1.0
+        
+        # Agent index
+        agent_indices[i] = human_idx
+        
+        # Goal coordinates
+        if hasattr(goal, 'target_pos'):
+            target = goal.target_pos
+            goal_coords[i, 0] = float(target[0]) / grid_width
+            goal_coords[i, 1] = float(target[1]) / grid_height
+            goal_coords[i, 2] = float(target[0]) / grid_width
+            goal_coords[i, 3] = float(target[1]) / grid_height
+    
+    return grid_tensors, step_tensors, positions, directions, agent_indices, goal_coords
+
+
+def _batch_next_states_to_tensors(
+    transitions: List[Dict[str, Any]],
+    grid_width: int,
+    grid_height: int,
+    num_agents: int,
+    num_object_types: int = 8,
+    max_steps: int = 100,
+    device: str = 'cpu'
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Convert next states from a batch of transitions to batched tensor representations.
+    
+    Args:
+        transitions: List of transition dictionaries with 'next_state', 'human_idx' keys.
+        grid_width: Width of the grid.
+        grid_height: Height of the grid.
+        num_agents: Number of agents.
+        num_object_types: Number of object types for encoding.
+        max_steps: Maximum steps for normalization.
+        device: Torch device.
+    
+    Returns:
+        Tuple of batched tensors for next states:
+            - grid_tensors: (batch, channels, H, W)
+            - step_tensors: (batch, 1)
+            - positions: (batch, 2)
+            - directions: (batch, 4)
+            - agent_indices: (batch,)
+    """
+    batch_size = len(transitions)
+    num_channels = num_object_types + num_agents
+    
+    # Pre-allocate tensors
+    grid_tensors = torch.zeros(batch_size, num_channels, grid_height, grid_width, device=device)
+    step_tensors = torch.zeros(batch_size, 1, device=device)
+    positions = torch.zeros(batch_size, 2, device=device)
+    directions = torch.zeros(batch_size, 4, device=device)
+    agent_indices = torch.zeros(batch_size, dtype=torch.long, device=device)
+    
+    for i, t in enumerate(transitions):
+        state = t['next_state']
+        human_idx = t['human_idx']
+        
+        step_count, agent_states, _, _ = state
+        
+        # Encode agent positions in grid
+        for j, agent_state in enumerate(agent_states):
+            if j < num_agents:
+                x, y = int(agent_state[0]), int(agent_state[1])
+                if 0 <= x < grid_width and 0 <= y < grid_height:
+                    channel_idx = num_object_types + j
+                    grid_tensors[i, channel_idx, y, x] = 1.0
+        
+        # Step count normalized
+        step_tensors[i, 0] = step_count / max_steps
+        
+        # Agent position and direction
+        agent_state = agent_states[human_idx]
+        positions[i, 0] = float(agent_state[0]) / grid_width
+        positions[i, 1] = float(agent_state[1]) / grid_height
+        dir_idx = int(agent_state[2]) % 4
+        directions[i, dir_idx] = 1.0
+        
+        # Agent index
+        agent_indices[i] = human_idx
+    
+    return grid_tensors, step_tensors, positions, directions, agent_indices
+
+
 class ReplayBuffer:
     """
     Experience replay buffer for storing transitions.
@@ -830,6 +979,272 @@ class ReplayBuffer:
         return len(self.buffer)
 
 
+class PathDistanceCalculator:
+    """
+    Computes shortest path distances between cells using precomputed paths on a stripped grid.
+    
+    At initialization, creates a "stripped down" grid version that only contains impassable
+    obstacles (walls, magic walls, lava) and precomputes shortest paths between all 
+    passable cells using BFS.
+    
+    At runtime, calculates a "distance indicator" by walking along the precomputed shortest
+    path and summing parameterized "passing difficulty" scores based on what's currently
+    on each cell.
+    
+    Default passing difficulty scores:
+        - Empty cell or open door: 1
+        - Closed door, another agent, or block: 2
+        - Pickable object (key, ball, box): 3
+        - Locked door: 25 (need to find a key)
+        - Rock: 50
+        - Wall/MagicWall/Lava (impassable): inf
+    
+    Args:
+        world_model: The environment with grid, width, height attributes.
+        passing_costs: Optional dict mapping object types to passing costs.
+                      Keys are object type strings ('empty', 'door_open', 'door_closed',
+                      'door_locked', 'agent', 'block', 'pickable', 'rock', 'wall', 'lava').
+    """
+    
+    # Default passing costs for different object types
+    DEFAULT_PASSING_COSTS = {
+        'empty': 1,
+        'door_open': 1,
+        'door_closed': 2,      # Can be opened easily
+        'door_locked': 25,     # Need to find a key first
+        'agent': 2,
+        'block': 2,
+        'pickable': 3,  # key, ball, box
+        'rock': 50,
+        'wall': float('inf'),
+        'magicwall': float('inf'),
+        'lava': float('inf'),  # Deadly - impassable
+        'unsteadyground': 2,
+        'unknown': 2,
+    }
+    
+    def __init__(self, world_model: Any, passing_costs: Optional[Dict[str, float]] = None):
+        """
+        Initialize the path distance calculator.
+        
+        Precomputes shortest paths between all pairs of empty cells on a stripped
+        grid containing only walls.
+        """
+        self.grid_width = world_model.width
+        self.grid_height = world_model.height
+        self.passing_costs = passing_costs or self.DEFAULT_PASSING_COSTS.copy()
+        
+        # Create wall-only grid and precompute shortest paths
+        self._wall_grid = self._create_wall_grid(world_model)
+        self._shortest_paths = self._precompute_shortest_paths()
+    
+    def _create_wall_grid(self, world_model: Any) -> np.ndarray:
+        """
+        Create a boolean grid where True = impassable, False = passable.
+        
+        Considers Wall, MagicWall, and Lava as impassable obstacles.
+        """
+        wall_grid = np.zeros((self.grid_height, self.grid_width), dtype=bool)
+        
+        for y in range(self.grid_height):
+            for x in range(self.grid_width):
+                cell = world_model.grid.get(x, y)
+                if cell is not None:
+                    # Check if it's an impassable type (Wall, MagicWall, or Lava)
+                    cell_type = getattr(cell, 'type', None)
+                    if cell_type in ('wall', 'magicwall', 'lava'):
+                        wall_grid[y, x] = True
+        
+        return wall_grid
+    
+    def _precompute_shortest_paths(self) -> Dict[Tuple[int, int], Dict[Tuple[int, int], List[Tuple[int, int]]]]:
+        """
+        Precompute shortest paths between all pairs of empty cells using BFS.
+        
+        Returns a dict: source_pos -> {target_pos -> path} where path is a list
+        of (x, y) coordinates from source to target (inclusive).
+        """
+        from collections import deque
+        
+        paths = {}
+        
+        # Find all empty cells (not walls)
+        empty_cells = []
+        for y in range(self.grid_height):
+            for x in range(self.grid_width):
+                if not self._wall_grid[y, x]:
+                    empty_cells.append((x, y))
+        
+        # For each empty cell, compute shortest paths to all other empty cells
+        for source in empty_cells:
+            paths[source] = {}
+            paths[source][source] = [source]  # Path to self is just the source
+            
+            # BFS from source
+            visited = {source: [source]}
+            queue = deque([source])
+            
+            while queue:
+                current = queue.popleft()
+                cx, cy = current
+                
+                # Check 4 neighbors (up, down, left, right)
+                for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                    nx, ny = cx + dx, cy + dy
+                    
+                    # Check bounds
+                    if 0 <= nx < self.grid_width and 0 <= ny < self.grid_height:
+                        neighbor = (nx, ny)
+                        
+                        # Check if not a wall and not visited
+                        if not self._wall_grid[ny, nx] and neighbor not in visited:
+                            # Path to neighbor is path to current + neighbor
+                            visited[neighbor] = visited[current] + [neighbor]
+                            paths[source][neighbor] = visited[neighbor]
+                            queue.append(neighbor)
+        
+        return paths
+    
+    def get_shortest_path(self, source: Tuple[int, int], target: Tuple[int, int]) -> Optional[List[Tuple[int, int]]]:
+        """
+        Get the precomputed shortest path from source to target.
+        
+        Returns None if no path exists (one or both positions are walls).
+        """
+        if source in self._shortest_paths:
+            return self._shortest_paths[source].get(target)
+        return None
+    
+    def compute_path_cost(self, source: Tuple[int, int], target: Tuple[int, int], 
+                          world_model: Any) -> float:
+        """
+        Compute the path cost from source to target based on current grid state.
+        
+        Walks along the precomputed shortest path and sums up passing difficulty
+        scores based on what's currently on each cell.
+        
+        Args:
+            source: (x, y) starting position
+            target: (x, y) target position
+            world_model: Current environment state for checking cell contents
+        
+        Returns:
+            Total path cost (sum of passing difficulties), or inf if no path exists.
+        """
+        path = self.get_shortest_path(source, target)
+        
+        if path is None:
+            return float('inf')
+        
+        if source == target:
+            return 0.0
+        
+        # Build agent position lookup once for efficiency
+        agent_positions = set()
+        for agent in world_model.agents:
+            if agent.pos is not None:
+                agent_positions.add((int(agent.pos[0]), int(agent.pos[1])))
+        
+        total_cost = 0.0
+        
+        # Sum passing costs for each cell along the path (excluding source)
+        for pos in path[1:]:  # Skip source position
+            x, y = pos
+            cell = world_model.grid.get(x, y)
+            cost = self._get_cell_passing_cost(cell, pos, agent_positions)
+            total_cost += cost
+        
+        return total_cost
+    
+    def _get_cell_passing_cost(self, cell: Any, pos: Tuple[int, int], 
+                               agent_positions: set) -> float:
+        """
+        Get the passing cost for a cell based on its current contents.
+        
+        Args:
+            cell: The object at this cell (or None for empty)
+            pos: (x, y) position of the cell
+            agent_positions: Set of (x, y) positions where agents are located
+        
+        Returns:
+            Passing cost for this cell.
+        """
+        # Check for agent at this position first (O(1) lookup)
+        if pos in agent_positions:
+            return self.passing_costs.get('agent', 2)
+        
+        if cell is None:
+            return self.passing_costs.get('empty', 1)
+        
+        cell_type = getattr(cell, 'type', None)
+        
+        # Handle different object types
+        if cell_type == 'door':
+            is_open = getattr(cell, 'is_open', False)
+            is_locked = getattr(cell, 'is_locked', False)
+            if is_open:
+                return self.passing_costs.get('door_open', 1)
+            elif is_locked:
+                return self.passing_costs.get('door_locked', 25)
+            else:
+                return self.passing_costs.get('door_closed', 2)
+        
+        elif cell_type == 'block':
+            return self.passing_costs.get('block', 2)
+        
+        elif cell_type == 'rock':
+            return self.passing_costs.get('rock', 50)
+        
+        elif cell_type in ('key', 'ball', 'box'):
+            return self.passing_costs.get('pickable', 3)
+        
+        elif cell_type in ('wall', 'magicwall'):
+            return self.passing_costs.get('wall', float('inf'))
+        
+        elif cell_type in ('goal', 'floor', 'switch', 'objectgoal'):
+            # These are typically passable like empty cells
+            return self.passing_costs.get('empty', 1)
+        
+        elif cell_type == 'lava':
+            # Lava is deadly - impassable
+            return self.passing_costs.get('lava', float('inf'))
+        
+        elif cell_type == 'unsteadyground':
+            return self.passing_costs.get('unsteadyground', 2)
+        
+        else:
+            # Unknown type - treat as mildly difficult
+            return self.passing_costs.get('unknown', 2)
+    
+    def compute_potential(self, agent_pos: Tuple[int, int], target_pos: Tuple[int, int],
+                         world_model: Any, max_cost: Optional[float] = None) -> float:
+        """
+        Compute the potential function value for reward shaping.
+        
+        Φ(s) = -path_cost(agent_pos, target_pos) / max_cost
+        
+        The potential is maximal (0) when agent is at target.
+        
+        Args:
+            agent_pos: (x, y) current agent position
+            target_pos: (x, y) target/goal position
+            world_model: Current environment for checking cell contents
+            max_cost: Maximum possible cost for normalization (default: grid_width + grid_height)
+        
+        Returns:
+            Potential value in range [-1, 0] (approximately).
+        """
+        if max_cost is None:
+            max_cost = (self.grid_width + self.grid_height) * 50  # Rough upper bound
+        
+        path_cost = self.compute_path_cost(agent_pos, target_pos, world_model)
+        
+        if path_cost == float('inf'):
+            return -1.0  # No path - minimum potential
+        
+        return -path_cost / max_cost
+
+
 def train_neural_policy_prior(
     world_model: Any,
     human_agent_indices: List[int],
@@ -844,6 +1259,8 @@ def train_neural_policy_prior(
     updates_per_episode: int = 4,
     train_phi_network: bool = True,
     epsilon: float = 0.3,
+    use_path_based_shaping: bool = False,
+    passing_costs: Optional[Dict[str, float]] = None,
     device: str = 'cpu',
     verbose: bool = True
 ) -> NeuralHumanPolicyPrior:
@@ -879,6 +1296,12 @@ def train_neural_policy_prior(
         updates_per_episode: Number of gradient updates per episode.
         train_phi_network: Whether to also train the marginal policy network.
         epsilon: Exploration rate for epsilon-greedy policy.
+        use_path_based_shaping: If True, use path-based reward shaping with precomputed
+            shortest paths and passing difficulty scores. If False (default), use simple 
+            Manhattan distance.
+        passing_costs: Optional dict mapping object types to passing costs for path-based
+            shaping. Keys: 'empty', 'door_open', 'door_closed', 'agent', 'block',
+            'pickable', 'rock', 'wall'. See PathDistanceCalculator for defaults.
         device: Torch device ('cpu' or 'cuda').
         verbose: Whether to print training progress.
     
@@ -891,6 +1314,13 @@ def train_neural_policy_prior(
     num_agents = len(world_model.agents)
     num_actions = world_model.action_space.n
     max_steps = getattr(world_model, 'max_steps', 100)
+    
+    # Initialize path distance calculator for reward shaping if enabled
+    path_calculator = None
+    if use_path_based_shaping:
+        path_calculator = PathDistanceCalculator(world_model, passing_costs)
+        if verbose:
+            print("Initialized path-based reward shaping with precomputed shortest paths")
     
     # Create Q-network with encoders
     state_encoder = StateEncoder(
@@ -1062,28 +1492,43 @@ def train_neural_policy_prior(
                 # Potential-based reward shaping (Ng et al. 1999):
                 # F(s,a,s') = γ * Φ(s') - Φ(s)
                 # This preserves the optimal policy while providing denser feedback.
-                # We use Φ(s) = -distance(agent, goal) / max_dist as potential function
-                # which is maximal (0) when agent is at the goal.
                 shaping_reward = 0.0
                 if hasattr(goal, 'target_pos'):
                     target = goal.target_pos
-                    max_dist = grid_width + grid_height
                     
-                    # Potential at current state: Φ(s) = -d(s)/max_dist
+                    # Get agent positions
                     curr_pos = curr_agent_states[human_idx]
-                    curr_dist = abs(curr_pos[0] - target[0]) + abs(curr_pos[1] - target[1])
-                    phi_s = -curr_dist / max_dist
-                    
-                    # Potential at next state: Φ(s') = -d(s')/max_dist  
+                    curr_pos_tuple = (int(curr_pos[0]), int(curr_pos[1]))
                     next_pos = next_agent_states[human_idx]
-                    next_dist = abs(next_pos[0] - target[0]) + abs(next_pos[1] - target[1])
-                    phi_s_prime = -next_dist / max_dist
+                    next_pos_tuple = (int(next_pos[0]), int(next_pos[1]))
+                    target_tuple = (int(target[0]), int(target[1]))
                     
-                    # Shaping: γ * Φ(s') - Φ(s) = γ * (-d(s')/max) - (-d(s)/max)
-                    #        = (d(s) - γ*d(s')) / max_dist
+                    if path_calculator is not None:
+                        # Use path-based distance with passing difficulty scores
+                        # Φ(s) = -path_cost(agent_pos, target) / max_cost
+                        max_cost = (grid_width + grid_height) * 50  # Upper bound
+                        
+                        # Potential at current state
+                        phi_s = path_calculator.compute_potential(
+                            curr_pos_tuple, target_tuple, world_model, max_cost)
+                        
+                        # Potential at next state
+                        phi_s_prime = path_calculator.compute_potential(
+                            next_pos_tuple, target_tuple, world_model, max_cost)
+                    else:
+                        # Fall back to simple Manhattan distance
+                        max_dist = grid_width + grid_height
+                        
+                        # Potential at current state: Φ(s) = -d(s)/max_dist
+                        curr_dist = abs(curr_pos[0] - target[0]) + abs(curr_pos[1] - target[1])
+                        phi_s = -curr_dist / max_dist
+                        
+                        # Potential at next state: Φ(s') = -d(s')/max_dist  
+                        next_dist = abs(next_pos[0] - target[0]) + abs(next_pos[1] - target[1])
+                        phi_s_prime = -next_dist / max_dist
+                    
+                    # Shaping: γ * Φ(s') - Φ(s)
                     shaping_reward = gamma * phi_s_prime - phi_s
-
-                    # TODO: generalize this for other goal types, especially for rectangular goals
                 else:
                     print("Warning: Goal does not have target_pos attribute for shaping reward.")
 
@@ -1126,7 +1571,7 @@ def train_neural_policy_prior(
         
         # ====================================================================
         # BATCH LEARNING: Train Q-network using mini-batches from replay buffer
-        # This reduces variance compared to per-transition updates
+        # Uses proper vectorized batch processing for efficiency
         # ====================================================================
         episode_q_loss = 0.0
         num_updates = 0
@@ -1136,79 +1581,85 @@ def train_neural_policy_prior(
             for _ in range(updates_per_episode):
                 # Sample random batch from replay buffer
                 batch = replay_buffer.sample(batch_size)
+                actual_batch_size = len(batch)
                 
                 q_optimizer.zero_grad()
                 
-                # Collect all losses for the batch
-                batch_losses = []
+                # Convert batch to tensors using vectorized helper
+                (grid_tensors, step_tensors, positions, directions, 
+                 agent_indices, goal_coords) = _batch_states_to_tensors(
+                    batch, grid_width, grid_height, num_agents,
+                    max_steps=max_steps, device=device
+                )
                 
-                for t in batch:
-                    human_idx = t['human_idx']
-                    reward = t['reward']
-                    done_flag = t['done']
+                # Single batched forward pass for current states
+                q_values = q_network(
+                    grid_tensors, step_tensors,
+                    positions, directions, agent_indices,
+                    goal_coords
+                )  # Shape: (batch_size, num_actions)
+                
+                # Extract Q-values for the actions that were taken
+                actions = torch.tensor([t['action'] for t in batch], device=device, dtype=torch.long)
+                q_values_selected = q_values.gather(1, actions.unsqueeze(1)).squeeze(1)  # Shape: (batch_size,)
+                
+                # Compute TD targets
+                rewards = torch.tensor([t['reward'] for t in batch], device=device, dtype=torch.float32)
+                dones = torch.tensor([t['done'] for t in batch], device=device, dtype=torch.bool)
+                
+                # For non-terminal states, we need to bootstrap from next state
+                with torch.no_grad():
+                    # Get indices of non-terminal transitions
+                    non_terminal_mask = ~dones
+                    non_terminal_indices = non_terminal_mask.nonzero(as_tuple=True)[0]
                     
-                    # Convert current state to tensors
-                    grid_tensor, step_tensor = _state_to_tensors_static(
-                        t['state'], grid_width, grid_height, num_agents,
-                        max_steps=max_steps, device=device
-                    )
-                    position, direction, agent_idx_t = _agent_to_tensors_static(
-                        t['state'], human_idx, grid_width, grid_height, device
-                    )
-                    goal_tensor = _goal_to_tensor_static(t['goal'], grid_width, grid_height, device)
+                    # Initialize targets with rewards (correct for terminal states)
+                    targets = rewards.clone()
                     
-                    # Forward pass through Q-network for current state
-                    q_values = q_network(
-                        grid_tensor, step_tensor,
-                        position, direction, agent_idx_t,
-                        goal_tensor
-                    )
-                    q_value = q_values[0, t['action']]
-                    
-                    # Compute TD target
-                    if done_flag:
-                        # Terminal state - target is just the reward
-                        target = torch.tensor(reward, device=device, dtype=torch.float32)
-                    else:
-                        # Non-terminal - bootstrap from next state
-                        next_grid, next_step = _state_to_tensors_static(
-                            t['next_state'], grid_width, grid_height, num_agents,
+                    if len(non_terminal_indices) > 0:
+                        # Get non-terminal transitions
+                        non_terminal_batch = [batch[i] for i in non_terminal_indices.tolist()]
+                        
+                        # Convert next states to tensors
+                        (next_grids, next_steps, next_positions, next_directions,
+                         next_agent_indices) = _batch_next_states_to_tensors(
+                            non_terminal_batch, grid_width, grid_height, num_agents,
                             max_steps=max_steps, device=device
                         )
-                        next_pos, next_dir, next_idx = _agent_to_tensors_static(
-                            t['next_state'], human_idx, grid_width, grid_height, device
-                        )
                         
-                        with torch.no_grad():
-                            next_q_values = q_network(
-                                next_grid, next_step,
-                                next_pos, next_dir, next_idx,
-                                goal_tensor
-                            )
-                            # For Boltzmann policy: V(s') = sum_a π(a|s') Q(s',a)
-                            next_policy = F.softmax(beta * next_q_values, dim=1)
-                            next_v = (next_policy * next_q_values).sum()
-                            target = reward + gamma * next_v
-                    
-                    # MSE loss: L = (Q(s,a,g) - target)²
-                    loss = F.mse_loss(q_value, target)
-                    batch_losses.append(loss)
+                        # Get goal coords for non-terminal transitions
+                        non_terminal_goal_coords = goal_coords[non_terminal_indices]
+                        
+                        # Single batched forward pass for next states
+                        next_q_values = q_network(
+                            next_grids, next_steps,
+                            next_positions, next_directions, next_agent_indices,
+                            non_terminal_goal_coords
+                        )  # Shape: (num_non_terminal, num_actions)
+                        
+                        # Compute V(s') = sum_a π(a|s') Q(s',a) for Boltzmann policy
+                        next_policy = F.softmax(beta * next_q_values, dim=1)
+                        next_v = (next_policy * next_q_values).sum(dim=1)  # Shape: (num_non_terminal,)
+                        
+                        # Update targets for non-terminal states: r + γ * V(s')
+                        targets[non_terminal_indices] = rewards[non_terminal_indices] + gamma * next_v
                 
-                # Average loss over batch and perform gradient update
-                if len(batch_losses) > 0:
-                    total_loss = torch.stack(batch_losses).mean()
-                    total_loss.backward()
-                    torch.nn.utils.clip_grad_norm_(q_network.parameters(), max_norm=1.0)
-                    q_optimizer.step()
-                    
-                    episode_q_loss += total_loss.item()
-                    num_updates += 1
+                # Compute MSE loss over the batch
+                loss = F.mse_loss(q_values_selected, targets)
+                
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(q_network.parameters(), max_norm=1.0)
+                q_optimizer.step()
+                
+                episode_q_loss += loss.item()
+                num_updates += 1
         
         if num_updates > 0:
             q_losses.append(episode_q_loss / num_updates)
         
         # ====================================================================
         # BATCH LEARNING: Train phi-network using mini-batches (optional)
+        # Uses proper vectorized batch processing for efficiency
         # ====================================================================
         if phi_network is not None and phi_optimizer is not None and len(replay_buffer) >= batch_size:
             episode_phi_loss = 0.0
@@ -1218,51 +1669,41 @@ def train_neural_policy_prior(
                 batch = replay_buffer.sample(batch_size)
                 
                 phi_optimizer.zero_grad()
-                phi_losses_list = []
                 
-                for t in batch:
-                    human_idx = t['human_idx']
-                    
-                    # Convert state to tensors
-                    grid_tensor, step_tensor = _state_to_tensors_static(
-                        t['state'], grid_width, grid_height, num_agents,
-                        max_steps=max_steps, device=device
-                    )
-                    position, direction, agent_idx_t = _agent_to_tensors_static(
-                        t['state'], human_idx, grid_width, grid_height, device
-                    )
-                    goal_tensor = _goal_to_tensor_static(t['goal'], grid_width, grid_height, device)
-                    
-                    # Get target policy from Q-network (detached)
-                    with torch.no_grad():
-                        q_values = q_network(
-                            grid_tensor, step_tensor,
-                            position, direction, agent_idx_t,
-                            goal_tensor
-                        )
-                        target_policy = F.softmax(beta * q_values, dim=1)
-                    
-                    # Get predicted policy from phi-network
-                    predicted_policy = phi_network(
-                        grid_tensor, step_tensor,
-                        position, direction, agent_idx_t
-                    )
-                    
-                    # KL divergence loss
-                    phi_loss = F.kl_div(
-                        predicted_policy.log(),
-                        target_policy,
-                        reduction='batchmean'
-                    )
-                    phi_losses_list.append(phi_loss)
+                # Convert batch to tensors using vectorized helper
+                (grid_tensors, step_tensors, positions, directions, 
+                 agent_indices, goal_coords) = _batch_states_to_tensors(
+                    batch, grid_width, grid_height, num_agents,
+                    max_steps=max_steps, device=device
+                )
                 
-                if len(phi_losses_list) > 0:
-                    avg_phi_loss = torch.stack(phi_losses_list).mean()
-                    avg_phi_loss.backward()
-                    phi_optimizer.step()
-                    
-                    episode_phi_loss += avg_phi_loss.item()
-                    phi_updates += 1
+                # Get target policy from Q-network (detached) - single batched forward pass
+                with torch.no_grad():
+                    q_values = q_network(
+                        grid_tensors, step_tensors,
+                        positions, directions, agent_indices,
+                        goal_coords
+                    )
+                    target_policy = F.softmax(beta * q_values, dim=1)
+                
+                # Get predicted policy from phi-network - single batched forward pass
+                predicted_policy = phi_network(
+                    grid_tensors, step_tensors,
+                    positions, directions, agent_indices
+                )
+                
+                # KL divergence loss over the batch
+                phi_loss = F.kl_div(
+                    predicted_policy.log(),
+                    target_policy,
+                    reduction='batchmean'
+                )
+                
+                phi_loss.backward()
+                phi_optimizer.step()
+                
+                episode_phi_loss += phi_loss.item()
+                phi_updates += 1
             
             if phi_updates > 0:
                 phi_losses.append(episode_phi_loss / phi_updates)

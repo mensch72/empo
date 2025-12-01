@@ -17,6 +17,7 @@ Main components:
     - PolicyPriorNetwork (h_phi): Maps (state, human) -> marginal policy prior
     - NeuralHumanPolicyPrior: HumanPolicyPrior implementation using neural networks
     - train_neural_policy_prior: Training function for the neural networks
+    - PathDistanceCalculator: Computes path-based distances for reward shaping
 
 Mathematical background:
     The networks approximate:
@@ -56,6 +57,8 @@ from empo.nn_based.neural_policy_prior import (
     # Training
     train_neural_policy_prior,
     create_policy_prior_networks,
+    # Reward Shaping
+    PathDistanceCalculator,
 )
 
 __all__ = [
@@ -71,4 +74,6 @@ __all__ = [
     # Training
     "train_neural_policy_prior",
     "create_policy_prior_networks",
+    # Reward Shaping
+    "PathDistanceCalculator",
 ]

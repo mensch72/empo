@@ -41,6 +41,7 @@ from empo.possible_goal import PossibleGoal, PossibleGoalGenerator, PossibleGoal
 from empo.nn_based import (
     StateEncoder, AgentEncoder, GoalEncoder,
     QNetwork, PolicyPriorNetwork,
+    train_neural_policy_prior,
 )
 
 
@@ -118,8 +119,42 @@ class ReachCellGoal(PossibleGoal):
                 self.target_pos == other.target_pos)
 
 
+class ReachCellGoalSampler(PossibleGoalSampler):
+    """
+    A goal sampler that samples uniformly from a list of target cell positions.
+    
+    This sampler creates ReachCellGoal instances for randomly selected cells.
+    """
+    
+    def __init__(self, world_model, goal_cells: List[Tuple[int, int]]):
+        """
+        Initialize the goal sampler.
+        
+        Args:
+            world_model: The environment.
+            goal_cells: List of (x, y) tuples representing possible goal positions.
+        """
+        super().__init__(world_model)
+        self.goal_cells = goal_cells
+    
+    def sample(self, state, human_agent_index: int) -> Tuple[PossibleGoal, float]:
+        """
+        Sample a random goal cell uniformly.
+        
+        Args:
+            state: Current world state.
+            human_agent_index: Index of the human agent.
+        
+        Returns:
+            Tuple of (ReachCellGoal, weight=1.0).
+        """
+        target_pos = random.choice(self.goal_cells)
+        goal = ReachCellGoal(self.world_model, human_agent_index, target_pos)
+        return goal, 1.0
+
+
 # ============================================================================
-# Neural Network Training
+# Helper functions for the demo
 # ============================================================================
 
 def state_to_grid_tensor(
@@ -196,279 +231,6 @@ def get_goal_tensor(
         goal_pos[0] / grid_width,  # Same as x1 for point goals
         goal_pos[1] / grid_height  # Same as y1 for point goals
     ]], device=device, dtype=torch.float32)
-
-
-def train_nn_policy_prior(
-    env: MultiGridEnv,
-    human_agent_indices: List[int],
-    goal_cells: List[Tuple[int, int]],
-    num_episodes: int = 500,
-    beta: float = 5.0,
-    gamma: float = 0.99,
-    learning_rate: float = 1e-3,
-    device: str = 'cpu',
-    verbose: bool = True
-) -> QNetwork:
-    """
-    Train neural network to approximate Q-values for goal-reaching policies.
-    
-    Uses Monte Carlo returns from random rollouts to train the Q-network.
-    All humans learn simultaneously with their respective goals.
-    """
-    grid_width = env.width
-    grid_height = env.height
-    num_agents = len(env.agents)
-    num_actions = env.action_space.n
-    
-    # Create networks
-    state_encoder = StateEncoder(
-        grid_width=grid_width,
-        grid_height=grid_height,
-        num_agents=num_agents,
-        feature_dim=64
-    ).to(device)
-    
-    agent_encoder = AgentEncoder(
-        grid_width=grid_width,
-        grid_height=grid_height,
-        num_agents=num_agents,
-        feature_dim=32
-    ).to(device)
-    
-    goal_encoder = GoalEncoder(
-        grid_width=grid_width,
-        grid_height=grid_height,
-        feature_dim=32
-    ).to(device)
-    
-    q_network = QNetwork(
-        state_encoder=state_encoder,
-        agent_encoder=agent_encoder,
-        goal_encoder=goal_encoder,
-        num_actions=num_actions,
-        hidden_dim=128
-    ).to(device)
-    
-    optimizer = torch.optim.Adam(q_network.parameters(), lr=learning_rate)
-    
-    losses = []
-    
-    for episode in range(num_episodes):
-        env.reset()
-        
-        # Sample a random goal for each human
-        human_goals = {
-            h_idx: random.choice(goal_cells) 
-            for h_idx in human_agent_indices
-        }
-        
-        # Track which humans have reached their goals
-        humans_reached_goal = {h_idx: False for h_idx in human_agent_indices}
-        
-        # Collect trajectory
-        trajectory = []
-        state = env.get_state()
-        
-        for step in range(env.max_steps):
-            # Check if humans are already at their goals at the START of this step
-            _, curr_agent_states, _, _ = state
-            for h_idx in human_agent_indices:
-                goal_pos = human_goals[h_idx]
-                curr_pos = curr_agent_states[h_idx]
-                if int(curr_pos[0]) == goal_pos[0] and int(curr_pos[1]) == goal_pos[1]:
-                    humans_reached_goal[h_idx] = True
-            
-            # Get actions for all agents
-            actions = []
-            action_info = {}
-            
-            for agent_idx in range(num_agents):
-                if agent_idx in human_agent_indices:
-                    # Human uses learned policy (with exploration)
-                    goal_pos = human_goals[agent_idx]
-                    
-                    grid_tensor, step_tensor = state_to_grid_tensor(
-                        state, grid_width, grid_height, num_agents, device=device
-                    )
-                    position, direction, agent_idx_t = get_agent_tensors(
-                        state, agent_idx, grid_width, grid_height, device
-                    )
-                    goal_coords = get_goal_tensor(goal_pos, grid_width, grid_height, device)
-                    
-                    with torch.no_grad():
-                        q_values = q_network(
-                            grid_tensor, step_tensor,
-                            position, direction, agent_idx_t,
-                            goal_coords
-                        )
-                    
-                    # Epsilon-greedy for exploration during training
-                    epsilon = 0.3  # Exploration rate
-                    if random.random() < epsilon:
-                        action = random.randint(0, num_actions - 1)
-                    else:
-                        policy = F.softmax(beta * q_values, dim=1)
-                        action = torch.multinomial(policy, 1).item()
-                    
-                    action_info[agent_idx] = {
-                        'action': action,
-                        'goal_pos': goal_pos
-                    }
-                else:
-                    # Robot uses random policy
-                    action = random.randint(0, num_actions - 1)
-                
-                actions.append(action)
-            
-            # Store transition for each human (only if they haven't reached goal yet)
-            for h_idx in human_agent_indices:
-                # Only add transitions for humans still pursuing their goal
-                trajectory.append({
-                    'state': state,
-                    'action': action_info[h_idx]['action'],
-                    'goal_pos': human_goals[h_idx],
-                    'human_idx': h_idx,
-                    'at_goal_before_action': humans_reached_goal[h_idx]
-                })
-            
-            # Take step
-            _, _, done, _ = env.step(actions)
-            next_state = env.get_state()
-            
-            # Get agent states for reward shaping
-            _, next_agent_states, _, _ = next_state
-            _, curr_agent_states, _, _ = state
-            
-            # Check rewards for each human with potential-based reward shaping
-            for h_idx in human_agent_indices:
-                target = human_goals[h_idx]
-                max_dist = grid_width + grid_height
-                
-                # Check if we were already at goal before taking action
-                was_at_goal = humans_reached_goal[h_idx]
-                
-                # Check if we're at goal after action
-                goal = ReachCellGoal(env, h_idx, human_goals[h_idx])
-                goal_achieved_after = goal.is_achieved(next_state)
-                
-                if was_at_goal:
-                    # If we were already at goal, give reward 1.0 for staying
-                    # (or whatever the outcome of staying/moving is)
-                    reward = 1.0  # Reward for being at goal
-                    is_terminal = True
-                else:
-                    # Standard reward computation with shaping
-                    base_reward = float(goal_achieved_after)
-                    
-                    # Potential-based reward shaping (Ng et al. 1999):
-                    # F(s,a,s') = γ * Φ(s') - Φ(s)
-                    # Φ(s) = -distance(agent, goal) / max_dist
-                    
-                    # Potential at current state
-                    curr_pos = curr_agent_states[h_idx]
-                    curr_dist = abs(curr_pos[0] - target[0]) + abs(curr_pos[1] - target[1])
-                    phi_s = -curr_dist / max_dist
-                    
-                    # Potential at next state
-                    next_pos = next_agent_states[h_idx]
-                    next_dist = abs(next_pos[0] - target[0]) + abs(next_pos[1] - target[1])
-                    phi_s_prime = -next_dist / max_dist
-                    
-                    # Shaping: γ * Φ(s') - Φ(s)
-                    shaping_reward = gamma * phi_s_prime - phi_s
-                    reward = base_reward + shaping_reward
-                    is_terminal = goal_achieved_after == 1
-                
-                # Find the trajectory entry for this human at this step
-                for t in reversed(trajectory):
-                    if t['human_idx'] == h_idx and 'reward' not in t:
-                        t['reward'] = reward
-                        t['next_state'] = next_state
-                        t['done'] = done or is_terminal
-                        break
-                
-                # Update goal reached status
-                if goal_achieved_after:
-                    humans_reached_goal[h_idx] = True
-            
-            if done:
-                break
-            
-            state = next_state
-        
-        # TD(0) learning update for each human
-        for h_idx in human_agent_indices:
-            h_trajectory = [t for t in trajectory if t['human_idx'] == h_idx and 'reward' in t]
-            
-            if not h_trajectory:
-                continue
-            
-            optimizer.zero_grad()
-            loss_list = []
-            
-            for i, t in enumerate(h_trajectory):
-                reward = t['reward']
-                done_flag = t.get('done', False)
-                was_at_goal = t.get('at_goal_before_action', False)
-                
-                # Current state Q-value
-                grid_tensor, step_tensor = state_to_grid_tensor(
-                    t['state'], grid_width, grid_height, num_agents, device=device
-                )
-                position, direction, agent_idx_t = get_agent_tensors(
-                    t['state'], t['human_idx'], grid_width, grid_height, device
-                )
-                goal_coords = get_goal_tensor(t['goal_pos'], grid_width, grid_height, device)
-                
-                q_values = q_network(
-                    grid_tensor, step_tensor,
-                    position, direction, agent_idx_t,
-                    goal_coords
-                )
-                q_value = q_values[0, t['action']]
-                
-                # TD target
-                if was_at_goal:
-                    # If we were at the goal, the Q-value should be 1.0
-                    # (since we already achieved the goal)
-                    target = torch.tensor(1.0, device=device, dtype=torch.float32)
-                elif done_flag or i == len(h_trajectory) - 1:
-                    # Terminal state - just use immediate reward
-                    target = torch.tensor(reward, device=device, dtype=torch.float32)
-                else:
-                    next_state = t['next_state']
-                    next_grid, next_step = state_to_grid_tensor(
-                        next_state, grid_width, grid_height, num_agents, device=device
-                    )
-                    next_pos, next_dir, next_idx = get_agent_tensors(
-                        next_state, t['human_idx'], grid_width, grid_height, device
-                    )
-                    
-                    with torch.no_grad():
-                        next_q = q_network(
-                            next_grid, next_step,
-                            next_pos, next_dir, next_idx,
-                            goal_coords
-                        )
-                        next_policy = F.softmax(beta * next_q, dim=1)
-                        next_v = (next_policy * next_q).sum()
-                        target = reward + gamma * next_v
-                
-                loss = F.mse_loss(q_value, target)
-                loss_list.append(loss)
-            
-            if len(loss_list) > 0:
-                total_loss = torch.stack(loss_list).mean()
-                total_loss.backward()
-                torch.nn.utils.clip_grad_norm_(q_network.parameters(), max_norm=1.0)
-                optimizer.step()
-                losses.append(total_loss.item())
-        
-        if verbose and (episode + 1) % 100 == 0:
-            avg_loss = np.mean(losses[-100:]) if losses else 0
-            print(f"  Episode {episode + 1}/{num_episodes}, Avg Loss: {avg_loss:.4f}")
-    
-    return q_network
 
 
 def compute_value_for_goals(
@@ -821,24 +583,37 @@ def main():
     
     print(f"Training neural network for all {len(goal_cells)} goal cells...")
     print("  Humans learn goal-specific Boltzmann policies")
+    print("  Using batch learning with replay buffer")
     print()
     
-    # Train neural network
+    # Create goal sampler for the training function
+    goal_sampler = ReachCellGoalSampler(env, goal_cells)
+    
+    # Train neural network using the module's function
+    # Hyperparameters tuned for this demo (5x5 grid, 25 goal cells, 10 steps)
     device = 'cpu'
-    beta = 20 #5.0
+    beta = 20.0  # Higher temperature for more deterministic policies
     
     t0 = time.time()
-    q_network = train_nn_policy_prior(
-        env=env,
+    neural_prior = train_neural_policy_prior(
+        world_model=env,
         human_agent_indices=human_agent_indices,
-        goal_cells=goal_cells,
-        num_episodes=5000, #500,
+        goal_sampler=goal_sampler,
+        num_episodes=5000,
+        steps_per_episode=env.max_steps,  # Match env's max_steps (10)
         beta=beta,
-        gamma=1, #0.99,
+        gamma=1.0,  # No discounting for this simple goal-reaching task
         learning_rate=1e-3,
+        batch_size=64,
+        replay_buffer_size=10000,
+        updates_per_episode=4,
+        train_phi_network=False,  # We only need Q-network for this demo
+        epsilon=0.3,
         device=device,
         verbose=True
     )
+    # Extract the Q-network from the trained policy prior
+    q_network = neural_prior.q_network
     elapsed = time.time() - t0
     print(f"  Training completed in {elapsed:.2f} seconds")
     print()
