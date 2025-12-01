@@ -981,10 +981,11 @@ class ReplayBuffer:
 
 class PathDistanceCalculator:
     """
-    Computes shortest path distances between cells using precomputed paths on a wall-only grid.
+    Computes shortest path distances between cells using precomputed paths on a stripped grid.
     
-    At initialization, creates a "stripped down" grid version that only contains walls
-    (ordinary and magic) and precomputes shortest paths between all empty cells using BFS.
+    At initialization, creates a "stripped down" grid version that only contains impassable
+    obstacles (walls, magic walls, lava) and precomputes shortest paths between all 
+    passable cells using BFS.
     
     At runtime, calculates a "distance indicator" by walking along the precomputed shortest
     path and summing parameterized "passing difficulty" scores based on what's currently
@@ -992,31 +993,32 @@ class PathDistanceCalculator:
     
     Default passing difficulty scores:
         - Empty cell or open door: 1
-        - Another agent or block: 2
+        - Closed door, another agent, or block: 2
         - Pickable object (key, ball, box): 3
-        - Closed door: 5
+        - Locked door: 25 (need to find a key)
         - Rock: 50
-        - Wall/MagicWall (impassable): inf
+        - Wall/MagicWall/Lava (impassable): inf
     
     Args:
         world_model: The environment with grid, width, height attributes.
         passing_costs: Optional dict mapping object types to passing costs.
                       Keys are object type strings ('empty', 'door_open', 'door_closed',
-                      'agent', 'block', 'pickable', 'rock', 'wall').
+                      'door_locked', 'agent', 'block', 'pickable', 'rock', 'wall', 'lava').
     """
     
     # Default passing costs for different object types
     DEFAULT_PASSING_COSTS = {
         'empty': 1,
         'door_open': 1,
-        'door_closed': 5,
+        'door_closed': 2,      # Can be opened easily
+        'door_locked': 25,     # Need to find a key first
         'agent': 2,
         'block': 2,
         'pickable': 3,  # key, ball, box
         'rock': 50,
         'wall': float('inf'),
         'magicwall': float('inf'),
-        'lava': 10,
+        'lava': float('inf'),  # Deadly - impassable
         'unsteadyground': 2,
         'unknown': 2,
     }
@@ -1038,9 +1040,9 @@ class PathDistanceCalculator:
     
     def _create_wall_grid(self, world_model: Any) -> np.ndarray:
         """
-        Create a boolean grid where True = wall (impassable), False = empty.
+        Create a boolean grid where True = impassable, False = passable.
         
-        Only considers Wall and MagicWall objects as walls.
+        Considers Wall, MagicWall, and Lava as impassable obstacles.
         """
         wall_grid = np.zeros((self.grid_height, self.grid_width), dtype=bool)
         
@@ -1048,9 +1050,9 @@ class PathDistanceCalculator:
             for x in range(self.grid_width):
                 cell = world_model.grid.get(x, y)
                 if cell is not None:
-                    # Check if it's a wall type (Wall or MagicWall)
+                    # Check if it's an impassable type (Wall, MagicWall, or Lava)
                     cell_type = getattr(cell, 'type', None)
-                    if cell_type in ('wall', 'magicwall'):
+                    if cell_type in ('wall', 'magicwall', 'lava'):
                         wall_grid[y, x] = True
         
         return wall_grid
@@ -1179,10 +1181,13 @@ class PathDistanceCalculator:
         # Handle different object types
         if cell_type == 'door':
             is_open = getattr(cell, 'is_open', False)
+            is_locked = getattr(cell, 'is_locked', False)
             if is_open:
                 return self.passing_costs.get('door_open', 1)
+            elif is_locked:
+                return self.passing_costs.get('door_locked', 25)
             else:
-                return self.passing_costs.get('door_closed', 5)
+                return self.passing_costs.get('door_closed', 2)
         
         elif cell_type == 'block':
             return self.passing_costs.get('block', 2)
@@ -1201,8 +1206,8 @@ class PathDistanceCalculator:
             return self.passing_costs.get('empty', 1)
         
         elif cell_type == 'lava':
-            # Lava is dangerous but passable
-            return self.passing_costs.get('lava', 10)
+            # Lava is deadly - impassable
+            return self.passing_costs.get('lava', float('inf'))
         
         elif cell_type == 'unsteadyground':
             return self.passing_costs.get('unsteadyground', 2)
