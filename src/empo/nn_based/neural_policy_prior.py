@@ -294,7 +294,7 @@ class QNetwork(nn.Module):
                        agent_encoder.feature_dim +
                        goal_encoder.feature_dim)
         
-        # Q-value head
+        # Q-value head - outputs logits, sigmoid applied in forward() to bound Q in [0,1]
         self.q_head = nn.Sequential(
             nn.Linear(combined_dim, hidden_dim),
             nn.ReLU(),
@@ -302,6 +302,9 @@ class QNetwork(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, num_actions),
         )
+        
+        # Flag to indicate bounded Q-values (rewards are 0/1, so Q,V in [0,1])
+        self.bounded_q = True
     
     def forward(
         self,
@@ -324,14 +327,20 @@ class QNetwork(nn.Module):
             goal_coords: Goal coordinates (batch, 4).
         
         Returns:
-            Q-values tensor of shape (batch, num_actions).
+            Q-values tensor of shape (batch, num_actions), bounded to [0,1] if bounded_q=True.
         """
         state_feat = self.state_encoder(state_tensor, step_count)
         agent_feat = self.agent_encoder(agent_position, agent_direction, agent_idx)
         goal_feat = self.goal_encoder(goal_coords)
         
         combined = torch.cat([state_feat, agent_feat, goal_feat], dim=1)
-        q_values = self.q_head(combined)
+        q_logits = self.q_head(combined)
+        
+        # Apply sigmoid to bound Q-values to [0,1] since rewards are 0/1
+        if self.bounded_q:
+            q_values = torch.sigmoid(q_logits)
+        else:
+            q_values = q_logits
         
         return q_values
     
@@ -341,6 +350,7 @@ class QNetwork(nn.Module):
         
         Args:
             q_values: Q-values tensor of shape (batch, num_actions).
+                     If bounded_q=True, these are already in [0,1].
             beta: Inverse temperature (higher = more deterministic).
         
         Returns:
@@ -352,10 +362,10 @@ class QNetwork(nn.Module):
             is_max = (q_values == max_q).float()
             policy = is_max / is_max.sum(dim=1, keepdim=True)
         else:
-            # Softmax with temperature - clamp beta*Q to prevent overflow
+            # Softmax with temperature
+            # Since Q-values are bounded to [0,1], beta*Q is bounded to [0, beta]
+            # Subtract max for numerical stability (standard softmax trick)
             scaled_q = beta * (q_values - q_values.max(dim=1, keepdim=True)[0])
-            # Clamp to prevent exp overflow (exp(88) is roughly max float32)
-            scaled_q = torch.clamp(scaled_q, min=-50.0, max=50.0)
             policy = F.softmax(scaled_q, dim=1)
         return policy
 
@@ -1451,10 +1461,8 @@ def train_neural_policy_prior(
                         # Random action with uniform distribution
                         action = np.random.randint(num_actions)
                     else:
-                        # Clamp beta*Q to prevent overflow
-                        scaled_q = beta * (q_values - q_values.max(dim=1, keepdim=True)[0])
-                        scaled_q = torch.clamp(scaled_q, min=-50.0, max=50.0)
-                        policy = F.softmax(scaled_q, dim=1)
+                        # Q-values are bounded to [0,1] by sigmoid, so beta*Q won't overflow
+                        policy = q_network.get_policy(q_values, beta)
                         action = torch.multinomial(policy, 1).item()
                     
                     # Only store transition if agent's personal episode hasn't ended
@@ -1538,8 +1546,10 @@ def train_neural_policy_prior(
                     print("Warning: Goal does not have target_pos attribute for shaping reward.")
 
                 reward = base_reward + shaping_reward
-                # Clamp reward to prevent numerical instability
-                reward = max(-10.0, min(10.0, reward))
+                # Clamp reward to [0,1] since we have 0/1 rewards with potential-based shaping
+                # Shaping is bounded: γ*Φ(s') - Φ(s) where Φ ∈ [-1, 0], so shaping ∈ [-1, 1]
+                # Total reward should still be clamped to [0,1] for Q-value bounds
+                reward = max(0.0, min(1.0, reward))
                 is_terminal = goal_achieved > 0
                 
                 # Update goal reached status BEFORE storing - this marks end of personal episode
@@ -1645,14 +1655,15 @@ def train_neural_policy_prior(
                         )  # Shape: (num_non_terminal, num_actions)
                         
                         # Compute V(s') = sum_a π(a|s') Q(s',a) for Boltzmann policy
-                        # Clamp to prevent overflow with high beta
-                        scaled_next_q = beta * (next_q_values - next_q_values.max(dim=1, keepdim=True)[0])
-                        scaled_next_q = torch.clamp(scaled_next_q, min=-50.0, max=50.0)
-                        next_policy = F.softmax(scaled_next_q, dim=1)
+                        # Q-values are bounded to [0,1] by sigmoid, so this is stable
+                        next_policy = q_network.get_policy(next_q_values, beta)
                         next_v = (next_policy * next_q_values).sum(dim=1)  # Shape: (num_non_terminal,)
                         
                         # Update targets for non-terminal states: r + γ * V(s')
                         targets[non_terminal_indices] = rewards[non_terminal_indices] + gamma * next_v
+                
+                # Clamp targets to [0,1] since Q-values are bounded
+                targets = torch.clamp(targets, 0.0, 1.0)
                 
                 # Compute MSE loss over the batch
                 loss = F.mse_loss(q_values_selected, targets)
