@@ -878,7 +878,7 @@ def train_and_rollout_with_learned_policy():
     print()
     
     device = 'cpu'
-    beta = 1000.0  # High beta for more deterministic human
+    beta = 10.0  # Reasonable beta for Boltzmann policy (1000 causes numerical issues)
     
     t0 = time.time()
     try:
@@ -890,8 +890,8 @@ def train_and_rollout_with_learned_policy():
             num_episodes=2000,  # 4x increase
             steps_per_episode=50,
             beta=beta,
-            gamma=1.0,
-            learning_rate=1e-3,
+            gamma=0.99,  # Standard discount factor
+            learning_rate=1e-4,  # Lower learning rate for stability
             batch_size=128,  # Larger batch size
             replay_buffer_size=10000,
             updates_per_episode=4,

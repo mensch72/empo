@@ -352,8 +352,10 @@ class QNetwork(nn.Module):
             is_max = (q_values == max_q).float()
             policy = is_max / is_max.sum(dim=1, keepdim=True)
         else:
-            # Softmax with temperature
+            # Softmax with temperature - clamp beta*Q to prevent overflow
             scaled_q = beta * (q_values - q_values.max(dim=1, keepdim=True)[0])
+            # Clamp to prevent exp overflow (exp(88) is roughly max float32)
+            scaled_q = torch.clamp(scaled_q, min=-50.0, max=50.0)
             policy = F.softmax(scaled_q, dim=1)
         return policy
 
@@ -1449,7 +1451,10 @@ def train_neural_policy_prior(
                         # Random action with uniform distribution
                         action = np.random.randint(num_actions)
                     else:
-                        policy = F.softmax(beta * q_values, dim=1)
+                        # Clamp beta*Q to prevent overflow
+                        scaled_q = beta * (q_values - q_values.max(dim=1, keepdim=True)[0])
+                        scaled_q = torch.clamp(scaled_q, min=-50.0, max=50.0)
+                        policy = F.softmax(scaled_q, dim=1)
                         action = torch.multinomial(policy, 1).item()
                     
                     # Only store transition if agent's personal episode hasn't ended
@@ -1533,6 +1538,8 @@ def train_neural_policy_prior(
                     print("Warning: Goal does not have target_pos attribute for shaping reward.")
 
                 reward = base_reward + shaping_reward
+                # Clamp reward to prevent numerical instability
+                reward = max(-10.0, min(10.0, reward))
                 is_terminal = goal_achieved > 0
                 
                 # Update goal reached status BEFORE storing - this marks end of personal episode
@@ -1638,7 +1645,10 @@ def train_neural_policy_prior(
                         )  # Shape: (num_non_terminal, num_actions)
                         
                         # Compute V(s') = sum_a π(a|s') Q(s',a) for Boltzmann policy
-                        next_policy = F.softmax(beta * next_q_values, dim=1)
+                        # Clamp to prevent overflow with high beta
+                        scaled_next_q = beta * (next_q_values - next_q_values.max(dim=1, keepdim=True)[0])
+                        scaled_next_q = torch.clamp(scaled_next_q, min=-50.0, max=50.0)
+                        next_policy = F.softmax(scaled_next_q, dim=1)
                         next_v = (next_policy * next_q_values).sum(dim=1)  # Shape: (num_non_terminal,)
                         
                         # Update targets for non-terminal states: r + γ * V(s')
