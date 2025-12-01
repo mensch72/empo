@@ -638,8 +638,8 @@ class ControlButton(WorldObj):
         h, w = img.shape[:2]
         white = np.array([255, 255, 255])
         
-        # Define large 5x7 pixel patterns for single characters, scaled to tile size
-        # These will be drawn at about 60% of the tile size
+        # Define character patterns as normalized (x, y) coordinates within tile
+        # Each point will be drawn as a small filled block for visibility
         patterns = {
             'L': [
                 (0.2, 0.15), (0.2, 0.3), (0.2, 0.45), (0.2, 0.6), (0.2, 0.75),
