@@ -600,29 +600,26 @@ class ControlButton(WorldObj):
                    action_val + 1)  # +1 so None (-1) becomes 0
     
     def render(self, img):
-        """Render the control button with state indication and action symbol."""
+        """Render the control button with state indication and action text label."""
         if self.enabled:
             if self.triggered_action is not None:
                 # Bright green when programmed
                 c = COLORS['green']
                 fill_coords(img, point_in_rect(0, 1, 0, 1), c)
                 
-                # Draw action-specific symbol
-                white = np.array([255, 255, 255])
+                # Get the action label text
                 action = self.triggered_action
-                
-                if action == 1:  # left - curved arrow left
-                    fill_coords(img, point_in_triangle((0.7, 0.3), (0.7, 0.7), (0.3, 0.5)), white)
-                    fill_coords(img, point_in_rect(0.5, 0.8, 0.4, 0.6), white)
-                elif action == 2:  # right - curved arrow right
-                    fill_coords(img, point_in_triangle((0.3, 0.3), (0.3, 0.7), (0.7, 0.5)), white)
-                    fill_coords(img, point_in_rect(0.2, 0.5, 0.4, 0.6), white)
-                elif action == 3:  # forward - upward arrow
-                    fill_coords(img, point_in_triangle((0.2, 0.6), (0.8, 0.6), (0.5, 0.2)), white)
-                    fill_coords(img, point_in_rect(0.35, 0.65, 0.5, 0.9), white)
+                if action == 1:  # left
+                    self._draw_text_label(img, "L")
+                elif action == 2:  # right
+                    self._draw_text_label(img, "R")
+                elif action == 3:  # forward
+                    self._draw_text_label(img, "F")
+                elif action == 6:  # toggle
+                    self._draw_text_label(img, "T")
                 else:
-                    # Generic action - simple arrow
-                    fill_coords(img, point_in_triangle((0.3, 0.3), (0.3, 0.7), (0.7, 0.5)), white)
+                    # Generic action number
+                    self._draw_text_label(img, str(action))
             else:
                 # Darker green when not programmed
                 c = COLORS['green'] / 2
@@ -635,6 +632,54 @@ class ControlButton(WorldObj):
             # Grey when disabled
             c = COLORS['grey']
             fill_coords(img, point_in_rect(0, 1, 0, 1), c / 2)
+    
+    def _draw_text_label(self, img, text):
+        """Draw a large single-character label on the button."""
+        h, w = img.shape[:2]
+        white = np.array([255, 255, 255])
+        
+        # Define large 5x7 pixel patterns for single characters, scaled to tile size
+        # These will be drawn at about 60% of the tile size
+        patterns = {
+            'L': [
+                (0.2, 0.15), (0.2, 0.3), (0.2, 0.45), (0.2, 0.6), (0.2, 0.75),
+                (0.35, 0.75), (0.5, 0.75), (0.65, 0.75)
+            ],
+            'R': [
+                (0.2, 0.15), (0.2, 0.3), (0.2, 0.45), (0.2, 0.6), (0.2, 0.75),
+                (0.35, 0.15), (0.5, 0.15), (0.65, 0.25),
+                (0.35, 0.45), (0.5, 0.45),
+                (0.5, 0.6), (0.65, 0.75)
+            ],
+            'F': [
+                (0.2, 0.15), (0.2, 0.3), (0.2, 0.45), (0.2, 0.6), (0.2, 0.75),
+                (0.35, 0.15), (0.5, 0.15), (0.65, 0.15),
+                (0.35, 0.45), (0.5, 0.45)
+            ],
+            'T': [
+                (0.2, 0.15), (0.35, 0.15), (0.5, 0.15), (0.65, 0.15), (0.8, 0.15),
+                (0.5, 0.3), (0.5, 0.45), (0.5, 0.6), (0.5, 0.75)
+            ],
+            '0': [(0.3, 0.2), (0.5, 0.2), (0.7, 0.2), (0.3, 0.4), (0.7, 0.4), (0.3, 0.6), (0.7, 0.6), (0.3, 0.8), (0.5, 0.8), (0.7, 0.8)],
+            '1': [(0.5, 0.2), (0.5, 0.4), (0.5, 0.6), (0.5, 0.8)],
+            '2': [(0.3, 0.2), (0.5, 0.2), (0.7, 0.2), (0.7, 0.4), (0.3, 0.6), (0.5, 0.6), (0.7, 0.6), (0.3, 0.8), (0.5, 0.8), (0.7, 0.8)],
+            '3': [(0.3, 0.2), (0.5, 0.2), (0.7, 0.2), (0.7, 0.4), (0.5, 0.5), (0.7, 0.6), (0.3, 0.8), (0.5, 0.8), (0.7, 0.8)],
+            '4': [(0.3, 0.2), (0.7, 0.2), (0.3, 0.4), (0.7, 0.4), (0.3, 0.5), (0.5, 0.5), (0.7, 0.5), (0.7, 0.6), (0.7, 0.8)],
+            '5': [(0.3, 0.2), (0.5, 0.2), (0.7, 0.2), (0.3, 0.4), (0.3, 0.5), (0.5, 0.5), (0.7, 0.6), (0.3, 0.8), (0.5, 0.8), (0.7, 0.8)],
+            '6': [(0.3, 0.2), (0.5, 0.2), (0.7, 0.2), (0.3, 0.4), (0.3, 0.5), (0.5, 0.5), (0.7, 0.5), (0.3, 0.6), (0.7, 0.6), (0.3, 0.8), (0.5, 0.8), (0.7, 0.8)],
+        }
+        
+        char = text[0].upper() if text else '?'
+        if char in patterns:
+            # Draw each point as a small filled circle
+            for fx, fy in patterns[char]:
+                cx, cy = int(fx * w), int(fy * h)
+                # Draw a 3x3 block for visibility
+                for dx in range(-2, 3):
+                    for dy in range(-2, 3):
+                        px, py = cx + dx, cy + dy
+                        if 0 <= px < w and 0 <= py < h:
+                            img[py, px] = white
 
 
 class Floor(WorldObj):

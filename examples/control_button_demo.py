@@ -36,22 +36,25 @@ sys.modules['gym'] = gym
 
 from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, Wall, World, Actions, ControlButton, Rock
 
+# Output directory for movies and images
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
+OUTPUT_DIR = os.path.join(PROJECT_DIR, 'outputs')
+
 # ============================================================================
 # Environment Definition
 # ============================================================================
 
-# Layout after robot has programmed buttons and stepped out of the way:
-# - Human (yellow) in between buttons at (2, 3)
-# - Robot (grey) out of the way at (4, 3)
-# - Upper button at (2, 2) -> left
-# - Right button at (3, 3) -> forward  
-# - Lower button at (2, 4) -> right
+# Initial layout for prequel (robot and human need to program buttons):
+# - Human (yellow) starts at (1, 1) out of the way
+# - Robot (grey) starts at (2, 3) in position to program buttons
+# - Buttons at (2, 2), (3, 3), (2, 4) need to be programmed
 # - Rocks at (5, 2), (5, 3), (5, 4)
-CONTROL_BUTTON_MAP = """
+PREQUEL_MAP = """
 We We We We We We We We
-We .. .. .. .. .. .. We
+We Ay .. .. .. .. .. We
 We .. CB .. .. Ro .. We
-We .. Ay CB Ae Ro We We
+We .. Ae CB .. Ro We We
 We .. CB .. .. Ro .. We
 We .. .. .. .. .. .. We
 We We We We We We We We
@@ -62,14 +65,14 @@ class ControlButtonEnv(MultiGridEnv):
     """
     Environment with control buttons that let humans control robot actions.
     
-    After the prequel programming phase:
-    - Human (yellow) is between the buttons at (2, 3)
-    - Robot (grey) is out of the way at (4, 3)
-    - 3 Control Buttons:
-      - Upper (2, 2) -> left action
-      - Right (3, 3) -> forward action
-      - Lower (2, 4) -> right action
-    - 3 Rocks at (5, 2), (5, 3), (5, 4)
+    Can be initialized in two modes:
+    1. pre_programmed=False: Robot starts in position to program buttons (for prequel)
+    2. pre_programmed=True: Buttons are already programmed (for learning phase)
+    
+    Button programming:
+    - Upper (2, 2) -> left action
+    - Right (3, 3) -> forward action
+    - Lower (2, 4) -> right action
     
     The robot can push rocks (has can_push_rocks=True).
     """
@@ -78,11 +81,11 @@ class ControlButtonEnv(MultiGridEnv):
         """
         Args:
             max_steps: Maximum steps per episode
-            pre_programmed: If True, buttons start pre-programmed (simulating robot already programmed them)
+            pre_programmed: If True, buttons start pre-programmed
         """
         self.pre_programmed = pre_programmed
         super().__init__(
-            map=CONTROL_BUTTON_MAP,
+            map=PREQUEL_MAP,
             max_steps=max_steps,
             partial_obs=False,
             objects_set=World,
@@ -136,49 +139,76 @@ class ControlButtonEnv(MultiGridEnv):
                                 cell.triggered_action = button_actions[pos]
 
 
-def get_prequel_actions():
+def create_movie(frames, output_path, fps=2):
     """
-    Get the sequence of actions for the prequel where robot programs the buttons.
+    Create a movie (GIF) from a list of frames.
     
-    The robot starts at the same position as in the map and needs to:
-    1. Move to face each button
-    2. Toggle to enter programming mode
-    3. Perform the action to program
-    4. Move to the next button
-    5. Finally step out of the way
-    
-    Returns:
-        List of (human_action, robot_action) tuples for each step
+    Args:
+        frames: List of (title, image) tuples or just images
+        output_path: Path to save the movie
+        fps: Frames per second
     """
-    # This is a simplified prequel - in a full implementation, the robot would
-    # navigate to each button and program it. For now, we assume pre-programming.
-    # The actual prequel steps would depend on the initial positions.
-    return []
+    try:
+        from PIL import Image
+        import matplotlib.pyplot as plt
+        from io import BytesIO
+        
+        # Convert frames to PIL images with titles
+        pil_frames = []
+        for frame in frames:
+            if isinstance(frame, tuple):
+                title, img = frame
+            else:
+                title, img = None, frame
+            
+            # Create figure with title
+            fig, ax = plt.subplots(figsize=(8, 8))
+            ax.imshow(img)
+            if title:
+                ax.set_title(title, fontsize=14)
+            ax.axis('off')
+            
+            # Convert to image using buffer
+            buf = BytesIO()
+            fig.savefig(buf, format='png', bbox_inches='tight', dpi=100)
+            buf.seek(0)
+            pil_frames.append(Image.open(buf).copy())
+            buf.close()
+            plt.close(fig)
+        
+        # Save as GIF
+        if pil_frames:
+            duration = int(1000 / fps)  # milliseconds per frame
+            pil_frames[0].save(
+                output_path,
+                save_all=True,
+                append_images=pil_frames[1:],
+                duration=duration,
+                loop=0
+            )
+            print(f"Saved movie to {output_path}")
+            return True
+    except ImportError as e:
+        print(f"Could not create movie: {e}")
+        return False
+    return False
 
 
-def demonstrate_control_button():
+def demonstrate_prequel_with_movie():
     """
-    Simple demonstration of how control buttons work.
+    Demonstrate the prequel phase where robot programs buttons, saving as a movie.
     """
     print("=" * 70)
-    print("Control Button Demonstration")
+    print("Prequel Demonstration: Robot Programs Buttons")
     print("=" * 70)
     print()
     
-    # Create environment with pre-programmed buttons
-    env = ControlButtonEnv(max_steps=100, pre_programmed=True)
+    # Ensure output directory exists
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    
+    # Create environment WITHOUT pre-programming
+    env = ControlButtonEnv(max_steps=100, pre_programmed=False)
     env.reset()
-    
-    print("Environment layout (after robot programming phase):")
-    print("  Yellow (Human): In between control buttons, can trigger them")
-    print("  Grey (Robot): Stepped aside, controlled by buttons, can push rocks")
-    print("  Green squares: Control buttons with action indicators:")
-    print("    - Upper button (2,2): LEFT action (arrow pointing left)")
-    print("    - Right button (3,3): FORWARD action (arrow pointing up)")
-    print("    - Lower button (2,4): RIGHT action (arrow pointing right)")
-    print("  Grey circles: Rocks (can be pushed by robot)")
-    print("  Green dashed lines: Connection from buttons to controlled robot")
-    print()
     
     # Find agents
     human_idx = None
@@ -189,64 +219,432 @@ def demonstrate_control_button():
         elif agent.color == 'grey':
             robot_idx = i
     
-    print(f"Human (yellow) at: {tuple(env.agents[human_idx].pos)}, dir={env.agents[human_idx].dir}")
-    print(f"Robot (grey) at: {tuple(env.agents[robot_idx].pos)}, dir={env.agents[robot_idx].dir}")
+    print(f"Initial state:")
+    print(f"  Robot at: {tuple(env.agents[robot_idx].pos)}, dir={env.agents[robot_idx].dir}")
+    print(f"  Human at: {tuple(env.agents[human_idx].pos)}")
     print()
     
-    # Find control buttons and their programming
-    print("Control buttons (pre-programmed):")
-    action_names = {1: 'left', 2: 'right', 3: 'forward', 6: 'toggle'}
-    for j in range(env.grid.height):
-        for i in range(env.grid.width):
-            cell = env.grid.get(i, j)
-            if cell is not None and cell.type == 'controlbutton':
-                action_name = action_names.get(cell.triggered_action, str(cell.triggered_action)) if cell.triggered_action is not None else "None"
-                print(f"  Button at ({i}, {j}): action={action_name}, controlled_agent={cell.controlled_agent}")
-    print()
+    frames = []
     
-    # Render the environment
     try:
         import matplotlib.pyplot as plt
+        
+        # Capture initial frame
         img = env.render(mode='rgb_array')
-        plt.figure(figsize=(8, 8))
-        plt.imshow(img)
-        plt.title("Control Button Environment\n(Dashed lines show button-to-robot connections)")
-        plt.axis('off')
-        plt.savefig('/tmp/control_button_env.png', dpi=150, bbox_inches='tight')
-        print("Saved environment rendering to /tmp/control_button_env.png")
+        frames.append(('Initial: Robot ready to program', img))
+        
+        actions = [Actions.still] * len(env.agents)
+        
+        # === Program upper button (2, 2) with 'left' ===
+        print("Programming upper button (2,2) with 'left'...")
+        
+        # Turn to face north
+        actions[robot_idx] = Actions.left
+        env.step(actions)
+        actions[robot_idx] = Actions.left
+        env.step(actions)
+        print(f"  Robot turned to face north, dir={env.agents[robot_idx].dir}")
+        
+        img = env.render(mode='rgb_array')
+        frames.append(('Robot faces upper button', img))
+        
+        # Toggle to enter programming mode
+        actions[robot_idx] = Actions.toggle
+        env.step(actions)
+        print(f"  Robot toggled button to enter programming mode")
+        
+        # Program 'left' action
+        actions[robot_idx] = Actions.left
+        env.step(actions)
+        print(f"  Robot performed 'left' - button now programmed")
+        
+        img = env.render(mode='rgb_array')
+        frames.append(('Upper button: "left" programmed', img))
+        
+        # === Program lower button (2, 4) with 'right' ===
+        print("\nProgramming lower button (2,4) with 'right'...")
+        
+        # Turn to face south
+        actions[robot_idx] = Actions.left
+        env.step(actions)
+        print(f"  Robot turned to face south, dir={env.agents[robot_idx].dir}")
+        
+        img = env.render(mode='rgb_array')
+        frames.append(('Robot faces lower button', img))
+        
+        # Toggle to enter programming mode
+        actions[robot_idx] = Actions.toggle
+        env.step(actions)
+        print(f"  Robot toggled button to enter programming mode")
+        
+        # Program 'right' action
+        actions[robot_idx] = Actions.right
+        env.step(actions)
+        print(f"  Robot performed 'right' - button now programmed")
+        
+        img = env.render(mode='rgb_array')
+        frames.append(('Lower button: "rght" programmed', img))
+        
+        # === Program right button (3, 3) with 'forward' ===
+        print("\nProgramming right button (3,3) with 'forward'...")
+        
+        # Turn to face east
+        actions[robot_idx] = Actions.left
+        env.step(actions)
+        actions[robot_idx] = Actions.left
+        env.step(actions)
+        print(f"  Robot turned to face east, dir={env.agents[robot_idx].dir}")
+        
+        img = env.render(mode='rgb_array')
+        frames.append(('Robot faces right button', img))
+        
+        # Toggle to enter programming mode
+        actions[robot_idx] = Actions.toggle
+        env.step(actions)
+        print(f"  Robot toggled button to enter programming mode")
+        
+        # Program 'forward' action
+        actions[robot_idx] = Actions.forward
+        env.step(actions)
+        print(f"  Robot performed 'forward' - button now programmed")
+        
+        img = env.render(mode='rgb_array')
+        frames.append(('All buttons programmed!', img))
+        
+        # Check final button states
+        print("\nFinal button states (programmed):")
+        action_names = {1: 'left', 2: 'right', 3: 'forward', 6: 'toggle'}
+        for j in range(env.grid.height):
+            for i in range(env.grid.width):
+                cell = env.grid.get(i, j)
+                if cell is not None and cell.type == 'controlbutton':
+                    action_name = action_names.get(cell.triggered_action, str(cell.triggered_action)) if cell.triggered_action else "None"
+                    print(f"  Button at ({i}, {j}): action={action_name}, controlled_agent={cell.controlled_agent}")
+        
+        # Save frames as individual images
+        fig, axes = plt.subplots(2, 4, figsize=(20, 10))
+        for idx, (title, img) in enumerate(frames):
+            ax = axes[idx // 4, idx % 4]
+            ax.imshow(img)
+            ax.set_title(title, fontsize=10)
+            ax.axis('off')
+        # Hide unused axes
+        for idx in range(len(frames), 8):
+            axes[idx // 4, idx % 4].axis('off')
+        plt.tight_layout()
+        prequel_img_path = os.path.join(OUTPUT_DIR, 'control_button_prequel.png')
+        plt.savefig(prequel_img_path, dpi=150, bbox_inches='tight')
+        print(f"\nSaved prequel frames to {prequel_img_path}")
         plt.close()
-    except ImportError:
-        print("(matplotlib not available for rendering)")
+        
+        # Save as movie/GIF
+        movie_path = os.path.join(OUTPUT_DIR, 'control_button_prequel.gif')
+        create_movie(frames, movie_path, fps=1)
+        
+    except ImportError as e:
+        print(f"(matplotlib not available for rendering: {e})")
     
-    # Demonstrate: Human triggers upper button (left)
-    print("\nDemonstration: Human triggers buttons to control robot")
-    print("-" * 50)
-    
-    # Human already faces north (dir=3), directly facing upper button at (2,2)
-    print("Step 1: Human is already facing upper button (north)")
-    print(f"  Human direction: {env.agents[human_idx].dir} (3=north)")
-    print(f"  Human front_pos: {tuple(env.agents[human_idx].front_pos)}")
-    
-    # Human toggles upper button
-    print("\nStep 2: Human toggles upper button (programmed for 'left')")
-    print(f"  Robot direction before: {env.agents[robot_idx].dir}")
-    actions = [Actions.still] * len(env.agents)
-    actions[human_idx] = Actions.toggle
-    env.step(actions)
-    print(f"  Robot forced_next_action set: {env.agents[robot_idx].forced_next_action}")
-    
-    # Robot's action is forced on next step
-    print("\nStep 3: On next step, robot's action is FORCED to 'left'")
-    robot_dir_before = env.agents[robot_idx].dir
-    actions = [Actions.still] * len(env.agents)
-    actions[robot_idx] = Actions.forward  # Robot "wants" to go forward
-    env.step(actions)
-    print(f"  Robot direction changed: {robot_dir_before} -> {env.agents[robot_idx].dir} (turned left!)")
+    print()
+    return env, frames
+
+
+def demonstrate_human_control_with_movie():
+    """
+    Demonstrate human using control buttons to control robot, saving as a movie.
+    """
+    print("=" * 70)
+    print("Human Control Demonstration: Using Programmed Buttons")
+    print("=" * 70)
     print()
     
-    print("Demonstration complete!")
+    # Ensure output directory exists
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    
+    # Create environment with pre-programmed buttons
+    env = ControlButtonEnv(max_steps=100, pre_programmed=True)
+    env.reset()
+    
+    # Find agents
+    human_idx = None
+    robot_idx = None
+    for i, agent in enumerate(env.agents):
+        if agent.color == 'yellow':
+            human_idx = i
+        elif agent.color == 'grey':
+            robot_idx = i
+    
+    print(f"Initial state:")
+    print(f"  Human at: {tuple(env.agents[human_idx].pos)}, dir={env.agents[human_idx].dir}")
+    print(f"  Robot at: {tuple(env.agents[robot_idx].pos)}, dir={env.agents[robot_idx].dir}")
     print()
-    return env
+    
+    frames = []
+    
+    try:
+        import matplotlib.pyplot as plt
+        
+        actions = [Actions.still] * len(env.agents)
+        
+        # Capture initial frame
+        img = env.render(mode='rgb_array')
+        frames.append(('Initial: Buttons programmed', img))
+        
+        # Human needs to move to face a button
+        # Human at (1,1), needs to get to position to toggle buttons
+        
+        # Move human to (2,2) area - but can't go through button
+        # Let's have human turn and move
+        print("Human moving into position...")
+        
+        # Turn right to face south
+        actions[human_idx] = Actions.right
+        env.step(actions)
+        img = env.render(mode='rgb_array')
+        frames.append(('Human turns south', img))
+        
+        # Move forward
+        actions[human_idx] = Actions.forward
+        env.step(actions)
+        img = env.render(mode='rgb_array')
+        frames.append(('Human moves to (1,2)', img))
+        
+        # Move forward again
+        actions[human_idx] = Actions.forward
+        env.step(actions)
+        img = env.render(mode='rgb_array')
+        frames.append(('Human at (1,3)', img))
+        
+        # Turn right to face west... no, east to face buttons
+        actions[human_idx] = Actions.left
+        env.step(actions)
+        img = env.render(mode='rgb_array')
+        frames.append(('Human faces east', img))
+        
+        # Move forward to get closer
+        actions[human_idx] = Actions.forward
+        env.step(actions)
+        img = env.render(mode='rgb_array')
+        frames.append(('Human at (2,3)', img))
+        
+        # Now human can toggle the right button at (3,3)
+        print("\nHuman toggles right button (programmed for 'forward')...")
+        actions[human_idx] = Actions.toggle
+        actions[robot_idx] = Actions.still
+        env.step(actions)
+        print(f"  Robot forced_next_action: {env.agents[robot_idx].forced_next_action}")
+        img = env.render(mode='rgb_array')
+        frames.append(('Human triggers "fore" button', img))
+        
+        # Robot's next action is forced
+        print("Robot executes forced 'forward' action...")
+        robot_pos_before = tuple(env.agents[robot_idx].pos)
+        actions[human_idx] = Actions.still
+        actions[robot_idx] = Actions.still  # Robot "chooses" still, but forced to forward
+        env.step(actions)
+        robot_pos_after = tuple(env.agents[robot_idx].pos)
+        print(f"  Robot moved: {robot_pos_before} -> {robot_pos_after}")
+        img = env.render(mode='rgb_array')
+        frames.append(('Robot moves forward!', img))
+        
+        # Human turns to face upper button
+        print("\nHuman toggles upper button (programmed for 'left')...")
+        actions[human_idx] = Actions.left  # Turn north
+        env.step(actions)
+        actions[human_idx] = Actions.toggle
+        env.step(actions)
+        print(f"  Robot forced_next_action: {env.agents[robot_idx].forced_next_action}")
+        img = env.render(mode='rgb_array')
+        frames.append(('Human triggers "left" button', img))
+        
+        # Robot turns left
+        robot_dir_before = env.agents[robot_idx].dir
+        actions[human_idx] = Actions.still
+        actions[robot_idx] = Actions.still
+        env.step(actions)
+        robot_dir_after = env.agents[robot_idx].dir
+        print(f"  Robot turned: dir {robot_dir_before} -> {robot_dir_after}")
+        img = env.render(mode='rgb_array')
+        frames.append(('Robot turns left!', img))
+        
+        # Save frames as individual images
+        fig, axes = plt.subplots(2, 5, figsize=(25, 10))
+        for idx, (title, img) in enumerate(frames):
+            ax = axes[idx // 5, idx % 5]
+            ax.imshow(img)
+            ax.set_title(title, fontsize=10)
+            ax.axis('off')
+        # Hide unused axes
+        for idx in range(len(frames), 10):
+            axes[idx // 5, idx % 5].axis('off')
+        plt.tight_layout()
+        control_img_path = os.path.join(OUTPUT_DIR, 'control_button_human_control.png')
+        plt.savefig(control_img_path, dpi=150, bbox_inches='tight')
+        print(f"\nSaved control frames to {control_img_path}")
+        plt.close()
+        
+        # Save as movie/GIF
+        movie_path = os.path.join(OUTPUT_DIR, 'control_button_human_control.gif')
+        create_movie(frames, movie_path, fps=1)
+        
+    except ImportError as e:
+        print(f"(matplotlib not available for rendering: {e})")
+    
+    print()
+    return env, frames
+
+
+def create_full_rollout_movie():
+    """
+    Create a complete rollout movie showing:
+    1. Prequel: Robot programs all buttons (handcrafted policy)
+    2. Human control phase: Human uses buttons to control robot
+    """
+    print("=" * 70)
+    print("Full Rollout Movie: Prequel + Human Control")
+    print("=" * 70)
+    print()
+    
+    # Ensure output directory exists
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    
+    all_frames = []
+    
+    # Create environment WITHOUT pre-programming for full demo
+    env = ControlButtonEnv(max_steps=100, pre_programmed=False)
+    env.reset()
+    
+    # Find agents
+    human_idx = None
+    robot_idx = None
+    for i, agent in enumerate(env.agents):
+        if agent.color == 'yellow':
+            human_idx = i
+        elif agent.color == 'grey':
+            robot_idx = i
+    
+    try:
+        import matplotlib.pyplot as plt
+        
+        actions = [Actions.still] * len(env.agents)
+        
+        # ========== PREQUEL PHASE ==========
+        print("=== PREQUEL: Robot programs buttons ===")
+        
+        img = env.render(mode='rgb_array')
+        all_frames.append(('PREQUEL: Initial state', img))
+        
+        # Program upper button with 'left'
+        actions[robot_idx] = Actions.left
+        env.step(actions)
+        actions[robot_idx] = Actions.left
+        env.step(actions)
+        actions[robot_idx] = Actions.toggle
+        env.step(actions)
+        actions[robot_idx] = Actions.left
+        env.step(actions)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('PREQUEL: Upper = "left"', img))
+        
+        # Program lower button with 'right'
+        actions[robot_idx] = Actions.left
+        env.step(actions)
+        actions[robot_idx] = Actions.toggle
+        env.step(actions)
+        actions[robot_idx] = Actions.right
+        env.step(actions)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('PREQUEL: Lower = "rght"', img))
+        
+        # Program right button with 'forward'
+        actions[robot_idx] = Actions.left
+        env.step(actions)
+        actions[robot_idx] = Actions.left
+        env.step(actions)
+        actions[robot_idx] = Actions.toggle
+        env.step(actions)
+        actions[robot_idx] = Actions.forward
+        env.step(actions)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('PREQUEL: Right = "fore"', img))
+        
+        print("  Buttons programmed!")
+        
+        # ========== HUMAN CONTROL PHASE ==========
+        print("\n=== HUMAN CONTROL: Using buttons ===")
+        
+        img = env.render(mode='rgb_array')
+        all_frames.append(('CONTROL: Ready', img))
+        
+        # Human moves into position
+        actions[human_idx] = Actions.right
+        actions[robot_idx] = Actions.still
+        env.step(actions)
+        actions[human_idx] = Actions.forward
+        env.step(actions)
+        actions[human_idx] = Actions.forward
+        env.step(actions)
+        actions[human_idx] = Actions.left
+        env.step(actions)
+        actions[human_idx] = Actions.forward
+        env.step(actions)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('CONTROL: Human in position', img))
+        
+        # Human triggers right button (forward)
+        actions[human_idx] = Actions.toggle
+        env.step(actions)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('CONTROL: Trigger "fore"', img))
+        
+        # Robot executes forced forward
+        actions[human_idx] = Actions.still
+        env.step(actions)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('CONTROL: Robot forward!', img))
+        
+        # Human triggers upper button (left)
+        actions[human_idx] = Actions.left
+        env.step(actions)
+        actions[human_idx] = Actions.toggle
+        env.step(actions)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('CONTROL: Trigger "left"', img))
+        
+        # Robot executes forced left
+        actions[human_idx] = Actions.still
+        env.step(actions)
+        img = env.render(mode='rgb_array')
+        all_frames.append(('CONTROL: Robot turns left!', img))
+        
+        print("  Control demonstration complete!")
+        
+        # Save as movie
+        movie_path = os.path.join(OUTPUT_DIR, 'control_button_full_rollout.gif')
+        create_movie(all_frames, movie_path, fps=1)
+        
+        # Save summary image
+        n_frames = len(all_frames)
+        cols = min(5, n_frames)
+        rows = (n_frames + cols - 1) // cols
+        fig, axes = plt.subplots(rows, cols, figsize=(5*cols, 5*rows))
+        axes = axes.flatten() if n_frames > 1 else [axes]
+        for idx, (title, img) in enumerate(all_frames):
+            axes[idx].imshow(img)
+            axes[idx].set_title(title, fontsize=9)
+            axes[idx].axis('off')
+        for idx in range(len(all_frames), len(axes)):
+            axes[idx].axis('off')
+        plt.tight_layout()
+        summary_path = os.path.join(OUTPUT_DIR, 'control_button_full_rollout.png')
+        plt.savefig(summary_path, dpi=150, bbox_inches='tight')
+        print(f"\nSaved rollout summary to {summary_path}")
+        plt.close()
+        
+    except ImportError as e:
+        print(f"(matplotlib not available: {e})")
+    
+    print()
+    return all_frames
 
 
 def main():
@@ -263,41 +661,23 @@ def main():
     print("   on the NEXT step (forced_next_action mechanism)")
     print()
     print("Button layout after programming:")
-    print("  - Upper button → LEFT action")
-    print("  - Right button → FORWARD action")
-    print("  - Lower button → RIGHT action")
+    print("  - Upper button → 'left' action")
+    print("  - Right button → 'fore' action")
+    print("  - Lower button → 'rght' action")
     print()
-    print("The dashed lines in rendering show connections from buttons to robot.")
-    print()
-    
-    # Run the demonstration
-    demonstrate_control_button()
-    
-    # Show rock positions as potential goals
-    env = ControlButtonEnv(max_steps=100, pre_programmed=True)
-    env.reset()
-    
-    print("=" * 70)
-    print("Potential Goals (Robot reaching rock positions)")
-    print("=" * 70)
+    print(f"Output directory: {OUTPUT_DIR}")
     print()
     
-    rocks = []
-    for j in range(env.grid.height):
-        for i in range(env.grid.width):
-            cell = env.grid.get(i, j)
-            if cell is not None and cell.type == 'rock':
-                rocks.append((i, j))
+    # Create full rollout movie
+    create_full_rollout_movie()
     
-    for i, (x, y) in enumerate(rocks):
-        print(f"  Goal {i+1}: Robot reaches position ({x}, {y})")
-    
-    print()
-    print("The human can use control buttons to guide the robot to these goals.")
-    print()
     print("=" * 70)
     print("Demo Complete")
     print("=" * 70)
+    print()
+    print(f"Check {OUTPUT_DIR} for generated movies and images:")
+    print("  - control_button_full_rollout.gif - Complete demo movie")
+    print("  - control_button_full_rollout.png - Summary image")
 
 
 if __name__ == "__main__":

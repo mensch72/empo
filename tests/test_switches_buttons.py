@@ -428,6 +428,233 @@ def test_terminated_agent_actions_ignored():
     assert env.agents[1].dir == grey_initial_dir, "Terminated agent should not turn"
 
 
+# ============================================================================
+# ControlButton Tests
+# ============================================================================
+
+from gym_multigrid.multigrid import ControlButton
+
+
+class ControlButtonEnv(MultiGridEnv):
+    """Simple environment for testing ControlButton."""
+    
+    def __init__(self):
+        # Create a yellow agent (human) and grey agent (robot)
+        agents = [
+            Agent(World, World.COLOR_TO_IDX['yellow']),  # Yellow agent (trigger)
+            Agent(World, World.COLOR_TO_IDX['grey']),    # Grey agent (controlled)
+        ]
+        
+        super().__init__(
+            width=6,
+            height=5,
+            max_steps=100,
+            agents=agents,
+            partial_obs=False,
+            objects_set=World
+        )
+    
+    def _gen_grid(self, width, height):
+        self.grid = Grid(width, height)
+        
+        # Add walls around perimeter
+        for x in range(width):
+            self.grid.set(x, 0, Wall(World))
+            self.grid.set(x, height - 1, Wall(World))
+        for y in range(height):
+            self.grid.set(0, y, Wall(World))
+            self.grid.set(width - 1, y, Wall(World))
+        
+        # Place yellow agent at (1, 2) facing right
+        self.agents[0].pos = np.array([1, 2])
+        self.agents[0].dir = 0  # facing right/east
+        self.grid.set(1, 2, self.agents[0])
+        
+        # Place grey agent at (3, 2) facing right
+        self.agents[1].pos = np.array([3, 2])
+        self.agents[1].dir = 0  # facing right/east
+        self.grid.set(3, 2, self.agents[1])
+        
+        # Place ControlButton at (2, 2) - between agents
+        self.control_button = ControlButton(World, trigger_color='yellow', controlled_color='grey')
+        self.grid.set(2, 2, self.control_button)
+
+
+def test_control_button_creation():
+    """Test that ControlButton can be created with correct attributes."""
+    cb = ControlButton(World, trigger_color='yellow', controlled_color='grey')
+    
+    assert cb.type == 'controlbutton'
+    assert cb.trigger_color == 'yellow'
+    assert cb.controlled_color == 'grey'
+    assert cb.enabled == True
+    assert cb.controlled_agent is None
+    assert cb.triggered_action is None
+    assert cb.can_overlap() == False
+
+
+def test_control_button_programming_phase():
+    """Test that robot can program a control button."""
+    env = ControlButtonEnv()
+    env.reset()
+    
+    # Grey agent (robot) is at (3, 2) facing east
+    # ControlButton is at (2, 2)
+    # Grey needs to turn to face the button (west)
+    
+    # Turn grey agent to face west (button direction)
+    actions = [Actions.still, Actions.left]  # human still, robot turns left
+    env.step(actions)
+    actions = [Actions.still, Actions.left]  # human still, robot turns left again
+    env.step(actions)
+    
+    # Now grey faces west, front_pos should be (2, 2)
+    assert tuple(env.agents[1].front_pos) == (2, 2), "Robot should face the button"
+    
+    # Robot toggles to enter programming mode
+    actions = [Actions.still, Actions.toggle]
+    env.step(actions)
+    
+    # Button should now have controlled_agent set
+    assert env.control_button.controlled_agent == 1, "Button should have controlled_agent set to robot index"
+    assert env.control_button._awaiting_action == True, "Button should be awaiting action"
+    
+    # Robot performs an action to program
+    actions = [Actions.still, Actions.forward]
+    env.step(actions)
+    
+    # Button should now have triggered_action set
+    assert env.control_button.triggered_action == Actions.forward, "Button should have 'forward' programmed"
+    assert env.control_button._awaiting_action == False, "Button should no longer be awaiting action"
+
+
+def test_control_button_triggering_phase():
+    """Test that human can trigger a control button to force robot action."""
+    env = ControlButtonEnv()
+    env.reset()
+    
+    # Pre-program the button
+    env.control_button.controlled_agent = 1  # Grey agent
+    env.control_button.triggered_action = Actions.left  # Programmed to turn left
+    
+    # Yellow agent (human) is at (1, 2) facing east
+    # ControlButton is at (2, 2)
+    # Yellow should face the button already
+    assert tuple(env.agents[0].front_pos) == (2, 2), "Human should face the button"
+    
+    # Record robot's initial direction
+    robot_initial_dir = env.agents[1].dir
+    
+    # Human toggles the button
+    actions = [Actions.toggle, Actions.still]
+    env.step(actions)
+    
+    # Robot should have forced_next_action set
+    assert env.agents[1].forced_next_action == Actions.left, "Robot should have forced_next_action set"
+    
+    # On next step, robot's action is forced to 'left' regardless of what it chooses
+    actions = [Actions.still, Actions.forward]  # Robot "tries" to go forward
+    env.step(actions)
+    
+    # Robot should have turned left (not moved forward)
+    expected_dir = (robot_initial_dir - 1) % 4  # Left turn decreases direction
+    assert env.agents[1].dir == expected_dir, f"Robot should have turned left: expected dir {expected_dir}, got {env.agents[1].dir}"
+    
+    # forced_next_action should be cleared
+    assert env.agents[1].forced_next_action is None, "forced_next_action should be cleared after use"
+
+
+def test_control_button_disabled():
+    """Test that disabled ControlButton doesn't work."""
+    env = ControlButtonEnv()
+    env.reset()
+    
+    # Disable the button
+    env.control_button.enabled = False
+    
+    # Pre-program it (shouldn't matter since disabled)
+    env.control_button.controlled_agent = 1
+    env.control_button.triggered_action = Actions.left
+    
+    # Human toggles the button
+    actions = [Actions.toggle, Actions.still]
+    env.step(actions)
+    
+    # Robot should NOT have forced_next_action set (button is disabled)
+    assert env.agents[1].forced_next_action is None, "Disabled button should not set forced_next_action"
+
+
+def test_control_button_encode():
+    """Test that ControlButton encode() includes all attributes."""
+    cb = ControlButton(World, trigger_color='yellow', controlled_color='grey')
+    cb.controlled_agent = 1
+    cb.triggered_action = Actions.forward
+    cb.enabled = False
+    
+    encoding = cb.encode()
+    
+    # encoding should include: type, color, trigger_color, controlled_color, enabled, controlled_agent, triggered_action
+    assert len(encoding) >= 5, "Encoding should include multiple attributes"
+    assert encoding[0] == World.OBJECT_TO_IDX['controlbutton'], "First element should be object type"
+
+
+def test_control_button_state_in_get_set_state():
+    """Test that ControlButton mutable state is preserved in get_state/set_state."""
+    env = ControlButtonEnv()
+    env.reset()
+    
+    # Set mutable state
+    env.control_button.controlled_agent = 1
+    env.control_button.triggered_action = Actions.right
+    env.control_button.enabled = False
+    
+    # Get state
+    state = env.get_state()
+    
+    # Change state
+    env.control_button.controlled_agent = None
+    env.control_button.triggered_action = None
+    env.control_button.enabled = True
+    
+    # Restore state
+    env.set_state(state)
+    
+    # Verify mutable state is restored
+    assert env.control_button.controlled_agent == 1, "controlled_agent should be restored"
+    assert env.control_button.triggered_action == Actions.right, "triggered_action should be restored"
+    assert env.control_button.enabled == False, "enabled state should be restored"
+
+
+def test_control_button_forced_action_overrides_choice():
+    """Test that forced_next_action truly overrides the agent's chosen action."""
+    env = ControlButtonEnv()
+    env.reset()
+    
+    # Pre-program and trigger
+    env.control_button.controlled_agent = 1
+    env.control_button.triggered_action = Actions.right
+    
+    # Human triggers
+    actions = [Actions.toggle, Actions.still]
+    env.step(actions)
+    
+    # Robot has forced_next_action
+    assert env.agents[1].forced_next_action == Actions.right
+    
+    # Record position and direction
+    robot_pos = tuple(env.agents[1].pos)
+    robot_dir = env.agents[1].dir
+    
+    # Robot "chooses" forward but should turn right instead
+    actions = [Actions.still, Actions.forward]
+    env.step(actions)
+    
+    # Robot should have turned right, not moved forward
+    expected_dir = (robot_dir + 1) % 4  # Right turn increases direction
+    assert env.agents[1].dir == expected_dir, "Robot should have turned right"
+    assert tuple(env.agents[1].pos) == robot_pos, "Robot should not have moved"
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])
