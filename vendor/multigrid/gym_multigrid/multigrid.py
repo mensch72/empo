@@ -253,14 +253,16 @@ class KillButton(WorldObj):
         return True
     
     def encode(self, world, current_agent=False):
-        """Encode the kill button with its mutable state (enabled only)."""
+        """Encode the kill button with all its attributes for observations."""
         if world.encode_dim == 3:
             return (world.OBJECT_TO_IDX[self.type], world.COLOR_TO_IDX[self.color], 
                     1 if self.enabled else 0)
         else:
-            # Only encode mutable state (enabled) - trigger_color and target_color are immutable
+            # Encode all attributes: trigger_color, target_color, and enabled state
+            trigger_idx = world.COLOR_TO_IDX.get(self.trigger_color, 0)
+            target_idx = world.COLOR_TO_IDX.get(self.target_color, 0)
             return (world.OBJECT_TO_IDX[self.type], world.COLOR_TO_IDX[self.color],
-                   1 if self.enabled else 0, 0, 0, 0)
+                   trigger_idx, target_idx, 1 if self.enabled else 0, 0)
     
     def render(self, img):
         """Render the kill button as a red floor tile with a skull/X pattern."""
@@ -623,15 +625,16 @@ class MagicWall(WorldObj):
         return False
     
     def encode(self, world, current_agent=False):
-        """Encode the magic wall with its magic side and entry probability."""
+        """Encode the magic wall with all its attributes (immutable and mutable)."""
         if world.encode_dim == 3:
             return (world.OBJECT_TO_IDX[self.type], world.COLOR_TO_IDX[self.color], self.magic_side)
         else:
-            # Encode magic_side in state field and entry_probability scaled to 0-255
+            # Encode all attributes: magic_side, entry_probability, solidify_probability, and active state
             entry_prob_encoded = int(self.entry_probability * 255)
             solidify_prob_encoded = int(self.solidify_probability * 255)
+            active_encoded = 1 if self.active else 0
             return (world.OBJECT_TO_IDX[self.type], world.COLOR_TO_IDX[self.color], 
-                   self.magic_side, entry_prob_encoded, solidify_prob_encoded, 0)
+                   self.magic_side, entry_prob_encoded, solidify_prob_encoded, active_encoded)
     
     def render(self, img):
         """Render magic wall like a normal wall with a dashed blue line near its magic side.
