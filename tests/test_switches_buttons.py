@@ -25,7 +25,7 @@ from gym_multigrid.multigrid import (
 )
 
 
-class TestKillButtonEnv(MultiGridEnv):
+class KillButtonEnv(MultiGridEnv):
     """Simple environment for testing KillButton."""
     
     def __init__(self):
@@ -70,7 +70,7 @@ class TestKillButtonEnv(MultiGridEnv):
         self.grid.set(2, 1, self.kill_button)
 
 
-class TestPauseSwitchEnv(MultiGridEnv):
+class PauseSwitchEnv(MultiGridEnv):
     """Simple environment for testing PauseSwitch."""
     
     def __init__(self):
@@ -115,7 +115,7 @@ class TestPauseSwitchEnv(MultiGridEnv):
         self.grid.set(2, 2, self.pause_switch)
 
 
-class TestDisablingSwitchEnv(MultiGridEnv):
+class DisablingSwitchEnv(MultiGridEnv):
     """Simple environment for testing DisablingSwitch."""
     
     def __init__(self):
@@ -166,7 +166,7 @@ class TestDisablingSwitchEnv(MultiGridEnv):
 
 def test_kill_button_kills_target_agents():
     """Test that KillButton kills target agents when stepped on by trigger agent."""
-    env = TestKillButtonEnv()
+    env = KillButtonEnv()
     env.reset()
     
     # Verify initial state
@@ -184,7 +184,7 @@ def test_kill_button_kills_target_agents():
 
 def test_kill_button_disabled():
     """Test that disabled KillButton does not kill agents."""
-    env = TestKillButtonEnv()
+    env = KillButtonEnv()
     env.reset()
     
     # Disable the kill button
@@ -200,7 +200,7 @@ def test_kill_button_disabled():
 
 def test_kill_button_wrong_trigger_color():
     """Test that KillButton only responds to correct trigger color."""
-    env = TestKillButtonEnv()
+    env = KillButtonEnv()
     env.reset()
     
     # Set trigger color to something else
@@ -216,7 +216,7 @@ def test_kill_button_wrong_trigger_color():
 
 def test_pause_switch_pauses_target_agents():
     """Test that PauseSwitch pauses target agents when toggled on."""
-    env = TestPauseSwitchEnv()
+    env = PauseSwitchEnv()
     env.reset()
     
     # Verify initial state
@@ -236,7 +236,7 @@ def test_pause_switch_pauses_target_agents():
 
 def test_pause_switch_toggle_off():
     """Test that toggling PauseSwitch off unpauses agents."""
-    env = TestPauseSwitchEnv()
+    env = PauseSwitchEnv()
     env.reset()
     
     # Toggle on
@@ -252,7 +252,7 @@ def test_pause_switch_toggle_off():
 
 def test_pause_switch_disabled():
     """Test that disabled PauseSwitch cannot be toggled."""
-    env = TestPauseSwitchEnv()
+    env = PauseSwitchEnv()
     env.reset()
     
     # Disable the switch
@@ -269,7 +269,7 @@ def test_pause_switch_disabled():
 
 def test_pause_switch_wrong_toggle_color():
     """Test that PauseSwitch only responds to correct toggle color."""
-    env = TestPauseSwitchEnv()
+    env = PauseSwitchEnv()
     env.reset()
     
     # Set toggle color to something else
@@ -285,7 +285,7 @@ def test_pause_switch_wrong_toggle_color():
 
 def test_disabling_switch_disables_kill_buttons():
     """Test that DisablingSwitch disables all KillButtons."""
-    env = TestDisablingSwitchEnv()
+    env = DisablingSwitchEnv()
     env.reset()
     
     # Verify kill button is enabled initially
@@ -301,7 +301,7 @@ def test_disabling_switch_disables_kill_buttons():
 
 def test_disabling_switch_enables_kill_buttons():
     """Test that DisablingSwitch can re-enable KillButtons."""
-    env = TestDisablingSwitchEnv()
+    env = DisablingSwitchEnv()
     env.reset()
     
     # First disable
@@ -316,7 +316,7 @@ def test_disabling_switch_enables_kill_buttons():
 
 def test_disabling_switch_wrong_toggle_color():
     """Test that DisablingSwitch only responds to correct toggle color."""
-    env = TestDisablingSwitchEnv()
+    env = DisablingSwitchEnv()
     env.reset()
     
     # Set toggle color to something else
@@ -332,7 +332,7 @@ def test_disabling_switch_wrong_toggle_color():
 
 def test_paused_agent_actions_ignored():
     """Test that paused agents can only use 'still' action effectively."""
-    env = TestPauseSwitchEnv()
+    env = PauseSwitchEnv()
     env.reset()
     
     # Record grey agent's position
@@ -354,7 +354,7 @@ def test_paused_agent_actions_ignored():
 
 def test_kill_button_state_in_get_set_state():
     """Test that KillButton state is preserved in get_state/set_state."""
-    env = TestKillButtonEnv()
+    env = KillButtonEnv()
     env.reset()
     
     # Disable kill button
@@ -376,7 +376,7 @@ def test_kill_button_state_in_get_set_state():
 
 def test_pause_switch_state_in_get_set_state():
     """Test that PauseSwitch state is preserved in get_state/set_state."""
-    env = TestPauseSwitchEnv()
+    env = PauseSwitchEnv()
     env.reset()
     
     # Toggle switch on
@@ -400,7 +400,7 @@ def test_pause_switch_state_in_get_set_state():
 
 def test_terminated_agent_actions_ignored():
     """Test that terminated (killed) agents can only use 'still' action effectively."""
-    env = TestKillButtonEnv()
+    env = KillButtonEnv()
     env.reset()
     
     # Record grey agent's position and direction
