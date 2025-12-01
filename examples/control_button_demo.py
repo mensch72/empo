@@ -181,9 +181,10 @@ class RobotAtRockGoal(PossibleGoal):
         step_count, agent_states, mobile_objects, mutable_objects = state
         if self.robot_agent_index < len(agent_states):
             agent_state = agent_states[self.robot_agent_index]
-            pos_x, pos_y = int(agent_state[0]), int(agent_state[1])
-            if pos_x == self.target_pos[0] and pos_y == self.target_pos[1]:
-                return 1
+            if len(agent_state) >= 2:
+                pos_x, pos_y = int(agent_state[0]), int(agent_state[1])
+                if pos_x == self.target_pos[0] and pos_y == self.target_pos[1]:
+                    return 1
         return 0
     
     def __str__(self):
