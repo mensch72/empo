@@ -979,6 +979,267 @@ class ReplayBuffer:
         return len(self.buffer)
 
 
+class PathDistanceCalculator:
+    """
+    Computes shortest path distances between cells using precomputed paths on a wall-only grid.
+    
+    At initialization, creates a "stripped down" grid version that only contains walls
+    (ordinary and magic) and precomputes shortest paths between all empty cells using BFS.
+    
+    At runtime, calculates a "distance indicator" by walking along the precomputed shortest
+    path and summing parameterized "passing difficulty" scores based on what's currently
+    on each cell.
+    
+    Default passing difficulty scores:
+        - Empty cell or open door: 1
+        - Another agent or block: 2
+        - Pickable object (key, ball, box): 3
+        - Closed door: 5
+        - Rock: 50
+        - Wall/MagicWall (impassable): inf
+    
+    Args:
+        world_model: The environment with grid, width, height attributes.
+        passing_costs: Optional dict mapping object types to passing costs.
+                      Keys are object type strings ('empty', 'door_open', 'door_closed',
+                      'agent', 'block', 'pickable', 'rock', 'wall').
+    """
+    
+    # Default passing costs for different object types
+    DEFAULT_PASSING_COSTS = {
+        'empty': 1,
+        'door_open': 1,
+        'door_closed': 5,
+        'agent': 2,
+        'block': 2,
+        'pickable': 3,  # key, ball, box
+        'rock': 50,
+        'wall': float('inf'),
+        'magicwall': float('inf'),
+        'lava': 10,
+        'unsteadyground': 2,
+        'unknown': 2,
+    }
+    
+    def __init__(self, world_model: Any, passing_costs: Optional[Dict[str, float]] = None):
+        """
+        Initialize the path distance calculator.
+        
+        Precomputes shortest paths between all pairs of empty cells on a stripped
+        grid containing only walls.
+        """
+        self.grid_width = world_model.width
+        self.grid_height = world_model.height
+        self.passing_costs = passing_costs or self.DEFAULT_PASSING_COSTS.copy()
+        
+        # Create wall-only grid and precompute shortest paths
+        self._wall_grid = self._create_wall_grid(world_model)
+        self._shortest_paths = self._precompute_shortest_paths()
+    
+    def _create_wall_grid(self, world_model: Any) -> np.ndarray:
+        """
+        Create a boolean grid where True = wall (impassable), False = empty.
+        
+        Only considers Wall and MagicWall objects as walls.
+        """
+        wall_grid = np.zeros((self.grid_height, self.grid_width), dtype=bool)
+        
+        for y in range(self.grid_height):
+            for x in range(self.grid_width):
+                cell = world_model.grid.get(x, y)
+                if cell is not None:
+                    # Check if it's a wall type (Wall or MagicWall)
+                    cell_type = getattr(cell, 'type', None)
+                    if cell_type in ('wall', 'magicwall'):
+                        wall_grid[y, x] = True
+        
+        return wall_grid
+    
+    def _precompute_shortest_paths(self) -> Dict[Tuple[int, int], Dict[Tuple[int, int], List[Tuple[int, int]]]]:
+        """
+        Precompute shortest paths between all pairs of empty cells using BFS.
+        
+        Returns a dict: source_pos -> {target_pos -> path} where path is a list
+        of (x, y) coordinates from source to target (inclusive).
+        """
+        from collections import deque
+        
+        paths = {}
+        
+        # Find all empty cells (not walls)
+        empty_cells = []
+        for y in range(self.grid_height):
+            for x in range(self.grid_width):
+                if not self._wall_grid[y, x]:
+                    empty_cells.append((x, y))
+        
+        # For each empty cell, compute shortest paths to all other empty cells
+        for source in empty_cells:
+            paths[source] = {}
+            paths[source][source] = [source]  # Path to self is just the source
+            
+            # BFS from source
+            visited = {source: [source]}
+            queue = deque([source])
+            
+            while queue:
+                current = queue.popleft()
+                cx, cy = current
+                
+                # Check 4 neighbors (up, down, left, right)
+                for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                    nx, ny = cx + dx, cy + dy
+                    
+                    # Check bounds
+                    if 0 <= nx < self.grid_width and 0 <= ny < self.grid_height:
+                        neighbor = (nx, ny)
+                        
+                        # Check if not a wall and not visited
+                        if not self._wall_grid[ny, nx] and neighbor not in visited:
+                            # Path to neighbor is path to current + neighbor
+                            visited[neighbor] = visited[current] + [neighbor]
+                            paths[source][neighbor] = visited[neighbor]
+                            queue.append(neighbor)
+        
+        return paths
+    
+    def get_shortest_path(self, source: Tuple[int, int], target: Tuple[int, int]) -> Optional[List[Tuple[int, int]]]:
+        """
+        Get the precomputed shortest path from source to target.
+        
+        Returns None if no path exists (one or both positions are walls).
+        """
+        if source in self._shortest_paths:
+            return self._shortest_paths[source].get(target)
+        return None
+    
+    def compute_path_cost(self, source: Tuple[int, int], target: Tuple[int, int], 
+                          world_model: Any) -> float:
+        """
+        Compute the path cost from source to target based on current grid state.
+        
+        Walks along the precomputed shortest path and sums up passing difficulty
+        scores based on what's currently on each cell.
+        
+        Args:
+            source: (x, y) starting position
+            target: (x, y) target position
+            world_model: Current environment state for checking cell contents
+        
+        Returns:
+            Total path cost (sum of passing difficulties), or inf if no path exists.
+        """
+        path = self.get_shortest_path(source, target)
+        
+        if path is None:
+            return float('inf')
+        
+        if source == target:
+            return 0.0
+        
+        # Build agent position lookup once for efficiency
+        agent_positions = set()
+        for agent in world_model.agents:
+            if agent.pos is not None:
+                agent_positions.add((int(agent.pos[0]), int(agent.pos[1])))
+        
+        total_cost = 0.0
+        
+        # Sum passing costs for each cell along the path (excluding source)
+        for pos in path[1:]:  # Skip source position
+            x, y = pos
+            cell = world_model.grid.get(x, y)
+            cost = self._get_cell_passing_cost(cell, pos, agent_positions)
+            total_cost += cost
+        
+        return total_cost
+    
+    def _get_cell_passing_cost(self, cell: Any, pos: Tuple[int, int], 
+                               agent_positions: set) -> float:
+        """
+        Get the passing cost for a cell based on its current contents.
+        
+        Args:
+            cell: The object at this cell (or None for empty)
+            pos: (x, y) position of the cell
+            agent_positions: Set of (x, y) positions where agents are located
+        
+        Returns:
+            Passing cost for this cell.
+        """
+        # Check for agent at this position first (O(1) lookup)
+        if pos in agent_positions:
+            return self.passing_costs.get('agent', 2)
+        
+        if cell is None:
+            return self.passing_costs.get('empty', 1)
+        
+        cell_type = getattr(cell, 'type', None)
+        
+        # Handle different object types
+        if cell_type == 'door':
+            is_open = getattr(cell, 'is_open', False)
+            if is_open:
+                return self.passing_costs.get('door_open', 1)
+            else:
+                return self.passing_costs.get('door_closed', 5)
+        
+        elif cell_type == 'block':
+            return self.passing_costs.get('block', 2)
+        
+        elif cell_type == 'rock':
+            return self.passing_costs.get('rock', 50)
+        
+        elif cell_type in ('key', 'ball', 'box'):
+            return self.passing_costs.get('pickable', 3)
+        
+        elif cell_type in ('wall', 'magicwall'):
+            return self.passing_costs.get('wall', float('inf'))
+        
+        elif cell_type in ('goal', 'floor', 'switch', 'objectgoal'):
+            # These are typically passable like empty cells
+            return self.passing_costs.get('empty', 1)
+        
+        elif cell_type == 'lava':
+            # Lava is dangerous but passable
+            return self.passing_costs.get('lava', 10)
+        
+        elif cell_type == 'unsteadyground':
+            return self.passing_costs.get('unsteadyground', 2)
+        
+        else:
+            # Unknown type - treat as mildly difficult
+            return self.passing_costs.get('unknown', 2)
+    
+    def compute_potential(self, agent_pos: Tuple[int, int], target_pos: Tuple[int, int],
+                         world_model: Any, max_cost: Optional[float] = None) -> float:
+        """
+        Compute the potential function value for reward shaping.
+        
+        Φ(s) = -path_cost(agent_pos, target_pos) / max_cost
+        
+        The potential is maximal (0) when agent is at target.
+        
+        Args:
+            agent_pos: (x, y) current agent position
+            target_pos: (x, y) target/goal position
+            world_model: Current environment for checking cell contents
+            max_cost: Maximum possible cost for normalization (default: grid_width + grid_height)
+        
+        Returns:
+            Potential value in range [-1, 0] (approximately).
+        """
+        if max_cost is None:
+            max_cost = (self.grid_width + self.grid_height) * 50  # Rough upper bound
+        
+        path_cost = self.compute_path_cost(agent_pos, target_pos, world_model)
+        
+        if path_cost == float('inf'):
+            return -1.0  # No path - minimum potential
+        
+        return -path_cost / max_cost
+
+
 def train_neural_policy_prior(
     world_model: Any,
     human_agent_indices: List[int],
@@ -993,6 +1254,8 @@ def train_neural_policy_prior(
     updates_per_episode: int = 4,
     train_phi_network: bool = True,
     epsilon: float = 0.3,
+    use_path_based_shaping: bool = False,
+    passing_costs: Optional[Dict[str, float]] = None,
     device: str = 'cpu',
     verbose: bool = True
 ) -> NeuralHumanPolicyPrior:
@@ -1028,6 +1291,12 @@ def train_neural_policy_prior(
         updates_per_episode: Number of gradient updates per episode.
         train_phi_network: Whether to also train the marginal policy network.
         epsilon: Exploration rate for epsilon-greedy policy.
+        use_path_based_shaping: If True, use path-based reward shaping with precomputed
+            shortest paths and passing difficulty scores. If False (default), use simple 
+            Manhattan distance.
+        passing_costs: Optional dict mapping object types to passing costs for path-based
+            shaping. Keys: 'empty', 'door_open', 'door_closed', 'agent', 'block',
+            'pickable', 'rock', 'wall'. See PathDistanceCalculator for defaults.
         device: Torch device ('cpu' or 'cuda').
         verbose: Whether to print training progress.
     
@@ -1040,6 +1309,13 @@ def train_neural_policy_prior(
     num_agents = len(world_model.agents)
     num_actions = world_model.action_space.n
     max_steps = getattr(world_model, 'max_steps', 100)
+    
+    # Initialize path distance calculator for reward shaping if enabled
+    path_calculator = None
+    if use_path_based_shaping:
+        path_calculator = PathDistanceCalculator(world_model, passing_costs)
+        if verbose:
+            print("Initialized path-based reward shaping with precomputed shortest paths")
     
     # Create Q-network with encoders
     state_encoder = StateEncoder(
@@ -1211,28 +1487,43 @@ def train_neural_policy_prior(
                 # Potential-based reward shaping (Ng et al. 1999):
                 # F(s,a,s') = γ * Φ(s') - Φ(s)
                 # This preserves the optimal policy while providing denser feedback.
-                # We use Φ(s) = -distance(agent, goal) / max_dist as potential function
-                # which is maximal (0) when agent is at the goal.
                 shaping_reward = 0.0
                 if hasattr(goal, 'target_pos'):
                     target = goal.target_pos
-                    max_dist = grid_width + grid_height
                     
-                    # Potential at current state: Φ(s) = -d(s)/max_dist
+                    # Get agent positions
                     curr_pos = curr_agent_states[human_idx]
-                    curr_dist = abs(curr_pos[0] - target[0]) + abs(curr_pos[1] - target[1])
-                    phi_s = -curr_dist / max_dist
-                    
-                    # Potential at next state: Φ(s') = -d(s')/max_dist  
+                    curr_pos_tuple = (int(curr_pos[0]), int(curr_pos[1]))
                     next_pos = next_agent_states[human_idx]
-                    next_dist = abs(next_pos[0] - target[0]) + abs(next_pos[1] - target[1])
-                    phi_s_prime = -next_dist / max_dist
+                    next_pos_tuple = (int(next_pos[0]), int(next_pos[1]))
+                    target_tuple = (int(target[0]), int(target[1]))
                     
-                    # Shaping: γ * Φ(s') - Φ(s) = γ * (-d(s')/max) - (-d(s)/max)
-                    #        = (d(s) - γ*d(s')) / max_dist
+                    if path_calculator is not None:
+                        # Use path-based distance with passing difficulty scores
+                        # Φ(s) = -path_cost(agent_pos, target) / max_cost
+                        max_cost = (grid_width + grid_height) * 50  # Upper bound
+                        
+                        # Potential at current state
+                        phi_s = path_calculator.compute_potential(
+                            curr_pos_tuple, target_tuple, world_model, max_cost)
+                        
+                        # Potential at next state
+                        phi_s_prime = path_calculator.compute_potential(
+                            next_pos_tuple, target_tuple, world_model, max_cost)
+                    else:
+                        # Fall back to simple Manhattan distance
+                        max_dist = grid_width + grid_height
+                        
+                        # Potential at current state: Φ(s) = -d(s)/max_dist
+                        curr_dist = abs(curr_pos[0] - target[0]) + abs(curr_pos[1] - target[1])
+                        phi_s = -curr_dist / max_dist
+                        
+                        # Potential at next state: Φ(s') = -d(s')/max_dist  
+                        next_dist = abs(next_pos[0] - target[0]) + abs(next_pos[1] - target[1])
+                        phi_s_prime = -next_dist / max_dist
+                    
+                    # Shaping: γ * Φ(s') - Φ(s)
                     shaping_reward = gamma * phi_s_prime - phi_s
-
-                    # TODO: generalize this for other goal types, especially for rectangular goals
                 else:
                     print("Warning: Goal does not have target_pos attribute for shaping reward.")
 
