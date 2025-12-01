@@ -1573,16 +1573,16 @@ def _parse_cell(cell_str, objects_set):
         return ('switch', {})
     elif full_cell_code == 'Un':
         return ('unsteady', {})
-    elif full_cell_code == 'Kb':
+    elif full_cell_code in ('Kb', 'Ki'):
         # KillButton with default colors (yellow triggers, grey killed)
         return ('killbutton', {})
-    elif full_cell_code == 'Ps':
+    elif full_cell_code in ('Ps', 'Pa'):
         # PauseSwitch with default colors (yellow toggles, grey paused)
         return ('pauseswitch', {})
-    elif full_cell_code == 'Dk':
+    elif full_cell_code in ('Dk', 'dK'):
         # DisablingSwitch for killbuttons (grey toggles)
         return ('disablingswitch', {'target_type': 'killbutton'})
-    elif full_cell_code == 'Dp':
+    elif full_cell_code in ('Dp', 'dP'):
         # DisablingSwitch for pauseswitches (grey toggles)
         return ('disablingswitch', {'target_type': 'pauseswitch'})
     
