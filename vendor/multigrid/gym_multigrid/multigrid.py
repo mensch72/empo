@@ -72,7 +72,10 @@ class World:
         'block': 13,
         'rock': 14,
         'unsteadyground': 15,
-        'magicwall': 16
+        'magicwall': 16,
+        'killbutton': 17,
+        'pauseswitch': 18,
+        'disablingswitch': 19
     }
     IDX_TO_OBJECT = dict(zip(OBJECT_TO_IDX.values(), OBJECT_TO_IDX.keys()))
 
@@ -217,6 +220,258 @@ class Switch(WorldObj):
 
     def render(self, img):
         fill_coords(img, point_in_rect(0, 1, 0, 1), COLORS[self.color])
+
+
+class KillButton(WorldObj):
+    """
+    An overlappable floor type that permanently kills agents when stepped on.
+    
+    When an agent of the trigger_color steps onto this button (and it's enabled),
+    all agents of the target_color become permanently "killed" (can only use "still" action).
+    
+    Attributes:
+        trigger_color: Color of agents that can activate the button (default: 'yellow')
+        target_color: Color of agents that will be killed (default: 'grey')
+        enabled: Whether the button is active (default: True). When disabled, behaves like empty floor.
+    """
+    
+    def __init__(self, world, trigger_color='yellow', target_color='grey', enabled=True):
+        """
+        Args:
+            world: World object defining the environment
+            trigger_color: Color of agents that trigger the kill effect
+            target_color: Color of agents that will be killed
+            enabled: Whether the button is active
+        """
+        # Use red color to distinguish kill button visually
+        super().__init__(world, 'killbutton', 'red')
+        self.trigger_color = trigger_color
+        self.target_color = target_color
+        self.enabled = enabled
+    
+    def can_overlap(self):
+        return True
+    
+    def encode(self, world, current_agent=False):
+        """Encode the kill button with its state."""
+        if world.encode_dim == 3:
+            return (world.OBJECT_TO_IDX[self.type], world.COLOR_TO_IDX[self.color], 
+                    1 if self.enabled else 0)
+        else:
+            # Encode trigger_color, target_color, and enabled state
+            trigger_idx = world.COLOR_TO_IDX.get(self.trigger_color, 0)
+            target_idx = world.COLOR_TO_IDX.get(self.target_color, 0)
+            return (world.OBJECT_TO_IDX[self.type], world.COLOR_TO_IDX[self.color],
+                   trigger_idx, target_idx, 1 if self.enabled else 0, 0)
+    
+    def render(self, img):
+        """Render the kill button as a red floor tile with a skull/X pattern."""
+        if self.enabled:
+            # Red background for enabled kill button
+            c = COLORS['red']
+            fill_coords(img, point_in_rect(0.031, 1, 0.031, 1), c / 2)
+            # Draw an X pattern in darker red
+            darker_red = np.array([150, 0, 0])
+            fill_coords(img, point_in_line(0.15, 0.15, 0.85, 0.85, r=0.05), darker_red)
+            fill_coords(img, point_in_line(0.15, 0.85, 0.85, 0.15, r=0.05), darker_red)
+        else:
+            # Grey background for disabled kill button
+            c = COLORS['grey']
+            fill_coords(img, point_in_rect(0.031, 1, 0.031, 1), c / 3)
+
+
+class PauseSwitch(WorldObj):
+    """
+    A non-overlappable switch that pauses agents when toggled on.
+    
+    Agents of toggle_color can use the "toggle" action on this switch when facing it.
+    While "on", all agents of target_color can only use the "still" action.
+    
+    Attributes:
+        toggle_color: Color of agents that can toggle the switch (default: 'yellow')
+        target_color: Color of agents that will be paused (default: 'grey')
+        is_on: Whether the switch is currently on (default: False)
+        enabled: Whether the switch can be toggled (default: True). When disabled, retains on/off state.
+    """
+    
+    def __init__(self, world, toggle_color='yellow', target_color='grey', is_on=False, enabled=True):
+        """
+        Args:
+            world: World object defining the environment
+            toggle_color: Color of agents that can toggle the switch
+            target_color: Color of agents that will be paused
+            is_on: Initial on/off state
+            enabled: Whether the switch can be toggled
+        """
+        # Use blue color to distinguish pause switch visually
+        super().__init__(world, 'pauseswitch', 'blue')
+        self.toggle_color = toggle_color
+        self.target_color = target_color
+        self.is_on = is_on
+        self.enabled = enabled
+    
+    def can_overlap(self):
+        return False
+    
+    def see_behind(self):
+        return True
+    
+    def toggle(self, env, pos):
+        """Toggle the switch on/off if enabled and toggled by correct color agent."""
+        if not self.enabled:
+            return False
+        
+        # Check if the toggling agent is of the correct color
+        # The agent performing the toggle is tracked by the environment
+        # We check via env.agents to find the agent facing this switch
+        toggler_agent = None
+        for agent in env.agents:
+            if agent.pos is not None and np.array_equal(agent.front_pos, pos):
+                toggler_agent = agent
+                break
+        
+        if toggler_agent is None or toggler_agent.color != self.toggle_color:
+            return False
+        
+        self.is_on = not self.is_on
+        
+        # Update paused state of all target color agents
+        for agent in env.agents:
+            if agent.color == self.target_color:
+                agent.paused = self.is_on
+        
+        return True
+    
+    def encode(self, world, current_agent=False):
+        """Encode the pause switch with its state."""
+        if world.encode_dim == 3:
+            # Encode is_on and enabled in state field (2 bits)
+            state = (1 if self.is_on else 0) | ((1 if self.enabled else 0) << 1)
+            return (world.OBJECT_TO_IDX[self.type], world.COLOR_TO_IDX[self.color], state)
+        else:
+            toggle_idx = world.COLOR_TO_IDX.get(self.toggle_color, 0)
+            target_idx = world.COLOR_TO_IDX.get(self.target_color, 0)
+            return (world.OBJECT_TO_IDX[self.type], world.COLOR_TO_IDX[self.color],
+                   toggle_idx, target_idx, 
+                   1 if self.is_on else 0, 
+                   1 if self.enabled else 0)
+    
+    def render(self, img):
+        """Render the pause switch with state indication."""
+        if self.enabled:
+            if self.is_on:
+                # Bright blue when on
+                c = COLORS['blue']
+                fill_coords(img, point_in_rect(0, 1, 0, 1), c)
+                # Draw pause symbol (two vertical bars)
+                fill_coords(img, point_in_rect(0.3, 0.4, 0.25, 0.75), np.array([255, 255, 255]))
+                fill_coords(img, point_in_rect(0.6, 0.7, 0.25, 0.75), np.array([255, 255, 255]))
+            else:
+                # Darker blue when off
+                c = COLORS['blue'] / 2
+                fill_coords(img, point_in_rect(0, 1, 0, 1), c)
+                # Draw play symbol (triangle pointing right)
+                fill_coords(img, point_in_triangle((0.3, 0.25), (0.3, 0.75), (0.7, 0.5)), 
+                           np.array([200, 200, 200]))
+        else:
+            # Grey when disabled
+            c = COLORS['grey']
+            fill_coords(img, point_in_rect(0, 1, 0, 1), c / 2)
+
+
+class DisablingSwitch(WorldObj):
+    """
+    A non-overlappable switch that toggles enabled/disabled state of other objects.
+    
+    Agents of toggle_color can use the "toggle" action on this switch when facing it.
+    This toggles the enabled/disabled state of all objects of target_type.
+    
+    Attributes:
+        toggle_color: Color of agents that can toggle the switch (default: 'grey')
+        target_type: Type of objects to enable/disable ('killbutton' or 'pauseswitch')
+    """
+    
+    def __init__(self, world, toggle_color='grey', target_type='killbutton'):
+        """
+        Args:
+            world: World object defining the environment
+            toggle_color: Color of agents that can toggle the switch
+            target_type: Type of objects to enable/disable ('killbutton' or 'pauseswitch')
+        """
+        # Use purple color to distinguish disabling switch visually
+        super().__init__(world, 'disablingswitch', 'purple')
+        self.toggle_color = toggle_color
+        self.target_type = target_type
+    
+    def can_overlap(self):
+        return False
+    
+    def see_behind(self):
+        return True
+    
+    def toggle(self, env, pos):
+        """Toggle enabled state of all target objects if toggled by correct color agent."""
+        # Check if the toggling agent is of the correct color
+        toggler_agent = None
+        for agent in env.agents:
+            if agent.pos is not None and np.array_equal(agent.front_pos, pos):
+                toggler_agent = agent
+                break
+        
+        if toggler_agent is None or toggler_agent.color != self.toggle_color:
+            return False
+        
+        # Toggle enabled state of all objects of target_type in the grid
+        for j in range(env.grid.height):
+            for i in range(env.grid.width):
+                cell = env.grid.get(i, j)
+                if cell is not None and cell.type == self.target_type:
+                    cell.enabled = not cell.enabled
+                    
+                    # If target is PauseSwitch and it's being disabled while ON,
+                    # we should unpause the affected agents
+                    if self.target_type == 'pauseswitch' and not cell.enabled and cell.is_on:
+                        # Unpause agents since the switch can't affect them while disabled
+                        for agent in env.agents:
+                            if agent.color == cell.target_color:
+                                agent.paused = False
+        
+        # Also check terrain_grid for objects that might be stored there
+        if hasattr(env, 'terrain_grid') and env.terrain_grid is not None:
+            for j in range(env.terrain_grid.height):
+                for i in range(env.terrain_grid.width):
+                    cell = env.terrain_grid.get(i, j)
+                    if cell is not None and cell.type == self.target_type:
+                        cell.enabled = not cell.enabled
+        
+        return True
+    
+    def encode(self, world, current_agent=False):
+        """Encode the disabling switch."""
+        if world.encode_dim == 3:
+            # Encode target_type as index
+            target_idx = 0  # killbutton
+            if self.target_type == 'pauseswitch':
+                target_idx = 1
+            return (world.OBJECT_TO_IDX[self.type], world.COLOR_TO_IDX[self.color], target_idx)
+        else:
+            toggle_idx = world.COLOR_TO_IDX.get(self.toggle_color, 0)
+            target_idx = 0  # killbutton
+            if self.target_type == 'pauseswitch':
+                target_idx = 1
+            return (world.OBJECT_TO_IDX[self.type], world.COLOR_TO_IDX[self.color],
+                   toggle_idx, target_idx, 0, 0)
+    
+    def render(self, img):
+        """Render the disabling switch with indication of target type."""
+        c = COLORS['purple']
+        fill_coords(img, point_in_rect(0, 1, 0, 1), c)
+        
+        # Draw a circle with a slash through it (disabled symbol)
+        white = np.array([255, 255, 255])
+        fill_coords(img, point_in_circle(0.5, 0.5, 0.3), white)
+        fill_coords(img, point_in_circle(0.5, 0.5, 0.2), c)
+        fill_coords(img, point_in_line(0.25, 0.75, 0.75, 0.25, r=0.04), white)
 
 
 class Floor(WorldObj):
@@ -1317,6 +1572,18 @@ def _parse_cell(cell_str, objects_set):
         return ('switch', {})
     elif full_cell_code == 'Un':
         return ('unsteady', {})
+    elif full_cell_code == 'Kb':
+        # KillButton with default colors (yellow triggers, grey killed)
+        return ('killbutton', {})
+    elif full_cell_code == 'Ps':
+        # PauseSwitch with default colors (yellow toggles, grey paused)
+        return ('pauseswitch', {})
+    elif full_cell_code == 'Dk':
+        # DisablingSwitch for killbuttons (grey toggles)
+        return ('disablingswitch', {'target_type': 'killbutton'})
+    elif full_cell_code == 'Dp':
+        # DisablingSwitch for pauseswitches (grey toggles)
+        return ('disablingswitch', {'target_type': 'pauseswitch'})
     
     # Handle magic walls
     if cell_str[0] == 'M':
@@ -1394,6 +1661,21 @@ def create_object_from_spec(cell_spec, objects_set):
         return MagicWall(objects_set, 
                         magic_side=params.get('magic_side', 0),
                         entry_probability=params.get('entry_probability', 0.5))
+    elif obj_type == 'killbutton':
+        return KillButton(objects_set,
+                         trigger_color=params.get('trigger_color', 'yellow'),
+                         target_color=params.get('target_color', 'grey'),
+                         enabled=params.get('enabled', True))
+    elif obj_type == 'pauseswitch':
+        return PauseSwitch(objects_set,
+                          toggle_color=params.get('toggle_color', 'yellow'),
+                          target_color=params.get('target_color', 'grey'),
+                          is_on=params.get('is_on', False),
+                          enabled=params.get('enabled', True))
+    elif obj_type == 'disablingswitch':
+        return DisablingSwitch(objects_set,
+                              toggle_color=params.get('toggle_color', 'grey'),
+                              target_type=params.get('target_type', 'killbutton'))
     elif obj_type == 'door':
         return Door(objects_set, 
                    params.get('color', 'blue'),
@@ -1644,7 +1926,7 @@ class MultiGridEnv(WorldModel):
         Build cache of mobile and mutable objects to avoid full grid scans in get_state().
         
         Mobile objects: blocks and rocks (can be pushed)
-        Mutable objects: doors, boxes, magic walls (have mutable state)
+        Mutable objects: doors, boxes, magic walls, killbuttons, pauseswitches (have mutable state)
         
         This cache stores references to the objects themselves, not their positions.
         Positions are read from the grid when get_state() is called.
@@ -1664,8 +1946,8 @@ class MultiGridEnv(WorldModel):
                 if obj_type in ('block', 'rock'):
                     self._mobile_objects.append(((i, j), cell))
                 
-                # Mutable objects: doors, boxes, magic walls
-                elif obj_type in ('door', 'box', 'magicwall'):
+                # Mutable objects: doors, boxes, magic walls, killbuttons, pauseswitches
+                elif obj_type in ('door', 'box', 'magicwall', 'killbutton', 'pauseswitch'):
                     self._mutable_objects.append(((i, j), cell))
         
         # Sort mobile objects by initial position for deterministic ordering
@@ -1793,7 +2075,18 @@ class MultiGridEnv(WorldModel):
         pass
 
     def _handle_special_moves(self, i, rewards, fwd_pos, fwd_cell):
-        pass
+        """
+        Handle special effects when an agent moves to a cell.
+        
+        This includes handling KillButton effects when an agent steps onto one.
+        """
+        # Handle KillButton effects
+        if fwd_cell is not None and fwd_cell.type == 'killbutton':
+            if fwd_cell.enabled and self.agents[i].color == fwd_cell.trigger_color:
+                # Kill all agents of the target color
+                for agent in self.agents:
+                    if agent.color == fwd_cell.target_color:
+                        agent.terminated = True
     
     def _can_push_objects(self, agent, start_pos):
         """
@@ -2603,7 +2896,7 @@ class MultiGridEnv(WorldModel):
             for j in range(self.grid.height):
                 for i in range(self.grid.width):
                     cell = self.grid.get(i, j)
-                    if cell is not None and cell.type in ('block', 'rock', 'door', 'box', 'magicwall'):
+                    if cell is not None and cell.type in ('block', 'rock', 'door', 'box', 'magicwall', 'killbutton', 'pauseswitch'):
                         has_trackable = True
                         break
                 if has_trackable:
@@ -2650,6 +2943,19 @@ class MultiGridEnv(WorldModel):
                     'magicwall',
                     x, y,
                     obj.active,
+                ))
+            elif obj.type == 'killbutton':
+                mutable_objects.append((
+                    'killbutton',
+                    x, y,
+                    obj.enabled,
+                ))
+            elif obj.type == 'pauseswitch':
+                mutable_objects.append((
+                    'pauseswitch',
+                    x, y,
+                    obj.is_on,
+                    obj.enabled,
                 ))
         
         # Sort mobile objects for deterministic ordering (type, x, y)
@@ -2788,7 +3094,7 @@ class MultiGridEnv(WorldModel):
                 obj.cur_pos = np.array([x, y])
                 self.grid.set(x, y, obj)
         
-        # Restore mutable objects (doors, boxes, magic walls)
+        # Restore mutable objects (doors, boxes, magic walls, killbuttons, pauseswitches)
         for mutable_obj in mutable_objects:
             obj_type = mutable_obj[0]
             x, y = mutable_obj[1], mutable_obj[2]
@@ -2818,6 +3124,18 @@ class MultiGridEnv(WorldModel):
                 active = mutable_obj[3]
                 if cell is not None and cell.type == 'magicwall':
                     cell.active = active
+            
+            elif obj_type == 'killbutton':
+                enabled = mutable_obj[3]
+                if cell is not None and cell.type == 'killbutton':
+                    cell.enabled = enabled
+            
+            elif obj_type == 'pauseswitch':
+                is_on = mutable_obj[3]
+                enabled = mutable_obj[4]
+                if cell is not None and cell.type == 'pauseswitch':
+                    cell.is_on = is_on
+                    cell.enabled = enabled
     
     def transition_probabilities(self, state, actions):
         """
