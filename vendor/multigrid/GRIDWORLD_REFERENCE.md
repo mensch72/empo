@@ -252,9 +252,96 @@ Each cell in the grid can contain:
   - Simulating doors with uncertain access that may lock permanently
   - Testing agent behavior with probabilistic barriers
 
-### 15. Agent
+### 15. KillButton
+- **Type**: `killbutton`
+- **Map Code**: `Kb` or `Ki`
+- **Color**: Red
+- **Appearance**: Red floor tile with X pattern (grey when disabled)
+- **Properties**:
+  - Can be overlapped (agents can walk on it)
+  - When stepped on by `trigger_color` agent (default: yellow), permanently terminates all `target_color` agents (default: grey)
+  - Terminated agents can only use "still" action
+  - Can be enabled/disabled via DisablingSwitch
+- **Attributes**:
+  - `trigger_color`: Color of agents that trigger the kill effect (default: 'yellow')
+  - `target_color`: Color of agents that will be terminated (default: 'grey')
+  - `enabled`: Whether the button is active (default: True)
+- **Use Cases**:
+  - Emergency stop mechanisms for robots
+  - Human-robot interaction scenarios where humans can shut down robots
+  - Creating hazardous zones for specific agent types
+
+### 16. PauseSwitch
+- **Type**: `pauseswitch`
+- **Map Code**: `Ps` or `Pa`
+- **Color**: Orange (on) / Blue (off) / Grey (disabled)
+- **Appearance**: Colored square with pause bars (||) when on
+- **Properties**:
+  - Cannot be overlapped (blocks movement)
+  - Toggle action by `toggle_color` agent (default: yellow) switches on/off
+  - When ON, all `target_color` agents (default: grey) are paused (can only use "still" action)
+  - Can be enabled/disabled via DisablingSwitch
+- **Attributes**:
+  - `toggle_color`: Color of agents that can toggle the switch (default: 'yellow')
+  - `target_color`: Color of agents that will be paused (default: 'grey')
+  - `is_on`: Whether the switch is currently on (default: False)
+  - `enabled`: Whether the switch is active (default: True)
+- **Use Cases**:
+  - Temporary pause controls for robots
+  - Human-robot coordination scenarios
+  - Turn-based gameplay mechanics
+
+### 17. DisablingSwitch
+- **Type**: `disablingswitch`
+- **Map Code**: `Dk`/`dK` (for killbuttons), `Dp`/`dP` (for pauseswitches), `dC`/`DC` (for controlbuttons)
+- **Color**: Purple
+- **Appearance**: Purple square with circle-slash (disabled symbol)
+- **Properties**:
+  - Cannot be overlapped (blocks movement)
+  - Toggle action by `toggle_color` agent (default: grey) enables/disables all objects of `target_type`
+  - Affects all objects of the target type in the grid
+- **Attributes**:
+  - `toggle_color`: Color of agents that can toggle the switch (default: 'grey')
+  - `target_type`: Type of objects to enable/disable ('killbutton', 'pauseswitch', or 'controlbutton')
+- **Use Cases**:
+  - Robots disabling human control mechanisms
+  - Strategic control over interactive elements
+  - Multi-stage puzzle environments
+
+### 18. ControlButton
+- **Type**: `controlbutton`
+- **Map Code**: `CB`
+- **Color**: Green (bright when programmed, dark when unprogrammed, grey when disabled)
+- **Appearance**: Green square with arrow (programmed) or empty circle (unprogrammed)
+- **Properties**:
+  - Cannot be overlapped (blocks movement)
+  - Two-phase interaction: programming and triggering
+  - **Programming**: `controlled_color` agent (default: grey) toggles, then performs any action - that action is memorized
+  - **Triggering**: `trigger_color` agent (default: yellow) toggles - forces the controlled agent to perform the memorized action on the next step
+  - Can be enabled/disabled via DisablingSwitch
+- **Attributes**:
+  - `trigger_color`: Color of agents that can trigger programmed actions (default: 'yellow')
+  - `controlled_color`: Color of agents that can program the button (default: 'grey')
+  - `enabled`: Whether the button is active (default: True)
+  - `controlled_agent`: Index of the agent that programmed this button (None initially)
+  - `triggered_action`: The action that was programmed (None initially)
+- **Programming Workflow**:
+  1. Robot (grey) faces button and uses toggle action → enters programming mode
+  2. Robot performs any action (left, right, forward, toggle, etc.) → action is recorded
+  3. Button is now programmed with that action
+- **Triggering Workflow**:
+  1. Human (yellow) faces programmed button and uses toggle action
+  2. Robot's `forced_next_action` is set to the programmed action
+  3. On the next step(), robot's chosen action is replaced by the programmed action
+- **Use Cases**:
+  - Human-robot control interfaces
+  - Programmable robot behaviors
+  - Remote control mechanisms where humans guide robot movement
+  - Teaching scenarios where robots pre-program actions for humans to trigger
+
+### 19. Agent
 - **Type**: `agent`
-- **Color**: Red, green, blue, purple, yellow (assigned by index)
+- **Color**: Red, green, blue, purple, yellow, grey (assigned by index)
 - **Properties**:
   - Occupies one cell at a time
   - Has a direction (0=right, 1=down, 2=left, 3=up)
@@ -270,6 +357,8 @@ Each cell in the grid can contain:
   - `started`: Whether agent has begun acting
   - `view_size`: Size of observable area (default 7)
   - `can_enter_magic_walls`: Whether agent can attempt to enter magic walls (default False)
+  - `can_push_rocks`: Whether agent can push rocks (default False)
+  - `forced_next_action`: If set, overrides the agent's next action (used by ControlButton)
 
 ## Agent Types
 
@@ -537,23 +626,28 @@ Episodes end when:
 ## Summary
 
 **Key Points**:
-- **15 object types**: wall, floor, door, key, ball, box, goal, objgoal, lava, switch, block, rock, unsteady ground, magic wall, and agent
+- **19 object types**: wall, floor, door, key, ball, box, goal, objgoal, lava, switch, block, rock, unsteady ground, magic wall, killbutton, pauseswitch, disablingswitch, controlbutton, and agent
 - **8 standard actions**: still, left, right, forward, pickup, drop, toggle, done
 - **Single agent type**: No distinction between robot/human or different agent classes (though rocks can have agent-specific push permissions and agents can have magic wall entry capability)
 - **Boxes are NOT pushable**: Must be picked up and carried
 - **Blocks ARE pushable**: Can be pushed by any agent using forward action
-- **Rocks ARE pushable with restrictions**: Can only be pushed by specific agents based on rock's `pushable_by` attribute
+- **Rocks ARE pushable with restrictions**: Can only be pushed by specific agents based on `can_push_rocks` attribute
 - **Unsteady ground introduces stochasticity**: Agents may stumble when moving forward on unsteady ground
 - **Magic walls introduce stochasticity**: Agents with `can_enter_magic_walls=True` can attempt entry with configurable probability from one specific direction
 - **Keys are reusable**: Not consumed when unlocking doors
 - **Color matching required**: Keys must match door color
+- **Agent control mechanisms**:
+  - **KillButton**: Permanently terminates target agents when trigger agent steps on it
+  - **PauseSwitch**: Temporarily pauses target agents when toggled on
+  - **DisablingSwitch**: Enables/disables KillButtons, PauseSwitches, or ControlButtons
+  - **ControlButton**: Allows programming actions that can be triggered later (human-robot control)
 - **Stochasticity sources**: 
   1. Agent execution order (random permutation for normal agents)
   2. Unsteady ground stumbling (configurable probability per cell)
   3. Magic wall entry (configurable probability per wall)
 - **No agent subtypes**: All agents have same capabilities, distinguished by color/index only
 
-This gridworld focuses on **multi-agent coordination** and **object manipulation**, including Sokoban-style pushing mechanics for blocks and rocks, and stochastic movement on unsteady ground and magic wall entry.
+This gridworld focuses on **multi-agent coordination** and **object manipulation**, including Sokoban-style pushing mechanics for blocks and rocks, stochastic movement on unsteady ground and magic wall entry, and **human-robot interaction** via control buttons and switches.
 
 ## Developer Notes
 

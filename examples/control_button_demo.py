@@ -200,14 +200,23 @@ def demonstrate_control_button():
     env.step(actions)
     print(f"  Human direction: {env.agents[human_idx].dir}")
     
-    # Step 4: Human toggles the button - this should make robot turn left
+    # Step 4: Human toggles the button - sets forced_next_action on robot
     print("Step 4: Human toggles top button (programmed for 'left')")
     print(f"  Robot direction before: {env.agents[robot_idx].dir}")
     actions = [Actions.still] * len(env.agents)
     actions[human_idx] = Actions.toggle
     env.step(actions)
-    print(f"  Robot direction after: {env.agents[robot_idx].dir}")
-    print(f"  (Robot should have turned left!)")
+    print(f"  Robot forced_next_action set: {env.agents[robot_idx].forced_next_action}")
+    print(f"  (Actions.left = {Actions.left})")
+    
+    # Step 5: Next step - robot's action is forced to 'left'
+    print("\nStep 5: On next step, robot's action is FORCED to 'left'")
+    print(f"  Robot direction before forced action: {env.agents[robot_idx].dir}")
+    actions = [Actions.still] * len(env.agents)
+    actions[robot_idx] = Actions.forward  # Robot tries to go forward, but will be forced to turn left
+    env.step(actions)
+    print(f"  Robot direction after forced action: {env.agents[robot_idx].dir}")
+    print(f"  Robot turned left! (dir went from 1 to 0)")
     print()
     
     print("Demonstration complete!")
@@ -226,6 +235,7 @@ def main():
     print("1. Robot (grey) programs buttons with specific actions")
     print("2. Human (yellow) can then trigger these buttons")
     print("3. When triggered, the robot performs the programmed action")
+    print("   on the NEXT step (forced_next_action mechanism)")
     print()
     print("Use case: Teaching humans to control robot behavior through")
     print("programmable interfaces.")
