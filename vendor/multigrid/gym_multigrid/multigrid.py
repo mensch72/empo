@@ -600,15 +600,29 @@ class ControlButton(WorldObj):
                    action_val + 1)  # +1 so None (-1) becomes 0
     
     def render(self, img):
-        """Render the control button with state indication."""
+        """Render the control button with state indication and action symbol."""
         if self.enabled:
             if self.triggered_action is not None:
                 # Bright green when programmed
                 c = COLORS['green']
                 fill_coords(img, point_in_rect(0, 1, 0, 1), c)
-                # Draw action indicator (arrow shape)
+                
+                # Draw action-specific symbol
                 white = np.array([255, 255, 255])
-                fill_coords(img, point_in_triangle((0.3, 0.3), (0.3, 0.7), (0.7, 0.5)), white)
+                action = self.triggered_action
+                
+                if action == 1:  # left - curved arrow left
+                    fill_coords(img, point_in_triangle((0.7, 0.3), (0.7, 0.7), (0.3, 0.5)), white)
+                    fill_coords(img, point_in_rect(0.5, 0.8, 0.4, 0.6), white)
+                elif action == 2:  # right - curved arrow right
+                    fill_coords(img, point_in_triangle((0.3, 0.3), (0.3, 0.7), (0.7, 0.5)), white)
+                    fill_coords(img, point_in_rect(0.2, 0.5, 0.4, 0.6), white)
+                elif action == 3:  # forward - upward arrow
+                    fill_coords(img, point_in_triangle((0.2, 0.6), (0.8, 0.6), (0.5, 0.2)), white)
+                    fill_coords(img, point_in_rect(0.35, 0.65, 0.5, 0.9), white)
+                else:
+                    # Generic action - simple arrow
+                    fill_coords(img, point_in_triangle((0.3, 0.3), (0.3, 0.7), (0.7, 0.5)), white)
             else:
                 # Darker green when not programmed
                 c = COLORS['green'] / 2
@@ -3026,11 +3040,88 @@ class MultiGridEnv(WorldModel):
             stumbled_cells=self.stumbled_cells if hasattr(self, 'stumbled_cells') else None,
             magic_wall_entered_cells=self.magic_wall_entered_cells if hasattr(self, 'magic_wall_entered_cells') else None
         )
+        
+        # Draw dashed lines from control buttons to controlled agents
+        self._draw_control_button_connections(img, tile_size)
 
         if mode == 'human':
             self.window.show_img(img)
 
         return img
+    
+    def _draw_control_button_connections(self, img, tile_size):
+        """Draw dashed lines from control buttons to their controlled agents."""
+        for j in range(self.grid.height):
+            for i in range(self.grid.width):
+                cell = self.grid.get(i, j)
+                if (cell is not None and cell.type == 'controlbutton' and 
+                    cell.controlled_agent is not None and cell.triggered_action is not None):
+                    # Get button center position in pixels
+                    btn_x = int((i + 0.5) * tile_size)
+                    btn_y = int((j + 0.5) * tile_size)
+                    
+                    # Get controlled agent position
+                    agent = self.agents[cell.controlled_agent]
+                    if agent.pos is not None:
+                        agent_x = int((agent.pos[0] + 0.5) * tile_size)
+                        agent_y = int((agent.pos[1] + 0.5) * tile_size)
+                        
+                        # Draw dashed line
+                        self._draw_dashed_line(img, btn_x, btn_y, agent_x, agent_y, 
+                                              color=(100, 255, 100), dash_len=4, gap_len=3)
+    
+    def _draw_dashed_line(self, img, x1, y1, x2, y2, color=(255, 255, 255), dash_len=5, gap_len=3):
+        """Draw a dashed line on the image."""
+        import math
+        dx = x2 - x1
+        dy = y2 - y1
+        dist = math.sqrt(dx*dx + dy*dy)
+        if dist == 0:
+            return
+        
+        # Normalize direction
+        dx /= dist
+        dy /= dist
+        
+        # Draw dashes
+        total_len = dash_len + gap_len
+        num_segments = int(dist / total_len)
+        
+        for seg in range(num_segments + 1):
+            start = seg * total_len
+            end = min(start + dash_len, dist)
+            
+            sx = int(x1 + dx * start)
+            sy = int(y1 + dy * start)
+            ex = int(x1 + dx * end)
+            ey = int(y1 + dy * end)
+            
+            # Draw the dash segment with simple line algorithm
+            self._draw_line_segment(img, sx, sy, ex, ey, color)
+    
+    def _draw_line_segment(self, img, x1, y1, x2, y2, color):
+        """Draw a simple line segment on the image using Bresenham-like approach."""
+        import math
+        dx = abs(x2 - x1)
+        dy = abs(y2 - y1)
+        steps = max(dx, dy, 1)
+        
+        x_inc = (x2 - x1) / steps
+        y_inc = (y2 - y1) / steps
+        
+        x, y = float(x1), float(y1)
+        h, w = img.shape[:2]
+        
+        for _ in range(int(steps) + 1):
+            px, py = int(x), int(y)
+            if 0 <= px < w and 0 <= py < h:
+                # Draw a small dot for visibility
+                for ox in range(-1, 2):
+                    for oy in range(-1, 2):
+                        if 0 <= px+ox < w and 0 <= py+oy < h:
+                            img[py+oy, px+ox] = color
+            x += x_inc
+            y += y_inc
 
     def get_state(self):
         """

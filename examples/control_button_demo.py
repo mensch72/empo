@@ -40,11 +40,18 @@ from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, Wall, World, Acti
 # Environment Definition
 # ============================================================================
 
+# Layout after robot has programmed buttons and stepped out of the way:
+# - Human (yellow) in between buttons at (2, 3)
+# - Robot (grey) out of the way at (4, 3)
+# - Upper button at (2, 2) -> left
+# - Right button at (3, 3) -> forward  
+# - Lower button at (2, 4) -> right
+# - Rocks at (5, 2), (5, 3), (5, 4)
 CONTROL_BUTTON_MAP = """
 We We We We We We We We
-We Ay .. .. .. .. .. We
+We .. .. .. .. .. .. We
 We .. CB .. .. Ro .. We
-We Ae .. CB .. Ro We We
+We .. Ay CB Ae Ro We We
 We .. CB .. .. Ro .. We
 We .. .. .. .. .. .. We
 We We We We We We We We
@@ -55,21 +62,23 @@ class ControlButtonEnv(MultiGridEnv):
     """
     Environment with control buttons that let humans control robot actions.
     
-    Layout:
-    - Human (yellow) at (1, 1)
-    - Robot (grey) at (1, 3)
-    - 3 Control Buttons at (2, 2), (3, 3), (2, 4)
+    After the prequel programming phase:
+    - Human (yellow) is between the buttons at (2, 3)
+    - Robot (grey) is out of the way at (4, 3)
+    - 3 Control Buttons:
+      - Upper (2, 2) -> left action
+      - Right (3, 3) -> forward action
+      - Lower (2, 4) -> right action
     - 3 Rocks at (5, 2), (5, 3), (5, 4)
     
     The robot can push rocks (has can_push_rocks=True).
-    The robot programs the control buttons, then the human uses them.
     """
     
     def __init__(self, max_steps: int = 100, pre_programmed: bool = True):
         """
         Args:
             max_steps: Maximum steps per episode
-            pre_programmed: If True, buttons start pre-programmed with left/forward/right
+            pre_programmed: If True, buttons start pre-programmed (simulating robot already programmed them)
         """
         self.pre_programmed = pre_programmed
         super().__init__(
@@ -99,14 +108,14 @@ class ControlButtonEnv(MultiGridEnv):
                 agent.can_push_rocks = True
         
         if self.pre_programmed:
-            # Pre-program the control buttons with actions
-            # Button 1 (top): left
-            # Button 2 (middle): forward
-            # Button 3 (bottom): right
+            # Pre-program the control buttons with actions as specified:
+            # Upper button (2, 2) -> left
+            # Right button (3, 3) -> forward
+            # Lower button (2, 4) -> right
             button_actions = {
-                (2, 2): Actions.left,     # Top button -> left
-                (3, 3): Actions.forward,  # Middle button -> forward
-                (2, 4): Actions.right,    # Bottom button -> right
+                (2, 2): Actions.left,     # Upper button -> left
+                (3, 3): Actions.forward,  # Right button -> forward
+                (2, 4): Actions.right,    # Lower button -> right
             }
             
             # Find the robot agent index
@@ -127,6 +136,26 @@ class ControlButtonEnv(MultiGridEnv):
                                 cell.triggered_action = button_actions[pos]
 
 
+def get_prequel_actions():
+    """
+    Get the sequence of actions for the prequel where robot programs the buttons.
+    
+    The robot starts at the same position as in the map and needs to:
+    1. Move to face each button
+    2. Toggle to enter programming mode
+    3. Perform the action to program
+    4. Move to the next button
+    5. Finally step out of the way
+    
+    Returns:
+        List of (human_action, robot_action) tuples for each step
+    """
+    # This is a simplified prequel - in a full implementation, the robot would
+    # navigate to each button and program it. For now, we assume pre-programming.
+    # The actual prequel steps would depend on the initial positions.
+    return []
+
+
 def demonstrate_control_button():
     """
     Simple demonstration of how control buttons work.
@@ -140,11 +169,15 @@ def demonstrate_control_button():
     env = ControlButtonEnv(max_steps=100, pre_programmed=True)
     env.reset()
     
-    print("Environment layout:")
-    print("  Yellow (Human): Can trigger control buttons")
-    print("  Grey (Robot): Controlled by buttons, can push rocks")
-    print("  Green squares: Control buttons (programmed with actions)")
+    print("Environment layout (after robot programming phase):")
+    print("  Yellow (Human): In between control buttons, can trigger them")
+    print("  Grey (Robot): Stepped aside, controlled by buttons, can push rocks")
+    print("  Green squares: Control buttons with action indicators:")
+    print("    - Upper button (2,2): LEFT action (arrow pointing left)")
+    print("    - Right button (3,3): FORWARD action (arrow pointing up)")
+    print("    - Lower button (2,4): RIGHT action (arrow pointing right)")
     print("  Grey circles: Rocks (can be pushed by robot)")
+    print("  Green dashed lines: Connection from buttons to controlled robot")
     print()
     
     # Find agents
@@ -156,67 +189,59 @@ def demonstrate_control_button():
         elif agent.color == 'grey':
             robot_idx = i
     
-    print(f"Human (yellow) at: {tuple(env.agents[human_idx].pos)}")
-    print(f"Robot (grey) at: {tuple(env.agents[robot_idx].pos)}")
-    print(f"Robot direction: {env.agents[robot_idx].dir} (0=right, 1=down, 2=left, 3=up)")
+    print(f"Human (yellow) at: {tuple(env.agents[human_idx].pos)}, dir={env.agents[human_idx].dir}")
+    print(f"Robot (grey) at: {tuple(env.agents[robot_idx].pos)}, dir={env.agents[robot_idx].dir}")
     print()
     
     # Find control buttons and their programming
     print("Control buttons (pre-programmed):")
+    action_names = {1: 'left', 2: 'right', 3: 'forward', 6: 'toggle'}
     for j in range(env.grid.height):
         for i in range(env.grid.width):
             cell = env.grid.get(i, j)
             if cell is not None and cell.type == 'controlbutton':
-                action_name = Actions.available[cell.triggered_action] if cell.triggered_action is not None else "None"
-                print(f"  Button at ({i}, {j}): action={action_name}")
+                action_name = action_names.get(cell.triggered_action, str(cell.triggered_action)) if cell.triggered_action is not None else "None"
+                print(f"  Button at ({i}, {j}): action={action_name}, controlled_agent={cell.controlled_agent}")
     print()
     
-    # Simulate the human using control buttons
-    print("Demonstration: Human triggers buttons to control robot")
+    # Render the environment
+    try:
+        import matplotlib.pyplot as plt
+        img = env.render(mode='rgb_array')
+        plt.figure(figsize=(8, 8))
+        plt.imshow(img)
+        plt.title("Control Button Environment\n(Dashed lines show button-to-robot connections)")
+        plt.axis('off')
+        plt.savefig('/tmp/control_button_env.png', dpi=150, bbox_inches='tight')
+        print("Saved environment rendering to /tmp/control_button_env.png")
+        plt.close()
+    except ImportError:
+        print("(matplotlib not available for rendering)")
+    
+    # Demonstrate: Human triggers upper button (left)
+    print("\nDemonstration: Human triggers buttons to control robot")
     print("-" * 50)
     
-    # First, position the human to face a button
-    # Human starts at (1,1) facing up (dir=3)
-    # Need to move to face a button
+    # Human already faces north (dir=3), directly facing upper button at (2,2)
+    print("Step 1: Human is already facing upper button (north)")
+    print(f"  Human direction: {env.agents[human_idx].dir} (3=north)")
+    print(f"  Human front_pos: {tuple(env.agents[human_idx].front_pos)}")
     
-    # Step 1: Human turns right to face east
-    print("Step 1: Human turns right (to face east)")
-    actions = [Actions.still] * len(env.agents)
-    actions[human_idx] = Actions.right
-    env.step(actions)
-    print(f"  Human direction: {env.agents[human_idx].dir}")
-    
-    # Step 2: Human moves forward to (2, 1)
-    print("Step 2: Human moves forward")
-    actions = [Actions.still] * len(env.agents)
-    actions[human_idx] = Actions.forward
-    env.step(actions)
-    print(f"  Human position: {tuple(env.agents[human_idx].pos)}")
-    
-    # Step 3: Human turns down to face the top button at (2, 2)
-    print("Step 3: Human turns right (to face south)")
-    actions = [Actions.still] * len(env.agents)
-    actions[human_idx] = Actions.right
-    env.step(actions)
-    print(f"  Human direction: {env.agents[human_idx].dir}")
-    
-    # Step 4: Human toggles the button - sets forced_next_action on robot
-    print("Step 4: Human toggles top button (programmed for 'left')")
+    # Human toggles upper button
+    print("\nStep 2: Human toggles upper button (programmed for 'left')")
     print(f"  Robot direction before: {env.agents[robot_idx].dir}")
     actions = [Actions.still] * len(env.agents)
     actions[human_idx] = Actions.toggle
     env.step(actions)
     print(f"  Robot forced_next_action set: {env.agents[robot_idx].forced_next_action}")
-    print(f"  (Actions.left = {Actions.left})")
     
-    # Step 5: Next step - robot's action is forced to 'left'
-    print("\nStep 5: On next step, robot's action is FORCED to 'left'")
-    print(f"  Robot direction before forced action: {env.agents[robot_idx].dir}")
+    # Robot's action is forced on next step
+    print("\nStep 3: On next step, robot's action is FORCED to 'left'")
+    robot_dir_before = env.agents[robot_idx].dir
     actions = [Actions.still] * len(env.agents)
-    actions[robot_idx] = Actions.forward  # Robot tries to go forward, but will be forced to turn left
+    actions[robot_idx] = Actions.forward  # Robot "wants" to go forward
     env.step(actions)
-    print(f"  Robot direction after forced action: {env.agents[robot_idx].dir}")
-    print(f"  Robot turned left! (dir went from 1 to 0)")
+    print(f"  Robot direction changed: {robot_dir_before} -> {env.agents[robot_idx].dir} (turned left!)")
     print()
     
     print("Demonstration complete!")
@@ -237,8 +262,12 @@ def main():
     print("3. When triggered, the robot performs the programmed action")
     print("   on the NEXT step (forced_next_action mechanism)")
     print()
-    print("Use case: Teaching humans to control robot behavior through")
-    print("programmable interfaces.")
+    print("Button layout after programming:")
+    print("  - Upper button → LEFT action")
+    print("  - Right button → FORWARD action")
+    print("  - Lower button → RIGHT action")
+    print()
+    print("The dashed lines in rendering show connections from buttons to robot.")
     print()
     
     # Run the demonstration
