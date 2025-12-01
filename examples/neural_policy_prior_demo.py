@@ -52,9 +52,9 @@ from empo.nn_based import (
 EMPTY_5X5_MAP = """
 We We We We We We We
 We .. .. .. .. .. We
-We .. .. .. Ay .. We
-We .. Ay Ae .. .. We
-We .. .. .. .. .. We
+We .. .. We Ay .. We
+We .. Ay Ae Ro .. We
+We .. .. .. .. Bl We
 We .. .. .. .. .. We
 We We We We We We We
 """
@@ -592,7 +592,7 @@ def main():
     # Train neural network using the module's function
     # Hyperparameters tuned for this demo (5x5 grid, 25 goal cells, 10 steps)
     device = 'cpu'
-    beta = 20.0  # Higher temperature for more deterministic policies
+    beta = 1000.0  # Higher temperature for more deterministic policies
     
     t0 = time.time()
     neural_prior = train_neural_policy_prior(
@@ -602,14 +602,16 @@ def main():
         num_episodes=5000,
         steps_per_episode=env.max_steps,  # Match env's max_steps (10)
         beta=beta,
-        gamma=1.0,  # No discounting for this simple goal-reaching task
+        gamma=0.99,  # Mild discounting to encourage earlier goal reaching
         learning_rate=1e-3,
-        batch_size=64,
+        batch_size=128,
         replay_buffer_size=10000,
         updates_per_episode=4,
         train_phi_network=False,  # We only need Q-network for this demo
         epsilon=0.3,
+        exploration_policy=[0.06,0.19,0.19,0.56],  # Biased exploration: prefer forward, rarely still
         device=device,
+        use_path_based_shaping=True,
         verbose=True
     )
     # Extract the Q-network from the trained policy prior
