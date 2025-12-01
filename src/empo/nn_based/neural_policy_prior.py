@@ -1449,8 +1449,13 @@ def train_neural_policy_prior(
                         action = np.random.choice(range(num_actions),p=[0.02,0.19,0.19,0.6])
 #                        action = np.random.randint(num_actions)
                     else:
-                        policy = F.softmax(beta * q_values, dim=1)
-                        action = torch.multinomial(policy, 1).item()
+                        if beta == float('inf'):
+                            # Greedy action
+                            action = torch.argmax(q_values, dim=1).item()
+                        else:
+                            q_values -= torch.max(q_values, dim=1, keepdim=True)  # For numerical stability
+                            policy = F.softmax(beta * q_values, dim=1)
+                            action = torch.multinomial(policy, 1).item()
                     
                     # Only store transition if agent's personal episode hasn't ended
                     # Once an agent reaches their goal, their episode is done and we

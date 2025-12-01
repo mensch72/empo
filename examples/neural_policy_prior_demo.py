@@ -52,13 +52,13 @@ from empo.nn_based import (
 EMPTY_5X5_MAP = """
 We We We We We We We
 We .. .. .. .. .. We
-We .. .. .. Ay .. We
-We .. Ay Ae .. .. We
-We .. .. .. .. .. We
+We .. .. We Ay .. We
+We .. Ay Ae Ro .. We
+We .. .. .. .. Bl We
 We .. .. .. .. .. We
 We We We We We We We
 """
-
+MAX_STEPS = 20  # Used for normalization in state_to_grid_tensor
 
 class Empty5x5Env(MultiGridEnv):
     """
@@ -69,7 +69,7 @@ class Empty5x5Env(MultiGridEnv):
         - Agents: 2 yellow (humans) at corners, 1 grey (robot) in center
     """
     
-    def __init__(self, max_steps: int = 10):
+    def __init__(self, max_steps: int = MAX_STEPS):
         super().__init__(
             map=EMPTY_5X5_MAP,
             max_steps=max_steps,
@@ -182,7 +182,7 @@ def state_to_grid_tensor(
                 grid_tensor[0, channel_idx, y, x] = 1.0
     
     # Normalize step count (max_steps should match environment setting)
-    max_steps = 10  # Must match env.max_steps for proper normalization
+    max_steps = MAX_STEPS  # Must match env.max_steps for proper normalization
     step_tensor = torch.tensor([[step_count / max_steps]], device=device, dtype=torch.float32)
     
     return grid_tensor, step_tensor
@@ -315,9 +315,14 @@ def get_boltzmann_action(
             grid_tensor, step_tensor,
             position, direction, agent_idx_t,
             goal_coords
-        )
-        policy = F.softmax(beta * q_values, dim=1)
-        action = torch.multinomial(policy, 1).item()
+        ) # shape: (1, num_actions)
+        if beta == float('inf'):
+            # Greedy action
+            action = torch.argmax(q_values, dim=1).item()
+        else:
+            q_values -= torch.max(q_values, dim=1, keepdim=True)  # For numerical stability
+            policy = F.softmax(beta * q_values, dim=1)
+            action = torch.multinomial(policy, 1).item()
     
     return action
 
@@ -479,6 +484,8 @@ def run_rollout_with_learned_policies(
 # Movie Creation
 # ============================================================================
 
+N_ROLLOUTS = 50  # Number of rollouts to visualize
+
 def create_multi_rollout_movie(
     all_rollout_frames: List[List[np.ndarray]],
     goal_positions: List[Tuple[int, int]],
@@ -508,7 +515,7 @@ def create_multi_rollout_movie(
     def update(frame_idx):
         rollout_idx, step_idx, goal_pos = rollout_info[frame_idx]
         im.set_array(frames[frame_idx])
-        title.set_text(f'Rollout {rollout_idx + 1}/10 | Step {step_idx} | '
+        title.set_text(f'Rollout {rollout_idx + 1}/{N_ROLLOUTS} | Step {step_idx} | '
                       f'Human 0 Goal: ({goal_pos[0]}, {goal_pos[1]})\n'
                       f'★ = actual goal | Colors = NN V-values for alternative goals\n'
                       f'Humans: learned Boltzmann policy | Robot: random policy')
@@ -550,8 +557,8 @@ def main():
     output_dir = os.path.join(os.path.dirname(__file__), '..', 'outputs')
     os.makedirs(output_dir, exist_ok=True)
     
-    # Create environment with 10 steps
-    max_steps = 10
+    # Create environment
+    max_steps = MAX_STEPS
     print(f"Creating 5x5 empty grid environment (max_steps={max_steps})...")
     env = Empty5x5Env(max_steps=max_steps)
     env.reset()
@@ -590,9 +597,9 @@ def main():
     goal_sampler = ReachCellGoalSampler(env, goal_cells)
     
     # Train neural network using the module's function
-    # Hyperparameters tuned for this demo (5x5 grid, 25 goal cells, 10 steps)
+    # Hyperparameters tuned for this demo (5x5 grid, 25 goal cells)
     device = 'cpu'
-    beta = 20.0  # Higher temperature for more deterministic policies
+    beta = np.inf  # Higher temperature for more deterministic policies
     
     t0 = time.time()
     neural_prior = train_neural_policy_prior(
@@ -602,7 +609,7 @@ def main():
         num_episodes=5000,
         steps_per_episode=env.max_steps,  # Match env's max_steps (10)
         beta=beta,
-        gamma=1.0,  # No discounting for this simple goal-reaching task
+        gamma=0.99,  # some incentive to reach goals quickly
         learning_rate=1e-3,
         batch_size=64,
         replay_buffer_size=10000,
@@ -618,15 +625,15 @@ def main():
     print(f"  Training completed in {elapsed:.2f} seconds")
     print()
     
-    # Select 10 random goal cells for first human's rollouts
-    print("Selecting 10 random goal cells for first human's rollouts...")
+    # Select N_ROLLOUTS random goal cells for first human's rollouts
+    print(f"Selecting {N_ROLLOUTS} random goal cells for first human's rollouts...")
     random.seed(42)
-    selected_goals = random.sample(goal_cells, min(10, len(goal_cells)))
+    selected_goals = random.sample(goal_cells, min(N_ROLLOUTS, len(goal_cells)))
     print(f"  Selected goals for human 0: {selected_goals}")
     print()
     
-    # Run 10 rollouts with visualization
-    print("Running 10 rollouts:")
+    # Run N_ROLLOUTS rollouts with visualization
+    print(f"Running {N_ROLLOUTS} rollouts:")
     print("  - Humans follow learned goal-specific Boltzmann policies")
     print("  - Robot uses random policy")
     print("  - Visualization shows human 0's value function")
@@ -642,7 +649,7 @@ def main():
             if h_idx != first_human_idx:
                 human_goals[h_idx] = random.choice(goal_cells)
         
-        print(f"  Rollout {i + 1}/10: Human 0 goal = {goal_pos}, Human 1 goal = {human_goals.get(human_agent_indices[1], 'N/A')}")
+        print(f"  Rollout {i + 1}/{N_ROLLOUTS}: Human 0 goal = {goal_pos}, Human 1 goal = {human_goals.get(human_agent_indices[1], 'N/A')}")
         
         frames = run_rollout_with_learned_policies(
             env=env,
