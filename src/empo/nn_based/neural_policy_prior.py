@@ -252,7 +252,48 @@ class AgentEncoder(nn.Module):
         x = torch.cat([position, direction, idx_embed], dim=1)  # (batch, 22)
         return self.fc(x)
 
+class SoftClamp(nn.Module):
+    """
+    Implements a soft clamp to [a - (b-a), b + (b-a)] that is linear in [a,b] and exponential outside.
+    
+    Q(Z) = 1 - ReLU(1 - ReLU(Z)) - exp(-ReLU(Z - 1)) + exp(-ReLU(-Z))
+    """
+    def __init__(self, a: float = 0.5, b: float = 1.5):
+        super().__init__()
+        # Define the linear boundaries
+        self.a = float(a)
+        self.b = float(b)
+        # Define the range size R = b - a
+        self.R = self.b - self.a
+        
+        if self.R <= 0:
+            raise ValueError("b must be greater than a for the linear region [a, b].")
 
+        self.relu = nn.ReLU()
+
+    def forward(self, Z: torch.Tensor) -> torch.Tensor:
+        
+        # --- 1. Term 1: Linear Core (The Clip Function) ---
+        # T1 = ReLU(Z - a) - ReLU(Z - b) + a
+        # This function is Z in [a, b], 'a' for Z < a, and 'b' for Z > b.
+        term1_linear_core = self.relu(Z - self.a) - self.relu(Z - self.b) + self.a
+        
+        # --- 2. Term 2: Upper Exponential Tail (Z > b) ---
+        # T2 = R * (1 - exp(-(1/R) * ReLU(Z - b)))
+        # This term is 0 for Z <= b, and approaches R for Z >> b.
+        # Adding T1 (which is 'b' for Z > b) and T2 (which approaches R) 
+        # gives a total saturation at b + R.
+        term2_tail_gt_b = self.R * (1.0 - torch.exp(-(1.0 / self.R) * self.relu(Z - self.b)))
+        
+        # --- 3. Term 3: Lower Exponential Tail (Z < a) ---
+        # T3 = R * (exp(-(1/R) * ReLU(a - Z)) - 1)
+        # This term is 0 for Z >= a, and approaches -R for Z << a.
+        # Adding T1 (which is 'a' for Z < a) and T3 (which approaches -R) 
+        # gives a total saturation at a - R.
+        term3_tail_lt_a = self.R * (torch.exp(-(1.0 / self.R) * self.relu(self.a - Z)) - 1.0)
+        
+        return term1_linear_core + term2_tail_gt_b + term3_tail_lt_a
+        
 class QNetwork(nn.Module):
     """
     Q-value network: h_Q(state, human, goal) -> Q-values by action.
@@ -273,6 +314,7 @@ class QNetwork(nn.Module):
         goal_encoder: Pretrained or trainable GoalEncoder.
         num_actions: Number of possible actions.
         hidden_dim: Hidden layer dimension (default: 256).
+        feasible_range: Optional tuple (a, b) for theoretical bounds for the Q values. Will be used for clamping (either soft or hard).
     """
     
     def __init__(
@@ -281,7 +323,8 @@ class QNetwork(nn.Module):
         agent_encoder: AgentEncoder,
         goal_encoder: GoalEncoder,
         num_actions: int,
-        hidden_dim: int = 256
+        hidden_dim: int = 256,
+        feasible_range: Optional[tuple] = None
     ):
         super().__init__()
         self.state_encoder = state_encoder
@@ -294,7 +337,7 @@ class QNetwork(nn.Module):
                        agent_encoder.feature_dim +
                        goal_encoder.feature_dim)
         
-        # Q-value head
+        # Q-value head - outputs logits, sigmoid applied in forward() to bound Q in [0,1]
         self.q_head = nn.Sequential(
             nn.Linear(combined_dim, hidden_dim),
             nn.ReLU(),
@@ -302,6 +345,11 @@ class QNetwork(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, num_actions),
         )
+        if feasible_range is not None:
+            # Add soft clamp to the output layer to prevent gradient explosion outside feasible range and nudge Q-values into feasible range:
+            self.q_head.add_module("soft_clamp", SoftClamp(*feasible_range))
+
+        self.feasible_range = feasible_range
     
     def forward(
         self,
@@ -324,16 +372,16 @@ class QNetwork(nn.Module):
             goal_coords: Goal coordinates (batch, 4).
         
         Returns:
-            Q-values tensor of shape (batch, num_actions).
+            Q-values tensor of shape (batch, num_actions), bounded to [0,1] if bounded_q=True.
         """
         state_feat = self.state_encoder(state_tensor, step_count)
         agent_feat = self.agent_encoder(agent_position, agent_direction, agent_idx)
         goal_feat = self.goal_encoder(goal_coords)
         
         combined = torch.cat([state_feat, agent_feat, goal_feat], dim=1)
-        q_values = self.q_head(combined)
+        q_values_predicted = self.q_head(combined)
         
-        return q_values
+        return q_values_predicted  # might be unbounded if soft_clamp is None!
     
     def get_policy(self, q_values: torch.Tensor, beta: float) -> torch.Tensor:
         """
@@ -341,11 +389,15 @@ class QNetwork(nn.Module):
         
         Args:
             q_values: Q-values tensor of shape (batch, num_actions).
+                     If bounded_q=True, these are already in [0,1].
             beta: Inverse temperature (higher = more deterministic).
         
         Returns:
             Policy tensor of shape (batch, num_actions) with action probabilities.
         """
+        if self.feasible_range is not None:
+            # hard clamp here because differentiability is not needed for policy extraction:
+            q_values = torch.clamp(q_values, self.feasible_range[0] - (self.feasible_range[1]-self.feasible_range[0]), self.feasible_range[1])
         if beta == float('inf'):
             # Argmax policy with ties broken uniformly
             max_q = q_values.max(dim=1, keepdim=True)[0]
@@ -353,6 +405,8 @@ class QNetwork(nn.Module):
             policy = is_max / is_max.sum(dim=1, keepdim=True)
         else:
             # Softmax with temperature
+            # Since Q-values are bounded to [0,1], beta*Q is bounded to [0, beta]
+            # Subtract max for numerical stability (standard softmax trick)
             scaled_q = beta * (q_values - q_values.max(dim=1, keepdim=True)[0])
             policy = F.softmax(scaled_q, dim=1)
         return policy
@@ -1037,6 +1091,7 @@ class PathDistanceCalculator:
         # Create wall-only grid and precompute shortest paths
         self._wall_grid = self._create_wall_grid(world_model)
         self._shortest_paths = self._precompute_shortest_paths()
+        self.feasible_range = self._compute_feasible_range()
     
     def _create_wall_grid(self, world_model: Any) -> np.ndarray:
         """
@@ -1216,6 +1271,18 @@ class PathDistanceCalculator:
             # Unknown type - treat as mildly difficult
             return self.passing_costs.get('unknown', 2)
     
+    def _compute_feasible_range(self) -> Tuple[float, float]:
+        """
+        Compute the feasible range of path costs based on grid size and passing costs.
+        
+        Returns:
+            Tuple of (-max_cost, max_cost) for clamping purposes.
+        """
+        max_cost = (self.grid_width + self.grid_height) * max(
+            cost for cost in self.passing_costs.values() if cost < float('inf')
+        )
+        return (-max_cost, max_cost)
+    
     def compute_potential(self, agent_pos: Tuple[int, int], target_pos: Tuple[int, int],
                          world_model: Any, max_cost: Optional[float] = None) -> float:
         """
@@ -1259,6 +1326,7 @@ def train_neural_policy_prior(
     updates_per_episode: int = 4,
     train_phi_network: bool = True,
     epsilon: float = 0.3,
+    exploration_policy: np.ndarray = None,
     use_path_based_shaping: bool = False,
     passing_costs: Optional[Dict[str, float]] = None,
     device: str = 'cpu',
@@ -1296,6 +1364,7 @@ def train_neural_policy_prior(
         updates_per_episode: Number of gradient updates per episode.
         train_phi_network: Whether to also train the marginal policy network.
         epsilon: Exploration rate for epsilon-greedy policy.
+        exploration_policy: Optional fixed exploration policy (action probabilities).
         use_path_based_shaping: If True, use path-based reward shaping with precomputed
             shortest paths and passing difficulty scores. If False (default), use simple 
             Manhattan distance.
@@ -1319,8 +1388,11 @@ def train_neural_policy_prior(
     path_calculator = None
     if use_path_based_shaping:
         path_calculator = PathDistanceCalculator(world_model, passing_costs)
+        feasible_range = tuple(np.array(path_calculator.feasible_range) + np.array([0,1]))
         if verbose:
             print("Initialized path-based reward shaping with precomputed shortest paths")
+    else:
+        feasible_range = (0, 1)  # Q values bounded in [0,1] due to rewards 0 or 1 (at most once)
     
     # Create Q-network with encoders
     state_encoder = StateEncoder(
@@ -1348,7 +1420,8 @@ def train_neural_policy_prior(
         agent_encoder=agent_encoder,
         goal_encoder=goal_encoder,
         num_actions=num_actions,
-        hidden_dim=128
+        hidden_dim=128,
+        feasible_range=feasible_range
     ).to(device)
     
     # Create phi network if requested
@@ -1446,16 +1519,15 @@ def train_neural_policy_prior(
                     
                     # Epsilon-greedy action selection
                     if np.random.random() < epsilon:
-                        action = np.random.choice(range(num_actions),p=[0.02,0.19,0.19,0.6])
-#                        action = np.random.randint(num_actions)
-                    else:
-                        if beta == float('inf'):
-                            # Greedy action
-                            action = torch.argmax(q_values, dim=1).item()
+                        # Random action with uniform distribution
+                        if exploration_policy is not None:
+                            action = np.random.choice(
+                                np.arange(num_actions), p=exploration_policy)
                         else:
-                            q_values -= torch.max(q_values, dim=1, keepdim=True).values  # For numerical stability
-                            policy = F.softmax(beta * q_values, dim=1)
-                            action = torch.multinomial(policy, 1).item()
+                            action = np.random.randint(num_actions)
+                    else:
+                        policy = q_network.get_policy(q_values, beta)
+                        action = torch.multinomial(policy, 1).item()
                     
                     # Only store transition if agent's personal episode hasn't ended
                     # Once an agent reaches their goal, their episode is done and we
@@ -1643,11 +1715,16 @@ def train_neural_policy_prior(
                         )  # Shape: (num_non_terminal, num_actions)
                         
                         # Compute V(s') = sum_a π(a|s') Q(s',a) for Boltzmann policy
-                        next_policy = F.softmax(beta * next_q_values, dim=1)
+                        # Q-values are bounded to [0,1] by sigmoid, so this is stable
+                        next_policy = q_network.get_policy(next_q_values, beta)
                         next_v = (next_policy * next_q_values).sum(dim=1)  # Shape: (num_non_terminal,)
                         
                         # Update targets for non-terminal states: r + γ * V(s')
                         targets[non_terminal_indices] = rewards[non_terminal_indices] + gamma * next_v
+                
+                # Clamp targets to feasible range since Q-values are bounded
+                if feasible_range is not None:  
+                    targets = torch.clamp(targets, feasible_range[0], feasible_range[1])
                 
                 # Compute MSE loss over the batch
                 loss = F.mse_loss(q_values_selected, targets)
@@ -1689,7 +1766,7 @@ def train_neural_policy_prior(
                         positions, directions, agent_indices,
                         goal_coords
                     )
-                    target_policy = F.softmax(beta * q_values, dim=1)
+                    target_policy = q_network.get_policy(q_values, beta)
                 
                 # Get predicted policy from phi-network - single batched forward pass
                 predicted_policy = phi_network(
