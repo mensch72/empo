@@ -253,16 +253,14 @@ class KillButton(WorldObj):
         return True
     
     def encode(self, world, current_agent=False):
-        """Encode the kill button with its state."""
+        """Encode the kill button with its mutable state (enabled only)."""
         if world.encode_dim == 3:
             return (world.OBJECT_TO_IDX[self.type], world.COLOR_TO_IDX[self.color], 
                     1 if self.enabled else 0)
         else:
-            # Encode trigger_color, target_color, and enabled state
-            trigger_idx = world.COLOR_TO_IDX.get(self.trigger_color, 0)
-            target_idx = world.COLOR_TO_IDX.get(self.target_color, 0)
+            # Only encode mutable state (enabled) - trigger_color and target_color are immutable
             return (world.OBJECT_TO_IDX[self.type], world.COLOR_TO_IDX[self.color],
-                   trigger_idx, target_idx, 1 if self.enabled else 0, 0)
+                   1 if self.enabled else 0, 0, 0, 0)
     
     def render(self, img):
         """Render the kill button as a red floor tile with a skull/X pattern."""
