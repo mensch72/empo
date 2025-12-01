@@ -159,8 +159,8 @@ def split_into_batches(items: List[int], num_batches: Optional[int]) -> List[Lis
 
 def _hpp_compute_sequential(
     states: List[State], 
-    Vh_values: VhValues, 
-    system2_policies: HumanPolicyDict, 
+    Vh_values: VhValues,  # result is inserted into this!
+    system2_policies: HumanPolicyDict,  # result is inserted into this! 
     transitions: List[List[Tuple[Tuple[int, ...], List[float], List[int]]]],
     human_agent_indices: List[int], 
     possible_goal_generator: PossibleGoalGenerator,
@@ -723,9 +723,9 @@ def compute_human_policy_prior(
 
 def _rp_compute_sequential(
     states: List[State], 
-    Vh_values: VhValues, 
-    Vr_values: VrValues, 
-    robot_policy: RobotPolicyDict, 
+    Vh_values: VhValues,  # result is inserted into this!
+    Vr_values: VrValues,  # result is inserted into this!
+    robot_policy: RobotPolicyDict,  # result is inserted into this! 
     transitions: List[List[Tuple[Tuple[int, ...], List[float], List[int]]]],
     human_agent_indices: List[int], 
     robot_agent_indices: List[int], # the AI coordinates all robots 
@@ -792,42 +792,22 @@ def _rp_compute_sequential(
                             print(f"      Goal achieved in this state")
                         vh = Vh_values[state_index][agent_index][possible_goal] = 1
                     else:
-
-                        # TODO!
-
-                        # otherwise, compute the Q values as expected future V values, and the policy as a Boltzmann policy based on those Q values:
-                        expected_Vs: npt.NDArray[np.floating[Any]] = np.zeros(num_actions)
-                        for action in actions:
-                            v_accum: float = 0.0
-                            for action_profile_prob, action_profile in human_policy_prior(state, agent_index, action):
-                                action_profile[agent_index] = action
-                                # convert profile [a,b,c] into index a + b*num_actions + c*num_actions*num_actions ...
-                                # Optimized base conversion using precomputed powers
-                                action_profile_index = int(np.dot(action_profile, action_powers))
-                                _, next_state_probabilities, next_state_indices = transitions[state_index][action_profile_index]
-                                # Vectorized computation using numpy
-                                v_values_array: npt.NDArray[np.floating[Any]] = np.array([
-                                    Vr_values[next_state_indices[i]][agent_index][possible_goal] 
-                                    for i in range(len(next_state_indices))
-                                ])
-                                v_accum += action_profile_prob * float(np.dot(next_state_probabilities, v_values_array))
-                            expected_Vs[action] = v_accum
-                        q = gamma_h * expected_Vs
-                        # Boltzmann policy (numerically stable softmax):
-                        if beta_h == float('inf'):
-                            # Infinite beta: deterministic argmax policy
-                            max_q = np.max(q)
-                            p = np.zeros_like(q)
-                            max_indices = np.where(q == max_q)[0]
-                            p[max_indices] = 1.0 / len(max_indices)  # Uniform over max actions
-                        else:
-                            scaled_q = beta_h * (q - np.max(q))  # Subtract max for numerical stability
-                            p = np.exp(scaled_q)
-                            p /= np.sum(p)
-                        psi[possible_goal] = p
-                        v_result = Vr_values[state_index][agent_index][possible_goal] = float(np.sum(p * q))
+                        # otherwise, first compute the human Vh value as a discounted expection over future Vh values given policy prior marginalized over others possible goals:
+                        expected_Vh: float = 0.0
+                        for action_profile_prob, action_profile in human_policy_prior.profile_distribution(state, agent_index, possible_goal):
+                            # convert profile [a,b,c] into index a + b*num_actions + c*num_actions*num_actions ...
+                            # Optimized base conversion using precomputed powers
+                            action_profile_index = int(np.dot(action_profile, action_powers))
+                            _, next_state_probabilities, next_state_indices = transitions[state_index][action_profile_index]
+                            # Vectorized computation using numpy
+                            vh_values_array: npt.NDArray[np.floating[Any]] = np.array([
+                                Vh_values[next_state_indices[i]][agent_index][possible_goal] 
+                                for i in range(len(next_state_indices))
+                            ])
+                            expected_Vh += action_profile_prob * float(np.dot(next_state_probabilities, vh_values_array))
+                        vh_result = Vh_values[state_index][agent_index][possible_goal] = gamma_h * expected_Vh
                         if DEBUG:
-                            print(f"      Goal not achieved; V = {v_result:.4f}")
+                            print(f"      Goal not achieved; V = {vh_result:.4f}")
                     xh += weight * vh**zeta
                 if DEBUG:
                     print(f"   ...Xh = {xh:.4f}")
@@ -836,3 +816,4 @@ def _rp_compute_sequential(
             vr = # TODO!
             if DEBUG:
                 print(f"  ...Vr = Ur = {vr:.4f}")
+        Vr_values[state_index] = vr

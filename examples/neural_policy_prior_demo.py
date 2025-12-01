@@ -52,8 +52,8 @@ from empo.nn_based import (
 EMPTY_5X5_MAP = """
 We We We We We We We
 We .. .. .. .. .. We
-We .. .. .. Ay .. We
-We .. Ay Ae .. .. We
+We .. .. We Ay .. We
+We .. Ay Ae Ro .. We
 We .. .. .. .. .. We
 We .. .. .. .. .. We
 We We We We We We We
@@ -592,24 +592,25 @@ def main():
     # Train neural network using the module's function
     # Hyperparameters tuned for this demo (5x5 grid, 25 goal cells, 10 steps)
     device = 'cpu'
-    beta = 20.0  # Higher temperature for more deterministic policies
+    beta = 100 #20.0  # Higher temperature for more deterministic policies
     
     t0 = time.time()
     neural_prior = train_neural_policy_prior(
         world_model=env,
         human_agent_indices=human_agent_indices,
         goal_sampler=goal_sampler,
-        num_episodes=5000,
+        num_episodes=20000, #5000,
         steps_per_episode=env.max_steps,  # Match env's max_steps (10)
         beta=beta,
         gamma=1.0,  # No discounting for this simple goal-reaching task
         learning_rate=1e-3,
-        batch_size=64,
+        batch_size=128, #64,
         replay_buffer_size=10000,
         updates_per_episode=4,
         train_phi_network=False,  # We only need Q-network for this demo
         epsilon=0.3,
         device=device,
+        use_path_based_shaping=True,
         verbose=True
     )
     # Extract the Q-network from the trained policy prior
@@ -621,7 +622,7 @@ def main():
     # Select 10 random goal cells for first human's rollouts
     print("Selecting 10 random goal cells for first human's rollouts...")
     random.seed(42)
-    selected_goals = random.sample(goal_cells, min(10, len(goal_cells)))
+    selected_goals = random.sample(goal_cells, min(30, len(goal_cells)))
     print(f"  Selected goals for human 0: {selected_goals}")
     print()
     

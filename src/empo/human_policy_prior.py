@@ -98,6 +98,53 @@ class HumanPolicyPrior(ABC):
         """
         pass
 
+    def profile_distribution(
+        self, 
+        state, 
+        human_agent_index: Optional[int], 
+        possible_goal: Optional['PossibleGoal'] = None,
+    ) -> List[tuple[float, List[int]]]:
+        """
+        Get joint action profile distribution for all human agents, 
+        marginalized over all possible goals.
+        
+        Assumes independence between human agents. The joint distribution
+        is computed as the product of individual agent distributions.
+        
+        Args:
+            state: Current world state.
+            possible_goal_generator: Generator for enumerating possible goals.
+            human_agent_index: If provided, cassume this agent has a particular goal.
+            possible_goal: If provided, condition on this goal for the specified agent.
+                          Only valid when human_agent_index is also provided.
+        """
+        from itertools import product
+
+        if human_agent_index is not None:
+            # One agent has a specific goal, others marginalize over goals
+            distributions = []
+            for agent_index in self.human_agent_indices:
+                if agent_index == human_agent_index:
+                    dist = self(state, agent_index, possible_goal)
+                else:
+                    dist = self(state, agent_index)
+                distributions.append(dist)
+        else:
+            # All agents marginalize over goals
+            distributions = [
+                self(state, agent_index) 
+                for agent_index in self.human_agent_indices
+            ]
+        
+        joint_distribution = []
+        for action_profile in product(*[range(len(dist)) for dist in distributions]):
+            prob = 1.0
+            for agent_idx, action in enumerate(action_profile):
+                prob *= distributions[agent_idx][action]
+            joint_distribution.append((prob, list(action_profile)))
+        
+        return joint_distribution
+
     def sample(
         self, 
         state, 
