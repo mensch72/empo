@@ -32,7 +32,6 @@ import random
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-import numpy as np
 
 # Patch gym import for compatibility
 import gymnasium as gym
