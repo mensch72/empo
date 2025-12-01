@@ -1446,8 +1446,8 @@ def train_neural_policy_prior(
                     
                     # Epsilon-greedy action selection
                     if np.random.random() < epsilon:
-                        action = np.random.choice(range(num_actions),p=[0.02,0.19,0.19,0.6])
-#                        action = np.random.randint(num_actions)
+                        # Random action with uniform distribution
+                        action = np.random.randint(num_actions)
                     else:
                         policy = F.softmax(beta * q_values, dim=1)
                         action = torch.multinomial(policy, 1).item()

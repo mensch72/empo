@@ -739,7 +739,7 @@ def create_full_rollout_movie():
         # Toggle upper button (2, 2)
         actions[robot_idx] = Actions.toggle
         env.step(actions)
-        # Program 'left' action
+        # Program 'left' action (robot now faces west)
         actions[robot_idx] = Actions.left
         env.step(actions)
         img = env.render(mode='rgb_array')
@@ -752,32 +752,46 @@ def create_full_rollout_movie():
         # Toggle lower button (2, 4)
         actions[robot_idx] = Actions.toggle
         env.step(actions)
-        # Program 'right' action
+        # Program 'right' action (robot now faces west again)
         actions[robot_idx] = Actions.right
         env.step(actions)
         img = env.render(mode='rgb_array')
         all_frames.append(('PREQUEL: Lower = "R"', img))
         print(f"  Lower button (2,4) programmed with 'right'")
         
-        # Now facing east (dir=0). Toggle right button (3, 3)
+        # Now facing west (dir=2). Need to face east to toggle right button (3,3)
+        # Turn left twice: west -> south -> east
+        actions[robot_idx] = Actions.left
+        env.step(actions)
+        actions[robot_idx] = Actions.left
+        env.step(actions)
+        # Toggle right button (3, 3)
         actions[robot_idx] = Actions.toggle
         env.step(actions)
-        # Program 'forward' action - this moves the robot!
+        # Program 'forward' action - robot stays in place (button blocks movement)
         actions[robot_idx] = Actions.forward
         env.step(actions)
         img = env.render(mode='rgb_array')
         all_frames.append(('PREQUEL: Right = "F"', img))
         print(f"  Right button (3,3) programmed with 'forward'")
-        print(f"  Robot moved to: {tuple(env.agents[robot_idx].pos)}")
+        print(f"  Robot at: {tuple(env.agents[robot_idx].pos)}, dir={env.agents[robot_idx].dir}")
         
         print("  All buttons programmed!")
         
         # ========== PREQUEL PHASE 2: ROBOT STEPS ASIDE TO (1, 5) ==========
         print("\n=== PREQUEL: Robot steps aside to (1,5) ===")
         
-        # Robot now at (1, 3) facing west (dir=2). Need to go to (1, 5).
-        # Turn left to face south (dir=1)
-        actions[robot_idx] = Actions.left
+        # Robot now at (2, 3) facing east (dir=0). Need to go to (1, 5).
+        # Turn left twice to face west, move to (1,3), turn left to face south, move to (1,5)
+        actions[robot_idx] = Actions.left  # east -> north
+        env.step(actions)
+        actions[robot_idx] = Actions.left  # north -> west
+        env.step(actions)
+        # Move west to (1, 3)
+        actions[robot_idx] = Actions.forward
+        env.step(actions)
+        # Turn left to face south
+        actions[robot_idx] = Actions.left  # west -> south
         env.step(actions)
         # Move south to (1, 4)
         actions[robot_idx] = Actions.forward
@@ -918,8 +932,8 @@ def train_and_rollout_with_learned_policy():
     Train a neural network for the human to learn to reach rock positions,
     then demonstrate rollouts with prequel + learned policy.
     
-    Note: This requires the nn_based module to support the full action space.
-    Currently skipped if training fails due to action space mismatch.
+    Uses train_neural_policy_prior() to train the policy, then neural_prior.sample()
+    to get actions during rollouts.
     """
     print("=" * 70)
     print("Neural Network Learning: Human learns to guide robot to rocks")
@@ -952,15 +966,92 @@ def train_and_rollout_with_learned_policy():
     # Goal cells are the 3 rock positions
     goal_cells = env.rock_positions  # [(5, 2), (5, 3), (5, 4)]
     
-    print(f"Note: Neural network training requires nn_based module to support")
-    print(f"      the full {env.action_space.n}-action space. Currently using")
-    print(f"      handcrafted demo only.")
-    print()
-    print(f"The full prequel + control demo has been saved to:")
-    print(f"  - {os.path.join(OUTPUT_DIR, 'control_button_full_rollout.gif')}")
-    print(f"  - {os.path.join(OUTPUT_DIR, 'control_button_full_rollout.png')}")
+    # Create goal sampler
+    goal_sampler = RockPositionGoalSampler(env, robot_idx, goal_cells)
     
-    return None
+    print(f"Training neural network for {len(goal_cells)} goal positions...")
+    print("  Human learns to guide robot to each rock position via control buttons")
+    print()
+    
+    device = 'cpu'
+    beta = 10.0
+    
+    t0 = time.time()
+    try:
+        # Train the neural policy prior
+        neural_prior = train_neural_policy_prior(
+            world_model=env,
+            human_agent_indices=[human_idx],
+            goal_sampler=goal_sampler,
+            num_episodes=500,  # Reduced for faster demo
+            steps_per_episode=50,  # Reduced for faster demo
+            beta=beta,
+            gamma=1.0,
+            learning_rate=1e-3,
+            batch_size=32,
+            replay_buffer_size=5000,
+            updates_per_episode=2,
+            train_phi_network=False,
+            epsilon=0.3,
+            device=device,
+            verbose=True
+        )
+        elapsed = time.time() - t0
+        print(f"  Training completed in {elapsed:.2f} seconds")
+        
+        # Run rollouts with learned policy using neural_prior.sample()
+        print("\nRunning rollouts with learned policy...")
+        
+        import matplotlib.pyplot as plt
+        
+        all_rollout_frames = []
+        
+        for goal_idx, goal_pos in enumerate(goal_cells):
+            print(f"\n  Rollout for goal: robot at {goal_pos}")
+            
+            env.reset()
+            rollout_frames = []
+            
+            # Create goal object for this rollout
+            goal = RobotAtRockGoal(env, robot_idx, goal_pos)
+            
+            for step in range(min(30, env.max_steps)):  # Limit steps for demo
+                state = env.get_state()
+                img = env.render(mode='rgb_array')
+                rollout_frames.append((f'Goal: Robot at {goal_pos} | Step {step}', img))
+                
+                # Get human action from learned policy using sample()
+                human_action = neural_prior.sample(state, human_idx, goal)
+                
+                # Robot stays still (human controls via buttons)
+                actions = [Actions.still] * len(env.agents)
+                actions[human_idx] = human_action
+                
+                _, _, done, _ = env.step(actions)
+                
+                # Check if goal achieved
+                robot_state = state[1][robot_idx]
+                if int(robot_state[0]) == goal_pos[0] and int(robot_state[1]) == goal_pos[1]:
+                    print(f"    Goal achieved at step {step}!")
+                    break
+                
+                if done:
+                    break
+            
+            all_rollout_frames.extend(rollout_frames)
+        
+        # Save rollouts movie
+        movie_path = os.path.join(OUTPUT_DIR, 'control_button_learned_rollouts.gif')
+        create_movie(all_rollout_frames, movie_path, fps=2)
+        
+        return neural_prior
+        
+    except Exception as e:
+        print(f"  Neural network training failed: {e}")
+        print("  (This may be due to action space mismatch or missing dependencies)")
+        import traceback
+        traceback.print_exc()
+        return None
 
 
 def main():
