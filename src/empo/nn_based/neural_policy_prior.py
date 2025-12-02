@@ -667,7 +667,6 @@ class AgentEncoder(nn.Module):
             all_agent_abilities: Optional tensor of shape (batch, num_agents, 2) with all agents' abilities.
             all_agent_carried: Optional tensor of shape (batch, num_agents, 2) with all agents' carried objects.
             all_agent_status: Optional tensor of shape (batch, num_agents, 3) with all agents' status.
-            all_agent_status: Optional tensor of shape (batch, num_agents, 3) with all agents' status.
             agent_color_indices: Optional tensor of shape (batch, num_agents) with color index per agent.
             agent_idx: Legacy parameter (ignored).
             agent_color_idx: Legacy parameter (ignored).

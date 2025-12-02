@@ -24,9 +24,13 @@ from empo.nn_based import (
     PolicyPriorNetwork,
     NeuralHumanPolicyPrior,
     create_policy_prior_networks,
+    NUM_OBJECT_TYPE_CHANNELS,
 )
 from empo.possible_goal import PossibleGoal, PossibleGoalSampler, PossibleGoalGenerator
 from typing import Iterator, Tuple
+
+# Use the actual number of object type channels from the module
+TEST_NUM_OBJECT_TYPES = NUM_OBJECT_TYPE_CHANNELS  # 29
 
 
 class SimpleReachGoal(PossibleGoal):
@@ -84,7 +88,7 @@ def test_state_encoder():
     """Test the StateEncoder network."""
     print("Testing StateEncoder...")
     
-    num_object_types = 29  # Updated for per-color doors/keys and magic wall channel
+    num_object_types = TEST_NUM_OBJECT_TYPES  # Updated for per-color doors/keys and magic wall channel
     num_agents = 2
     # New channel structure:
     # - num_object_types: explicit object type channels (including per-color doors/keys)
@@ -171,7 +175,7 @@ def test_q_network():
     """Test the QNetwork."""
     print("Testing QNetwork...")
     
-    num_object_types = 29  # Updated for per-color doors/keys and magic wall channel
+    num_object_types = TEST_NUM_OBJECT_TYPES  # Updated for per-color doors/keys and magic wall channel
     num_agents = 2
     # New channel structure: num_object_types + 3 (other) + 1 (color) + 1 (query)
     num_color_channels = 1
@@ -227,7 +231,7 @@ def test_policy_prior_network():
     """Test the PolicyPriorNetwork."""
     print("Testing PolicyPriorNetwork...")
     
-    num_object_types = 29  # Updated for per-color doors/keys and magic wall channel
+    num_object_types = TEST_NUM_OBJECT_TYPES  # Updated for per-color doors/keys and magic wall channel
     num_agents = 2
     # New channel structure: num_object_types + 3 (other) + 1 (color) + 1 (query)
     num_color_channels = 1

@@ -52,11 +52,10 @@ Total Channels = num_object_types + 3 + num_colors + 1
 
 | Channel Range | Object Type | Value Encoding |
 |---------------|-------------|----------------|
-| 0-9 | Base objects | 1.0 = present |
-| 10-16 | Per-color doors | 0=none, 0.33=open, 0.67=closed, 1.0=locked |
-| 17-23 | Per-color keys | 1.0 = present |
-| 24 | Magic walls | 0=none, 0.2-0.8=active (by magic_side), 1.0=inactive |
-| 25-28 | Buttons/switches | Grid presence only (details in InteractiveObjectEncoder) |
+| 0-13 | Base objects (wall, ball, box, goal, lava, block, rock, etc.) | 1.0 = present |
+| 14-20 | Per-color doors (7 colors) | 0=none, 0.33=open, 0.67=closed, 1.0=locked |
+| 21-27 | Per-color keys (7 colors) | 1.0 = present |
+| 28 | Magic walls | 0=none, 0.2-0.8=active (by magic_side), 1.0=inactive |
 
 ### Additional Input Features
 
