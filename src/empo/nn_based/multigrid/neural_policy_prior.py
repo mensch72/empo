@@ -267,6 +267,7 @@ def train_multigrid_neural_policy_prior(
     path_calc = PathDistanceCalculator(grid_height, grid_width) if reward_shaping else None
     
     for episode in range(num_episodes):
+        env.reset()
         state = env.get_state()
         
         for step in range(steps_per_episode):
@@ -279,7 +280,14 @@ def train_multigrid_neural_policy_prior(
             # Get action using trainer's sample_action
             action = trainer.sample_action(state, env, agent_idx, goal)
             
-            next_state = state  # Placeholder
+            # Execute action and get next state
+            # Build action list with 'still' for other agents
+            num_agents = len(env.agents) if hasattr(env, 'agents') else 1
+            actions = [0] * num_agents  # 0 = still
+            actions[agent_idx] = action
+            
+            env.step(actions)
+            next_state = env.get_state()
             
             # Store transition
             trainer.store_transition(state, action, next_state, agent_idx, goal)
