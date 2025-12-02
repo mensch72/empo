@@ -84,17 +84,22 @@ def test_state_encoder():
     """Test the StateEncoder network."""
     print("Testing StateEncoder...")
     
+    num_object_types = 8
+    num_agents = 2
+    # Now includes +1 for "other humans" channel
+    num_channels = num_object_types + num_agents + 1  # = 11
+    
     encoder = StateEncoder(
         grid_width=10,
         grid_height=10,
-        num_object_types=8,
-        num_agents=2,
+        num_object_types=num_object_types,
+        num_agents=num_agents,
         feature_dim=128
     )
     
-    # Create dummy input
+    # Create dummy input with correct number of channels
     batch_size = 4
-    state_tensor = torch.randn(batch_size, 10, 10, 10)  # 10 channels
+    state_tensor = torch.randn(batch_size, num_channels, 10, 10)  # 11 channels now
     step_count = torch.randn(batch_size, 1)
     
     # Forward pass
@@ -157,9 +162,14 @@ def test_q_network():
     """Test the QNetwork."""
     print("Testing QNetwork...")
     
+    num_object_types = 8
+    num_agents = 2
+    # Now includes +1 for "other humans" channel
+    num_channels = num_object_types + num_agents + 1  # = 11
+    
     # Create encoders
-    state_encoder = StateEncoder(grid_width=10, grid_height=10, num_agents=2)
-    agent_encoder = AgentEncoder(grid_width=10, grid_height=10, num_agents=2)
+    state_encoder = StateEncoder(grid_width=10, grid_height=10, num_object_types=num_object_types, num_agents=num_agents)
+    agent_encoder = AgentEncoder(grid_width=10, grid_height=10, num_agents=num_agents)
     goal_encoder = GoalEncoder(grid_width=10, grid_height=10)
     
     q_network = QNetwork(
@@ -169,9 +179,9 @@ def test_q_network():
         num_actions=4
     )
     
-    # Create dummy input
+    # Create dummy input with correct number of channels
     batch_size = 4
-    state_tensor = torch.randn(batch_size, 10, 10, 10)
+    state_tensor = torch.randn(batch_size, num_channels, 10, 10)
     step_count = torch.randn(batch_size, 1)
     position = torch.randn(batch_size, 2)
     direction = torch.zeros(batch_size, 4)
@@ -201,9 +211,14 @@ def test_policy_prior_network():
     """Test the PolicyPriorNetwork."""
     print("Testing PolicyPriorNetwork...")
     
+    num_object_types = 8
+    num_agents = 2
+    # Now includes +1 for "other humans" channel
+    num_channels = num_object_types + num_agents + 1  # = 11
+    
     # Create encoders
-    state_encoder = StateEncoder(grid_width=10, grid_height=10, num_agents=2)
-    agent_encoder = AgentEncoder(grid_width=10, grid_height=10, num_agents=2)
+    state_encoder = StateEncoder(grid_width=10, grid_height=10, num_object_types=num_object_types, num_agents=num_agents)
+    agent_encoder = AgentEncoder(grid_width=10, grid_height=10, num_agents=num_agents)
     
     phi_network = PolicyPriorNetwork(
         state_encoder=state_encoder,
@@ -211,9 +226,9 @@ def test_policy_prior_network():
         num_actions=4
     )
     
-    # Create dummy input
+    # Create dummy input with correct number of channels
     batch_size = 4
-    state_tensor = torch.randn(batch_size, 10, 10, 10)
+    state_tensor = torch.randn(batch_size, num_channels, 10, 10)
     step_count = torch.randn(batch_size, 1)
     position = torch.randn(batch_size, 2)
     direction = torch.zeros(batch_size, 4)
