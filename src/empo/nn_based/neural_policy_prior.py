@@ -55,7 +55,6 @@ Example usage:
     ... )
 """
 
-import json
 import numpy as np
 import torch
 import torch.nn as nn
@@ -398,7 +397,8 @@ class AgentEncoder(nn.Module):
         Returns:
             Feature tensor of shape (batch, feature_dim).
         """
-        # Clamp agent indices to valid embedding range
+        # Clamp agent indices to valid embedding range [0, num_agents-1]
+        # This handles both negative indices and indices beyond capacity
         clamped_idx = torch.clamp(agent_idx, 0, self.num_agents - 1)
         idx_embed = self.agent_embedding(clamped_idx)  # (batch, 16)
         
@@ -1102,8 +1102,14 @@ class NeuralHumanPolicyPrior(HumanPolicyPrior):
         
         Raises:
             ValueError: If grid dimensions don't match or action encodings conflict.
+        
+        Security Note:
+            This method uses torch.load with weights_only=False to load the complete
+            metadata dictionary. Only load model files from trusted sources.
         """
         # Load saved data
+        # Note: weights_only=False is required to load the metadata dict containing
+        # action encodings and other non-tensor data. Only load from trusted sources.
         save_dict = torch.load(filepath, map_location=device, weights_only=False)
         metadata = save_dict['metadata']
         
