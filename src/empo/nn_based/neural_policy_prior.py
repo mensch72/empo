@@ -156,34 +156,34 @@ NON_OVERLAPPABLE_MOBILE_OBJECTS = {'block', 'rock'}
 # Grid channels mark presence/location, list encoding captures full state.
 
 # KillButton features (per button):
-# - position (2): normalized x, y
+# - position (2): raw x, y coordinates
 # - enabled (1): 0.0 or 1.0
-# - trigger_color (1): normalized color index
-# - target_color (1): normalized color index
+# - trigger_color (1): color index (integer)
+# - target_color (1): color index (integer)
 KILLBUTTON_FEATURE_SIZE = 5
 
 # PauseSwitch features (per switch):
-# - position (2): normalized x, y
+# - position (2): raw x, y coordinates
 # - enabled (1): 0.0 or 1.0
 # - is_on (1): 0.0 or 1.0
-# - toggle_color (1): normalized color index
-# - target_color (1): normalized color index
+# - toggle_color (1): color index (integer)
+# - target_color (1): color index (integer)
 PAUSESWITCH_FEATURE_SIZE = 6
 
 # DisablingSwitch features (per switch):
-# - position (2): normalized x, y
+# - position (2): raw x, y coordinates
 # - enabled (1): 0.0 or 1.0
 # - is_on (1): 0.0 or 1.0
-# - toggle_color (1): normalized color index
-# - target_type (1): normalized object type index
+# - toggle_color (1): color index (integer)
+# - target_type (1): object type index (integer)
 DISABLINGSWITCH_FEATURE_SIZE = 6
 
 # ControlButton features (per button):
-# - position (2): normalized x, y
+# - position (2): raw x, y coordinates
 # - enabled (1): 0.0 or 1.0
-# - trigger_color (1): normalized color index
-# - target_color (1): normalized color index
-# - forced_action (1): normalized action index
+# - trigger_color (1): color index (integer)
+# - target_color (1): color index (integer)
+# - forced_action (1): action index (integer)
 CONTROLBUTTON_FEATURE_SIZE = 6
 
 # Global world parameters that can vary across environments
@@ -386,12 +386,14 @@ class GoalEncoder(nn.Module):
     or "reach a rectangular region". This encoder handles position-based goals.
     
     Goal encoding:
-        - Target position: (x, y) normalized to [0, 1] range
+        - Target position: raw (x, y) coordinates
         - Optional: region bounds (x1, y1, x2, y2) for rectangular goals
     
+    All values are raw (not normalized).
+    
     Args:
-        grid_width: Width of the grid for normalization.
-        grid_height: Height of the grid for normalization.
+        grid_width: Width of the grid.
+        grid_height: Height of the grid.
         feature_dim: Output feature dimension (default: 32).
     """
     
@@ -419,8 +421,8 @@ class GoalEncoder(nn.Module):
         Encode goal coordinates into feature vectors.
         
         Args:
-            goal_coords: Tensor of shape (batch, 4) with normalized coordinates
-                        [x1/W, y1/H, x2/W, y2/H]. For point goals, x1=x2, y1=y2.
+            goal_coords: Tensor of shape (batch, 4) with raw coordinates
+                        [x1, y1, x2, y2]. For point goals, x1=x2, y1=y2.
         
         Returns:
             Feature tensor of shape (batch, feature_dim).
@@ -439,9 +441,11 @@ class InteractiveObjectEncoder(nn.Module):
     Each object type has a maximum count parameter that determines the list size.
     Objects are encoded in order of appearance; missing slots are zero-padded.
     
+    All values are raw (not normalized).
+    
     Args:
-        grid_width: Width of the grid for normalization.
-        grid_height: Height of the grid for normalization.
+        grid_width: Width of the grid.
+        grid_height: Height of the grid.
         max_kill_buttons: Maximum number of KillButtons to track.
         max_pause_switches: Maximum number of PauseSwitches to track.
         max_disabling_switches: Maximum number of DisablingSwitches to track.
@@ -495,6 +499,8 @@ class InteractiveObjectEncoder(nn.Module):
     ) -> torch.Tensor:
         """
         Encode interactive objects into feature vectors.
+        
+        All values are raw (not normalized).
         
         Args:
             kill_buttons: Optional tensor of shape (batch, max_kill_buttons, KILLBUTTON_FEATURE_SIZE)
@@ -552,18 +558,12 @@ class AgentEncoder(nn.Module):
         2. For each color k: features of first num_agents_per_color[k] agents of that color
            Each agent contributes: position (2) + direction (4) + abilities (2) + carried (2) + status (3) = 13 features
     
-    Agent abilities encoded:
-        - can_enter_magic_walls: 1.0 if agent can attempt to enter magic walls, 0.0 otherwise
-        - can_push_rocks: 1.0 if agent can push rocks, 0.0 otherwise
-    
-    Carried object encoding:
-        - carried_type: Normalized object type index (0.0 = nothing, then object types scaled to [0.1, 1.0])
-        - carried_color: Normalized color index (0.0 = nothing, then colors scaled to [0.1, 1.0])
-    
-    Agent status encoding:
-        - paused: 1.0 if agent is paused (can only use 'still' action), 0.0 otherwise
-        - terminated: 1.0 if agent is terminated/killed, 0.0 otherwise
-        - forced_next_action: Normalized action index if forced by ControlButton, -1.0 if none
+    All values are raw (not normalized):
+        - Position: raw x, y coordinates (integers)
+        - Direction: one-hot encoding (4 values)
+        - Abilities: can_enter_magic_walls (0/1), can_push_rocks (0/1)
+        - Carried object: object type index (0 = nothing), color index (0 = nothing)
+        - Status: paused (0/1), terminated (0/1), forced_next_action (-1 if none, else action index)
     
     This list-based encoding captures *individual* agent features, while the grid-based
     StateEncoder captures the *distribution* of agents by color.
@@ -573,8 +573,8 @@ class AgentEncoder(nn.Module):
     to environments with more agents than the network was trained with.
     
     Args:
-        grid_width: Width of the grid for normalization.
-        grid_height: Height of the grid for normalization.
+        grid_width: Width of the grid.
+        grid_height: Height of the grid.
         num_agents: Total number of agents (for backward compatibility).
         num_agents_per_color: Dict mapping color string to max number of agents of that color.
             Required for the list-based encoding. If None, falls back to simple encoding.
@@ -651,19 +651,22 @@ class AgentEncoder(nn.Module):
         """
         Encode agent attributes into feature vectors.
         
+        All values are raw (not normalized).
+        
         Args:
-            query_position: Tensor of shape (batch, 2) with query agent's normalized position.
+            query_position: Tensor of shape (batch, 2) with query agent's raw position (x, y).
             query_direction: Tensor of shape (batch, 4) with query agent's one-hot direction.
             query_abilities: Optional tensor of shape (batch, 2) with query agent's abilities
-                            [can_enter_magic_walls, can_push_rocks].
+                            [can_enter_magic_walls, can_push_rocks] as 0/1.
             query_carried: Optional tensor of shape (batch, 2) with query agent's carried object
-                          [carried_type_normalized, carried_color_normalized].
+                          [carried_type_index, carried_color_index] (0 = nothing).
             query_status: Optional tensor of shape (batch, 3) with query agent's status
-                         [paused, terminated, forced_next_action_normalized].
-            all_agent_positions: Optional tensor of shape (batch, num_agents, 2) with all agents' positions.
+                         [paused, terminated, forced_next_action] (-1 if no forced action).
+            all_agent_positions: Optional tensor of shape (batch, num_agents, 2) with all agents' raw positions.
             all_agent_directions: Optional tensor of shape (batch, num_agents, 4) with all agents' directions.
             all_agent_abilities: Optional tensor of shape (batch, num_agents, 2) with all agents' abilities.
             all_agent_carried: Optional tensor of shape (batch, num_agents, 2) with all agents' carried objects.
+            all_agent_status: Optional tensor of shape (batch, num_agents, 3) with all agents' status.
             all_agent_status: Optional tensor of shape (batch, num_agents, 3) with all agents' status.
             agent_color_indices: Optional tensor of shape (batch, num_agents) with color index per agent.
             agent_idx: Legacy parameter (ignored).

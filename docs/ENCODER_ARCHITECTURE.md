@@ -13,6 +13,14 @@ The neural policy prior system uses four main encoders to transform environment 
 
 These features are combined by the `QNetwork` to predict Q-values for each action.
 
+## Design Principle: No Normalization
+
+**All values are passed as raw integers/floats, NOT normalized.** This is intentional because:
+
+1. **Absolute distances matter**: The number of steps to reach a goal depends on absolute grid distance
+2. **Scale information is useful**: The network can learn that larger grids require different strategies
+3. **Simplicity**: No need for denormalization or scaling factors during inference
+
 ## Design Principle: Grid vs. List Encoding
 
 The architecture uses two complementary encoding strategies:
@@ -61,15 +69,15 @@ Total Channels = num_object_types + 3 + num_colors + 1
 
 ## AgentEncoder Features
 
-Each agent is encoded with 13 features:
+Each agent is encoded with 13 features (all raw, not normalized):
 
 | Feature | Size | Description |
 |---------|------|-------------|
-| Position | 2 | Normalized (x/width, y/height) |
+| Position | 2 | Raw (x, y) coordinates |
 | Direction | 4 | One-hot encoding (right, down, left, up) |
-| Abilities | 2 | can_enter_magic_walls, can_push_rocks |
-| Carried object | 2 | (type_normalized, color_normalized), 0 if none |
-| Status | 3 | paused, terminated, forced_next_action (-1 if none) |
+| Abilities | 2 | can_enter_magic_walls (0/1), can_push_rocks (0/1) |
+| Carried object | 2 | (type_index, color_index), 0 if none |
+| Status | 3 | paused (0/1), terminated (0/1), forced_action (-1 if none) |
 
 ### Encoding Structure
 
@@ -84,34 +92,39 @@ The query agent is always first, enabling policy transfer regardless of agent co
 
 ## InteractiveObjectEncoder Features
 
-Complex interactive objects are encoded in lists with configurable maximum counts:
+Complex interactive objects are encoded in lists with configurable maximum counts. All values are raw (not normalized).
 
 ### KillButton (5 features each)
-- position (2): normalized x, y
-- enabled (1): 0.0 or 1.0
-- trigger_color (1): which color agent triggers it
-- target_color (1): which color agents are killed
+- position (2): raw x, y coordinates
+- enabled (1): 0 or 1
+- trigger_color (1): color index (integer)
+- target_color (1): color index (integer)
 
 ### PauseSwitch (6 features each)
-- position (2): normalized x, y
-- enabled (1): 0.0 or 1.0
-- is_on (1): current on/off state
-- toggle_color (1): which color agent can toggle
-- target_color (1): which color agents are paused
+- position (2): raw x, y coordinates
+- enabled (1): 0 or 1
+- is_on (1): 0 or 1
+- toggle_color (1): color index (integer)
+- target_color (1): color index (integer)
 
 ### DisablingSwitch (6 features each)
-- position (2): normalized x, y
-- enabled (1): 0.0 or 1.0
-- is_on (1): current on/off state
-- toggle_color (1): which color agent can toggle
-- target_type (1): which object type is controlled
+- position (2): raw x, y coordinates
+- enabled (1): 0 or 1
+- is_on (1): 0 or 1
+- toggle_color (1): color index (integer)
+- target_type (1): object type index (integer)
 
 ### ControlButton (6 features each)
-- position (2): normalized x, y
-- enabled (1): 0.0 or 1.0
-- trigger_color (1): which color agent triggers it
-- target_color (1): which color agents are controlled
-- forced_action (1): which action is forced
+- position (2): raw x, y coordinates
+- enabled (1): 0 or 1
+- trigger_color (1): color index (integer)
+- target_color (1): color index (integer)
+- forced_action (1): action index (integer)
+
+## GoalEncoder Features
+
+Goals are encoded with raw coordinates:
+- goal_coords (4): [x1, y1, x2, y2] for rectangular goals, or [x, y, x, y] for point goals
 
 ## Policy Transfer Capabilities
 
@@ -149,11 +162,11 @@ For an environment with:
 ```python
 # StateEncoder
 grid_tensor: (29 + 3 + 2 + 1, 10, 10)  # 35 channels
-remaining_time: (1,)
+remaining_time: (1,)  # e.g., 50 (raw integer)
 global_world_features: (4,)
 
 # AgentEncoder  
-query_features: (13,)  # human 1
+query_features: (13,)  # human 1 at position (3, 5), etc.
 yellow_agents: (2 × 13,)  # both humans
 grey_agents: (1 × 13,)  # robot
 
@@ -162,5 +175,5 @@ control_buttons: (2 × 6,)  # 2 buttons × 6 features
 # ... other interactive objects ...
 
 # GoalEncoder
-goal_coords: (4,)
+goal_coords: (4,)  # e.g., (7, 8, 7, 8) for point goal
 ```
