@@ -11,11 +11,9 @@ the encoders in this package may need to be updated. See docs/ENCODER_ARCHITECTU
 Main components:
     - constants: Object type mappings, color indices, feature sizes
     - feature_extraction: Extract features from state/world_model
-    - state_encoder: Grid-based CNN encoder
-    - agent_encoder: List-based agent encoder
-    - goal_encoder: Goal position encoder
-    - interactive_encoder: Button/switch encoder
-    - q_network: Q-network combining all encoders
+    - state_encoder_unified: Unified state encoder (grid + agents + interactive)
+    - goal_encoder: Goal position encoder (separate - not part of world state)
+    - q_network: Q-network combining state and goal encoders
     - policy_prior_network: Marginal policy computation
     - neural_policy_prior: Main class with save/load and training
     - path_distance: BFS-based path distance calculator
@@ -56,10 +54,8 @@ from .feature_extraction import (
     get_num_agents_per_color,
 )
 
-from .state_encoder import MultiGridStateEncoder
-from .agent_encoder import MultiGridAgentEncoder
+from .state_encoder_unified import MultiGridStateEncoder
 from .goal_encoder import MultiGridGoalEncoder
-from .interactive_encoder import MultiGridInteractiveObjectEncoder
 from .q_network import MultiGridQNetwork
 from .policy_prior_network import MultiGridPolicyPriorNetwork
 from .neural_policy_prior import (
@@ -102,9 +98,7 @@ __all__ = [
     'get_num_agents_per_color',
     # Encoders
     'MultiGridStateEncoder',
-    'MultiGridAgentEncoder',
     'MultiGridGoalEncoder',
-    'MultiGridInteractiveObjectEncoder',
     # Networks
     'MultiGridQNetwork',
     'MultiGridPolicyPriorNetwork',

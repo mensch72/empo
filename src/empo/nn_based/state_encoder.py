@@ -1,5 +1,10 @@
 """
 Base state encoder class.
+
+A StateEncoder encodes the complete world state as seen by a query agent,
+including grid/spatial information, agent features, and interactive object features.
+This unified approach allows domain-specific implementations to choose their
+own internal structure (grid vs list, separate vs combined encoders).
 """
 
 import torch
@@ -13,6 +18,13 @@ class BaseStateEncoder(nn.Module, ABC):
     Abstract base class for state encoders.
     
     State encoders convert environment states into fixed-size feature vectors.
+    This includes ALL state information visible to the query agent:
+    - Spatial/grid information
+    - Agent features (query agent and others)
+    - Interactive object features
+    - Global world features
+    
+    The internal structure (CNN, MLP, separate encoders) is domain-specific.
     Subclasses implement domain-specific encoding logic.
     """
     
@@ -26,8 +38,25 @@ class BaseStateEncoder(nn.Module, ABC):
         pass
     
     @abstractmethod
-    def encode_state(self, state: Any, world_model: Any, **kwargs) -> Any:
-        """Encode a single state from the environment."""
+    def encode_state(
+        self,
+        state: Any,
+        world_model: Any,
+        query_agent_idx: int,
+        device: str = 'cpu'
+    ) -> torch.Tensor:
+        """
+        Encode a single state from the environment.
+        
+        Args:
+            state: Environment state.
+            world_model: Environment/world model.
+            query_agent_idx: Index of the agent making decisions.
+            device: Torch device.
+        
+        Returns:
+            Encoded state tensor ready for forward().
+        """
         pass
     
     @abstractmethod

@@ -70,6 +70,27 @@ class MultiGridNeuralHumanPolicyPrior(BaseNeuralHumanPolicyPrior):
         )
     
     @classmethod
+    def _validate_grid_dimensions(
+        cls,
+        config: Dict[str, Any],
+        world_model: Any
+    ) -> None:
+        """Validate that grid dimensions match (multigrid-specific)."""
+        env_height = getattr(world_model, 'height', None)
+        env_width = getattr(world_model, 'width', None)
+        
+        if env_height is not None and env_height != config.get('grid_height'):
+            raise ValueError(
+                f"Grid dimensions mismatch: saved height={config.get('grid_height')}, "
+                f"environment height={env_height}"
+            )
+        if env_width is not None and env_width != config.get('grid_width'):
+            raise ValueError(
+                f"Grid dimensions mismatch: saved width={config.get('grid_width')}, "
+                f"environment width={env_width}"
+            )
+    
+    @classmethod
     def load(
         cls,
         filepath: str,
@@ -99,8 +120,9 @@ class MultiGridNeuralHumanPolicyPrior(BaseNeuralHumanPolicyPrior):
         checkpoint = torch.load(filepath, map_location=device, weights_only=False)
         config = checkpoint['config']
         
-        # Validate using base class methods
+        # Validate grid dimensions (multigrid-specific)
         cls._validate_grid_dimensions(config, world_model)
+        # Validate using base class method
         saved_encoding = config.get('action_encoding', DEFAULT_ACTION_ENCODING)
         cls._validate_action_encoding(saved_encoding, world_model)
         
@@ -116,10 +138,8 @@ class MultiGridNeuralHumanPolicyPrior(BaseNeuralHumanPolicyPrior):
             num_actions=config['num_actions'],
             num_agents_per_color=num_agents_per_color,
             num_agent_colors=config.get('num_agent_colors', 7),
-            state_feature_dim=config.get('state_feature_dim', 128),
-            agent_feature_dim=config.get('agent_feature_dim', 64),
+            state_feature_dim=config.get('state_feature_dim', 256),
             goal_feature_dim=config.get('goal_feature_dim', 32),
-            interactive_feature_dim=config.get('interactive_feature_dim', 32),
             hidden_dim=config.get('hidden_dim', 256),
             beta=config.get('beta', 1.0),
             max_kill_buttons=config.get('max_kill_buttons', 4),
@@ -157,10 +177,8 @@ def train_multigrid_neural_policy_prior(
     beta: float = 1.0,
     buffer_capacity: int = 100000,
     target_update_freq: int = 100,
-    state_feature_dim: int = 128,
-    agent_feature_dim: int = 64,
+    state_feature_dim: int = 256,
     goal_feature_dim: int = 32,
-    interactive_feature_dim: int = 32,
     hidden_dim: int = 256,
     device: str = 'cpu',
     verbose: bool = True,
@@ -183,10 +201,8 @@ def train_multigrid_neural_policy_prior(
         beta: Boltzmann temperature.
         buffer_capacity: Replay buffer capacity.
         target_update_freq: Steps between target network updates.
-        state_feature_dim: State encoder feature dim.
-        agent_feature_dim: Agent encoder feature dim.
+        state_feature_dim: State encoder feature dim (includes grid, agent, interactive).
         goal_feature_dim: Goal encoder feature dim.
-        interactive_feature_dim: Interactive encoder feature dim.
         hidden_dim: Hidden layer dim.
         device: Torch device.
         verbose: Print progress.
@@ -206,7 +222,7 @@ def train_multigrid_neural_policy_prior(
     
     num_agent_colors = len(set(num_agents_per_color.keys()))
     
-    # Create Q-network
+    # Create Q-network with unified state encoder
     q_network = MultiGridQNetwork(
         grid_height=grid_height,
         grid_width=grid_width,
@@ -214,9 +230,7 @@ def train_multigrid_neural_policy_prior(
         num_agents_per_color=num_agents_per_color,
         num_agent_colors=num_agent_colors,
         state_feature_dim=state_feature_dim,
-        agent_feature_dim=agent_feature_dim,
         goal_feature_dim=goal_feature_dim,
-        interactive_feature_dim=interactive_feature_dim,
         hidden_dim=hidden_dim,
         beta=beta
     ).to(device)
@@ -229,9 +243,7 @@ def train_multigrid_neural_policy_prior(
         num_agents_per_color=num_agents_per_color,
         num_agent_colors=num_agent_colors,
         state_feature_dim=state_feature_dim,
-        agent_feature_dim=agent_feature_dim,
         goal_feature_dim=goal_feature_dim,
-        interactive_feature_dim=interactive_feature_dim,
         hidden_dim=hidden_dim,
         beta=beta
     ).to(device)
@@ -240,9 +252,19 @@ def train_multigrid_neural_policy_prior(
     optimizer = optim.Adam(q_network.parameters(), lr=learning_rate)
     replay_buffer = ReplayBuffer(buffer_capacity)
     
-    path_calc = PathDistanceCalculator(grid_height, grid_width) if reward_shaping else None
+    # Use generic Trainer
+    from ..trainer import Trainer
+    trainer = Trainer(
+        q_network=q_network,
+        target_network=target_network,
+        optimizer=optimizer,
+        replay_buffer=replay_buffer,
+        gamma=gamma,
+        target_update_freq=target_update_freq,
+        device=device
+    )
     
-    total_steps = 0
+    path_calc = PathDistanceCalculator(grid_height, grid_width) if reward_shaping else None
     
     for episode in range(num_episodes):
         state = env.get_state()
@@ -254,36 +276,16 @@ def train_multigrid_neural_policy_prior(
                 continue
             goal = goals[0]
             
-            # Get action from current policy
-            q_network.eval()
-            with torch.no_grad():
-                q_values = q_network.encode_and_forward(
-                    state, env, agent_idx, goal, device
-                )
-                probs = q_network.get_policy(q_values).squeeze(0)
-                action = torch.multinomial(probs, 1).item()
+            # Get action using trainer's sample_action
+            action = trainer.sample_action(state, env, agent_idx, goal)
             
             next_state = state  # Placeholder
             
-            replay_buffer.push(state, action, next_state, agent_idx, goal)
+            # Store transition
+            trainer.store_transition(state, action, next_state, agent_idx, goal)
             
-            # Train
-            if len(replay_buffer) >= batch_size:
-                q_network.train()
-                batch = replay_buffer.sample(batch_size)
-                
-                loss = _compute_td_loss(
-                    q_network, target_network, batch, gamma, device
-                )
-                
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-            
-            total_steps += 1
-            
-            if total_steps % target_update_freq == 0:
-                target_network.load_state_dict(q_network.state_dict())
+            # Train using generic train_step
+            trainer.train_step(batch_size)
             
             state = next_state
         
@@ -303,38 +305,3 @@ def train_multigrid_neural_policy_prior(
         action_encoding=action_encoding,
         device=device
     )
-
-
-def _compute_td_loss(
-    q_network: MultiGridQNetwork,
-    target_network: MultiGridQNetwork,
-    batch: List[Dict],
-    gamma: float,
-    device: str
-) -> torch.Tensor:
-    """Compute TD loss for a batch of transitions."""
-    total_loss = torch.tensor(0.0, device=device, requires_grad=True)
-    
-    for transition in batch:
-        state = transition['state']
-        action = transition['action']
-        next_state = transition['next_state']
-        agent_idx = transition['agent_idx']
-        goal = transition['goal']
-        
-        q_values = q_network.encode_and_forward(
-            state, None, agent_idx, goal, device
-        )
-        current_q = q_values[0, action]
-        
-        with torch.no_grad():
-            next_q = target_network.encode_and_forward(
-                next_state, None, agent_idx, goal, device
-            )
-            next_v = q_network.get_value(next_q)
-        
-        target = gamma * next_v
-        loss = (current_q - target) ** 2
-        total_loss = total_loss + loss
-    
-    return total_loss / len(batch)

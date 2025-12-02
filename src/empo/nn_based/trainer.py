@@ -4,7 +4,7 @@ Trainer class for neural policy priors.
 
 import torch
 import torch.optim as optim
-from typing import Any, Optional
+from typing import Any, List, Optional, Dict
 import random
 
 from .q_network import BaseQNetwork
@@ -89,3 +89,73 @@ class Trainer:
             )
             probs = self.q_network.get_policy(q_values).squeeze(0)
             return torch.multinomial(probs, 1).item()
+    
+    def train_step(self, batch_size: int) -> Optional[float]:
+        """
+        Perform one training step with experience replay.
+        
+        Args:
+            batch_size: Number of transitions to sample.
+        
+        Returns:
+            Training loss if training occurred, None if not enough samples.
+        """
+        if len(self.replay_buffer) < batch_size:
+            return None
+        
+        self.q_network.train()
+        batch = self.replay_buffer.sample(batch_size)
+        
+        loss = self._compute_td_loss(batch)
+        
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
+        
+        # Update target network if needed
+        if self.should_update_target():
+            self.update_target_network()
+        
+        return loss.item()
+    
+    def _compute_td_loss(self, batch: List[Dict]) -> torch.Tensor:
+        """
+        Compute TD loss for a batch of transitions.
+        
+        This is the generic TD loss computation that works with any Q-network
+        that implements encode_and_forward().
+        
+        Args:
+            batch: List of transition dicts with 'state', 'action', 
+                   'next_state', 'agent_idx', 'goal'.
+        
+        Returns:
+            Scalar loss tensor.
+        """
+        total_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
+        
+        for transition in batch:
+            state = transition['state']
+            action = transition['action']
+            next_state = transition['next_state']
+            agent_idx = transition['agent_idx']
+            goal = transition['goal']
+            
+            # Current Q-value
+            q_values = self.q_network.encode_and_forward(
+                state, None, agent_idx, goal, self.device
+            )
+            current_q = q_values[0, action]
+            
+            # Target Q-value (soft)
+            with torch.no_grad():
+                next_q = self.target_network.encode_and_forward(
+                    next_state, None, agent_idx, goal, self.device
+                )
+                next_v = self.q_network.get_value(next_q)
+            
+            target = self.gamma * next_v
+            loss = (current_q - target) ** 2
+            total_loss = total_loss + loss
+        
+        return total_loss / len(batch)

@@ -1,12 +1,18 @@
 """
-State encoder for multigrid environments.
+Unified state encoder for multigrid environments.
 
-Encodes grid-based states into feature vectors using a CNN.
+Encodes the complete world state as seen by a query agent:
+- Grid-based spatial information (objects, doors, magic walls)
+- Agent features (query agent + per-color agent lists)
+- Interactive object features (buttons/switches)
+- Global world features
+
+This unified approach keeps all state encoding in one class.
 """
 
 import torch
 import torch.nn as nn
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Tuple
 
 from ..state_encoder import BaseStateEncoder
 from .constants import (
@@ -26,95 +32,171 @@ from .constants import (
     NON_OVERLAPPABLE_IMMOBILE_OBJECTS,
     NON_OVERLAPPABLE_MOBILE_OBJECTS,
     NUM_GLOBAL_WORLD_FEATURES,
+    AGENT_FEATURE_SIZE,
+    KILLBUTTON_FEATURE_SIZE,
+    PAUSESWITCH_FEATURE_SIZE,
+    DISABLINGSWITCH_FEATURE_SIZE,
+    CONTROLBUTTON_FEATURE_SIZE,
 )
-from .feature_extraction import extract_global_world_features
+from .feature_extraction import (
+    extract_global_world_features,
+    extract_all_agent_features,
+    extract_interactive_objects,
+)
 
 
 class MultiGridStateEncoder(BaseStateEncoder):
     """
-    CNN-based encoder for multigrid environment states.
+    Unified encoder for multigrid environment states.
     
-    Channel layout:
-        0-13: Base object types
-        14-20: Per-color doors (value encodes state)
-        21-27: Per-color keys
-        28: Magic walls (value encodes state)
-        29-31: "Other objects" (overlappable, immobile, mobile)
-        32+: Per-color agent channels
-        Last: Query agent channel
+    Combines:
+    1. Grid-based CNN for spatial information (objects, doors, agents by color)
+    2. MLP for agent features (query agent + per-color lists)
+    3. MLP for interactive objects (buttons/switches)
+    4. Global world features
     
     Args:
         grid_height: Height of the grid.
         grid_width: Width of the grid.
-        num_agent_colors: Number of distinct agent colors.
-        feature_dim: Output feature dimension.
+        num_agents_per_color: Dict mapping color to max agents of that color.
+        num_agent_colors: Number of distinct agent colors for grid channels.
+        feature_dim: Total output feature dimension.
+        max_kill_buttons: Max KillButtons to encode.
+        max_pause_switches: Max PauseSwitches to encode.
+        max_disabling_switches: Max DisablingSwitches to encode.
+        max_control_buttons: Max ControlButtons to encode.
     """
     
     def __init__(
         self,
         grid_height: int,
         grid_width: int,
+        num_agents_per_color: Dict[str, int],
         num_agent_colors: int = NUM_STANDARD_COLORS,
-        feature_dim: int = 128
+        feature_dim: int = 256,
+        max_kill_buttons: int = 4,
+        max_pause_switches: int = 4,
+        max_disabling_switches: int = 4,
+        max_control_buttons: int = 4
     ):
         super().__init__(feature_dim)
         self.grid_height = grid_height
         self.grid_width = grid_width
+        self.num_agents_per_color = num_agents_per_color
         self.num_agent_colors = num_agent_colors
+        self.max_kill_buttons = max_kill_buttons
+        self.max_pause_switches = max_pause_switches
+        self.max_disabling_switches = max_disabling_switches
+        self.max_control_buttons = max_control_buttons
         
-        # Channel structure
+        # Grid channel structure
         self.num_object_channels = NUM_OBJECT_TYPE_CHANNELS
         self.num_other_channels = 3  # overlappable, immobile, mobile
         self.agent_channels_start = self.num_object_channels + self.num_other_channels
         self.query_agent_channel = self.agent_channels_start + num_agent_colors
-        self.num_channels = self.query_agent_channel + 1
+        self.num_grid_channels = self.query_agent_channel + 1
         
-        # CNN layers
-        self.conv = nn.Sequential(
-            nn.Conv2d(self.num_channels, 32, kernel_size=3, padding=1),
+        # Grid encoder (CNN)
+        self.grid_conv = nn.Sequential(
+            nn.Conv2d(self.num_grid_channels, 32, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.Conv2d(32, 64, kernel_size=3, padding=1),
             nn.ReLU(),
             nn.Conv2d(64, 64, kernel_size=3, padding=1),
             nn.ReLU(),
         )
-        
-        conv_out_size = 64 * grid_height * grid_width
-        
-        # MLP combining spatial and global features
-        self.fc = nn.Sequential(
-            nn.Linear(conv_out_size + NUM_GLOBAL_WORLD_FEATURES, feature_dim),
+        grid_conv_out_size = 64 * grid_height * grid_width
+        grid_feature_dim = 128
+        self.grid_fc = nn.Sequential(
+            nn.Linear(grid_conv_out_size + NUM_GLOBAL_WORLD_FEATURES, grid_feature_dim),
             nn.ReLU(),
         )
+        
+        # Agent encoder (MLP)
+        self.color_order = sorted(num_agents_per_color.keys())
+        total_agents = sum(num_agents_per_color.values())
+        agent_input_size = AGENT_FEATURE_SIZE * (1 + total_agents)  # query + per-color lists
+        agent_feature_dim = 64
+        self.agent_fc = nn.Sequential(
+            nn.Linear(agent_input_size, agent_feature_dim * 2),
+            nn.ReLU(),
+            nn.Linear(agent_feature_dim * 2, agent_feature_dim),
+            nn.ReLU(),
+        )
+        
+        # Interactive object encoder (MLP)
+        interactive_input_size = (
+            max_kill_buttons * KILLBUTTON_FEATURE_SIZE +
+            max_pause_switches * PAUSESWITCH_FEATURE_SIZE +
+            max_disabling_switches * DISABLINGSWITCH_FEATURE_SIZE +
+            max_control_buttons * CONTROLBUTTON_FEATURE_SIZE
+        )
+        interactive_feature_dim = 32
+        self.interactive_fc = nn.Sequential(
+            nn.Linear(interactive_input_size, interactive_feature_dim),
+            nn.ReLU(),
+        )
+        
+        # Combined feature dimension
+        combined_dim = grid_feature_dim + agent_feature_dim + interactive_feature_dim
+        
+        # Final projection to feature_dim
+        self.output_fc = nn.Sequential(
+            nn.Linear(combined_dim, feature_dim),
+            nn.ReLU(),
+        )
+        
+        # Store sub-feature dimensions for get_config
+        self._grid_feature_dim = grid_feature_dim
+        self._agent_feature_dim = agent_feature_dim
+        self._interactive_feature_dim = interactive_feature_dim
+        self._agent_input_size = agent_input_size
+        self._interactive_input_size = interactive_input_size
     
     def forward(
         self,
         grid_tensor: torch.Tensor,
-        global_features: torch.Tensor
+        global_features: torch.Tensor,
+        agent_features: torch.Tensor,
+        interactive_features: torch.Tensor
     ) -> torch.Tensor:
         """
-        Encode grid state.
+        Encode complete state.
         
         Args:
-            grid_tensor: (batch, num_channels, H, W)
+            grid_tensor: (batch, num_grid_channels, H, W)
             global_features: (batch, NUM_GLOBAL_WORLD_FEATURES)
+            agent_features: (batch, agent_input_size)
+            interactive_features: (batch, interactive_input_size)
         
         Returns:
             Feature tensor (batch, feature_dim)
         """
         batch_size = grid_tensor.shape[0]
-        conv_out = self.conv(grid_tensor)
+        
+        # Grid encoding
+        conv_out = self.grid_conv(grid_tensor)
         conv_flat = conv_out.view(batch_size, -1)
-        combined = torch.cat([conv_flat, global_features], dim=1)
-        return self.fc(combined)
+        grid_combined = torch.cat([conv_flat, global_features], dim=1)
+        grid_emb = self.grid_fc(grid_combined)
+        
+        # Agent encoding
+        agent_emb = self.agent_fc(agent_features)
+        
+        # Interactive object encoding
+        interactive_emb = self.interactive_fc(interactive_features)
+        
+        # Combine all features
+        combined = torch.cat([grid_emb, agent_emb, interactive_emb], dim=1)
+        return self.output_fc(combined)
     
     def encode_state(
         self,
         state: Tuple,
         world_model: Any,
-        query_agent_idx: Optional[int] = None,
+        query_agent_idx: int,
         device: str = 'cpu'
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Encode a single state.
         
@@ -125,12 +207,39 @@ class MultiGridStateEncoder(BaseStateEncoder):
             device: Torch device.
         
         Returns:
-            (grid_tensor, global_features)
+            Tuple of (grid_tensor, global_features, agent_features, interactive_features)
         """
         step_count, agent_states, mobile_objects, mutable_objects = state
         H, W = self.grid_height, self.grid_width
         
-        grid_tensor = torch.zeros(1, self.num_channels, H, W, device=device)
+        # Encode grid
+        grid_tensor = torch.zeros(1, self.num_grid_channels, H, W, device=device)
+        self._encode_grid(grid_tensor, world_model, agent_states, 
+                          mobile_objects, mutable_objects, query_agent_idx)
+        
+        # Global features
+        global_features = extract_global_world_features(state, world_model, device)
+        global_features = global_features.unsqueeze(0)
+        
+        # Agent features
+        agent_features = self._encode_agents(agent_states, world_model, query_agent_idx, device)
+        
+        # Interactive object features
+        interactive_features = self._encode_interactive(state, world_model, device)
+        
+        return grid_tensor, global_features, agent_features, interactive_features
+    
+    def _encode_grid(
+        self,
+        grid_tensor: torch.Tensor,
+        world_model: Any,
+        agent_states: list,
+        mobile_objects: list,
+        mutable_objects: list,
+        query_agent_idx: int
+    ):
+        """Encode grid objects into tensor."""
+        H, W = self.grid_height, self.grid_width
         
         # Encode grid objects
         if world_model is not None and hasattr(world_model, 'grid') and world_model.grid is not None:
@@ -187,12 +296,6 @@ class MultiGridStateEncoder(BaseStateEncoder):
                 x, y = int(agent_state[0]), int(agent_state[1])
                 if 0 <= x < W and 0 <= y < H:
                     grid_tensor[0, self.query_agent_channel, y, x] = 1.0
-        
-        # Global features
-        global_features = extract_global_world_features(state, world_model, device)
-        global_features = global_features.unsqueeze(0)
-        
-        return grid_tensor, global_features
     
     def _encode_door(self, cell, x: int, y: int, mutable_objects, grid_tensor: torch.Tensor):
         """Encode door into per-color channel."""
@@ -202,7 +305,6 @@ class MultiGridStateEncoder(BaseStateEncoder):
         
         channel = DOOR_CHANNEL_START + COLOR_TO_IDX[color]
         
-        # Get state from mutable_objects
         is_open, is_locked = False, False
         for obj_data in mutable_objects:
             if obj_data[0] == 'door' and obj_data[1] == x and obj_data[2] == y:
@@ -247,11 +349,11 @@ class MultiGridStateEncoder(BaseStateEncoder):
     def _encode_other_object(self, cell, cell_type: str, x: int, y: int, grid_tensor: torch.Tensor):
         """Encode object not in main channels."""
         if cell_type in OVERLAPPABLE_OBJECTS:
-            channel = self.num_object_channels  # other_overlappable
+            channel = self.num_object_channels
         elif cell_type in NON_OVERLAPPABLE_MOBILE_OBJECTS:
-            channel = self.num_object_channels + 2  # other_mobile
+            channel = self.num_object_channels + 2
         elif cell_type in NON_OVERLAPPABLE_IMMOBILE_OBJECTS:
-            channel = self.num_object_channels + 1  # other_immobile
+            channel = self.num_object_channels + 1
         elif hasattr(cell, 'can_overlap') and cell.can_overlap():
             channel = self.num_object_channels
         else:
@@ -259,11 +361,59 @@ class MultiGridStateEncoder(BaseStateEncoder):
         
         grid_tensor[0, channel, y, x] = 1.0
     
+    def _encode_agents(
+        self,
+        agent_states: list,
+        world_model: Any,
+        query_agent_idx: int,
+        device: str
+    ) -> torch.Tensor:
+        """Encode agent features."""
+        query_features, color_features = extract_all_agent_features(
+            agent_states, world_model, query_agent_idx, self.num_agents_per_color
+        )
+        
+        all_features = [query_features]
+        for color in self.color_order:
+            if color in color_features:
+                all_features.append(color_features[color].flatten())
+        
+        return torch.cat(all_features).unsqueeze(0).to(device)
+    
+    def _encode_interactive(
+        self,
+        state: Tuple,
+        world_model: Any,
+        device: str
+    ) -> torch.Tensor:
+        """Encode interactive object features."""
+        objects = extract_interactive_objects(
+            state, world_model,
+            self.max_kill_buttons,
+            self.max_pause_switches,
+            self.max_disabling_switches,
+            self.max_control_buttons
+        )
+        
+        features = torch.cat([
+            objects['kill_buttons'].flatten(),
+            objects['pause_switches'].flatten(),
+            objects['disabling_switches'].flatten(),
+            objects['control_buttons'].flatten(),
+        ]).unsqueeze(0).to(device)
+        
+        return features
+    
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for save/load."""
         return {
             'grid_height': self.grid_height,
             'grid_width': self.grid_width,
+            'num_agents_per_color': self.num_agents_per_color,
             'num_agent_colors': self.num_agent_colors,
             'feature_dim': self.feature_dim,
+            'max_kill_buttons': self.max_kill_buttons,
+            'max_pause_switches': self.max_pause_switches,
+            'max_disabling_switches': self.max_disabling_switches,
+            'max_control_buttons': self.max_control_buttons,
         }

@@ -11,7 +11,6 @@ For multigrid environments, use the `multigrid` subpackage:
         train_multigrid_neural_policy_prior,
         MultiGridQNetwork,
         MultiGridStateEncoder,
-        MultiGridAgentEncoder,
     )
 
 Base classes for custom implementations:
@@ -19,16 +18,15 @@ Base classes for custom implementations:
     from empo.nn_based import (
         BaseStateEncoder,
         BaseGoalEncoder,
-        BaseAgentEncoder,
         BaseQNetwork,
         BasePolicyPriorNetwork,
         BaseNeuralHumanPolicyPrior,
+        Trainer,
     )
 """
 
 from .state_encoder import BaseStateEncoder
 from .goal_encoder import BaseGoalEncoder
-from .agent_encoder import BaseAgentEncoder
 from .q_network import BaseQNetwork
 from .policy_prior_network import BasePolicyPriorNetwork
 from .neural_policy_prior import BaseNeuralHumanPolicyPrior
@@ -41,7 +39,6 @@ __all__ = [
     # Base classes
     'BaseStateEncoder',
     'BaseGoalEncoder',
-    'BaseAgentEncoder',
     'BaseQNetwork',
     'BasePolicyPriorNetwork',
     'BaseNeuralHumanPolicyPrior',

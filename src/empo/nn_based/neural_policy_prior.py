@@ -143,27 +143,6 @@ class BaseNeuralHumanPolicyPrior(HumanPolicyPrior, ABC):
         }, filepath)
     
     @classmethod
-    def _validate_grid_dimensions(
-        cls,
-        config: Dict[str, Any],
-        world_model: Any
-    ) -> None:
-        """Validate that grid dimensions match."""
-        env_height = getattr(world_model, 'height', None)
-        env_width = getattr(world_model, 'width', None)
-        
-        if env_height is not None and env_height != config.get('grid_height'):
-            raise ValueError(
-                f"Grid dimensions mismatch: saved height={config.get('grid_height')}, "
-                f"environment height={env_height}"
-            )
-        if env_width is not None and env_width != config.get('grid_width'):
-            raise ValueError(
-                f"Grid dimensions mismatch: saved width={config.get('grid_width')}, "
-                f"environment width={env_width}"
-            )
-    
-    @classmethod
     def _validate_action_encoding(
         cls,
         saved_encoding: Dict[int, str],
