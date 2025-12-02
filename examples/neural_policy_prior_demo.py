@@ -484,14 +484,27 @@ def run_rollout_with_learned_policies(
 # Movie Creation
 # ============================================================================
 
-N_ROLLOUTS = 50  # Number of rollouts to visualize
+# Configuration for quick mode vs full mode
+N_ROLLOUTS = 50  # Number of rollouts to visualize (full mode)
+N_ROLLOUTS_QUICK = 3  # Quick test mode
+N_EPISODES_FULL = 5000  # Training episodes for full mode
+N_EPISODES_QUICK = 100  # Training episodes for quick test
 
 def create_multi_rollout_movie(
     all_rollout_frames: List[List[np.ndarray]],
     goal_positions: List[Tuple[int, int]],
-    output_path: str
+    output_path: str,
+    n_rollouts: int
 ):
-    """Create a movie with multiple rollouts."""
+    """
+    Create a movie with multiple rollouts.
+    
+    Args:
+        all_rollout_frames: List of frame lists, one per rollout
+        goal_positions: List of goal positions for each rollout
+        output_path: Path to save the movie
+        n_rollouts: Total number of rollouts (for title display)
+    """
     print(f"Creating movie with {len(all_rollout_frames)} rollouts...")
     
     frames = []
@@ -515,7 +528,7 @@ def create_multi_rollout_movie(
     def update(frame_idx):
         rollout_idx, step_idx, goal_pos = rollout_info[frame_idx]
         im.set_array(frames[frame_idx])
-        title.set_text(f'Rollout {rollout_idx + 1}/{N_ROLLOUTS} | Step {step_idx} | '
+        title.set_text(f'Rollout {rollout_idx + 1}/{n_rollouts} | Step {step_idx} | '
                       f'Human 0 Goal: ({goal_pos[0]}, {goal_pos[1]})\n'
                       f'★ = actual goal | Colors = NN V-values for alternative goals\n'
                       f'Humans: learned Boltzmann policy | Robot: random policy')
@@ -546,9 +559,14 @@ def create_multi_rollout_movie(
 # Main
 # ============================================================================
 
-def main():
+def main(quick_mode=False):
+    n_rollouts = N_ROLLOUTS_QUICK if quick_mode else N_ROLLOUTS
+    n_episodes = N_EPISODES_QUICK if quick_mode else N_EPISODES_FULL
+    mode_str = "QUICK TEST MODE" if quick_mode else "FULL MODE"
+    
     print("=" * 70)
     print("Neural Network Policy Prior Demo: 5x5 Grid")
+    print(f"  [{mode_str}]")
     print("Using nn_based module for learning human policies")
     print("=" * 70)
     print()
@@ -589,6 +607,7 @@ def main():
                 goal_cells.append((x, y))
     
     print(f"Training neural network for all {len(goal_cells)} goal cells...")
+    print(f"  Training episodes: {n_episodes}")
     print("  Humans learn goal-specific Boltzmann policies")
     print("  Using batch learning with replay buffer")
     print()
@@ -606,7 +625,7 @@ def main():
         world_model=env,
         human_agent_indices=human_agent_indices,
         goal_sampler=goal_sampler,
-        num_episodes=5000,
+        num_episodes=n_episodes,
         steps_per_episode=env.max_steps,  # Match env's max_steps (10)
         beta=beta,
         gamma=0.99,  # Mild discounting to encourage earlier goal reaching
@@ -627,15 +646,15 @@ def main():
     print(f"  Training completed in {elapsed:.2f} seconds")
     print()
     
-    # Select N_ROLLOUTS random goal cells for first human's rollouts
-    print(f"Selecting {N_ROLLOUTS} random goal cells for first human's rollouts...")
+    # Select n_rollouts random goal cells for first human's rollouts
+    print(f"Selecting {n_rollouts} random goal cells for first human's rollouts...")
     random.seed(42)
-    selected_goals = random.sample(goal_cells, min(N_ROLLOUTS, len(goal_cells)))
+    selected_goals = random.sample(goal_cells, min(n_rollouts, len(goal_cells)))
     print(f"  Selected goals for human 0: {selected_goals}")
     print()
     
-    # Run N_ROLLOUTS rollouts with visualization
-    print(f"Running {N_ROLLOUTS} rollouts:")
+    # Run n_rollouts rollouts with visualization
+    print(f"Running {n_rollouts} rollouts:")
     print("  - Humans follow learned goal-specific Boltzmann policies")
     print("  - Robot uses random policy")
     print("  - Visualization shows human 0's value function")
@@ -651,7 +670,7 @@ def main():
             if h_idx != first_human_idx:
                 human_goals[h_idx] = random.choice(goal_cells)
         
-        print(f"  Rollout {i + 1}/{N_ROLLOUTS}: Human 0 goal = {goal_pos}, Human 1 goal = {human_goals.get(human_agent_indices[1], 'N/A')}")
+        print(f"  Rollout {i + 1}/{n_rollouts}: Human 0 goal = {goal_pos}, Human 1 goal = {human_goals.get(human_agent_indices[1], 'N/A')}")
         
         frames = run_rollout_with_learned_policies(
             env=env,
@@ -671,7 +690,7 @@ def main():
     
     # Create movie
     movie_path = os.path.join(output_dir, 'neural_policy_prior_demo.mp4')
-    create_multi_rollout_movie(all_frames, selected_goals, movie_path)
+    create_multi_rollout_movie(all_frames, selected_goals, movie_path, n_rollouts=n_rollouts)
     
     print()
     print("=" * 70)
@@ -681,4 +700,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description='Neural Policy Prior Demo')
+    parser.add_argument('--quick', '-q', action='store_true',
+                        help='Run in quick test mode with fewer episodes and rollouts')
+    args = parser.parse_args()
+    main(quick_mode=args.quick)

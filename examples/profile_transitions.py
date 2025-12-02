@@ -89,14 +89,18 @@ def profile_state_operations():
     print(f"\n  Round-trip test: {'PASS' if state == state2 else 'FAIL'}")
 
 
-def profile_get_dag():
+def profile_get_dag(quick_mode=False):
     """Profile the get_dag method."""
     print("\n" + "=" * 70)
     print("Profiling get_dag()")
     print("=" * 70)
     
     env = SmallOneOrTwoChambersMapEnv()
+    if quick_mode:
+        env.max_steps = 4  # Reduced from 8 for quick mode
     env.reset()
+    
+    print(f"\nEnvironment: max_steps={env.max_steps}")
     
     start = time.time()
     states, state_to_idx, successors, transitions = env.get_dag(return_probabilities=True)
@@ -147,6 +151,12 @@ def verify_correctness():
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description='Profile Transition Operations')
+    parser.add_argument('--quick', '-q', action='store_true',
+                        help='Run in quick test mode with reduced time steps')
+    args = parser.parse_args()
+    
     profile_state_operations()
     verify_correctness()
-    profile_get_dag()
+    profile_get_dag(quick_mode=args.quick)

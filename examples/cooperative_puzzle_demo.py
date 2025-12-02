@@ -51,8 +51,8 @@ class CooperativePuzzleEnv(MultiGridEnv):
         # Agent 0 (RED): Can push rocks, can enter magic walls
         # Agent 1 (GREEN): Cannot push rocks, cannot enter magic walls
         self.agents = [
-            Agent(World, 0, can_enter_magic_walls=True),   # RED
-            Agent(World, 1, can_enter_magic_walls=False),  # GREEN
+            Agent(World, 0, can_enter_magic_walls=True, can_push_rocks=True),   # RED
+            Agent(World, 1, can_enter_magic_walls=False, can_push_rocks=False),  # GREEN
         ]
         
         super().__init__(
@@ -108,8 +108,8 @@ class CooperativePuzzleEnv(MultiGridEnv):
         self.grid.set(7, 2, Floor(World, 'yellow'))
         
         # === ROCK BLOCKING PATH TO MAGIC WALL ===
-        # Only RED agent can push this rock (pushable_by=[0])
-        rock = Rock(World, pushable_by=[0])
+        # Only RED agent can push this rock (RED has can_push_rocks=True)
+        rock = Rock(World)
         self.grid.set(5, 2, rock)
         
         # === COOPERATIVE BLOCK PUZZLE ===
@@ -369,8 +369,18 @@ def create_animation(output_path='cooperative_puzzle_animation.mp4', num_steps=2
     plt.close()
 
 
-def main():
+# Configuration for quick mode vs full mode
+NUM_STEPS_FULL = 200   # Full mode: 200 steps
+NUM_STEPS_QUICK = 30   # Quick mode: 30 steps
+
+
+def main(quick_mode=False):
     """Main function to run the cooperative puzzle demo."""
+    num_steps = NUM_STEPS_QUICK if quick_mode else NUM_STEPS_FULL
+    mode_str = "QUICK TEST MODE" if quick_mode else "FULL MODE"
+    
+    print(f"[{mode_str}]")
+    print()
     
     # Create output directory
     output_dir = os.path.join(os.path.dirname(__file__), '..', 'outputs')
@@ -378,8 +388,8 @@ def main():
     
     output_path = os.path.join(output_dir, 'cooperative_puzzle_animation.mp4')
     
-    # Create animation with 200 steps (long episode)
-    create_animation(output_path, num_steps=200)
+    # Create animation with specified number of steps
+    create_animation(output_path, num_steps=num_steps)
     
     print()
     print("=" * 70)
@@ -389,4 +399,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description='Cooperative Puzzle Demo')
+    parser.add_argument('--quick', '-q', action='store_true',
+                        help='Run in quick test mode with fewer steps')
+    args = parser.parse_args()
+    main(quick_mode=args.quick)

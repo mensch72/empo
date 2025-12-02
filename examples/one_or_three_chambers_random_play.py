@@ -165,8 +165,18 @@ def create_random_play_video(output_path='one_or_three_chambers_random_play.mp4'
     plt.close(fig)
 
 
-def main():
+# Configuration for quick mode vs full mode
+NUM_STEPS_FULL = 1000   # Full mode: 1000 steps
+NUM_STEPS_QUICK = 50    # Quick mode: 50 steps
+
+
+def main(quick_mode=False):
     """Main function to run the random play video example."""
+    num_steps = NUM_STEPS_QUICK if quick_mode else NUM_STEPS_FULL
+    mode_str = "QUICK TEST MODE" if quick_mode else "FULL MODE"
+    
+    print(f"[{mode_str}]")
+    print()
     
     # Create output directory
     output_dir = os.path.join(os.path.dirname(__file__), '..', 'outputs')
@@ -174,8 +184,8 @@ def main():
     
     output_path = os.path.join(output_dir, 'one_or_three_chambers_random_play.mp4')
     
-    # Create video with 1000 steps
-    create_random_play_video(output_path, num_steps=1000)
+    # Create video with specified number of steps
+    create_random_play_video(output_path, num_steps=num_steps)
     
     print()
     print("=" * 70)
@@ -185,4 +195,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description='One or Three Chambers Random Play')
+    parser.add_argument('--quick', '-q', action='store_true',
+                        help='Run in quick test mode with fewer steps')
+    args = parser.parse_args()
+    main(quick_mode=args.quick)

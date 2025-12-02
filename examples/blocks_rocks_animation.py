@@ -20,7 +20,8 @@ class BlockRockDemoEnv(MultiGridEnv):
     """Demo environment showing blocks and rocks being pushed."""
     
     def __init__(self, num_agents=1):
-        self.agents = [Agent(World, i) for i in range(num_agents)]
+        # Agent with can_push_rocks=True so it can push rocks
+        self.agents = [Agent(World, i, can_push_rocks=True) for i in range(num_agents)]
         super().__init__(
             width=12,
             height=8,
@@ -54,7 +55,7 @@ class BlockRockDemoEnv(MultiGridEnv):
         
         # Place consecutive rocks in another row
         for i in range(3):
-            rock = Rock(World, pushable_by=None)  # Pushable by all agents
+            rock = Rock(World)  # Pushable by agents with can_push_rocks=True
             self.grid.set(3 + i, 5, rock)
 
 

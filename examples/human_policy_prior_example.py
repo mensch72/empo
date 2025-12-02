@@ -173,10 +173,19 @@ def save_profiler_results(profiler, output_path):
     print(f"Line profiling results saved to: {output_path}")
 
 
-def main():
+# Configuration for quick mode vs full mode
+MAX_STEPS_FULL = 3        # Full mode (still relatively small)
+MAX_STEPS_QUICK = 2       # Quick mode (minimal)
+
+
+def main(quick_mode=False):
     """Main function to demonstrate compute_human_policy_prior()."""
+    max_steps = MAX_STEPS_QUICK if quick_mode else MAX_STEPS_FULL
+    mode_str = "QUICK TEST MODE" if quick_mode else "FULL MODE"
+    
     print("=" * 70)
     print("Human Policy Prior Computation Example with Line Profiling")
+    print(f"  [{mode_str}]")
     print("=" * 70)
     print()
     
@@ -191,7 +200,7 @@ def main():
     # Create environment
     print("Creating SmallOneOrThreeChambersMapEnv...")
     world_model = SmallOneOrThreeChambersMapEnv()
-    world_model.max_steps = 3  # Set to 3 for quick testing
+    world_model.max_steps = max_steps
     world_model.reset()
     
     print(f"Environment created successfully!")
@@ -291,4 +300,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description='Human Policy Prior Example')
+    parser.add_argument('--quick', '-q', action='store_true',
+                        help='Run in quick test mode with fewer time steps')
+    args = parser.parse_args()
+    main(quick_mode=args.quick)

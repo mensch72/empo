@@ -11,6 +11,11 @@ This script demonstrates backward induction on the SmallOneOrTwoChambersMapEnv:
 
 The reward function gives +1 when the robot is in cell (3, 7), 0 otherwise.
 
+Usage:
+    python bellman_backward_induction.py           # Full run (8 time steps)
+    python bellman_backward_induction.py --quick   # Quick test (4 time steps)
+    python bellman_backward_induction.py --profile # Enable line-by-line profiling
+
 Run with --profile to enable line-by-line profiling of multigrid.py.
 """
 
@@ -32,6 +37,10 @@ from envs.one_or_three_chambers import SmallOneOrTwoChambersMapEnv
 
 # Line profiler global
 line_profiler = None
+
+# Configuration constants
+MAX_STEPS_FULL = 8        # Full run: 8 time steps
+MAX_STEPS_QUICK = 4       # Quick test: 4 time steps for faster DAG computation
 
 
 def setup_line_profiler():
@@ -497,9 +506,13 @@ def create_episode_movie(frames, output_path):
     plt.close()
 
 
-def main(enable_profiling=False):
+def main(enable_profiling=False, quick_mode=False):
     """Main function to run the backward induction example."""
     global line_profiler
+    
+    # Determine configuration based on mode
+    max_steps = MAX_STEPS_QUICK if quick_mode else MAX_STEPS_FULL
+    mode_str = "QUICK TEST MODE" if quick_mode else "FULL MODE"
     
     # Set up line profiler if requested
     if enable_profiling:
@@ -510,12 +523,14 @@ def main(enable_profiling=False):
     
     print("=" * 70)
     print("Bellman Backward Induction Example")
+    print(f"  [{mode_str}]")
     print("=" * 70)
     print()
     print("This script demonstrates backward induction on a small gridworld:")
     print(f"  - Target cell: {TARGET_CELL} (robot receives reward=1 here)")
     print("  - Robot follows optimal policy computed via Bellman equation")
     print("  - Humans move randomly")
+    print(f"  - Max steps: {max_steps}")
     if enable_profiling:
         print("  - LINE PROFILING ENABLED")
     print()
@@ -527,6 +542,7 @@ def main(enable_profiling=False):
     # Create environment
     print("Creating environment...")
     env = SmallOneOrTwoChambersMapEnv()
+    env.max_steps = max_steps  # Override max_steps for quick mode
     env.reset()
     print(f"  Grid size: {env.width} x {env.height}")
     print(f"  Number of agents: {len(env.agents)}")
@@ -601,5 +617,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Bellman backward induction example')
     parser.add_argument('--profile', action='store_true', 
                         help='Enable line-by-line profiling of multigrid.py')
+    parser.add_argument('--quick', '-q', action='store_true',
+                        help='Run in quick test mode with reduced time steps')
     args = parser.parse_args()
-    main(enable_profiling=args.profile)
+    main(enable_profiling=args.profile, quick_mode=args.quick)
