@@ -619,6 +619,294 @@ def test_load_conflicting_action_space():
     print("  ✓ load_conflicting_action_space test passed!")
 
 
+# =============================================================================
+# Tests for new nn_based.multigrid subpackage
+# =============================================================================
+
+def test_multigrid_state_encoder():
+    """Test the MultiGridStateEncoder from the new subpackage."""
+    from empo.nn_based.multigrid import MultiGridStateEncoder, NUM_OBJECT_TYPE_CHANNELS, NUM_GLOBAL_WORLD_FEATURES
+    print("Testing MultiGridStateEncoder...")
+    
+    encoder = MultiGridStateEncoder(
+        grid_height=10,
+        grid_width=10,
+        num_object_types=NUM_OBJECT_TYPE_CHANNELS,
+        num_agent_colors=7,
+        feature_dim=128
+    )
+    
+    # Expected channels: 29 object types + 3 other + 7 colors + 1 query = 40
+    assert encoder.num_channels == 40, f"Expected 40 channels, got {encoder.num_channels}"
+    
+    # Create dummy input
+    batch_size = 4
+    grid_tensor = torch.randn(batch_size, encoder.num_channels, 10, 10)
+    global_features = torch.randn(batch_size, NUM_GLOBAL_WORLD_FEATURES)
+    
+    features = encoder(grid_tensor, global_features)
+    assert features.shape == (batch_size, 128), f"Expected (4, 128), got {features.shape}"
+    
+    print(f"  ✓ Channels: {encoder.num_channels}")
+    print(f"  ✓ Output shape: {features.shape}")
+    print("  ✓ MultiGridStateEncoder test passed!")
+
+
+def test_multigrid_agent_encoder():
+    """Test the MultiGridAgentEncoder from the new subpackage."""
+    from empo.nn_based.multigrid import MultiGridAgentEncoder, AGENT_FEATURE_SIZE, COLOR_TO_IDX
+    print("Testing MultiGridAgentEncoder...")
+    
+    encoder = MultiGridAgentEncoder(
+        num_agents_per_color={'yellow': 2, 'grey': 1},
+        feature_dim=64
+    )
+    
+    # Input dim: query(13) + yellow(2*13) + grey(1*13) = 13 + 26 + 13 = 52
+    assert encoder.input_dim == 52, f"Expected input_dim 52, got {encoder.input_dim}"
+    
+    batch_size = 4
+    query_pos = torch.randn(batch_size, 2)
+    query_dir = torch.zeros(batch_size, 4)
+    query_dir[:, 0] = 1
+    query_abil = torch.zeros(batch_size, 2)
+    query_carr = torch.zeros(batch_size, 2)
+    query_stat = torch.zeros(batch_size, 3)
+    query_stat[:, 2] = -1
+    
+    # All agents data
+    num_agents = 3
+    all_pos = torch.randn(batch_size, num_agents, 2)
+    all_dir = torch.zeros(batch_size, num_agents, 4)
+    all_dir[:, :, 0] = 1
+    all_abil = torch.zeros(batch_size, num_agents, 2)
+    all_carr = torch.zeros(batch_size, num_agents, 2)
+    all_stat = torch.zeros(batch_size, num_agents, 3)
+    all_stat[:, :, 2] = -1
+    # Agent colors: 2 yellow, 1 grey
+    colors = torch.tensor([[COLOR_TO_IDX['yellow'], COLOR_TO_IDX['yellow'], COLOR_TO_IDX['grey']]] * batch_size)
+    
+    features = encoder(
+        query_pos, query_dir, query_abil, query_carr, query_stat,
+        all_pos, all_dir, all_abil, all_carr, all_stat, colors
+    )
+    
+    assert features.shape == (batch_size, 64), f"Expected (4, 64), got {features.shape}"
+    print(f"  ✓ Input dim: {encoder.input_dim}")
+    print(f"  ✓ Output shape: {features.shape}")
+    print("  ✓ MultiGridAgentEncoder test passed!")
+
+
+def test_multigrid_interactive_encoder():
+    """Test the MultiGridInteractiveObjectEncoder from the new subpackage."""
+    from empo.nn_based.multigrid import (
+        MultiGridInteractiveObjectEncoder,
+        KILLBUTTON_FEATURE_SIZE,
+        PAUSESWITCH_FEATURE_SIZE,
+        DISABLINGSWITCH_FEATURE_SIZE,
+        CONTROLBUTTON_FEATURE_SIZE,
+    )
+    print("Testing MultiGridInteractiveObjectEncoder...")
+    
+    encoder = MultiGridInteractiveObjectEncoder(
+        max_kill_buttons=4,
+        max_pause_switches=4,
+        max_disabling_switches=4,
+        max_control_buttons=4,
+        feature_dim=64
+    )
+    
+    # Expected input dim: 4*5 + 4*6 + 4*6 + 4*7 = 20 + 24 + 24 + 28 = 96
+    expected_input_dim = (
+        4 * KILLBUTTON_FEATURE_SIZE +
+        4 * PAUSESWITCH_FEATURE_SIZE +
+        4 * DISABLINGSWITCH_FEATURE_SIZE +
+        4 * CONTROLBUTTON_FEATURE_SIZE
+    )
+    assert encoder.input_dim == expected_input_dim, f"Expected {expected_input_dim}, got {encoder.input_dim}"
+    
+    # Verify ControlButton has 7 features (including _awaiting_action)
+    assert CONTROLBUTTON_FEATURE_SIZE == 7, f"Expected 7, got {CONTROLBUTTON_FEATURE_SIZE}"
+    
+    batch_size = 4
+    kb = torch.randn(batch_size, 4, KILLBUTTON_FEATURE_SIZE)
+    ps = torch.randn(batch_size, 4, PAUSESWITCH_FEATURE_SIZE)
+    ds = torch.randn(batch_size, 4, DISABLINGSWITCH_FEATURE_SIZE)
+    cb = torch.randn(batch_size, 4, CONTROLBUTTON_FEATURE_SIZE)
+    
+    features = encoder(kb, ps, ds, cb)
+    assert features.shape == (batch_size, 64), f"Expected (4, 64), got {features.shape}"
+    
+    print(f"  ✓ Input dim: {encoder.input_dim}")
+    print(f"  ✓ ControlButton features: {CONTROLBUTTON_FEATURE_SIZE} (includes _awaiting_action)")
+    print(f"  ✓ Output shape: {features.shape}")
+    print("  ✓ MultiGridInteractiveObjectEncoder test passed!")
+
+
+def test_multigrid_q_network():
+    """Test the full MultiGridQNetwork from the new subpackage."""
+    from empo.nn_based.multigrid import (
+        MultiGridStateEncoder,
+        MultiGridAgentEncoder,
+        MultiGridGoalEncoder,
+        MultiGridInteractiveObjectEncoder,
+        MultiGridQNetwork,
+        COLOR_TO_IDX,
+    )
+    print("Testing MultiGridQNetwork...")
+    
+    # Create encoders
+    state_enc = MultiGridStateEncoder(10, 10, feature_dim=128)
+    agent_enc = MultiGridAgentEncoder({'yellow': 2, 'grey': 1}, feature_dim=64)
+    goal_enc = MultiGridGoalEncoder(feature_dim=32)
+    interactive_enc = MultiGridInteractiveObjectEncoder(feature_dim=64)
+    
+    q_network = MultiGridQNetwork(
+        state_encoder=state_enc,
+        agent_encoder=agent_enc,
+        goal_encoder=goal_enc,
+        interactive_encoder=interactive_enc,
+        num_actions=8,
+        hidden_dim=256
+    )
+    
+    batch_size = 4
+    
+    # State inputs
+    grid_tensor = torch.randn(batch_size, state_enc.num_channels, 10, 10)
+    global_features = torch.randn(batch_size, 4)
+    
+    # Agent inputs
+    query_pos = torch.randn(batch_size, 2)
+    query_dir = torch.zeros(batch_size, 4)
+    query_dir[:, 0] = 1
+    query_abil = torch.zeros(batch_size, 2)
+    query_carr = torch.zeros(batch_size, 2)
+    query_stat = torch.zeros(batch_size, 3)
+    query_stat[:, 2] = -1
+    
+    num_agents = 3
+    all_pos = torch.randn(batch_size, num_agents, 2)
+    all_dir = torch.zeros(batch_size, num_agents, 4)
+    all_dir[:, :, 0] = 1
+    all_abil = torch.zeros(batch_size, num_agents, 2)
+    all_carr = torch.zeros(batch_size, num_agents, 2)
+    all_stat = torch.zeros(batch_size, num_agents, 3)
+    all_stat[:, :, 2] = -1
+    colors = torch.tensor([[COLOR_TO_IDX['yellow'], COLOR_TO_IDX['yellow'], COLOR_TO_IDX['grey']]] * batch_size)
+    
+    # Goal inputs
+    goal_coords = torch.randn(batch_size, 4)
+    
+    # Interactive object inputs
+    kb = torch.randn(batch_size, 4, 5)
+    ps = torch.randn(batch_size, 4, 6)
+    ds = torch.randn(batch_size, 4, 6)
+    cb = torch.randn(batch_size, 4, 7)
+    
+    q_values = q_network(
+        grid_tensor, global_features,
+        query_pos, query_dir, query_abil, query_carr, query_stat,
+        all_pos, all_dir, all_abil, all_carr, all_stat, colors,
+        goal_coords,
+        kb, ps, ds, cb
+    )
+    
+    assert q_values.shape == (batch_size, 8), f"Expected (4, 8), got {q_values.shape}"
+    
+    # Test policy computation
+    policy = q_network.get_policy(q_values, beta=1.0)
+    assert policy.shape == (batch_size, 8)
+    assert torch.allclose(policy.sum(dim=1), torch.ones(batch_size), atol=1e-5)
+    
+    print(f"  ✓ Q-values shape: {q_values.shape}")
+    print(f"  ✓ Policy sums to 1.0: {policy.sum(dim=1).mean():.4f}")
+    print("  ✓ MultiGridQNetwork test passed!")
+
+
+def test_multigrid_feature_extraction():
+    """Test feature extraction functions."""
+    from empo.nn_based.multigrid.feature_extraction import (
+        extract_agent_features,
+        extract_interactive_objects,
+        extract_global_world_features,
+    )
+    from empo.nn_based.multigrid.constants import CONTROLBUTTON_FEATURE_SIZE
+    print("Testing multigrid feature extraction...")
+    
+    # Create a mock state tuple
+    # Format: (step_count, agent_states, mobile_objects, mutable_objects)
+    # Agent state: (pos_x, pos_y, dir, terminated, started, paused, carrying_type, carrying_color, forced_next_action)
+    agent_states = [
+        (3, 4, 0, False, True, False, 'key', 'red', None),
+        (5, 6, 1, True, True, True, None, None, 2),
+    ]
+    mutable_objects = [
+        ('door', 1, 1, True, False),  # open door
+        ('controlbutton', 2, 2, True, 0, 3),  # enabled, controlled_agent=0, triggered_action=3
+    ]
+    state = (10, tuple(agent_states), (), tuple(mutable_objects))
+    
+    # Mock world model
+    class MockAgent:
+        def __init__(self, color, can_magic=False, can_push=False):
+            self.color = color
+            self.can_enter_magic_walls = can_magic
+            self.can_push_rocks = can_push
+    
+    class MockWorldModel:
+        width = 10
+        height = 10
+        max_steps = 100
+        stumble_prob = 0.1
+        magic_entry_prob = 0.5
+        magic_solidify_prob = 0.3
+        agents = [MockAgent('yellow', True, False), MockAgent('grey', False, True)]
+        grid = None
+    
+    world_model = MockWorldModel()
+    
+    # Test agent feature extraction
+    positions, directions, abilities, carried, status, colors = extract_agent_features(
+        state, world_model, device='cpu'
+    )
+    
+    assert positions.shape == (2, 2), f"Expected (2, 2), got {positions.shape}"
+    assert directions.shape == (2, 4), f"Expected (2, 4), got {directions.shape}"
+    assert abilities.shape == (2, 2), f"Expected (2, 2), got {abilities.shape}"
+    assert carried.shape == (2, 2), f"Expected (2, 2), got {carried.shape}"
+    assert status.shape == (2, 3), f"Expected (2, 3), got {status.shape}"
+    
+    # Verify agent 0 values
+    assert positions[0, 0] == 3.0, "Agent 0 x should be 3"
+    assert positions[0, 1] == 4.0, "Agent 0 y should be 4"
+    assert directions[0, 0] == 1.0, "Agent 0 should face right"
+    assert abilities[0, 0] == 1.0, "Agent 0 should have can_enter_magic_walls"
+    assert abilities[0, 1] == 0.0, "Agent 0 should not have can_push_rocks"
+    assert status[0, 0] == 0.0, "Agent 0 should not be paused"
+    assert status[0, 1] == 0.0, "Agent 0 should not be terminated"
+    
+    # Verify agent 1 values
+    assert positions[1, 0] == 5.0, "Agent 1 x should be 5"
+    assert positions[1, 1] == 6.0, "Agent 1 y should be 6"
+    assert status[1, 0] == 1.0, "Agent 1 should be paused"
+    assert status[1, 1] == 1.0, "Agent 1 should be terminated"
+    assert status[1, 2] == 2.0, "Agent 1 should have forced_next_action=2"
+    
+    print("  ✓ Agent features extracted correctly")
+    
+    # Test global feature extraction
+    global_features = extract_global_world_features(state, world_model, device='cpu')
+    assert global_features.shape == (4,)
+    assert global_features[0] == 0.1, "stumble_prob should be 0.1"
+    assert global_features[1] == 0.5, "magic_entry_prob should be 0.5"
+    assert global_features[2] == 0.3, "magic_solidify_prob should be 0.3"
+    assert global_features[3] == 90.0, "remaining_time should be 90 (100-10)"
+    
+    print("  ✓ Global features extracted correctly")
+    print("  ✓ multigrid feature extraction test passed!")
+
+
 def main():
     """Run all tests."""
     print("=" * 60)
@@ -651,6 +939,27 @@ def main():
     print()
     
     test_load_conflicting_action_space()
+    print()
+    
+    # New multigrid subpackage tests
+    print("=" * 60)
+    print("nn_based.multigrid Subpackage Tests")
+    print("=" * 60)
+    print()
+    
+    test_multigrid_state_encoder()
+    print()
+    
+    test_multigrid_agent_encoder()
+    print()
+    
+    test_multigrid_interactive_encoder()
+    print()
+    
+    test_multigrid_q_network()
+    print()
+    
+    test_multigrid_feature_extraction()
     print()
     
     print("=" * 60)
