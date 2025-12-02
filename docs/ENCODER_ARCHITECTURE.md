@@ -52,7 +52,7 @@ Total Channels = num_object_types + 3 + num_colors + 1
 
 ### Additional Input Features
 
-- **Remaining time**: Normalized (remaining_steps / max_steps)
+- **Remaining time**: Raw integer (max_steps - step_count), NOT normalized
 - **Global world features** (4 values):
   - Stumble probability (for unsteady ground)
   - Magic wall entry probability

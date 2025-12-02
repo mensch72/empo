@@ -331,7 +331,7 @@ class StateEncoder(nn.Module):
         self.flat_size = 64 * grid_width * grid_height
         
         # Project to feature dimension
-        # +1 for remaining time steps (normalized)
+        # +1 for remaining time steps (raw integer value, not normalized)
         # +NUM_GLOBAL_WORLD_FEATURES for global world parameters
         num_scalar_features = 1 + NUM_GLOBAL_WORLD_FEATURES
         self.fc = nn.Sequential(
@@ -351,8 +351,8 @@ class StateEncoder(nn.Module):
         Args:
             state_tensor: Tensor of shape (batch, channels, height, width) 
                          representing the grid state.
-            remaining_time: Tensor of shape (batch, 1) with normalized remaining time steps
-                           (remaining_steps / max_steps).
+            remaining_time: Tensor of shape (batch, 1) with remaining time steps
+                           (max_steps - step_count). Raw integer value, NOT normalized.
             global_world_features: Optional tensor of shape (batch, NUM_GLOBAL_WORLD_FEATURES)
                                   with global world parameters (stumble prob, magic wall probs, etc.).
                                   If None, zeros are used.
@@ -876,7 +876,7 @@ class QNetwork(nn.Module):
         
         Args:
             state_tensor: Grid state tensor (batch, channels, H, W).
-            remaining_time: Normalized remaining time steps (batch, 1).
+            remaining_time: Remaining time steps (batch, 1). Raw integer, NOT normalized.
             agent_position: Query agent position (batch, 2).
             agent_direction: Query agent direction one-hot (batch, 4).
             agent_idx: Agent index (batch,) - kept for compatibility.
@@ -1027,7 +1027,7 @@ class PolicyPriorNetwork(nn.Module):
         
         Args:
             state_tensor: Grid state tensor (batch, channels, H, W).
-            remaining_time: Normalized remaining time steps (batch, 1).
+            remaining_time: Remaining time steps (batch, 1). Raw integer, NOT normalized.
             agent_position: Query agent position (batch, 2).
             agent_direction: Query agent direction one-hot (batch, 4).
             agent_idx: Agent index (batch,) - kept for compatibility.
