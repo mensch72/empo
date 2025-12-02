@@ -1717,9 +1717,8 @@ def _batch_states_to_tensors(
                                     other_objects_tensor[1, y, x] = 1.0
     
     for i, t in enumerate(transitions):
-        state = t['state']
+        state = t['next_state']
         human_idx = t['human_idx']
-        goal = t['goal']
         
         step_count, agent_states, mobile_objects, _ = state
         
