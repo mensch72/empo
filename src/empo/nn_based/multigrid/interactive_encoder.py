@@ -1,20 +1,12 @@
 """
 Interactive object encoder for multigrid environments.
 
-This encoder handles complex interactive objects (buttons, switches) using
-list-based encoding. Each object type has a configurable maximum count, and
-objects are encoded with all their transition-relevant features.
-
-Object Types:
-    - KillButton: Terminates agents of target_color when triggered
-    - PauseSwitch: Pauses/unpauses agents of target_color
-    - DisablingSwitch: Enables/disables objects of target_type
-    - ControlButton: Programs and triggers agent actions
+Encodes buttons and switches using list-based approach.
 """
 
 import torch
 import torch.nn as nn
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, Tuple
 
 from .constants import (
     KILLBUTTON_FEATURE_SIZE,
@@ -27,16 +19,15 @@ from .feature_extraction import extract_interactive_objects
 
 class MultiGridInteractiveObjectEncoder(nn.Module):
     """
-    List-based encoder for interactive objects in multigrid environments.
+    Encoder for interactive objects (buttons/switches).
     
-    Encodes buttons and switches with all their transition-relevant features.
-    Each object type has a configurable maximum count.
+    Uses list-based encoding with configurable max counts per type.
     
     Args:
-        max_kill_buttons: Maximum number of KillButtons to track.
-        max_pause_switches: Maximum number of PauseSwitches to track.
-        max_disabling_switches: Maximum number of DisablingSwitches to track.
-        max_control_buttons: Maximum number of ControlButtons to track.
+        max_kill_buttons: Max KillButtons to encode.
+        max_pause_switches: Max PauseSwitches to encode.
+        max_disabling_switches: Max DisablingSwitches to encode.
+        max_control_buttons: Max ControlButtons to encode.
         feature_dim: Output feature dimension.
     """
     
@@ -46,7 +37,7 @@ class MultiGridInteractiveObjectEncoder(nn.Module):
         max_pause_switches: int = 4,
         max_disabling_switches: int = 4,
         max_control_buttons: int = 4,
-        feature_dim: int = 64
+        feature_dim: int = 32
     ):
         super().__init__()
         self.max_kill_buttons = max_kill_buttons
@@ -55,86 +46,71 @@ class MultiGridInteractiveObjectEncoder(nn.Module):
         self.max_control_buttons = max_control_buttons
         self.feature_dim = feature_dim
         
-        # Total input size
-        self.input_dim = (
+        # Calculate input size
+        input_size = (
             max_kill_buttons * KILLBUTTON_FEATURE_SIZE +
             max_pause_switches * PAUSESWITCH_FEATURE_SIZE +
             max_disabling_switches * DISABLINGSWITCH_FEATURE_SIZE +
             max_control_buttons * CONTROLBUTTON_FEATURE_SIZE
         )
         
-        # MLP to produce feature vector
         self.fc = nn.Sequential(
-            nn.Linear(self.input_dim, feature_dim),
+            nn.Linear(input_size, feature_dim),
             nn.ReLU(),
         )
     
-    def forward(
+    def forward(self, object_features: torch.Tensor) -> torch.Tensor:
+        """
+        Encode interactive object features.
+        
+        Args:
+            object_features: (batch, input_size) flattened features
+        
+        Returns:
+            Feature tensor (batch, feature_dim)
+        """
+        return self.fc(object_features)
+    
+    def encode_objects(
         self,
-        kill_buttons: torch.Tensor,
-        pause_switches: torch.Tensor,
-        disabling_switches: torch.Tensor,
-        control_buttons: torch.Tensor
+        state: Tuple,
+        world_model: Any,
+        device: str = 'cpu'
     ) -> torch.Tensor:
         """
-        Encode interactive objects into feature vector.
+        Encode interactive objects from state.
         
         Args:
-            kill_buttons: (batch, max_kill_buttons, KILLBUTTON_FEATURE_SIZE)
-                Features: [x, y, enabled, trigger_color, target_color]
-            pause_switches: (batch, max_pause_switches, PAUSESWITCH_FEATURE_SIZE)
-                Features: [x, y, enabled, is_on, toggle_color, target_color]
-            disabling_switches: (batch, max_disabling_switches, DISABLINGSWITCH_FEATURE_SIZE)
-                Features: [x, y, enabled, is_on, toggle_color, target_type]
-            control_buttons: (batch, max_control_buttons, CONTROLBUTTON_FEATURE_SIZE)
-                Features: [x, y, enabled, trigger_color, controlled_color, 
-                          triggered_action, awaiting_action]
+            state: Environment state tuple.
+            world_model: Environment with grid.
+            device: Torch device.
         
         Returns:
-            Feature tensor of shape (batch, feature_dim)
+            Tensor (1, input_size) ready for forward().
         """
-        batch_size = kill_buttons.shape[0]
-        
-        # Flatten each object type
-        kb_flat = kill_buttons.view(batch_size, -1)
-        ps_flat = pause_switches.view(batch_size, -1)
-        ds_flat = disabling_switches.view(batch_size, -1)
-        cb_flat = control_buttons.view(batch_size, -1)
-        
-        # Concatenate all features
-        all_features = torch.cat([kb_flat, ps_flat, ds_flat, cb_flat], dim=1)
-        
-        # Apply MLP
-        return self.fc(all_features)
-    
-    def encode_interactive_objects(
-        self,
-        world_model: Any,
-        state: Optional[Tuple] = None,
-        device: str = 'cpu'
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Extract and encode interactive objects from environment.
-        
-        Args:
-            world_model: Environment with grid
-            state: Optional state tuple for dynamic object states
-            device: Torch device
-        
-        Returns:
-            Tuple of tensors ready for forward():
-                kill_buttons, pause_switches, disabling_switches, control_buttons
-                Each with shape (1, max_count, feature_size)
-        """
-        kb, ps, ds, cb = extract_interactive_objects(
-            world_model=world_model,
-            state=state,
-            max_kill_buttons=self.max_kill_buttons,
-            max_pause_switches=self.max_pause_switches,
-            max_disabling_switches=self.max_disabling_switches,
-            max_control_buttons=self.max_control_buttons,
-            device=device
+        objects = extract_interactive_objects(
+            state, world_model,
+            self.max_kill_buttons,
+            self.max_pause_switches,
+            self.max_disabling_switches,
+            self.max_control_buttons
         )
         
-        # Add batch dimension
-        return kb.unsqueeze(0), ps.unsqueeze(0), ds.unsqueeze(0), cb.unsqueeze(0)
+        # Flatten all object features
+        features = torch.cat([
+            objects['kill_buttons'].flatten(),
+            objects['pause_switches'].flatten(),
+            objects['disabling_switches'].flatten(),
+            objects['control_buttons'].flatten(),
+        ]).unsqueeze(0).to(device)
+        
+        return features
+    
+    def get_input_size(self) -> int:
+        """Return the input feature size."""
+        return (
+            self.max_kill_buttons * KILLBUTTON_FEATURE_SIZE +
+            self.max_pause_switches * PAUSESWITCH_FEATURE_SIZE +
+            self.max_disabling_switches * DISABLINGSWITCH_FEATURE_SIZE +
+            self.max_control_buttons * CONTROLBUTTON_FEATURE_SIZE
+        )

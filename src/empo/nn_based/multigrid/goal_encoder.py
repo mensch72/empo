@@ -1,75 +1,80 @@
 """
 Goal encoder for multigrid environments.
 
-Simple encoder for goal positions. Goals are typically represented as
-target positions (x, y coordinates).
+Encodes goal positions into feature vectors.
 """
 
 import torch
 import torch.nn as nn
 from typing import Any, Optional, Tuple
 
-from empo.possible_goal import PossibleGoal
+from ..goal_encoder import BaseGoalEncoder
 
 
-class MultiGridGoalEncoder(nn.Module):
+class MultiGridGoalEncoder(BaseGoalEncoder):
     """
-    Encoder for goal positions in multigrid environments.
+    Encoder for position-based goals in multigrid.
     
-    Goals are encoded as raw (x, y) coordinates, optionally with a bounding
-    box for rectangular goals.
+    Goals are typically target positions. Encodes raw (x, y) coordinates.
     
     Args:
+        grid_height: Height of the grid.
+        grid_width: Width of the grid.
         feature_dim: Output feature dimension.
     """
     
-    def __init__(self, feature_dim: int = 32):
-        super().__init__()
-        self.feature_dim = feature_dim
+    def __init__(
+        self,
+        grid_height: int,
+        grid_width: int,
+        feature_dim: int = 32
+    ):
+        super().__init__(feature_dim)
+        self.grid_height = grid_height
+        self.grid_width = grid_width
         
-        # Input: 4 coordinates (x1, y1, x2, y2) for rectangular goals
-        # or (x, y, x, y) for point goals
+        # Input: x, y coordinates (raw integers)
         self.fc = nn.Sequential(
-            nn.Linear(4, feature_dim),
+            nn.Linear(2, feature_dim),
             nn.ReLU(),
         )
     
     def forward(self, goal_coords: torch.Tensor) -> torch.Tensor:
         """
-        Encode goal coordinates into feature vector.
+        Encode goal coordinates.
         
         Args:
-            goal_coords: (batch, 4) goal coordinates [x1, y1, x2, y2]
+            goal_coords: (batch, 2) with x, y coordinates
         
         Returns:
-            Feature tensor of shape (batch, feature_dim)
+            Feature tensor (batch, feature_dim)
         """
         return self.fc(goal_coords)
     
     def encode_goal(
         self,
-        goal: PossibleGoal,
+        goal: Any,
         device: str = 'cpu'
     ) -> torch.Tensor:
         """
-        Encode a single goal into tensor.
+        Encode a goal object.
         
         Args:
-            goal: PossibleGoal instance
-            device: Torch device
+            goal: Goal object with target position.
+            device: Torch device.
         
         Returns:
-            Goal coordinates tensor of shape (1, 4)
+            Tensor (1, 2) with goal coordinates.
         """
+        # Extract position from goal
         if hasattr(goal, 'target_pos'):
-            target = goal.target_pos
-            x, y = float(target[0]), float(target[1])
-            return torch.tensor([[x, y, x, y]], device=device, dtype=torch.float32)
-        elif hasattr(goal, 'target_region'):
-            # Rectangular goal region
-            x1, y1, x2, y2 = goal.target_region
-            return torch.tensor([[float(x1), float(y1), float(x2), float(y2)]], 
-                              device=device, dtype=torch.float32)
+            x, y = goal.target_pos
+        elif hasattr(goal, 'position'):
+            x, y = goal.position
+        elif isinstance(goal, (tuple, list)) and len(goal) >= 2:
+            x, y = goal[0], goal[1]
         else:
-            # Unknown goal type - return zeros
-            return torch.zeros(1, 4, device=device, dtype=torch.float32)
+            x, y = 0, 0
+        
+        coords = torch.tensor([[float(x), float(y)]], device=device)
+        return coords
