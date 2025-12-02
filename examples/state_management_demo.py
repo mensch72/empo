@@ -148,6 +148,10 @@ def example_state_properties():
     print(f"✓ State type: {type(state).__name__}")
     
     # State format: (step_count, agent_states, mobile_objects, mutable_objects)
+    # - step_count: integer, current time step
+    # - agent_states: tuple of tuples, each with (pos_x, pos_y, dir, terminated, started, paused, carrying_type, carrying_color)
+    # - mobile_objects: tuple of tuples for blocks, rocks, etc.
+    # - mutable_objects: tuple of tuples for doors, switches, etc.
     step_count, agent_states, mobile_objects, mutable_objects = state
     print(f"✓ Step count in state: {step_count}")
     

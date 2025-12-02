@@ -494,11 +494,17 @@ def create_multi_rollout_movie(
     all_rollout_frames: List[List[np.ndarray]],
     goal_positions: List[Tuple[int, int]],
     output_path: str,
-    n_rollouts: int = None
+    n_rollouts: int
 ):
-    """Create a movie with multiple rollouts."""
-    if n_rollouts is None:
-        n_rollouts = len(all_rollout_frames)
+    """
+    Create a movie with multiple rollouts.
+    
+    Args:
+        all_rollout_frames: List of frame lists, one per rollout
+        goal_positions: List of goal positions for each rollout
+        output_path: Path to save the movie
+        n_rollouts: Total number of rollouts (for title display)
+    """
     print(f"Creating movie with {len(all_rollout_frames)} rollouts...")
     
     frames = []
