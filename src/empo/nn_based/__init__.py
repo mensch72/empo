@@ -24,6 +24,15 @@ Main components:
         Object type categories for "other objects" channels
     - DEFAULT_ACTION_ENCODING, SMALL_ACTION_ENCODING: Standard action encodings
 
+For multigrid-specific implementations, use the `multigrid` subpackage:
+    >>> from empo.nn_based.multigrid import (
+    ...     MultiGridStateEncoder,
+    ...     MultiGridAgentEncoder,
+    ...     MultiGridQNetwork,
+    ...     MultiGridNeuralHumanPolicyPrior,
+    ...     train_multigrid_neural_policy_prior,
+    ... )
+
 Mathematical background:
     The networks approximate:
     
@@ -58,6 +67,7 @@ Example usage:
     ... )
 """
 
+# Import generic world_model components from the main module
 from empo.nn_based.neural_policy_prior import (
     # Constants for grid encoding
     OBJECT_TYPE_TO_CHANNEL,
@@ -67,21 +77,24 @@ from empo.nn_based.neural_policy_prior import (
     NON_OVERLAPPABLE_MOBILE_OBJECTS,
     DEFAULT_ACTION_ENCODING,
     SMALL_ACTION_ENCODING,
-    # Encoders
+    # Encoders (generic)
     StateEncoder,
     GoalEncoder,
     AgentEncoder,
-    # Networks
+    # Networks (generic)
     QNetwork,
     PolicyPriorNetwork,
-    # Policy Prior
+    # Policy Prior (generic)
     NeuralHumanPolicyPrior,
-    # Training
+    # Training (generic)
     train_neural_policy_prior,
     create_policy_prior_networks,
     # Reward Shaping
     PathDistanceCalculator,
 )
+
+# Also expose the multigrid subpackage
+from empo.nn_based import multigrid
 
 __all__ = [
     # Constants
@@ -106,4 +119,6 @@ __all__ = [
     "create_policy_prior_networks",
     # Reward Shaping
     "PathDistanceCalculator",
+    # Subpackage
+    "multigrid",
 ]
