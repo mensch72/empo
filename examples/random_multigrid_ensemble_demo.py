@@ -58,8 +58,7 @@ from gym_multigrid.multigrid import (
 )
 from empo.possible_goal import PossibleGoal, PossibleGoalSampler
 from empo.nn_based import (
-    StateEncoder, AgentEncoder, GoalEncoder,
-    QNetwork, PolicyPriorNetwork,
+    QNetwork,
     train_neural_policy_prior,
     OBJECT_TYPE_TO_CHANNEL,
     NUM_OBJECT_TYPE_CHANNELS,
@@ -74,7 +73,7 @@ GRID_SIZE = 7           # 7x7 grid (including outer walls)
 NUM_HUMANS = 3          # 3 human agents (yellow)
 NUM_ROBOTS = 1          # 1 robot agent (grey)
 MAX_STEPS = 20          # Maximum steps per episode
-NUM_ENVS = 10           # Number of random environments to generate
+NUM_TEST_ENVS = 10      # Number of test environments for rollout evaluation
 NUM_ROLLOUTS = 10       # Number of rollouts for the movie
 
 # Full training configuration (default)
@@ -82,7 +81,7 @@ NUM_TRAINING_EPISODES_FULL = 500
 
 # Quick test configuration (for --quick flag)
 NUM_TRAINING_EPISODES_QUICK = 50
-NUM_ENVS_QUICK = 3
+NUM_TEST_ENVS_QUICK = 3
 NUM_ROLLOUTS_QUICK = 3
 
 # Object placement probabilities
@@ -115,7 +114,7 @@ def parse_args():
         '--envs', '-n',
         type=int,
         default=None,
-        help='Number of random environments to generate (overrides default)'
+        help='Number of test environments for rollout evaluation (overrides default)'
     )
     parser.add_argument(
         '--rollouts', '-r',
@@ -727,7 +726,7 @@ def create_rollout_movie(
     env_indices: List[int],
     output_path: str,
     num_rollouts: int,
-    num_envs: int
+    num_test_envs: int
 ):
     """Create a movie from rollout frames."""
     print(f"Creating movie with {len(all_frames)} rollouts...")
@@ -754,7 +753,7 @@ def create_rollout_movie(
         rollout_idx, step_idx, env_idx = rollout_info[frame_idx]
         im.set_array(frames[frame_idx])
         title.set_text(
-            f'Rollout {rollout_idx + 1}/{num_rollouts} | Env {env_idx + 1}/{num_envs} | Step {step_idx}\n'
+            f'Rollout {rollout_idx + 1}/{num_rollouts} | Env {env_idx + 1}/{num_test_envs} | Step {step_idx}\n'
             f'★ = H1 goal | ○ = H1 agent | Humans: learned policy | Robot: random'
         )
         return [im, title]
@@ -790,12 +789,12 @@ def main():
     
     # Determine configuration based on --quick flag or explicit overrides
     if args.quick:
-        num_envs = args.envs if args.envs is not None else NUM_ENVS_QUICK
+        num_test_envs = args.envs if args.envs is not None else NUM_TEST_ENVS_QUICK
         num_episodes = args.episodes if args.episodes is not None else NUM_TRAINING_EPISODES_QUICK
         num_rollouts = args.rollouts if args.rollouts is not None else NUM_ROLLOUTS_QUICK
         mode_str = "QUICK TEST MODE"
     else:
-        num_envs = args.envs if args.envs is not None else NUM_ENVS
+        num_test_envs = args.envs if args.envs is not None else NUM_TEST_ENVS
         num_episodes = args.episodes if args.episodes is not None else NUM_TRAINING_EPISODES_FULL
         num_rollouts = args.rollouts if args.rollouts is not None else NUM_ROLLOUTS
         mode_str = "FULL MODE"
@@ -850,8 +849,8 @@ def main():
     print()
     
     # Generate test environments for rollouts
-    print(f"Generating {num_envs} test environments for rollouts...")
-    test_environments = [create_random_env(seed=1000 + i) for i in range(num_envs)]
+    print(f"Generating {num_test_envs} test environments for rollouts...")
+    test_environments = [create_random_env(seed=1000 + i) for i in range(num_test_envs)]
     for env in test_environments:
         env.reset()
     
@@ -906,7 +905,7 @@ def main():
     
     # Create movie
     movie_path = os.path.join(output_dir, 'random_multigrid_ensemble_demo.mp4')
-    create_rollout_movie(all_frames, env_indices, movie_path, num_rollouts, num_envs)
+    create_rollout_movie(all_frames, env_indices, movie_path, num_rollouts, num_test_envs)
     
     print()
     print("=" * 70)
