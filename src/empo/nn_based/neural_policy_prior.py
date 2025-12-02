@@ -183,8 +183,9 @@ DISABLINGSWITCH_FEATURE_SIZE = 6
 # - enabled (1): 0.0 or 1.0
 # - trigger_color (1): color index (integer)
 # - target_color (1): color index (integer)
-# - forced_action (1): action index (integer)
-CONTROLBUTTON_FEATURE_SIZE = 6
+# - forced_action (1): action index (integer), -1 if not programmed
+# - awaiting_action (1): 0.0 or 1.0 (whether button is waiting for programming)
+CONTROLBUTTON_FEATURE_SIZE = 7
 
 # Global world parameters that can vary across environments
 # These are encoded as a separate global feature vector
@@ -510,7 +511,7 @@ class InteractiveObjectEncoder(nn.Module):
             disabling_switches: Optional tensor of shape (batch, max_disabling_switches, DISABLINGSWITCH_FEATURE_SIZE)
                                with DisablingSwitch features [x, y, enabled, is_on, toggle_color, target_type].
             control_buttons: Optional tensor of shape (batch, max_control_buttons, CONTROLBUTTON_FEATURE_SIZE)
-                            with ControlButton features [x, y, enabled, trigger_color, target_color, forced_action].
+                            with ControlButton features [x, y, enabled, trigger_color, target_color, forced_action, awaiting_action].
         
         Returns:
             Feature tensor of shape (batch, feature_dim).
@@ -897,7 +898,7 @@ class QNetwork(nn.Module):
             kill_buttons: Optional tensor (batch, max_kill_buttons, 5) with KillButton features.
             pause_switches: Optional tensor (batch, max_pause_switches, 6) with PauseSwitch features.
             disabling_switches: Optional tensor (batch, max_disabling_switches, 6) with DisablingSwitch features.
-            control_buttons: Optional tensor (batch, max_control_buttons, 6) with ControlButton features.
+            control_buttons: Optional tensor (batch, max_control_buttons, 7) with ControlButton features.
         
         Returns:
             Q-values tensor of shape (batch, num_actions).
@@ -2076,8 +2077,9 @@ def _batch_states_to_tensors(
                                     other_objects_tensor[1, y, x] = 1.0
     
     for i, t in enumerate(transitions):
-        state = t['next_state']
+        state = t['state']
         human_idx = t['human_idx']
+        goal = t['goal']
         
         step_count, agent_states, mobile_objects, _ = state
         
@@ -2300,6 +2302,249 @@ def _batch_next_states_to_tensors(
         agent_indices[i] = human_idx
     
     return grid_tensors, step_tensors, positions, directions, agent_indices
+
+
+def _extract_agent_features_from_state(
+    state: Tuple,
+    world_model: Any,
+    device: str = 'cpu'
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Extract all agent features from state tuple and world_model.
+    
+    State tuple format (from multigrid.get_state()):
+        (step_count, agent_states, mobile_objects, mutable_objects)
+    
+    Agent state format:
+        (pos_x, pos_y, dir, terminated, started, paused, carrying_type, carrying_color, forced_next_action)
+    
+    Args:
+        state: State tuple from world_model.get_state()
+        world_model: Environment with agents list for accessing abilities
+        device: Torch device
+    
+    Returns:
+        Tuple of tensors:
+            - positions: (num_agents, 2) raw x, y
+            - directions: (num_agents, 4) one-hot
+            - abilities: (num_agents, 2) can_enter_magic_walls, can_push_rocks
+            - carried: (num_agents, 2) type_idx, color_idx
+            - status: (num_agents, 3) paused, terminated, forced_next_action
+    """
+    _, agent_states, _, _ = state
+    num_agents = len(agent_states)
+    
+    positions = torch.zeros(num_agents, 2, device=device)
+    directions = torch.zeros(num_agents, 4, device=device)
+    abilities = torch.zeros(num_agents, 2, device=device)
+    carried = torch.zeros(num_agents, 2, device=device)
+    status = torch.zeros(num_agents, 3, device=device)
+    status[:, 2] = -1.0  # Default: no forced action
+    
+    for i, agent_state in enumerate(agent_states):
+        # Position (raw)
+        if agent_state[0] is not None:
+            positions[i, 0] = float(agent_state[0])
+            positions[i, 1] = float(agent_state[1])
+        
+        # Direction (one-hot)
+        if agent_state[2] is not None:
+            dir_idx = int(agent_state[2]) % 4
+            directions[i, dir_idx] = 1.0
+        
+        # Status from state tuple
+        # agent_state = (pos_x, pos_y, dir, terminated, started, paused, carrying_type, carrying_color, forced_next_action)
+        status[i, 0] = 1.0 if agent_state[5] else 0.0  # paused
+        status[i, 1] = 1.0 if agent_state[3] else 0.0  # terminated
+        if agent_state[8] is not None:
+            status[i, 2] = float(agent_state[8])  # forced_next_action
+        
+        # Carried object from state tuple
+        if agent_state[6] is not None:  # carrying_type
+            # Convert type string to index
+            carrying_type = agent_state[6]
+            if carrying_type in OBJECT_TYPE_TO_CHANNEL:
+                carried[i, 0] = float(OBJECT_TYPE_TO_CHANNEL[carrying_type])
+            else:
+                carried[i, 0] = -1.0  # Unknown type
+        
+        if agent_state[7] is not None:  # carrying_color
+            carrying_color = agent_state[7]
+            if carrying_color in COLOR_TO_IDX:
+                carried[i, 1] = float(COLOR_TO_IDX[carrying_color])
+            else:
+                carried[i, 1] = -1.0  # Unknown color
+        
+        # Abilities from world_model.agents (not in state tuple)
+        if world_model is not None and hasattr(world_model, 'agents') and i < len(world_model.agents):
+            agent = world_model.agents[i]
+            abilities[i, 0] = 1.0 if getattr(agent, 'can_enter_magic_walls', False) else 0.0
+            abilities[i, 1] = 1.0 if getattr(agent, 'can_push_rocks', False) else 0.0
+    
+    return positions, directions, abilities, carried, status
+
+
+def _extract_interactive_objects_from_grid(
+    world_model: Any,
+    max_kill_buttons: int = 4,
+    max_pause_switches: int = 4,
+    max_disabling_switches: int = 4,
+    max_control_buttons: int = 4,
+    device: str = 'cpu'
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Extract interactive object features from world_model.grid.
+    
+    Args:
+        world_model: Environment with grid attribute
+        max_kill_buttons: Maximum number of KillButtons to track
+        max_pause_switches: Maximum number of PauseSwitches to track
+        max_disabling_switches: Maximum number of DisablingSwitches to track
+        max_control_buttons: Maximum number of ControlButtons to track
+        device: Torch device
+    
+    Returns:
+        Tuple of tensors:
+            - kill_buttons: (max_kill_buttons, 5)
+            - pause_switches: (max_pause_switches, 6)
+            - disabling_switches: (max_disabling_switches, 6)
+            - control_buttons: (max_control_buttons, 7)
+    """
+    kill_buttons = torch.zeros(max_kill_buttons, KILLBUTTON_FEATURE_SIZE, device=device)
+    pause_switches = torch.zeros(max_pause_switches, PAUSESWITCH_FEATURE_SIZE, device=device)
+    disabling_switches = torch.zeros(max_disabling_switches, DISABLINGSWITCH_FEATURE_SIZE, device=device)
+    control_buttons = torch.zeros(max_control_buttons, CONTROLBUTTON_FEATURE_SIZE, device=device)
+    
+    if world_model is None or not hasattr(world_model, 'grid') or world_model.grid is None:
+        return kill_buttons, pause_switches, disabling_switches, control_buttons
+    
+    kb_count = 0
+    ps_count = 0
+    ds_count = 0
+    cb_count = 0
+    
+    for y in range(world_model.height):
+        for x in range(world_model.width):
+            cell = world_model.grid.get(x, y)
+            if cell is None:
+                continue
+            
+            cell_type = getattr(cell, 'type', None)
+            
+            if cell_type == 'killbutton' and kb_count < max_kill_buttons:
+                # KillButton: position (2), enabled (1), trigger_color (1), target_color (1)
+                kill_buttons[kb_count, 0] = float(x)
+                kill_buttons[kb_count, 1] = float(y)
+                kill_buttons[kb_count, 2] = 1.0 if getattr(cell, 'enabled', True) else 0.0
+                trigger_color = getattr(cell, 'trigger_color', None)
+                if trigger_color in COLOR_TO_IDX:
+                    kill_buttons[kb_count, 3] = float(COLOR_TO_IDX[trigger_color])
+                target_color = getattr(cell, 'target_color', None)
+                if target_color in COLOR_TO_IDX:
+                    kill_buttons[kb_count, 4] = float(COLOR_TO_IDX[target_color])
+                kb_count += 1
+            
+            elif cell_type == 'pauseswitch' and ps_count < max_pause_switches:
+                # PauseSwitch: position (2), enabled (1), is_on (1), toggle_color (1), target_color (1)
+                pause_switches[ps_count, 0] = float(x)
+                pause_switches[ps_count, 1] = float(y)
+                pause_switches[ps_count, 2] = 1.0 if getattr(cell, 'enabled', True) else 0.0
+                pause_switches[ps_count, 3] = 1.0 if getattr(cell, 'is_on', False) else 0.0
+                toggle_color = getattr(cell, 'toggle_color', None)
+                if toggle_color in COLOR_TO_IDX:
+                    pause_switches[ps_count, 4] = float(COLOR_TO_IDX[toggle_color])
+                target_color = getattr(cell, 'target_color', None)
+                if target_color in COLOR_TO_IDX:
+                    pause_switches[ps_count, 5] = float(COLOR_TO_IDX[target_color])
+                ps_count += 1
+            
+            elif cell_type == 'disablingswitch' and ds_count < max_disabling_switches:
+                # DisablingSwitch: position (2), enabled (1), is_on (1), toggle_color (1), target_type (1)
+                disabling_switches[ds_count, 0] = float(x)
+                disabling_switches[ds_count, 1] = float(y)
+                disabling_switches[ds_count, 2] = 1.0 if getattr(cell, 'enabled', True) else 0.0
+                disabling_switches[ds_count, 3] = 1.0 if getattr(cell, 'is_on', False) else 0.0
+                toggle_color = getattr(cell, 'toggle_color', None)
+                if toggle_color in COLOR_TO_IDX:
+                    disabling_switches[ds_count, 4] = float(COLOR_TO_IDX[toggle_color])
+                target_type = getattr(cell, 'target_type', None)
+                if target_type in OBJECT_TYPE_TO_CHANNEL:
+                    disabling_switches[ds_count, 5] = float(OBJECT_TYPE_TO_CHANNEL[target_type])
+                ds_count += 1
+            
+            elif cell_type == 'controlbutton' and cb_count < max_control_buttons:
+                # ControlButton: position (2), enabled (1), trigger_color (1), target_color (1), forced_action (1), awaiting_action (1)
+                control_buttons[cb_count, 0] = float(x)
+                control_buttons[cb_count, 1] = float(y)
+                control_buttons[cb_count, 2] = 1.0 if getattr(cell, 'enabled', True) else 0.0
+                trigger_color = getattr(cell, 'trigger_color', None)
+                if trigger_color in COLOR_TO_IDX:
+                    control_buttons[cb_count, 3] = float(COLOR_TO_IDX[trigger_color])
+                # ControlButton has controlled_color instead of target_color
+                controlled_color = getattr(cell, 'controlled_color', None)
+                if controlled_color in COLOR_TO_IDX:
+                    control_buttons[cb_count, 4] = float(COLOR_TO_IDX[controlled_color])
+                triggered_action = getattr(cell, 'triggered_action', None)
+                if triggered_action is not None:
+                    control_buttons[cb_count, 5] = float(triggered_action)
+                else:
+                    control_buttons[cb_count, 5] = -1.0  # Not programmed
+                # _awaiting_action - the key transient state that persists across steps
+                control_buttons[cb_count, 6] = 1.0 if getattr(cell, '_awaiting_action', False) else 0.0
+                cb_count += 1
+    
+    return kill_buttons, pause_switches, disabling_switches, control_buttons
+
+
+def _extract_global_world_features(
+    world_model: Any,
+    device: str = 'cpu'
+) -> torch.Tensor:
+    """
+    Extract global world parameters that influence transitions.
+    
+    Args:
+        world_model: Environment with global parameters
+        device: Torch device
+    
+    Returns:
+        global_features: (4,) tensor containing:
+            - stumble_prob
+            - magic_entry_prob  
+            - magic_solidify_prob
+            - reserved (0)
+    """
+    global_features = torch.zeros(NUM_GLOBAL_WORLD_FEATURES, device=device)
+    
+    if world_model is None:
+        return global_features
+    
+    # Try to get from world_model attributes
+    global_features[0] = float(getattr(world_model, 'stumble_prob', 0.0))
+    global_features[1] = float(getattr(world_model, 'magic_entry_prob', 0.0))
+    global_features[2] = float(getattr(world_model, 'magic_solidify_prob', 0.0))
+    # global_features[3] reserved for future use
+    
+    return global_features
+
+
+def _extract_remaining_time(
+    state: Tuple,
+    world_model: Any
+) -> int:
+    """
+    Extract remaining time steps from state.
+    
+    Args:
+        state: State tuple (step_count, agent_states, mobile_objects, mutable_objects)
+        world_model: Environment with max_steps attribute
+    
+    Returns:
+        remaining_time: max_steps - step_count (raw integer, NOT normalized)
+    """
+    step_count = state[0]
+    max_steps = getattr(world_model, 'max_steps', 100) if world_model else 100
+    return max_steps - step_count
 
 
 class ReplayBuffer:

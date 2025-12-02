@@ -113,12 +113,15 @@ Complex interactive objects are encoded in lists with configurable maximum count
 - toggle_color (1): color index (integer)
 - target_type (1): object type index (integer)
 
-### ControlButton (6 features each)
+### ControlButton (7 features each)
 - position (2): raw x, y coordinates
 - enabled (1): 0 or 1
 - trigger_color (1): color index (integer)
 - target_color (1): color index (integer)
-- forced_action (1): action index (integer)
+- forced_action (1): action index (integer), -1 if not programmed
+- awaiting_action (1): 0 or 1 (whether button is waiting for programming from controlled agent)
+
+Note: The `awaiting_action` flag persists across time steps. When a controlled_color agent toggles a ControlButton, the button enters programming mode (`awaiting_action=1`) until the agent's next action is recorded.
 
 ## GoalEncoder Features
 
@@ -176,3 +179,11 @@ control_buttons: (2 × 6,)  # 2 buttons × 6 features
 # GoalEncoder
 goal_coords: (4,)  # e.g., (7, 8, 7, 8) for point goal
 ```
+
+## Known Limitations and Future Work
+
+### Box.contains
+Currently, boxes are encoded only by their grid presence (channel 2). The contents of boxes (what item is inside) are not encoded. If your environment uses boxes with contents that affect gameplay, a list-based encoder for Box objects may be needed in the future, similar to the InteractiveObjectEncoder pattern.
+
+### Extensibility
+When adding new object types or agent features to the multigrid environment, the encoder architecture may need to be extended accordingly. See the maintenance note in `multigrid.py` for details on keeping encoders synchronized with environment features.
