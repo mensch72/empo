@@ -672,25 +672,87 @@ def get_boltzmann_action(
     return action
 
 
+def render_with_goal_overlay(
+    env: RandomMultigridEnv,
+    first_human_idx: int,
+    first_human_goal: Tuple[int, int],
+    tile_size: int = 32
+) -> np.ndarray:
+    """
+    Render the environment with goal and human indicators.
+    
+    - Blue circle around the first human agent
+    - Blue star marking the first human's goal
+    """
+    img = env.render(mode='rgb_array', highlight=False)
+    
+    fig, ax = plt.subplots(figsize=(8, 8))
+    ax.imshow(img)
+    
+    # Mark the first human's goal with a blue star
+    if first_human_goal:
+        gx = first_human_goal[0] * tile_size + tile_size // 2
+        gy = first_human_goal[1] * tile_size + tile_size // 2
+        ax.plot(gx, gy, marker='*', markersize=20, color='blue',
+                markeredgecolor='white', markeredgewidth=2)
+    
+    # Mark the first human with a blue circle/ring
+    state = env.get_state()
+    _, agent_states, _, _ = state
+    if first_human_idx < len(agent_states):
+        human_pos = agent_states[first_human_idx]
+        hx = int(human_pos[0]) * tile_size + tile_size // 2
+        hy = int(human_pos[1]) * tile_size + tile_size // 2
+        # Draw a blue ring around the first human
+        ring = plt.Circle((hx, hy), tile_size * 0.45, fill=False,
+                          color='blue', linewidth=3)
+        ax.add_patch(ring)
+        # Add "H1" label
+        ax.text(hx, hy - tile_size * 0.35, 'H1', ha='center', va='center',
+                fontsize=9, fontweight='bold', color='blue',
+                bbox=dict(boxstyle='round,pad=0.1', facecolor='white', alpha=0.8))
+    
+    ax.axis('off')
+    ax.set_xlim(0, img.shape[1])
+    ax.set_ylim(img.shape[0], 0)
+    
+    fig.tight_layout(pad=0)
+    fig.canvas.draw()
+    
+    buf = np.asarray(fig.canvas.buffer_rgba())
+    buf = buf[:, :, :3]
+    
+    plt.close(fig)
+    return buf
+
+
 def run_rollout(
     env: RandomMultigridEnv,
     q_network: QNetwork,
     human_agent_indices: List[int],
     human_goals: Dict[int, Tuple[int, int]],
     robot_index: int,
+    first_human_idx: int,
     beta: float = 100.0,
     device: str = 'cpu'
 ) -> List[np.ndarray]:
-    """Run a single rollout and return frames for animation."""
+    """
+    Run a single rollout and return frames for animation.
+    
+    Visualization includes:
+    - Blue circle around the first human agent (H1)
+    - Blue star marking the first human's goal
+    """
     env.reset()
     frames = []
     num_actions = env.action_space.n
+    first_human_goal = human_goals.get(first_human_idx)
     
     for step in range(env.max_steps):
         state = env.get_state()
         
-        # Render current frame
-        frame = env.render(mode='rgb_array', highlight=False)
+        # Render current frame with goal overlay
+        frame = render_with_goal_overlay(env, first_human_idx, first_human_goal)
         frames.append(frame)
         
         # Get actions for all agents
@@ -714,7 +776,7 @@ def run_rollout(
             break
     
     # Final frame
-    frame = env.render(mode='rgb_array', highlight=False)
+    frame = render_with_goal_overlay(env, first_human_idx, first_human_goal)
     frames.append(frame)
     
     return frames
@@ -723,7 +785,9 @@ def run_rollout(
 def create_rollout_movie(
     all_frames: List[List[np.ndarray]],
     env_indices: List[int],
-    output_path: str
+    output_path: str,
+    num_rollouts: int,
+    num_envs: int
 ):
     """Create a movie from rollout frames."""
     print(f"Creating movie with {len(all_frames)} rollouts...")
@@ -750,8 +814,8 @@ def create_rollout_movie(
         rollout_idx, step_idx, env_idx = rollout_info[frame_idx]
         im.set_array(frames[frame_idx])
         title.set_text(
-            f'Rollout {rollout_idx + 1}/{NUM_ROLLOUTS} | Env {env_idx + 1}/{NUM_ENVS} | Step {step_idx}\n'
-            f'Humans (yellow): learned Boltzmann policy | Robot (grey): random policy'
+            f'Rollout {rollout_idx + 1}/{num_rollouts} | Env {env_idx + 1}/{num_envs} | Step {step_idx}\n'
+            f'★ = H1 goal | ○ = H1 agent | Humans: learned policy | Robot: random'
         )
         return [im, title]
     
@@ -858,6 +922,9 @@ def main():
     all_frames = []
     env_indices = []
     
+    # First human is the one whose goal we'll visualize
+    first_human_idx = human_agent_indices[0] if human_agent_indices else 0
+    
     for rollout_idx in range(num_rollouts):
         # Select a random environment for this rollout
         env_idx = rollout_idx % len(environments)
@@ -876,7 +943,8 @@ def main():
             else:
                 human_goals[h_idx] = (env.width // 2, env.height // 2)
         
-        print(f"  Rollout {rollout_idx + 1}: Env {env_idx + 1}, Goals: {list(human_goals.values())}")
+        first_human_goal = human_goals.get(first_human_idx, None)
+        print(f"  Rollout {rollout_idx + 1}: Env {env_idx + 1}, H1 Goal: {first_human_goal}")
         
         frames = run_rollout(
             env=env,
@@ -884,6 +952,7 @@ def main():
             human_agent_indices=human_agent_indices,
             human_goals=human_goals,
             robot_index=robot_index,
+            first_human_idx=first_human_idx,
             beta=100.0,
             device=device
         )
@@ -895,7 +964,7 @@ def main():
     
     # Create movie
     movie_path = os.path.join(output_dir, 'random_multigrid_ensemble_demo.mp4')
-    create_rollout_movie(all_frames, env_indices, movie_path)
+    create_rollout_movie(all_frames, env_indices, movie_path, num_rollouts, num_envs)
     
     print()
     print("=" * 70)
