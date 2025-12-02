@@ -55,6 +55,34 @@ from empo.human_policy_prior import HumanPolicyPrior
 from empo.possible_goal import PossibleGoal, PossibleGoalGenerator, PossibleGoalSampler
 
 
+"""
+Object type to channel index mapping for grid encoding.
+
+This defines a consistent mapping from object types (wall, door, key, etc.)
+to channel indices, used during both training and inference.
+"""
+OBJECT_TYPE_TO_CHANNEL = {
+    'wall': 0,
+    'magicwall': 0,     # Treat as wall variant
+    'door': 1,
+    'key': 2,
+    'ball': 3,
+    'box': 4,
+    'goal': 5,
+    'lava': 6,
+    'block': 7,
+    'rock': 8,
+    'unsteadyground': 9,
+    'switch': 10,
+    'killbutton': 11,
+    'pauseswitch': 12,
+    'disablingswitch': 13,
+    'controlbutton': 14,
+    'floor': 15,
+}
+NUM_OBJECT_TYPE_CHANNELS = 16  # Total object type channels
+
+
 class StateEncoder(nn.Module):
     """
     Encodes grid-based multigrid states into feature vectors.
@@ -68,10 +96,15 @@ class StateEncoder(nn.Module):
     The encoder converts this into a 2D grid representation and applies
     convolutional layers to extract spatial features.
     
+    Input channels:
+        - Object type channels (walls, doors, lava, etc.): NUM_OBJECT_TYPE_CHANNELS
+        - Per-agent position channels: num_agents channels
+        - "Other humans" channel: 1 channel (marks all human agents other than the query agent)
+    
     Args:
         grid_width: Width of the grid environment.
         grid_height: Height of the grid environment.
-        num_object_types: Number of distinct object types to encode.
+        num_object_types: Number of distinct object types to encode (default: NUM_OBJECT_TYPE_CHANNELS).
         num_agents: Total number of agents in the environment.
         feature_dim: Output feature dimension (default: 128).
     """
@@ -80,7 +113,7 @@ class StateEncoder(nn.Module):
         self, 
         grid_width: int, 
         grid_height: int, 
-        num_object_types: int = 8,
+        num_object_types: int = NUM_OBJECT_TYPE_CHANNELS,
         num_agents: int = 2,
         feature_dim: int = 128
     ):
@@ -91,8 +124,9 @@ class StateEncoder(nn.Module):
         self.num_agents = num_agents
         self.feature_dim = feature_dim
         
-        # Input channels: object type one-hot + agent positions (one channel per agent)
-        in_channels = num_object_types + num_agents
+        # Input channels: object type one-hot + agent positions (one channel per agent) + 1 "other humans" channel
+        # The "other humans" channel marks all human agents except the query agent
+        in_channels = num_object_types + num_agents + 1  # +1 for "other humans" channel
         
         # CNN for spatial features
         self.conv = nn.Sequential(
@@ -540,40 +574,96 @@ class NeuralHumanPolicyPrior(HumanPolicyPrior):
         if self.phi_network:
             self.phi_network.eval()
     
-    def _state_to_tensors(self, state) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _state_to_tensors(self, state, query_agent_index: Optional[int] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Convert a state tuple to tensor representation.
+        Convert a state tuple to tensor representation with full grid encoding.
+        
+        This method populates:
+        1. Object-type channels (walls, doors, lava, etc.) from the world grid
+        2. Per-agent position channels
+        3. "Other humans" channel (all human agents except query_agent_index)
         
         Args:
             state: State tuple (step_count, agent_states, mobile_objects, mutable_objects).
+            query_agent_index: The index of the agent making the query. If provided,
+                              this agent is excluded from the "other humans" channel.
         
         Returns:
             Tuple of (state_tensor, step_count_tensor).
         """
         step_count, agent_states, mobile_objects, mutable_objects = state
         
-        # Create grid tensor (simplified - actual implementation would be more complex)
-        # This is a placeholder - real implementation needs to match environment specifics
         num_channels = self.q_network.state_encoder.conv[0].in_channels
         H = self.q_network.state_encoder.grid_height
         W = self.q_network.state_encoder.grid_width
+        num_object_types = self.q_network.state_encoder.num_object_types
+        num_agents = self.q_network.state_encoder.num_agents
         
         grid_tensor = torch.zeros(1, num_channels, H, W, device=self.device)
         
-        # Encode agent positions
+        # 1. Encode object-type channels from the persistent world grid
+        if hasattr(self.world_model, 'grid') and self.world_model.grid is not None:
+            for y in range(H):
+                for x in range(W):
+                    cell = self.world_model.grid.get(x, y)
+                    if cell is not None:
+                        cell_type = getattr(cell, 'type', None)
+                        if cell_type is not None and cell_type in OBJECT_TYPE_TO_CHANNEL:
+                            channel_idx = OBJECT_TYPE_TO_CHANNEL[cell_type]
+                            if channel_idx < num_object_types:
+                                grid_tensor[0, channel_idx, y, x] = 1.0
+        
+        # 2. Encode mobile objects (if any) into their respective channels
+        if mobile_objects:
+            for obj_type, obj_color, obj_x, obj_y in mobile_objects:
+                if obj_type in OBJECT_TYPE_TO_CHANNEL:
+                    channel_idx = OBJECT_TYPE_TO_CHANNEL[obj_type]
+                    if channel_idx < num_object_types and 0 <= obj_x < W and 0 <= obj_y < H:
+                        grid_tensor[0, channel_idx, int(obj_y), int(obj_x)] = 1.0
+        
+        # 3. Encode agent positions (per-agent channels)
         for i, agent_state in enumerate(agent_states):
-            if i < self.q_network.state_encoder.num_agents:
+            if i < num_agents:
                 x, y = int(agent_state[0]), int(agent_state[1])
                 if 0 <= x < W and 0 <= y < H:
-                    # Agent channel
-                    channel_idx = self.q_network.state_encoder.num_object_types + i
+                    channel_idx = num_object_types + i
                     grid_tensor[0, channel_idx, y, x] = 1.0
+        
+        # 4. Encode "other humans" channel (anonymous channel for all other human agents)
+        other_humans_channel_idx = num_object_types + num_agents  # Last channel
+        for i, agent_state in enumerate(agent_states):
+            # Skip the query agent (if specified)
+            if query_agent_index is not None and i == query_agent_index:
+                continue
+            # Only include human agents (in human_agent_indices)
+            if i in self.human_agent_indices:
+                x, y = int(agent_state[0]), int(agent_state[1])
+                if 0 <= x < W and 0 <= y < H:
+                    grid_tensor[0, other_humans_channel_idx, y, x] = 1.0
         
         # Normalize step count
         max_steps = getattr(self.world_model, 'max_steps', 100)
         step_tensor = torch.tensor([[step_count / max_steps]], device=self.device)
         
         return grid_tensor, step_tensor
+    
+    def get_human_positions_by_id(self, state) -> Dict[int, Tuple[int, int]]:
+        """
+        Get human agent positions indexed by agent ID.
+        
+        Args:
+            state: State tuple (step_count, agent_states, mobile_objects, mutable_objects).
+        
+        Returns:
+            Dictionary mapping agent index to (x, y) position for all human agents.
+        """
+        _, agent_states, _, _ = state
+        positions = {}
+        for agent_idx in self.human_agent_indices:
+            if agent_idx < len(agent_states):
+                agent_state = agent_states[agent_idx]
+                positions[agent_idx] = (int(agent_state[0]), int(agent_state[1]))
+        return positions
     
     def _agent_to_tensors(
         self, 
@@ -650,7 +740,7 @@ class NeuralHumanPolicyPrior(HumanPolicyPrior):
         with torch.no_grad():
             if possible_goal is not None:
                 # Goal-conditioned policy using Q-network
-                state_tensor, step_tensor = self._state_to_tensors(state)
+                state_tensor, step_tensor = self._state_to_tensors(state, query_agent_index=human_agent_index)
                 position, direction, agent_idx = self._agent_to_tensors(state, human_agent_index)
                 goal_tensor = self._goal_to_tensor(possible_goal)
                 
@@ -665,7 +755,7 @@ class NeuralHumanPolicyPrior(HumanPolicyPrior):
             
             elif self.phi_network is not None:
                 # Use direct marginal network
-                state_tensor, step_tensor = self._state_to_tensors(state)
+                state_tensor, step_tensor = self._state_to_tensors(state, query_agent_index=human_agent_index)
                 position, direction, agent_idx = self._agent_to_tensors(state, human_agent_index)
                 
                 policy = self.phi_network(
@@ -676,7 +766,7 @@ class NeuralHumanPolicyPrior(HumanPolicyPrior):
             
             elif self.goal_generator is not None:
                 # Compute marginal by exact enumeration over goals
-                state_tensor, step_tensor = self._state_to_tensors(state)
+                state_tensor, step_tensor = self._state_to_tensors(state, query_agent_index=human_agent_index)
                 position, direction, agent_idx = self._agent_to_tensors(state, human_agent_index)
                 
                 total_policy = np.zeros(self.q_network.num_actions)
@@ -697,7 +787,7 @@ class NeuralHumanPolicyPrior(HumanPolicyPrior):
             
             elif self.goal_sampler is not None:
                 # Compute marginal by Monte Carlo sampling
-                state_tensor, step_tensor = self._state_to_tensors(state)
+                state_tensor, step_tensor = self._state_to_tensors(state, query_agent_index=human_agent_index)
                 position, direction, agent_idx = self._agent_to_tensors(state, human_agent_index)
                 
                 total_policy = np.zeros(self.q_network.num_actions)
@@ -731,12 +821,20 @@ def _state_to_tensors_static(
     grid_width: int,
     grid_height: int,
     num_agents: int,
-    num_object_types: int = 8,
+    num_object_types: int = NUM_OBJECT_TYPE_CHANNELS,
     max_steps: int = 100,
-    device: str = 'cpu'
+    device: str = 'cpu',
+    world_model: Any = None,
+    human_agent_indices: Optional[List[int]] = None,
+    query_agent_index: Optional[int] = None
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Convert a state tuple to tensor representation.
+    Convert a state tuple to tensor representation with full grid encoding.
+    
+    This function populates:
+    1. Object-type channels (walls, doors, lava, etc.) from the world grid
+    2. Per-agent position channels
+    3. "Other humans" channel (all human agents except query_agent_index)
     
     Args:
         state: State tuple (step_count, agent_states, mobile_objects, mutable_objects).
@@ -746,22 +844,59 @@ def _state_to_tensors_static(
         num_object_types: Number of object types for encoding.
         max_steps: Maximum steps for normalization.
         device: Torch device.
+        world_model: Optional world model for accessing persistent grid objects.
+        human_agent_indices: Optional list of human agent indices for "other humans" channel.
+        query_agent_index: Optional index of query agent to exclude from "other humans".
     
     Returns:
         Tuple of (grid_tensor, step_count_tensor).
     """
     step_count, agent_states, mobile_objects, mutable_objects = state
     
-    num_channels = num_object_types + num_agents
+    # +1 for "other humans" channel
+    num_channels = num_object_types + num_agents + 1
     grid_tensor = torch.zeros(1, num_channels, grid_height, grid_width, device=device)
     
-    # Encode agent positions
+    # 1. Encode object-type channels from the persistent world grid
+    if world_model is not None and hasattr(world_model, 'grid') and world_model.grid is not None:
+        for y in range(grid_height):
+            for x in range(grid_width):
+                cell = world_model.grid.get(x, y)
+                if cell is not None:
+                    cell_type = getattr(cell, 'type', None)
+                    if cell_type is not None and cell_type in OBJECT_TYPE_TO_CHANNEL:
+                        channel_idx = OBJECT_TYPE_TO_CHANNEL[cell_type]
+                        if channel_idx < num_object_types:
+                            grid_tensor[0, channel_idx, y, x] = 1.0
+    
+    # 2. Encode mobile objects (if any) into their respective channels
+    if mobile_objects:
+        for obj_type, obj_color, obj_x, obj_y in mobile_objects:
+            if obj_type in OBJECT_TYPE_TO_CHANNEL:
+                channel_idx = OBJECT_TYPE_TO_CHANNEL[obj_type]
+                if channel_idx < num_object_types and 0 <= obj_x < grid_width and 0 <= obj_y < grid_height:
+                    grid_tensor[0, channel_idx, int(obj_y), int(obj_x)] = 1.0
+    
+    # 3. Encode agent positions (per-agent channels)
     for i, agent_state in enumerate(agent_states):
         if i < num_agents:
             x, y = int(agent_state[0]), int(agent_state[1])
             if 0 <= x < grid_width and 0 <= y < grid_height:
                 channel_idx = num_object_types + i
                 grid_tensor[0, channel_idx, y, x] = 1.0
+    
+    # 4. Encode "other humans" channel (anonymous channel for all other human agents)
+    if human_agent_indices is not None:
+        other_humans_channel_idx = num_object_types + num_agents  # Last channel
+        for i, agent_state in enumerate(agent_states):
+            # Skip the query agent (if specified)
+            if query_agent_index is not None and i == query_agent_index:
+                continue
+            # Only include human agents
+            if i in human_agent_indices:
+                x, y = int(agent_state[0]), int(agent_state[1])
+                if 0 <= x < grid_width and 0 <= y < grid_height:
+                    grid_tensor[0, other_humans_channel_idx, y, x] = 1.0
     
     # Normalize step count
     step_tensor = torch.tensor([[step_count / max_steps]], device=device, dtype=torch.float32)
@@ -852,12 +987,19 @@ def _batch_states_to_tensors(
     grid_width: int,
     grid_height: int,
     num_agents: int,
-    num_object_types: int = 8,
+    num_object_types: int = NUM_OBJECT_TYPE_CHANNELS,
     max_steps: int = 100,
-    device: str = 'cpu'
+    device: str = 'cpu',
+    world_model: Any = None,
+    human_agent_indices: Optional[List[int]] = None
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Convert a batch of transitions to batched tensor representations.
+    
+    This function populates:
+    1. Object-type channels (walls, doors, lava, etc.) from the world grid
+    2. Per-agent position channels
+    3. "Other humans" channel (all human agents except the query agent for each transition)
     
     Args:
         transitions: List of transition dictionaries with 'state', 'human_idx', 'goal' keys.
@@ -867,6 +1009,8 @@ def _batch_states_to_tensors(
         num_object_types: Number of object types for encoding.
         max_steps: Maximum steps for normalization.
         device: Torch device.
+        world_model: Optional world model for accessing persistent grid objects.
+        human_agent_indices: Optional list of human agent indices for "other humans" channel.
     
     Returns:
         Tuple of batched tensors:
@@ -878,7 +1022,8 @@ def _batch_states_to_tensors(
             - goal_coords: (batch, 4)
     """
     batch_size = len(transitions)
-    num_channels = num_object_types + num_agents
+    # +1 for "other humans" channel
+    num_channels = num_object_types + num_agents + 1
     
     # Pre-allocate tensors
     grid_tensors = torch.zeros(batch_size, num_channels, grid_height, grid_width, device=device)
@@ -888,20 +1033,59 @@ def _batch_states_to_tensors(
     agent_indices = torch.zeros(batch_size, dtype=torch.long, device=device)
     goal_coords = torch.zeros(batch_size, 4, device=device)
     
+    # Pre-compute grid objects (shared across batch since grid is static)
+    grid_objects_tensor = None
+    if world_model is not None and hasattr(world_model, 'grid') and world_model.grid is not None:
+        grid_objects_tensor = torch.zeros(num_object_types, grid_height, grid_width, device=device)
+        for y in range(grid_height):
+            for x in range(grid_width):
+                cell = world_model.grid.get(x, y)
+                if cell is not None:
+                    cell_type = getattr(cell, 'type', None)
+                    if cell_type is not None and cell_type in OBJECT_TYPE_TO_CHANNEL:
+                        channel_idx = OBJECT_TYPE_TO_CHANNEL[cell_type]
+                        if channel_idx < num_object_types:
+                            grid_objects_tensor[channel_idx, y, x] = 1.0
+    
     for i, t in enumerate(transitions):
         state = t['state']
         human_idx = t['human_idx']
         goal = t['goal']
         
-        step_count, agent_states, _, _ = state
+        step_count, agent_states, mobile_objects, _ = state
         
-        # Encode agent positions in grid
+        # 1. Copy grid object channels (if precomputed)
+        if grid_objects_tensor is not None:
+            grid_tensors[i, :num_object_types] = grid_objects_tensor
+        
+        # 2. Encode mobile objects (if any)
+        if mobile_objects:
+            for obj_type, obj_color, obj_x, obj_y in mobile_objects:
+                if obj_type in OBJECT_TYPE_TO_CHANNEL:
+                    channel_idx = OBJECT_TYPE_TO_CHANNEL[obj_type]
+                    if channel_idx < num_object_types and 0 <= obj_x < grid_width and 0 <= obj_y < grid_height:
+                        grid_tensors[i, channel_idx, int(obj_y), int(obj_x)] = 1.0
+        
+        # 3. Encode agent positions in grid (per-agent channels)
         for j, agent_state in enumerate(agent_states):
             if j < num_agents:
                 x, y = int(agent_state[0]), int(agent_state[1])
                 if 0 <= x < grid_width and 0 <= y < grid_height:
                     channel_idx = num_object_types + j
                     grid_tensors[i, channel_idx, y, x] = 1.0
+        
+        # 4. Encode "other humans" channel
+        if human_agent_indices is not None:
+            other_humans_channel_idx = num_object_types + num_agents
+            for j, agent_state in enumerate(agent_states):
+                # Skip the query agent
+                if j == human_idx:
+                    continue
+                # Only include human agents
+                if j in human_agent_indices:
+                    x, y = int(agent_state[0]), int(agent_state[1])
+                    if 0 <= x < grid_width and 0 <= y < grid_height:
+                        grid_tensors[i, other_humans_channel_idx, y, x] = 1.0
         
         # Step count normalized
         step_tensors[i, 0] = step_count / max_steps
@@ -932,9 +1116,11 @@ def _batch_next_states_to_tensors(
     grid_width: int,
     grid_height: int,
     num_agents: int,
-    num_object_types: int = 8,
+    num_object_types: int = NUM_OBJECT_TYPE_CHANNELS,
     max_steps: int = 100,
-    device: str = 'cpu'
+    device: str = 'cpu',
+    world_model: Any = None,
+    human_agent_indices: Optional[List[int]] = None
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Convert next states from a batch of transitions to batched tensor representations.
@@ -947,6 +1133,8 @@ def _batch_next_states_to_tensors(
         num_object_types: Number of object types for encoding.
         max_steps: Maximum steps for normalization.
         device: Torch device.
+        world_model: Optional world model for accessing persistent grid objects.
+        human_agent_indices: Optional list of human agent indices for "other humans" channel.
     
     Returns:
         Tuple of batched tensors for next states:
@@ -957,7 +1145,8 @@ def _batch_next_states_to_tensors(
             - agent_indices: (batch,)
     """
     batch_size = len(transitions)
-    num_channels = num_object_types + num_agents
+    # +1 for "other humans" channel
+    num_channels = num_object_types + num_agents + 1
     
     # Pre-allocate tensors
     grid_tensors = torch.zeros(batch_size, num_channels, grid_height, grid_width, device=device)
@@ -966,19 +1155,56 @@ def _batch_next_states_to_tensors(
     directions = torch.zeros(batch_size, 4, device=device)
     agent_indices = torch.zeros(batch_size, dtype=torch.long, device=device)
     
+    # Pre-compute grid objects (shared across batch since grid is static)
+    grid_objects_tensor = None
+    if world_model is not None and hasattr(world_model, 'grid') and world_model.grid is not None:
+        grid_objects_tensor = torch.zeros(num_object_types, grid_height, grid_width, device=device)
+        for y in range(grid_height):
+            for x in range(grid_width):
+                cell = world_model.grid.get(x, y)
+                if cell is not None:
+                    cell_type = getattr(cell, 'type', None)
+                    if cell_type is not None and cell_type in OBJECT_TYPE_TO_CHANNEL:
+                        channel_idx = OBJECT_TYPE_TO_CHANNEL[cell_type]
+                        if channel_idx < num_object_types:
+                            grid_objects_tensor[channel_idx, y, x] = 1.0
+    
     for i, t in enumerate(transitions):
         state = t['next_state']
         human_idx = t['human_idx']
         
-        step_count, agent_states, _, _ = state
+        step_count, agent_states, mobile_objects, _ = state
         
-        # Encode agent positions in grid
+        # 1. Copy grid object channels (if precomputed)
+        if grid_objects_tensor is not None:
+            grid_tensors[i, :num_object_types] = grid_objects_tensor
+        
+        # 2. Encode mobile objects (if any)
+        if mobile_objects:
+            for obj_type, obj_color, obj_x, obj_y in mobile_objects:
+                if obj_type in OBJECT_TYPE_TO_CHANNEL:
+                    channel_idx = OBJECT_TYPE_TO_CHANNEL[obj_type]
+                    if channel_idx < num_object_types and 0 <= obj_x < grid_width and 0 <= obj_y < grid_height:
+                        grid_tensors[i, channel_idx, int(obj_y), int(obj_x)] = 1.0
+        
+        # 3. Encode agent positions in grid
         for j, agent_state in enumerate(agent_states):
             if j < num_agents:
                 x, y = int(agent_state[0]), int(agent_state[1])
                 if 0 <= x < grid_width and 0 <= y < grid_height:
                     channel_idx = num_object_types + j
                     grid_tensors[i, channel_idx, y, x] = 1.0
+        
+        # 4. Encode "other humans" channel
+        if human_agent_indices is not None:
+            other_humans_channel_idx = num_object_types + num_agents
+            for j, agent_state in enumerate(agent_states):
+                if j == human_idx:
+                    continue
+                if j in human_agent_indices:
+                    x, y = int(agent_state[0]), int(agent_state[1])
+                    if 0 <= x < grid_width and 0 <= y < grid_height:
+                        grid_tensors[i, other_humans_channel_idx, y, x] = 1.0
         
         # Step count normalized
         step_tensors[i, 0] = step_count / max_steps
@@ -1663,10 +1889,14 @@ def train_neural_policy_prior(
                 q_optimizer.zero_grad()
                 
                 # Convert batch to tensors using vectorized helper
+                # Pass world_model and human_agent_indices for full grid encoding
                 (grid_tensors, step_tensors, positions, directions, 
                  agent_indices, goal_coords) = _batch_states_to_tensors(
                     batch, grid_width, grid_height, num_agents,
-                    max_steps=max_steps, device=device
+                    num_object_types=NUM_OBJECT_TYPE_CHANNELS,
+                    max_steps=max_steps, device=device,
+                    world_model=world_model,
+                    human_agent_indices=human_agent_indices
                 )
                 
                 # Single batched forward pass for current states
@@ -1701,7 +1931,10 @@ def train_neural_policy_prior(
                         (next_grids, next_steps, next_positions, next_directions,
                          next_agent_indices) = _batch_next_states_to_tensors(
                             non_terminal_batch, grid_width, grid_height, num_agents,
-                            max_steps=max_steps, device=device
+                            num_object_types=NUM_OBJECT_TYPE_CHANNELS,
+                            max_steps=max_steps, device=device,
+                            world_model=world_model,
+                            human_agent_indices=human_agent_indices
                         )
                         
                         # Get goal coords for non-terminal transitions
@@ -1753,10 +1986,14 @@ def train_neural_policy_prior(
                 phi_optimizer.zero_grad()
                 
                 # Convert batch to tensors using vectorized helper
+                # Pass world_model and human_agent_indices for full grid encoding
                 (grid_tensors, step_tensors, positions, directions, 
                  agent_indices, goal_coords) = _batch_states_to_tensors(
                     batch, grid_width, grid_height, num_agents,
-                    max_steps=max_steps, device=device
+                    num_object_types=NUM_OBJECT_TYPE_CHANNELS,
+                    max_steps=max_steps, device=device,
+                    world_model=world_model,
+                    human_agent_indices=human_agent_indices
                 )
                 
                 # Get target policy from Q-network (detached) - single batched forward pass

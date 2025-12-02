@@ -18,6 +18,8 @@ Main components:
     - NeuralHumanPolicyPrior: HumanPolicyPrior implementation using neural networks
     - train_neural_policy_prior: Training function for the neural networks
     - PathDistanceCalculator: Computes path-based distances for reward shaping
+    - OBJECT_TYPE_TO_CHANNEL: Mapping from object types to channel indices
+    - NUM_OBJECT_TYPE_CHANNELS: Total number of object type channels
 
 Mathematical background:
     The networks approximate:
@@ -45,6 +47,9 @@ Example usage:
 """
 
 from empo.nn_based.neural_policy_prior import (
+    # Constants for grid encoding
+    OBJECT_TYPE_TO_CHANNEL,
+    NUM_OBJECT_TYPE_CHANNELS,
     # Encoders
     StateEncoder,
     GoalEncoder,
@@ -62,6 +67,9 @@ from empo.nn_based.neural_policy_prior import (
 )
 
 __all__ = [
+    # Constants
+    "OBJECT_TYPE_TO_CHANNEL",
+    "NUM_OBJECT_TYPE_CHANNELS",
     # Encoders
     "StateEncoder",
     "GoalEncoder", 
