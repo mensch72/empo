@@ -614,8 +614,12 @@ class NeuralHumanPolicyPrior(HumanPolicyPrior):
                                 grid_tensor[0, channel_idx, y, x] = 1.0
         
         # 2. Encode mobile objects (if any) into their respective channels
+        # Mobile objects format: (obj_type, x, y) - no color
         if mobile_objects:
-            for obj_type, obj_color, obj_x, obj_y in mobile_objects:
+            for mobile_obj in mobile_objects:
+                obj_type = mobile_obj[0]
+                obj_x = mobile_obj[1]
+                obj_y = mobile_obj[2]
                 if obj_type in OBJECT_TYPE_TO_CHANNEL:
                     channel_idx = OBJECT_TYPE_TO_CHANNEL[obj_type]
                     if channel_idx < num_object_types and 0 <= obj_x < W and 0 <= obj_y < H:
@@ -870,8 +874,12 @@ def _state_to_tensors_static(
                             grid_tensor[0, channel_idx, y, x] = 1.0
     
     # 2. Encode mobile objects (if any) into their respective channels
+    # Mobile objects format: (obj_type, x, y) - no color
     if mobile_objects:
-        for obj_type, obj_color, obj_x, obj_y in mobile_objects:
+        for mobile_obj in mobile_objects:
+            obj_type = mobile_obj[0]
+            obj_x = mobile_obj[1]
+            obj_y = mobile_obj[2]
             if obj_type in OBJECT_TYPE_TO_CHANNEL:
                 channel_idx = OBJECT_TYPE_TO_CHANNEL[obj_type]
                 if channel_idx < num_object_types and 0 <= obj_x < grid_width and 0 <= obj_y < grid_height:
@@ -1059,8 +1067,12 @@ def _batch_states_to_tensors(
             grid_tensors[i, :num_object_types] = grid_objects_tensor
         
         # 2. Encode mobile objects (if any)
+        # Mobile objects format: (obj_type, x, y) - no color
         if mobile_objects:
-            for obj_type, obj_color, obj_x, obj_y in mobile_objects:
+            for mobile_obj in mobile_objects:
+                obj_type = mobile_obj[0]
+                obj_x = mobile_obj[1]
+                obj_y = mobile_obj[2]
                 if obj_type in OBJECT_TYPE_TO_CHANNEL:
                     channel_idx = OBJECT_TYPE_TO_CHANNEL[obj_type]
                     if channel_idx < num_object_types and 0 <= obj_x < grid_width and 0 <= obj_y < grid_height:
@@ -1180,8 +1192,12 @@ def _batch_next_states_to_tensors(
             grid_tensors[i, :num_object_types] = grid_objects_tensor
         
         # 2. Encode mobile objects (if any)
+        # Mobile objects format: (obj_type, x, y) - no color
         if mobile_objects:
-            for obj_type, obj_color, obj_x, obj_y in mobile_objects:
+            for mobile_obj in mobile_objects:
+                obj_type = mobile_obj[0]
+                obj_x = mobile_obj[1]
+                obj_y = mobile_obj[2]
                 if obj_type in OBJECT_TYPE_TO_CHANNEL:
                     channel_idx = OBJECT_TYPE_TO_CHANNEL[obj_type]
                     if channel_idx < num_object_types and 0 <= obj_x < grid_width and 0 <= obj_y < grid_height:
