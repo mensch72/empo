@@ -84,15 +84,15 @@ def test_state_encoder():
     """Test the StateEncoder network."""
     print("Testing StateEncoder...")
     
-    num_object_types = 8
+    num_object_types = 29  # Updated for per-color doors/keys and magic wall channel
     num_agents = 2
     # New channel structure:
-    # - num_object_types: explicit object type channels
+    # - num_object_types: explicit object type channels (including per-color doors/keys)
     # - 3: "other" object channels (overlappable, immobile, mobile)
     # - num_color_channels: per-color agent channels (1 for backward compat)
     # - 1: query agent channel
     num_color_channels = 1  # Backward compatibility when no colors specified
-    num_channels = num_object_types + 3 + num_color_channels + 1  # = 13
+    num_channels = num_object_types + 3 + num_color_channels + 1  # = 34
     
     encoder = StateEncoder(
         grid_width=10,
@@ -105,10 +105,11 @@ def test_state_encoder():
     # Create dummy input with correct number of channels
     batch_size = 4
     state_tensor = torch.randn(batch_size, num_channels, 10, 10)
-    step_count = torch.randn(batch_size, 1)
+    remaining_time = torch.randn(batch_size, 1)
+    global_world_features = torch.randn(batch_size, 4)  # NUM_GLOBAL_WORLD_FEATURES = 4
     
     # Forward pass
-    features = encoder(state_tensor, step_count)
+    features = encoder(state_tensor, remaining_time, global_world_features)
     
     assert features.shape == (batch_size, 128), f"Expected (4, 128), got {features.shape}"
     print(f"  ✓ Output shape: {features.shape}")
@@ -131,9 +132,13 @@ def test_agent_encoder():
     query_position = torch.randn(batch_size, 2)
     query_direction = torch.zeros(batch_size, 4)
     query_direction[:, 0] = 1  # All facing right
+    query_abilities = torch.zeros(batch_size, 2)  # can_enter_magic_walls, can_push_rocks
+    query_carried = torch.zeros(batch_size, 2)  # carried_type, carried_color
+    query_status = torch.zeros(batch_size, 3)  # paused, terminated, forced_next_action
+    query_status[:, 2] = -1.0  # No forced action
     
-    # Forward pass - new signature uses query_position and query_direction
-    features = encoder(query_position, query_direction)
+    # Forward pass - new signature uses query_position, query_direction, abilities, carried, status
+    features = encoder(query_position, query_direction, query_abilities, query_carried, query_status)
     
     assert features.shape == (batch_size, 32), f"Expected (4, 32), got {features.shape}"
     print(f"  ✓ Output shape: {features.shape}")
@@ -166,11 +171,11 @@ def test_q_network():
     """Test the QNetwork."""
     print("Testing QNetwork...")
     
-    num_object_types = 8
+    num_object_types = 29  # Updated for per-color doors/keys and magic wall channel
     num_agents = 2
-    # New channel structure: num_object_types + 3 (other) + 1 (color) + 1 (query) = 13
+    # New channel structure: num_object_types + 3 (other) + 1 (color) + 1 (query)
     num_color_channels = 1
-    num_channels = num_object_types + 3 + num_color_channels + 1  # = 13
+    num_channels = num_object_types + 3 + num_color_channels + 1  # = 34
     
     # Create encoders
     state_encoder = StateEncoder(grid_width=10, grid_height=10, num_object_types=num_object_types, num_agents=num_agents)
@@ -187,18 +192,24 @@ def test_q_network():
     # Create dummy input with correct number of channels
     batch_size = 4
     state_tensor = torch.randn(batch_size, num_channels, 10, 10)
-    step_count = torch.randn(batch_size, 1)
+    remaining_time = torch.randn(batch_size, 1)
     position = torch.randn(batch_size, 2)
     direction = torch.zeros(batch_size, 4)
     direction[:, 0] = 1
     agent_idx = torch.zeros(batch_size, dtype=torch.long)
     goal_coords = torch.randn(batch_size, 4)
+    global_world_features = torch.randn(batch_size, 4)
+    query_abilities = torch.zeros(batch_size, 2)
+    query_carried = torch.zeros(batch_size, 2)
+    query_status = torch.zeros(batch_size, 3)
+    query_status[:, 2] = -1.0  # No forced action
     
     # Forward pass
     q_values = q_network(
-        state_tensor, step_count,
+        state_tensor, remaining_time,
         position, direction, agent_idx,
-        goal_coords
+        goal_coords, global_world_features,
+        query_abilities, query_carried, query_status
     )
     
     assert q_values.shape == (batch_size, 4), f"Expected (4, 4), got {q_values.shape}"
@@ -216,11 +227,11 @@ def test_policy_prior_network():
     """Test the PolicyPriorNetwork."""
     print("Testing PolicyPriorNetwork...")
     
-    num_object_types = 8
+    num_object_types = 29  # Updated for per-color doors/keys and magic wall channel
     num_agents = 2
-    # New channel structure: num_object_types + 3 (other) + 1 (color) + 1 (query) = 13
+    # New channel structure: num_object_types + 3 (other) + 1 (color) + 1 (query)
     num_color_channels = 1
-    num_channels = num_object_types + 3 + num_color_channels + 1  # = 13
+    num_channels = num_object_types + 3 + num_color_channels + 1  # = 34
     
     # Create encoders
     state_encoder = StateEncoder(grid_width=10, grid_height=10, num_object_types=num_object_types, num_agents=num_agents)
@@ -235,16 +246,22 @@ def test_policy_prior_network():
     # Create dummy input with correct number of channels
     batch_size = 4
     state_tensor = torch.randn(batch_size, num_channels, 10, 10)
-    step_count = torch.randn(batch_size, 1)
+    remaining_time = torch.randn(batch_size, 1)
     position = torch.randn(batch_size, 2)
     direction = torch.zeros(batch_size, 4)
     direction[:, 0] = 1
     agent_idx = torch.zeros(batch_size, dtype=torch.long)
+    global_world_features = torch.randn(batch_size, 4)
+    query_abilities = torch.zeros(batch_size, 2)
+    query_carried = torch.zeros(batch_size, 2)
+    query_status = torch.zeros(batch_size, 3)
+    query_status[:, 2] = -1.0  # No forced action
     
     # Forward pass
     policy = phi_network(
-        state_tensor, step_count,
-        position, direction, agent_idx
+        state_tensor, remaining_time,
+        position, direction, agent_idx,
+        global_world_features, query_abilities, query_carried, query_status
     )
     
     assert policy.shape == (batch_size, 4), f"Expected (4, 4), got {policy.shape}"

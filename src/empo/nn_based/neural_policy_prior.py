@@ -76,33 +76,119 @@ Objects are organized by their properties:
 - Overlappable: Goal, Floor, Switch, etc. (agents can stand on them)
 - Non-overlappable immobile: Wall, MagicWall, Lava, Door (fixed obstacles)
 - Non-overlappable mobile: Block, Rock (can be pushed)
+
+Special handling for stateful objects:
+- Doors: One channel per color, value encodes state (0=none, 0.33=open, 0.67=closed, 1.0=locked)
+  This matters because only same-colored keys can open doors.
+- Keys: One channel per color, value = 1.0 if present
+  This matches doors since key-door color matching is required.
+- Magic walls: Single channel with values 0=none, 0.2-0.8=active with magic_side 0-3, 1.0=inactive
+- KillButton: Multiple channels encoding state and colors
+- PauseSwitch: Multiple channels encoding state and colors
+- DisablingSwitch: Multiple channels encoding state and target type
+- ControlButton: Multiple channels encoding state, colors, and action
+
+Carried objects are encoded in the AgentEncoder, not in the grid.
+
+Agent state features (encoded in AgentEncoder):
+- position (2), direction (4)
+- abilities: can_enter_magic_walls, can_push_rocks (2)
+- carried object: type, color (2)
+- status: paused, terminated/killed (2)
+- forced_next_action (from ControlButton): one-hot or -1 for none (1 normalized value)
 """
+# Standard colors used in multigrid environments
+STANDARD_COLORS = ['red', 'green', 'blue', 'purple', 'yellow', 'grey', 'brown']
+NUM_STANDARD_COLORS = len(STANDARD_COLORS)
+COLOR_TO_IDX = {color: i for i, color in enumerate(STANDARD_COLORS)}
+
+# Base object type channels (simple presence/absence, value = 1.0 if present)
 OBJECT_TYPE_TO_CHANNEL = {
     'wall': 0,
-    'magicwall': 0,     # Treat as wall variant
-    'door': 1,
-    'key': 2,
-    'ball': 3,
-    'box': 4,
-    'goal': 5,
-    'lava': 6,
-    'block': 7,
-    'rock': 8,
-    'unsteadyground': 9,
-    'switch': 10,
-    'killbutton': 11,
-    'pauseswitch': 12,
-    'disablingswitch': 13,
-    'controlbutton': 14,
-    'floor': 15,
+    'ball': 1,
+    'box': 2,
+    'goal': 3,
+    'lava': 4,
+    'block': 5,
+    'rock': 6,
+    'unsteadyground': 7,
+    'switch': 8,  # Simple switch (just presence)
+    'floor': 9,
+    'killbutton': 10,  # Grid presence only, details in list encoder
+    'pauseswitch': 11,  # Grid presence only, details in list encoder
+    'disablingswitch': 12,  # Grid presence only, details in list encoder
+    'controlbutton': 13,  # Grid presence only, details in list encoder
 }
-NUM_OBJECT_TYPE_CHANNELS = 16  # Total object type channels
+NUM_BASE_OBJECT_CHANNELS = 14
+
+# Per-color door channels (one per color): value encodes state
+# 0=none, 0.33=open, 0.67=closed, 1.0=locked
+DOOR_CHANNEL_START = NUM_BASE_OBJECT_CHANNELS  # 14
+DOOR_STATE_NONE = 0.0
+DOOR_STATE_OPEN = 0.33
+DOOR_STATE_CLOSED = 0.67
+DOOR_STATE_LOCKED = 1.0
+
+# Per-color key channels (one per color): value = 1.0 if present
+KEY_CHANNEL_START = DOOR_CHANNEL_START + NUM_STANDARD_COLORS  # 21
+
+# Magic wall channel: 0=none, 0.2-0.8=active with magic_side 0-3, 1.0=inactive
+MAGICWALL_CHANNEL = KEY_CHANNEL_START + NUM_STANDARD_COLORS  # 28
+MAGICWALL_STATE_NONE = 0.0
+MAGICWALL_STATE_RIGHT = 0.2   # magic_side = 0, active
+MAGICWALL_STATE_DOWN = 0.4    # magic_side = 1, active
+MAGICWALL_STATE_LEFT = 0.6    # magic_side = 2, active
+MAGICWALL_STATE_UP = 0.8      # magic_side = 3, active
+MAGICWALL_STATE_INACTIVE = 1.0  # solidified (no longer magic)
+
+NUM_OBJECT_TYPE_CHANNELS = MAGICWALL_CHANNEL + 1  # 29
 
 # Object property categories for "other objects" channels
-OVERLAPPABLE_OBJECTS = {'goal', 'floor', 'switch', 'killbutton', 'pauseswitch', 
-                        'disablingswitch', 'controlbutton', 'unsteadyground', 'objectgoal'}
-NON_OVERLAPPABLE_IMMOBILE_OBJECTS = {'wall', 'magicwall', 'lava', 'door'}
+OVERLAPPABLE_OBJECTS = {'goal', 'floor', 'switch', 'killbutton', 
+                        'controlbutton', 'unsteadyground', 'objectgoal'}
+NON_OVERLAPPABLE_IMMOBILE_OBJECTS = {'wall', 'magicwall', 'lava', 'door', 'pauseswitch', 'disablingswitch'}
 NON_OVERLAPPABLE_MOBILE_OBJECTS = {'block', 'rock'}
+
+# =============================================================================
+# INTERACTIVE OBJECT FEATURE SIZES (for list-based encoding)
+# =============================================================================
+# These objects have complex state that requires list-based encoding similar to agents.
+# Grid channels mark presence/location, list encoding captures full state.
+
+# KillButton features (per button):
+# - position (2): normalized x, y
+# - enabled (1): 0.0 or 1.0
+# - trigger_color (1): normalized color index
+# - target_color (1): normalized color index
+KILLBUTTON_FEATURE_SIZE = 5
+
+# PauseSwitch features (per switch):
+# - position (2): normalized x, y
+# - enabled (1): 0.0 or 1.0
+# - is_on (1): 0.0 or 1.0
+# - toggle_color (1): normalized color index
+# - target_color (1): normalized color index
+PAUSESWITCH_FEATURE_SIZE = 6
+
+# DisablingSwitch features (per switch):
+# - position (2): normalized x, y
+# - enabled (1): 0.0 or 1.0
+# - is_on (1): 0.0 or 1.0
+# - toggle_color (1): normalized color index
+# - target_type (1): normalized object type index
+DISABLINGSWITCH_FEATURE_SIZE = 6
+
+# ControlButton features (per button):
+# - position (2): normalized x, y
+# - enabled (1): 0.0 or 1.0
+# - trigger_color (1): normalized color index
+# - target_color (1): normalized color index
+# - forced_action (1): normalized action index
+CONTROLBUTTON_FEATURE_SIZE = 6
+
+# Global world parameters that can vary across environments
+# These are encoded as a separate global feature vector
+NUM_GLOBAL_WORLD_FEATURES = 4  # stumble_prob, magic_entry_prob, magic_solidify_prob, reserved
 
 # Default action encoding (can be customized per environment)
 DEFAULT_ACTION_ENCODING = {
@@ -138,15 +224,32 @@ class StateEncoder(nn.Module):
     convolutional layers to extract spatial features.
     
     Input channels (in order):
-        1. Object type channels (walls, doors, lava, etc.): num_object_types
+        1. Object type channels (walls, doors with state, magic walls with state, etc.): num_object_types
         2. "Other overlappable objects" channel: 1 (for objects not in object_types_list)
         3. "Other non-overlappable immobile objects" channel: 1
         4. "Other non-overlappable mobile objects" channel: 1
         5. Per-color agent channels: num_colors (one channel per color, marking all agents of that color)
         6. Query agent channel: 1 (marks the agent being queried)
     
+    Additional scalar inputs:
+        - Remaining time steps (normalized): 1 feature
+        - Global world parameters: NUM_GLOBAL_WORLD_FEATURES (stumble prob, magic wall probs, etc.)
+    
     The grid-based encoding captures the *distribution* of agents by color,
     while the AgentEncoder captures *individual* agent features.
+    
+    Door state encoding:
+        - DOOR_CHANNEL_OPEN: 1.0 if door is open
+        - DOOR_CHANNEL_CLOSED: 1.0 if door is closed (not locked)
+        - DOOR_CHANNEL_LOCKED: 1.0 if door is locked
+    
+    Magic wall state encoding:
+        - MAGICWALL_CHANNEL_RIGHT/DOWN/LEFT/UP: 1.0 if magic side is that direction and wall is active
+        - MAGICWALL_CHANNEL_INACTIVE: 1.0 if wall has solidified (no longer magic)
+    
+    Switch state encoding:
+        - Value in [0, 1]: 0.0 = off, 1.0 = on (for enabled switches)
+        - Disabled switches show 0.5 to indicate unknown/unavailable state
     
     Args:
         grid_width: Width of the grid environment.
@@ -228,31 +331,48 @@ class StateEncoder(nn.Module):
         self.flat_size = 64 * grid_width * grid_height
         
         # Project to feature dimension
+        # +1 for remaining time steps (normalized)
+        # +NUM_GLOBAL_WORLD_FEATURES for global world parameters
+        num_scalar_features = 1 + NUM_GLOBAL_WORLD_FEATURES
         self.fc = nn.Sequential(
-            nn.Linear(self.flat_size + 1, feature_dim),  # +1 for step count
+            nn.Linear(self.flat_size + num_scalar_features, feature_dim),
             nn.ReLU(),
         )
     
-    def forward(self, state_tensor: torch.Tensor, step_count: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, 
+        state_tensor: torch.Tensor, 
+        remaining_time: torch.Tensor,
+        global_world_features: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         """
         Encode a batch of states into feature vectors.
         
         Args:
             state_tensor: Tensor of shape (batch, channels, height, width) 
                          representing the grid state.
-            step_count: Tensor of shape (batch, 1) with normalized step counts.
+            remaining_time: Tensor of shape (batch, 1) with normalized remaining time steps
+                           (remaining_steps / max_steps).
+            global_world_features: Optional tensor of shape (batch, NUM_GLOBAL_WORLD_FEATURES)
+                                  with global world parameters (stumble prob, magic wall probs, etc.).
+                                  If None, zeros are used.
         
         Returns:
             Feature tensor of shape (batch, feature_dim).
         """
         batch_size = state_tensor.shape[0]
+        device = state_tensor.device
         
         # Apply CNN
         x = self.conv(state_tensor)  # (batch, 64, H, W)
         x = x.view(batch_size, -1)   # (batch, 64*H*W)
         
-        # Concatenate step count and project
-        x = torch.cat([x, step_count], dim=1)
+        # Handle global world features
+        if global_world_features is None:
+            global_world_features = torch.zeros(batch_size, NUM_GLOBAL_WORLD_FEATURES, device=device)
+        
+        # Concatenate remaining time and global features, then project
+        x = torch.cat([x, remaining_time, global_world_features], dim=1)
         x = self.fc(x)
         
         return x
@@ -308,14 +428,142 @@ class GoalEncoder(nn.Module):
         return self.fc(goal_coords)
 
 
+class InteractiveObjectEncoder(nn.Module):
+    """
+    Encodes interactive objects (KillButtons, PauseSwitches, DisablingSwitches, ControlButtons)
+    using a list-based approach.
+    
+    These objects have complex state that cannot be efficiently encoded in grid channels.
+    The grid marks their presence/location, while this encoder captures their full state.
+    
+    Each object type has a maximum count parameter that determines the list size.
+    Objects are encoded in order of appearance; missing slots are zero-padded.
+    
+    Args:
+        grid_width: Width of the grid for normalization.
+        grid_height: Height of the grid for normalization.
+        max_kill_buttons: Maximum number of KillButtons to track.
+        max_pause_switches: Maximum number of PauseSwitches to track.
+        max_disabling_switches: Maximum number of DisablingSwitches to track.
+        max_control_buttons: Maximum number of ControlButtons to track.
+        feature_dim: Output feature dimension (default: 32).
+    """
+    
+    def __init__(
+        self,
+        grid_width: int,
+        grid_height: int,
+        max_kill_buttons: int = 4,
+        max_pause_switches: int = 4,
+        max_disabling_switches: int = 4,
+        max_control_buttons: int = 4,
+        feature_dim: int = 32
+    ):
+        super().__init__()
+        self.grid_width = grid_width
+        self.grid_height = grid_height
+        self.max_kill_buttons = max_kill_buttons
+        self.max_pause_switches = max_pause_switches
+        self.max_disabling_switches = max_disabling_switches
+        self.max_control_buttons = max_control_buttons
+        self.feature_dim = feature_dim
+        
+        # Calculate total input dimension
+        input_dim = (
+            max_kill_buttons * KILLBUTTON_FEATURE_SIZE +
+            max_pause_switches * PAUSESWITCH_FEATURE_SIZE +
+            max_disabling_switches * DISABLINGSWITCH_FEATURE_SIZE +
+            max_control_buttons * CONTROLBUTTON_FEATURE_SIZE
+        )
+        
+        self.input_dim = input_dim
+        
+        # MLP to combine all interactive object features
+        self.fc = nn.Sequential(
+            nn.Linear(input_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, feature_dim),
+            nn.ReLU(),
+        )
+    
+    def forward(
+        self,
+        kill_buttons: Optional[torch.Tensor] = None,
+        pause_switches: Optional[torch.Tensor] = None,
+        disabling_switches: Optional[torch.Tensor] = None,
+        control_buttons: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        """
+        Encode interactive objects into feature vectors.
+        
+        Args:
+            kill_buttons: Optional tensor of shape (batch, max_kill_buttons, KILLBUTTON_FEATURE_SIZE)
+                         with KillButton features [x, y, enabled, trigger_color, target_color].
+            pause_switches: Optional tensor of shape (batch, max_pause_switches, PAUSESWITCH_FEATURE_SIZE)
+                           with PauseSwitch features [x, y, enabled, is_on, toggle_color, target_color].
+            disabling_switches: Optional tensor of shape (batch, max_disabling_switches, DISABLINGSWITCH_FEATURE_SIZE)
+                               with DisablingSwitch features [x, y, enabled, is_on, toggle_color, target_type].
+            control_buttons: Optional tensor of shape (batch, max_control_buttons, CONTROLBUTTON_FEATURE_SIZE)
+                            with ControlButton features [x, y, enabled, trigger_color, target_color, forced_action].
+        
+        Returns:
+            Feature tensor of shape (batch, feature_dim).
+        """
+        # Determine batch size from first non-None input
+        batch_size = None
+        device = 'cpu'
+        for tensor in [kill_buttons, pause_switches, disabling_switches, control_buttons]:
+            if tensor is not None:
+                batch_size = tensor.shape[0]
+                device = tensor.device
+                break
+        
+        if batch_size is None:
+            raise ValueError("At least one input tensor must be provided")
+        
+        # Default to zeros for missing inputs
+        if kill_buttons is None:
+            kill_buttons = torch.zeros(batch_size, self.max_kill_buttons, KILLBUTTON_FEATURE_SIZE, device=device)
+        if pause_switches is None:
+            pause_switches = torch.zeros(batch_size, self.max_pause_switches, PAUSESWITCH_FEATURE_SIZE, device=device)
+        if disabling_switches is None:
+            disabling_switches = torch.zeros(batch_size, self.max_disabling_switches, DISABLINGSWITCH_FEATURE_SIZE, device=device)
+        if control_buttons is None:
+            control_buttons = torch.zeros(batch_size, self.max_control_buttons, CONTROLBUTTON_FEATURE_SIZE, device=device)
+        
+        # Flatten each object type's features
+        kb_flat = kill_buttons.view(batch_size, -1)
+        ps_flat = pause_switches.view(batch_size, -1)
+        ds_flat = disabling_switches.view(batch_size, -1)
+        cb_flat = control_buttons.view(batch_size, -1)
+        
+        # Concatenate all features
+        all_features = torch.cat([kb_flat, ps_flat, ds_flat, cb_flat], dim=1)
+        
+        return self.fc(all_features)
+
+
 class AgentEncoder(nn.Module):
     """
     Encodes agent attributes into feature vectors using a list-based approach.
     
     The encoding is a concatenation of:
-        1. Query agent features: position (2) + direction (4) = 6 features
+        1. Query agent features: position (2) + direction (4) + abilities (2) + carried (2) + status (3) = 13 features
         2. For each color k: features of first num_agents_per_color[k] agents of that color
-           Each agent contributes: position (2) + direction (4) = 6 features
+           Each agent contributes: position (2) + direction (4) + abilities (2) + carried (2) + status (3) = 13 features
+    
+    Agent abilities encoded:
+        - can_enter_magic_walls: 1.0 if agent can attempt to enter magic walls, 0.0 otherwise
+        - can_push_rocks: 1.0 if agent can push rocks, 0.0 otherwise
+    
+    Carried object encoding:
+        - carried_type: Normalized object type index (0.0 = nothing, then object types scaled to [0.1, 1.0])
+        - carried_color: Normalized color index (0.0 = nothing, then colors scaled to [0.1, 1.0])
+    
+    Agent status encoding:
+        - paused: 1.0 if agent is paused (can only use 'still' action), 0.0 otherwise
+        - terminated: 1.0 if agent is terminated/killed, 0.0 otherwise
+        - forced_next_action: Normalized action index if forced by ControlButton, -1.0 if none
     
     This list-based encoding captures *individual* agent features, while the grid-based
     StateEncoder captures the *distribution* of agents by color.
@@ -352,8 +600,8 @@ class AgentEncoder(nn.Module):
         self.num_agents_per_color = num_agents_per_color
         self.agent_colors = agent_colors
         
-        # Per-agent feature size: position (2) + direction (4)
-        self.agent_feature_size = 6
+        # Per-agent feature size: position (2) + direction (4) + abilities (2) + carried (2) + status (3)
+        self.agent_feature_size = 13
         
         if num_agents_per_color is not None:
             # List-based encoding: query agent + per-color agent lists
@@ -364,8 +612,8 @@ class AgentEncoder(nn.Module):
             total_list_agents = sum(num_agents_per_color.values())
             
             # Input size: query agent features + all per-color agent features
-            # Query agent: 6 features
-            # Per-color lists: total_list_agents * 6 features
+            # Query agent: 10 features
+            # Per-color lists: total_list_agents * 10 features
             input_dim = self.agent_feature_size + total_list_agents * self.agent_feature_size
         else:
             # Backward compatibility: simple encoding with just query agent
@@ -387,8 +635,14 @@ class AgentEncoder(nn.Module):
         self, 
         query_position: torch.Tensor, 
         query_direction: torch.Tensor, 
+        query_abilities: Optional[torch.Tensor] = None,
+        query_carried: Optional[torch.Tensor] = None,
+        query_status: Optional[torch.Tensor] = None,
         all_agent_positions: Optional[torch.Tensor] = None,
         all_agent_directions: Optional[torch.Tensor] = None,
+        all_agent_abilities: Optional[torch.Tensor] = None,
+        all_agent_carried: Optional[torch.Tensor] = None,
+        all_agent_status: Optional[torch.Tensor] = None,
         agent_color_indices: Optional[torch.Tensor] = None,
         # Legacy parameters for backward compatibility
         agent_idx: Optional[torch.Tensor] = None,
@@ -400,8 +654,17 @@ class AgentEncoder(nn.Module):
         Args:
             query_position: Tensor of shape (batch, 2) with query agent's normalized position.
             query_direction: Tensor of shape (batch, 4) with query agent's one-hot direction.
+            query_abilities: Optional tensor of shape (batch, 2) with query agent's abilities
+                            [can_enter_magic_walls, can_push_rocks].
+            query_carried: Optional tensor of shape (batch, 2) with query agent's carried object
+                          [carried_type_normalized, carried_color_normalized].
+            query_status: Optional tensor of shape (batch, 3) with query agent's status
+                         [paused, terminated, forced_next_action_normalized].
             all_agent_positions: Optional tensor of shape (batch, num_agents, 2) with all agents' positions.
             all_agent_directions: Optional tensor of shape (batch, num_agents, 4) with all agents' directions.
+            all_agent_abilities: Optional tensor of shape (batch, num_agents, 2) with all agents' abilities.
+            all_agent_carried: Optional tensor of shape (batch, num_agents, 2) with all agents' carried objects.
+            all_agent_status: Optional tensor of shape (batch, num_agents, 3) with all agents' status.
             agent_color_indices: Optional tensor of shape (batch, num_agents) with color index per agent.
             agent_idx: Legacy parameter (ignored).
             agent_color_idx: Legacy parameter (ignored).
@@ -412,12 +675,31 @@ class AgentEncoder(nn.Module):
         batch_size = query_position.shape[0]
         device = query_position.device
         
-        # Query agent features (always first)
-        query_features = torch.cat([query_position, query_direction], dim=1)  # (batch, 6)
+        # Default abilities, carried, and status if not provided
+        if query_abilities is None:
+            query_abilities = torch.zeros(batch_size, 2, device=device)
+        if query_carried is None:
+            query_carried = torch.zeros(batch_size, 2, device=device)
+        if query_status is None:
+            # Default: not paused, not terminated, no forced action (-1)
+            query_status = torch.zeros(batch_size, 3, device=device)
+            query_status[:, 2] = -1.0  # No forced action
+        
+        # Query agent features (always first): position + direction + abilities + carried + status
+        query_features = torch.cat([query_position, query_direction, query_abilities, query_carried, query_status], dim=1)  # (batch, 13)
         
         if self.num_agents_per_color is not None and all_agent_positions is not None:
             # Build per-color agent lists
             color_features_list = []
+            
+            # Default abilities, carried, and status for other agents if not provided
+            if all_agent_abilities is None:
+                all_agent_abilities = torch.zeros(batch_size, all_agent_positions.shape[1], 2, device=device)
+            if all_agent_carried is None:
+                all_agent_carried = torch.zeros(batch_size, all_agent_positions.shape[1], 2, device=device)
+            if all_agent_status is None:
+                all_agent_status = torch.zeros(batch_size, all_agent_positions.shape[1], 3, device=device)
+                all_agent_status[:, :, 2] = -1.0  # No forced action
             
             for color in self.color_order:
                 max_agents_this_color = self.num_agents_per_color[color]
@@ -438,9 +720,15 @@ class AgentEncoder(nn.Module):
                                         # This agent fills this slot
                                         pos = all_agent_positions[b, agent_i]  # (2,)
                                         dir_ = all_agent_directions[b, agent_i]  # (4,)
+                                        abilities = all_agent_abilities[b, agent_i]  # (2,)
+                                        carried = all_agent_carried[b, agent_i]  # (2,)
+                                        status = all_agent_status[b, agent_i]  # (3,)
                                         start_idx = slot * self.agent_feature_size
                                         color_features[b, start_idx:start_idx+2] = pos
                                         color_features[b, start_idx+2:start_idx+6] = dir_
+                                        color_features[b, start_idx+6:start_idx+8] = abilities
+                                        color_features[b, start_idx+8:start_idx+10] = carried
+                                        color_features[b, start_idx+10:start_idx+13] = status
                                         break
                                     agent_count_this_color += 1
                 
@@ -500,23 +788,25 @@ class QNetwork(nn.Module):
     """
     Q-value network: h_Q(state, human, goal) -> Q-values by action.
     
-    Combines state, agent, and goal encodings to predict Q-values
+    Combines state, agent, goal, and interactive object encodings to predict Q-values
     for each action the human agent can take.
     
     Architecture:
         state_features = StateEncoder(state)
-        agent_features = AgentEncoder(human_pos, human_dir, human_idx)
+        agent_features = AgentEncoder(human_pos, human_dir, ...)
         goal_features = GoalEncoder(goal_coords)
-        combined = concat(state_features, agent_features, goal_features)
+        interactive_features = InteractiveObjectEncoder(kill_buttons, pause_switches, ...)
+        combined = concat(state_features, agent_features, goal_features, interactive_features)
         Q_values = MLP(combined)
     
     Args:
         state_encoder: Pretrained or trainable StateEncoder.
         agent_encoder: Pretrained or trainable AgentEncoder.
         goal_encoder: Pretrained or trainable GoalEncoder.
+        interactive_encoder: Optional pretrained or trainable InteractiveObjectEncoder.
         num_actions: Number of possible actions.
         hidden_dim: Hidden layer dimension (default: 256).
-        feasible_range: Optional tuple (a, b) for theoretical bounds for the Q values. Will be used for clamping (either soft or hard).
+        feasible_range: Optional tuple (a, b) for theoretical bounds for the Q values.
     """
     
     def __init__(
@@ -526,18 +816,22 @@ class QNetwork(nn.Module):
         goal_encoder: GoalEncoder,
         num_actions: int,
         hidden_dim: int = 256,
-        feasible_range: Optional[tuple] = None
+        feasible_range: Optional[tuple] = None,
+        interactive_encoder: Optional['InteractiveObjectEncoder'] = None
     ):
         super().__init__()
         self.state_encoder = state_encoder
         self.agent_encoder = agent_encoder
         self.goal_encoder = goal_encoder
+        self.interactive_encoder = interactive_encoder
         self.num_actions = num_actions
         
         # Combined feature dimension from encoder outputs
         combined_dim = (state_encoder.feature_dim + 
                        agent_encoder.feature_dim +
                        goal_encoder.feature_dim)
+        if interactive_encoder is not None:
+            combined_dim += interactive_encoder.feature_dim
         
         # Q-value head - outputs logits, sigmoid applied in forward() to bound Q in [0,1]
         self.q_head = nn.Sequential(
@@ -556,42 +850,84 @@ class QNetwork(nn.Module):
     def forward(
         self,
         state_tensor: torch.Tensor,
-        step_count: torch.Tensor,
+        remaining_time: torch.Tensor,
         agent_position: torch.Tensor,
         agent_direction: torch.Tensor,
         agent_idx: torch.Tensor,
         goal_coords: torch.Tensor,
+        global_world_features: Optional[torch.Tensor] = None,
+        query_abilities: Optional[torch.Tensor] = None,
+        query_carried: Optional[torch.Tensor] = None,
+        query_status: Optional[torch.Tensor] = None,
         all_agent_positions: Optional[torch.Tensor] = None,
         all_agent_directions: Optional[torch.Tensor] = None,
-        agent_color_indices: Optional[torch.Tensor] = None
+        all_agent_abilities: Optional[torch.Tensor] = None,
+        all_agent_carried: Optional[torch.Tensor] = None,
+        all_agent_status: Optional[torch.Tensor] = None,
+        agent_color_indices: Optional[torch.Tensor] = None,
+        # Interactive object features
+        kill_buttons: Optional[torch.Tensor] = None,
+        pause_switches: Optional[torch.Tensor] = None,
+        disabling_switches: Optional[torch.Tensor] = None,
+        control_buttons: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
         Compute Q-values for all actions.
         
         Args:
             state_tensor: Grid state tensor (batch, channels, H, W).
-            step_count: Normalized step count (batch, 1).
+            remaining_time: Normalized remaining time steps (batch, 1).
             agent_position: Query agent position (batch, 2).
             agent_direction: Query agent direction one-hot (batch, 4).
             agent_idx: Agent index (batch,) - kept for compatibility.
             goal_coords: Goal coordinates (batch, 4).
+            global_world_features: Optional tensor (batch, NUM_GLOBAL_WORLD_FEATURES) with
+                                  global world parameters (stumble prob, magic wall probs, etc.).
+            query_abilities: Optional tensor (batch, 2) with query agent's abilities.
+            query_carried: Optional tensor (batch, 2) with query agent's carried object.
+            query_status: Optional tensor (batch, 3) with query agent's status.
             all_agent_positions: Optional tensor (batch, num_agents, 2) for per-color encoding.
             all_agent_directions: Optional tensor (batch, num_agents, 4) for per-color encoding.
+            all_agent_abilities: Optional tensor (batch, num_agents, 2) for per-color encoding.
+            all_agent_carried: Optional tensor (batch, num_agents, 2) for per-color encoding.
+            all_agent_status: Optional tensor (batch, num_agents, 3) for per-color encoding.
             agent_color_indices: Optional tensor (batch, num_agents) for per-color encoding.
+            kill_buttons: Optional tensor (batch, max_kill_buttons, 5) with KillButton features.
+            pause_switches: Optional tensor (batch, max_pause_switches, 6) with PauseSwitch features.
+            disabling_switches: Optional tensor (batch, max_disabling_switches, 6) with DisablingSwitch features.
+            control_buttons: Optional tensor (batch, max_control_buttons, 6) with ControlButton features.
         
         Returns:
             Q-values tensor of shape (batch, num_actions).
         """
-        state_feat = self.state_encoder(state_tensor, step_count)
+        state_feat = self.state_encoder(state_tensor, remaining_time, global_world_features)
         agent_feat = self.agent_encoder(
             agent_position, agent_direction,
+            query_abilities=query_abilities,
+            query_carried=query_carried,
+            query_status=query_status,
             all_agent_positions=all_agent_positions,
             all_agent_directions=all_agent_directions,
+            all_agent_abilities=all_agent_abilities,
+            all_agent_carried=all_agent_carried,
+            all_agent_status=all_agent_status,
             agent_color_indices=agent_color_indices
         )
         goal_feat = self.goal_encoder(goal_coords)
         
-        combined = torch.cat([state_feat, agent_feat, goal_feat], dim=1)
+        feature_list = [state_feat, agent_feat, goal_feat]
+        
+        # Add interactive object features if encoder exists
+        if self.interactive_encoder is not None:
+            interactive_feat = self.interactive_encoder(
+                kill_buttons=kill_buttons,
+                pause_switches=pause_switches,
+                disabling_switches=disabling_switches,
+                control_buttons=control_buttons
+            )
+            feature_list.append(interactive_feat)
+        
+        combined = torch.cat(feature_list, dim=1)
         q_values_predicted = self.q_head(combined)
         
         return q_values_predicted  # might be unbounded if soft_clamp is None!
@@ -671,12 +1007,19 @@ class PolicyPriorNetwork(nn.Module):
     def forward(
         self,
         state_tensor: torch.Tensor,
-        step_count: torch.Tensor,
+        remaining_time: torch.Tensor,
         agent_position: torch.Tensor,
         agent_direction: torch.Tensor,
         agent_idx: torch.Tensor,
+        global_world_features: Optional[torch.Tensor] = None,
+        query_abilities: Optional[torch.Tensor] = None,
+        query_carried: Optional[torch.Tensor] = None,
+        query_status: Optional[torch.Tensor] = None,
         all_agent_positions: Optional[torch.Tensor] = None,
         all_agent_directions: Optional[torch.Tensor] = None,
+        all_agent_abilities: Optional[torch.Tensor] = None,
+        all_agent_carried: Optional[torch.Tensor] = None,
+        all_agent_status: Optional[torch.Tensor] = None,
         agent_color_indices: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
@@ -684,22 +1027,36 @@ class PolicyPriorNetwork(nn.Module):
         
         Args:
             state_tensor: Grid state tensor (batch, channels, H, W).
-            step_count: Normalized step count (batch, 1).
+            remaining_time: Normalized remaining time steps (batch, 1).
             agent_position: Query agent position (batch, 2).
             agent_direction: Query agent direction one-hot (batch, 4).
             agent_idx: Agent index (batch,) - kept for compatibility.
+            global_world_features: Optional tensor (batch, NUM_GLOBAL_WORLD_FEATURES) with
+                                  global world parameters.
+            query_abilities: Optional tensor (batch, 2) with query agent's abilities.
+            query_carried: Optional tensor (batch, 2) with query agent's carried object.
+            query_status: Optional tensor (batch, 3) with query agent's status.
             all_agent_positions: Optional tensor (batch, num_agents, 2) for per-color encoding.
             all_agent_directions: Optional tensor (batch, num_agents, 4) for per-color encoding.
+            all_agent_abilities: Optional tensor (batch, num_agents, 2) for per-color encoding.
+            all_agent_carried: Optional tensor (batch, num_agents, 2) for per-color encoding.
+            all_agent_status: Optional tensor (batch, num_agents, 3) for per-color encoding.
             agent_color_indices: Optional tensor (batch, num_agents) for per-color encoding.
         
         Returns:
             Policy tensor of shape (batch, num_actions) with action probabilities.
         """
-        state_feat = self.state_encoder(state_tensor, step_count)
+        state_feat = self.state_encoder(state_tensor, remaining_time, global_world_features)
         agent_feat = self.agent_encoder(
             agent_position, agent_direction,
+            query_abilities=query_abilities,
+            query_carried=query_carried,
+            query_status=query_status,
             all_agent_positions=all_agent_positions,
             all_agent_directions=all_agent_directions,
+            all_agent_abilities=all_agent_abilities,
+            all_agent_carried=all_agent_carried,
+            all_agent_status=all_agent_status,
             agent_color_indices=agent_color_indices
         )
         

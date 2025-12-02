@@ -4,11 +4,12 @@ This document explains the architecture of the neural network encoders used in t
 
 ## Overview
 
-The neural policy prior system uses three main encoders to transform environment state into features suitable for Q-value prediction:
+The neural policy prior system uses four main encoders to transform environment state into features suitable for Q-value prediction:
 
 1. **StateEncoder** - Encodes the grid-based world state (objects, agent distributions by color)
 2. **AgentEncoder** - Encodes individual agent features (query agent + per-color agent lists)
 3. **GoalEncoder** - Encodes goal locations
+4. **InteractiveObjectEncoder** - Encodes complex interactive objects (buttons, switches)
 
 These features are combined by the `QNetwork` to predict Q-values for each action.
 
@@ -16,11 +17,14 @@ These features are combined by the `QNetwork` to predict Q-values for each actio
 
 The architecture uses two complementary encoding strategies:
 
-- **Grid-based encoding (StateEncoder)**: Captures the *distribution* of agents by color - where agents of each type are located on the grid. This is spatially rich but doesn't distinguish individual agents within a color.
+- **Grid-based encoding (StateEncoder)**: Captures the *spatial distribution* of objects and agents. Good for objects with simple state (walls, lava, goals) and agent positions by color.
 
-- **List-based encoding (AgentEncoder)**: Captures *individual* agent features - the specific position and direction of each agent. This allows the network to reason about specific agents.
+- **List-based encoding (AgentEncoder, InteractiveObjectEncoder)**: Captures *detailed features* of individual entities. Used for agents (with abilities, carried objects, status) and complex interactive objects (with multiple state variables).
 
-This separation enables policy transfer: the grid-based encoding naturally handles varying numbers of agents per color, while the list-based encoding provides fixed-size slots for individual agent information.
+This separation enables:
+1. Policy transfer across different entity counts
+2. Rich feature encoding without exponential channel growth
+3. Efficient CNN processing for spatial information
 
 ## StateEncoder Channel Structure
 
@@ -33,82 +37,91 @@ Total Channels = num_object_types + 3 + num_colors + 1
                        |           |       |         +-- Query agent channel
                        |           |       +-- Per-color agent channels
                        |           +-- "Other objects" channels (3 types)
-                       +-- Explicit object type channels (walls, doors, lava, etc.)
+                       +-- Object type channels (29 total)
 ```
 
-### Channel Details
+### Object Type Channels (29 channels)
 
-1. **Object Type Channels** (16 channels by default):
-   - Wall, Door, Key, Ball, Box, Goal, Lava, Block, Rock, UnsteadyGround, Switch, etc.
-   - Each cell marked with 1.0 if that object type is present
+| Channel Range | Object Type | Value Encoding |
+|---------------|-------------|----------------|
+| 0-9 | Base objects | 1.0 = present |
+| 10-16 | Per-color doors | 0=none, 0.33=open, 0.67=closed, 1.0=locked |
+| 17-23 | Per-color keys | 1.0 = present |
+| 24 | Magic walls | 0=none, 0.2-0.8=active (by magic_side), 1.0=inactive |
+| 25-28 | Buttons/switches | Grid presence only (details in InteractiveObjectEncoder) |
 
-2. **"Other Objects" Channels** (3 channels):
-   - **Other Overlappable Objects**: Objects not in the explicit list that agents can overlap with
-   - **Other Non-Overlappable Immobile Objects**: Static blocking objects not in the explicit list
-   - **Other Non-Overlappable Mobile Objects**: Movable blocking objects not in the explicit list
-   
-   **Justification**: These channels enable policy transfer to environments with novel object types. Objects the network wasn't trained on get encoded in these fallback channels based on their properties, allowing the learned policy to generalize.
+### Additional Input Features
 
-3. **Per-Color Agent Channels** (num_colors channels):
-   - One channel per agent color (e.g., "yellow" for humans, "grey" for robots)
-   - All agents of a given color are marked in their color's channel
-   
-   **Justification**: Agents are distinguished by their role (color), not their index. This enables:
-   - Policy transfer to environments with more agents of a color
-   - Learning general behaviors that apply to any agent of a given type
-   - Reasoning about the spatial distribution of agent types
+- **Remaining time**: Normalized (remaining_steps / max_steps)
+- **Global world features** (4 values):
+  - Stumble probability (for unsteady ground)
+  - Magic wall entry probability
+  - Magic wall solidify probability
+  - Reserved for future use
 
-4. **Query Agent Channel** (1 channel):
-   - Marks the position of the specific agent being queried
-   
-   **Justification**: While agents are grouped by color in the grid, the network needs to know which specific agent is the "subject" of the query. This channel explicitly marks that agent's position.
+## AgentEncoder Features
 
-## AgentEncoder Architecture
+Each agent is encoded with 13 features:
 
-The AgentEncoder processes agent-specific features using a list-based approach:
+| Feature | Size | Description |
+|---------|------|-------------|
+| Position | 2 | Normalized (x/width, y/height) |
+| Direction | 4 | One-hot encoding (right, down, left, up) |
+| Abilities | 2 | can_enter_magic_walls, can_push_rocks |
+| Carried object | 2 | (type_normalized, color_normalized), 0 if none |
+| Status | 3 | paused, terminated, forced_next_action (-1 if none) |
 
-```
-Input Features (concatenated):
-├── Query Agent Features (6D: pos + dir)  ← FIRST in the list
-├── Color 0 Agents: [Agent 0 features, Agent 1 features, ...]
-├── Color 1 Agents: [Agent 0 features, Agent 1 features, ...]
-└── ...
-
-Each agent contributes: position (2D) + direction (4D one-hot) = 6 features
-
-Output: Combined feature vector (32D)
-```
-
-### Key Design Decisions
-
-1. **Query Agent First**: The query agent's features are always the first element in the concatenation. This:
-   - Makes the query agent easily identifiable regardless of its index
-   - Enables policy transfer to environments with different agent configurations
-   - Separates "who is being queried" from "what color is that agent"
-
-2. **Per-Color Agent Lists**: For each color, the encoder has fixed slots for `num_agents_per_color[color]` agents. This:
-   - Provides a consistent input size regardless of actual agent count
-   - Allows reasoning about individual agents within each color group
-   - Zero-pads missing agents (fewer than max in that color)
-
-3. **No Agent Index Embedding**: Unlike the previous architecture, there's no learned embedding for agent indices. The query agent is identified by:
-   - Being first in the AgentEncoder input
-   - Having its position marked in the query agent grid channel
-   - This removes the capacity limitation of index embeddings
-
-### Example: 2 Humans + 1 Robot
+### Encoding Structure
 
 ```
-num_agents_per_color = {'yellow': 2, 'grey': 1}
-agent_colors = ['grey', 'yellow', 'yellow']  # robot at 0, humans at 1,2
+AgentEncoder input = [query_agent_features] + [per_color_agent_lists]
 
-Query for human 1:
-├── Query features: [pos_1, dir_1]              # 6 features
-├── Grey agents:    [pos_0, dir_0]              # 6 features (robot)
-└── Yellow agents:  [pos_1, dir_1, pos_2, dir_2] # 12 features (both humans)
-
-Total input: 24 features → MLP → 32D output
+Query agent: 13 features
+Per-color list: num_agents_per_color[color] × 13 features each
 ```
+
+The query agent is always first, enabling policy transfer regardless of agent count.
+
+## InteractiveObjectEncoder Features
+
+Complex interactive objects are encoded in lists with configurable maximum counts:
+
+### KillButton (5 features each)
+- position (2): normalized x, y
+- enabled (1): 0.0 or 1.0
+- trigger_color (1): which color agent triggers it
+- target_color (1): which color agents are killed
+
+### PauseSwitch (6 features each)
+- position (2): normalized x, y
+- enabled (1): 0.0 or 1.0
+- is_on (1): current on/off state
+- toggle_color (1): which color agent can toggle
+- target_color (1): which color agents are paused
+
+### DisablingSwitch (6 features each)
+- position (2): normalized x, y
+- enabled (1): 0.0 or 1.0
+- is_on (1): current on/off state
+- toggle_color (1): which color agent can toggle
+- target_type (1): which object type is controlled
+
+### ControlButton (6 features each)
+- position (2): normalized x, y
+- enabled (1): 0.0 or 1.0
+- trigger_color (1): which color agent triggers it
+- target_color (1): which color agents are controlled
+- forced_action (1): which action is forced
+
+## Policy Transfer Capabilities
+
+This architecture enables several transfer scenarios:
+
+1. **More agents per color**: Extra agents visible in grid, up to max in list encoder
+2. **More interactive objects**: Up to configurable maximum per type
+3. **Different action spaces**: Action mapping with fallback for unknown actions
+4. **New object types**: Encoded in "other objects" fallback channels
+5. **Different agent abilities**: Abilities encoded per-agent, not assumed global
 
 ## Why This Redundancy?
 
@@ -119,21 +132,35 @@ The query agent appears in multiple places:
 
 This redundancy serves different purposes:
 
-| Encoding | Information Provided | Transfer Benefit |
-|----------|---------------------|------------------|
-| Per-color grid | Agent distribution by type | Works with any agent count |
-| Query agent grid | Which position is being queried | Spatial context for CNN |
-| Query agent features (first) | Exact position/direction | Works with any configuration |
-| Per-color agent lists | Individual agent states | Fixed slots, zero-padded |
+| Encoding | Purpose |
+|----------|---------|
+| Per-color grid | Agent distribution for spatial reasoning |
+| Query agent grid | Mark which position needs a decision |
+| Query agent features (first) | Full feature access regardless of config |
 
-## Policy Transfer Capabilities
+## Example: Full Feature Encoding
 
-This architecture enables several transfer scenarios:
+For an environment with:
+- 10x10 grid
+- 2 humans (yellow), 1 robot (grey)
+- 2 control buttons
+- Query for human at index 1
 
-1. **Same Grid, More Agents per Color**: Load a network trained with 2 humans into an environment with 3 humans. The extra human's features fit in the per-color list (if slots available) or are visible only in the grid.
+```python
+# StateEncoder
+grid_tensor: (29 + 3 + 2 + 1, 10, 10)  # 35 channels
+remaining_time: (1,)
+global_world_features: (4,)
 
-2. **Same Grid, Different Actions**: Load a network trained with 4 actions into an environment with 8 actions. Action mapping handles compatible actions; new actions get zero probability.
+# AgentEncoder  
+query_features: (13,)  # human 1
+yellow_agents: (2 × 13,)  # both humans
+grey_agents: (1 × 13,)  # robot
 
-3. **New Object Types**: Objects not in the training set are encoded in "other objects" channels based on their properties (overlappable, mobile, etc.).
+# InteractiveObjectEncoder
+control_buttons: (2 × 6,)  # 2 buttons × 6 features
+# ... other interactive objects ...
 
-4. **Different Grid Size**: Not supported - grid dimensions must match exactly because the CNN architecture is size-specific.
+# GoalEncoder
+goal_coords: (4,)
+```
