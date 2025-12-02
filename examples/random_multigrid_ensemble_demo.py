@@ -306,36 +306,6 @@ class RandomMultigridEnv(MultiGridEnv):
         return '\n'.join(' '.join(row) for row in grid_lines)
 
 
-def generate_random_environments(
-    num_envs: int,
-    grid_size: int = GRID_SIZE,
-    num_humans: int = NUM_HUMANS,
-    num_robots: int = NUM_ROBOTS,
-    max_steps: int = MAX_STEPS,
-    base_seed: int = 42
-) -> List[RandomMultigridEnv]:
-    """Generate a list of random multigrid environments."""
-    envs = []
-    for i in range(num_envs):
-        env = RandomMultigridEnv(
-            grid_size=grid_size,
-            num_humans=num_humans,
-            num_robots=num_robots,
-            max_steps=max_steps,
-            seed=base_seed + i,
-            wall_prob=WALL_PROBABILITY,
-            key_prob=KEY_PROBABILITY,
-            ball_prob=BALL_PROBABILITY,
-            box_prob=BOX_PROBABILITY,
-            door_prob=DOOR_PROBABILITY,
-            lava_prob=LAVA_PROBABILITY,
-            block_prob=BLOCK_PROBABILITY
-        )
-        env.reset()
-        envs.append(env)
-    return envs
-
-
 # ============================================================================
 # Goal Definitions
 # ============================================================================
@@ -374,169 +344,139 @@ class ReachCellGoal(PossibleGoal):
                 self.target_pos == other.target_pos)
 
 
-class EnsembleGoalSampler(PossibleGoalSampler):
+# ============================================================================
+# Training on Ensemble (Using world_model_generator)
+# ============================================================================
+
+def create_random_env(seed: int) -> RandomMultigridEnv:
+    """Create a new random environment with the given seed."""
+    return RandomMultigridEnv(
+        grid_size=GRID_SIZE,
+        num_humans=NUM_HUMANS,
+        num_robots=NUM_ROBOTS,
+        max_steps=MAX_STEPS,
+        seed=seed,
+        wall_prob=WALL_PROBABILITY,
+        key_prob=KEY_PROBABILITY,
+        ball_prob=BALL_PROBABILITY,
+        box_prob=BOX_PROBABILITY,
+        door_prob=DOOR_PROBABILITY,
+        lava_prob=LAVA_PROBABILITY,
+        block_prob=BLOCK_PROBABILITY
+    )
+
+
+class DynamicGoalSampler(PossibleGoalSampler):
     """
-    A goal sampler for an ensemble of environments.
+    A goal sampler that dynamically adapts to changing environments.
     
-    This sampler maintains a list of goal cells for each environment and
-    samples goals uniformly from the current environment's goal cells.
+    When set_world_model() is called (by train_neural_policy_prior when using
+    world_model_generator), it updates its internal goal cells list.
     """
     
-    def __init__(self, environments: List[RandomMultigridEnv]):
-        """
-        Initialize the ensemble goal sampler.
-        
-        Args:
-            environments: List of environments in the ensemble.
-        """
-        # Use first environment as the "world_model" for base class
-        super().__init__(environments[0])
-        self.environments = environments
-        self.current_env_idx = 0
-        
-        # Precompute goal cells for each environment
-        self.goal_cells_by_env = []
-        for env in environments:
-            goal_cells = self._get_walkable_cells(env)
-            self.goal_cells_by_env.append(goal_cells)
+    def __init__(self, base_env: RandomMultigridEnv):
+        """Initialize with a base environment."""
+        super().__init__(base_env)
+        self._update_goal_cells()
     
-    def _get_walkable_cells(self, env: RandomMultigridEnv) -> List[Tuple[int, int]]:
-        """Get list of walkable cells in an environment."""
-        walkable = []
+    def _update_goal_cells(self):
+        """Update the list of walkable goal cells from current world_model."""
+        self._goal_cells = []
+        env = self.world_model
         for x in range(1, env.width - 1):
             for y in range(1, env.height - 1):
                 cell = env.grid.get(x, y)
-                # Cell is walkable if empty or has an overlappable object
                 if cell is None:
-                    walkable.append((x, y))
+                    self._goal_cells.append((x, y))
                 elif hasattr(cell, 'can_overlap') and cell.can_overlap():
-                    walkable.append((x, y))
+                    self._goal_cells.append((x, y))
                 elif hasattr(cell, 'type') and cell.type in ('goal', 'floor', 'switch'):
-                    walkable.append((x, y))
-        return walkable
+                    self._goal_cells.append((x, y))
     
-    def set_current_env(self, env_idx: int):
-        """Set the current environment index for sampling."""
-        self.current_env_idx = env_idx
-        self.world_model = self.environments[env_idx]
+    def set_world_model(self, world_model):
+        """Called by train_neural_policy_prior when environment changes."""
+        self.world_model = world_model
+        self._update_goal_cells()
     
     def sample(self, state, human_agent_index: int) -> Tuple[PossibleGoal, float]:
-        """Sample a random goal from the current environment's goal cells."""
-        goal_cells = self.goal_cells_by_env[self.current_env_idx]
-        if not goal_cells:
-            # Fallback: use center cell
+        """Sample a random goal from walkable cells."""
+        if not self._goal_cells:
             target_pos = (self.world_model.width // 2, self.world_model.height // 2)
         else:
-            target_pos = random.choice(goal_cells)
+            target_pos = random.choice(self._goal_cells)
         goal = ReachCellGoal(self.world_model, human_agent_index, target_pos)
         return goal, 1.0
 
 
-# ============================================================================
-# Training on Ensemble
-# ============================================================================
-
 def train_on_ensemble(
-    environments: List[RandomMultigridEnv],
     human_agent_indices: List[int],
     num_episodes: int = NUM_TRAINING_EPISODES_FULL,
+    episodes_per_env: int = 1,
     device: str = 'cpu',
-    verbose: bool = True
-) -> Tuple[QNetwork, Any]:
+    verbose: bool = True,
+    base_seed: int = 42
+) -> Tuple[QNetwork, RandomMultigridEnv]:
     """
-    Train a neural policy prior on an ensemble of environments.
+    Train a SINGLE Q-network on an ensemble of randomly generated environments.
     
-    This function cycles through environments during training to learn
-    policies that generalize across different grid layouts.
+    Uses the world_model_generator feature of train_neural_policy_prior to
+    generate new environments during training, enabling generalization.
+    
+    Args:
+        human_agent_indices: Indices of human agents to model.
+        num_episodes: Total number of training episodes.
+        episodes_per_env: Number of episodes per generated environment.
+        device: Torch device ('cpu' or 'cuda').
+        verbose: Whether to print training progress.
+        base_seed: Base random seed for reproducibility.
     
     Returns:
-        Tuple of (trained_q_network, trained_neural_prior)
+        Tuple of (trained_q_network, sample_environment_for_testing)
     """
     if verbose:
-        print(f"Training on ensemble of {len(environments)} environments...")
-        print(f"  Grid size: {environments[0].width}x{environments[0].height}")
+        print(f"Training SINGLE Q-network on random environment ensemble...")
+        print(f"  Grid size: {GRID_SIZE}x{GRID_SIZE}")
         print(f"  Agents: {NUM_HUMANS} humans + {NUM_ROBOTS} robot")
         print(f"  Training episodes: {num_episodes}")
+        print(f"  Episodes per environment: {episodes_per_env}")
     
-    # Create goal sampler for the ensemble
-    goal_sampler = EnsembleGoalSampler(environments)
+    # Create base environment for initialization
+    base_env = create_random_env(seed=base_seed)
+    base_env.reset()
     
-    # We'll use the first environment for initial network creation,
-    # but cycle through environments during training
-    base_env = environments[0]
+    # Goal sampler that updates when environment changes
+    goal_sampler = DynamicGoalSampler(base_env)
     
-    # Custom training loop that cycles through environments
-    grid_width = base_env.width
-    grid_height = base_env.height
-    num_agents = len(base_env.agents)
-    num_actions = base_env.action_space.n
-    max_steps = base_env.max_steps
+    # World model generator: creates new random environment for each batch of episodes
+    def world_model_generator(episode: int) -> RandomMultigridEnv:
+        env = create_random_env(seed=base_seed + episode)
+        env.reset()
+        return env
     
-    # Create networks
-    state_encoder = StateEncoder(
-        grid_width=grid_width,
-        grid_height=grid_height,
-        num_object_types=NUM_OBJECT_TYPE_CHANNELS,
-        num_agents=num_agents,
-        feature_dim=64
-    ).to(device)
+    # Use train_neural_policy_prior with world_model_generator
+    neural_prior = train_neural_policy_prior(
+        world_model=base_env,
+        human_agent_indices=human_agent_indices,
+        goal_sampler=goal_sampler,
+        num_episodes=num_episodes,
+        steps_per_episode=MAX_STEPS,
+        beta=100.0,
+        gamma=0.99,
+        learning_rate=1e-3,
+        batch_size=128,
+        replay_buffer_size=10000,
+        updates_per_episode=4,
+        train_phi_network=False,
+        epsilon=0.3,
+        exploration_policy=np.array([0.06, 0.19, 0.19, 0.56]),
+        use_path_based_shaping=False,  # Use Manhattan distance for ensemble (simpler)
+        device=device,
+        verbose=verbose,
+        world_model_generator=world_model_generator,
+        episodes_per_model=episodes_per_env
+    )
     
-    agent_encoder = AgentEncoder(
-        grid_width=grid_width,
-        grid_height=grid_height,
-        num_agents=num_agents,
-        feature_dim=32
-    ).to(device)
-    
-    goal_encoder = GoalEncoder(
-        grid_width=grid_width,
-        grid_height=grid_height,
-        feature_dim=32
-    ).to(device)
-    
-    q_network = QNetwork(
-        state_encoder=state_encoder,
-        agent_encoder=agent_encoder,
-        goal_encoder=goal_encoder,
-        num_actions=num_actions,
-        hidden_dim=128,
-        feasible_range=(0, 1)
-    ).to(device)
-    
-    # Use the train_neural_policy_prior function but cycle environments
-    # For simplicity, we'll train on each environment in sequence
-    episodes_per_env = num_episodes // len(environments)
-    
-    neural_priors = []
-    for i, env in enumerate(environments):
-        if verbose:
-            print(f"\n  Training on environment {i+1}/{len(environments)} for {episodes_per_env} episodes...")
-        
-        goal_sampler.set_current_env(i)
-        
-        neural_prior = train_neural_policy_prior(
-            world_model=env,
-            human_agent_indices=human_agent_indices,
-            goal_sampler=goal_sampler,
-            num_episodes=episodes_per_env,
-            steps_per_episode=max_steps,
-            beta=100.0,  # High temperature for more deterministic policies
-            gamma=0.99,
-            learning_rate=1e-3,
-            batch_size=128,
-            replay_buffer_size=10000,
-            updates_per_episode=4,
-            train_phi_network=False,
-            epsilon=0.3,
-            exploration_policy=[0.06, 0.19, 0.19, 0.56],  # Biased exploration
-            device=device,
-            use_path_based_shaping=True,
-            verbose=verbose
-        )
-        neural_priors.append(neural_prior)
-    
-    # Return the last trained prior (has the most recent Q-network)
-    return neural_priors[-1].q_network, neural_priors[-1]
+    return neural_prior.q_network, base_env
 
 
 # ============================================================================
@@ -877,48 +817,46 @@ def main():
     
     device = 'cpu'
     
-    # Generate random environments
-    print(f"Generating {num_envs} random environments...")
-    environments = generate_random_environments(
-        num_envs=num_envs,
-        grid_size=GRID_SIZE,
-        num_humans=NUM_HUMANS,
-        num_robots=NUM_ROBOTS,
-        max_steps=MAX_STEPS,
-        base_seed=42
-    )
-    
-    for i, env in enumerate(environments):
-        print(f"  Env {i+1}: {env.width}x{env.height}, {len(env.agents)} agents")
+    # Create a sample environment to identify agent types
+    sample_env = create_random_env(seed=42)
+    sample_env.reset()
     
     # Identify agent types
     human_agent_indices = []
     robot_index = None
-    for i, agent in enumerate(environments[0].agents):
+    for i, agent in enumerate(sample_env.agents):
         if agent.color == 'yellow':
             human_agent_indices.append(i)
         elif agent.color == 'grey':
             robot_index = i
     
-    print(f"\nHuman agents (yellow): {human_agent_indices}")
+    print(f"Grid size: {GRID_SIZE}x{GRID_SIZE}")
+    print(f"Human agents (yellow): {human_agent_indices}")
     print(f"Robot agent (grey): {robot_index}")
     print()
     
-    # Train on ensemble
+    # Train on ensemble (new env generated each episode)
     t0 = time.time()
-    q_network, neural_prior = train_on_ensemble(
-        environments=environments,
+    q_network, base_env = train_on_ensemble(
         human_agent_indices=human_agent_indices,
         num_episodes=num_episodes,
+        episodes_per_env=1,  # New environment each episode for maximum diversity
         device=device,
-        verbose=True
+        verbose=True,
+        base_seed=42
     )
     elapsed = time.time() - t0
     print(f"\nTraining completed in {elapsed:.2f} seconds")
     print()
     
-    # Run rollouts across different environments
-    print(f"Running {num_rollouts} rollouts across environments...")
+    # Generate test environments for rollouts
+    print(f"Generating {num_envs} test environments for rollouts...")
+    test_environments = [create_random_env(seed=1000 + i) for i in range(num_envs)]
+    for env in test_environments:
+        env.reset()
+    
+    # Run rollouts across different test environments
+    print(f"Running {num_rollouts} rollouts across test environments...")
     all_frames = []
     env_indices = []
     
@@ -926,14 +864,18 @@ def main():
     first_human_idx = human_agent_indices[0] if human_agent_indices else 0
     
     for rollout_idx in range(num_rollouts):
-        # Select a random environment for this rollout
-        env_idx = rollout_idx % len(environments)
-        env = environments[env_idx]
+        # Select a test environment for this rollout
+        env_idx = rollout_idx % len(test_environments)
+        env = test_environments[env_idx]
+        env.reset()
         
         # Get walkable cells for goal sampling
-        goal_sampler = EnsembleGoalSampler(environments)
-        goal_sampler.set_current_env(env_idx)
-        goal_cells = goal_sampler.goal_cells_by_env[env_idx]
+        goal_cells = []
+        for x in range(1, env.width - 1):
+            for y in range(1, env.height - 1):
+                cell = env.grid.get(x, y)
+                if cell is None or (hasattr(cell, 'can_overlap') and cell.can_overlap()):
+                    goal_cells.append((x, y))
         
         # Assign random goals to humans
         human_goals = {}

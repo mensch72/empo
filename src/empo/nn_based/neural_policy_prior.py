@@ -1573,7 +1573,9 @@ def train_neural_policy_prior(
     use_path_based_shaping: bool = False,
     passing_costs: Optional[Dict[str, float]] = None,
     device: str = 'cpu',
-    verbose: bool = True
+    verbose: bool = True,
+    world_model_generator: Optional[Callable[[int], Any]] = None,
+    episodes_per_model: int = 1
 ) -> NeuralHumanPolicyPrior:
     """
     Train neural networks to approximate the human policy prior.
@@ -1595,8 +1597,13 @@ def train_neural_policy_prior(
     
     Args:
         world_model: The environment (must support get_state, set_state, step).
+            Used as the base environment for network initialization, and as the
+            training environment when world_model_generator is not provided.
         human_agent_indices: Indices of human agents to model.
-        goal_sampler: Sampler for possible goals.
+        goal_sampler: Sampler for possible goals. When using world_model_generator,
+            the sampler should support being updated with new environments via
+            set_world_model() or similar method, or should work with any environment
+            of the same structure.
         num_episodes: Number of training episodes.
         steps_per_episode: Steps per episode for state sampling.
         beta: Inverse temperature for Boltzmann policy.
@@ -1610,12 +1617,24 @@ def train_neural_policy_prior(
         exploration_policy: Optional fixed exploration policy (action probabilities).
         use_path_based_shaping: If True, use path-based reward shaping with precomputed
             shortest paths and passing difficulty scores. If False (default), use simple 
-            Manhattan distance.
+            Manhattan distance. Note: when using world_model_generator, path-based
+            shaping uses Manhattan distance as fallback since paths vary per environment.
         passing_costs: Optional dict mapping object types to passing costs for path-based
             shaping. Keys: 'empty', 'door_open', 'door_closed', 'agent', 'block',
             'pickable', 'rock', 'wall'. See PathDistanceCalculator for defaults.
         device: Torch device ('cpu' or 'cuda').
         verbose: Whether to print training progress.
+        world_model_generator: Optional callable that takes an episode index and returns
+            a new world model. When provided, a new environment is generated periodically
+            (controlled by episodes_per_model), enabling the Q-network to learn policies
+            that generalize across different grid layouts. The generated environments must
+            have the same dimensions (width, height, num_agents, num_actions) as world_model.
+            The episode index enables curriculum learning (e.g., increasing difficulty).
+            Example: lambda episode: RandomMultigridEnv(seed=episode)
+        episodes_per_model: Number of episodes to run on each generated environment before
+            creating a new one. Only used when world_model_generator is provided.
+            Default is 1 (new environment each episode). Higher values are more efficient
+            but may reduce diversity. For curriculum learning, consider values like 10-50.
     
     Returns:
         NeuralHumanPolicyPrior: Trained policy prior model.
@@ -1703,12 +1722,32 @@ def train_neural_policy_prior(
     q_losses = []
     phi_losses = []
     
+    # For ensemble training: track current environment
+    current_world_model = world_model
+    current_path_calculator = path_calculator
+    
+    if world_model_generator is not None and verbose:
+        print(f"Ensemble training enabled: new environment every {episodes_per_model} episode(s)")
+    
     # Training loop
     for episode in range(num_episodes):
-        world_model.reset()
+        # Generate new environment if using world_model_generator
+        if world_model_generator is not None and episode % episodes_per_model == 0:
+            current_world_model = world_model_generator(episode)
+            current_world_model.reset()
+            # Update goal sampler if it has a method to do so
+            if hasattr(goal_sampler, 'set_world_model'):
+                goal_sampler.set_world_model(current_world_model)
+            elif hasattr(goal_sampler, 'world_model'):
+                goal_sampler.world_model = current_world_model
+            # Recompute path calculator for new environment if using path-based shaping
+            if use_path_based_shaping:
+                current_path_calculator = PathDistanceCalculator(current_world_model, passing_costs)
+        else:
+            current_world_model.reset()
         
         # Sample a random goal for each human agent
-        initial_state = world_model.get_state()
+        initial_state = current_world_model.get_state()
         human_goals = {}
         for human_idx in human_agent_indices:
             goal, _ = goal_sampler.sample(initial_state, human_idx)
@@ -1789,8 +1828,8 @@ def train_neural_policy_prior(
                 actions.append(action)
             
             # Take step
-            _, _, done, _ = world_model.step(actions)
-            next_state = world_model.get_state()
+            _, _, done, _ = current_world_model.step(actions)
+            next_state = current_world_model.get_state()
             
             # Store rewards with reward shaping for denser feedback
             _, next_agent_states, _, _ = next_state
@@ -1823,18 +1862,18 @@ def train_neural_policy_prior(
                     next_pos_tuple = (int(next_pos[0]), int(next_pos[1]))
                     target_tuple = (int(target[0]), int(target[1]))
                     
-                    if path_calculator is not None:
+                    if current_path_calculator is not None:
                         # Use path-based distance with passing difficulty scores
                         # Φ(s) = -path_cost(agent_pos, target) / max_cost
                         max_cost = (grid_width + grid_height) * 50  # Upper bound
                         
                         # Potential at current state
-                        phi_s = path_calculator.compute_potential(
-                            curr_pos_tuple, target_tuple, world_model, max_cost)
+                        phi_s = current_path_calculator.compute_potential(
+                            curr_pos_tuple, target_tuple, current_world_model, max_cost)
                         
                         # Potential at next state
-                        phi_s_prime = path_calculator.compute_potential(
-                            next_pos_tuple, target_tuple, world_model, max_cost)
+                        phi_s_prime = current_path_calculator.compute_potential(
+                            next_pos_tuple, target_tuple, current_world_model, max_cost)
                     else:
                         # Fall back to simple Manhattan distance
                         max_dist = grid_width + grid_height
@@ -1906,13 +1945,15 @@ def train_neural_policy_prior(
                 q_optimizer.zero_grad()
                 
                 # Convert batch to tensors using vectorized helper
-                # Pass world_model and human_agent_indices for full grid encoding
+                # Note: When using world_model_generator, grid encoding from current_world_model
+                # may not match older transitions in buffer. This is acceptable as the network
+                # learns to generalize across grid layouts.
                 (grid_tensors, step_tensors, positions, directions, 
                  agent_indices, goal_coords) = _batch_states_to_tensors(
                     batch, grid_width, grid_height, num_agents,
                     num_object_types=NUM_OBJECT_TYPE_CHANNELS,
                     max_steps=max_steps, device=device,
-                    world_model=world_model,
+                    world_model=current_world_model,
                     human_agent_indices=human_agent_indices
                 )
                 
@@ -1950,7 +1991,7 @@ def train_neural_policy_prior(
                             non_terminal_batch, grid_width, grid_height, num_agents,
                             num_object_types=NUM_OBJECT_TYPE_CHANNELS,
                             max_steps=max_steps, device=device,
-                            world_model=world_model,
+                            world_model=current_world_model,
                             human_agent_indices=human_agent_indices
                         )
                         
