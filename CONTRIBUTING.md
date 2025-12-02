@@ -267,6 +267,53 @@ docs: Update cluster deployment instructions
 3. Address feedback
 4. Approval and merge
 
+## Example Scripts Guidelines
+
+When creating example scripts (in the `examples/` directory):
+
+### Quick Test Mode
+
+**Always include a command-line parameter for shortened test runs.**
+
+Long-running example scripts should include `--quick`, `--test`, or `--fast` flags that reduce training episodes, environments, and other time-consuming parameters. This allows developers to quickly verify the script works without waiting for the full run.
+
+Example implementation:
+```python
+import argparse
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Example Demo")
+    parser.add_argument(
+        '--quick', '-q',
+        action='store_true',
+        help='Run in quick test mode with reduced parameters'
+    )
+    return parser.parse_args()
+
+def main():
+    args = parse_args()
+    
+    # Use reduced parameters in quick mode
+    num_episodes = 50 if args.quick else 500
+    num_envs = 3 if args.quick else 10
+    
+    # ... rest of script
+```
+
+Usage:
+```bash
+# Full run
+python examples/my_demo.py
+
+# Quick test run
+python examples/my_demo.py --quick
+```
+
+This pattern:
+- Enables CI/CD testing of example scripts without timeouts
+- Allows developers to quickly verify scripts work before long runs
+- Documents expected run time differences
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the project's license.

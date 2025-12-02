@@ -104,7 +104,8 @@ class StateEncoder(nn.Module):
     Args:
         grid_width: Width of the grid environment.
         grid_height: Height of the grid environment.
-        num_object_types: Number of distinct object types to encode (default: NUM_OBJECT_TYPE_CHANNELS).
+        num_object_types: Number of object type channels in the network (default: NUM_OBJECT_TYPE_CHANNELS).
+            Each channel is a binary indicator for a specific object type presence.
         num_agents: Total number of agents in the environment.
         feature_dim: Output feature dimension (default: 128).
     """
@@ -124,7 +125,7 @@ class StateEncoder(nn.Module):
         self.num_agents = num_agents
         self.feature_dim = feature_dim
         
-        # Input channels: object type one-hot + agent positions (one channel per agent) + 1 "other humans" channel
+        # Input channels: object type channels (binary) + per-agent position channels + 1 "other humans" channel
         # The "other humans" channel marks all human agents except the query agent
         in_channels = num_object_types + num_agents + 1  # +1 for "other humans" channel
         

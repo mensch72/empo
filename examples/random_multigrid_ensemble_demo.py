@@ -19,18 +19,26 @@ of randomly generated small multigrids. The demo:
    generalization of the learned policy.
 
 Usage:
-    python random_multigrid_ensemble_demo.py
+    python random_multigrid_ensemble_demo.py           # Full run (500 episodes)
+    python random_multigrid_ensemble_demo.py --quick   # Quick test run (50 episodes)
 
 Requirements:
     - torch
     - matplotlib
     - ffmpeg (optional, for MP4 output; falls back to GIF)
+
+NOTE FOR FUTURE EXAMPLES:
+    When creating long-running example scripts, always include a command-line
+    parameter (e.g., --quick, --test, --fast) that shortens the run time for
+    testing purposes. This allows developers to quickly verify the script works
+    without waiting for the full training run.
 """
 
 import sys
 import os
 import time
 import random
+import argparse
 from typing import List, Tuple, Dict, Any, Optional
 
 # Add paths for imports
@@ -67,8 +75,15 @@ NUM_HUMANS = 3          # 3 human agents (yellow)
 NUM_ROBOTS = 1          # 1 robot agent (grey)
 MAX_STEPS = 20          # Maximum steps per episode
 NUM_ENVS = 10           # Number of random environments to generate
-NUM_TRAINING_EPISODES = 500  # Number of training episodes (reduced for faster demo)
 NUM_ROLLOUTS = 10       # Number of rollouts for the movie
+
+# Full training configuration (default)
+NUM_TRAINING_EPISODES_FULL = 500
+
+# Quick test configuration (for --quick flag)
+NUM_TRAINING_EPISODES_QUICK = 50
+NUM_ENVS_QUICK = 3
+NUM_ROLLOUTS_QUICK = 3
 
 # Object placement probabilities
 WALL_PROBABILITY = 0.15      # Probability of placing internal walls
@@ -78,6 +93,37 @@ BOX_PROBABILITY = 0.03       # Probability of placing a box
 DOOR_PROBABILITY = 0.03      # Probability of placing a door
 LAVA_PROBABILITY = 0.02      # Probability of placing lava
 BLOCK_PROBABILITY = 0.03     # Probability of placing a block
+
+
+def parse_args():
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Random Multigrid Ensemble Policy Prior Learning Demo"
+    )
+    parser.add_argument(
+        '--quick', '-q',
+        action='store_true',
+        help='Run in quick test mode with reduced training episodes and environments'
+    )
+    parser.add_argument(
+        '--episodes', '-e',
+        type=int,
+        default=None,
+        help='Number of training episodes (overrides default)'
+    )
+    parser.add_argument(
+        '--envs', '-n',
+        type=int,
+        default=None,
+        help='Number of random environments to generate (overrides default)'
+    )
+    parser.add_argument(
+        '--rollouts', '-r',
+        type=int,
+        default=None,
+        help='Number of rollouts for the movie (overrides default)'
+    )
+    return parser.parse_args()
 
 
 # ============================================================================
@@ -393,7 +439,7 @@ class EnsembleGoalSampler(PossibleGoalSampler):
 def train_on_ensemble(
     environments: List[RandomMultigridEnv],
     human_agent_indices: List[int],
-    num_episodes: int = NUM_TRAINING_EPISODES,
+    num_episodes: int = NUM_TRAINING_EPISODES_FULL,
     device: str = 'cpu',
     verbose: bool = True
 ) -> Tuple[QNetwork, Any]:
@@ -735,8 +781,24 @@ def create_rollout_movie(
 # ============================================================================
 
 def main():
+    # Parse command-line arguments
+    args = parse_args()
+    
+    # Determine configuration based on --quick flag or explicit overrides
+    if args.quick:
+        num_envs = args.envs if args.envs is not None else NUM_ENVS_QUICK
+        num_episodes = args.episodes if args.episodes is not None else NUM_TRAINING_EPISODES_QUICK
+        num_rollouts = args.rollouts if args.rollouts is not None else NUM_ROLLOUTS_QUICK
+        mode_str = "QUICK TEST MODE"
+    else:
+        num_envs = args.envs if args.envs is not None else NUM_ENVS
+        num_episodes = args.episodes if args.episodes is not None else NUM_TRAINING_EPISODES_FULL
+        num_rollouts = args.rollouts if args.rollouts is not None else NUM_ROLLOUTS
+        mode_str = "FULL MODE"
+    
     print("=" * 70)
     print("Random Multigrid Ensemble Policy Prior Learning Demo")
+    print(f"  [{mode_str}]")
     print("=" * 70)
     print()
     
@@ -752,9 +814,9 @@ def main():
     device = 'cpu'
     
     # Generate random environments
-    print(f"Generating {NUM_ENVS} random environments...")
+    print(f"Generating {num_envs} random environments...")
     environments = generate_random_environments(
-        num_envs=NUM_ENVS,
+        num_envs=num_envs,
         grid_size=GRID_SIZE,
         num_humans=NUM_HUMANS,
         num_robots=NUM_ROBOTS,
@@ -783,7 +845,7 @@ def main():
     q_network, neural_prior = train_on_ensemble(
         environments=environments,
         human_agent_indices=human_agent_indices,
-        num_episodes=NUM_TRAINING_EPISODES,
+        num_episodes=num_episodes,
         device=device,
         verbose=True
     )
@@ -792,11 +854,11 @@ def main():
     print()
     
     # Run rollouts across different environments
-    print(f"Running {NUM_ROLLOUTS} rollouts across environments...")
+    print(f"Running {num_rollouts} rollouts across environments...")
     all_frames = []
     env_indices = []
     
-    for rollout_idx in range(NUM_ROLLOUTS):
+    for rollout_idx in range(num_rollouts):
         # Select a random environment for this rollout
         env_idx = rollout_idx % len(environments)
         env = environments[env_idx]
