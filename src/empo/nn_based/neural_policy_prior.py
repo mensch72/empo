@@ -42,13 +42,25 @@ Example usage:
     >>> 
     >>> # Use like tabular policy prior
     >>> action_dist = neural_prior(state, agent_idx=0, goal=my_goal)
+    >>>
+    >>> # Save trained model for reuse
+    >>> neural_prior.save("my_policy_prior.pt")
+    >>>
+    >>> # Load for use with different action space
+    >>> loaded_prior = NeuralHumanPolicyPrior.load(
+    ...     "my_policy_prior.pt",
+    ...     world_model=new_env,
+    ...     human_agent_indices=[0, 1, 2],
+    ...     infeasible_actions_become=0  # Map unknown actions to 'still'
+    ... )
 """
 
+import json
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, List, Tuple, Dict, Any, Callable
+from typing import Optional, List, Tuple, Dict, Any, Callable, Union
 from abc import ABC, abstractmethod
 
 from empo.human_policy_prior import HumanPolicyPrior
@@ -60,6 +72,11 @@ Object type to channel index mapping for grid encoding.
 
 This defines a consistent mapping from object types (wall, door, key, etc.)
 to channel indices, used during both training and inference.
+
+Objects are organized by their properties:
+- Overlappable: Goal, Floor, Switch, etc. (agents can stand on them)
+- Non-overlappable immobile: Wall, MagicWall, Lava, Door (fixed obstacles)
+- Non-overlappable mobile: Block, Rock (can be pushed)
 """
 OBJECT_TYPE_TO_CHANNEL = {
     'wall': 0,
@@ -82,6 +99,31 @@ OBJECT_TYPE_TO_CHANNEL = {
 }
 NUM_OBJECT_TYPE_CHANNELS = 16  # Total object type channels
 
+# Object property categories for "other objects" channels
+OVERLAPPABLE_OBJECTS = {'goal', 'floor', 'switch', 'killbutton', 'pauseswitch', 
+                        'disablingswitch', 'controlbutton', 'unsteadyground', 'objectgoal'}
+NON_OVERLAPPABLE_IMMOBILE_OBJECTS = {'wall', 'magicwall', 'lava', 'door'}
+NON_OVERLAPPABLE_MOBILE_OBJECTS = {'block', 'rock'}
+
+# Default action encoding (can be customized per environment)
+DEFAULT_ACTION_ENCODING = {
+    0: 'still',
+    1: 'left',
+    2: 'right', 
+    3: 'forward',
+    4: 'pickup',
+    5: 'drop',
+    6: 'toggle',
+    7: 'done',
+}
+
+SMALL_ACTION_ENCODING = {
+    0: 'still',
+    1: 'left',
+    2: 'right',
+    3: 'forward',
+}
+
 
 class StateEncoder(nn.Module):
     """
@@ -96,10 +138,14 @@ class StateEncoder(nn.Module):
     The encoder converts this into a 2D grid representation and applies
     convolutional layers to extract spatial features.
     
-    Input channels:
-        - Object type channels (walls, doors, lava, etc.): NUM_OBJECT_TYPE_CHANNELS
-        - Per-agent position channels: num_agents channels
-        - "Other humans" channel: 1 channel (marks all human agents other than the query agent)
+    Input channels (in order):
+        1. Object type channels (walls, doors, lava, etc.): num_object_types
+        2. "Other overlappable objects" channel: 1 (for objects not in object_types_list)
+        3. "Other non-overlappable immobile objects" channel: 1
+        4. "Other non-overlappable mobile objects" channel: 1
+        5. Per-agent position channels: num_agents_per_color * num_colors
+        6. Query agent channel: 1 (marks the agent specified by agent_idx)
+        7. "Other humans" channel: 1 (marks all human agents other than the query agent)
     
     Args:
         grid_width: Width of the grid environment.
@@ -107,7 +153,12 @@ class StateEncoder(nn.Module):
         num_object_types: Number of object type channels in the network (default: NUM_OBJECT_TYPE_CHANNELS).
             Each channel is a binary indicator for a specific object type presence.
         num_agents: Total number of agents in the environment.
+        num_agents_per_color: Dict mapping color string to number of agents of that color.
+            Used for color-specific agent channels. If None, uses num_agents for backward compatibility.
         feature_dim: Output feature dimension (default: 128).
+        object_types_list: List of object type strings that have explicit channels.
+            Objects not in this list go into the "other objects" channels.
+            If None, uses all types in OBJECT_TYPE_TO_CHANNEL.
     """
     
     def __init__(
@@ -116,7 +167,9 @@ class StateEncoder(nn.Module):
         grid_height: int, 
         num_object_types: int = NUM_OBJECT_TYPE_CHANNELS,
         num_agents: int = 2,
-        feature_dim: int = 128
+        num_agents_per_color: Optional[Dict[str, int]] = None,
+        feature_dim: int = 128,
+        object_types_list: Optional[List[str]] = None
     ):
         super().__init__()
         self.grid_width = grid_width
@@ -125,9 +178,36 @@ class StateEncoder(nn.Module):
         self.num_agents = num_agents
         self.feature_dim = feature_dim
         
-        # Input channels: object type channels (binary) + per-agent position channels + 1 "other humans" channel
-        # The "other humans" channel marks all human agents except the query agent
-        in_channels = num_object_types + num_agents + 1  # +1 for "other humans" channel
+        # Store object types list for save/load compatibility
+        if object_types_list is None:
+            self.object_types_list = list(OBJECT_TYPE_TO_CHANNEL.keys())
+        else:
+            self.object_types_list = object_types_list
+        
+        # Store agent counts per color for enhanced agent encoding
+        if num_agents_per_color is None:
+            # Backward compatibility: single set of agent channels
+            self.num_agents_per_color = None
+            self.agent_color_order = None
+            num_agent_channels = num_agents
+        else:
+            self.num_agents_per_color = num_agents_per_color
+            # Consistent ordering of colors for channel assignment
+            self.agent_color_order = sorted(num_agents_per_color.keys())
+            num_agent_channels = sum(num_agents_per_color.values())
+        
+        # Calculate total input channels:
+        # - num_object_types: explicit object type channels
+        # - 3: "other" object channels (overlappable, immobile, mobile)
+        # - num_agent_channels: per-agent position channels (or per-color lists)
+        # - 1: query agent channel
+        # - 1: "other humans" channel
+        self.num_other_object_channels = 3  # overlappable, immobile, mobile
+        in_channels = (num_object_types + 
+                      self.num_other_object_channels +
+                      num_agent_channels + 
+                      1 +  # query agent channel
+                      1)   # other humans channel
         
         # CNN for spatial features
         self.conv = nn.Sequential(
@@ -231,15 +311,22 @@ class AgentEncoder(nn.Module):
         - Agent position (x, y) normalized to [0, 1]
         - Agent direction (one-hot over 4 directions)
         - Agent index (embedded)
+        - Agent color (embedded, for color-aware encoding)
     
     This allows the network to generalize across agents at different positions
-    while still distinguishing them by index when needed.
+    while still distinguishing them by index and color when needed.
+    
+    When num_agents_per_color is provided, the encoder supports color-specific
+    agent lists, which is useful for policy transfer across environments with
+    different numbers of agents per color.
     
     Args:
         grid_width: Width of the grid for normalization.
         grid_height: Height of the grid for normalization.
         num_agents: Maximum number of agents (for index embedding).
+        num_agents_per_color: Optional dict mapping color to agent count.
         feature_dim: Output feature dimension (default: 32).
+        agent_colors: Optional list of agent color strings in order of agent index.
     """
     
     def __init__(
@@ -247,20 +334,37 @@ class AgentEncoder(nn.Module):
         grid_width: int, 
         grid_height: int, 
         num_agents: int,
-        feature_dim: int = 32
+        num_agents_per_color: Optional[Dict[str, int]] = None,
+        feature_dim: int = 32,
+        agent_colors: Optional[List[str]] = None
     ):
         super().__init__()
         self.grid_width = grid_width
         self.grid_height = grid_height
+        self.num_agents = num_agents
         self.feature_dim = feature_dim
+        self.num_agents_per_color = num_agents_per_color
+        self.agent_colors = agent_colors
         
         # Agent index embedding
         self.agent_embedding = nn.Embedding(num_agents, 16)
         
-        # MLP combining position, direction, and index embedding
-        # Input: 2 (pos) + 4 (direction one-hot) + 16 (index embedding) = 22
+        # Color embedding if we have color info
+        if agent_colors is not None:
+            unique_colors = sorted(set(agent_colors))
+            self.color_to_idx = {c: i for i, c in enumerate(unique_colors)}
+            self.color_embedding = nn.Embedding(len(unique_colors), 8)
+            color_embed_dim = 8
+        else:
+            self.color_to_idx = None
+            self.color_embedding = None
+            color_embed_dim = 0
+        
+        # MLP combining position, direction, index embedding, and optional color embedding
+        # Input: 2 (pos) + 4 (direction one-hot) + 16 (index embedding) + color_embed_dim
+        input_dim = 2 + 4 + 16 + color_embed_dim
         self.fc = nn.Sequential(
-            nn.Linear(22, 64),
+            nn.Linear(input_dim, 64),
             nn.ReLU(),
             nn.Linear(64, feature_dim),
             nn.ReLU(),
@@ -270,7 +374,8 @@ class AgentEncoder(nn.Module):
         self, 
         position: torch.Tensor, 
         direction: torch.Tensor, 
-        agent_idx: torch.Tensor
+        agent_idx: torch.Tensor,
+        agent_color_idx: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
         Encode agent attributes into feature vectors.
@@ -279,12 +384,23 @@ class AgentEncoder(nn.Module):
             position: Tensor of shape (batch, 2) with normalized positions [x/W, y/H].
             direction: Tensor of shape (batch, 4) with one-hot direction encoding.
             agent_idx: Tensor of shape (batch,) with agent indices.
+            agent_color_idx: Optional tensor of shape (batch,) with color indices.
+                If None and color_embedding exists, will use zeros.
         
         Returns:
             Feature tensor of shape (batch, feature_dim).
         """
         idx_embed = self.agent_embedding(agent_idx)  # (batch, 16)
-        x = torch.cat([position, direction, idx_embed], dim=1)  # (batch, 22)
+        
+        if self.color_embedding is not None:
+            if agent_color_idx is None:
+                # Default to first color if not provided
+                agent_color_idx = torch.zeros_like(agent_idx)
+            color_embed = self.color_embedding(agent_color_idx)  # (batch, 8)
+            x = torch.cat([position, direction, idx_embed, color_embed], dim=1)
+        else:
+            x = torch.cat([position, direction, idx_embed], dim=1)  # (batch, 22)
+        
         return self.fc(x)
 
 class SoftClamp(nn.Module):
@@ -581,8 +697,10 @@ class NeuralHumanPolicyPrior(HumanPolicyPrior):
         
         This method populates:
         1. Object-type channels (walls, doors, lava, etc.) from the world grid
-        2. Per-agent position channels
-        3. "Other humans" channel (all human agents except query_agent_index)
+        2. "Other objects" channels (overlappable, immobile, mobile)
+        3. Per-agent position channels
+        4. Query agent channel
+        5. "Other humans" channel (all human agents except query_agent_index)
         
         Args:
             state: State tuple (step_count, agent_states, mobile_objects, mutable_objects).
@@ -600,6 +718,15 @@ class NeuralHumanPolicyPrior(HumanPolicyPrior):
         num_object_types = self.q_network.state_encoder.num_object_types
         num_agents = self.q_network.state_encoder.num_agents
         
+        # Channel indices (must match StateEncoder structure)
+        num_other_object_channels = 3
+        other_overlappable_idx = num_object_types
+        other_immobile_idx = num_object_types + 1
+        other_mobile_idx = num_object_types + 2
+        agent_channels_start = num_object_types + num_other_object_channels
+        query_agent_channel_idx = agent_channels_start + num_agents
+        other_humans_channel_idx = query_agent_channel_idx + 1
+        
         grid_tensor = torch.zeros(1, num_channels, H, W, device=self.device)
         
         # 1. Encode object-type channels from the persistent world grid
@@ -609,33 +736,55 @@ class NeuralHumanPolicyPrior(HumanPolicyPrior):
                     cell = self.world_model.grid.get(x, y)
                     if cell is not None:
                         cell_type = getattr(cell, 'type', None)
-                        if cell_type is not None and cell_type in OBJECT_TYPE_TO_CHANNEL:
-                            channel_idx = OBJECT_TYPE_TO_CHANNEL[cell_type]
-                            if channel_idx < num_object_types:
-                                grid_tensor[0, channel_idx, y, x] = 1.0
+                        if cell_type is not None:
+                            if cell_type in OBJECT_TYPE_TO_CHANNEL:
+                                channel_idx = OBJECT_TYPE_TO_CHANNEL[cell_type]
+                                if channel_idx < num_object_types:
+                                    grid_tensor[0, channel_idx, y, x] = 1.0
+                            else:
+                                # Object type not in explicit channels - use "other" channels
+                                if cell_type in OVERLAPPABLE_OBJECTS:
+                                    grid_tensor[0, other_overlappable_idx, y, x] = 1.0
+                                elif cell_type in NON_OVERLAPPABLE_MOBILE_OBJECTS:
+                                    grid_tensor[0, other_mobile_idx, y, x] = 1.0
+                                elif cell_type in NON_OVERLAPPABLE_IMMOBILE_OBJECTS:
+                                    grid_tensor[0, other_immobile_idx, y, x] = 1.0
+                                else:
+                                    if hasattr(cell, 'can_overlap') and cell.can_overlap():
+                                        grid_tensor[0, other_overlappable_idx, y, x] = 1.0
+                                    else:
+                                        grid_tensor[0, other_immobile_idx, y, x] = 1.0
         
         # 2. Encode mobile objects (if any) into their respective channels
-        # Mobile objects format: (obj_type, x, y) - no color
         if mobile_objects:
             for mobile_obj in mobile_objects:
                 obj_type = mobile_obj[0]
                 obj_x = mobile_obj[1]
                 obj_y = mobile_obj[2]
-                if obj_type in OBJECT_TYPE_TO_CHANNEL:
-                    channel_idx = OBJECT_TYPE_TO_CHANNEL[obj_type]
-                    if channel_idx < num_object_types and 0 <= obj_x < W and 0 <= obj_y < H:
-                        grid_tensor[0, channel_idx, int(obj_y), int(obj_x)] = 1.0
+                if 0 <= obj_x < W and 0 <= obj_y < H:
+                    if obj_type in OBJECT_TYPE_TO_CHANNEL:
+                        channel_idx = OBJECT_TYPE_TO_CHANNEL[obj_type]
+                        if channel_idx < num_object_types:
+                            grid_tensor[0, channel_idx, int(obj_y), int(obj_x)] = 1.0
+                    else:
+                        grid_tensor[0, other_mobile_idx, int(obj_y), int(obj_x)] = 1.0
         
         # 3. Encode agent positions (per-agent channels)
         for i, agent_state in enumerate(agent_states):
             if i < num_agents:
                 x, y = int(agent_state[0]), int(agent_state[1])
                 if 0 <= x < W and 0 <= y < H:
-                    channel_idx = num_object_types + i
+                    channel_idx = agent_channels_start + i
                     grid_tensor[0, channel_idx, y, x] = 1.0
         
-        # 4. Encode "other humans" channel (anonymous channel for all other human agents)
-        other_humans_channel_idx = num_object_types + num_agents  # Last channel
+        # 4. Encode query agent channel
+        if query_agent_index is not None and query_agent_index < len(agent_states):
+            agent_state = agent_states[query_agent_index]
+            x, y = int(agent_state[0]), int(agent_state[1])
+            if 0 <= x < W and 0 <= y < H:
+                grid_tensor[0, query_agent_channel_idx, y, x] = 1.0
+        
+        # 5. Encode "other humans" channel (anonymous channel for all other human agents)
         for i, agent_state in enumerate(agent_states):
             # Skip the query agent (if specified)
             if query_agent_index is not None and i == query_agent_index:
@@ -698,8 +847,10 @@ class NeuralHumanPolicyPrior(HumanPolicyPrior):
         dir_idx = int(agent_state[2]) % 4
         direction[0, dir_idx] = 1.0
         
-        # Agent index
-        agent_idx = torch.tensor([human_agent_index], device=self.device)
+        # Agent index - clamp to max supported by the network
+        max_agent_idx = self.q_network.state_encoder.num_agents - 1
+        clamped_idx = min(human_agent_index, max_agent_idx)
+        agent_idx = torch.tensor([clamped_idx], device=self.device)
         
         return position, direction, agent_idx
     
@@ -756,7 +907,8 @@ class NeuralHumanPolicyPrior(HumanPolicyPrior):
                 )
                 
                 policy = self.q_network.get_policy(q_values, self.beta)
-                return policy.cpu().numpy()[0]
+                saved_policy = policy.cpu().numpy()[0]
+                return self._remap_policy(saved_policy)
             
             elif self.phi_network is not None:
                 # Use direct marginal network
@@ -767,7 +919,8 @@ class NeuralHumanPolicyPrior(HumanPolicyPrior):
                     state_tensor, step_tensor,
                     position, direction, agent_idx
                 )
-                return policy.cpu().numpy()[0]
+                saved_policy = policy.cpu().numpy()[0]
+                return self._remap_policy(saved_policy)
             
             elif self.goal_generator is not None:
                 # Compute marginal by exact enumeration over goals
@@ -788,7 +941,7 @@ class NeuralHumanPolicyPrior(HumanPolicyPrior):
                     policy = self.q_network.get_policy(q_values, self.beta)
                     total_policy += weight * policy.cpu().numpy()[0]
                 
-                return total_policy
+                return self._remap_policy(total_policy)
             
             elif self.goal_sampler is not None:
                 # Compute marginal by Monte Carlo sampling
@@ -812,13 +965,355 @@ class NeuralHumanPolicyPrior(HumanPolicyPrior):
                     total_policy += weight * policy.cpu().numpy()[0]
                     total_weight += weight
                 
-                return total_policy / total_weight if total_weight > 0 else total_policy
+                saved_policy = total_policy / total_weight if total_weight > 0 else total_policy
+                return self._remap_policy(saved_policy)
             
             else:
                 raise ValueError(
                     "Either possible_goal must be provided, or one of "
                     "phi_network, goal_generator, or goal_sampler must be set"
                 )
+    
+    def save(self, filepath: str) -> None:
+        """
+        Save the trained policy prior to a file.
+        
+        Saves the Q-network weights and all input-relevant architectural parameters
+        needed for loading the network in a different environment.
+        
+        Saved metadata includes:
+            - grid_dimensions: (width, height) of the grid
+            - object_types_list: List of object types with explicit channels
+            - action_encoding: Mapping of action index to action string
+            - num_agents: Number of agents the network was trained with
+            - num_agents_per_color: Dict of agent counts per color (if available)
+            - num_actions: Number of actions in action space
+            - beta: Inverse temperature parameter
+            - feature_dims: Feature dimensions for encoders
+        
+        Args:
+            filepath: Path to save the model file (.pt format recommended).
+        """
+        # Build action encoding from world_model
+        action_encoding = {}
+        if hasattr(self.world_model, 'actions') and hasattr(self.world_model.actions, 'available'):
+            for i, action_name in enumerate(self.world_model.actions.available):
+                action_encoding[i] = action_name
+        else:
+            # Fallback to default encoding
+            num_actions = self.q_network.num_actions
+            for i in range(num_actions):
+                if i in DEFAULT_ACTION_ENCODING:
+                    action_encoding[i] = DEFAULT_ACTION_ENCODING[i]
+                else:
+                    action_encoding[i] = f'action_{i}'
+        
+        # Collect metadata
+        state_encoder = self.q_network.state_encoder
+        
+        # Get hidden_dim from q_head (first linear layer output dimension)
+        hidden_dim = self.q_network.q_head[0].out_features
+        
+        metadata = {
+            'grid_width': state_encoder.grid_width,
+            'grid_height': state_encoder.grid_height,
+            'num_object_types': state_encoder.num_object_types,
+            'object_types_list': getattr(state_encoder, 'object_types_list', list(OBJECT_TYPE_TO_CHANNEL.keys())),
+            'action_encoding': action_encoding,
+            'num_agents': state_encoder.num_agents,
+            'num_agents_per_color': getattr(state_encoder, 'num_agents_per_color', None),
+            'agent_color_order': getattr(state_encoder, 'agent_color_order', None),
+            'num_actions': self.q_network.num_actions,
+            'beta': self.beta,
+            'human_agent_indices': self.human_agent_indices,
+            'state_encoder_feature_dim': state_encoder.feature_dim,
+            'agent_encoder_feature_dim': self.q_network.agent_encoder.feature_dim,
+            'goal_encoder_feature_dim': self.q_network.goal_encoder.feature_dim,
+            'hidden_dim': hidden_dim,
+            'feasible_range': self.q_network.feasible_range,
+        }
+        
+        # Collect agent encoder specific metadata
+        agent_encoder = self.q_network.agent_encoder
+        if hasattr(agent_encoder, 'agent_colors') and agent_encoder.agent_colors is not None:
+            metadata['agent_colors'] = agent_encoder.agent_colors
+        if hasattr(agent_encoder, 'color_to_idx') and agent_encoder.color_to_idx is not None:
+            metadata['agent_color_to_idx'] = agent_encoder.color_to_idx
+        
+        # Save state dict and metadata
+        save_dict = {
+            'metadata': metadata,
+            'q_network_state_dict': self.q_network.state_dict(),
+        }
+        
+        if self.phi_network is not None:
+            save_dict['phi_network_state_dict'] = self.phi_network.state_dict()
+        
+        torch.save(save_dict, filepath)
+    
+    @classmethod
+    def load(
+        cls,
+        filepath: str,
+        world_model: Any,
+        human_agent_indices: List[int],
+        goal_sampler: Optional[PossibleGoalSampler] = None,
+        goal_generator: Optional[PossibleGoalGenerator] = None,
+        infeasible_actions_become: Optional[int] = None,
+        beta: Optional[float] = None,
+        device: str = 'cpu'
+    ) -> 'NeuralHumanPolicyPrior':
+        """
+        Load a saved policy prior for use with a potentially different environment.
+        
+        This method handles compatibility between the saved network and the new
+        environment, including:
+        - Grid dimension matching (must match exactly)
+        - Action encoding compatibility (no conflicts allowed)
+        - Object type handling (unrecognized types go to "other" channels)
+        - Agent count handling (padding/truncation as needed)
+        
+        Args:
+            filepath: Path to the saved model file.
+            world_model: The new environment/world model.
+            human_agent_indices: Indices of human agents in the new environment.
+            goal_sampler: Optional goal sampler for marginal computation.
+            goal_generator: Optional goal generator for marginal computation.
+            infeasible_actions_become: How to handle actions in the saved network
+                that don't exist in the new world_model's action space:
+                - If an integer (e.g., 0 for 'still'), probability is mapped to that action.
+                - If None, these actions are conditioned out (probability set to 0).
+            beta: Inverse temperature. If None, uses the saved value.
+            device: Torch device ('cpu' or 'cuda').
+        
+        Returns:
+            NeuralHumanPolicyPrior: A loaded policy prior adapted for the new environment.
+        
+        Raises:
+            ValueError: If grid dimensions don't match or action encodings conflict.
+        """
+        # Load saved data
+        save_dict = torch.load(filepath, map_location=device, weights_only=False)
+        metadata = save_dict['metadata']
+        
+        # Validate grid dimensions
+        if world_model.width != metadata['grid_width'] or world_model.height != metadata['grid_height']:
+            raise ValueError(
+                f"Grid dimensions mismatch: saved ({metadata['grid_width']}x{metadata['grid_height']}) "
+                f"vs current ({world_model.width}x{world_model.height}). "
+                "Grid dimensions must match exactly for loading."
+            )
+        
+        # Get current action encoding from world_model
+        current_action_encoding = {}
+        if hasattr(world_model, 'actions') and hasattr(world_model.actions, 'available'):
+            for i, action_name in enumerate(world_model.actions.available):
+                current_action_encoding[i] = action_name
+        else:
+            num_current_actions = world_model.action_space.n
+            for i in range(num_current_actions):
+                if i in DEFAULT_ACTION_ENCODING:
+                    current_action_encoding[i] = DEFAULT_ACTION_ENCODING[i]
+                else:
+                    current_action_encoding[i] = f'action_{i}'
+        
+        saved_action_encoding = metadata['action_encoding']
+        # Convert string keys back to int (JSON serialization issue)
+        saved_action_encoding = {int(k): v for k, v in saved_action_encoding.items()}
+        
+        # Check for action encoding conflicts
+        # A conflict is when the same action ID maps to different action names
+        for action_id, action_name in current_action_encoding.items():
+            if action_id in saved_action_encoding and saved_action_encoding[action_id] != action_name:
+                raise ValueError(
+                    f"Action encoding conflict at index {action_id}: "
+                    f"saved='{saved_action_encoding[action_id]}' vs current='{action_name}'. "
+                    "Cannot load network with conflicting action meanings."
+                )
+        
+        # Build action mapping
+        # - saved_to_current: maps saved action index to current action index (for valid actions)
+        # - actions_to_mask: list of saved action indices that should be masked (prob=0)
+        # - actions_to_remap: list of saved action indices that should be remapped
+        saved_action_to_name = saved_action_encoding
+        current_name_to_action = {v: k for k, v in current_action_encoding.items()}
+        
+        num_saved_actions = metadata['num_actions']
+        num_current_actions = len(current_action_encoding)
+        
+        action_mapping = {}  # saved_idx -> current_idx or None
+        for saved_idx in range(num_saved_actions):
+            saved_name = saved_action_to_name.get(saved_idx, f'action_{saved_idx}')
+            if saved_name in current_name_to_action:
+                action_mapping[saved_idx] = current_name_to_action[saved_name]
+            else:
+                # Action exists in saved but not in current
+                if infeasible_actions_become is not None:
+                    action_mapping[saved_idx] = infeasible_actions_become
+                else:
+                    action_mapping[saved_idx] = None  # Will be masked out
+        
+        # Reconstruct the network architecture
+        grid_width = metadata['grid_width']
+        grid_height = metadata['grid_height']
+        num_agents = metadata['num_agents']
+        num_object_types = metadata['num_object_types']
+        
+        # Recreate encoders with saved architecture
+        state_encoder = StateEncoder(
+            grid_width=grid_width,
+            grid_height=grid_height,
+            num_object_types=num_object_types,
+            num_agents=num_agents,
+            num_agents_per_color=metadata.get('num_agents_per_color'),
+            feature_dim=metadata.get('state_encoder_feature_dim', 128),
+            object_types_list=metadata.get('object_types_list')
+        ).to(device)
+        
+        agent_colors = metadata.get('agent_colors')
+        agent_encoder = AgentEncoder(
+            grid_width=grid_width,
+            grid_height=grid_height,
+            num_agents=num_agents,
+            num_agents_per_color=metadata.get('num_agents_per_color'),
+            feature_dim=metadata.get('agent_encoder_feature_dim', 32),
+            agent_colors=agent_colors
+        ).to(device)
+        
+        goal_encoder = GoalEncoder(
+            grid_width=grid_width,
+            grid_height=grid_height,
+            feature_dim=metadata.get('goal_encoder_feature_dim', 32)
+        ).to(device)
+        
+        hidden_dim = metadata.get('hidden_dim', 128)
+        
+        q_network = QNetwork(
+            state_encoder=state_encoder,
+            agent_encoder=agent_encoder,
+            goal_encoder=goal_encoder,
+            num_actions=num_saved_actions,  # Use saved num_actions
+            hidden_dim=hidden_dim,
+            feasible_range=metadata.get('feasible_range')
+        ).to(device)
+        
+        # Load weights
+        q_network.load_state_dict(save_dict['q_network_state_dict'])
+        
+        # Load phi_network if available
+        phi_network = None
+        if 'phi_network_state_dict' in save_dict:
+            phi_state_encoder = StateEncoder(
+                grid_width=grid_width,
+                grid_height=grid_height,
+                num_object_types=num_object_types,
+                num_agents=num_agents,
+                num_agents_per_color=metadata.get('num_agents_per_color'),
+                feature_dim=metadata.get('state_encoder_feature_dim', 128),
+                object_types_list=metadata.get('object_types_list')
+            ).to(device)
+            
+            phi_agent_encoder = AgentEncoder(
+                grid_width=grid_width,
+                grid_height=grid_height,
+                num_agents=num_agents,
+                num_agents_per_color=metadata.get('num_agents_per_color'),
+                feature_dim=metadata.get('agent_encoder_feature_dim', 32),
+                agent_colors=agent_colors
+            ).to(device)
+            
+            phi_network = PolicyPriorNetwork(
+                state_encoder=phi_state_encoder,
+                agent_encoder=phi_agent_encoder,
+                num_actions=num_saved_actions
+            ).to(device)
+            
+            phi_network.load_state_dict(save_dict['phi_network_state_dict'])
+        
+        # Use saved beta if not overridden
+        if beta is None:
+            beta = metadata.get('beta', 1.0)
+        
+        # Create wrapper that handles action mapping
+        prior = cls(
+            world_model=world_model,
+            human_agent_indices=human_agent_indices,
+            q_network=q_network,
+            phi_network=phi_network,
+            beta=beta,
+            goal_sampler=goal_sampler,
+            goal_generator=goal_generator,
+            device=device
+        )
+        
+        # Store action mapping info for runtime use
+        prior._action_mapping = action_mapping
+        prior._num_current_actions = num_current_actions
+        prior._saved_action_encoding = saved_action_encoding
+        prior._current_action_encoding = current_action_encoding
+        
+        return prior
+    
+    def _remap_policy(self, saved_policy: np.ndarray) -> np.ndarray:
+        """
+        Remap policy from saved action space to current action space.
+        
+        This method handles:
+        - Actions that exist in both: probability transferred directly
+        - Actions in saved but not current: masked (prob=0) or remapped
+        - Actions in current but not saved: get probability 0
+        
+        Args:
+            saved_policy: Policy over saved action space (sums to 1).
+        
+        Returns:
+            Policy over current action space (renormalized to sum to 1).
+        """
+        if not hasattr(self, '_action_mapping'):
+            # No mapping needed - same action space
+            return saved_policy
+        
+        current_policy = np.zeros(self._num_current_actions)
+        
+        for saved_idx, prob in enumerate(saved_policy):
+            if saved_idx in self._action_mapping:
+                current_idx = self._action_mapping[saved_idx]
+                if current_idx is not None:
+                    current_policy[current_idx] += prob
+        
+        # Renormalize to sum to 1 (handles masked actions)
+        total = current_policy.sum()
+        if total > 0:
+            current_policy /= total
+        else:
+            # All actions masked - uniform over current actions
+            current_policy = np.ones(self._num_current_actions) / self._num_current_actions
+        
+        return current_policy
+
+
+def _get_action_encoding(world_model: Any) -> Dict[int, str]:
+    """
+    Extract action encoding from a world model.
+    
+    Args:
+        world_model: Environment with actions attribute.
+    
+    Returns:
+        Dictionary mapping action index to action string.
+    """
+    if hasattr(world_model, 'actions') and hasattr(world_model.actions, 'available'):
+        return {i: name for i, name in enumerate(world_model.actions.available)}
+    elif hasattr(world_model, 'action_space'):
+        num_actions = world_model.action_space.n
+        encoding = {}
+        for i in range(num_actions):
+            if i in DEFAULT_ACTION_ENCODING:
+                encoding[i] = DEFAULT_ACTION_ENCODING[i]
+            else:
+                encoding[i] = f'action_{i}'
+        return encoding
+    return {}
 
 
 def _state_to_tensors_static(
@@ -838,8 +1333,10 @@ def _state_to_tensors_static(
     
     This function populates:
     1. Object-type channels (walls, doors, lava, etc.) from the world grid
-    2. Per-agent position channels
-    3. "Other humans" channel (all human agents except query_agent_index)
+    2. "Other objects" channels (overlappable, immobile, mobile) for unknown types
+    3. Per-agent position channels
+    4. Query agent channel
+    5. "Other humans" channel (all human agents except query_agent_index)
     
     Args:
         state: State tuple (step_count, agent_states, mobile_objects, mutable_objects).
@@ -858,9 +1355,23 @@ def _state_to_tensors_static(
     """
     step_count, agent_states, mobile_objects, mutable_objects = state
     
-    # +1 for "other humans" channel
-    num_channels = num_object_types + num_agents + 1
+    # Channel structure:
+    # - num_object_types: explicit object type channels
+    # - 3: "other" object channels (overlappable, immobile, mobile)
+    # - num_agents: per-agent position channels
+    # - 1: query agent channel
+    # - 1: "other humans" channel
+    num_other_object_channels = 3
+    num_channels = num_object_types + num_other_object_channels + num_agents + 1 + 1
     grid_tensor = torch.zeros(1, num_channels, grid_height, grid_width, device=device)
+    
+    # Channel indices
+    other_overlappable_idx = num_object_types
+    other_immobile_idx = num_object_types + 1
+    other_mobile_idx = num_object_types + 2
+    agent_channels_start = num_object_types + num_other_object_channels
+    query_agent_channel_idx = agent_channels_start + num_agents
+    other_humans_channel_idx = query_agent_channel_idx + 1
     
     # 1. Encode object-type channels from the persistent world grid
     if world_model is not None and hasattr(world_model, 'grid') and world_model.grid is not None:
@@ -869,10 +1380,25 @@ def _state_to_tensors_static(
                 cell = world_model.grid.get(x, y)
                 if cell is not None:
                     cell_type = getattr(cell, 'type', None)
-                    if cell_type is not None and cell_type in OBJECT_TYPE_TO_CHANNEL:
-                        channel_idx = OBJECT_TYPE_TO_CHANNEL[cell_type]
-                        if channel_idx < num_object_types:
-                            grid_tensor[0, channel_idx, y, x] = 1.0
+                    if cell_type is not None:
+                        if cell_type in OBJECT_TYPE_TO_CHANNEL:
+                            channel_idx = OBJECT_TYPE_TO_CHANNEL[cell_type]
+                            if channel_idx < num_object_types:
+                                grid_tensor[0, channel_idx, y, x] = 1.0
+                        else:
+                            # Object type not in explicit channels - use "other" channels
+                            if cell_type in OVERLAPPABLE_OBJECTS:
+                                grid_tensor[0, other_overlappable_idx, y, x] = 1.0
+                            elif cell_type in NON_OVERLAPPABLE_MOBILE_OBJECTS:
+                                grid_tensor[0, other_mobile_idx, y, x] = 1.0
+                            elif cell_type in NON_OVERLAPPABLE_IMMOBILE_OBJECTS:
+                                grid_tensor[0, other_immobile_idx, y, x] = 1.0
+                            else:
+                                # Unknown type - check can_overlap
+                                if hasattr(cell, 'can_overlap') and cell.can_overlap():
+                                    grid_tensor[0, other_overlappable_idx, y, x] = 1.0
+                                else:
+                                    grid_tensor[0, other_immobile_idx, y, x] = 1.0
     
     # 2. Encode mobile objects (if any) into their respective channels
     # Mobile objects format: (obj_type, x, y) - no color
@@ -881,22 +1407,32 @@ def _state_to_tensors_static(
             obj_type = mobile_obj[0]
             obj_x = mobile_obj[1]
             obj_y = mobile_obj[2]
-            if obj_type in OBJECT_TYPE_TO_CHANNEL:
-                channel_idx = OBJECT_TYPE_TO_CHANNEL[obj_type]
-                if channel_idx < num_object_types and 0 <= obj_x < grid_width and 0 <= obj_y < grid_height:
-                    grid_tensor[0, channel_idx, int(obj_y), int(obj_x)] = 1.0
+            if 0 <= obj_x < grid_width and 0 <= obj_y < grid_height:
+                if obj_type in OBJECT_TYPE_TO_CHANNEL:
+                    channel_idx = OBJECT_TYPE_TO_CHANNEL[obj_type]
+                    if channel_idx < num_object_types:
+                        grid_tensor[0, channel_idx, int(obj_y), int(obj_x)] = 1.0
+                else:
+                    # Mobile object not in explicit channels
+                    grid_tensor[0, other_mobile_idx, int(obj_y), int(obj_x)] = 1.0
     
     # 3. Encode agent positions (per-agent channels)
     for i, agent_state in enumerate(agent_states):
         if i < num_agents:
             x, y = int(agent_state[0]), int(agent_state[1])
             if 0 <= x < grid_width and 0 <= y < grid_height:
-                channel_idx = num_object_types + i
+                channel_idx = agent_channels_start + i
                 grid_tensor[0, channel_idx, y, x] = 1.0
     
-    # 4. Encode "other humans" channel (anonymous channel for all other human agents)
+    # 4. Encode query agent channel (specific agent being queried)
+    if query_agent_index is not None and query_agent_index < len(agent_states):
+        agent_state = agent_states[query_agent_index]
+        x, y = int(agent_state[0]), int(agent_state[1])
+        if 0 <= x < grid_width and 0 <= y < grid_height:
+            grid_tensor[0, query_agent_channel_idx, y, x] = 1.0
+    
+    # 5. Encode "other humans" channel (anonymous channel for all other human agents)
     if human_agent_indices is not None:
-        other_humans_channel_idx = num_object_types + num_agents  # Last channel
         for i, agent_state in enumerate(agent_states):
             # Skip the query agent (if specified)
             if query_agent_index is not None and i == query_agent_index:
@@ -1007,8 +1543,10 @@ def _batch_states_to_tensors(
     
     This function populates:
     1. Object-type channels (walls, doors, lava, etc.) from the world grid
-    2. Per-agent position channels
-    3. "Other humans" channel (all human agents except the query agent for each transition)
+    2. "Other objects" channels (overlappable, immobile, mobile)
+    3. Per-agent position channels
+    4. Query agent channel
+    5. "Other humans" channel (all human agents except the query agent for each transition)
     
     Args:
         transitions: List of transition dictionaries with 'state', 'human_idx', 'goal' keys.
@@ -1031,8 +1569,23 @@ def _batch_states_to_tensors(
             - goal_coords: (batch, 4)
     """
     batch_size = len(transitions)
-    # +1 for "other humans" channel
-    num_channels = num_object_types + num_agents + 1
+    
+    # Channel structure:
+    # - num_object_types: explicit object type channels
+    # - 3: "other" object channels (overlappable, immobile, mobile)
+    # - num_agents: per-agent position channels
+    # - 1: query agent channel
+    # - 1: "other humans" channel
+    num_other_object_channels = 3
+    num_channels = num_object_types + num_other_object_channels + num_agents + 1 + 1
+    
+    # Channel indices
+    other_overlappable_idx = num_object_types
+    other_immobile_idx = num_object_types + 1
+    other_mobile_idx = num_object_types + 2
+    agent_channels_start = num_object_types + num_other_object_channels
+    query_agent_channel_idx = agent_channels_start + num_agents
+    other_humans_channel_idx = query_agent_channel_idx + 1
     
     # Pre-allocate tensors
     grid_tensors = torch.zeros(batch_size, num_channels, grid_height, grid_width, device=device)
@@ -1044,17 +1597,33 @@ def _batch_states_to_tensors(
     
     # Pre-compute grid objects (shared across batch since grid is static)
     grid_objects_tensor = None
+    other_objects_tensor = None
     if world_model is not None and hasattr(world_model, 'grid') and world_model.grid is not None:
         grid_objects_tensor = torch.zeros(num_object_types, grid_height, grid_width, device=device)
+        other_objects_tensor = torch.zeros(3, grid_height, grid_width, device=device)  # overlappable, immobile, mobile
         for y in range(grid_height):
             for x in range(grid_width):
                 cell = world_model.grid.get(x, y)
                 if cell is not None:
                     cell_type = getattr(cell, 'type', None)
-                    if cell_type is not None and cell_type in OBJECT_TYPE_TO_CHANNEL:
-                        channel_idx = OBJECT_TYPE_TO_CHANNEL[cell_type]
-                        if channel_idx < num_object_types:
-                            grid_objects_tensor[channel_idx, y, x] = 1.0
+                    if cell_type is not None:
+                        if cell_type in OBJECT_TYPE_TO_CHANNEL:
+                            channel_idx = OBJECT_TYPE_TO_CHANNEL[cell_type]
+                            if channel_idx < num_object_types:
+                                grid_objects_tensor[channel_idx, y, x] = 1.0
+                        else:
+                            # Object type not in explicit channels - use "other" channels
+                            if cell_type in OVERLAPPABLE_OBJECTS:
+                                other_objects_tensor[0, y, x] = 1.0
+                            elif cell_type in NON_OVERLAPPABLE_MOBILE_OBJECTS:
+                                other_objects_tensor[2, y, x] = 1.0
+                            elif cell_type in NON_OVERLAPPABLE_IMMOBILE_OBJECTS:
+                                other_objects_tensor[1, y, x] = 1.0
+                            else:
+                                if hasattr(cell, 'can_overlap') and cell.can_overlap():
+                                    other_objects_tensor[0, y, x] = 1.0
+                                else:
+                                    other_objects_tensor[1, y, x] = 1.0
     
     for i, t in enumerate(transitions):
         state = t['state']
@@ -1066,35 +1635,43 @@ def _batch_states_to_tensors(
         # 1. Copy grid object channels (if precomputed)
         if grid_objects_tensor is not None:
             grid_tensors[i, :num_object_types] = grid_objects_tensor
+        if other_objects_tensor is not None:
+            grid_tensors[i, other_overlappable_idx:other_mobile_idx+1] = other_objects_tensor
         
         # 2. Encode mobile objects (if any)
-        # Mobile objects format: (obj_type, x, y) - no color
         if mobile_objects:
             for mobile_obj in mobile_objects:
                 obj_type = mobile_obj[0]
                 obj_x = mobile_obj[1]
                 obj_y = mobile_obj[2]
-                if obj_type in OBJECT_TYPE_TO_CHANNEL:
-                    channel_idx = OBJECT_TYPE_TO_CHANNEL[obj_type]
-                    if channel_idx < num_object_types and 0 <= obj_x < grid_width and 0 <= obj_y < grid_height:
-                        grid_tensors[i, channel_idx, int(obj_y), int(obj_x)] = 1.0
+                if 0 <= obj_x < grid_width and 0 <= obj_y < grid_height:
+                    if obj_type in OBJECT_TYPE_TO_CHANNEL:
+                        channel_idx = OBJECT_TYPE_TO_CHANNEL[obj_type]
+                        if channel_idx < num_object_types:
+                            grid_tensors[i, channel_idx, int(obj_y), int(obj_x)] = 1.0
+                    else:
+                        grid_tensors[i, other_mobile_idx, int(obj_y), int(obj_x)] = 1.0
         
         # 3. Encode agent positions in grid (per-agent channels)
         for j, agent_state in enumerate(agent_states):
             if j < num_agents:
                 x, y = int(agent_state[0]), int(agent_state[1])
                 if 0 <= x < grid_width and 0 <= y < grid_height:
-                    channel_idx = num_object_types + j
+                    channel_idx = agent_channels_start + j
                     grid_tensors[i, channel_idx, y, x] = 1.0
         
-        # 4. Encode "other humans" channel
+        # 4. Encode query agent channel
+        if human_idx < len(agent_states):
+            agent_state = agent_states[human_idx]
+            x, y = int(agent_state[0]), int(agent_state[1])
+            if 0 <= x < grid_width and 0 <= y < grid_height:
+                grid_tensors[i, query_agent_channel_idx, y, x] = 1.0
+        
+        # 5. Encode "other humans" channel
         if human_agent_indices is not None:
-            other_humans_channel_idx = num_object_types + num_agents
             for j, agent_state in enumerate(agent_states):
-                # Skip the query agent
                 if j == human_idx:
                     continue
-                # Only include human agents
                 if j in human_agent_indices:
                     x, y = int(agent_state[0]), int(agent_state[1])
                     if 0 <= x < grid_width and 0 <= y < grid_height:
@@ -1158,8 +1735,18 @@ def _batch_next_states_to_tensors(
             - agent_indices: (batch,)
     """
     batch_size = len(transitions)
-    # +1 for "other humans" channel
-    num_channels = num_object_types + num_agents + 1
+    
+    # Channel structure matches _batch_states_to_tensors
+    num_other_object_channels = 3
+    num_channels = num_object_types + num_other_object_channels + num_agents + 1 + 1
+    
+    # Channel indices
+    other_overlappable_idx = num_object_types
+    other_immobile_idx = num_object_types + 1
+    other_mobile_idx = num_object_types + 2
+    agent_channels_start = num_object_types + num_other_object_channels
+    query_agent_channel_idx = agent_channels_start + num_agents
+    other_humans_channel_idx = query_agent_channel_idx + 1
     
     # Pre-allocate tensors
     grid_tensors = torch.zeros(batch_size, num_channels, grid_height, grid_width, device=device)
@@ -1170,17 +1757,32 @@ def _batch_next_states_to_tensors(
     
     # Pre-compute grid objects (shared across batch since grid is static)
     grid_objects_tensor = None
+    other_objects_tensor = None
     if world_model is not None and hasattr(world_model, 'grid') and world_model.grid is not None:
         grid_objects_tensor = torch.zeros(num_object_types, grid_height, grid_width, device=device)
+        other_objects_tensor = torch.zeros(3, grid_height, grid_width, device=device)
         for y in range(grid_height):
             for x in range(grid_width):
                 cell = world_model.grid.get(x, y)
                 if cell is not None:
                     cell_type = getattr(cell, 'type', None)
-                    if cell_type is not None and cell_type in OBJECT_TYPE_TO_CHANNEL:
-                        channel_idx = OBJECT_TYPE_TO_CHANNEL[cell_type]
-                        if channel_idx < num_object_types:
-                            grid_objects_tensor[channel_idx, y, x] = 1.0
+                    if cell_type is not None:
+                        if cell_type in OBJECT_TYPE_TO_CHANNEL:
+                            channel_idx = OBJECT_TYPE_TO_CHANNEL[cell_type]
+                            if channel_idx < num_object_types:
+                                grid_objects_tensor[channel_idx, y, x] = 1.0
+                        else:
+                            if cell_type in OVERLAPPABLE_OBJECTS:
+                                other_objects_tensor[0, y, x] = 1.0
+                            elif cell_type in NON_OVERLAPPABLE_MOBILE_OBJECTS:
+                                other_objects_tensor[2, y, x] = 1.0
+                            elif cell_type in NON_OVERLAPPABLE_IMMOBILE_OBJECTS:
+                                other_objects_tensor[1, y, x] = 1.0
+                            else:
+                                if hasattr(cell, 'can_overlap') and cell.can_overlap():
+                                    other_objects_tensor[0, y, x] = 1.0
+                                else:
+                                    other_objects_tensor[1, y, x] = 1.0
     
     for i, t in enumerate(transitions):
         state = t['next_state']
@@ -1191,30 +1793,40 @@ def _batch_next_states_to_tensors(
         # 1. Copy grid object channels (if precomputed)
         if grid_objects_tensor is not None:
             grid_tensors[i, :num_object_types] = grid_objects_tensor
+        if other_objects_tensor is not None:
+            grid_tensors[i, other_overlappable_idx:other_mobile_idx+1] = other_objects_tensor
         
         # 2. Encode mobile objects (if any)
-        # Mobile objects format: (obj_type, x, y) - no color
         if mobile_objects:
             for mobile_obj in mobile_objects:
                 obj_type = mobile_obj[0]
                 obj_x = mobile_obj[1]
                 obj_y = mobile_obj[2]
-                if obj_type in OBJECT_TYPE_TO_CHANNEL:
-                    channel_idx = OBJECT_TYPE_TO_CHANNEL[obj_type]
-                    if channel_idx < num_object_types and 0 <= obj_x < grid_width and 0 <= obj_y < grid_height:
-                        grid_tensors[i, channel_idx, int(obj_y), int(obj_x)] = 1.0
+                if 0 <= obj_x < grid_width and 0 <= obj_y < grid_height:
+                    if obj_type in OBJECT_TYPE_TO_CHANNEL:
+                        channel_idx = OBJECT_TYPE_TO_CHANNEL[obj_type]
+                        if channel_idx < num_object_types:
+                            grid_tensors[i, channel_idx, int(obj_y), int(obj_x)] = 1.0
+                    else:
+                        grid_tensors[i, other_mobile_idx, int(obj_y), int(obj_x)] = 1.0
         
         # 3. Encode agent positions in grid
         for j, agent_state in enumerate(agent_states):
             if j < num_agents:
                 x, y = int(agent_state[0]), int(agent_state[1])
                 if 0 <= x < grid_width and 0 <= y < grid_height:
-                    channel_idx = num_object_types + j
+                    channel_idx = agent_channels_start + j
                     grid_tensors[i, channel_idx, y, x] = 1.0
         
-        # 4. Encode "other humans" channel
+        # 4. Encode query agent channel
+        if human_idx < len(agent_states):
+            agent_state = agent_states[human_idx]
+            x, y = int(agent_state[0]), int(agent_state[1])
+            if 0 <= x < grid_width and 0 <= y < grid_height:
+                grid_tensors[i, query_agent_channel_idx, y, x] = 1.0
+        
+        # 5. Encode "other humans" channel
         if human_agent_indices is not None:
-            other_humans_channel_idx = num_object_types + num_agents
             for j, agent_state in enumerate(agent_states):
                 if j == human_idx:
                     continue

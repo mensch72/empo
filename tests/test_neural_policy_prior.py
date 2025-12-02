@@ -86,8 +86,13 @@ def test_state_encoder():
     
     num_object_types = 8
     num_agents = 2
-    # Now includes +1 for "other humans" channel
-    num_channels = num_object_types + num_agents + 1  # = 11
+    # New channel structure:
+    # - num_object_types: explicit object type channels
+    # - 3: "other" object channels (overlappable, immobile, mobile)
+    # - num_agents: per-agent position channels
+    # - 1: query agent channel
+    # - 1: "other humans" channel
+    num_channels = num_object_types + 3 + num_agents + 1 + 1  # = 15
     
     encoder = StateEncoder(
         grid_width=10,
@@ -99,7 +104,7 @@ def test_state_encoder():
     
     # Create dummy input with correct number of channels
     batch_size = 4
-    state_tensor = torch.randn(batch_size, num_channels, 10, 10)  # 11 channels now
+    state_tensor = torch.randn(batch_size, num_channels, 10, 10)
     step_count = torch.randn(batch_size, 1)
     
     # Forward pass
@@ -164,8 +169,8 @@ def test_q_network():
     
     num_object_types = 8
     num_agents = 2
-    # Now includes +1 for "other humans" channel
-    num_channels = num_object_types + num_agents + 1  # = 11
+    # New channel structure
+    num_channels = num_object_types + 3 + num_agents + 1 + 1  # = 15
     
     # Create encoders
     state_encoder = StateEncoder(grid_width=10, grid_height=10, num_object_types=num_object_types, num_agents=num_agents)
@@ -213,8 +218,8 @@ def test_policy_prior_network():
     
     num_object_types = 8
     num_agents = 2
-    # Now includes +1 for "other humans" channel
-    num_channels = num_object_types + num_agents + 1  # = 11
+    # New channel structure
+    num_channels = num_object_types + 3 + num_agents + 1 + 1  # = 15
     
     # Create encoders
     state_encoder = StateEncoder(grid_width=10, grid_height=10, num_object_types=num_object_types, num_agents=num_agents)
@@ -270,6 +275,130 @@ def test_create_networks():
     print("  ✓ create_policy_prior_networks test passed!")
 
 
+def test_save_load():
+    """Test the save and load functionality of NeuralHumanPolicyPrior."""
+    print("Testing save/load functionality...")
+    import os
+    import tempfile
+    
+    # Create a mock world model with SmallActions
+    class MockWorldModel:
+        width = 7
+        height = 7
+        max_steps = 20
+        
+        class grid:
+            @staticmethod
+            def get(x, y):
+                return None  # Empty grid
+        
+        class actions:
+            available = ['still', 'left', 'right', 'forward']
+            still = 0
+            left = 1
+            right = 2
+            forward = 3
+        
+        class action_space:
+            n = 4
+        
+        agents = [None, None, None]  # 3 agents
+    
+    world_model = MockWorldModel()
+    
+    # Create encoders and network
+    num_agents = len(world_model.agents)
+    state_encoder = StateEncoder(
+        grid_width=world_model.width,
+        grid_height=world_model.height,
+        num_agents=num_agents
+    )
+    agent_encoder = AgentEncoder(
+        grid_width=world_model.width,
+        grid_height=world_model.height,
+        num_agents=num_agents
+    )
+    goal_encoder = GoalEncoder(
+        grid_width=world_model.width,
+        grid_height=world_model.height
+    )
+    q_network = QNetwork(
+        state_encoder=state_encoder,
+        agent_encoder=agent_encoder,
+        goal_encoder=goal_encoder,
+        num_actions=4
+    )
+    
+    # Create the prior
+    prior = NeuralHumanPolicyPrior(
+        world_model=world_model,
+        human_agent_indices=[0, 1],
+        q_network=q_network,
+        beta=10.0
+    )
+    
+    # Save to temp file
+    with tempfile.TemporaryDirectory() as tmpdir:
+        filepath = os.path.join(tmpdir, 'test_prior.pt')
+        prior.save(filepath)
+        assert os.path.exists(filepath), "Save file should be created"
+        print("  ✓ Save successful")
+        
+        # Load back - same environment
+        loaded_prior = NeuralHumanPolicyPrior.load(
+            filepath,
+            world_model=world_model,
+            human_agent_indices=[0, 1],
+            device='cpu'
+        )
+        assert loaded_prior is not None, "Loaded prior should not be None"
+        assert loaded_prior.beta == 10.0, "Beta should be preserved"
+        print("  ✓ Load successful with same environment")
+        
+        # Test with a different world model that has more actions
+        class MockWorldModelFullActions:
+            width = 7
+            height = 7
+            max_steps = 20
+            
+            class grid:
+                @staticmethod
+                def get(x, y):
+                    return None
+            
+            class actions:
+                available = ['still', 'left', 'right', 'forward', 'pickup', 'drop', 'toggle', 'done']
+                still = 0
+                left = 1
+                right = 2
+                forward = 3
+                pickup = 4
+                drop = 5
+                toggle = 6
+                done = 7
+            
+            class action_space:
+                n = 8
+            
+            agents = [None, None, None, None, None]  # More agents
+        
+        world_model_full = MockWorldModelFullActions()
+        
+        # Load with full actions environment
+        loaded_prior_full = NeuralHumanPolicyPrior.load(
+            filepath,
+            world_model=world_model_full,
+            human_agent_indices=[0, 1, 2],
+            infeasible_actions_become=None,  # Mask out non-existent actions
+            device='cpu'
+        )
+        assert loaded_prior_full is not None
+        assert hasattr(loaded_prior_full, '_action_mapping')
+        print("  ✓ Load successful with different action space")
+        
+    print("  ✓ save/load test passed!")
+
+
 def main():
     """Run all tests."""
     print("=" * 60)
@@ -293,6 +422,9 @@ def main():
     print()
     
     test_create_networks()
+    print()
+    
+    test_save_load()
     print()
     
     print("=" * 60)

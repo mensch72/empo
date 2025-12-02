@@ -20,6 +20,9 @@ Main components:
     - PathDistanceCalculator: Computes path-based distances for reward shaping
     - OBJECT_TYPE_TO_CHANNEL: Mapping from object types to channel indices
     - NUM_OBJECT_TYPE_CHANNELS: Total number of object type channels
+    - OVERLAPPABLE_OBJECTS, NON_OVERLAPPABLE_IMMOBILE_OBJECTS, NON_OVERLAPPABLE_MOBILE_OBJECTS:
+        Object type categories for "other objects" channels
+    - DEFAULT_ACTION_ENCODING, SMALL_ACTION_ENCODING: Standard action encodings
 
 Mathematical background:
     The networks approximate:
@@ -44,12 +47,26 @@ Example usage:
     >>> 
     >>> # Use like tabular policy prior
     >>> action_dist = neural_prior(state, agent_idx=0, goal=my_goal)
+    >>>
+    >>> # Save trained model
+    >>> neural_prior.save("my_policy.pt")
+    >>>
+    >>> # Load for a different environment
+    >>> loaded_prior = NeuralHumanPolicyPrior.load(
+    ...     "my_policy.pt", new_env, human_indices,
+    ...     infeasible_actions_become=0
+    ... )
 """
 
 from empo.nn_based.neural_policy_prior import (
     # Constants for grid encoding
     OBJECT_TYPE_TO_CHANNEL,
     NUM_OBJECT_TYPE_CHANNELS,
+    OVERLAPPABLE_OBJECTS,
+    NON_OVERLAPPABLE_IMMOBILE_OBJECTS,
+    NON_OVERLAPPABLE_MOBILE_OBJECTS,
+    DEFAULT_ACTION_ENCODING,
+    SMALL_ACTION_ENCODING,
     # Encoders
     StateEncoder,
     GoalEncoder,
@@ -70,6 +87,11 @@ __all__ = [
     # Constants
     "OBJECT_TYPE_TO_CHANNEL",
     "NUM_OBJECT_TYPE_CHANNELS",
+    "OVERLAPPABLE_OBJECTS",
+    "NON_OVERLAPPABLE_IMMOBILE_OBJECTS",
+    "NON_OVERLAPPABLE_MOBILE_OBJECTS",
+    "DEFAULT_ACTION_ENCODING",
+    "SMALL_ACTION_ENCODING",
     # Encoders
     "StateEncoder",
     "GoalEncoder", 
