@@ -1,36 +1,45 @@
 # Encoder Architecture for Neural Policy Priors
 
-This document explains the architecture of the neural network encoders used in the `NeuralHumanPolicyPrior` system, including the rationale for certain design decisions and seemingly redundant encodings.
+This document explains the architecture of the neural network encoders used in the `NeuralHumanPolicyPrior` system, including the rationale for certain design decisions and the complementary roles of grid-based and list-based encodings.
 
 ## Overview
 
 The neural policy prior system uses three main encoders to transform environment state into features suitable for Q-value prediction:
 
-1. **StateEncoder** - Encodes the grid-based world state (objects, agents, walls)
-2. **AgentEncoder** - Encodes the query agent's attributes (position, direction, index)
+1. **StateEncoder** - Encodes the grid-based world state (objects, agent distributions by color)
+2. **AgentEncoder** - Encodes individual agent features (query agent + per-color agent lists)
 3. **GoalEncoder** - Encodes goal locations
 
 These features are combined by the `QNetwork` to predict Q-values for each action.
 
+## Design Principle: Grid vs. List Encoding
+
+The architecture uses two complementary encoding strategies:
+
+- **Grid-based encoding (StateEncoder)**: Captures the *distribution* of agents by color - where agents of each type are located on the grid. This is spatially rich but doesn't distinguish individual agents within a color.
+
+- **List-based encoding (AgentEncoder)**: Captures *individual* agent features - the specific position and direction of each agent. This allows the network to reason about specific agents.
+
+This separation enables policy transfer: the grid-based encoding naturally handles varying numbers of agents per color, while the list-based encoding provides fixed-size slots for individual agent information.
+
 ## StateEncoder Channel Structure
 
-The StateEncoder uses a CNN to process a multi-channel grid representation. The channels are organized as follows:
+The StateEncoder uses a CNN to process a multi-channel grid representation:
 
 ```
-Total Channels = num_object_types + 3 + num_agents + 1 + 1
-                 ---------------   -   ----------   -   -
-                       |           |       |        |   |
-                       |           |       |        |   +-- "Other humans" channel
-                       |           |       |        +-- Query agent grid channel
-                       |           |       +-- Per-agent position channels
+Total Channels = num_object_types + 3 + num_colors + 1
+                 ---------------   -   -----------   -
+                       |           |       |         |
+                       |           |       |         +-- Query agent channel
+                       |           |       +-- Per-color agent channels
                        |           +-- "Other objects" channels (3 types)
                        +-- Explicit object type channels (walls, doors, lava, etc.)
 ```
 
 ### Channel Details
 
-1. **Object Type Channels** (8 channels by default):
-   - Wall, Door, Key, Ball, Box, Goal, Lava, Block
+1. **Object Type Channels** (16 channels by default):
+   - Wall, Door, Key, Ball, Box, Goal, Lava, Block, Rock, UnsteadyGround, Switch, etc.
    - Each cell marked with 1.0 if that object type is present
 
 2. **"Other Objects" Channels** (3 channels):
@@ -40,95 +49,91 @@ Total Channels = num_object_types + 3 + num_agents + 1 + 1
    
    **Justification**: These channels enable policy transfer to environments with novel object types. Objects the network wasn't trained on get encoded in these fallback channels based on their properties, allowing the learned policy to generalize.
 
-3. **Per-Agent Position Channels** (num_agents channels):
-   - One channel per agent index
-   - Each agent's position marked with 1.0 on their dedicated channel
+3. **Per-Color Agent Channels** (num_colors channels):
+   - One channel per agent color (e.g., "yellow" for humans, "grey" for robots)
+   - All agents of a given color are marked in their color's channel
    
-   **Justification**: Enables the network to distinguish between different agents and learn agent-specific behaviors or interactions.
+   **Justification**: Agents are distinguished by their role (color), not their index. This enables:
+   - Policy transfer to environments with more agents of a color
+   - Learning general behaviors that apply to any agent of a given type
+   - Reasoning about the spatial distribution of agent types
 
-4. **Query Agent Grid Channel** (1 channel):
-   - Marks the position of the agent being queried (the one whose policy we're computing)
+4. **Query Agent Channel** (1 channel):
+   - Marks the position of the specific agent being queried
    
-   **Justification**: This is redundant with the per-agent channel but serves an important purpose for policy transfer. When loading a trained network into an environment with more agents than originally trained, the per-agent embedding in AgentEncoder may not cover new agent indices. The grid channel ensures the query agent's position is always explicitly encoded regardless of agent count.
-
-5. **"Other Humans" Channel** (1 channel):
-   - Marks positions of all human agents except the query agent
-   
-   **Justification**: Provides anonymous information about other human agents without requiring the network to track specific identities. Useful for learning collision avoidance and coordination behaviors.
+   **Justification**: While agents are grouped by color in the grid, the network needs to know which specific agent is the "subject" of the query. This channel explicitly marks that agent's position.
 
 ## AgentEncoder Architecture
 
-The AgentEncoder processes agent-specific features:
+The AgentEncoder processes agent-specific features using a list-based approach:
 
 ```
-Input Features:
-├── Position (2D, normalized)
-├── Direction (4D one-hot)
-├── Agent Index Embedding (16D)
-└── Query Agent Features (16D) ← NEW: Dedicated encoding pathway
+Input Features (concatenated):
+├── Query Agent Features (6D: pos + dir)  ← FIRST in the list
+├── Color 0 Agents: [Agent 0 features, Agent 1 features, ...]
+├── Color 1 Agents: [Agent 0 features, Agent 1 features, ...]
+└── ...
+
+Each agent contributes: position (2D) + direction (4D one-hot) = 6 features
 
 Output: Combined feature vector (32D)
 ```
 
-### Query Agent Encoder
+### Key Design Decisions
 
-The `query_agent_encoder` is a dedicated neural pathway that encodes the query agent's position and direction independently of the agent index:
+1. **Query Agent First**: The query agent's features are always the first element in the concatenation. This:
+   - Makes the query agent easily identifiable regardless of its index
+   - Enables policy transfer to environments with different agent configurations
+   - Separates "who is being queried" from "what color is that agent"
 
-```python
-query_agent_encoder = Sequential(
-    Linear(6, 16),  # pos(2) + dir(4) -> 16
-    ReLU()
-)
+2. **Per-Color Agent Lists**: For each color, the encoder has fixed slots for `num_agents_per_color[color]` agents. This:
+   - Provides a consistent input size regardless of actual agent count
+   - Allows reasoning about individual agents within each color group
+   - Zero-pads missing agents (fewer than max in that color)
+
+3. **No Agent Index Embedding**: Unlike the previous architecture, there's no learned embedding for agent indices. The query agent is identified by:
+   - Being first in the AgentEncoder input
+   - Having its position marked in the query agent grid channel
+   - This removes the capacity limitation of index embeddings
+
+### Example: 2 Humans + 1 Robot
+
+```
+num_agents_per_color = {'yellow': 2, 'grey': 1}
+agent_colors = ['grey', 'yellow', 'yellow']  # robot at 0, humans at 1,2
+
+Query for human 1:
+├── Query features: [pos_1, dir_1]              # 6 features
+├── Grey agents:    [pos_0, dir_0]              # 6 features (robot)
+└── Yellow agents:  [pos_1, dir_1, pos_2, dir_2] # 12 features (both humans)
+
+Total input: 24 features → MLP → 32D output
 ```
 
-**Why This Redundancy is Important:**
+## Why This Redundancy?
 
-1. **Policy Transfer Across Agent Counts**: The agent index embedding has fixed capacity (trained for N agents). When loading into an environment with N+K agents, agent indices > N cannot be properly embedded. The query agent encoder captures the agent's position and direction without relying on the index embedding.
+The query agent appears in multiple places:
+1. In the query agent grid channel (StateEncoder)
+2. As the first element in AgentEncoder
+3. In its color's per-color grid channel
 
-2. **Index Embedding vs. Feature Encoding**: The index embedding learns to distinguish agents by their ID during training. The query agent encoder learns what being the "query agent" means regardless of which specific agent it is. This separation allows the network to learn both agent-specific patterns and general query-agent patterns.
+This redundancy serves different purposes:
 
-3. **Graceful Degradation**: For agents beyond the trained capacity, the index embedding is clamped to the maximum valid index. The query agent encoder ensures the actual position/direction information is still properly encoded.
-
-## Redundancy Summary
-
-| Encoding | Purpose | Transfer Benefit |
-|----------|---------|------------------|
-| Per-agent grid channels | Distinguish agents by position | Works up to trained agent count |
-| Query agent grid channel | Mark query agent position | Works with any agent count |
-| Agent index embedding | Learn agent-specific behaviors | Works up to trained agent count |
-| Query agent encoder | Encode query agent features | Works with any agent count |
-| "Other objects" channels | Encode unknown object types | Enables new object type transfer |
-| "Other humans" channel | Anonymous human positions | Reduces reliance on specific agent IDs |
+| Encoding | Information Provided | Transfer Benefit |
+|----------|---------------------|------------------|
+| Per-color grid | Agent distribution by type | Works with any agent count |
+| Query agent grid | Which position is being queried | Spatial context for CNN |
+| Query agent features (first) | Exact position/direction | Works with any configuration |
+| Per-color agent lists | Individual agent states | Fixed slots, zero-padded |
 
 ## Policy Transfer Capabilities
 
 This architecture enables several transfer scenarios:
 
-1. **Same Grid, More Agents**: Load a network trained with 3 agents into an environment with 5 agents. The query agent encoder and grid channels ensure proper encoding.
+1. **Same Grid, More Agents per Color**: Load a network trained with 2 humans into an environment with 3 humans. The extra human's features fit in the per-color list (if slots available) or are visible only in the grid.
 
 2. **Same Grid, Different Actions**: Load a network trained with 4 actions into an environment with 8 actions. Action mapping handles compatible actions; new actions get zero probability.
 
-3. **New Object Types**: Objects not in the training set are encoded in "other objects" channels based on their properties.
+3. **New Object Types**: Objects not in the training set are encoded in "other objects" channels based on their properties (overlappable, mobile, etc.).
 
 4. **Different Grid Size**: Not supported - grid dimensions must match exactly because the CNN architecture is size-specific.
-
-## Example: How Query Agent Encoding Works
-
-Consider an environment with 5 agents but a network trained with 3:
-
-```
-Training: agents [0, 1, 2] with embeddings E_0, E_1, E_2
-
-Deployment: agents [0, 1, 2, 3, 4]
-- Agent 0 query → E_0 + query_encoder(pos_0, dir_0)
-- Agent 1 query → E_1 + query_encoder(pos_1, dir_1)
-- Agent 2 query → E_2 + query_encoder(pos_2, dir_2)
-- Agent 3 query → E_2 (clamped) + query_encoder(pos_3, dir_3) ← still captures actual position!
-- Agent 4 query → E_2 (clamped) + query_encoder(pos_4, dir_4) ← still captures actual position!
-```
-
-Agents 3 and 4 share the embedding of agent 2, but their actual position and direction are properly encoded by the query agent encoder, and their grid position is marked in the query agent grid channel.
-
-## Conclusion
-
-The seemingly redundant encodings serve distinct purposes in enabling robust policy transfer. Each encoding pathway captures different aspects of agent identity and position, and their combination ensures the network can generalize beyond its training configuration while still leveraging learned patterns when applicable.

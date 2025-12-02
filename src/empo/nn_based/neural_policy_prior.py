@@ -129,7 +129,7 @@ class StateEncoder(nn.Module):
     Encodes grid-based multigrid states into feature vectors.
     
     The encoder uses a CNN to process a spatial representation of the grid,
-    capturing object positions, types, and agent locations.
+    capturing object positions, types, and agent distributions by color.
     
     For multigrid environments, the state tuple format is:
         (step_count, agent_states, mobile_objects, mutable_objects)
@@ -142,22 +142,26 @@ class StateEncoder(nn.Module):
         2. "Other overlappable objects" channel: 1 (for objects not in object_types_list)
         3. "Other non-overlappable immobile objects" channel: 1
         4. "Other non-overlappable mobile objects" channel: 1
-        5. Per-agent position channels: num_agents_per_color * num_colors
-        6. Query agent channel: 1 (marks the agent specified by agent_idx)
-        7. "Other humans" channel: 1 (marks all human agents other than the query agent)
+        5. Per-color agent channels: num_colors (one channel per color, marking all agents of that color)
+        6. Query agent channel: 1 (marks the agent being queried)
+    
+    The grid-based encoding captures the *distribution* of agents by color,
+    while the AgentEncoder captures *individual* agent features.
     
     Args:
         grid_width: Width of the grid environment.
         grid_height: Height of the grid environment.
         num_object_types: Number of object type channels in the network (default: NUM_OBJECT_TYPE_CHANNELS).
             Each channel is a binary indicator for a specific object type presence.
-        num_agents: Total number of agents in the environment.
+        num_agents: Total number of agents in the environment (for backward compatibility).
         num_agents_per_color: Dict mapping color string to number of agents of that color.
-            Used for color-specific agent channels. If None, uses num_agents for backward compatibility.
+            Required for per-color agent channels. If None, falls back to single agent channel.
         feature_dim: Output feature dimension (default: 128).
         object_types_list: List of object type strings that have explicit channels.
             Objects not in this list go into the "other objects" channels.
             If None, uses all types in OBJECT_TYPE_TO_CHANNEL.
+        agent_colors: List of agent color strings in order of agent index.
+            Required for mapping agent indices to colors.
     """
     
     def __init__(
@@ -168,7 +172,8 @@ class StateEncoder(nn.Module):
         num_agents: int = 2,
         num_agents_per_color: Optional[Dict[str, int]] = None,
         feature_dim: int = 128,
-        object_types_list: Optional[List[str]] = None
+        object_types_list: Optional[List[str]] = None,
+        agent_colors: Optional[List[str]] = None
     ):
         super().__init__()
         self.grid_width = grid_width
@@ -176,6 +181,7 @@ class StateEncoder(nn.Module):
         self.num_object_types = num_object_types
         self.num_agents = num_agents
         self.feature_dim = feature_dim
+        self.agent_colors = agent_colors
         
         # Store object types list for save/load compatibility
         if object_types_list is None:
@@ -183,30 +189,30 @@ class StateEncoder(nn.Module):
         else:
             self.object_types_list = object_types_list
         
-        # Store agent counts per color for enhanced agent encoding
+        # Store agent counts per color for per-color agent channels
         if num_agents_per_color is None:
-            # Backward compatibility: single set of agent channels
+            # Backward compatibility: single channel for all agents
             self.num_agents_per_color = None
             self.agent_color_order = None
-            num_agent_channels = num_agents
+            num_color_channels = 1  # Single channel for all agents
         else:
             self.num_agents_per_color = num_agents_per_color
             # Consistent ordering of colors for channel assignment
             self.agent_color_order = sorted(num_agents_per_color.keys())
-            num_agent_channels = sum(num_agents_per_color.values())
+            num_color_channels = len(self.agent_color_order)
+        
+        self.num_color_channels = num_color_channels
         
         # Calculate total input channels:
         # - num_object_types: explicit object type channels
         # - 3: "other" object channels (overlappable, immobile, mobile)
-        # - num_agent_channels: per-agent position channels (or per-color lists)
+        # - num_color_channels: per-color agent channels (one per color)
         # - 1: query agent channel
-        # - 1: "other humans" channel
         self.num_other_object_channels = 3  # overlappable, immobile, mobile
         in_channels = (num_object_types + 
                       self.num_other_object_channels +
-                      num_agent_channels + 
-                      1 +  # query agent channel
-                      1)   # other humans channel
+                      num_color_channels +
+                      1)  # query agent channel
         
         # CNN for spatial features
         self.conv = nn.Sequential(
@@ -304,26 +310,29 @@ class GoalEncoder(nn.Module):
 
 class AgentEncoder(nn.Module):
     """
-    Encodes agent attributes into feature vectors.
+    Encodes agent attributes into feature vectors using a list-based approach.
     
-    The encoding captures:
-        - Agent position (x, y) normalized to [0, 1]
-        - Agent direction (one-hot over 4 directions)
-        - Agent index (embedded) - for distinguishing agents within trained capacity
-        - Query agent features - separate encoding for the agent being queried
-        - Agent color (embedded, optional)
+    The encoding is a concatenation of:
+        1. Query agent features: position (2) + direction (4) = 6 features
+        2. For each color k: features of first num_agents_per_color[k] agents of that color
+           Each agent contributes: position (2) + direction (4) = 6 features
     
-    The query agent encoding is crucial for policy transfer: when the environment
-    has more agents than the network was trained with, the query agent's identity
-    is preserved through its dedicated feature encoding, not just the index embedding.
+    This list-based encoding captures *individual* agent features, while the grid-based
+    StateEncoder captures the *distribution* of agents by color.
+    
+    The query agent features come first, making the query agent easily identifiable
+    regardless of its index or the total number of agents. This enables policy transfer
+    to environments with more agents than the network was trained with.
     
     Args:
         grid_width: Width of the grid for normalization.
         grid_height: Height of the grid for normalization.
-        num_agents: Maximum number of agents (for index embedding).
-        num_agents_per_color: Optional dict mapping color to agent count.
+        num_agents: Total number of agents (for backward compatibility).
+        num_agents_per_color: Dict mapping color string to max number of agents of that color.
+            Required for the list-based encoding. If None, falls back to simple encoding.
         feature_dim: Output feature dimension (default: 32).
-        agent_colors: Optional list of agent color strings in order of agent index.
+        agent_colors: List of agent color strings in order of agent index.
+            Required for mapping agent indices to colors during forward pass.
     """
     
     def __init__(
@@ -343,31 +352,30 @@ class AgentEncoder(nn.Module):
         self.num_agents_per_color = num_agents_per_color
         self.agent_colors = agent_colors
         
-        # Agent index embedding (for agents within trained capacity)
-        self.agent_embedding = nn.Embedding(num_agents, 16)
+        # Per-agent feature size: position (2) + direction (4)
+        self.agent_feature_size = 6
         
-        # Query agent encoder - encodes the query agent's features separately
-        # This provides a dedicated pathway that doesn't depend on agent index
-        # Input: 2 (position) + 4 (direction) = 6
-        self.query_agent_encoder = nn.Sequential(
-            nn.Linear(6, 16),
-            nn.ReLU(),
-        )
-        
-        # Color embedding if we have color info
-        if agent_colors is not None:
-            unique_colors = sorted(set(agent_colors))
-            self.color_to_idx = {c: i for i, c in enumerate(unique_colors)}
-            self.color_embedding = nn.Embedding(len(unique_colors), 8)
-            color_embed_dim = 8
+        if num_agents_per_color is not None:
+            # List-based encoding: query agent + per-color agent lists
+            self.color_order = sorted(num_agents_per_color.keys())
+            self.color_to_idx = {c: i for i, c in enumerate(self.color_order)}
+            
+            # Total agents in per-color lists
+            total_list_agents = sum(num_agents_per_color.values())
+            
+            # Input size: query agent features + all per-color agent features
+            # Query agent: 6 features
+            # Per-color lists: total_list_agents * 6 features
+            input_dim = self.agent_feature_size + total_list_agents * self.agent_feature_size
         else:
+            # Backward compatibility: simple encoding with just query agent
+            self.color_order = None
             self.color_to_idx = None
-            self.color_embedding = None
-            color_embed_dim = 0
+            input_dim = self.agent_feature_size
         
-        # MLP combining all features:
-        # - position (2) + direction (4) + index embedding (16) + query agent features (16) + color (optional)
-        input_dim = 2 + 4 + 16 + 16 + color_embed_dim
+        self.input_dim = input_dim
+        
+        # MLP to combine all agent features
         self.fc = nn.Sequential(
             nn.Linear(input_dim, 64),
             nn.ReLU(),
@@ -377,44 +385,74 @@ class AgentEncoder(nn.Module):
     
     def forward(
         self, 
-        position: torch.Tensor, 
-        direction: torch.Tensor, 
-        agent_idx: torch.Tensor,
+        query_position: torch.Tensor, 
+        query_direction: torch.Tensor, 
+        all_agent_positions: Optional[torch.Tensor] = None,
+        all_agent_directions: Optional[torch.Tensor] = None,
+        agent_color_indices: Optional[torch.Tensor] = None,
+        # Legacy parameters for backward compatibility
+        agent_idx: Optional[torch.Tensor] = None,
         agent_color_idx: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
         Encode agent attributes into feature vectors.
         
         Args:
-            position: Tensor of shape (batch, 2) with normalized positions [x/W, y/H].
-            direction: Tensor of shape (batch, 4) with one-hot direction encoding.
-            agent_idx: Tensor of shape (batch,) with agent indices.
-                Indices >= num_agents are clamped to num_agents-1 for the embedding,
-                but the query agent features still capture the actual position/direction.
-            agent_color_idx: Optional tensor of shape (batch,) with color indices.
-                If None and color_embedding exists, will use zeros.
+            query_position: Tensor of shape (batch, 2) with query agent's normalized position.
+            query_direction: Tensor of shape (batch, 4) with query agent's one-hot direction.
+            all_agent_positions: Optional tensor of shape (batch, num_agents, 2) with all agents' positions.
+            all_agent_directions: Optional tensor of shape (batch, num_agents, 4) with all agents' directions.
+            agent_color_indices: Optional tensor of shape (batch, num_agents) with color index per agent.
+            agent_idx: Legacy parameter (ignored).
+            agent_color_idx: Legacy parameter (ignored).
         
         Returns:
             Feature tensor of shape (batch, feature_dim).
         """
-        # Clamp agent indices to valid embedding range [0, num_agents-1]
-        # This handles both negative indices and indices beyond capacity
-        clamped_idx = torch.clamp(agent_idx, 0, self.num_agents - 1)
-        idx_embed = self.agent_embedding(clamped_idx)  # (batch, 16)
+        batch_size = query_position.shape[0]
+        device = query_position.device
         
-        # Query agent encoding - captures position and direction in dedicated pathway
-        query_input = torch.cat([position, direction], dim=1)  # (batch, 6)
-        query_features = self.query_agent_encoder(query_input)  # (batch, 16)
+        # Query agent features (always first)
+        query_features = torch.cat([query_position, query_direction], dim=1)  # (batch, 6)
         
-        if self.color_embedding is not None:
-            if agent_color_idx is None:
-                agent_color_idx = torch.zeros_like(agent_idx)
-            color_embed = self.color_embedding(agent_color_idx)  # (batch, 8)
-            x = torch.cat([position, direction, idx_embed, query_features, color_embed], dim=1)
+        if self.num_agents_per_color is not None and all_agent_positions is not None:
+            # Build per-color agent lists
+            color_features_list = []
+            
+            for color in self.color_order:
+                max_agents_this_color = self.num_agents_per_color[color]
+                color_idx = self.color_to_idx[color]
+                
+                # Initialize features for this color (zeros for missing agents)
+                color_features = torch.zeros(batch_size, max_agents_this_color * self.agent_feature_size, device=device)
+                
+                if agent_color_indices is not None:
+                    # Find agents of this color and fill in their features
+                    for slot in range(max_agents_this_color):
+                        # For each slot, find if there's an agent of this color at position slot
+                        for b in range(batch_size):
+                            agent_count_this_color = 0
+                            for agent_i in range(all_agent_positions.shape[1]):
+                                if agent_color_indices[b, agent_i] == color_idx:
+                                    if agent_count_this_color == slot:
+                                        # This agent fills this slot
+                                        pos = all_agent_positions[b, agent_i]  # (2,)
+                                        dir_ = all_agent_directions[b, agent_i]  # (4,)
+                                        start_idx = slot * self.agent_feature_size
+                                        color_features[b, start_idx:start_idx+2] = pos
+                                        color_features[b, start_idx+2:start_idx+6] = dir_
+                                        break
+                                    agent_count_this_color += 1
+                
+                color_features_list.append(color_features)
+            
+            # Concatenate query features with all color features
+            all_features = torch.cat([query_features] + color_features_list, dim=1)
         else:
-            x = torch.cat([position, direction, idx_embed, query_features], dim=1)
+            # Simple encoding: just query features
+            all_features = query_features
         
-        return self.fc(x)
+        return self.fc(all_features)
 
 class SoftClamp(nn.Module):
     """
@@ -522,7 +560,10 @@ class QNetwork(nn.Module):
         agent_position: torch.Tensor,
         agent_direction: torch.Tensor,
         agent_idx: torch.Tensor,
-        goal_coords: torch.Tensor
+        goal_coords: torch.Tensor,
+        all_agent_positions: Optional[torch.Tensor] = None,
+        all_agent_directions: Optional[torch.Tensor] = None,
+        agent_color_indices: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
         Compute Q-values for all actions.
@@ -530,16 +571,24 @@ class QNetwork(nn.Module):
         Args:
             state_tensor: Grid state tensor (batch, channels, H, W).
             step_count: Normalized step count (batch, 1).
-            agent_position: Agent position (batch, 2).
-            agent_direction: Agent direction one-hot (batch, 4).
-            agent_idx: Agent index (batch,).
+            agent_position: Query agent position (batch, 2).
+            agent_direction: Query agent direction one-hot (batch, 4).
+            agent_idx: Agent index (batch,) - kept for compatibility.
             goal_coords: Goal coordinates (batch, 4).
+            all_agent_positions: Optional tensor (batch, num_agents, 2) for per-color encoding.
+            all_agent_directions: Optional tensor (batch, num_agents, 4) for per-color encoding.
+            agent_color_indices: Optional tensor (batch, num_agents) for per-color encoding.
         
         Returns:
-            Q-values tensor of shape (batch, num_actions), bounded to [0,1] if bounded_q=True.
+            Q-values tensor of shape (batch, num_actions).
         """
         state_feat = self.state_encoder(state_tensor, step_count)
-        agent_feat = self.agent_encoder(agent_position, agent_direction, agent_idx)
+        agent_feat = self.agent_encoder(
+            agent_position, agent_direction,
+            all_agent_positions=all_agent_positions,
+            all_agent_directions=all_agent_directions,
+            agent_color_indices=agent_color_indices
+        )
         goal_feat = self.goal_encoder(goal_coords)
         
         combined = torch.cat([state_feat, agent_feat, goal_feat], dim=1)
@@ -625,7 +674,10 @@ class PolicyPriorNetwork(nn.Module):
         step_count: torch.Tensor,
         agent_position: torch.Tensor,
         agent_direction: torch.Tensor,
-        agent_idx: torch.Tensor
+        agent_idx: torch.Tensor,
+        all_agent_positions: Optional[torch.Tensor] = None,
+        all_agent_directions: Optional[torch.Tensor] = None,
+        agent_color_indices: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
         Compute marginal policy prior.
@@ -633,15 +685,23 @@ class PolicyPriorNetwork(nn.Module):
         Args:
             state_tensor: Grid state tensor (batch, channels, H, W).
             step_count: Normalized step count (batch, 1).
-            agent_position: Agent position (batch, 2).
-            agent_direction: Agent direction one-hot (batch, 4).
-            agent_idx: Agent index (batch,).
+            agent_position: Query agent position (batch, 2).
+            agent_direction: Query agent direction one-hot (batch, 4).
+            agent_idx: Agent index (batch,) - kept for compatibility.
+            all_agent_positions: Optional tensor (batch, num_agents, 2) for per-color encoding.
+            all_agent_directions: Optional tensor (batch, num_agents, 4) for per-color encoding.
+            agent_color_indices: Optional tensor (batch, num_agents) for per-color encoding.
         
         Returns:
             Policy tensor of shape (batch, num_actions) with action probabilities.
         """
         state_feat = self.state_encoder(state_tensor, step_count)
-        agent_feat = self.agent_encoder(agent_position, agent_direction, agent_idx)
+        agent_feat = self.agent_encoder(
+            agent_position, agent_direction,
+            all_agent_positions=all_agent_positions,
+            all_agent_directions=all_agent_directions,
+            agent_color_indices=agent_color_indices
+        )
         
         combined = torch.cat([state_feat, agent_feat], dim=1)
         logits = self.policy_head(combined)
@@ -1343,7 +1403,9 @@ def _state_to_tensors_static(
     device: str = 'cpu',
     world_model: Any = None,
     human_agent_indices: Optional[List[int]] = None,
-    query_agent_index: Optional[int] = None
+    query_agent_index: Optional[int] = None,
+    agent_colors: Optional[List[str]] = None,
+    num_agents_per_color: Optional[Dict[str, int]] = None
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Convert a state tuple to tensor representation with full grid encoding.
@@ -1351,9 +1413,8 @@ def _state_to_tensors_static(
     This function populates:
     1. Object-type channels (walls, doors, lava, etc.) from the world grid
     2. "Other objects" channels (overlappable, immobile, mobile) for unknown types
-    3. Per-agent position channels
+    3. Per-color agent channels (one per color, marking all agents of that color)
     4. Query agent channel
-    5. "Other humans" channel (all human agents except query_agent_index)
     
     Args:
         state: State tuple (step_count, agent_states, mobile_objects, mutable_objects).
@@ -1364,31 +1425,42 @@ def _state_to_tensors_static(
         max_steps: Maximum steps for normalization.
         device: Torch device.
         world_model: Optional world model for accessing persistent grid objects.
-        human_agent_indices: Optional list of human agent indices for "other humans" channel.
-        query_agent_index: Optional index of query agent to exclude from "other humans".
+        human_agent_indices: Optional list of human agent indices (unused, kept for compatibility).
+        query_agent_index: Optional index of query agent for query agent channel.
+        agent_colors: Optional list of agent color strings in order of agent index.
+        num_agents_per_color: Optional dict mapping color to agent count.
     
     Returns:
         Tuple of (grid_tensor, step_count_tensor).
     """
     step_count, agent_states, mobile_objects, mutable_objects = state
     
+    # Determine color channels
+    if num_agents_per_color is not None:
+        color_order = sorted(num_agents_per_color.keys())
+        num_color_channels = len(color_order)
+        color_to_channel = {c: i for i, c in enumerate(color_order)}
+    else:
+        # Backward compatibility: single channel for all agents
+        color_order = None
+        num_color_channels = 1
+        color_to_channel = None
+    
     # Channel structure:
     # - num_object_types: explicit object type channels
     # - 3: "other" object channels (overlappable, immobile, mobile)
-    # - num_agents: per-agent position channels
+    # - num_color_channels: per-color agent channels
     # - 1: query agent channel
-    # - 1: "other humans" channel
     num_other_object_channels = 3
-    num_channels = num_object_types + num_other_object_channels + num_agents + 1 + 1
+    num_channels = num_object_types + num_other_object_channels + num_color_channels + 1
     grid_tensor = torch.zeros(1, num_channels, grid_height, grid_width, device=device)
     
     # Channel indices
     other_overlappable_idx = num_object_types
     other_immobile_idx = num_object_types + 1
     other_mobile_idx = num_object_types + 2
-    agent_channels_start = num_object_types + num_other_object_channels
-    query_agent_channel_idx = agent_channels_start + num_agents
-    other_humans_channel_idx = query_agent_channel_idx + 1
+    color_channels_start = num_object_types + num_other_object_channels
+    query_agent_channel_idx = color_channels_start + num_color_channels
     
     # 1. Encode object-type channels from the persistent world grid
     if world_model is not None and hasattr(world_model, 'grid') and world_model.grid is not None:
@@ -1418,7 +1490,6 @@ def _state_to_tensors_static(
                                     grid_tensor[0, other_immobile_idx, y, x] = 1.0
     
     # 2. Encode mobile objects (if any) into their respective channels
-    # Mobile objects format: (obj_type, x, y) - no color
     if mobile_objects:
         for mobile_obj in mobile_objects:
             obj_type = mobile_obj[0]
@@ -1430,16 +1501,21 @@ def _state_to_tensors_static(
                     if channel_idx < num_object_types:
                         grid_tensor[0, channel_idx, int(obj_y), int(obj_x)] = 1.0
                 else:
-                    # Mobile object not in explicit channels
                     grid_tensor[0, other_mobile_idx, int(obj_y), int(obj_x)] = 1.0
     
-    # 3. Encode agent positions (per-agent channels)
+    # 3. Encode agent positions (per-color channels)
     for i, agent_state in enumerate(agent_states):
-        if i < num_agents:
-            x, y = int(agent_state[0]), int(agent_state[1])
-            if 0 <= x < grid_width and 0 <= y < grid_height:
-                channel_idx = agent_channels_start + i
-                grid_tensor[0, channel_idx, y, x] = 1.0
+        x, y = int(agent_state[0]), int(agent_state[1])
+        if 0 <= x < grid_width and 0 <= y < grid_height:
+            if agent_colors is not None and color_to_channel is not None and i < len(agent_colors):
+                # Per-color channel
+                agent_color = agent_colors[i]
+                if agent_color in color_to_channel:
+                    channel_idx = color_channels_start + color_to_channel[agent_color]
+                    grid_tensor[0, channel_idx, y, x] = 1.0
+            else:
+                # Backward compatibility: single channel for all agents
+                grid_tensor[0, color_channels_start, y, x] = 1.0
     
     # 4. Encode query agent channel (specific agent being queried)
     if query_agent_index is not None and query_agent_index < len(agent_states):
@@ -1447,18 +1523,6 @@ def _state_to_tensors_static(
         x, y = int(agent_state[0]), int(agent_state[1])
         if 0 <= x < grid_width and 0 <= y < grid_height:
             grid_tensor[0, query_agent_channel_idx, y, x] = 1.0
-    
-    # 5. Encode "other humans" channel (anonymous channel for all other human agents)
-    if human_agent_indices is not None:
-        for i, agent_state in enumerate(agent_states):
-            # Skip the query agent (if specified)
-            if query_agent_index is not None and i == query_agent_index:
-                continue
-            # Only include human agents
-            if i in human_agent_indices:
-                x, y = int(agent_state[0]), int(agent_state[1])
-                if 0 <= x < grid_width and 0 <= y < grid_height:
-                    grid_tensor[0, other_humans_channel_idx, y, x] = 1.0
     
     # Normalize step count
     step_tensor = torch.tensor([[step_count / max_steps]], device=device, dtype=torch.float32)
@@ -1553,7 +1617,9 @@ def _batch_states_to_tensors(
     max_steps: int = 100,
     device: str = 'cpu',
     world_model: Any = None,
-    human_agent_indices: Optional[List[int]] = None
+    human_agent_indices: Optional[List[int]] = None,
+    agent_colors: Optional[List[str]] = None,
+    num_agents_per_color: Optional[Dict[str, int]] = None
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Convert a batch of transitions to batched tensor representations.
@@ -1561,9 +1627,8 @@ def _batch_states_to_tensors(
     This function populates:
     1. Object-type channels (walls, doors, lava, etc.) from the world grid
     2. "Other objects" channels (overlappable, immobile, mobile)
-    3. Per-agent position channels
+    3. Per-color agent channels (one per color)
     4. Query agent channel
-    5. "Other humans" channel (all human agents except the query agent for each transition)
     
     Args:
         transitions: List of transition dictionaries with 'state', 'human_idx', 'goal' keys.
@@ -1574,7 +1639,9 @@ def _batch_states_to_tensors(
         max_steps: Maximum steps for normalization.
         device: Torch device.
         world_model: Optional world model for accessing persistent grid objects.
-        human_agent_indices: Optional list of human agent indices for "other humans" channel.
+        human_agent_indices: Optional list of human agent indices (kept for compatibility).
+        agent_colors: Optional list of agent color strings in order of agent index.
+        num_agents_per_color: Optional dict mapping color to agent count.
     
     Returns:
         Tuple of batched tensors:
@@ -1587,22 +1654,30 @@ def _batch_states_to_tensors(
     """
     batch_size = len(transitions)
     
+    # Determine color channels
+    if num_agents_per_color is not None:
+        color_order = sorted(num_agents_per_color.keys())
+        num_color_channels = len(color_order)
+        color_to_channel = {c: i for i, c in enumerate(color_order)}
+    else:
+        color_order = None
+        num_color_channels = 1
+        color_to_channel = None
+    
     # Channel structure:
     # - num_object_types: explicit object type channels
     # - 3: "other" object channels (overlappable, immobile, mobile)
-    # - num_agents: per-agent position channels
+    # - num_color_channels: per-color agent channels
     # - 1: query agent channel
-    # - 1: "other humans" channel
     num_other_object_channels = 3
-    num_channels = num_object_types + num_other_object_channels + num_agents + 1 + 1
+    num_channels = num_object_types + num_other_object_channels + num_color_channels + 1
     
     # Channel indices
     other_overlappable_idx = num_object_types
     other_immobile_idx = num_object_types + 1
     other_mobile_idx = num_object_types + 2
-    agent_channels_start = num_object_types + num_other_object_channels
-    query_agent_channel_idx = agent_channels_start + num_agents
-    other_humans_channel_idx = query_agent_channel_idx + 1
+    color_channels_start = num_object_types + num_other_object_channels
+    query_agent_channel_idx = color_channels_start + num_color_channels
     
     # Pre-allocate tensors
     grid_tensors = torch.zeros(batch_size, num_channels, grid_height, grid_width, device=device)
@@ -1617,7 +1692,7 @@ def _batch_states_to_tensors(
     other_objects_tensor = None
     if world_model is not None and hasattr(world_model, 'grid') and world_model.grid is not None:
         grid_objects_tensor = torch.zeros(num_object_types, grid_height, grid_width, device=device)
-        other_objects_tensor = torch.zeros(3, grid_height, grid_width, device=device)  # overlappable, immobile, mobile
+        other_objects_tensor = torch.zeros(3, grid_height, grid_width, device=device)
         for y in range(grid_height):
             for x in range(grid_width):
                 cell = world_model.grid.get(x, y)
@@ -1629,7 +1704,6 @@ def _batch_states_to_tensors(
                             if channel_idx < num_object_types:
                                 grid_objects_tensor[channel_idx, y, x] = 1.0
                         else:
-                            # Object type not in explicit channels - use "other" channels
                             if cell_type in OVERLAPPABLE_OBJECTS:
                                 other_objects_tensor[0, y, x] = 1.0
                             elif cell_type in NON_OVERLAPPABLE_MOBILE_OBJECTS:
@@ -1669,13 +1743,18 @@ def _batch_states_to_tensors(
                     else:
                         grid_tensors[i, other_mobile_idx, int(obj_y), int(obj_x)] = 1.0
         
-        # 3. Encode agent positions in grid (per-agent channels)
+        # 3. Encode agent positions in grid (per-color channels)
         for j, agent_state in enumerate(agent_states):
-            if j < num_agents:
-                x, y = int(agent_state[0]), int(agent_state[1])
-                if 0 <= x < grid_width and 0 <= y < grid_height:
-                    channel_idx = agent_channels_start + j
-                    grid_tensors[i, channel_idx, y, x] = 1.0
+            x, y = int(agent_state[0]), int(agent_state[1])
+            if 0 <= x < grid_width and 0 <= y < grid_height:
+                if agent_colors is not None and color_to_channel is not None and j < len(agent_colors):
+                    agent_color = agent_colors[j]
+                    if agent_color in color_to_channel:
+                        channel_idx = color_channels_start + color_to_channel[agent_color]
+                        grid_tensors[i, channel_idx, y, x] = 1.0
+                else:
+                    # Backward compatibility: single channel for all agents
+                    grid_tensors[i, color_channels_start, y, x] = 1.0
         
         # 4. Encode query agent channel
         if human_idx < len(agent_states):
@@ -1683,16 +1762,6 @@ def _batch_states_to_tensors(
             x, y = int(agent_state[0]), int(agent_state[1])
             if 0 <= x < grid_width and 0 <= y < grid_height:
                 grid_tensors[i, query_agent_channel_idx, y, x] = 1.0
-        
-        # 5. Encode "other humans" channel
-        if human_agent_indices is not None:
-            for j, agent_state in enumerate(agent_states):
-                if j == human_idx:
-                    continue
-                if j in human_agent_indices:
-                    x, y = int(agent_state[0]), int(agent_state[1])
-                    if 0 <= x < grid_width and 0 <= y < grid_height:
-                        grid_tensors[i, other_humans_channel_idx, y, x] = 1.0
         
         # Step count normalized
         step_tensors[i, 0] = step_count / max_steps
@@ -1727,7 +1796,9 @@ def _batch_next_states_to_tensors(
     max_steps: int = 100,
     device: str = 'cpu',
     world_model: Any = None,
-    human_agent_indices: Optional[List[int]] = None
+    human_agent_indices: Optional[List[int]] = None,
+    agent_colors: Optional[List[str]] = None,
+    num_agents_per_color: Optional[Dict[str, int]] = None
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Convert next states from a batch of transitions to batched tensor representations.
@@ -1741,7 +1812,9 @@ def _batch_next_states_to_tensors(
         max_steps: Maximum steps for normalization.
         device: Torch device.
         world_model: Optional world model for accessing persistent grid objects.
-        human_agent_indices: Optional list of human agent indices for "other humans" channel.
+        human_agent_indices: Optional list of human agent indices (kept for compatibility).
+        agent_colors: Optional list of agent color strings.
+        num_agents_per_color: Optional dict mapping color to agent count.
     
     Returns:
         Tuple of batched tensors for next states:
@@ -1753,17 +1826,26 @@ def _batch_next_states_to_tensors(
     """
     batch_size = len(transitions)
     
+    # Determine color channels
+    if num_agents_per_color is not None:
+        color_order = sorted(num_agents_per_color.keys())
+        num_color_channels = len(color_order)
+        color_to_channel = {c: i for i, c in enumerate(color_order)}
+    else:
+        color_order = None
+        num_color_channels = 1
+        color_to_channel = None
+    
     # Channel structure matches _batch_states_to_tensors
     num_other_object_channels = 3
-    num_channels = num_object_types + num_other_object_channels + num_agents + 1 + 1
+    num_channels = num_object_types + num_other_object_channels + num_color_channels + 1
     
     # Channel indices
     other_overlappable_idx = num_object_types
     other_immobile_idx = num_object_types + 1
     other_mobile_idx = num_object_types + 2
-    agent_channels_start = num_object_types + num_other_object_channels
-    query_agent_channel_idx = agent_channels_start + num_agents
-    other_humans_channel_idx = query_agent_channel_idx + 1
+    color_channels_start = num_object_types + num_other_object_channels
+    query_agent_channel_idx = color_channels_start + num_color_channels
     
     # Pre-allocate tensors
     grid_tensors = torch.zeros(batch_size, num_channels, grid_height, grid_width, device=device)
@@ -1827,13 +1909,17 @@ def _batch_next_states_to_tensors(
                     else:
                         grid_tensors[i, other_mobile_idx, int(obj_y), int(obj_x)] = 1.0
         
-        # 3. Encode agent positions in grid
+        # 3. Encode agent positions in grid (per-color channels)
         for j, agent_state in enumerate(agent_states):
-            if j < num_agents:
-                x, y = int(agent_state[0]), int(agent_state[1])
-                if 0 <= x < grid_width and 0 <= y < grid_height:
-                    channel_idx = agent_channels_start + j
-                    grid_tensors[i, channel_idx, y, x] = 1.0
+            x, y = int(agent_state[0]), int(agent_state[1])
+            if 0 <= x < grid_width and 0 <= y < grid_height:
+                if agent_colors is not None and color_to_channel is not None and j < len(agent_colors):
+                    agent_color = agent_colors[j]
+                    if agent_color in color_to_channel:
+                        channel_idx = color_channels_start + color_to_channel[agent_color]
+                        grid_tensors[i, channel_idx, y, x] = 1.0
+                else:
+                    grid_tensors[i, color_channels_start, y, x] = 1.0
         
         # 4. Encode query agent channel
         if human_idx < len(agent_states):
@@ -1841,16 +1927,6 @@ def _batch_next_states_to_tensors(
             x, y = int(agent_state[0]), int(agent_state[1])
             if 0 <= x < grid_width and 0 <= y < grid_height:
                 grid_tensors[i, query_agent_channel_idx, y, x] = 1.0
-        
-        # 5. Encode "other humans" channel
-        if human_agent_indices is not None:
-            for j, agent_state in enumerate(agent_states):
-                if j == human_idx:
-                    continue
-                if j in human_agent_indices:
-                    x, y = int(agent_state[0]), int(agent_state[1])
-                    if 0 <= x < grid_width and 0 <= y < grid_height:
-                        grid_tensors[i, other_humans_channel_idx, y, x] = 1.0
         
         # Step count normalized
         step_tensors[i, 0] = step_count / max_steps

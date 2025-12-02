@@ -89,10 +89,10 @@ def test_state_encoder():
     # New channel structure:
     # - num_object_types: explicit object type channels
     # - 3: "other" object channels (overlappable, immobile, mobile)
-    # - num_agents: per-agent position channels
+    # - num_color_channels: per-color agent channels (1 for backward compat)
     # - 1: query agent channel
-    # - 1: "other humans" channel
-    num_channels = num_object_types + 3 + num_agents + 1 + 1  # = 15
+    num_color_channels = 1  # Backward compatibility when no colors specified
+    num_channels = num_object_types + 3 + num_color_channels + 1  # = 13
     
     encoder = StateEncoder(
         grid_width=10,
@@ -128,13 +128,12 @@ def test_agent_encoder():
     
     # Create dummy input
     batch_size = 4
-    position = torch.randn(batch_size, 2)
-    direction = torch.zeros(batch_size, 4)
-    direction[:, 0] = 1  # All facing right
-    agent_idx = torch.zeros(batch_size, dtype=torch.long)
+    query_position = torch.randn(batch_size, 2)
+    query_direction = torch.zeros(batch_size, 4)
+    query_direction[:, 0] = 1  # All facing right
     
-    # Forward pass
-    features = encoder(position, direction, agent_idx)
+    # Forward pass - new signature uses query_position and query_direction
+    features = encoder(query_position, query_direction)
     
     assert features.shape == (batch_size, 32), f"Expected (4, 32), got {features.shape}"
     print(f"  ✓ Output shape: {features.shape}")
@@ -169,8 +168,9 @@ def test_q_network():
     
     num_object_types = 8
     num_agents = 2
-    # New channel structure
-    num_channels = num_object_types + 3 + num_agents + 1 + 1  # = 15
+    # New channel structure: num_object_types + 3 (other) + 1 (color) + 1 (query) = 13
+    num_color_channels = 1
+    num_channels = num_object_types + 3 + num_color_channels + 1  # = 13
     
     # Create encoders
     state_encoder = StateEncoder(grid_width=10, grid_height=10, num_object_types=num_object_types, num_agents=num_agents)
@@ -218,8 +218,9 @@ def test_policy_prior_network():
     
     num_object_types = 8
     num_agents = 2
-    # New channel structure
-    num_channels = num_object_types + 3 + num_agents + 1 + 1  # = 15
+    # New channel structure: num_object_types + 3 (other) + 1 (color) + 1 (query) = 13
+    num_color_channels = 1
+    num_channels = num_object_types + 3 + num_color_channels + 1  # = 13
     
     # Create encoders
     state_encoder = StateEncoder(grid_width=10, grid_height=10, num_object_types=num_object_types, num_agents=num_agents)
