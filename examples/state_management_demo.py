@@ -147,13 +147,15 @@ def example_state_properties():
     # States are immutable tuples
     print(f"✓ State type: {type(state).__name__}")
     
-    # State includes step count
-    state_dict = dict(state)
-    print(f"✓ Step count in state: {state_dict.get('step_count', 'NOT FOUND')}")
+    # State format: (step_count, agent_states, mobile_objects, mutable_objects)
+    step_count, agent_states, mobile_objects, mutable_objects = state
+    print(f"✓ Step count in state: {step_count}")
     
     # State includes time left
-    time_left = env.max_steps - state_dict['step_count']
+    time_left = env.max_steps - step_count
     print(f"✓ Time left: {time_left} steps")
+    print(f"✓ Number of agents: {len(agent_states)}")
+    print(f"✓ Number of mobile objects: {len(mobile_objects)}")
     
     print()
 

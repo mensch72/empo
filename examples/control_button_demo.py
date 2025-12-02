@@ -874,7 +874,12 @@ def create_full_rollout_movie():
     return all_frames
 
 
-def train_and_rollout_with_learned_policy():
+# Configuration for quick mode vs full mode
+N_EPISODES_FULL = 2000  # Training episodes for full mode
+N_EPISODES_QUICK = 50   # Training episodes for quick test
+
+
+def train_and_rollout_with_learned_policy(quick_mode=False):
     """
     Train a neural network for the human to learn to reach goal positions,
     then demonstrate rollouts with prequel + learned policy.
@@ -882,6 +887,8 @@ def train_and_rollout_with_learned_policy():
     Uses train_neural_policy_prior() to train the policy, then neural_prior.sample()
     to get actions during rollouts.
     """
+    n_episodes = N_EPISODES_QUICK if quick_mode else N_EPISODES_FULL
+    
     print("=" * 70)
     print("Neural Network Learning: Human learns to guide robot to goals")
     print("=" * 70)
@@ -917,6 +924,7 @@ def train_and_rollout_with_learned_policy():
     
     print(f"Training neural network for {len(goal_cells)} goal positions...")
     print(f"  Goals: {goal_cells}")
+    print(f"  Training episodes: {n_episodes}")
     print("  Human learns to guide robot to goal positions via control buttons")
     print()
     
@@ -930,7 +938,7 @@ def train_and_rollout_with_learned_policy():
             world_model=env,
             human_agent_indices=[human_idx],
             goal_sampler=goal_sampler,
-            num_episodes=2000,  # 4x increase
+            num_episodes=n_episodes,
             steps_per_episode=50,
             beta=beta,
             gamma=0.99,  # Standard discount factor
@@ -1001,11 +1009,13 @@ def train_and_rollout_with_learned_policy():
         return None
 
 
-def main():
+def main(quick_mode=False):
     """Main function to run the control button demo."""
+    mode_str = "QUICK TEST MODE" if quick_mode else "FULL MODE"
     
     print("=" * 70)
     print("Control Button Demo with Neural Policy Learning")
+    print(f"  [{mode_str}]")
     print("=" * 70)
     print()
     print("This demo shows how ControlButton objects work:")
@@ -1028,7 +1038,7 @@ def main():
     # Part 2: Try to train neural network and run learned policy
     print()
     try:
-        train_and_rollout_with_learned_policy()
+        train_and_rollout_with_learned_policy(quick_mode=quick_mode)
     except Exception as e:
         print(f"Neural network learning skipped: {e}")
     
@@ -1044,4 +1054,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description='Control Button Demo')
+    parser.add_argument('--quick', '-q', action='store_true',
+                        help='Run in quick test mode with fewer training episodes')
+    args = parser.parse_args()
+    main(quick_mode=args.quick)

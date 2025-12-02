@@ -32,7 +32,7 @@ class SmallDAGEnv(MultiGridEnv):
     
     def __init__(self):
         # Create 2 agents - agent 1 can push rocks, agent 0 cannot
-        self.agents = [Agent(World, 0), Agent(World, 1)]
+        self.agents = [Agent(World, 0, can_push_rocks=False), Agent(World, 1, can_push_rocks=True)]
         
         super().__init__(
             width=4,
@@ -69,11 +69,11 @@ class SmallDAGEnv(MultiGridEnv):
         self.grid.set(1, 2, block2)
         
         # Place 2 rocks at (2,1) and (2,2)
-        # Both rocks pushable only by agent 1 (who can push rocks)
-        rock1 = Rock(World, pushable_by=1)
+        # Only agent 1 can push rocks (has can_push_rocks=True)
+        rock1 = Rock(World)
         self.grid.set(2, 1, rock1)
         
-        rock2 = Rock(World, pushable_by=1)
+        rock2 = Rock(World)
         self.grid.set(2, 2, rock2)
     
     def _is_valid_pos(self, pos):
@@ -152,18 +152,17 @@ class SmallDAGEnv(MultiGridEnv):
         # Return new state
         return self.get_state()
     
-    def _identify_conflict_blocks(self, state, actions, active_agents):
+    def _identify_conflict_blocks(self, actions, active_agents):
         """
         Override to handle out-of-bounds positions gracefully.
+        Note: This method assumes the environment is already set to the relevant state
+        (i.e., the caller has already called set_state() before calling this method).
         """
         # Constants for resource types
         RESOURCE_INDEPENDENT = 'independent'
         RESOURCE_CELL = 'cell'
         RESOURCE_PICKUP = 'pickup'
         RESOURCE_DROP_AGENT = 'drop_agent'
-        
-        # Restore to the query state to inspect agent positions and targets
-        self.set_state(state)
         
         # Track which resource each agent targets
         agent_targets = {}  # agent_idx -> resource identifier
