@@ -494,12 +494,11 @@ def state_to_grid_tensor(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Convert a state to tensor representation for the neural network.
     
-    Uses the new channel structure:
+    Uses the same channel structure as StateEncoder:
     - num_object_types: explicit object type channels
     - 3: "other" object channels (overlappable, immobile, mobile)
-    - num_agents: per-agent position channels
+    - 1: per-color agent channel (backward compatibility mode)
     - 1: query agent channel
-    - 1: "other humans" channel
     """
     step_count, agent_states, mobile_objects, mutable_objects = state
     
@@ -508,17 +507,17 @@ def state_to_grid_tensor(
     num_agents = len(env.agents)
     num_object_types = NUM_OBJECT_TYPE_CHANNELS
     
-    # Channel structure
+    # Channel structure (matching StateEncoder with num_agents_per_color=None)
     num_other_object_channels = 3
-    num_channels = num_object_types + num_other_object_channels + num_agents + 1 + 1
+    num_color_channels = 1  # Backward compatibility: single channel for all agents
+    num_channels = num_object_types + num_other_object_channels + num_color_channels + 1
     
     # Channel indices
     other_overlappable_idx = num_object_types
     other_immobile_idx = num_object_types + 1
     other_mobile_idx = num_object_types + 2
-    agent_channels_start = num_object_types + num_other_object_channels
-    query_agent_channel_idx = agent_channels_start + num_agents
-    other_humans_channel_idx = query_agent_channel_idx + 1
+    color_channels_start = num_object_types + num_other_object_channels
+    query_agent_channel_idx = color_channels_start + num_color_channels
     
     grid_tensor = torch.zeros(1, num_channels, grid_height, grid_width, device=device)
     
@@ -542,13 +541,11 @@ def state_to_grid_tensor(
                         else:
                             grid_tensor[0, other_immobile_idx, y, x] = 1.0
     
-    # 2. Encode agent positions (per-agent channels)
+    # 2. Encode all agent positions in single color channel (backward compatibility)
     for i, agent_state in enumerate(agent_states):
-        if i < num_agents:
-            x, y = int(agent_state[0]), int(agent_state[1])
-            if 0 <= x < grid_width and 0 <= y < grid_height:
-                channel_idx = agent_channels_start + i
-                grid_tensor[0, channel_idx, y, x] = 1.0
+        x, y = int(agent_state[0]), int(agent_state[1])
+        if 0 <= x < grid_width and 0 <= y < grid_height:
+            grid_tensor[0, color_channels_start, y, x] = 1.0
     
     # 3. Encode query agent channel
     if query_agent_index < len(agent_states):
@@ -556,15 +553,6 @@ def state_to_grid_tensor(
         x, y = int(agent_state[0]), int(agent_state[1])
         if 0 <= x < grid_width and 0 <= y < grid_height:
             grid_tensor[0, query_agent_channel_idx, y, x] = 1.0
-    
-    # 4. Encode "other humans" channel
-    for i, agent_state in enumerate(agent_states):
-        if i == query_agent_index:
-            continue
-        if i in human_agent_indices:
-            x, y = int(agent_state[0]), int(agent_state[1])
-            if 0 <= x < grid_width and 0 <= y < grid_height:
-                grid_tensor[0, other_humans_channel_idx, y, x] = 1.0
     
     # Normalize step count
     step_tensor = torch.tensor([[step_count / env.max_steps]], device=device, dtype=torch.float32)
