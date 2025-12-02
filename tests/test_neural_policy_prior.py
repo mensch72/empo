@@ -399,6 +399,204 @@ def test_save_load():
     print("  ✓ save/load test passed!")
 
 
+def test_load_conflicting_dimensions():
+    """Test that load raises ValueError when grid dimensions don't match."""
+    print("Testing load with conflicting dimensions...")
+    import os
+    import tempfile
+    
+    # Create a mock world model with 7x7 grid
+    class MockWorldModel:
+        width = 7
+        height = 7
+        max_steps = 20
+        
+        class grid:
+            @staticmethod
+            def get(x, y):
+                return None
+        
+        class actions:
+            available = ['still', 'left', 'right', 'forward']
+        
+        class action_space:
+            n = 4
+        
+        agents = [None, None, None]
+    
+    world_model = MockWorldModel()
+    
+    # Create and save a prior
+    num_agents = len(world_model.agents)
+    state_encoder = StateEncoder(
+        grid_width=world_model.width,
+        grid_height=world_model.height,
+        num_agents=num_agents
+    )
+    agent_encoder = AgentEncoder(
+        grid_width=world_model.width,
+        grid_height=world_model.height,
+        num_agents=num_agents
+    )
+    goal_encoder = GoalEncoder(
+        grid_width=world_model.width,
+        grid_height=world_model.height
+    )
+    q_network = QNetwork(
+        state_encoder=state_encoder,
+        agent_encoder=agent_encoder,
+        goal_encoder=goal_encoder,
+        num_actions=4
+    )
+    
+    prior = NeuralHumanPolicyPrior(
+        world_model=world_model,
+        human_agent_indices=[0, 1],
+        q_network=q_network,
+        beta=10.0
+    )
+    
+    with tempfile.TemporaryDirectory() as tmpdir:
+        filepath = os.path.join(tmpdir, 'test_prior.pt')
+        prior.save(filepath)
+        
+        # Create a world model with different dimensions (10x10)
+        class MockWorldModelDifferentSize:
+            width = 10
+            height = 10
+            max_steps = 20
+            
+            class grid:
+                @staticmethod
+                def get(x, y):
+                    return None
+            
+            class actions:
+                available = ['still', 'left', 'right', 'forward']
+            
+            class action_space:
+                n = 4
+            
+            agents = [None, None, None]
+        
+        world_model_different = MockWorldModelDifferentSize()
+        
+        # Try to load with different dimensions - should raise ValueError
+        try:
+            NeuralHumanPolicyPrior.load(
+                filepath,
+                world_model=world_model_different,
+                human_agent_indices=[0, 1],
+                device='cpu'
+            )
+            assert False, "Should have raised ValueError for dimension mismatch"
+        except ValueError as e:
+            assert "Grid dimensions mismatch" in str(e)
+            print(f"  ✓ Correctly raised ValueError: {e}")
+    
+    print("  ✓ load_conflicting_dimensions test passed!")
+
+
+def test_load_conflicting_action_space():
+    """Test that load raises ValueError when action encodings conflict."""
+    print("Testing load with conflicting action space...")
+    import os
+    import tempfile
+    
+    # Create a mock world model with specific action encoding
+    class MockWorldModel:
+        width = 7
+        height = 7
+        max_steps = 20
+        
+        class grid:
+            @staticmethod
+            def get(x, y):
+                return None
+        
+        class actions:
+            available = ['still', 'left', 'right', 'forward']
+        
+        class action_space:
+            n = 4
+        
+        agents = [None, None, None]
+    
+    world_model = MockWorldModel()
+    
+    # Create and save a prior
+    num_agents = len(world_model.agents)
+    state_encoder = StateEncoder(
+        grid_width=world_model.width,
+        grid_height=world_model.height,
+        num_agents=num_agents
+    )
+    agent_encoder = AgentEncoder(
+        grid_width=world_model.width,
+        grid_height=world_model.height,
+        num_agents=num_agents
+    )
+    goal_encoder = GoalEncoder(
+        grid_width=world_model.width,
+        grid_height=world_model.height
+    )
+    q_network = QNetwork(
+        state_encoder=state_encoder,
+        agent_encoder=agent_encoder,
+        goal_encoder=goal_encoder,
+        num_actions=4
+    )
+    
+    prior = NeuralHumanPolicyPrior(
+        world_model=world_model,
+        human_agent_indices=[0, 1],
+        q_network=q_network,
+        beta=10.0
+    )
+    
+    with tempfile.TemporaryDirectory() as tmpdir:
+        filepath = os.path.join(tmpdir, 'test_prior.pt')
+        prior.save(filepath)
+        
+        # Create a world model with conflicting action encoding
+        # (same indices but different action meanings)
+        class MockWorldModelConflictingActions:
+            width = 7
+            height = 7
+            max_steps = 20
+            
+            class grid:
+                @staticmethod
+                def get(x, y):
+                    return None
+            
+            class actions:
+                # Conflict: index 1 is 'left' in saved but 'pickup' here
+                available = ['still', 'pickup', 'drop', 'toggle']
+            
+            class action_space:
+                n = 4
+            
+            agents = [None, None, None]
+        
+        world_model_conflict = MockWorldModelConflictingActions()
+        
+        # Try to load with conflicting action space - should raise ValueError
+        try:
+            NeuralHumanPolicyPrior.load(
+                filepath,
+                world_model=world_model_conflict,
+                human_agent_indices=[0, 1],
+                device='cpu'
+            )
+            assert False, "Should have raised ValueError for action encoding conflict"
+        except ValueError as e:
+            assert "Action encoding conflict" in str(e)
+            print(f"  ✓ Correctly raised ValueError: {e}")
+    
+    print("  ✓ load_conflicting_action_space test passed!")
+
+
 def main():
     """Run all tests."""
     print("=" * 60)
@@ -425,6 +623,12 @@ def main():
     print()
     
     test_save_load()
+    print()
+    
+    test_load_conflicting_dimensions()
+    print()
+    
+    test_load_conflicting_action_space()
     print()
     
     print("=" * 60)
