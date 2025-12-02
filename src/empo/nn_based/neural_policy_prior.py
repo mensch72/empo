@@ -310,15 +310,13 @@ class AgentEncoder(nn.Module):
     The encoding captures:
         - Agent position (x, y) normalized to [0, 1]
         - Agent direction (one-hot over 4 directions)
-        - Agent index (embedded)
-        - Agent color (embedded, for color-aware encoding)
+        - Agent index (embedded) - for distinguishing agents within trained capacity
+        - Query agent features - separate encoding for the agent being queried
+        - Agent color (embedded, optional)
     
-    This allows the network to generalize across agents at different positions
-    while still distinguishing them by index and color when needed.
-    
-    When num_agents_per_color is provided, the encoder supports color-specific
-    agent lists, which is useful for policy transfer across environments with
-    different numbers of agents per color.
+    The query agent encoding is crucial for policy transfer: when the environment
+    has more agents than the network was trained with, the query agent's identity
+    is preserved through its dedicated feature encoding, not just the index embedding.
     
     Args:
         grid_width: Width of the grid for normalization.
@@ -346,8 +344,16 @@ class AgentEncoder(nn.Module):
         self.num_agents_per_color = num_agents_per_color
         self.agent_colors = agent_colors
         
-        # Agent index embedding
+        # Agent index embedding (for agents within trained capacity)
         self.agent_embedding = nn.Embedding(num_agents, 16)
+        
+        # Query agent encoder - encodes the query agent's features separately
+        # This provides a dedicated pathway that doesn't depend on agent index
+        # Input: 2 (position) + 4 (direction) = 6
+        self.query_agent_encoder = nn.Sequential(
+            nn.Linear(6, 16),
+            nn.ReLU(),
+        )
         
         # Color embedding if we have color info
         if agent_colors is not None:
@@ -360,9 +366,9 @@ class AgentEncoder(nn.Module):
             self.color_embedding = None
             color_embed_dim = 0
         
-        # MLP combining position, direction, index embedding, and optional color embedding
-        # Input: 2 (pos) + 4 (direction one-hot) + 16 (index embedding) + color_embed_dim
-        input_dim = 2 + 4 + 16 + color_embed_dim
+        # MLP combining all features:
+        # - position (2) + direction (4) + index embedding (16) + query agent features (16) + color (optional)
+        input_dim = 2 + 4 + 16 + 16 + color_embed_dim
         self.fc = nn.Sequential(
             nn.Linear(input_dim, 64),
             nn.ReLU(),
@@ -384,22 +390,29 @@ class AgentEncoder(nn.Module):
             position: Tensor of shape (batch, 2) with normalized positions [x/W, y/H].
             direction: Tensor of shape (batch, 4) with one-hot direction encoding.
             agent_idx: Tensor of shape (batch,) with agent indices.
+                Indices >= num_agents are clamped to num_agents-1 for the embedding,
+                but the query agent features still capture the actual position/direction.
             agent_color_idx: Optional tensor of shape (batch,) with color indices.
                 If None and color_embedding exists, will use zeros.
         
         Returns:
             Feature tensor of shape (batch, feature_dim).
         """
-        idx_embed = self.agent_embedding(agent_idx)  # (batch, 16)
+        # Clamp agent indices to valid embedding range
+        clamped_idx = torch.clamp(agent_idx, 0, self.num_agents - 1)
+        idx_embed = self.agent_embedding(clamped_idx)  # (batch, 16)
+        
+        # Query agent encoding - captures position and direction in dedicated pathway
+        query_input = torch.cat([position, direction], dim=1)  # (batch, 6)
+        query_features = self.query_agent_encoder(query_input)  # (batch, 16)
         
         if self.color_embedding is not None:
             if agent_color_idx is None:
-                # Default to first color if not provided
                 agent_color_idx = torch.zeros_like(agent_idx)
             color_embed = self.color_embedding(agent_color_idx)  # (batch, 8)
-            x = torch.cat([position, direction, idx_embed, color_embed], dim=1)
+            x = torch.cat([position, direction, idx_embed, query_features, color_embed], dim=1)
         else:
-            x = torch.cat([position, direction, idx_embed], dim=1)  # (batch, 22)
+            x = torch.cat([position, direction, idx_embed, query_features], dim=1)
         
         return self.fc(x)
 
@@ -847,10 +860,8 @@ class NeuralHumanPolicyPrior(HumanPolicyPrior):
         dir_idx = int(agent_state[2]) % 4
         direction[0, dir_idx] = 1.0
         
-        # Agent index - clamp to max supported by the network
-        max_agent_idx = self.q_network.state_encoder.num_agents - 1
-        clamped_idx = min(human_agent_index, max_agent_idx)
-        agent_idx = torch.tensor([clamped_idx], device=self.device)
+        # Agent index - AgentEncoder handles clamping internally
+        agent_idx = torch.tensor([human_agent_index], device=self.device)
         
         return position, direction, agent_idx
     
