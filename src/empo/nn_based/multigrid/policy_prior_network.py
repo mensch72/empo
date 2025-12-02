@@ -24,16 +24,16 @@ class MultiGridPolicyPriorNetwork(BasePolicyPriorNetwork):
     """
     
     def __init__(self, q_network: MultiGridQNetwork):
-        super().__init__(q_network.num_actions)
-        self.q_network = q_network
+        super().__init__(q_network)
+        # q_network is already set by parent class
     
     def forward(
         self,
         grid_tensor: torch.Tensor,
         global_features: torch.Tensor,
         agent_features: torch.Tensor,
-        goal_coords_batch: torch.Tensor,
         interactive_features: torch.Tensor,
+        goal_coords_batch: torch.Tensor,
         goal_weights: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
@@ -43,8 +43,8 @@ class MultiGridPolicyPriorNetwork(BasePolicyPriorNetwork):
             grid_tensor: (batch, channels, H, W)
             global_features: (batch, 4)
             agent_features: (batch, agent_input_size)
-            goal_coords_batch: (batch, num_goals, 2)
             interactive_features: (batch, interactive_input_size)
+            goal_coords_batch: (batch, num_goals, 2)
             goal_weights: Optional (batch, num_goals) goal probabilities
         
         Returns:
@@ -63,7 +63,7 @@ class MultiGridPolicyPriorNetwork(BasePolicyPriorNetwork):
             goal_coords = goal_coords_batch[:, g, :]
             q_values = self.q_network(
                 grid_tensor, global_features, agent_features,
-                goal_coords, interactive_features
+                interactive_features, goal_coords
             )
             policy = self.q_network.get_policy(q_values)
             all_policies.append(policy)
@@ -103,16 +103,11 @@ class MultiGridPolicyPriorNetwork(BasePolicyPriorNetwork):
         if not goals:
             return torch.ones(self.num_actions, device=device) / self.num_actions
         
-        # Encode state (shared across goals)
-        grid_tensor, global_features = self.q_network.state_encoder.encode_state(
-            state, world_model, query_agent_idx, device
-        )
-        agent_features = self.q_network.agent_encoder.encode_agents(
-            state, world_model, query_agent_idx, device
-        )
-        interactive_features = self.q_network.interactive_encoder.encode_objects(
-            state, world_model, device
-        )
+        # Encode state using unified encoder (shared across goals)
+        grid_tensor, global_features, agent_features, interactive_features = \
+            self.q_network.state_encoder.encode_state(
+                state, world_model, query_agent_idx, device
+            )
         
         # Encode goals
         goal_coords_list = []
@@ -130,7 +125,7 @@ class MultiGridPolicyPriorNetwork(BasePolicyPriorNetwork):
         
         marginal = self.forward(
             grid_tensor, global_features, agent_features,
-            goal_coords_batch, interactive_features, weights
+            interactive_features, goal_coords_batch, weights
         )
         
         return marginal.squeeze(0)
