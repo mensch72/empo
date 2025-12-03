@@ -1,8 +1,9 @@
 """
 Goal encoder for multigrid environments.
 
-Encodes goal positions into feature vectors.
-Supports both point goals (x, y) and rectangle goals (x1, y1, x2, y2).
+Encodes goal regions into feature vectors.
+All goals are represented as bounding boxes (x1, y1, x2, y2) with inclusive coordinates.
+Point goals are represented as (x, y, x, y).
 """
 
 import torch
@@ -14,20 +15,17 @@ from ..goal_encoder import BaseGoalEncoder
 
 class MultiGridGoalEncoder(BaseGoalEncoder):
     """
-    Encoder for position-based goals in multigrid.
+    Encoder for region-based goals in multigrid.
     
-    Supports two types of goals:
-    - Point goals: target position (x, y)
-    - Rectangle goals: target region (x1, y1, x2, y2)
-    
-    For rectangle goals, encodes the center and size of the rectangle.
+    All goals are represented as bounding boxes (x1, y1, x2, y2) with inclusive
+    coordinates. Point goals are represented as (x, y, x, y).
     
     Args:
         grid_height: Height of the grid.
         grid_width: Width of the grid.
         feature_dim: Output feature dimension.
-        support_rectangles: If True, encode rectangles with center + size.
-            If False, only encode point position (for backward compatibility).
+        support_rectangles: If True, encode as bounding box (x1, y1, x2, y2).
+            If False, only encode point position (x, y) for backward compatibility.
     """
     
     def __init__(
@@ -43,8 +41,8 @@ class MultiGridGoalEncoder(BaseGoalEncoder):
         self.support_rectangles = support_rectangles
         
         if support_rectangles:
-            # Input: center_x, center_y, width, height (4 values)
-            # For point goals, width=height=0
+            # Input: bounding box (x1, y1, x2, y2) with inclusive coordinates
+            # Point goals are (x, y, x, y)
             self.fc = nn.Sequential(
                 nn.Linear(4, feature_dim),
                 nn.ReLU(),
@@ -62,8 +60,8 @@ class MultiGridGoalEncoder(BaseGoalEncoder):
         
         Args:
             goal_coords: (batch, 2) or (batch, 4) with goal coordinates.
-                For point goals: (x, y)
-                For rectangle goals: (center_x, center_y, width, height)
+                For backward compat point-only mode: (x, y)
+                For rectangle mode: bounding box (x1, y1, x2, y2)
         
         Returns:
             Feature tensor (batch, feature_dim)
@@ -76,22 +74,22 @@ class MultiGridGoalEncoder(BaseGoalEncoder):
         device: str = 'cpu'
     ) -> torch.Tensor:
         """
-        Encode a goal object.
+        Encode a goal object as a bounding box.
         
-        Handles three goal formats:
-        1. Point goal with target_pos: (x, y)
-        2. Rectangle goal with target_rect: (x1, y1, x2, y2)
-        3. Tuple/list goal: (x, y) or (x1, y1, x2, y2)
+        Handles goal formats:
+        1. Rectangle goal with target_rect: (x1, y1, x2, y2)
+        2. Point goal with target_pos: (x, y) -> encoded as (x, y, x, y)
+        3. Tuple/list goal: (x1, y1, x2, y2) or (x, y) -> (x, y, x, y)
         
         Args:
             goal: Goal object with target position or rectangle.
             device: Torch device.
         
         Returns:
-            Tensor (1, 4) with (center_x, center_y, width, height) if support_rectangles,
+            Tensor (1, 4) with bounding box (x1, y1, x2, y2) if support_rectangles,
             or (1, 2) with (x, y) otherwise.
         """
-        # Extract goal coordinates
+        # Extract goal coordinates as bounding box (x1, y1, x2, y2)
         if hasattr(goal, 'target_rect'):
             # Rectangle goal: (x1, y1, x2, y2)
             x1, y1, x2, y2 = goal.target_rect
@@ -100,22 +98,13 @@ class MultiGridGoalEncoder(BaseGoalEncoder):
                 x1, x2 = x2, x1
             if y1 > y2:
                 y1, y2 = y2, y1
-            center_x = (x1 + x2) / 2.0
-            center_y = (y1 + y2) / 2.0
-            width = x2 - x1
-            height = y2 - y1
-            is_rectangle = True
         elif hasattr(goal, 'target_pos'):
-            # Point goal
+            # Point goal -> bounding box (x, y, x, y)
             x, y = goal.target_pos
-            center_x, center_y = float(x), float(y)
-            width, height = 0.0, 0.0
-            is_rectangle = False
+            x1, y1, x2, y2 = float(x), float(y), float(x), float(y)
         elif hasattr(goal, 'position'):
             x, y = goal.position
-            center_x, center_y = float(x), float(y)
-            width, height = 0.0, 0.0
-            is_rectangle = False
+            x1, y1, x2, y2 = float(x), float(y), float(x), float(y)
         elif isinstance(goal, (tuple, list)):
             if len(goal) == 4:
                 # Rectangle goal
@@ -124,32 +113,24 @@ class MultiGridGoalEncoder(BaseGoalEncoder):
                     x1, x2 = x2, x1
                 if y1 > y2:
                     y1, y2 = y2, y1
-                center_x = (x1 + x2) / 2.0
-                center_y = (y1 + y2) / 2.0
-                width = x2 - x1
-                height = y2 - y1
-                is_rectangle = True
             elif len(goal) >= 2:
-                center_x, center_y = float(goal[0]), float(goal[1])
-                width, height = 0.0, 0.0
-                is_rectangle = False
+                # Point goal -> bounding box (x, y, x, y)
+                x1, y1 = float(goal[0]), float(goal[1])
+                x2, y2 = x1, y1
             else:
-                center_x, center_y = 0.0, 0.0
-                width, height = 0.0, 0.0
-                is_rectangle = False
+                x1, y1, x2, y2 = 0.0, 0.0, 0.0, 0.0
         else:
-            center_x, center_y = 0.0, 0.0
-            width, height = 0.0, 0.0
-            is_rectangle = False
+            x1, y1, x2, y2 = 0.0, 0.0, 0.0, 0.0
         
         if self.support_rectangles:
             coords = torch.tensor(
-                [[center_x, center_y, width, height]], 
+                [[float(x1), float(y1), float(x2), float(y2)]], 
                 device=device
             )
         else:
+            # For backward compatibility, use first corner as point
             coords = torch.tensor(
-                [[center_x, center_y]], 
+                [[float(x1), float(y1)]], 
                 device=device
             )
         

@@ -11,9 +11,10 @@ The demo:
 3. Produces a movie showing agents navigating to rectangle goal regions
 
 Key features:
-- Goals are rectangles (x1, y1, x2, y2) instead of single points (x, y)
+- All goals are bounding boxes (x1, y1, x2, y2) with inclusive coordinates
+- Point goals are represented as (x, y, x, y)
 - PathDistanceCalculator computes shortest path to any cell in the rectangle
-- Goal encoder encodes rectangle center + size for neural network
+- Goal encoder encodes bounding box coordinates directly
 
 Usage:
     python rectangle_goal_demo.py           # Full run (300 episodes)
@@ -608,9 +609,10 @@ def main():
     print("=" * 70)
     print()
     print("Key takeaways:")
-    print("  - Rectangle goals allow reaching any cell in a target region")
+    print("  - All goals are bounding boxes (x1, y1, x2, y2) with inclusive coordinates")
+    print("  - Point goals are represented as (x, y, x, y)")
     print("  - PathDistanceCalculator computes distances to rectangles via BFS")
-    print("  - Goal encoder encodes rectangle center + size (4 values)")
+    print("  - Goal encoder directly encodes bounding box coordinates")
     print("  - Reward shaping uses potential based on distance to rectangle")
     print()
 

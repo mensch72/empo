@@ -197,7 +197,7 @@ def test_multigrid_goal_encoder():
         support_rectangles=True
     )
     
-    # Create dummy input with 4 coordinates (center_x, center_y, width, height)
+    # Create dummy input with 4 coordinates (bounding box: x1, y1, x2, y2)
     batch_size = 4
     goal_coords = torch.randn(batch_size, 4)
     
@@ -215,7 +215,10 @@ def test_multigrid_goal_encoder():
     rect_goal = RectGoal()
     encoded = encoder.encode_goal(rect_goal)
     assert encoded.shape == (1, 4), f"Expected (1, 4), got {encoded.shape}"
-    print(f"  ✓ Rectangle goal encoding shape: {encoded.shape}")
+    # Verify bounding box encoding (x1, y1, x2, y2)
+    assert encoded[0, 0] == 2 and encoded[0, 1] == 3  # x1, y1
+    assert encoded[0, 2] == 5 and encoded[0, 3] == 7  # x2, y2
+    print(f"  ✓ Rectangle goal encoding: {encoded.tolist()}")
     
     # Test encode_goal with point goal
     class PointGoal:
@@ -225,9 +228,10 @@ def test_multigrid_goal_encoder():
     point_goal = PointGoal()
     encoded = encoder.encode_goal(point_goal)
     assert encoded.shape == (1, 4), f"Expected (1, 4), got {encoded.shape}"
-    # For point goals, width and height should be 0
-    assert encoded[0, 2] == 0 and encoded[0, 3] == 0
-    print(f"  ✓ Point goal encoding shape: {encoded.shape}")
+    # For point goals, bounding box is (x, y, x, y)
+    assert encoded[0, 0] == 5 and encoded[0, 1] == 5  # x1, y1
+    assert encoded[0, 2] == 5 and encoded[0, 3] == 5  # x2, y2
+    print(f"  ✓ Point goal encoding as bbox: {encoded.tolist()}")
     
     # Test without rectangle support (backward compatibility)
     encoder_no_rect = MultiGridGoalEncoder(
