@@ -604,8 +604,9 @@ def _train_phi_network_step(
     Training procedure:
     1. Sample a batch of states from the buffer
     2. For each state, sample multiple goals and compute the Q-network's 
-       average policy (stochastic approximation of the marginal)
-    3. Train phi to match this marginal via cross-entropy loss
+       weighted average policy (stochastic approximation of the marginal)
+    3. Goal weights are (1+x2-x1)*(1+y2-y1) - the area of the bounding box
+    4. Train phi to match this weighted marginal via cross-entropy loss
     
     Joint training with Q-network ensures:
     - Both networks see the same state distribution
@@ -642,33 +643,37 @@ def _train_phi_network_step(
         agent_idx = item['agent_idx']
         world_model = item['world_model']
         
-        # Compute Q-network's marginal policy over sampled goals
+        # Compute Q-network's weighted marginal policy over sampled goals
+        # Weight = (1+x2-x1)*(1+y2-y1) = area of goal bounding box
         with torch.no_grad():
-            marginal_probs = torch.zeros(q_network.num_actions, device=device)
-            valid_goals = 0
+            weighted_probs = torch.zeros(q_network.num_actions, device=device)
+            total_weight = 0.0
             
-            # Sample multiple goals and average their policies
+            # Sample multiple goals and compute weighted average of their policies
             for _ in range(num_goal_samples):
                 try:
                     goal, _ = goal_sampler.sample(state, agent_idx)
                     if goal is None:
                         continue
                     
+                    # Get goal weight: (1+x2-x1)*(1+y2-y1)
+                    weight = MultiGridGoalEncoder.compute_goal_weight(goal)
+                    
                     q_values = q_network.encode_and_forward(
                         state, world_model, agent_idx, goal, device
                     )
                     policy = q_network.get_policy(q_values).squeeze(0)
-                    marginal_probs += policy
-                    valid_goals += 1
+                    weighted_probs += weight * policy
+                    total_weight += weight
                 except (ValueError, RuntimeError, IndexError):
                     # Goal sampling or Q-network forward can fail for edge cases
                     continue
             
-            if valid_goals == 0:
+            if total_weight == 0.0:
                 continue
             
-            # Average to get marginal (target for phi network)
-            target_marginal = marginal_probs / valid_goals
+            # Weighted average to get marginal (target for phi network)
+            target_marginal = weighted_probs / total_weight
         
         # Get phi network's prediction
         phi_probs = phi_network.encode_and_forward(
