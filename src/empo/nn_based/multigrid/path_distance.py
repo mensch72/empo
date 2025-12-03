@@ -73,9 +73,12 @@ class PathDistanceCalculator:
             self._wall_grid = self._create_wall_grid(world_model)
             self._shortest_paths = self._precompute_shortest_paths()
         
-        # Compute feasible range based on passing costs
-        self.feasible_range = self._compute_feasible_range()
+        self.feasible_range = (-1.0, 2.0)
+
+        # Compute max nonnormalized cost for potential function normalization
+        self.max_nonnormalized_cost = self._compute_max_nonnormalized_cost()
         
+
         # Caches for BFS-based distance computation (used when no world_model)
         self._cache: Dict[Tuple, np.ndarray] = {}
         self._rect_cache: Dict[Tuple, np.ndarray] = {}
@@ -147,7 +150,7 @@ class PathDistanceCalculator:
         
         return paths
     
-    def _compute_feasible_range(self) -> Tuple[float, float]:
+    def _compute_max_nonnormalized_cost(self) -> float:
         """
         Compute the feasible range of path costs based on grid size and passing costs.
         
@@ -160,7 +163,7 @@ class PathDistanceCalculator:
         max_finite_cost = max(finite_costs) if finite_costs else 1  # Default to 1 if all infinite
         max_path_length = self.grid_width + self.grid_height
         max_cost = max_path_length * max_finite_cost
-        return (-max_cost, max_cost)
+        return max_cost
     
     def get_shortest_path(
         self,
@@ -323,7 +326,7 @@ class PathDistanceCalculator:
             Potential value in range [-1, 0] (approximately).
         """
         if max_cost is None:
-            max_cost = self.feasible_range[1]  # Use computed max cost
+            max_cost = self.max_nonnormalized_cost  # Use computed max cost
         
         # For rectangle goals, compute distance to closest point
         if len(goal) == 4:

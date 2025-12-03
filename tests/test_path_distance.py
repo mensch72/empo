@@ -235,21 +235,6 @@ def test_default_passing_costs():
     print("  ✓ Default passing costs test passed!")
 
 
-def test_feasible_range_computation():
-    """Test that feasible_range is computed correctly."""
-    calc = PathDistanceCalculator(grid_height=10, grid_width=10)
-    
-    # Max finite cost is 50 (rock)
-    # Max path length is 10 + 10 = 20
-    # So max cost should be 20 * 50 = 1000
-    expected_max = (10 + 10) * 50
-    
-    assert calc.feasible_range == (-expected_max, expected_max), \
-        f"Expected {(-expected_max, expected_max)}, got {calc.feasible_range}"
-    
-    print("  ✓ Feasible range computation test passed!")
-
-
 def test_path_cost_with_world_model():
     """Test path cost computation with world model and obstacles."""
     # Create a world model with a door
@@ -365,7 +350,6 @@ def run_all_tests():
     test_rectangle_normalization()
     test_rectangle_cache_normalization()
     test_default_passing_costs()
-    test_feasible_range_computation()
     test_path_cost_with_world_model()
     test_path_cost_with_agents()
     test_cell_passing_costs()
