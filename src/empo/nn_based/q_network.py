@@ -139,11 +139,10 @@ class BaseQNetwork(nn.Module, ABC):
             Tensor of shape (..., num_actions) with action probabilities
         """
         if self.feasible_range is not None:
-            R = self.feasible_range[1] - self.feasible_range[0]
             q_values = torch.clamp(
                 q_values, 
-                self.feasible_range[0] - R, 
-                self.feasible_range[1] + R
+                self.feasible_range[0], 
+                self.feasible_range[1]
             )
         
         if self.beta == np.inf:
