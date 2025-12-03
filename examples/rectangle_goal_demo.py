@@ -47,6 +47,11 @@ from gym_multigrid.multigrid import (
     MultiGridEnv, Grid, Agent, Wall, World, SmallActions,
 )
 from empo.possible_goal import PossibleGoal, PossibleGoalSampler
+from empo.multigrid import (
+    ReachRectangleGoal,
+    MultiGridGoalSampler,
+    render_goal_overlay,
+)
 from empo.nn_based.multigrid import (
     MultiGridQNetwork as QNetwork,
     train_multigrid_neural_policy_prior as train_neural_policy_prior,
@@ -95,114 +100,6 @@ def parse_args():
         help='Number of training episodes'
     )
     return parser.parse_args()
-
-
-# ============================================================================
-# Rectangle Goal Class
-# ============================================================================
-
-class ReachRectangleGoal(PossibleGoal):
-    """
-    A goal where an agent tries to reach any cell in a rectangle.
-    
-    Args:
-        world_model: The environment.
-        human_agent_index: Index of the human agent.
-        target_rect: Tuple (x1, y1, x2, y2) defining the rectangle.
-    """
-    
-    def __init__(
-        self,
-        world_model,
-        human_agent_index: int,
-        target_rect: Tuple[int, int, int, int]
-    ):
-        super().__init__(world_model)
-        self.human_agent_index = human_agent_index
-        # Normalize rectangle coordinates
-        x1, y1, x2, y2 = target_rect
-        if x1 > x2:
-            x1, x2 = x2, x1
-        if y1 > y2:
-            y1, y2 = y2, y1
-        self.target_rect = (x1, y1, x2, y2)
-    
-    def is_achieved(self, state) -> int:
-        """Check if agent is inside the rectangle."""
-        step_count, agent_states, mobile_objects, mutable_objects = state
-        if self.human_agent_index < len(agent_states):
-            agent_state = agent_states[self.human_agent_index]
-            x, y = int(agent_state[0]), int(agent_state[1])
-            x1, y1, x2, y2 = self.target_rect
-            if x1 <= x <= x2 and y1 <= y <= y2:
-                return 1
-        return 0
-    
-    def __str__(self):
-        return f"ReachRect({self.target_rect})"
-    
-    def __hash__(self):
-        return hash((self.human_agent_index, self.target_rect))
-    
-    def __eq__(self, other):
-        if not isinstance(other, ReachRectangleGoal):
-            return False
-        return (self.human_agent_index == other.human_agent_index and
-                self.target_rect == other.target_rect)
-
-
-class RectangleGoalSampler(PossibleGoalSampler):
-    """
-    Samples rectangle goals with probability proportional to their area weight.
-    
-    Goals are sampled with P(goal) ∝ (1+x2-x1)*(1+y2-y1), which is the area
-    of the bounding box. This ensures that larger rectangles are sampled
-    proportionally more often, which is required for correct phi network training.
-    
-    The sampling uses the product structure: (x1, x2) is sampled independently
-    from (y1, y2), each using efficient inverse transform sampling without rejection.
-    """
-    
-    def __init__(
-        self,
-        world_model,
-    ):
-        super().__init__(world_model)
-        self._rng = np.random.default_rng()
-        self._update_valid_range()
-    
-    def _update_valid_range(self):
-        """Update valid coordinate ranges for goal placement."""
-        env = self.world_model
-        # Valid cells are typically 1 to width-2 (excluding outer walls)
-        self._x_range = (1, env.width - 2)
-        self._y_range = (1, env.height - 2)
-    
-    def set_world_model(self, world_model):
-        """Update world model and refresh valid ranges."""
-        self.world_model = world_model
-        self._update_valid_range()
-    
-    def sample(self, state, human_agent_index: int) -> Tuple[PossibleGoal, float]:
-        """
-        Sample a rectangle goal with probability proportional to its area.
-        
-        Uses weight-proportional sampling from MultiGridGoalEncoder.
-        The returned weight is 1.0 since the sampling already accounts for weights.
-        """
-        from empo.nn_based.multigrid.goal_encoder import MultiGridGoalEncoder
-        
-        env = self.world_model
-        
-        # Sample rectangle with weight-proportional probabilities
-        x1, y1, x2, y2 = MultiGridGoalEncoder.sample_rectangle_weighted(
-            self._x_range, self._y_range, self._rng
-        )
-        
-        goal = ReachRectangleGoal(env, human_agent_index, (x1, y1, x2, y2))
-        
-        # Return weight 1.0 since sampling already accounts for goal weights
-        return goal, 1.0
 
 
 # ============================================================================
@@ -323,7 +220,7 @@ def train_rectangle_goal_policy(
     
     # Create rectangle goal sampler with weight-proportional sampling
     # This samples goals with P(goal) ∝ (1+x2-x1)*(1+y2-y1)
-    goal_sampler = RectangleGoalSampler(base_env)
+    goal_sampler = MultiGridGoalSampler(base_env)
     
     # World model generator for ensemble training
     def world_model_generator(episode: int):
@@ -376,11 +273,9 @@ def render_with_rectangle_overlay(
     """
     Render environment with rectangle goal overlays.
     
-    Uses MultiGridGoalEncoder.render_goal_overlay for dashed blue rectangle
+    Uses render_goal_overlay from empo.multigrid for dashed blue rectangle
     boundaries and agent-to-goal connection lines.
     """
-    from empo.nn_based.multigrid.goal_encoder import MultiGridGoalEncoder
-    
     fig, ax = plt.subplots(figsize=(8, 8))
     
     # Render base environment
@@ -394,13 +289,13 @@ def render_with_rectangle_overlay(
     state = env.get_state()
     _, agent_states, _, _ = state
     
-    # Draw rectangle goals using new rendering method
+    # Draw rectangle goals using rendering from empo.multigrid
     for agent_idx, goal in rectangle_goals.items():
         if agent_idx < len(agent_states):
             agent_state = agent_states[agent_idx]
             agent_pos = (float(agent_state[0]), float(agent_state[1]))
             
-            MultiGridGoalEncoder.render_goal_overlay(
+            render_goal_overlay(
                 ax=ax,
                 goal=goal,
                 agent_pos=agent_pos,
@@ -430,7 +325,7 @@ def run_rollouts(
     neural_prior,
     env,
     human_agent_indices: List[int],
-    goal_sampler: RectangleGoalSampler,
+    goal_sampler: MultiGridGoalSampler,
     num_rollouts: int,
     device: str = 'cpu'
 ):

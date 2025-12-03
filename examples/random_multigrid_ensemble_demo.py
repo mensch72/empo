@@ -57,6 +57,11 @@ from gym_multigrid.multigrid import (
     Key, Ball, Box, Door, Lava, Block, Goal
 )
 from empo.possible_goal import PossibleGoal, PossibleGoalSampler
+from empo.multigrid import (
+    ReachCellGoal,
+    MultiGridGoalSampler,
+    render_goal_overlay,
+)
 from empo.nn_based.multigrid import (
     MultiGridQNetwork as QNetwork,
     train_multigrid_neural_policy_prior as train_neural_policy_prior,
@@ -309,44 +314,6 @@ class RandomMultigridEnv(MultiGridEnv):
 
 
 # ============================================================================
-# Goal Definitions
-# ============================================================================
-
-class ReachCellGoal(PossibleGoal):
-    """A goal where a specific human agent tries to reach a specific cell."""
-    
-    def __init__(self, world_model, human_agent_index: int, target_pos: tuple):
-        super().__init__(world_model)
-        self.human_agent_index = human_agent_index
-        self.target_pos = tuple(target_pos)
-    
-    def is_achieved(self, state) -> int:
-        """Returns 1 if the specific human agent is at the target position."""
-        step_count, agent_states, mobile_objects, mutable_objects = state
-        if self.human_agent_index < len(agent_states):
-            agent_state = agent_states[self.human_agent_index]
-            pos_x, pos_y = agent_state[0], agent_state[1]
-            if pos_x == self.target_pos[0] and pos_y == self.target_pos[1]:
-                return 1
-        return 0
-    
-    def __str__(self):
-        return f"ReachCell({self.target_pos[0]},{self.target_pos[1]})"
-    
-    def __repr__(self):
-        return self.__str__()
-    
-    def __hash__(self):
-        return hash((self.human_agent_index, self.target_pos[0], self.target_pos[1]))
-    
-    def __eq__(self, other):
-        if not isinstance(other, ReachCellGoal):
-            return False
-        return (self.human_agent_index == other.human_agent_index and 
-                self.target_pos == other.target_pos)
-
-
-# ============================================================================
 # Training on Ensemble (Using world_model_generator)
 # ============================================================================
 
@@ -366,48 +333,6 @@ def create_random_env(seed: int) -> RandomMultigridEnv:
         lava_prob=LAVA_PROBABILITY,
         block_prob=BLOCK_PROBABILITY
     )
-
-
-class DynamicGoalSampler(PossibleGoalSampler):
-    """
-    A goal sampler that dynamically adapts to changing environments.
-    
-    When set_world_model() is called (by train_neural_policy_prior when using
-    world_model_generator), it updates its internal goal cells list.
-    """
-    
-    def __init__(self, base_env: RandomMultigridEnv):
-        """Initialize with a base environment."""
-        super().__init__(base_env)
-        self._update_goal_cells()
-    
-    def _update_goal_cells(self):
-        """Update the list of walkable goal cells from current world_model."""
-        self._goal_cells = []
-        env = self.world_model
-        for x in range(1, env.width - 1):
-            for y in range(1, env.height - 1):
-                cell = env.grid.get(x, y)
-                if cell is None:
-                    self._goal_cells.append((x, y))
-                elif hasattr(cell, 'can_overlap') and cell.can_overlap():
-                    self._goal_cells.append((x, y))
-                elif hasattr(cell, 'type') and cell.type in ('goal', 'floor', 'switch'):
-                    self._goal_cells.append((x, y))
-    
-    def set_world_model(self, world_model):
-        """Called by train_neural_policy_prior when environment changes."""
-        self.world_model = world_model
-        self._update_goal_cells()
-    
-    def sample(self, state, human_agent_index: int) -> Tuple[PossibleGoal, float]:
-        """Sample a random goal from walkable cells."""
-        if not self._goal_cells:
-            target_pos = (self.world_model.width // 2, self.world_model.height // 2)
-        else:
-            target_pos = random.choice(self._goal_cells)
-        goal = ReachCellGoal(self.world_model, human_agent_index, target_pos)
-        return goal, 1.0
 
 
 def train_on_ensemble(
@@ -446,8 +371,8 @@ def train_on_ensemble(
     base_env = create_random_env(seed=base_seed)
     base_env.reset()
     
-    # Goal sampler that updates when environment changes
-    goal_sampler = DynamicGoalSampler(base_env)
+    # Use MultiGridGoalSampler for weight-proportional sampling
+    goal_sampler = MultiGridGoalSampler(base_env)
     
     # World model generator: creates new random environment for each batch of episodes
     def world_model_generator(episode: int) -> RandomMultigridEnv:
