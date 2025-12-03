@@ -265,6 +265,9 @@ class CyclicMockEnv:
     
     Creates a cyclic state space:
         State 0 (root) -> State 1 -> State 2 -> State 0 (cycle!)
+    
+    Note: This mock does NOT have a get_dag method, so it cannot be used
+    with env_utils.get_dag(). This is intentional for testing the TypeError.
     """
     
     def __init__(self):
@@ -299,14 +302,14 @@ class CyclicMockEnv:
             return None
 
 
-def test_get_dag_raises_on_cyclic_env():
-    """Test that get_dag raises ValueError for environments with cycles."""
+def test_get_dag_requires_get_dag_method():
+    """Test that env_utils.get_dag raises TypeError for envs without get_dag method."""
     import pytest
     
     cyclic_env = CyclicMockEnv()
     
-    # The get_dag function should raise ValueError when it detects a cycle
-    with pytest.raises(ValueError, match="Environment contains cycles"):
+    # The get_dag function should raise TypeError when env doesn't have get_dag method
+    with pytest.raises(TypeError, match="must have a get_dag"):
         env_utils.get_dag(cyclic_env)
 
 
@@ -325,7 +328,7 @@ def run_all_tests():
         test_is_terminal_method,
         test_default_step_method,
         test_default_step_with_probabilistic_transitions,
-        test_get_dag_raises_on_cyclic_env,
+        test_get_dag_requires_get_dag_method,
     ]
     
     print("=" * 60)
