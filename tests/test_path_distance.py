@@ -153,6 +153,31 @@ def test_rectangle_normalization():
     print("  ✓ Rectangle normalization test passed!")
 
 
+def test_rectangle_cache_normalization():
+    """Test that normalized rectangles share the same cache entry."""
+    calc = PathDistanceCalculator(grid_height=10, grid_width=10)
+    obstacles = set()
+    
+    # Clear cache
+    calc.clear_cache()
+    
+    # First query with normal order
+    rect_normal = (4, 4, 6, 6)
+    _ = calc.get_distance_to_rectangle((0, 0), rect_normal, obstacles)
+    
+    # Check cache has one entry
+    assert len(calc._rect_cache) == 1, f"Expected 1 cache entry, got {len(calc._rect_cache)}"
+    
+    # Query with swapped order - should use same cache entry
+    rect_swapped = (6, 6, 4, 4)
+    _ = calc.get_distance_to_rectangle((0, 0), rect_swapped, obstacles)
+    
+    # Cache should still have only one entry (both use normalized coords)
+    assert len(calc._rect_cache) == 1, f"Expected 1 cache entry after swap, got {len(calc._rect_cache)}"
+    
+    print("  ✓ Rectangle cache normalization test passed!")
+
+
 def run_all_tests():
     """Run all path distance tests."""
     print("=" * 60)
@@ -166,6 +191,7 @@ def run_all_tests():
     test_compute_potential()
     test_is_in_goal()
     test_rectangle_normalization()
+    test_rectangle_cache_normalization()
     
     print()
     print("=" * 60)

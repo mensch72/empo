@@ -6,7 +6,7 @@ Combines state encoder and goal encoder to predict action Q-values.
 
 import torch
 import torch.nn as nn
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from ..q_network import BaseQNetwork
 from .state_encoder import MultiGridStateEncoder
@@ -48,7 +48,7 @@ class MultiGridQNetwork(BaseQNetwork):
         goal_feature_dim: int = 32,
         hidden_dim: int = 256,
         beta: float = 1.0,
-        feasible_range: tuple = None,
+        feasible_range: Optional[Tuple[float, float]] = None,
         support_rectangle_goals: bool = True,
         max_kill_buttons: int = 4,
         max_pause_switches: int = 4,

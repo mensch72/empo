@@ -138,7 +138,6 @@ class BaseQNetwork(nn.Module, ABC):
         Returns:
             Tensor of shape (..., num_actions) with action probabilities
         """
-        # Hard clamp for policy extraction (soft clamp is used during training)
         if self.feasible_range is not None:
             R = self.feasible_range[1] - self.feasible_range[0]
             q_values = torch.clamp(

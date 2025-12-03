@@ -268,7 +268,7 @@ class RectangleGoalEnv(MultiGridEnv):
                 if x == 0 or y == 0 or x == self.grid_size - 1 or y == self.grid_size - 1:
                     row.append('We')  # Wall
                 else:
-                    if random.random() < WALL_PROBABILITY:
+                    if np.random.random() < WALL_PROBABILITY:
                         row.append('We')
                     else:
                         row.append('..')

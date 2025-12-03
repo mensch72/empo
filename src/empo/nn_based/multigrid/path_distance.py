@@ -117,8 +117,9 @@ class PathDistanceCalculator:
         if y1 > y2:
             y1, y2 = y2, y1
         
-        # Check cache
-        cache_key = (rectangle, frozenset(obstacles))
+        # Use normalized coordinates for cache key for consistency
+        normalized_rect = (x1, y1, x2, y2)
+        cache_key = (normalized_rect, frozenset(obstacles))
         if cache_key in self._rect_cache:
             return self._rect_cache[cache_key]
         
