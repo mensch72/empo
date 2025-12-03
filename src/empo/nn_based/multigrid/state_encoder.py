@@ -90,10 +90,11 @@ class MultiGridStateEncoder(BaseStateEncoder):
         self.max_control_buttons = max_control_buttons
         
         # Grid channel structure
+        # Use all standard colors for agent channels to support any color combination
         self.num_object_channels = NUM_OBJECT_TYPE_CHANNELS
         self.num_other_channels = 3  # overlappable, immobile, mobile
         self.agent_channels_start = self.num_object_channels + self.num_other_channels
-        self.query_agent_channel = self.agent_channels_start + num_agent_colors
+        self.query_agent_channel = self.agent_channels_start + NUM_STANDARD_COLORS  # Use all colors
         self.num_grid_channels = self.query_agent_channel + 1
         
         # Grid encoder (CNN)

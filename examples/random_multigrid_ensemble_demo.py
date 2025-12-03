@@ -611,19 +611,16 @@ def get_boltzmann_action(
     device: str = 'cpu'
 ) -> int:
     """Sample an action from the learned Boltzmann policy."""
-    grid_tensor, step_tensor = state_to_grid_tensor(
-        state, env, human_idx, human_agent_indices, device
-    )
-    position, direction, agent_idx_t = get_agent_tensors(
-        state, human_idx, env.width, env.height, device
-    )
-    goal_coords = get_goal_tensor(goal_pos, env.width, env.height, device)
+    # Create a simple goal object with target_pos attribute
+    class SimpleGoal:
+        def __init__(self, pos):
+            self.target_pos = pos
+    
+    goal = SimpleGoal(goal_pos)
     
     with torch.no_grad():
-        q_values = q_network(
-            grid_tensor, step_tensor,
-            position, direction, agent_idx_t,
-            goal_coords
+        q_values = q_network.encode_and_forward(
+            state, env, human_idx, goal, device
         )
         if beta == float('inf'):
             action = torch.argmax(q_values, dim=1).item()

@@ -244,7 +244,20 @@ def train_multigrid_neural_policy_prior(
     # Get environment info
     grid_height = getattr(env, 'height', 10)
     grid_width = getattr(env, 'width', 10)
-    num_actions = len(getattr(env, 'actions', range(8)))
+    
+    # Get number of actions - handle action_space, action enum classes, and instances
+    num_actions = 8  # Default
+    if hasattr(env, 'action_space') and hasattr(env.action_space, 'n'):
+        num_actions = env.action_space.n
+    else:
+        actions = getattr(env, 'actions', None)
+        if actions is not None:
+            if hasattr(actions, '__len__'):
+                num_actions = len(actions)
+            elif hasattr(actions, '__members__'):
+                # It's an enum class
+                num_actions = len(actions.__members__)
+    
     num_agents_per_color = get_num_agents_per_color(env)
     
     if not num_agents_per_color:
@@ -311,21 +324,35 @@ def train_multigrid_neural_policy_prior(
         if world_model_generator is not None:
             episode_count_for_model += 1
             if episode_count_for_model >= episodes_per_model:
-                try:
-                    current_env = next(world_model_generator)
-                    episode_count_for_model = 0
-                except StopIteration:
-                    pass  # Keep using current env
+                # world_model_generator is a function that takes episode number
+                if callable(world_model_generator):
+                    current_env = world_model_generator(episode)
+                else:
+                    # It's an iterator
+                    try:
+                        current_env = next(world_model_generator)
+                    except StopIteration:
+                        pass  # Keep using current env
+                episode_count_for_model = 0
+                
+                # Update goal sampler if it has set_world_model method
+                if hasattr(goal_sampler, 'set_world_model'):
+                    goal_sampler.set_world_model(current_env)
         
         current_env.reset()
         state = current_env.get_state()
         
         for step in range(steps_per_episode):
             agent_idx = random.choice(human_agent_indices)
-            goals = list(goal_sampler.sample_goals(state, agent_idx, n=1))
-            if not goals:
+            
+            # Sample goal using sampler
+            try:
+                goal, _ = goal_sampler.sample(state, agent_idx)
+            except Exception:
                 continue
-            goal = goals[0]
+            
+            if goal is None:
+                continue
             
             # Get action using trainer's sample_action with epsilon exploration
             action = trainer.sample_action(state, current_env, agent_idx, goal, epsilon=epsilon)
@@ -354,7 +381,12 @@ def train_multigrid_neural_policy_prior(
     # Get action encoding
     action_encoding = DEFAULT_ACTION_ENCODING
     if hasattr(env, 'actions'):
-        action_encoding = {i: a.name.lower() for i, a in enumerate(env.actions)}
+        actions = env.actions
+        if hasattr(actions, '__members__'):
+            # It's an enum class
+            action_encoding = {i: name.lower() for i, name in enumerate(actions.__members__.keys())}
+        elif hasattr(actions, '__iter__'):
+            action_encoding = {i: a.name.lower() for i, a in enumerate(actions)}
     
     return MultiGridNeuralHumanPolicyPrior(
         q_network=q_network,
