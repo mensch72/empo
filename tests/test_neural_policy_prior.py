@@ -520,11 +520,9 @@ def test_load_action_conflict():
 
 def test_soft_clamp():
     """Test the SoftClamp module."""
-    from empo.nn_based.q_network import SoftClamp
-    
-    print("Testing SoftClamp...")
-    
-    # Test with default range [0.5, 1.5]
+    from empo.nn_based.soft_clamp import SoftClamp
+
+    print("Testing SoftClamp...")    # Test with default range [0.5, 1.5]
     soft_clamp = SoftClamp(a=0.5, b=1.5)
     
     # Values in range should be unchanged
