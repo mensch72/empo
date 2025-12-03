@@ -189,21 +189,59 @@ def test_multigrid_goal_encoder():
     """Test the MultiGridGoalEncoder."""
     print("Testing MultiGridGoalEncoder...")
     
+    # Test with rectangle support (default)
     encoder = MultiGridGoalEncoder(
         grid_height=10,
         grid_width=10,
-        feature_dim=32
+        feature_dim=32,
+        support_rectangles=True
     )
     
-    # Create dummy input
+    # Create dummy input with 4 coordinates (center_x, center_y, width, height)
     batch_size = 4
-    goal_coords = torch.randn(batch_size, 2)
+    goal_coords = torch.randn(batch_size, 4)
     
     # Forward pass
     features = encoder(goal_coords)
     
     assert features.shape == (batch_size, 32), f"Expected (4, 32), got {features.shape}"
-    print(f"  ✓ Output shape: {features.shape}")
+    print(f"  ✓ Output shape (rectangle mode): {features.shape}")
+    
+    # Test encode_goal with rectangle
+    class RectGoal:
+        def __init__(self):
+            self.target_rect = (2, 3, 5, 7)
+    
+    rect_goal = RectGoal()
+    encoded = encoder.encode_goal(rect_goal)
+    assert encoded.shape == (1, 4), f"Expected (1, 4), got {encoded.shape}"
+    print(f"  ✓ Rectangle goal encoding shape: {encoded.shape}")
+    
+    # Test encode_goal with point goal
+    class PointGoal:
+        def __init__(self):
+            self.target_pos = (5, 5)
+    
+    point_goal = PointGoal()
+    encoded = encoder.encode_goal(point_goal)
+    assert encoded.shape == (1, 4), f"Expected (1, 4), got {encoded.shape}"
+    # For point goals, width and height should be 0
+    assert encoded[0, 2] == 0 and encoded[0, 3] == 0
+    print(f"  ✓ Point goal encoding shape: {encoded.shape}")
+    
+    # Test without rectangle support (backward compatibility)
+    encoder_no_rect = MultiGridGoalEncoder(
+        grid_height=10,
+        grid_width=10,
+        feature_dim=32,
+        support_rectangles=False
+    )
+    
+    goal_coords_2d = torch.randn(batch_size, 2)
+    features = encoder_no_rect(goal_coords_2d)
+    assert features.shape == (batch_size, 32)
+    print(f"  ✓ Output shape (point-only mode): {features.shape}")
+    
     print("  ✓ MultiGridGoalEncoder test passed!")
 
 
@@ -479,6 +517,64 @@ def test_load_action_conflict():
     print("  ✓ load action conflict test passed!")
 
 
+def test_soft_clamp():
+    """Test the SoftClamp module."""
+    from empo.nn_based.q_network import SoftClamp
+    
+    print("Testing SoftClamp...")
+    
+    # Test with default range [0.5, 1.5]
+    soft_clamp = SoftClamp(a=0.5, b=1.5)
+    
+    # Values in range should be unchanged
+    x_in_range = torch.tensor([0.5, 1.0, 1.5])
+    y = soft_clamp(x_in_range)
+    assert torch.allclose(y, x_in_range, atol=1e-5), f"In-range values should be unchanged"
+    print("  ✓ In-range values are linear")
+    
+    # Values outside range should be soft-clamped
+    x_above = torch.tensor([2.0, 3.0, 10.0])
+    y_above = soft_clamp(x_above)
+    
+    # Should be less than actual values but greater than upper bound
+    R = 1.5 - 0.5  # = 1.0
+    for i, (orig, clamped) in enumerate(zip(x_above.tolist(), y_above.tolist())):
+        assert clamped < orig, f"Clamped should be < original for above-range"
+        assert clamped < 1.5 + R, f"Clamped should approach b + R asymptotically"
+    print("  ✓ Above-range values are soft-clamped")
+    
+    x_below = torch.tensor([0.0, -1.0, -10.0])
+    y_below = soft_clamp(x_below)
+    
+    for i, (orig, clamped) in enumerate(zip(x_below.tolist(), y_below.tolist())):
+        assert clamped > orig, f"Clamped should be > original for below-range"
+        assert clamped > 0.5 - R, f"Clamped should approach a - R asymptotically"
+    print("  ✓ Below-range values are soft-clamped")
+    
+    # Test gradient flow
+    x = torch.tensor([0.0, 1.0, 2.0], requires_grad=True)
+    y = soft_clamp(x)
+    loss = y.sum()
+    loss.backward()
+    assert x.grad is not None and x.grad.abs().sum() > 0, "Gradients should flow"
+    print("  ✓ Gradients flow correctly")
+    
+    # Test with feasible_range in Q-network
+    q_network = MultiGridQNetwork(
+        grid_height=10,
+        grid_width=10,
+        num_actions=4,
+        num_agents_per_color={'grey': 2},
+        num_agent_colors=7,
+        feasible_range=(-1.0, 2.0)
+    )
+    assert q_network.soft_clamp is not None
+    assert q_network.feasible_range == (-1.0, 2.0)
+    print("  ✓ Q-network correctly initializes SoftClamp with feasible_range")
+    
+    print("  ✓ SoftClamp test passed!")
+
+
 def run_all_tests():
     """Run all tests."""
     print("=" * 60)
@@ -510,6 +606,9 @@ def run_all_tests():
     print()
     
     test_load_action_conflict()
+    print()
+    
+    test_soft_clamp()
     print()
     
     print("=" * 60)

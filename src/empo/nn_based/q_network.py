@@ -6,7 +6,68 @@ import numpy as np
 import torch
 import torch.nn as nn
 from abc import ABC, abstractmethod
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Tuple
+
+
+class SoftClamp(nn.Module):
+    """
+    Implements a soft clamp that is linear in [a, b] and exponential outside.
+    
+    The function smoothly transitions from the linear region to exponential
+    tails, ensuring differentiability while preventing gradient explosion
+    for values far outside the expected range.
+    
+    For Z in [a, b]: Q(Z) = Z (linear)
+    For Z < a: Q(Z) approaches a - R asymptotically
+    For Z > b: Q(Z) approaches b + R asymptotically
+    
+    where R = b - a is the range size.
+    
+    This is useful for bounding Q-values based on the theoretical feasible
+    range determined by the reward structure (e.g., shaping rewards).
+    
+    Args:
+        a: Lower bound of linear region (default: 0.5)
+        b: Upper bound of linear region (default: 1.5)
+    """
+    
+    def __init__(self, a: float = 0.5, b: float = 1.5):
+        super().__init__()
+        self.a = float(a)
+        self.b = float(b)
+        self.R = self.b - self.a
+        
+        if self.R <= 0:
+            raise ValueError("b must be greater than a for the linear region [a, b].")
+        
+        self.relu = nn.ReLU()
+    
+    def forward(self, Z: torch.Tensor) -> torch.Tensor:
+        """
+        Apply soft clamping to the input tensor.
+        
+        Args:
+            Z: Input tensor of any shape.
+        
+        Returns:
+            Soft-clamped tensor of same shape.
+        """
+        # Term 1: Linear Core (The Clip Function)
+        # T1 = ReLU(Z - a) - ReLU(Z - b) + a
+        # This is Z in [a, b], 'a' for Z < a, and 'b' for Z > b.
+        term1_linear_core = self.relu(Z - self.a) - self.relu(Z - self.b) + self.a
+        
+        # Term 2: Upper Exponential Tail (Z > b)
+        # T2 = R * (1 - exp(-(1/R) * ReLU(Z - b)))
+        # This is 0 for Z <= b, approaches R for Z >> b.
+        term2_tail_gt_b = self.R * (1.0 - torch.exp(-(1.0 / self.R) * self.relu(Z - self.b)))
+        
+        # Term 3: Lower Exponential Tail (Z < a)
+        # T3 = R * (exp(-(1/R) * ReLU(a - Z)) - 1)
+        # This is 0 for Z >= a, approaches -R for Z << a.
+        term3_tail_lt_a = self.R * (torch.exp(-(1.0 / self.R) * self.relu(self.a - Z)) - 1.0)
+        
+        return term1_linear_core + term2_tail_gt_b + term3_tail_lt_a
 
 
 class BaseQNetwork(nn.Module, ABC):
@@ -15,12 +76,30 @@ class BaseQNetwork(nn.Module, ABC):
     
     Q-networks estimate action values Q(s, a, g) for state s, action a, and goal g.
     Contains the generic Boltzmann policy computation.
+    
+    Args:
+        num_actions: Number of possible actions.
+        beta: Temperature for Boltzmann policy.
+        feasible_range: Optional tuple (a, b) for theoretical Q-value bounds.
+            When provided, Q-values are soft-clamped to prevent gradient explosion
+            for values outside the expected range.
     """
     
-    def __init__(self, num_actions: int, beta: float = 1.0):
+    def __init__(
+        self,
+        num_actions: int,
+        beta: float = 1.0,
+        feasible_range: Optional[Tuple[float, float]] = None
+    ):
         super().__init__()
         self.num_actions = num_actions
         self.beta = beta
+        self.feasible_range = feasible_range
+        
+        # Create soft clamp module if feasible_range is specified
+        self.soft_clamp: Optional[SoftClamp] = None
+        if feasible_range is not None:
+            self.soft_clamp = SoftClamp(a=feasible_range[0], b=feasible_range[1])
     
     @abstractmethod
     def forward(self, *args, **kwargs) -> torch.Tensor:
@@ -50,12 +129,24 @@ class BaseQNetwork(nn.Module, ABC):
         
         π(a|s,g) = softmax(β * Q(s,a,g))
         
+        If feasible_range is set, Q-values are hard-clamped before policy computation
+        to ensure numerical stability.
+        
         Args:
             q_values: Tensor of shape (..., num_actions)
         
         Returns:
             Tensor of shape (..., num_actions) with action probabilities
         """
+        # Hard clamp for policy extraction (soft clamp is used during training)
+        if self.feasible_range is not None:
+            R = self.feasible_range[1] - self.feasible_range[0]
+            q_values = torch.clamp(
+                q_values, 
+                self.feasible_range[0] - R, 
+                self.feasible_range[1] + R
+            )
+        
         if self.beta == np.inf:
             # Greedy policy
             policy = torch.zeros_like(q_values)
@@ -63,8 +154,25 @@ class BaseQNetwork(nn.Module, ABC):
             policy.scatter_(-1, max_indices, 1.0)
             return policy
         else:
-            q_values -= q_values.max(dim=-1, keepdim=True).values  # For numerical stability
+            q_values = q_values - q_values.max(dim=-1, keepdim=True).values  # For numerical stability
             return torch.softmax(self.beta * q_values, dim=-1)
+    
+    def apply_soft_clamp(self, q_values: torch.Tensor) -> torch.Tensor:
+        """
+        Apply soft clamping to Q-values during training.
+        
+        This preserves gradients while bounding Q-values to prevent explosion
+        for values far outside the expected range.
+        
+        Args:
+            q_values: Raw Q-values from the network.
+        
+        Returns:
+            Soft-clamped Q-values.
+        """
+        if self.soft_clamp is not None:
+            return self.soft_clamp(q_values)
+        return q_values
     
     def get_value(self, q_values: torch.Tensor) -> torch.Tensor:
         """
