@@ -168,7 +168,6 @@ class MultiGridNeuralHumanPolicyPrior(BaseNeuralHumanPolicyPrior):
             hidden_dim=config.get('hidden_dim', 256),
             beta=config.get('beta', 1.0),
             feasible_range=config.get('feasible_range', None),
-            support_rectangle_goals=config.get('support_rectangle_goals', True),
             max_kill_buttons=config.get('max_kill_buttons', 4),
             max_pause_switches=config.get('max_pause_switches', 4),
             max_disabling_switches=config.get('max_disabling_switches', 4),
@@ -229,7 +228,6 @@ def train_multigrid_neural_policy_prior(
     verbose: bool = True,
     reward_shaping: bool = True,
     use_path_based_shaping: bool = None,  # Alias for reward_shaping
-    support_rectangle_goals: bool = True,
     epsilon: float = 0.3,
     exploration_policy: Optional[List[float]] = None,
     updates_per_episode: int = 1,
@@ -244,6 +242,9 @@ def train_multigrid_neural_policy_prior(
     
     Uses Q-learning with experience replay. Optionally trains a direct phi network
     that can predict marginal policies without iterating over goals.
+    
+    All goals are represented as bounding boxes (x1, y1, x2, y2).
+    Point goals are (x, y, x, y).
     
     The phi network (h_phi) is trained jointly with the Q-network in the same
     training loop. This is more accurate than distillation because:
@@ -272,8 +273,6 @@ def train_multigrid_neural_policy_prior(
         verbose: Print progress.
         reward_shaping: Use distance-based reward shaping.
         use_path_based_shaping: Alias for reward_shaping.
-        support_rectangle_goals: Support rectangle goals (x1, y1, x2, y2) in addition to
-            point goals (x, y). When True, the goal encoder uses 4 inputs (center + size).
         epsilon: Exploration rate for epsilon-greedy.
         exploration_policy: Optional action probability weights for exploration.
         updates_per_episode: Number of training updates per episode.
@@ -344,6 +343,7 @@ def train_multigrid_neural_policy_prior(
         feasible_range = (0.0, 1.0)
     
     # Create Q-network with unified state encoder
+    # All goals are rectangles (x1, y1, x2, y2). Point goals are (x, y, x, y).
     q_network = MultiGridQNetwork(
         grid_height=grid_height,
         grid_width=grid_width,
@@ -354,11 +354,10 @@ def train_multigrid_neural_policy_prior(
         goal_feature_dim=goal_feature_dim,
         hidden_dim=hidden_dim,
         beta=beta,
-        feasible_range=feasible_range,
-        support_rectangle_goals=support_rectangle_goals
+        feasible_range=feasible_range
     ).to(device)
     
-    # Target network (same feasible_range and rectangle goal support)
+    # Target network (same feasible_range)
     target_network = MultiGridQNetwork(
         grid_height=grid_height,
         grid_width=grid_width,
@@ -369,8 +368,7 @@ def train_multigrid_neural_policy_prior(
         goal_feature_dim=goal_feature_dim,
         hidden_dim=hidden_dim,
         beta=beta,
-        feasible_range=feasible_range,
-        support_rectangle_goals=support_rectangle_goals
+        feasible_range=feasible_range
     ).to(device)
     target_network.load_state_dict(q_network.state_dict())
     

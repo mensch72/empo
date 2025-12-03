@@ -359,7 +359,7 @@ def train_rectangle_goal_policy(
         env.reset()
         return env
     
-    # Train with rectangle goal support
+    # Train (all goals are rectangles now)
     t0 = time.time()
     neural_prior = train_neural_policy_prior(
         world_model=base_env,
@@ -374,7 +374,6 @@ def train_rectangle_goal_policy(
         replay_buffer_size=10000,
         updates_per_episode=4,
         reward_shaping=True,
-        support_rectangle_goals=True,  # Enable rectangle goal support
         epsilon=0.3,
         device=device,
         verbose=verbose,

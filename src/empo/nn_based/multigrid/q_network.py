@@ -20,6 +20,8 @@ class MultiGridQNetwork(BaseQNetwork):
     Uses unified MultiGridStateEncoder for complete state encoding
     and MultiGridGoalEncoder for goal encoding.
     
+    All goals are rectangles (x1, y1, x2, y2). Point goals are (x, y, x, y).
+    
     Args:
         grid_height: Height of the grid.
         grid_width: Width of the grid.
@@ -49,7 +51,6 @@ class MultiGridQNetwork(BaseQNetwork):
         hidden_dim: int = 256,
         beta: float = 1.0,
         feasible_range: Optional[Tuple[float, float]] = None,
-        support_rectangle_goals: bool = True,
         max_kill_buttons: int = 4,
         max_pause_switches: int = 4,
         max_disabling_switches: int = 4,
@@ -59,7 +60,6 @@ class MultiGridQNetwork(BaseQNetwork):
         self.grid_height = grid_height
         self.grid_width = grid_width
         self.hidden_dim = hidden_dim
-        self.support_rectangle_goals = support_rectangle_goals
         
         # Unified state encoder
         self.state_encoder = MultiGridStateEncoder(
@@ -75,10 +75,9 @@ class MultiGridQNetwork(BaseQNetwork):
         )
         
         # Goal encoder (separate from state - not part of world state)
-        # Supports both point goals (x, y) and rectangle goals (x1, y1, x2, y2)
+        # All goals are rectangles (x1, y1, x2, y2). Point goals are (x, y, x, y).
         self.goal_encoder = MultiGridGoalEncoder(
-            grid_height, grid_width, goal_feature_dim,
-            support_rectangles=support_rectangle_goals
+            grid_height, grid_width, goal_feature_dim
         )
         
         # Combined feature dimension
@@ -109,7 +108,7 @@ class MultiGridQNetwork(BaseQNetwork):
             global_features: (batch, 4)
             agent_features: (batch, agent_input_size)
             interactive_features: (batch, interactive_input_size)
-            goal_coords: (batch, 2)
+            goal_coords: (batch, 4) bounding box
         
         Returns:
             Q-values (batch, num_actions), soft-clamped if feasible_range is set.
@@ -165,6 +164,5 @@ class MultiGridQNetwork(BaseQNetwork):
             'hidden_dim': self.hidden_dim,
             'beta': self.beta,
             'feasible_range': self.feasible_range,
-            'support_rectangle_goals': self.support_rectangle_goals,
         })
         return config

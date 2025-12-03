@@ -189,12 +189,11 @@ def test_multigrid_goal_encoder():
     """Test the MultiGridGoalEncoder."""
     print("Testing MultiGridGoalEncoder...")
     
-    # Test with rectangle support (default)
+    # All goals are rectangles (x1, y1, x2, y2). Point goals are (x, y, x, y).
     encoder = MultiGridGoalEncoder(
         grid_height=10,
         grid_width=10,
-        feature_dim=32,
-        support_rectangles=True
+        feature_dim=32
     )
     
     # Create dummy input with 4 coordinates (bounding box: x1, y1, x2, y2)
@@ -205,7 +204,7 @@ def test_multigrid_goal_encoder():
     features = encoder(goal_coords)
     
     assert features.shape == (batch_size, 32), f"Expected (4, 32), got {features.shape}"
-    print(f"  ✓ Output shape (rectangle mode): {features.shape}")
+    print(f"  ✓ Output shape: {features.shape}")
     
     # Test encode_goal with rectangle
     class RectGoal:
@@ -220,7 +219,7 @@ def test_multigrid_goal_encoder():
     assert encoded[0, 2] == 5 and encoded[0, 3] == 7  # x2, y2
     print(f"  ✓ Rectangle goal encoding: {encoded.tolist()}")
     
-    # Test encode_goal with point goal
+    # Test encode_goal with point goal (encoded as (x, y, x, y))
     class PointGoal:
         def __init__(self):
             self.target_pos = (5, 5)
@@ -233,18 +232,16 @@ def test_multigrid_goal_encoder():
     assert encoded[0, 2] == 5 and encoded[0, 3] == 5  # x2, y2
     print(f"  ✓ Point goal encoding as bbox: {encoded.tolist()}")
     
-    # Test without rectangle support (backward compatibility)
-    encoder_no_rect = MultiGridGoalEncoder(
-        grid_height=10,
-        grid_width=10,
-        feature_dim=32,
-        support_rectangles=False
-    )
+    # Test compute_goal_weight for rectangle (area)
+    weight = MultiGridGoalEncoder.compute_goal_weight(rect_goal)
+    expected_area = (1 + 5 - 2) * (1 + 7 - 3)  # (1+x2-x1)*(1+y2-y1) = 4 * 5 = 20
+    assert weight == expected_area, f"Expected {expected_area}, got {weight}"
+    print(f"  ✓ Rectangle goal weight (area): {weight}")
     
-    goal_coords_2d = torch.randn(batch_size, 2)
-    features = encoder_no_rect(goal_coords_2d)
-    assert features.shape == (batch_size, 32)
-    print(f"  ✓ Output shape (point-only mode): {features.shape}")
+    # Test compute_goal_weight for point goal (area = 1)
+    weight = MultiGridGoalEncoder.compute_goal_weight(point_goal)
+    assert weight == 1.0, f"Expected 1.0, got {weight}"
+    print(f"  ✓ Point goal weight (area): {weight}")
     
     print("  ✓ MultiGridGoalEncoder test passed!")
 
