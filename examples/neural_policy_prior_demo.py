@@ -316,14 +316,10 @@ def compute_value_for_goals(
     agent_pos = agent_states[human_idx]
     agent_x, agent_y = int(agent_pos[0]), int(agent_pos[1])
     
-    grid_tensor, step_tensor = state_to_grid_tensor(
-        state, grid_width, grid_height, num_agents, device=device,
-        world_model=world_model, human_agent_indices=human_agent_indices,
-        query_agent_index=human_idx
-    )
-    position, direction, agent_idx_t = get_agent_tensors(
-        state, human_idx, grid_width, grid_height, device
-    )
+    # Create simple goal object for encode_and_forward
+    class SimpleGoal:
+        def __init__(self, pos):
+            self.target_pos = pos
     
     with torch.no_grad():
         for goal_pos in goal_cells:
@@ -332,12 +328,9 @@ def compute_value_for_goals(
                 values[goal_pos] = 1.0
                 continue
             
-            goal_coords = get_goal_tensor(goal_pos, grid_width, grid_height, device)
-            
-            q_values = q_network(
-                grid_tensor, step_tensor,
-                position, direction, agent_idx_t,
-                goal_coords
+            goal = SimpleGoal(goal_pos)
+            q_values = q_network.encode_and_forward(
+                state, world_model, human_idx, goal, device
             )
             
             # V = E_π[Q] where π = softmax(β*Q)
@@ -364,22 +357,17 @@ def get_boltzmann_action(
     """
     Sample an action from the learned Boltzmann policy.
     """
-    grid_tensor, step_tensor = state_to_grid_tensor(
-        state, grid_width, grid_height, num_agents, device=device,
-        world_model=world_model, human_agent_indices=human_agent_indices,
-        query_agent_index=human_idx
-    )
-    position, direction, agent_idx_t = get_agent_tensors(
-        state, human_idx, grid_width, grid_height, device
-    )
-    goal_coords = get_goal_tensor(goal_pos, grid_width, grid_height, device)
+    # Create simple goal object for encode_and_forward
+    class SimpleGoal:
+        def __init__(self, pos):
+            self.target_pos = pos
+    
+    goal = SimpleGoal(goal_pos)
     
     with torch.no_grad():
-        q_values = q_network(
-            grid_tensor, step_tensor,
-            position, direction, agent_idx_t,
-            goal_coords
-        ) # shape: (1, num_actions)
+        q_values = q_network.encode_and_forward(
+            state, world_model, human_idx, goal, device
+        )  # shape: (1, num_actions)
         if beta == float('inf'):
             # Greedy action
             action = torch.argmax(q_values, dim=1).item()

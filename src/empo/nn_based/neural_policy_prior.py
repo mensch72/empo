@@ -153,7 +153,14 @@ class BaseNeuralHumanPolicyPrior(HumanPolicyPrior, ABC):
         if env_actions is None:
             return
         
-        env_encoding = {i: a.name.lower() for i, a in enumerate(env_actions)}
+        # Handle both enum classes and iterables
+        if hasattr(env_actions, '__members__'):
+            # It's an enum class
+            env_encoding = {i: name.lower() for i, name in enumerate(env_actions.__members__.keys())}
+        elif hasattr(env_actions, '__iter__'):
+            env_encoding = {i: a.name.lower() for i, a in enumerate(env_actions)}
+        else:
+            return
         
         for action_idx, action_name in saved_encoding.items():
             if action_idx in env_encoding and env_encoding[action_idx] != action_name:

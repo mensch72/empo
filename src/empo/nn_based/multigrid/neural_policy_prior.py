@@ -148,7 +148,23 @@ class MultiGridNeuralHumanPolicyPrior(BaseNeuralHumanPolicyPrior):
             max_control_buttons=config.get('max_control_buttons', 4),
         )
         
-        q_network.load_state_dict(checkpoint['q_network_state_dict'])
+        # Load state dict with strict=False to allow size mismatches for agent encoder
+        # (enables policy transfer across different agent configurations)
+        try:
+            q_network.load_state_dict(checkpoint['q_network_state_dict'])
+        except RuntimeError as e:
+            if 'size mismatch' in str(e):
+                # Partial loading for policy transfer - compatible layers only
+                saved_state = checkpoint['q_network_state_dict']
+                current_state = q_network.state_dict()
+                compatible_state = {}
+                for key, value in saved_state.items():
+                    if key in current_state and current_state[key].shape == value.shape:
+                        compatible_state[key] = value
+                current_state.update(compatible_state)
+                q_network.load_state_dict(current_state)
+            else:
+                raise
         
         prior = cls(
             q_network=q_network,

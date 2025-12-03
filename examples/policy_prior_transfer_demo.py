@@ -485,9 +485,6 @@ def load_and_transfer_policy(
     )
     
     print("  Policy loaded successfully!")
-    print(f"  Action mapping: {loaded_prior._action_mapping}")
-    print(f"  Saved encoding: {loaded_prior._saved_action_encoding}")
-    print(f"  Current encoding: {loaded_prior._current_action_encoding}")
     
     return loaded_prior, test_env
 
@@ -532,8 +529,10 @@ def run_transfer_rollouts(
                 if agent_idx in human_agent_indices:
                     goal = human_goals[agent_idx]
                     
-                    # Get action distribution from transferred policy
-                    action_dist = prior(state, agent_idx, goal)
+                    # Get action distribution from transferred policy (returns Dict[int, float])
+                    action_dist_dict = prior(state, agent_idx, goal)
+                    action_dist = np.array([action_dist_dict.get(i, 0.0) for i in range(num_actions)])
+                    action_dist = action_dist / action_dist.sum()  # Normalize
                     
                     # Sample action
                     action = np.random.choice(len(action_dist), p=action_dist)
