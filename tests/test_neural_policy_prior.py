@@ -576,6 +576,76 @@ def test_soft_clamp():
     print("  ✓ SoftClamp test passed!")
 
 
+def test_weight_proportional_sampling():
+    """Test that weight-proportional rectangle sampling works correctly."""
+    print("Testing weight-proportional sampling...")
+    
+    # Test sample_coordinate_pair_weighted
+    n = 5  # Coordinates 0-4
+    counts = {}
+    num_samples = 100000
+    rng = np.random.default_rng(42)
+    
+    for _ in range(num_samples):
+        c1, c2 = MultiGridGoalEncoder.sample_coordinate_pair_weighted(n, rng)
+        key = (c1, c2)
+        counts[key] = counts.get(key, 0) + 1
+    
+    # Verify that weights are proportional to (1 + c2 - c1)
+    # Expected weight for (c1, c2) is (1 + c2 - c1)
+    total_weight = 0
+    for c1 in range(n):
+        for c2 in range(c1, n):
+            total_weight += (1 + c2 - c1)
+    
+    for c1 in range(n):
+        for c2 in range(c1, n):
+            key = (c1, c2)
+            expected_weight = (1 + c2 - c1)
+            expected_prob = expected_weight / total_weight
+            observed_prob = counts.get(key, 0) / num_samples
+            
+            # Allow 20% relative error due to sampling variance
+            relative_error = abs(observed_prob - expected_prob) / expected_prob
+            assert relative_error < 0.2, f"Pair {key}: expected prob {expected_prob:.4f}, got {observed_prob:.4f}"
+    
+    print("  ✓ sample_coordinate_pair_weighted produces correct distribution")
+    
+    # Test sample_rectangle_weighted
+    x_range = (1, 4)  # x in [1, 4]
+    y_range = (2, 5)  # y in [2, 5]
+    
+    rect_counts = {}
+    for _ in range(num_samples):
+        rect = MultiGridGoalEncoder.sample_rectangle_weighted(x_range, y_range, rng)
+        rect_counts[rect] = rect_counts.get(rect, 0) + 1
+    
+    # Verify a few samples have correct relative frequencies
+    # Weight = (1+x2-x1)*(1+y2-y1)
+    # Point goal (2, 3, 2, 3): weight = 1*1 = 1
+    # Small rect (2, 3, 3, 4): weight = 2*2 = 4
+    # The ratio should be approximately 1:4
+    
+    point_count = rect_counts.get((2, 3, 2, 3), 0)
+    small_rect_count = rect_counts.get((2, 3, 3, 4), 0)
+    
+    if point_count > 0 and small_rect_count > 0:
+        ratio = small_rect_count / point_count
+        # Expected ratio is 4.0, allow some variance
+        assert 2.0 < ratio < 8.0, f"Ratio should be ~4.0, got {ratio:.2f}"
+        print(f"  ✓ sample_rectangle_weighted: ratio of (2,3,3,4) to (2,3,2,3) is {ratio:.2f} (expected ~4.0)")
+    
+    # Verify edges
+    for _ in range(1000):
+        x1, y1, x2, y2 = MultiGridGoalEncoder.sample_rectangle_weighted(x_range, y_range, rng)
+        assert x_range[0] <= x1 <= x2 <= x_range[1], f"x coords out of range: {x1}, {x2}"
+        assert y_range[0] <= y1 <= y2 <= y_range[1], f"y coords out of range: {y1}, {y2}"
+    
+    print("  ✓ sample_rectangle_weighted respects coordinate ranges")
+    
+    print("  ✓ weight-proportional sampling test passed!")
+
+
 def run_all_tests():
     """Run all tests."""
     print("=" * 60)
@@ -610,6 +680,9 @@ def run_all_tests():
     print()
     
     test_soft_clamp()
+    print()
+    
+    test_weight_proportional_sampling()
     print()
     
     print("=" * 60)

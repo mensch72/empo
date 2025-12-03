@@ -603,10 +603,14 @@ def _train_phi_network_step(
     
     Training procedure:
     1. Sample a batch of states from the buffer
-    2. For each state, sample multiple goals and compute the Q-network's 
-       weighted average policy (stochastic approximation of the marginal)
-    3. Goal weights are (1+x2-x1)*(1+y2-y1) - the area of the bounding box
-    4. Train phi to match this weighted marginal via cross-entropy loss
+    2. For each state, sample multiple goals using weight-proportional sampling
+       (goals are sampled with probability proportional to their area weight)
+    3. Average the Q-network policies (simple average since sampling already accounts for weights)
+    4. Train phi to match this marginal via cross-entropy loss
+    
+    IMPORTANT: The goal sampler should sample goals with probability proportional
+    to their weight (1+x2-x1)*(1+y2-y1). If it does, we use simple averaging.
+    If it samples uniformly, the marginal will be biased toward smaller goals.
     
     Joint training with Q-network ensures:
     - Both networks see the same state distribution
@@ -618,7 +622,7 @@ def _train_phi_network_step(
         phi_optimizer: Optimizer for phi network.
         q_network: Current Q-network (used to compute target marginals).
         state_buffer: Buffer of (state, agent_idx, world_model) tuples.
-        goal_sampler: Goal sampler for computing marginals.
+        goal_sampler: Goal sampler that samples with weight-proportional probabilities.
         batch_size: Batch size.
         num_goal_samples: Number of goals to sample per state for marginal computation.
         device: Torch device.
@@ -643,37 +647,36 @@ def _train_phi_network_step(
         agent_idx = item['agent_idx']
         world_model = item['world_model']
         
-        # Compute Q-network's weighted marginal policy over sampled goals
-        # Weight = (1+x2-x1)*(1+y2-y1) = area of goal bounding box
+        # Compute Q-network's marginal policy over sampled goals
+        # Goals are sampled with weight-proportional probabilities, so we use simple averaging
         with torch.no_grad():
-            weighted_probs = torch.zeros(q_network.num_actions, device=device)
-            total_weight = 0.0
+            marginal_probs = torch.zeros(q_network.num_actions, device=device)
+            valid_samples = 0
             
-            # Sample multiple goals and compute weighted average of their policies
+            # Sample multiple goals and average their policies
+            # The sampler samples with P(goal) ∝ weight, so simple average gives correct marginal
             for _ in range(num_goal_samples):
                 try:
                     goal, _ = goal_sampler.sample(state, agent_idx)
                     if goal is None:
                         continue
                     
-                    # Get goal weight: (1+x2-x1)*(1+y2-y1)
-                    weight = MultiGridGoalEncoder.compute_goal_weight(goal)
-                    
                     q_values = q_network.encode_and_forward(
                         state, world_model, agent_idx, goal, device
                     )
                     policy = q_network.get_policy(q_values).squeeze(0)
-                    weighted_probs += weight * policy
-                    total_weight += weight
+                    marginal_probs += policy
+                    valid_samples += 1
                 except (ValueError, RuntimeError, IndexError):
                     # Goal sampling or Q-network forward can fail for edge cases
                     continue
             
-            if total_weight == 0.0:
+            if valid_samples == 0:
                 continue
             
-            # Weighted average to get marginal (target for phi network)
-            target_marginal = weighted_probs / total_weight
+            # Simple average to get marginal (target for phi network)
+            # This is correct because goals are sampled with weight-proportional probabilities
+            target_marginal = marginal_probs / valid_samples
         
         # Get phi network's prediction
         phi_probs = phi_network.encode_and_forward(

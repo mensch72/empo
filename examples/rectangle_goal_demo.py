@@ -153,73 +153,55 @@ class ReachRectangleGoal(PossibleGoal):
 
 class RectangleGoalSampler(PossibleGoalSampler):
     """
-    Samples rectangle goals for training.
+    Samples rectangle goals with probability proportional to their area weight.
     
-    Generates random rectangles within the grid, with configurable
-    minimum and maximum sizes.
+    Goals are sampled with P(goal) ∝ (1+x2-x1)*(1+y2-y1), which is the area
+    of the bounding box. This ensures that larger rectangles are sampled
+    proportionally more often, which is required for correct phi network training.
+    
+    The sampling uses the product structure: (x1, x2) is sampled independently
+    from (y1, y2), each using efficient inverse transform sampling without rejection.
     """
     
     def __init__(
         self,
         world_model,
-        min_size: int = 1,
-        max_size: int = 3,
-        point_goal_probability: float = 0.3
     ):
         super().__init__(world_model)
-        self.min_size = min_size
-        self.max_size = max_size
-        self.point_goal_probability = point_goal_probability
-        self._update_valid_cells()
+        self._rng = np.random.default_rng()
+        self._update_valid_range()
     
-    def _update_valid_cells(self):
-        """Update list of valid cells for goal placement."""
-        self._valid_cells = []
+    def _update_valid_range(self):
+        """Update valid coordinate ranges for goal placement."""
         env = self.world_model
-        for x in range(1, env.width - 1):
-            for y in range(1, env.height - 1):
-                cell = env.grid.get(x, y)
-                if cell is None or (hasattr(cell, 'can_overlap') and cell.can_overlap()):
-                    self._valid_cells.append((x, y))
+        # Valid cells are typically 1 to width-2 (excluding outer walls)
+        self._x_range = (1, env.width - 2)
+        self._y_range = (1, env.height - 2)
     
     def set_world_model(self, world_model):
-        """Update world model and refresh valid cells."""
+        """Update world model and refresh valid ranges."""
         self.world_model = world_model
-        self._update_valid_cells()
+        self._update_valid_range()
     
     def sample(self, state, human_agent_index: int) -> Tuple[PossibleGoal, float]:
-        """Sample a rectangle or point goal."""
+        """
+        Sample a rectangle goal with probability proportional to its area.
+        
+        Uses weight-proportional sampling from MultiGridGoalEncoder.
+        The returned weight is 1.0 since the sampling already accounts for weights.
+        """
+        from empo.nn_based.multigrid.goal_encoder import MultiGridGoalEncoder
+        
         env = self.world_model
         
-        # Sometimes sample a point goal for diversity
-        if random.random() < self.point_goal_probability:
-            if self._valid_cells:
-                x, y = random.choice(self._valid_cells)
-                # Return rectangle with same corner (effectively a point)
-                goal = ReachRectangleGoal(env, human_agent_index, (x, y, x, y))
-                return goal, 1.0
+        # Sample rectangle with weight-proportional probabilities
+        x1, y1, x2, y2 = MultiGridGoalEncoder.sample_rectangle_weighted(
+            self._x_range, self._y_range, self._rng
+        )
         
-        # Sample rectangle goal
-        if self._valid_cells:
-            # Pick a random center cell
-            cx, cy = random.choice(self._valid_cells)
-            
-            # Random size within bounds
-            width = random.randint(self.min_size, self.max_size)
-            height = random.randint(self.min_size, self.max_size)
-            
-            # Compute rectangle bounds
-            x1 = max(1, cx - width // 2)
-            y1 = max(1, cy - height // 2)
-            x2 = min(env.width - 2, x1 + width - 1)
-            y2 = min(env.height - 2, y1 + height - 1)
-            
-            goal = ReachRectangleGoal(env, human_agent_index, (x1, y1, x2, y2))
-            return goal, 1.0
+        goal = ReachRectangleGoal(env, human_agent_index, (x1, y1, x2, y2))
         
-        # Fallback: center of grid
-        cx, cy = env.width // 2, env.height // 2
-        goal = ReachRectangleGoal(env, human_agent_index, (cx, cy, cx, cy))
+        # Return weight 1.0 since sampling already accounts for goal weights
         return goal, 1.0
 
 
@@ -339,13 +321,9 @@ def train_rectangle_goal_policy(
     
     print(f"  Human agent indices: {human_agent_indices}")
     
-    # Create rectangle goal sampler
-    goal_sampler = RectangleGoalSampler(
-        base_env,
-        min_size=1,
-        max_size=3,
-        point_goal_probability=0.3
-    )
+    # Create rectangle goal sampler with weight-proportional sampling
+    # This samples goals with P(goal) ∝ (1+x2-x1)*(1+y2-y1)
+    goal_sampler = RectangleGoalSampler(base_env)
     
     # World model generator for ensemble training
     def world_model_generator(episode: int):
