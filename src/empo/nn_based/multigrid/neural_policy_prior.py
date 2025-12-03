@@ -368,7 +368,70 @@ def train_multigrid_neural_policy_prior(
         if hasattr(exploration_policy, 'tolist'):
             exploration_policy = exploration_policy.tolist()
     
-    # Use generic Trainer with exploration_policy
+    # Create path calculator for reward shaping
+    path_calc = PathDistanceCalculator(grid_height, grid_width) if reward_shaping else None
+    
+    # Create reward function with potential-based shaping (Ng et al. 1999)
+    # F(s,a,s') = γ * Φ(s') - Φ(s) where Φ(s) = -distance(agent, goal) / max_distance
+    def compute_shaped_reward(state, action, next_state, agent_idx, goal):
+        """Compute reward with optional potential-based shaping."""
+        # Extract goal target (point or rectangle)
+        if hasattr(goal, 'target_rect'):
+            target = goal.target_rect  # Rectangle goal (x1, y1, x2, y2)
+        elif hasattr(goal, 'target_pos'):
+            target = goal.target_pos  # Point goal (x, y)
+        else:
+            # No target position - just use goal achievement
+            if hasattr(goal, 'is_achieved'):
+                return float(goal.is_achieved(next_state))
+            return 0.0
+        
+        # Base reward: goal achievement
+        base_reward = 0.0
+        if hasattr(goal, 'is_achieved'):
+            base_reward = float(goal.is_achieved(next_state))
+        else:
+            # Check if agent is at/in the goal
+            _, next_agent_states, _, _ = next_state
+            if agent_idx < len(next_agent_states):
+                next_pos = (int(next_agent_states[agent_idx][0]), 
+                           int(next_agent_states[agent_idx][1]))
+                if path_calc is not None:
+                    base_reward = 1.0 if path_calc.is_in_goal(next_pos, target) else 0.0
+        
+        # If no path calculator, just return base reward
+        if path_calc is None:
+            return base_reward
+        
+        # Compute potential-based shaping reward
+        _, curr_agent_states, _, _ = state
+        _, next_agent_states, _, _ = next_state
+        
+        if agent_idx >= len(curr_agent_states) or agent_idx >= len(next_agent_states):
+            return base_reward
+        
+        curr_pos = (int(curr_agent_states[agent_idx][0]), 
+                   int(curr_agent_states[agent_idx][1]))
+        next_pos = (int(next_agent_states[agent_idx][0]), 
+                   int(next_agent_states[agent_idx][1]))
+        
+        # Get obstacles (use empty set for simplicity - full obstacles would need world_model)
+        obstacles = set()
+        
+        max_dist = grid_width + grid_height
+        
+        # Φ(s) = -distance(agent, goal) / max_distance
+        phi_s = path_calc.compute_potential(curr_pos, target, obstacles, max_dist)
+        phi_s_prime = path_calc.compute_potential(next_pos, target, obstacles, max_dist)
+        
+        # Shaping: F(s,a,s') = γ * Φ(s') - Φ(s)
+        shaping_reward = gamma * phi_s_prime - phi_s
+        
+        return base_reward + shaping_reward
+    
+    reward_fn = compute_shaped_reward if reward_shaping else None
+    
+    # Use generic Trainer with exploration_policy and reward function
     from ..trainer import Trainer
     trainer = Trainer(
         q_network=q_network,
@@ -378,10 +441,9 @@ def train_multigrid_neural_policy_prior(
         gamma=gamma,
         target_update_freq=target_update_freq,
         device=device,
-        exploration_policy=exploration_policy
+        exploration_policy=exploration_policy,
+        reward_fn=reward_fn
     )
-    
-    path_calc = PathDistanceCalculator(grid_height, grid_width) if reward_shaping else None
     
     # Handle environment ensemble training
     current_env = env

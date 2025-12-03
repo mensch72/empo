@@ -4,7 +4,7 @@ Trainer class for neural policy priors.
 
 import torch
 import torch.optim as optim
-from typing import Any, List, Optional, Dict
+from typing import Any, Callable, List, Optional, Dict
 import random
 
 from .q_network import BaseQNetwork
@@ -17,6 +17,12 @@ class Trainer:
     
     Handles the training loop, experience replay, and target network updates.
     Domain-specific state encoding is delegated to the Q-network.
+    
+    The reward function computes rewards for transitions. It should take:
+        (state, action, next_state, agent_idx, goal) -> reward (float)
+    
+    If no reward_fn is provided, a default goal-achievement reward is used:
+        reward = 1.0 if goal.is_achieved(next_state) else 0.0
     """
     
     def __init__(
@@ -28,7 +34,8 @@ class Trainer:
         gamma: float = 0.99,
         target_update_freq: int = 100,
         device: str = 'cpu',
-        exploration_policy: Optional[List[float]] = None
+        exploration_policy: Optional[List[float]] = None,
+        reward_fn: Optional[Callable[[Any, int, Any, int, Any], float]] = None
     ):
         self.q_network = q_network
         self.target_network = target_network
@@ -38,6 +45,7 @@ class Trainer:
         self.target_update_freq = target_update_freq
         self.device = device
         self.exploration_policy = exploration_policy
+        self.reward_fn = reward_fn
         self.total_steps = 0
     
     def update_target_network(self):
@@ -130,6 +138,9 @@ class Trainer:
         This is the generic TD loss computation that works with any Q-network
         that implements encode_and_forward().
         
+        Uses the reward function if provided, otherwise uses goal achievement:
+            reward = 1.0 if goal.is_achieved(next_state) else 0.0
+        
         Args:
             batch: List of transition dicts with 'state', 'action', 
                    'next_state', 'agent_idx', 'goal'.
@@ -146,6 +157,16 @@ class Trainer:
             agent_idx = transition['agent_idx']
             goal = transition['goal']
             
+            # Compute reward
+            if self.reward_fn is not None:
+                reward = self.reward_fn(state, action, next_state, agent_idx, goal)
+            else:
+                # Default: goal achievement reward
+                if hasattr(goal, 'is_achieved'):
+                    reward = float(goal.is_achieved(next_state))
+                else:
+                    reward = 0.0
+            
             # Current Q-value
             q_values = self.q_network.encode_and_forward(
                 state, None, agent_idx, goal, self.device
@@ -159,7 +180,8 @@ class Trainer:
                 )
                 next_v = self.q_network.get_value(next_q)
             
-            target = self.gamma * next_v
+            # TD target: r + γ * V(s')
+            target = reward + self.gamma * next_v
             loss = (current_q - target) ** 2
             total_loss = total_loss + loss
         
