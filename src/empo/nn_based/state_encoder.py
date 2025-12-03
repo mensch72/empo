@@ -18,11 +18,6 @@ class BaseStateEncoder(nn.Module, ABC):
     Abstract base class for state encoders.
     
     State encoders convert environment states into fixed-size feature vectors.
-    This includes ALL state information visible to the query agent:
-    - Spatial/grid information
-    - Agent features (query agent and others)
-    - Interactive object features
-    - Global world features
     
     The internal structure (CNN, MLP, separate encoders) is domain-specific.
     Subclasses implement domain-specific encoding logic.

@@ -9,7 +9,7 @@ import torch.nn as nn
 from typing import Any, Dict, Tuple
 
 from ..q_network import BaseQNetwork
-from .state_encoder_unified import MultiGridStateEncoder
+from .state_encoder import MultiGridStateEncoder
 from .goal_encoder import MultiGridGoalEncoder
 
 

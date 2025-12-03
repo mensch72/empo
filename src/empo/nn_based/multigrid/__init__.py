@@ -54,7 +54,7 @@ from .feature_extraction import (
     get_num_agents_per_color,
 )
 
-from .state_encoder_unified import MultiGridStateEncoder
+from .state_encoder import MultiGridStateEncoder
 from .goal_encoder import MultiGridGoalEncoder
 from .q_network import MultiGridQNetwork
 from .policy_prior_network import MultiGridPolicyPriorNetwork
