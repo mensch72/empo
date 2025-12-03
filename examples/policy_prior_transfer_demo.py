@@ -419,6 +419,7 @@ def train_small_actions_policy(
         updates_per_episode=4,
         train_phi_network=False,
         epsilon=0.3,
+        reward_shaping=True,  # Use path-based reward shaping with passing costs
         device=device,
         verbose=verbose,
         world_model_generator=world_model_generator,

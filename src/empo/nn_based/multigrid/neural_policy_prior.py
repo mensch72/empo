@@ -323,16 +323,22 @@ def train_multigrid_neural_policy_prior(
     
     num_agent_colors = len(set(num_agents_per_color.keys()))
     
+    # Create path calculator for reward shaping (with world_model for path precomputation)
+    path_calc = PathDistanceCalculator(
+        grid_height, grid_width, 
+        world_model=env,
+        passing_costs=None  # Use default passing costs
+    ) if reward_shaping else None
+    
     # Compute feasible range for Q-values based on reward shaping
-    # The max shaping reward is approximately (grid_width + grid_height) / max_distance
-    # since the potential function is -distance/max_distance
-    # With base reward [0, 1] and shaping in [-1, 1], Q-values can be roughly in [-1, 2]
-    # We add some margin for safety
-    if reward_shaping:
-        max_distance = grid_width + grid_height
-        # Max shaping reward per step is about 1/max_distance * (1 + gamma)
-        # Over the horizon, Q-values can accumulate to around [0, 1] + shaping margin
-        feasible_range = (-1.0, 2.0)
+    # When using path-based shaping, the feasible range is determined by the
+    # maximum possible path cost (grid diagonal * max passing cost)
+    if reward_shaping and path_calc is not None:
+        # Use the feasible_range computed by PathDistanceCalculator
+        # which accounts for passing difficulty scores
+        feasible_range = path_calc.feasible_range
+        # Add small margin for the base reward [0, 1]
+        feasible_range = (feasible_range[0] - 1.0, feasible_range[1] + 1.0)
     else:
         # Without shaping, Q-values are bounded by discounted rewards in [0, 1]
         feasible_range = (0.0, 1.0)
@@ -391,13 +397,14 @@ def train_multigrid_neural_policy_prior(
         if hasattr(exploration_policy, 'tolist'):
             exploration_policy = exploration_policy.tolist()
     
-    # Create path calculator for reward shaping
-    path_calc = PathDistanceCalculator(grid_height, grid_width) if reward_shaping else None
+    # Track current world_model for reward shaping (updated in ensemble training)
+    current_world_model = [env]  # Use list to allow modification in closure
     
     # Create reward function with potential-based shaping (Ng et al. 1999)
-    # F(s,a,s') = γ * Φ(s') - Φ(s) where Φ(s) = -distance(agent, goal) / max_distance
+    # F(s,a,s') = γ * Φ(s') - Φ(s) where Φ(s) = -path_cost(agent, goal) / max_cost
+    # Path cost sums passing difficulty scores along the shortest path
     def compute_shaped_reward(state, action, next_state, agent_idx, goal):
-        """Compute reward with optional potential-based shaping."""
+        """Compute reward with path-based potential shaping."""
         # Extract goal target (point or rectangle)
         if hasattr(goal, 'target_rect'):
             target = goal.target_rect  # Rectangle goal (x1, y1, x2, y2)
@@ -426,7 +433,7 @@ def train_multigrid_neural_policy_prior(
         if path_calc is None:
             return base_reward
         
-        # Compute potential-based shaping reward
+        # Compute potential-based shaping reward using path costs
         _, curr_agent_states, _, _ = state
         _, next_agent_states, _, _ = next_state
         
@@ -438,14 +445,12 @@ def train_multigrid_neural_policy_prior(
         next_pos = (int(next_agent_states[agent_idx][0]), 
                    int(next_agent_states[agent_idx][1]))
         
-        # Get obstacles (use empty set for simplicity - full obstacles would need world_model)
-        obstacles = set()
+        # Use world_model for path cost computation with passing difficulty scores
+        wm = current_world_model[0]
         
-        max_dist = grid_width + grid_height
-        
-        # Φ(s) = -distance(agent, goal) / max_distance
-        phi_s = path_calc.compute_potential(curr_pos, target, obstacles, max_dist)
-        phi_s_prime = path_calc.compute_potential(next_pos, target, obstacles, max_dist)
+        # Φ(s) = -path_cost(agent, goal) / max_cost
+        phi_s = path_calc.compute_potential(curr_pos, target, wm)
+        phi_s_prime = path_calc.compute_potential(next_pos, target, wm)
         
         # Shaping: F(s,a,s') = γ * Φ(s') - Φ(s)
         shaping_reward = gamma * phi_s_prime - phi_s
@@ -494,6 +499,9 @@ def train_multigrid_neural_policy_prior(
                 # Update goal sampler if it has set_world_model method
                 if hasattr(goal_sampler, 'set_world_model'):
                     goal_sampler.set_world_model(current_env)
+        
+        # Update current_world_model for reward shaping closure
+        current_world_model[0] = current_env
         
         current_env.reset()
         state = current_env.get_state()

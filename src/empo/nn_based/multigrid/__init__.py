@@ -64,7 +64,7 @@ from .neural_policy_prior import (
     MultiGridNeuralHumanPolicyPrior,
     train_multigrid_neural_policy_prior,
 )
-from .path_distance import PathDistanceCalculator
+from .path_distance import PathDistanceCalculator, DEFAULT_PASSING_COSTS
 
 __all__ = [
     # Constants
@@ -89,6 +89,7 @@ __all__ = [
     'OVERLAPPABLE_OBJECTS',
     'NON_OVERLAPPABLE_IMMOBILE_OBJECTS',
     'NON_OVERLAPPABLE_MOBILE_OBJECTS',
+    'DEFAULT_PASSING_COSTS',
     # Feature extraction
     'extract_agent_features',
     'extract_all_agent_features',

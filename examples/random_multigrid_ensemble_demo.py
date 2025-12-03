@@ -471,7 +471,7 @@ def train_on_ensemble(
         train_phi_network=False,
         epsilon=0.3,
         exploration_policy=np.array([0.06, 0.19, 0.19, 0.56]),
-        use_path_based_shaping=False,  # Use Manhattan distance for ensemble (simpler)
+        use_path_based_shaping=True,  # Use path-based reward shaping with passing costs
         device=device,
         verbose=verbose,
         world_model_generator=world_model_generator,
