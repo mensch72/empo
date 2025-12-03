@@ -9,6 +9,32 @@ from .window import Window
 import numpy as np
 from itertools import product
 
+"""
+MAINTAINER NOTE - Encoder Synchronization
+=========================================
+When adding new object types, agent features, or modifying transition-relevant
+attributes in this file, the neural network encoders in `empo.nn_based` may need
+to be updated accordingly.
+
+The encoders must encode ALL attributes that:
+1. Can change during a transition (state before -> state after)
+2. Can influence which transitions are possible or their probabilities
+
+Currently encoded attributes are documented in:
+- src/empo/nn_based/neural_policy_prior.py (OBJECT_TYPE_TO_CHANNEL, feature sizes)
+- docs/ENCODER_ARCHITECTURE.md (comprehensive encoder documentation)
+
+Examples of attributes that MUST be encoded:
+- Agent: position, direction, color, terminated, paused, forced_next_action,
+         can_enter_magic_walls, can_push_rocks, carrying
+- Door: is_open, is_locked, color
+- MagicWall: magic_side, active, entry_probability, solidify_probability
+- ControlButton: enabled, trigger_color, target_color, triggered_action, _awaiting_action
+- UnsteadyGround: stumble_probability
+
+If you add a new object type or feature, update the encoders and documentation!
+"""
+
 # Import WorldModel base class from empo
 import sys
 from pathlib import Path

@@ -38,10 +38,17 @@ from typing import Iterator, Tuple, Dict, List, Any, Optional
 
 from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, Wall, World, SmallActions
 from empo.possible_goal import PossibleGoal, PossibleGoalGenerator, PossibleGoalSampler
-from empo.nn_based import (
-    StateEncoder, AgentEncoder, GoalEncoder,
-    QNetwork, PolicyPriorNetwork,
-    train_neural_policy_prior,
+from empo.nn_based.multigrid import (
+    MultiGridStateEncoder as StateEncoder,
+    MultiGridGoalEncoder as GoalEncoder,
+    MultiGridQNetwork as QNetwork,
+    MultiGridPolicyPriorNetwork as PolicyPriorNetwork,
+    train_multigrid_neural_policy_prior as train_neural_policy_prior,
+    NUM_OBJECT_TYPE_CHANNELS,
+    OBJECT_TYPE_TO_CHANNEL,
+    OVERLAPPABLE_OBJECTS,
+    NON_OVERLAPPABLE_IMMOBILE_OBJECTS,
+    NON_OVERLAPPABLE_MOBILE_OBJECTS,
 )
 
 
@@ -162,27 +169,73 @@ def state_to_grid_tensor(
     grid_width: int, 
     grid_height: int,
     num_agents: int,
-    num_object_types: int = 8,
-    device: str = 'cpu'
+    num_object_types: int = NUM_OBJECT_TYPE_CHANNELS,
+    device: str = 'cpu',
+    world_model: Any = None,
+    human_agent_indices: Optional[List[int]] = None,
+    query_agent_index: Optional[int] = None
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Convert a multigrid state to tensor representation for the neural network.
+    
+    Uses the same channel structure as StateEncoder:
+    - num_object_types: explicit object type channels
+    - 3: "other" object channels (overlappable, immobile, mobile)
+    - 1: per-color agent channel (backward compatibility mode)
+    - 1: query agent channel
     """
     step_count, agent_states, mobile_objects, mutable_objects = state
     
-    num_channels = num_object_types + num_agents
+    # Channel structure (matching StateEncoder with num_agents_per_color=None)
+    num_other_object_channels = 3
+    num_color_channels = 1  # Backward compatibility: single channel for all agents
+    num_channels = num_object_types + num_other_object_channels + num_color_channels + 1
+    
+    # Channel indices
+    other_overlappable_idx = num_object_types
+    other_immobile_idx = num_object_types + 1
+    other_mobile_idx = num_object_types + 2
+    color_channels_start = num_object_types + num_other_object_channels
+    query_agent_channel_idx = color_channels_start + num_color_channels
+    
     grid_tensor = torch.zeros(1, num_channels, grid_height, grid_width, device=device)
     
-    # Encode agent positions
-    for i, agent_state in enumerate(agent_states):
-        if i < num_agents:
-            x, y = int(agent_state[0]), int(agent_state[1])
-            if 0 <= x < grid_width and 0 <= y < grid_height:
-                channel_idx = num_object_types + i
-                grid_tensor[0, channel_idx, y, x] = 1.0
+    # 1. Encode object-type channels from the persistent world grid
+    if world_model is not None and hasattr(world_model, 'grid') and world_model.grid is not None:
+        for y in range(grid_height):
+            for x in range(grid_width):
+                cell = world_model.grid.get(x, y)
+                if cell is not None:
+                    cell_type = getattr(cell, 'type', None)
+                    if cell_type is not None:
+                        if cell_type in OBJECT_TYPE_TO_CHANNEL:
+                            channel_idx = OBJECT_TYPE_TO_CHANNEL[cell_type]
+                            if channel_idx < num_object_types:
+                                grid_tensor[0, channel_idx, y, x] = 1.0
+                        else:
+                            # Object type not in explicit channels - use "other" channels
+                            if cell_type in OVERLAPPABLE_OBJECTS:
+                                grid_tensor[0, other_overlappable_idx, y, x] = 1.0
+                            elif cell_type in NON_OVERLAPPABLE_MOBILE_OBJECTS:
+                                grid_tensor[0, other_mobile_idx, y, x] = 1.0
+                            else:
+                                grid_tensor[0, other_immobile_idx, y, x] = 1.0
     
-    # Normalize step count (max_steps should match environment setting)
-    max_steps = MAX_STEPS  # Must match env.max_steps for proper normalization
+    # 2. Encode all agent positions in single color channel (backward compatibility)
+    for i, agent_state in enumerate(agent_states):
+        x, y = int(agent_state[0]), int(agent_state[1])
+        if 0 <= x < grid_width and 0 <= y < grid_height:
+            grid_tensor[0, color_channels_start, y, x] = 1.0
+    
+    # 3. Encode query agent channel
+    if query_agent_index is not None and query_agent_index < len(agent_states):
+        agent_state = agent_states[query_agent_index]
+        x, y = int(agent_state[0]), int(agent_state[1])
+        if 0 <= x < grid_width and 0 <= y < grid_height:
+            grid_tensor[0, query_agent_channel_idx, y, x] = 1.0
+    
+    # Normalize step count
+    max_steps = MAX_STEPS
     step_tensor = torch.tensor([[step_count / max_steps]], device=device, dtype=torch.float32)
     
     return grid_tensor, step_tensor
@@ -195,7 +248,10 @@ def get_agent_tensors(
     grid_height: int,
     device: str = 'cpu'
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Extract agent position, direction, and index tensors from state."""
+    """Extract agent position, direction, and index tensors from state.
+    
+    The AgentEncoder handles clamping internally for indices beyond its capacity.
+    """
     _, agent_states, _, _ = state
     agent_state = agent_states[human_idx]
     
@@ -242,7 +298,9 @@ def compute_value_for_goals(
     grid_height: int,
     num_agents: int,
     beta: float = 5.0,
-    device: str = 'cpu'
+    device: str = 'cpu',
+    world_model: Any = None,
+    human_agent_indices: Optional[List[int]] = None
 ) -> Dict[Tuple[int, int], float]:
     """
     Compute V-value for each goal at the current state using the Q-network.
@@ -258,12 +316,10 @@ def compute_value_for_goals(
     agent_pos = agent_states[human_idx]
     agent_x, agent_y = int(agent_pos[0]), int(agent_pos[1])
     
-    grid_tensor, step_tensor = state_to_grid_tensor(
-        state, grid_width, grid_height, num_agents, device=device
-    )
-    position, direction, agent_idx_t = get_agent_tensors(
-        state, human_idx, grid_width, grid_height, device
-    )
+    # Create simple goal object for encode_and_forward
+    class SimpleGoal:
+        def __init__(self, pos):
+            self.target_pos = pos
     
     with torch.no_grad():
         for goal_pos in goal_cells:
@@ -272,12 +328,9 @@ def compute_value_for_goals(
                 values[goal_pos] = 1.0
                 continue
             
-            goal_coords = get_goal_tensor(goal_pos, grid_width, grid_height, device)
-            
-            q_values = q_network(
-                grid_tensor, step_tensor,
-                position, direction, agent_idx_t,
-                goal_coords
+            goal = SimpleGoal(goal_pos)
+            q_values = q_network.encode_and_forward(
+                state, world_model, human_idx, goal, device
             )
             
             # V = E_π[Q] where π = softmax(β*Q)
@@ -297,25 +350,24 @@ def get_boltzmann_action(
     grid_height: int,
     num_agents: int,
     beta: float = 5.0,
-    device: str = 'cpu'
+    device: str = 'cpu',
+    world_model: Any = None,
+    human_agent_indices: Optional[List[int]] = None
 ) -> int:
     """
     Sample an action from the learned Boltzmann policy.
     """
-    grid_tensor, step_tensor = state_to_grid_tensor(
-        state, grid_width, grid_height, num_agents, device=device
-    )
-    position, direction, agent_idx_t = get_agent_tensors(
-        state, human_idx, grid_width, grid_height, device
-    )
-    goal_coords = get_goal_tensor(goal_pos, grid_width, grid_height, device)
+    # Create simple goal object for encode_and_forward
+    class SimpleGoal:
+        def __init__(self, pos):
+            self.target_pos = pos
+    
+    goal = SimpleGoal(goal_pos)
     
     with torch.no_grad():
-        q_values = q_network(
-            grid_tensor, step_tensor,
-            position, direction, agent_idx_t,
-            goal_coords
-        ) # shape: (1, num_actions)
+        q_values = q_network.encode_and_forward(
+            state, world_model, human_idx, goal, device
+        )  # shape: (1, num_actions)
         if beta == float('inf'):
             # Greedy action
             action = torch.argmax(q_values, dim=1).item()
@@ -440,7 +492,8 @@ def run_rollout_with_learned_policies(
         # Compute value function for first human across all goals
         value_dict = compute_value_for_goals(
             q_network, state, first_human_idx, goal_cells,
-            grid_width, grid_height, num_agents, beta, device
+            grid_width, grid_height, num_agents, beta, device,
+            world_model=env, human_agent_indices=human_agent_indices
         )
         
         # Render with overlay (showing first human's actual goal)
@@ -455,7 +508,8 @@ def run_rollout_with_learned_policies(
                 goal_pos = human_goals[agent_idx]
                 action = get_boltzmann_action(
                     q_network, state, agent_idx, goal_pos,
-                    grid_width, grid_height, num_agents, beta, device
+                    grid_width, grid_height, num_agents, beta, device,
+                    world_model=env, human_agent_indices=human_agent_indices
                 )
             else:
                 # Robot uses random policy
@@ -472,7 +526,8 @@ def run_rollout_with_learned_policies(
     state = env.get_state()
     value_dict = compute_value_for_goals(
         q_network, state, first_human_idx, goal_cells,
-        grid_width, grid_height, num_agents, beta, device
+        grid_width, grid_height, num_agents, beta, device,
+        world_model=env, human_agent_indices=human_agent_indices
     )
     frame = render_with_value_overlay(env, value_dict, first_human_goal)
     frames.append(frame)
