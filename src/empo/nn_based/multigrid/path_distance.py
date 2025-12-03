@@ -63,7 +63,7 @@ class PathDistanceCalculator:
     ):
         self.grid_height = grid_height
         self.grid_width = grid_width
-        self.passing_costs = passing_costs or DEFAULT_PASSING_COSTS.copy()
+        self.passing_costs = passing_costs if passing_costs is not None else DEFAULT_PASSING_COSTS
         
         # Create wall-only grid and precompute shortest paths if world_model provided
         self._wall_grid: Optional[np.ndarray] = None
@@ -156,9 +156,8 @@ class PathDistanceCalculator:
         Returns:
             Tuple of (-max_cost, max_cost) for Q-value clamping.
         """
-        max_finite_cost = max(
-            cost for cost in self.passing_costs.values() if cost < float('inf')
-        )
+        finite_costs = [cost for cost in self.passing_costs.values() if cost < float('inf')]
+        max_finite_cost = max(finite_costs) if finite_costs else 1  # Default to 1 if all infinite
         max_path_length = self.grid_width + self.grid_height
         max_cost = max_path_length * max_finite_cost
         return (-max_cost, max_cost)
@@ -203,8 +202,16 @@ class PathDistanceCalculator:
         
         if path is None:
             # Fall back to simple BFS distance if no precomputed paths
-            obstacles = self.get_obstacles_from_state(
-                (0, [], [], []), world_model) if world_model else set()
+            # Extract obstacles from world_model directly when available
+            obstacles = set()
+            if world_model is not None and hasattr(world_model, 'grid') and world_model.grid is not None:
+                for y in range(self.grid_height):
+                    for x in range(self.grid_width):
+                        cell = world_model.grid.get(x, y)
+                        if cell is not None:
+                            cell_type = getattr(cell, 'type', None)
+                            if cell_type in ('wall', 'magicwall', 'lava'):
+                                obstacles.add((x, y))
             dist = self.get_distance(source, target, obstacles)
             return dist  # Simple step count
         
