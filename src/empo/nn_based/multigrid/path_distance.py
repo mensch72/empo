@@ -57,18 +57,17 @@ class PathDistanceCalculator:
         queue = deque([(tx, ty, 0)])
         visited = {(tx, ty)}
         
-        for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
-            while queue:
-                x, y, dist = queue.popleft()
-                for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
-                    nx, ny = x + dx, y + dy
-                    if not (0 <= nx < self.grid_width and 0 <= ny < self.grid_height):
-                        continue
-                    if (nx, ny) in visited or (nx, ny) in obstacles:
-                        continue
-                    visited.add((nx, ny))
-                    distances[ny, nx] = dist + 1
-                    queue.append((nx, ny, dist + 1))
+        while queue:
+            x, y, dist = queue.popleft()
+            for dx, dy in [(0, 1), (0, -1), (1, 0), (-1, 0)]:
+                nx, ny = x + dx, y + dy
+                if not (0 <= nx < self.grid_width and 0 <= ny < self.grid_height):
+                    continue
+                if (nx, ny) in visited or (nx, ny) in obstacles:
+                    continue
+                visited.add((nx, ny))
+                distances[ny, nx] = dist + 1
+                queue.append((nx, ny, dist + 1))
         
         self._cache[cache_key] = distances
         return distances

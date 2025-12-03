@@ -14,7 +14,8 @@ Main components:
     - state_encoder_unified: Unified state encoder (grid + agents + interactive)
     - goal_encoder: Goal position encoder (separate - not part of world state)
     - q_network: Q-network combining state and goal encoders
-    - policy_prior_network: Marginal policy computation
+    - policy_prior_network: Marginal policy computation via goal enumeration
+    - direct_phi_network: Trainable network for stochastic marginal approximation
     - neural_policy_prior: Main class with save/load and training
     - path_distance: BFS-based path distance calculator
 """
@@ -58,6 +59,7 @@ from .state_encoder import MultiGridStateEncoder
 from .goal_encoder import MultiGridGoalEncoder
 from .q_network import MultiGridQNetwork
 from .policy_prior_network import MultiGridPolicyPriorNetwork
+from .direct_phi_network import DirectPhiNetwork
 from .neural_policy_prior import (
     MultiGridNeuralHumanPolicyPrior,
     train_multigrid_neural_policy_prior,
@@ -102,6 +104,7 @@ __all__ = [
     # Networks
     'MultiGridQNetwork',
     'MultiGridPolicyPriorNetwork',
+    'DirectPhiNetwork',
     'MultiGridNeuralHumanPolicyPrior',
     'train_multigrid_neural_policy_prior',
     # Utilities

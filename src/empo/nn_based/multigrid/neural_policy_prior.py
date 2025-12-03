@@ -5,7 +5,9 @@ Extends BaseNeuralHumanPolicyPrior with multigrid-specific implementation.
 """
 
 import torch
+import torch.nn.functional as F
 import torch.optim as optim
+from collections import deque
 from typing import Any, Dict, List, Optional
 import random
 
@@ -16,8 +18,12 @@ from ..replay_buffer import ReplayBuffer
 from .constants import DEFAULT_ACTION_ENCODING
 from .q_network import MultiGridQNetwork
 from .policy_prior_network import MultiGridPolicyPriorNetwork
+from .direct_phi_network import DirectPhiNetwork
 from .feature_extraction import get_num_agents_per_color
 from .path_distance import PathDistanceCalculator
+
+# Numerical stability constant for log operations
+LOG_EPS = 1e-10
 
 
 class MultiGridNeuralHumanPolicyPrior(BaseNeuralHumanPolicyPrior):
@@ -27,6 +33,7 @@ class MultiGridNeuralHumanPolicyPrior(BaseNeuralHumanPolicyPrior):
     Extends BaseNeuralHumanPolicyPrior with multigrid-specific:
     - Network creation from multigrid world_model
     - Load with multigrid-specific validation
+    - Optional direct phi network for fast marginal queries
     """
     
     def __init__(
@@ -36,7 +43,8 @@ class MultiGridNeuralHumanPolicyPrior(BaseNeuralHumanPolicyPrior):
         human_agent_indices: List[int],
         goal_sampler: Optional[PossibleGoalSampler] = None,
         action_encoding: Optional[Dict[int, str]] = None,
-        device: str = 'cpu'
+        device: str = 'cpu',
+        direct_phi_network: Optional[DirectPhiNetwork] = None
     ):
         policy_network = MultiGridPolicyPriorNetwork(q_network)
         super().__init__(
@@ -48,13 +56,30 @@ class MultiGridNeuralHumanPolicyPrior(BaseNeuralHumanPolicyPrior):
             action_encoding=action_encoding or DEFAULT_ACTION_ENCODING,
             device=device
         )
+        self.direct_phi_network = direct_phi_network
+        if self.direct_phi_network is not None:
+            self.direct_phi_network.to(device)
+            self.direct_phi_network.eval()
     
     def _compute_marginal_policy(
         self,
         state: Any,
         agent_idx: int
     ) -> torch.Tensor:
-        """Compute marginal policy over goals."""
+        """Compute marginal policy over goals.
+        
+        If a direct phi network is available, uses it for fast inference.
+        Otherwise, computes marginal by averaging over sampled goals.
+        """
+        # Use direct phi network if available (fast path)
+        if self.direct_phi_network is not None:
+            with torch.no_grad():
+                probs = self.direct_phi_network.encode_and_forward(
+                    state, self.world_model, agent_idx, self.device
+                )
+                return probs.squeeze(0)
+        
+        # Fall back to averaging over sampled goals (slow path)
         if self.goal_sampler is not None:
             goals = list(self.goal_sampler.sample_goals(state, agent_idx, n=10))
         else:
@@ -205,14 +230,23 @@ def train_multigrid_neural_policy_prior(
     epsilon: float = 0.3,
     exploration_policy: Optional[List[float]] = None,
     updates_per_episode: int = 1,
-    train_phi_network: bool = False,  # Kept for API compatibility
+    train_phi_network: bool = False,
+    phi_learning_rate: float = 1e-3,
+    phi_num_goal_samples: int = 10,
     world_model_generator: Optional[Any] = None,
     episodes_per_model: int = 1
 ) -> MultiGridNeuralHumanPolicyPrior:
     """
     Train a neural policy prior for multigrid environments.
     
-    Uses Q-learning with experience replay.
+    Uses Q-learning with experience replay. Optionally trains a direct phi network
+    that can predict marginal policies without iterating over goals.
+    
+    The phi network (h_phi) is trained jointly with the Q-network in the same
+    training loop. This is more accurate than distillation because:
+    1. Both networks see the same states from the same exploration policy
+    2. The phi network learns from fresh Q-network policies at each step
+    3. No lag between Q-network improvement and phi network learning
     
     Args:
         world_model: Multigrid environment (alias for env).
@@ -222,7 +256,7 @@ def train_multigrid_neural_policy_prior(
         num_episodes: Number of training episodes.
         steps_per_episode: Steps per episode.
         batch_size: Training batch size.
-        learning_rate: Learning rate.
+        learning_rate: Learning rate for Q-network.
         gamma: Discount factor.
         beta: Boltzmann temperature.
         buffer_capacity: Replay buffer capacity.
@@ -238,12 +272,15 @@ def train_multigrid_neural_policy_prior(
         epsilon: Exploration rate for epsilon-greedy.
         exploration_policy: Optional action probability weights for exploration.
         updates_per_episode: Number of training updates per episode.
-        train_phi_network: Kept for API compatibility (unused).
+        train_phi_network: Whether to train a direct phi network for fast marginal queries.
+            When True, trains h_phi(s, agent) -> P(action) to approximate E_g[π(a|s,g)].
+        phi_learning_rate: Learning rate for phi network.
+        phi_num_goal_samples: Number of goals to sample per state for phi network training.
         world_model_generator: Optional generator for environment ensemble training.
         episodes_per_model: Episodes per environment when using ensemble.
     
     Returns:
-        Trained MultiGridNeuralHumanPolicyPrior.
+        Trained MultiGridNeuralHumanPolicyPrior (with optional direct_phi_network).
     """
     # Handle parameter aliases
     if world_model is not None and env is None:
@@ -311,6 +348,21 @@ def train_multigrid_neural_policy_prior(
     optimizer = optim.Adam(q_network.parameters(), lr=learning_rate)
     replay_buffer = ReplayBuffer(buffer_capacity)
     
+    # Create phi network if requested
+    phi_network = None
+    phi_optimizer = None
+    if train_phi_network:
+        phi_network = DirectPhiNetwork(
+            grid_height=grid_height,
+            grid_width=grid_width,
+            num_actions=num_actions,
+            num_agents_per_color=num_agents_per_color,
+            num_agent_colors=num_agent_colors,
+            state_feature_dim=state_feature_dim,
+            hidden_dim=hidden_dim
+        ).to(device)
+        phi_optimizer = optim.Adam(phi_network.parameters(), lr=phi_learning_rate)
+    
     # Convert numpy array exploration_policy to list if needed
     if exploration_policy is not None:
         if hasattr(exploration_policy, 'tolist'):
@@ -334,6 +386,9 @@ def train_multigrid_neural_policy_prior(
     # Handle environment ensemble training
     current_env = env
     episode_count_for_model = 0
+    
+    # State buffer for phi network training (uses deque for O(1) append/remove)
+    phi_state_buffer = deque(maxlen=buffer_capacity) if train_phi_network else None
     
     for episode in range(num_episodes):
         # Switch environment if using ensemble
@@ -364,7 +419,8 @@ def train_multigrid_neural_policy_prior(
             # Sample goal using sampler
             try:
                 goal, _ = goal_sampler.sample(state, agent_idx)
-            except Exception:
+            except (ValueError, RuntimeError, IndexError):
+                # Goal sampling can fail for invalid states or edge cases
                 continue
             
             if goal is None:
@@ -382,14 +438,36 @@ def train_multigrid_neural_policy_prior(
             current_env.step(actions)
             next_state = current_env.get_state()
             
-            # Store transition
+            # Store transition for Q-network training
             trainer.store_transition(state, action, next_state, agent_idx, goal)
+            
+            # Store state for phi network training (deque auto-removes oldest when full)
+            if train_phi_network:
+                phi_state_buffer.append({
+                    'state': state,
+                    'agent_idx': agent_idx,
+                    'world_model': current_env
+                })
             
             state = next_state
         
-        # Training updates at end of episode
+        # Training updates at end of episode - train both networks together
         for _ in range(updates_per_episode):
+            # Train Q-network
             trainer.train_step(batch_size)
+            
+            # Train phi network in the same loop (joint training)
+            if train_phi_network and len(phi_state_buffer) >= batch_size:
+                _train_phi_network_step(
+                    phi_network=phi_network,
+                    phi_optimizer=phi_optimizer,
+                    q_network=q_network,
+                    state_buffer=phi_state_buffer,
+                    goal_sampler=goal_sampler,
+                    batch_size=batch_size,
+                    num_goal_samples=phi_num_goal_samples,
+                    device=device
+                )
         
         if verbose and (episode + 1) % 100 == 0:
             print(f"Episode {episode + 1}/{num_episodes}")
@@ -410,5 +488,110 @@ def train_multigrid_neural_policy_prior(
         human_agent_indices=human_agent_indices,
         goal_sampler=goal_sampler,
         action_encoding=action_encoding,
-        device=device
+        device=device,
+        direct_phi_network=phi_network
     )
+
+
+def _train_phi_network_step(
+    phi_network: DirectPhiNetwork,
+    phi_optimizer: optim.Optimizer,
+    q_network: MultiGridQNetwork,
+    state_buffer: List[Dict],
+    goal_sampler: PossibleGoalSampler,
+    batch_size: int,
+    num_goal_samples: int,
+    device: str
+) -> float:
+    """
+    Train the phi network jointly with Q-network (called each training step).
+    
+    The phi network (h_phi) learns to approximate E_g[π(a|s,g)] - the marginal
+    policy prior over goals. Since we use a goal *sampler* (not generator),
+    this is a stochastic approximation trained via gradient descent.
+    
+    Training procedure:
+    1. Sample a batch of states from the buffer
+    2. For each state, sample multiple goals and compute the Q-network's 
+       average policy (stochastic approximation of the marginal)
+    3. Train phi to match this marginal via cross-entropy loss
+    
+    Joint training with Q-network ensures:
+    - Both networks see the same state distribution
+    - Phi learns from fresh Q-network policies (no lag)
+    - Better convergence than separate distillation phase
+    
+    Args:
+        phi_network: The direct phi network to train.
+        phi_optimizer: Optimizer for phi network.
+        q_network: Current Q-network (used to compute target marginals).
+        state_buffer: Buffer of (state, agent_idx, world_model) tuples.
+        goal_sampler: Goal sampler for computing marginals.
+        batch_size: Batch size.
+        num_goal_samples: Number of goals to sample per state for marginal computation.
+        device: Torch device.
+    
+    Returns:
+        Training loss.
+    """
+    if len(state_buffer) < batch_size:
+        return 0.0
+    
+    # Sample batch of states
+    indices = random.sample(range(len(state_buffer)), batch_size)
+    
+    phi_network.train()
+    q_network.eval()
+    
+    total_loss = torch.tensor(0.0, device=device)
+    
+    for idx in indices:
+        item = state_buffer[idx]
+        state = item['state']
+        agent_idx = item['agent_idx']
+        world_model = item['world_model']
+        
+        # Compute Q-network's marginal policy over sampled goals
+        with torch.no_grad():
+            marginal_probs = torch.zeros(q_network.num_actions, device=device)
+            valid_goals = 0
+            
+            # Sample multiple goals and average their policies
+            for _ in range(num_goal_samples):
+                try:
+                    goal, _ = goal_sampler.sample(state, agent_idx)
+                    if goal is None:
+                        continue
+                    
+                    q_values = q_network.encode_and_forward(
+                        state, world_model, agent_idx, goal, device
+                    )
+                    policy = q_network.get_policy(q_values).squeeze(0)
+                    marginal_probs += policy
+                    valid_goals += 1
+                except (ValueError, RuntimeError, IndexError):
+                    # Goal sampling or Q-network forward can fail for edge cases
+                    continue
+            
+            if valid_goals == 0:
+                continue
+            
+            # Average to get marginal (target for phi network)
+            target_marginal = marginal_probs / valid_goals
+        
+        # Get phi network's prediction
+        phi_probs = phi_network.encode_and_forward(
+            state, world_model, agent_idx, device
+        ).squeeze(0)
+        
+        # Cross-entropy loss (target is fixed): -sum(target * log(phi))
+        loss = -torch.sum(target_marginal * torch.log(phi_probs + LOG_EPS))
+        total_loss = total_loss + loss
+    
+    # Backpropagate
+    avg_loss = total_loss / batch_size
+    phi_optimizer.zero_grad()
+    avg_loss.backward()
+    phi_optimizer.step()
+    
+    return avg_loss.item()
