@@ -38,10 +38,12 @@ from typing import Iterator, Tuple, Dict, List, Any, Optional
 
 from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, Wall, World, SmallActions
 from empo.possible_goal import PossibleGoal, PossibleGoalGenerator, PossibleGoalSampler
-from empo.nn_based import (
-    StateEncoder, AgentEncoder, GoalEncoder,
-    QNetwork, PolicyPriorNetwork,
-    train_neural_policy_prior,
+from empo.nn_based.multigrid import (
+    MultiGridStateEncoder as StateEncoder,
+    MultiGridGoalEncoder as GoalEncoder,
+    MultiGridQNetwork as QNetwork,
+    MultiGridPolicyPriorNetwork as PolicyPriorNetwork,
+    train_multigrid_neural_policy_prior as train_neural_policy_prior,
     NUM_OBJECT_TYPE_CHANNELS,
     OBJECT_TYPE_TO_CHANNEL,
     OVERLAPPABLE_OBJECTS,

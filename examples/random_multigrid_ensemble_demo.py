@@ -57,9 +57,9 @@ from gym_multigrid.multigrid import (
     Key, Ball, Box, Door, Lava, Block, Goal
 )
 from empo.possible_goal import PossibleGoal, PossibleGoalSampler
-from empo.nn_based import (
-    QNetwork,
-    train_neural_policy_prior,
+from empo.nn_based.multigrid import (
+    MultiGridQNetwork as QNetwork,
+    train_multigrid_neural_policy_prior as train_neural_policy_prior,
     OBJECT_TYPE_TO_CHANNEL,
     NUM_OBJECT_TYPE_CHANNELS,
     OVERLAPPABLE_OBJECTS,

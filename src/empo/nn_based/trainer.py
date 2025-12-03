@@ -27,7 +27,8 @@ class Trainer:
         replay_buffer: ReplayBuffer,
         gamma: float = 0.99,
         target_update_freq: int = 100,
-        device: str = 'cpu'
+        device: str = 'cpu',
+        exploration_policy: Optional[List[float]] = None
     ):
         self.q_network = q_network
         self.target_network = target_network
@@ -36,6 +37,7 @@ class Trainer:
         self.gamma = gamma
         self.target_update_freq = target_update_freq
         self.device = device
+        self.exploration_policy = exploration_policy
         self.total_steps = 0
     
     def update_target_network(self):
@@ -80,7 +82,10 @@ class Trainer:
             Selected action index.
         """
         if random.random() < epsilon:
-            return random.randint(0, self.q_network.num_actions - 1)
+            if self.exploration_policy is not None:
+                return random.choices(range(self.q_network.num_actions), weights=self.exploration_policy)[0]
+            else:
+                return random.randint(0, self.q_network.num_actions - 1)
         
         self.q_network.eval()
         with torch.no_grad():

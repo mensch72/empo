@@ -166,9 +166,10 @@ class MultiGridNeuralHumanPolicyPrior(BaseNeuralHumanPolicyPrior):
 
 
 def train_multigrid_neural_policy_prior(
-    env: Any,
-    human_agent_indices: List[int],
-    goal_sampler: PossibleGoalSampler,
+    world_model: Any = None,
+    env: Any = None,
+    human_agent_indices: List[int] = None,
+    goal_sampler: PossibleGoalSampler = None,
     num_episodes: int = 1000,
     steps_per_episode: int = 50,
     batch_size: int = 64,
@@ -176,13 +177,21 @@ def train_multigrid_neural_policy_prior(
     gamma: float = 0.99,
     beta: float = 1.0,
     buffer_capacity: int = 100000,
+    replay_buffer_size: int = None,  # Alias for buffer_capacity
     target_update_freq: int = 100,
     state_feature_dim: int = 256,
     goal_feature_dim: int = 32,
     hidden_dim: int = 256,
     device: str = 'cpu',
     verbose: bool = True,
-    reward_shaping: bool = True
+    reward_shaping: bool = True,
+    use_path_based_shaping: bool = None,  # Alias for reward_shaping
+    epsilon: float = 0.3,
+    exploration_policy: Optional[List[float]] = None,
+    updates_per_episode: int = 1,
+    train_phi_network: bool = False,  # Kept for API compatibility
+    world_model_generator: Optional[Any] = None,
+    episodes_per_model: int = 1
 ) -> MultiGridNeuralHumanPolicyPrior:
     """
     Train a neural policy prior for multigrid environments.
@@ -190,6 +199,7 @@ def train_multigrid_neural_policy_prior(
     Uses Q-learning with experience replay.
     
     Args:
+        world_model: Multigrid environment (alias for env).
         env: Multigrid environment.
         human_agent_indices: Indices of human agents.
         goal_sampler: Sampler for training goals.
@@ -200,6 +210,7 @@ def train_multigrid_neural_policy_prior(
         gamma: Discount factor.
         beta: Boltzmann temperature.
         buffer_capacity: Replay buffer capacity.
+        replay_buffer_size: Alias for buffer_capacity.
         target_update_freq: Steps between target network updates.
         state_feature_dim: State encoder feature dim (includes grid, agent, interactive).
         goal_feature_dim: Goal encoder feature dim.
@@ -207,10 +218,29 @@ def train_multigrid_neural_policy_prior(
         device: Torch device.
         verbose: Print progress.
         reward_shaping: Use distance-based reward shaping.
+        use_path_based_shaping: Alias for reward_shaping.
+        epsilon: Exploration rate for epsilon-greedy.
+        exploration_policy: Optional action probability weights for exploration.
+        updates_per_episode: Number of training updates per episode.
+        train_phi_network: Kept for API compatibility (unused).
+        world_model_generator: Optional generator for environment ensemble training.
+        episodes_per_model: Episodes per environment when using ensemble.
     
     Returns:
         Trained MultiGridNeuralHumanPolicyPrior.
     """
+    # Handle parameter aliases
+    if world_model is not None and env is None:
+        env = world_model
+    if env is None:
+        raise ValueError("Must provide either 'env' or 'world_model'")
+    
+    if replay_buffer_size is not None:
+        buffer_capacity = replay_buffer_size
+    
+    if use_path_based_shaping is not None:
+        reward_shaping = use_path_based_shaping
+    
     # Get environment info
     grid_height = getattr(env, 'height', 10)
     grid_width = getattr(env, 'width', 10)
@@ -252,7 +282,12 @@ def train_multigrid_neural_policy_prior(
     optimizer = optim.Adam(q_network.parameters(), lr=learning_rate)
     replay_buffer = ReplayBuffer(buffer_capacity)
     
-    # Use generic Trainer
+    # Convert numpy array exploration_policy to list if needed
+    if exploration_policy is not None:
+        if hasattr(exploration_policy, 'tolist'):
+            exploration_policy = exploration_policy.tolist()
+    
+    # Use generic Trainer with exploration_policy
     from ..trainer import Trainer
     trainer = Trainer(
         q_network=q_network,
@@ -261,14 +296,29 @@ def train_multigrid_neural_policy_prior(
         replay_buffer=replay_buffer,
         gamma=gamma,
         target_update_freq=target_update_freq,
-        device=device
+        device=device,
+        exploration_policy=exploration_policy
     )
     
     path_calc = PathDistanceCalculator(grid_height, grid_width) if reward_shaping else None
     
+    # Handle environment ensemble training
+    current_env = env
+    episode_count_for_model = 0
+    
     for episode in range(num_episodes):
-        env.reset()
-        state = env.get_state()
+        # Switch environment if using ensemble
+        if world_model_generator is not None:
+            episode_count_for_model += 1
+            if episode_count_for_model >= episodes_per_model:
+                try:
+                    current_env = next(world_model_generator)
+                    episode_count_for_model = 0
+                except StopIteration:
+                    pass  # Keep using current env
+        
+        current_env.reset()
+        state = current_env.get_state()
         
         for step in range(steps_per_episode):
             agent_idx = random.choice(human_agent_indices)
@@ -277,25 +327,26 @@ def train_multigrid_neural_policy_prior(
                 continue
             goal = goals[0]
             
-            # Get action using trainer's sample_action
-            action = trainer.sample_action(state, env, agent_idx, goal)
+            # Get action using trainer's sample_action with epsilon exploration
+            action = trainer.sample_action(state, current_env, agent_idx, goal, epsilon=epsilon)
             
             # Execute action and get next state
             # Build action list with 'still' for other agents
-            num_agents = len(env.agents) if hasattr(env, 'agents') else 1
+            num_agents = len(current_env.agents) if hasattr(current_env, 'agents') else 1
             actions = [0] * num_agents  # 0 = still
             actions[agent_idx] = action
             
-            env.step(actions)
-            next_state = env.get_state()
+            current_env.step(actions)
+            next_state = current_env.get_state()
             
             # Store transition
             trainer.store_transition(state, action, next_state, agent_idx, goal)
             
-            # Train using generic train_step
-            trainer.train_step(batch_size)
-            
             state = next_state
+        
+        # Training updates at end of episode
+        for _ in range(updates_per_episode):
+            trainer.train_step(batch_size)
         
         if verbose and (episode + 1) % 100 == 0:
             print(f"Episode {episode + 1}/{num_episodes}")
