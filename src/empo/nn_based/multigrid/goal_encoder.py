@@ -5,14 +5,21 @@ Encodes goal regions into feature vectors.
 All goals are represented as bounding boxes (x1, y1, x2, y2) with inclusive coordinates.
 Point goals are represented as (x, y, x, y).
 
-Also provides weight-proportional goal sampling where goals are sampled with
-probability proportional to their area weight (1+x2-x1)*(1+y2-y1).
+Also provides:
+- Weight-proportional goal sampling where goals are sampled with
+  probability proportional to their area weight (1+x2-x1)*(1+y2-y1).
+- Goal rendering for visualization with dashed rectangle boundaries and
+  agent-to-goal connection lines.
 """
 
 import torch
 import torch.nn as nn
 import numpy as np
-from typing import Any, Optional, Tuple, Union, List
+from typing import Any, Optional, Tuple, Union, List, Dict, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import matplotlib.pyplot as plt
+    import matplotlib.axes
 
 from ..goal_encoder import BaseGoalEncoder
 
@@ -295,3 +302,238 @@ class MultiGridGoalEncoder(BaseGoalEncoder):
         y2 = y_min + y2_offset
         
         return (x1, y1, x2, y2)
+    
+    @staticmethod
+    def get_goal_bounding_box(goal: Any) -> Tuple[int, int, int, int]:
+        """
+        Extract bounding box coordinates from a goal object.
+        
+        Args:
+            goal: Goal object with target_rect, target_pos, position, or tuple.
+        
+        Returns:
+            Tuple (x1, y1, x2, y2) with inclusive coordinates.
+        """
+        if hasattr(goal, 'target_rect'):
+            x1, y1, x2, y2 = goal.target_rect
+        elif hasattr(goal, 'target_pos'):
+            x, y = goal.target_pos
+            x1, y1, x2, y2 = int(x), int(y), int(x), int(y)
+        elif hasattr(goal, 'position'):
+            x, y = goal.position
+            x1, y1, x2, y2 = int(x), int(y), int(x), int(y)
+        elif isinstance(goal, (tuple, list)):
+            if len(goal) == 4:
+                x1, y1, x2, y2 = int(goal[0]), int(goal[1]), int(goal[2]), int(goal[3])
+            elif len(goal) >= 2:
+                x1, y1 = int(goal[0]), int(goal[1])
+                x2, y2 = x1, y1
+            else:
+                x1, y1, x2, y2 = 0, 0, 0, 0
+        else:
+            x1, y1, x2, y2 = 0, 0, 0, 0
+        
+        # Normalize order
+        if x1 > x2:
+            x1, x2 = x2, x1
+        if y1 > y2:
+            y1, y2 = y2, y1
+        
+        return (x1, y1, x2, y2)
+    
+    @staticmethod
+    def closest_point_on_rectangle(
+        rect: Tuple[int, int, int, int],
+        px: float,
+        py: float,
+        tile_size: int = 32,
+        inset: float = 0.08
+    ) -> Tuple[float, float]:
+        """
+        Find the closest point on the rectangle boundary to a given point.
+        
+        The rectangle is defined by cell coordinates (x1, y1, x2, y2) with inclusive
+        coordinates. The rectangle boundary is slightly inside the cells.
+        
+        Args:
+            rect: Bounding box (x1, y1, x2, y2) in cell coordinates.
+            px, py: Point position in pixel coordinates.
+            tile_size: Size of each grid cell in pixels.
+            inset: Fraction of cell to inset the rectangle boundary (0.08 = 8%).
+        
+        Returns:
+            (closest_x, closest_y) in pixel coordinates.
+        """
+        x1, y1, x2, y2 = rect
+        
+        # Convert to pixel coordinates with inset
+        left = x1 * tile_size + tile_size * inset
+        right = (x2 + 1) * tile_size - tile_size * inset
+        top = y1 * tile_size + tile_size * inset
+        bottom = (y2 + 1) * tile_size - tile_size * inset
+        
+        # If point is inside the rectangle, find closest edge
+        if left <= px <= right and top <= py <= bottom:
+            # Distances to each edge
+            d_left = px - left
+            d_right = right - px
+            d_top = py - top
+            d_bottom = bottom - py
+            
+            min_d = min(d_left, d_right, d_top, d_bottom)
+            
+            if min_d == d_left:
+                return (left, py)
+            elif min_d == d_right:
+                return (right, py)
+            elif min_d == d_top:
+                return (px, top)
+            else:
+                return (px, bottom)
+        
+        # Clamp point to rectangle boundary
+        cx = max(left, min(px, right))
+        cy = max(top, min(py, bottom))
+        
+        return (cx, cy)
+    
+    @staticmethod
+    def render_goal_overlay(
+        ax: 'matplotlib.axes.Axes',
+        goal: Any,
+        agent_pos: Tuple[float, float],
+        agent_idx: int,
+        tile_size: int = 32,
+        goal_color: Tuple[float, float, float, float] = (0.0, 0.4, 1.0, 0.7),
+        line_width: float = 2.5,
+        inset: float = 0.08
+    ) -> None:
+        """
+        Render a goal region on the given matplotlib axes.
+        
+        Draws:
+        1. A non-filled rectangle with dashed, semi-transparent blue boundary
+           lines slightly inside the cell boundaries.
+        2. A dashed, semi-transparent line connecting the agent to the closest
+           point on the rectangle boundary.
+        
+        Args:
+            ax: Matplotlib axes to draw on.
+            goal: Goal object with target_rect or target_pos.
+            agent_pos: (x, y) position of the agent in cell coordinates.
+            agent_idx: Index of the agent (used for color variation if needed).
+            tile_size: Size of each grid cell in pixels.
+            goal_color: RGBA color tuple for the goal visualization.
+            line_width: Width of the dashed lines.
+            inset: Fraction of cell to inset rectangle from cell edges (0.08 = 8%).
+        """
+        import matplotlib.patches as patches
+        import matplotlib.lines as mlines
+        
+        # Get bounding box
+        x1, y1, x2, y2 = MultiGridGoalEncoder.get_goal_bounding_box(goal)
+        
+        # Calculate pixel coordinates for rectangle with inset
+        # Inset slightly inside the cell boundaries so rectangle lines don't
+        # overlay the cell boundary lines
+        left = x1 * tile_size + tile_size * inset
+        top = y1 * tile_size + tile_size * inset
+        width = (x2 - x1 + 1) * tile_size - 2 * tile_size * inset
+        height = (y2 - y1 + 1) * tile_size - 2 * tile_size * inset
+        
+        # Draw dashed rectangle boundary
+        rect = patches.Rectangle(
+            (left, top), width, height,
+            linewidth=line_width,
+            edgecolor=goal_color,
+            facecolor='none',
+            linestyle='--',
+            alpha=goal_color[3] if len(goal_color) > 3 else 0.7
+        )
+        ax.add_patch(rect)
+        
+        # Calculate agent pixel position (center of cell)
+        agent_px = agent_pos[0] * tile_size + tile_size / 2
+        agent_py = agent_pos[1] * tile_size + tile_size / 2
+        
+        # Find closest point on rectangle boundary to agent
+        rect_coords = (x1, y1, x2, y2)
+        closest_x, closest_y = MultiGridGoalEncoder.closest_point_on_rectangle(
+            rect_coords, agent_px, agent_py, tile_size, inset
+        )
+        
+        # Draw dashed line from agent to closest point on rectangle
+        line = mlines.Line2D(
+            [agent_px, closest_x],
+            [agent_py, closest_y],
+            linewidth=line_width * 0.8,
+            color=goal_color[:3] if len(goal_color) >= 3 else goal_color,
+            linestyle='--',
+            alpha=goal_color[3] * 0.8 if len(goal_color) > 3 else 0.5
+        )
+        ax.add_line(line)
+    
+    @staticmethod
+    def render_goals_on_frame(
+        env,
+        agent_goals: Dict[int, Any],
+        tile_size: int = 32,
+        goal_color: Tuple[float, float, float, float] = (0.0, 0.4, 1.0, 0.7)
+    ) -> np.ndarray:
+        """
+        Render the environment with goal overlays for all agents.
+        
+        This is a convenience method that:
+        1. Renders the base environment to an image
+        2. Overlays goal rectangles and agent-to-goal lines
+        3. Returns the combined image
+        
+        Args:
+            env: The multigrid environment.
+            agent_goals: Dict mapping agent indices to their goal objects.
+            tile_size: Size of each grid cell in pixels.
+            goal_color: RGBA color for goal visualization.
+        
+        Returns:
+            RGB image array of the rendered frame.
+        """
+        import matplotlib.pyplot as plt
+        
+        # Render base environment
+        img = env.render(mode='rgb_array', highlight=False)
+        
+        fig, ax = plt.subplots(figsize=(8, 8))
+        ax.imshow(img)
+        
+        # Get agent positions from environment state
+        state = env.get_state()
+        _, agent_states, _, _ = state
+        
+        # Render each agent's goal
+        for agent_idx, goal in agent_goals.items():
+            if agent_idx < len(agent_states):
+                agent_state = agent_states[agent_idx]
+                agent_pos = (float(agent_state[0]), float(agent_state[1]))
+                
+                MultiGridGoalEncoder.render_goal_overlay(
+                    ax=ax,
+                    goal=goal,
+                    agent_pos=agent_pos,
+                    agent_idx=agent_idx,
+                    tile_size=tile_size,
+                    goal_color=goal_color
+                )
+        
+        ax.axis('off')
+        ax.set_xlim(0, img.shape[1])
+        ax.set_ylim(img.shape[0], 0)
+        
+        fig.tight_layout(pad=0)
+        fig.canvas.draw()
+        
+        # Convert to array
+        buf = np.asarray(fig.canvas.buffer_rgba())
+        buf = buf[:, :, :3]  # Remove alpha channel
+        
+        plt.close(fig)
+        return buf

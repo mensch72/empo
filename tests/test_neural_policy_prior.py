@@ -644,6 +644,107 @@ def test_weight_proportional_sampling():
     print("  ✓ weight-proportional sampling test passed!")
 
 
+def test_goal_rendering():
+    """Test the goal rendering methods."""
+    import matplotlib
+    matplotlib.use('Agg')  # Use non-interactive backend for tests
+    import matplotlib.pyplot as plt
+    
+    print("Testing goal rendering...")
+    
+    # Test get_goal_bounding_box
+    # 1. Rectangle goal with target_rect
+    class RectGoal:
+        def __init__(self, rect):
+            self.target_rect = rect
+    
+    goal = RectGoal((2, 3, 5, 6))
+    bb = MultiGridGoalEncoder.get_goal_bounding_box(goal)
+    assert bb == (2, 3, 5, 6), f"Expected (2, 3, 5, 6), got {bb}"
+    print("  ✓ get_goal_bounding_box works with target_rect")
+    
+    # 2. Point goal with target_pos
+    class PointGoal:
+        def __init__(self, pos):
+            self.target_pos = pos
+    
+    goal = PointGoal((4, 5))
+    bb = MultiGridGoalEncoder.get_goal_bounding_box(goal)
+    assert bb == (4, 5, 4, 5), f"Expected (4, 5, 4, 5), got {bb}"
+    print("  ✓ get_goal_bounding_box works with target_pos")
+    
+    # 3. Tuple goal
+    bb = MultiGridGoalEncoder.get_goal_bounding_box((1, 2, 3, 4))
+    assert bb == (1, 2, 3, 4), f"Expected (1, 2, 3, 4), got {bb}"
+    print("  ✓ get_goal_bounding_box works with tuple")
+    
+    # 4. Reversed coordinates should be normalized
+    bb = MultiGridGoalEncoder.get_goal_bounding_box((5, 6, 2, 3))
+    assert bb == (2, 3, 5, 6), f"Expected (2, 3, 5, 6), got {bb}"
+    print("  ✓ get_goal_bounding_box normalizes reversed coordinates")
+    
+    # Test closest_point_on_rectangle
+    rect = (2, 2, 4, 4)
+    tile_size = 32
+    inset = 0.08
+    
+    # Point outside rectangle (agent at 1, 1)
+    agent_px = 1 * tile_size + tile_size / 2
+    agent_py = 1 * tile_size + tile_size / 2
+    closest = MultiGridGoalEncoder.closest_point_on_rectangle(rect, agent_px, agent_py, tile_size, inset)
+    
+    # Closest point should be top-left corner of rectangle (with inset)
+    expected_x = 2 * tile_size + tile_size * inset
+    expected_y = 2 * tile_size + tile_size * inset
+    assert abs(closest[0] - expected_x) < 0.01 and abs(closest[1] - expected_y) < 0.01, \
+        f"Expected ({expected_x}, {expected_y}), got {closest}"
+    print("  ✓ closest_point_on_rectangle works for outside point")
+    
+    # Point inside rectangle (agent at 3, 3)
+    agent_px = 3 * tile_size + tile_size / 2
+    agent_py = 3 * tile_size + tile_size / 2
+    closest = MultiGridGoalEncoder.closest_point_on_rectangle(rect, agent_px, agent_py, tile_size, inset)
+    
+    # Should return a point on the rectangle boundary
+    left = 2 * tile_size + tile_size * inset
+    right = (4 + 1) * tile_size - tile_size * inset
+    top = 2 * tile_size + tile_size * inset
+    bottom = (4 + 1) * tile_size - tile_size * inset
+    
+    # Point should be on one of the edges
+    on_edge = (abs(closest[0] - left) < 0.01 or abs(closest[0] - right) < 0.01 or
+               abs(closest[1] - top) < 0.01 or abs(closest[1] - bottom) < 0.01)
+    assert on_edge, f"Point inside rectangle should return edge point, got {closest}"
+    print("  ✓ closest_point_on_rectangle works for inside point")
+    
+    # Test render_goal_overlay
+    fig, ax = plt.subplots()
+    ax.set_xlim(0, 200)
+    ax.set_ylim(200, 0)
+    
+    goal = (2, 2, 4, 4)
+    agent_pos = (1, 1)
+    
+    MultiGridGoalEncoder.render_goal_overlay(
+        ax=ax,
+        goal=goal,
+        agent_pos=agent_pos,
+        agent_idx=0,
+        tile_size=32,
+        goal_color=(0.0, 0.4, 1.0, 0.7),
+        line_width=2.5
+    )
+    
+    # Check that patches and lines were added
+    assert len(ax.patches) == 1, f"Expected 1 patch (rectangle), got {len(ax.patches)}"
+    assert len(ax.lines) == 1, f"Expected 1 line (connection), got {len(ax.lines)}"
+    print("  ✓ render_goal_overlay adds rectangle and line")
+    
+    plt.close(fig)
+    
+    print("  ✓ goal rendering test passed!")
+
+
 def run_all_tests():
     """Run all tests."""
     print("=" * 60)
@@ -681,6 +782,9 @@ def run_all_tests():
     print()
     
     test_weight_proportional_sampling()
+    print()
+    
+    test_goal_rendering()
     print()
     
     print("=" * 60)

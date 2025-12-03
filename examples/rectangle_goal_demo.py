@@ -373,7 +373,14 @@ def render_with_rectangle_overlay(
     rectangle_goals: Dict[int, ReachRectangleGoal],
     value_dict: Optional[Dict[Tuple[int, int], float]] = None
 ):
-    """Render environment with rectangle goal overlays."""
+    """
+    Render environment with rectangle goal overlays.
+    
+    Uses MultiGridGoalEncoder.render_goal_overlay for dashed blue rectangle
+    boundaries and agent-to-goal connection lines.
+    """
+    from empo.nn_based.multigrid.goal_encoder import MultiGridGoalEncoder
+    
     fig, ax = plt.subplots(figsize=(8, 8))
     
     # Render base environment
@@ -381,32 +388,39 @@ def render_with_rectangle_overlay(
     ax.imshow(img)
     
     # Get cell size in pixels
-    cell_width = img.shape[1] / env.width
-    cell_height = img.shape[0] / env.height
+    tile_size = img.shape[1] // env.width
     
-    # Draw rectangle goals
-    colors = ['red', 'blue', 'green', 'orange']
-    for i, (agent_idx, goal) in enumerate(rectangle_goals.items()):
-        x1, y1, x2, y2 = goal.target_rect
-        
-        # Convert to pixel coordinates
-        left = x1 * cell_width
-        top = y1 * cell_height
-        width = (x2 - x1 + 1) * cell_width
-        height = (y2 - y1 + 1) * cell_height
-        
-        color = colors[i % len(colors)]
-        rect = patches.Rectangle(
-            (left, top), width, height,
-            linewidth=3, edgecolor=color, facecolor=color, alpha=0.3
-        )
-        ax.add_patch(rect)
+    # Get agent positions from environment state
+    state = env.get_state()
+    _, agent_states, _, _ = state
+    
+    # Draw rectangle goals using new rendering method
+    for agent_idx, goal in rectangle_goals.items():
+        if agent_idx < len(agent_states):
+            agent_state = agent_states[agent_idx]
+            agent_pos = (float(agent_state[0]), float(agent_state[1]))
+            
+            MultiGridGoalEncoder.render_goal_overlay(
+                ax=ax,
+                goal=goal,
+                agent_pos=agent_pos,
+                agent_idx=agent_idx,
+                tile_size=tile_size,
+                goal_color=(0.0, 0.4, 1.0, 0.7),  # Blue, semi-transparent
+                line_width=2.5,
+                inset=0.08
+            )
     
     ax.axis('off')
+    ax.set_xlim(0, img.shape[1])
+    ax.set_ylim(img.shape[0], 0)
+    
+    fig.tight_layout(pad=0)
     
     # Convert to array
     fig.canvas.draw()
-    frame = np.array(fig.canvas.renderer.buffer_rgba())
+    frame = np.asarray(fig.canvas.buffer_rgba())
+    frame = frame[:, :, :3]  # Remove alpha channel
     plt.close(fig)
     
     return frame

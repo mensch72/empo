@@ -641,32 +641,48 @@ def render_with_goal_overlay(
     """
     Render the environment with goal and human indicators.
     
-    - Blue circle around the first human agent
-    - Blue star marking the first human's goal
+    Uses MultiGridGoalEncoder.render_goal_overlay for dashed blue rectangle
+    boundaries and agent-to-goal connection lines.
+    
+    - Blue dashed rectangle around the goal area (slightly inside cell bounds)
+    - Blue dashed line connecting the agent to the closest point on the goal boundary
     """
+    from empo.nn_based.multigrid.goal_encoder import MultiGridGoalEncoder
+    
     img = env.render(mode='rgb_array', highlight=False)
     
     fig, ax = plt.subplots(figsize=(8, 8))
     ax.imshow(img)
     
-    # Mark the first human's goal with a blue star
-    if first_human_goal:
-        gx = first_human_goal[0] * tile_size + tile_size // 2
-        gy = first_human_goal[1] * tile_size + tile_size // 2
-        ax.plot(gx, gy, marker='*', markersize=20, color='blue',
-                markeredgecolor='white', markeredgewidth=2)
-    
-    # Mark the first human with a blue circle/ring
+    # Get agent positions from environment state
     state = env.get_state()
     _, agent_states, _, _ = state
+    
+    # Render goal using the new goal overlay method
+    if first_human_goal and first_human_idx < len(agent_states):
+        human_pos = agent_states[first_human_idx]
+        agent_pos = (float(human_pos[0]), float(human_pos[1]))
+        
+        # Point goal represented as (x, y, x, y)
+        goal = (first_human_goal[0], first_human_goal[1], 
+                first_human_goal[0], first_human_goal[1])
+        
+        MultiGridGoalEncoder.render_goal_overlay(
+            ax=ax,
+            goal=goal,
+            agent_pos=agent_pos,
+            agent_idx=first_human_idx,
+            tile_size=tile_size,
+            goal_color=(0.0, 0.4, 1.0, 0.7),  # Blue, semi-transparent
+            line_width=2.5,
+            inset=0.08
+        )
+    
+    # Mark the first human with a label
     if first_human_idx < len(agent_states):
         human_pos = agent_states[first_human_idx]
         hx = int(human_pos[0]) * tile_size + tile_size // 2
         hy = int(human_pos[1]) * tile_size + tile_size // 2
-        # Draw a blue ring around the first human
-        ring = plt.Circle((hx, hy), tile_size * 0.45, fill=False,
-                          color='blue', linewidth=3)
-        ax.add_patch(ring)
         # Add "H1" label
         ax.text(hx, hy - tile_size * 0.35, 'H1', ha='center', va='center',
                 fontsize=9, fontweight='bold', color='blue',
