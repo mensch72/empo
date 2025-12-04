@@ -56,7 +56,7 @@ from gym_multigrid.multigrid import (
     Key, Ball, Box, Door, Lava, Block, Goal
 )
 from empo.possible_goal import PossibleGoal, PossibleGoalSampler
-from empo.multigrid import ReachCellGoal, MultiGridGoalSampler
+from empo.multigrid import ReachCellGoal, MultiGridGoalSampler, RandomPolicy
 from empo.nn_based.multigrid import (
     MultiGridNeuralHumanPolicyPrior as NeuralHumanPolicyPrior,
     MultiGridQNetwork as QNetwork,
@@ -445,7 +445,6 @@ def run_transfer_rollouts(
     print("=" * 60)
     
     human_agent_indices = [i for i, a in enumerate(env.agents) if a.color == 'yellow']
-    num_actions = env.action_space.n
     
     for rollout_idx in range(num_rollouts):
         env.reset()
@@ -462,6 +461,9 @@ def run_transfer_rollouts(
         
         total_rewards = {h_idx: 0 for h_idx in human_agent_indices}
         
+        # Robot uses RandomPolicy (biased toward forward movement)
+        robot_policy = RandomPolicy()
+        
         for step in range(env.max_steps):
             state = env.get_state()
             
@@ -470,17 +472,11 @@ def run_transfer_rollouts(
             for agent_idx in range(len(env.agents)):
                 if agent_idx in human_agent_indices:
                     goal = human_goals[agent_idx]
-                    
-                    # Get action distribution from transferred policy (returns Dict[int, float])
-                    action_dist_dict = prior(state, agent_idx, goal)
-                    action_dist = np.array([action_dist_dict.get(i, 0.0) for i in range(num_actions)])
-                    action_dist = action_dist / action_dist.sum()  # Normalize
-                    
-                    # Sample action
-                    action = np.random.choice(len(action_dist), p=action_dist)
+                    # Use prior.sample() directly
+                    action = prior.sample(state, agent_idx, goal)
                 else:
-                    # Robot uses random policy (only first 4 actions to match training behavior)
-                    action = np.random.choice([0, 1, 2, 3])
+                    # Robot uses random policy
+                    action = robot_policy.sample()
                 
                 actions.append(action)
             

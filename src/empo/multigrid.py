@@ -1,10 +1,11 @@
 """
-Multigrid-specific goal types, samplers, and rendering utilities.
+Multigrid-specific goal types, samplers, policies, and rendering utilities.
 
 This module provides goal classes and samplers for use with multigrid environments:
 - ReachCellGoal: Goal to reach a specific cell
 - ReachRectangleGoal: Goal to reach any cell in a rectangle region
 - MultiGridGoalSampler: Weight-proportional goal sampler for multigrid
+- RandomPolicy: Random action policy with configurable probabilities
 
 Also provides goal rendering utilities:
 - get_goal_bounding_box(): Extract bounding box from goal objects
@@ -587,3 +588,82 @@ def render_goals_on_frame(
     
     plt.close(fig)
     return buf
+
+
+# ============================================================================
+# Random Policy for Agents
+# ============================================================================
+
+class RandomPolicy:
+    """
+    A simple random policy for agents in multigrid environments.
+    
+    Samples actions according to a configurable probability distribution.
+    Default distribution is biased toward forward movement:
+    - 6% still (action 0)
+    - 18% left (action 1)
+    - 18% right (action 2)
+    - 58% forward (action 3)
+    
+    This distribution encourages exploration while preferring forward movement,
+    which is typical behavior for goal-seeking agents.
+    
+    Args:
+        action_probs: Optional array of action probabilities.
+                     If None, uses default [0.06, 0.18, 0.18, 0.58].
+                     Must sum to 1.0 and have length matching action space.
+    
+    Example:
+        >>> policy = RandomPolicy()  # Use default distribution
+        >>> action = policy.sample()  # Sample a random action
+        
+        >>> # Custom uniform distribution
+        >>> policy = RandomPolicy(action_probs=[0.25, 0.25, 0.25, 0.25])
+        >>> action = policy.sample()
+    """
+    
+    # Default probabilities: 6% still, 18% left, 18% right, 58% forward
+    DEFAULT_PROBS = np.array([0.06, 0.18, 0.18, 0.58])
+    
+    def __init__(self, action_probs: Optional[np.ndarray] = None):
+        """
+        Initialize the random policy.
+        
+        Args:
+            action_probs: Optional array of action probabilities.
+                         If None, uses default biased distribution.
+        """
+        if action_probs is not None:
+            self._probs = np.array(action_probs, dtype=np.float64)
+            # Normalize to ensure it sums to 1.0
+            self._probs = self._probs / self._probs.sum()
+        else:
+            self._probs = self.DEFAULT_PROBS.copy()
+        
+        self._num_actions = len(self._probs)
+    
+    @property
+    def action_probs(self) -> np.ndarray:
+        """Get the action probability distribution."""
+        return self._probs.copy()
+    
+    @property
+    def num_actions(self) -> int:
+        """Get the number of actions in this policy."""
+        return self._num_actions
+    
+    def sample(self) -> int:
+        """
+        Sample a random action from the policy distribution.
+        
+        Returns:
+            int: Sampled action index.
+        """
+        return int(np.random.choice(self._num_actions, p=self._probs))
+    
+    def __call__(self) -> int:
+        """Alias for sample() to allow policy() syntax."""
+        return self.sample()
+    
+    def __repr__(self) -> str:
+        return f"RandomPolicy(action_probs={self._probs.tolist()})"

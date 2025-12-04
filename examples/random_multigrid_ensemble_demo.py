@@ -59,6 +59,7 @@ from empo.possible_goal import PossibleGoal, PossibleGoalSampler
 from empo.multigrid import (
     ReachRectangleGoal,
     MultiGridGoalSampler,
+    RandomPolicy,
     render_goal_overlay,
 )
 from empo.nn_based.multigrid import (
@@ -496,7 +497,8 @@ def run_rollout(
     human_agent_indices: List[int],
     human_goals: Dict[int, ReachRectangleGoal],
     robot_index: int,
-    first_human_idx: int
+    first_human_idx: int,
+    robot_policy: Optional[RandomPolicy] = None
 ) -> List[np.ndarray]:
     """
     Run a single rollout and return frames for animation.
@@ -508,14 +510,19 @@ def run_rollout(
         human_goals: Dict mapping agent index to ReachRectangleGoal.
         robot_index: Index of the robot agent.
         first_human_idx: Index of the first human (for visualization).
+        robot_policy: Optional RandomPolicy for robot actions.
+                     If None, creates one with default distribution.
     
     Returns:
         List of frames for animation.
     """
     env.reset()
     frames = []
-    num_actions = env.action_space.n
     first_human_goal = human_goals.get(first_human_idx)
+    
+    # Create robot policy if not provided
+    if robot_policy is None:
+        robot_policy = RandomPolicy()
     
     for step in range(env.max_steps):
         state = env.get_state()
@@ -533,7 +540,7 @@ def run_rollout(
                 action = policy.sample(state, agent_idx, goal)
             else:
                 # Robot uses random policy
-                action = random.randint(0, num_actions - 1)
+                action = robot_policy.sample()
             actions.append(action)
         
         # Take step
