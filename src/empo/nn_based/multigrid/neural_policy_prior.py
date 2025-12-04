@@ -337,7 +337,7 @@ def train_multigrid_neural_policy_prior(
         # which accounts for passing difficulty scores
         feasible_range = path_calc.feasible_range
         # Add small margin for the base reward [0, 1]
-        feasible_range = (feasible_range[0] - 1.0, feasible_range[1] + 1.0)
+        feasible_range = (feasible_range[0], feasible_range[1] + 1.0)
     else:
         # Without shaping, Q-values are bounded by discounted rewards in [0, 1]
         feasible_range = (0.0, 1.0)
