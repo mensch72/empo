@@ -37,7 +37,8 @@ from matplotlib.colors import Normalize
 from typing import Iterator, Tuple, Dict, List, Any, Optional
 
 from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, Wall, World, SmallActions
-from empo.possible_goal import PossibleGoal, PossibleGoalGenerator, PossibleGoalSampler
+from empo.possible_goal import PossibleGoal, PossibleGoalSampler
+from empo.multigrid import ReachCellGoal, MultiGridGoalSampler
 from empo.nn_based.multigrid import (
     MultiGridStateEncoder as StateEncoder,
     MultiGridGoalEncoder as GoalEncoder,
@@ -86,78 +87,6 @@ class Empty5x5Env(MultiGridEnv):
         )
         self.num_humans = sum(1 for a in self.agents if a.color == 'yellow')
         self.num_robots = sum(1 for a in self.agents if a.color == 'grey')
-
-
-# ============================================================================
-# Goal Definitions
-# ============================================================================
-
-class ReachCellGoal(PossibleGoal):
-    """A goal where a specific human agent tries to reach a specific cell."""
-    
-    def __init__(self, world_model, human_agent_index: int, target_pos: tuple):
-        super().__init__(world_model)
-        self.human_agent_index = human_agent_index
-        self.target_pos = tuple(target_pos)
-    
-    def is_achieved(self, state) -> int:
-        """Returns 1 if the specific human agent is at the target position."""
-        step_count, agent_states, mobile_objects, mutable_objects = state
-        if self.human_agent_index < len(agent_states):
-            agent_state = agent_states[self.human_agent_index]
-            pos_x, pos_y = agent_state[0], agent_state[1]
-            if pos_x == self.target_pos[0] and pos_y == self.target_pos[1]:
-                return 1
-        return 0
-    
-    def __str__(self):
-        return f"ReachCell({self.target_pos[0]},{self.target_pos[1]})"
-    
-    def __repr__(self):
-        return self.__str__()
-    
-    def __hash__(self):
-        return hash((self.human_agent_index, self.target_pos[0], self.target_pos[1]))
-    
-    def __eq__(self, other):
-        if not isinstance(other, ReachCellGoal):
-            return False
-        return (self.human_agent_index == other.human_agent_index and 
-                self.target_pos == other.target_pos)
-
-
-class ReachCellGoalSampler(PossibleGoalSampler):
-    """
-    A goal sampler that samples uniformly from a list of target cell positions.
-    
-    This sampler creates ReachCellGoal instances for randomly selected cells.
-    """
-    
-    def __init__(self, world_model, goal_cells: List[Tuple[int, int]]):
-        """
-        Initialize the goal sampler.
-        
-        Args:
-            world_model: The environment.
-            goal_cells: List of (x, y) tuples representing possible goal positions.
-        """
-        super().__init__(world_model)
-        self.goal_cells = goal_cells
-    
-    def sample(self, state, human_agent_index: int) -> Tuple[PossibleGoal, float]:
-        """
-        Sample a random goal cell uniformly.
-        
-        Args:
-            state: Current world state.
-            human_agent_index: Index of the human agent.
-        
-        Returns:
-            Tuple of (ReachCellGoal, weight=1.0).
-        """
-        target_pos = random.choice(self.goal_cells)
-        goal = ReachCellGoal(self.world_model, human_agent_index, target_pos)
-        return goal, 1.0
 
 
 # ============================================================================
@@ -676,8 +605,9 @@ def main(quick_mode=False):
     print("  Using batch learning with replay buffer")
     print()
     
-    # Create goal sampler for the training function
-    goal_sampler = ReachCellGoalSampler(env, goal_cells)
+    # Create goal sampler using MultiGridGoalSampler from empo.multigrid
+    # It samples rectangle goals with weight-proportional probability
+    goal_sampler = MultiGridGoalSampler(env)
     
     # Train neural network using the module's function
     # Hyperparameters tuned for this demo (5x5 grid, 25 goal cells)

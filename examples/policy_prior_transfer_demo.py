@@ -56,6 +56,7 @@ from gym_multigrid.multigrid import (
     Key, Ball, Box, Door, Lava, Block, Goal
 )
 from empo.possible_goal import PossibleGoal, PossibleGoalSampler
+from empo.multigrid import ReachCellGoal, MultiGridGoalSampler
 from empo.nn_based.multigrid import (
     MultiGridNeuralHumanPolicyPrior as NeuralHumanPolicyPrior,
     MultiGridQNetwork as QNetwork,
@@ -290,66 +291,6 @@ class FullActionsEnv(MultiGridEnv):
         return '\n'.join(' '.join(row) for row in grid_lines)
 
 
-# ============================================================================
-# Goal Definitions
-# ============================================================================
-
-class ReachCellGoal(PossibleGoal):
-    """A goal where a specific human agent tries to reach a specific cell."""
-    
-    def __init__(self, world_model, human_agent_index: int, target_pos: tuple):
-        super().__init__(world_model)
-        self.human_agent_index = human_agent_index
-        self.target_pos = tuple(target_pos)
-    
-    def is_achieved(self, state) -> int:
-        step_count, agent_states, mobile_objects, mutable_objects = state
-        if self.human_agent_index < len(agent_states):
-            agent_state = agent_states[self.human_agent_index]
-            if int(agent_state[0]) == self.target_pos[0] and int(agent_state[1]) == self.target_pos[1]:
-                return 1
-        return 0
-    
-    def __str__(self):
-        return f"ReachCell({self.target_pos[0]},{self.target_pos[1]})"
-    
-    def __hash__(self):
-        return hash((self.human_agent_index, self.target_pos[0], self.target_pos[1]))
-    
-    def __eq__(self, other):
-        if not isinstance(other, ReachCellGoal):
-            return False
-        return (self.human_agent_index == other.human_agent_index and 
-                self.target_pos == other.target_pos)
-
-
-class DynamicGoalSampler(PossibleGoalSampler):
-    """Goal sampler that adapts to changing environments."""
-    
-    def __init__(self, base_env):
-        super().__init__(base_env)
-        self._update_goal_cells()
-    
-    def _update_goal_cells(self):
-        self._goal_cells = []
-        env = self.world_model
-        for x in range(1, env.width - 1):
-            for y in range(1, env.height - 1):
-                cell = env.grid.get(x, y)
-                if cell is None or (hasattr(cell, 'can_overlap') and cell.can_overlap()):
-                    self._goal_cells.append((x, y))
-    
-    def set_world_model(self, world_model):
-        self.world_model = world_model
-        self._update_goal_cells()
-    
-    def sample(self, state, human_agent_index: int) -> Tuple[PossibleGoal, float]:
-        if not self._goal_cells:
-            target_pos = (self.world_model.width // 2, self.world_model.height // 2)
-        else:
-            target_pos = random.choice(self._goal_cells)
-        return ReachCellGoal(self.world_model, human_agent_index, target_pos), 1.0
-
 
 # ============================================================================
 # Training and Transfer
@@ -388,8 +329,8 @@ def train_small_actions_policy(
     print(f"  Human agent indices: {human_agent_indices}")
     print(f"  Action space: {base_env.actions.available}")
     
-    # Create goal sampler
-    goal_sampler = DynamicGoalSampler(base_env)
+    # Use MultiGridGoalSampler for weight-proportional goal sampling
+    goal_sampler = MultiGridGoalSampler(base_env)
     
     # World model generator for ensemble training
     def world_model_generator(episode: int):
@@ -471,8 +412,8 @@ def load_and_transfer_policy(
     print(f"  Human agent indices: {human_agent_indices}")
     print(f"  Action space: {test_env.actions.available}")
     
-    # Create goal sampler
-    goal_sampler = DynamicGoalSampler(test_env)
+    # Use MultiGridGoalSampler for weight-proportional goal sampling
+    goal_sampler = MultiGridGoalSampler(test_env)
     
     # Load with action transfer
     # Actions not in SmallActions (pickup, drop, toggle, done) will get 0 probability
@@ -493,7 +434,7 @@ def load_and_transfer_policy(
 def run_transfer_rollouts(
     prior: NeuralHumanPolicyPrior,
     env: FullActionsEnv,
-    goal_sampler: DynamicGoalSampler,
+    goal_sampler: MultiGridGoalSampler,
     num_rollouts: int,
     device: str = 'cpu'
 ) -> None:
@@ -606,7 +547,7 @@ def main():
     )
     
     # Phase 3: Run rollouts
-    goal_sampler = DynamicGoalSampler(test_env)
+    goal_sampler = MultiGridGoalSampler(test_env)
     run_transfer_rollouts(
         prior=loaded_prior,
         env=test_env,
