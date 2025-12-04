@@ -62,7 +62,7 @@ from empo.multigrid import (
     render_goal_overlay,
 )
 from empo.nn_based.multigrid import (
-    MultiGridQNetwork as QNetwork,
+    MultiGridNeuralHumanPolicyPrior,
     train_multigrid_neural_policy_prior as train_neural_policy_prior,
 )
 
@@ -357,9 +357,9 @@ def train_on_ensemble(
     device: str = 'cpu',
     verbose: bool = True,
     base_seed: int = 42
-) -> Tuple[QNetwork, RandomMultigridEnv]:
+) -> Tuple['MultiGridNeuralHumanPolicyPrior', RandomMultigridEnv]:
     """
-    Train a SINGLE Q-network on an ensemble of randomly generated environments.
+    Train a neural policy prior on an ensemble of randomly generated environments.
     
     Uses the world_model_generator feature of train_neural_policy_prior to
     generate new environments during training, enabling generalization.
@@ -373,10 +373,10 @@ def train_on_ensemble(
         base_seed: Base random seed for reproducibility.
     
     Returns:
-        Tuple of (trained_q_network, sample_environment_for_testing)
+        Tuple of (trained_policy, sample_environment_for_testing)
     """
     if verbose:
-        print(f"Training SINGLE Q-network on random environment ensemble...")
+        print(f"Training neural policy prior on random environment ensemble...")
         print(f"  Grid size: {GRID_SIZE}x{GRID_SIZE}")
         print(f"  Agents: {NUM_HUMANS} humans + {NUM_ROBOTS} robot")
         print(f"  Training episodes: {num_episodes}")
@@ -396,7 +396,7 @@ def train_on_ensemble(
         return env
     
     # Use train_neural_policy_prior with world_model_generator
-    neural_prior = train_neural_policy_prior(
+    policy = train_neural_policy_prior(
         world_model=base_env,
         human_agent_indices=human_agent_indices,
         goal_sampler=goal_sampler,
@@ -418,50 +418,12 @@ def train_on_ensemble(
         episodes_per_model=episodes_per_env
     )
     
-    return neural_prior.q_network, base_env
+    return policy, base_env
 
 
 # ============================================================================
 # Rollout and Visualization
 # ============================================================================
-
-def sample_action_from_policy(
-    q_network: QNetwork,
-    state,
-    env: RandomMultigridEnv,
-    agent_idx: int,
-    goal: ReachRectangleGoal,
-    device: str = 'cpu'
-) -> int:
-    """
-    Sample an action using the Q-network's get_policy() method.
-    
-    This uses the package's standard Boltzmann policy implementation
-    rather than a custom implementation.
-    
-    Args:
-        q_network: Trained Q-network.
-        state: Current environment state.
-        env: The environment.
-        agent_idx: Index of the agent to get action for.
-        goal: ReachRectangleGoal instance for the agent.
-        device: Torch device.
-    
-    Returns:
-        Sampled action index.
-    """
-    with torch.no_grad():
-        # Get Q-values using the network's encode_and_forward method
-        q_values = q_network.encode_and_forward(
-            state, env, agent_idx, goal, device
-        )
-        # Use the network's get_policy method (Boltzmann policy with network's beta)
-        policy = q_network.get_policy(q_values)
-        # Sample action from policy
-        action = torch.multinomial(policy, 1).item()
-    
-    return action
-
 
 def render_with_goal_overlay(
     env: RandomMultigridEnv,
@@ -530,24 +492,22 @@ def render_with_goal_overlay(
 
 def run_rollout(
     env: RandomMultigridEnv,
-    q_network: QNetwork,
+    policy: 'MultiGridNeuralHumanPolicyPrior',
     human_agent_indices: List[int],
     human_goals: Dict[int, ReachRectangleGoal],
     robot_index: int,
-    first_human_idx: int,
-    device: str = 'cpu'
+    first_human_idx: int
 ) -> List[np.ndarray]:
     """
     Run a single rollout and return frames for animation.
     
     Args:
         env: The environment.
-        q_network: Trained Q-network.
+        policy: Trained neural policy prior.
         human_agent_indices: List of human agent indices.
         human_goals: Dict mapping agent index to ReachRectangleGoal.
         robot_index: Index of the robot agent.
         first_human_idx: Index of the first human (for visualization).
-        device: Torch device.
     
     Returns:
         List of frames for animation.
@@ -569,9 +529,8 @@ def run_rollout(
         for agent_idx in range(len(env.agents)):
             if agent_idx in human_agent_indices:
                 goal = human_goals[agent_idx]
-                action = sample_action_from_policy(
-                    q_network, state, env, agent_idx, goal, device
-                )
+                # Use policy.sample() directly with the goal
+                action = policy.sample(state, agent_idx, goal)
             else:
                 # Robot uses random policy
                 action = random.randint(0, num_actions - 1)
@@ -705,7 +664,7 @@ def main():
     
     # Train on ensemble (new env generated each episode)
     t0 = time.time()
-    q_network, base_env = train_on_ensemble(
+    policy, base_env = train_on_ensemble(
         human_agent_indices=human_agent_indices,
         num_episodes=num_episodes,
         episodes_per_env=1,  # New environment each episode for maximum diversity
@@ -754,12 +713,11 @@ def main():
         
         frames = run_rollout(
             env=env,
-            q_network=q_network,
+            policy=policy,
             human_agent_indices=human_agent_indices,
             human_goals=human_goals,
             robot_index=robot_index,
-            first_human_idx=first_human_idx,
-            device=device
+            first_human_idx=first_human_idx
         )
         all_frames.append(frames)
         env_indices.append(env_idx)
