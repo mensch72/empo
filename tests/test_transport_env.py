@@ -440,5 +440,199 @@ def test_cluster_k_larger_than_nodes():
     assert cluster_info['num_clusters'] == 3
 
 
+# =============================================================================
+# Tests for Cluster-Based Routing
+# =============================================================================
+
+def test_wrapper_cluster_routing_enabled():
+    """Test wrapper with cluster-based routing enabled."""
+    from empo.transport import create_transport_env
+    
+    env = create_transport_env(
+        num_humans=2, 
+        num_vehicles=1, 
+        num_nodes=12, 
+        num_clusters=4,
+        seed=42
+    )
+    obs = env.reset(seed=42)
+    
+    # Should have clustering enabled
+    assert env.use_clusters == True
+    assert env.num_clusters == 4
+    assert env.cluster_info is not None
+    
+    # Observations should include cluster info
+    for agent_obs in obs:
+        assert 'use_clusters' in agent_obs
+        assert agent_obs['use_clusters'] == True
+        assert 'num_clusters' in agent_obs
+        assert agent_obs['num_clusters'] == 4
+
+
+def test_wrapper_cluster_action_mask():
+    """Test action mask with cluster-based routing."""
+    from empo.transport import create_transport_env, TransportActions
+    import numpy as np
+    
+    env = create_transport_env(
+        num_humans=2, 
+        num_vehicles=1, 
+        num_nodes=12, 
+        num_clusters=4,
+        seed=42
+    )
+    env.reset(seed=42)
+    
+    # Find vehicle agent index
+    vehicle_idx = env.vehicle_agent_indices[0]
+    
+    # Wait for routing step
+    max_steps = 10
+    for _ in range(max_steps):
+        # Check current step type BEFORE taking action
+        step_type = env.step_type
+        masks = env.action_masks()
+        
+        if step_type == 'routing':
+            # Check vehicle can set cluster destinations
+            vehicle_mask = masks[vehicle_idx]
+            
+            # Vehicle at a node should be able to set destinations
+            # Check if vehicle is at a node
+            vehicle_pos = env.get_agent_position(vehicle_idx)
+            if vehicle_pos is not None and not isinstance(vehicle_pos, tuple):
+                # DEST_START should be valid (None destination)
+                assert vehicle_mask[TransportActions.DEST_START] == True
+                
+                # Cluster destinations should be valid (4 clusters)
+                for cluster_idx in range(4):
+                    assert vehicle_mask[TransportActions.DEST_START + 1 + cluster_idx] == True
+            break
+        
+        actions = [TransportActions.PASS] * env.num_agents
+        obs, rewards, done, info = env.step(actions)
+
+
+def test_cluster_goal():
+    """Test TransportClusterGoal class."""
+    from empo.transport import create_transport_env, TransportClusterGoal
+    
+    env = create_transport_env(
+        num_humans=2, 
+        num_vehicles=1, 
+        num_nodes=12, 
+        num_clusters=4,
+        seed=42
+    )
+    env.reset(seed=42)
+    
+    # Create a cluster goal
+    goal = TransportClusterGoal(env, agent_idx=0, target_cluster=2)
+    
+    assert goal.agent_idx == 0
+    assert goal.target_cluster == 2
+    
+    # Test hash and equality
+    goal2 = TransportClusterGoal(env, agent_idx=0, target_cluster=2)
+    goal3 = TransportClusterGoal(env, agent_idx=0, target_cluster=3)
+    
+    assert hash(goal) == hash(goal2)
+    assert goal == goal2
+    assert goal != goal3
+
+
+def test_cluster_goal_generator():
+    """Test TransportClusterGoalGenerator class."""
+    from empo.transport import (
+        create_transport_env, 
+        TransportClusterGoalGenerator, 
+        TransportClusterGoal
+    )
+    
+    env = create_transport_env(
+        num_humans=2, 
+        num_vehicles=1, 
+        num_nodes=12, 
+        num_clusters=4,
+        seed=42
+    )
+    env.reset(seed=42)
+    
+    generator = TransportClusterGoalGenerator(env)
+    goals = list(generator.generate(state=None, human_agent_index=0))
+    
+    # Should generate one goal per cluster
+    assert len(goals) == 4
+    
+    # Each goal should be a TransportClusterGoal with weight 1.0
+    for goal, weight in goals:
+        assert isinstance(goal, TransportClusterGoal)
+        assert goal.agent_idx == 0
+        assert weight == 1.0
+
+
+def test_cluster_goal_sampler():
+    """Test TransportClusterGoalSampler class."""
+    from empo.transport import (
+        create_transport_env, 
+        TransportClusterGoalSampler, 
+        TransportClusterGoal
+    )
+    
+    env = create_transport_env(
+        num_humans=2, 
+        num_vehicles=1, 
+        num_nodes=12, 
+        num_clusters=4,
+        seed=42
+    )
+    env.reset(seed=42)
+    
+    sampler = TransportClusterGoalSampler(env, seed=42)
+    
+    # Sample multiple goals
+    for _ in range(10):
+        goal, weight = sampler.sample(state=None, human_agent_index=0)
+        assert isinstance(goal, TransportClusterGoal)
+        assert goal.agent_idx == 0
+        assert weight == 1.0
+        # Target cluster should be valid
+        assert 0 <= goal.target_cluster < 4
+
+
+def test_wrapper_cluster_vs_node_routing():
+    """Test that cluster and node routing work differently."""
+    from empo.transport import create_transport_env
+    
+    # Node-based routing
+    env_nodes = create_transport_env(
+        num_humans=2, 
+        num_vehicles=1, 
+        num_nodes=12, 
+        seed=42
+    )
+    env_nodes.reset(seed=42)
+    assert env_nodes.use_clusters == False
+    
+    # Cluster-based routing
+    env_clusters = create_transport_env(
+        num_humans=2, 
+        num_vehicles=1, 
+        num_nodes=12, 
+        num_clusters=4,
+        seed=42
+    )
+    env_clusters.reset(seed=42)
+    assert env_clusters.use_clusters == True
+    
+    # Both should work but have different num_clusters
+    obs_nodes = env_nodes.reset(seed=42)
+    obs_clusters = env_clusters.reset(seed=42)
+    
+    assert obs_nodes[0]['num_clusters'] == 0
+    assert obs_clusters[0]['num_clusters'] == 4
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

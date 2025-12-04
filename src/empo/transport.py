@@ -11,15 +11,22 @@ Key Features:
 3. Provides action masking for handling invalid actions across step types
 4. Action mask included in observations AND available via action_masks() method
 5. Compatible with existing training code used for multigrid
+6. Optional cluster-based routing: vehicles announce destination clusters rather than nodes
 
 Goal Classes:
 - TransportGoal: Goal that an agent reaches a particular node
 - TransportGoalGenerator: Iterates over all node goals for an agent
 - TransportGoalSampler: Samples node goals uniformly
+- TransportClusterGoal: Goal that an agent reaches any node in a cluster
+- TransportClusterGoalGenerator: Iterates over all cluster goals for an agent
+- TransportClusterGoalSampler: Samples cluster goals uniformly
 
 Usage:
     >>> from empo.transport import TransportEnvWrapper
+    >>> # Node-based routing (default)
     >>> env = TransportEnvWrapper(num_humans=4, num_vehicles=2)
+    >>> # Cluster-based routing
+    >>> env = TransportEnvWrapper(num_humans=4, num_vehicles=2, num_clusters=10)
     >>> obs = env.reset(seed=42)
     >>> # Action mask is in observation AND available via method
     >>> masks = env.action_masks()
@@ -34,6 +41,7 @@ import networkx as nx
 
 # Import the ai_transport parallel environment
 from ai_transport import parallel_env as TransportParallelEnv
+from ai_transport.envs.clustering import cluster_network, get_cluster_for_node, get_nodes_in_cluster
 
 # Import goal base classes
 from empo.possible_goal import PossibleGoal, PossibleGoalGenerator, PossibleGoalSampler
@@ -49,7 +57,9 @@ class TransportActions:
     - PASS (0): Do nothing / stay in place
     - UNBOARD (1): Human unboards from vehicle
     - BOARD_0 to BOARD_9 (2-11): Board vehicle 0-9 at current node
-    - DEST_0 to DEST_N (12-31): Vehicle sets destination to node 0-19
+    - DEST_0 to DEST_N (12-31): Vehicle sets destination to node/cluster 0-19
+      - When use_clusters=False: DEST_0 = None, DEST_1..N = node 0..N-1
+      - When use_clusters=True: DEST_0 = None, DEST_1..N = cluster 0..N-1
     - DEPART_0 to DEPART_9 (32-41): Depart into outgoing edge 0-9
     
     Note: The actual validity of actions depends on step_type and agent state.
@@ -60,7 +70,7 @@ class TransportActions:
     BOARD_START = 2
     BOARD_END = 11  # Support up to 10 vehicles at a node
     DEST_START = 12
-    DEST_END = 31  # Support up to 20 destination nodes
+    DEST_END = 31  # Support up to 20 destination nodes/clusters
     DEPART_START = 32
     DEPART_END = 41  # Support up to 10 outgoing edges
     
@@ -73,9 +83,19 @@ class TransportActions:
         return cls.BOARD_START + vehicle_idx
     
     @classmethod
-    def set_destination(cls, node_idx: int) -> int:
+    def set_destination(cls, idx: int) -> int:
+        """Get action index for setting destination to given node/cluster index."""
+        return cls.DEST_START + idx
+    
+    @classmethod
+    def set_destination_cluster(cls, cluster_idx: int) -> int:
+        """Get action index for setting destination to given cluster index."""
+        return cls.DEST_START + cluster_idx + 1  # +1 because DEST_START is None
+    
+    @classmethod
+    def set_destination_node(cls, node_idx: int) -> int:
         """Get action index for setting destination to given node index."""
-        return cls.DEST_START + node_idx
+        return cls.DEST_START + node_idx + 1  # +1 because DEST_START is None
     
     @classmethod
     def depart_edge(cls, edge_idx: int) -> int:
@@ -115,6 +135,13 @@ class TransportEnvWrapper:
     2. Returns observations as a list by agent index
     3. Provides action_masks() for valid action checking
     4. Includes step_type in observations
+    5. Optional cluster-based routing (num_clusters > 0)
+    
+    Cluster-Based Routing:
+    When num_clusters > 0, the network is clustered using k-means and vehicles
+    announce destination clusters rather than specific nodes. This increases
+    flexibility and potentially passenger empowerment, as vehicles are committed
+    to regions rather than fixed destinations.
     
     Attributes:
         env: The underlying ai_transport parallel environment
@@ -122,6 +149,8 @@ class TransportEnvWrapper:
         num_agents: Total number of agents
         action_space: gymnasium.spaces.Discrete with fixed action count
         observation_space: Dictionary observation space
+        use_clusters: Whether cluster-based routing is enabled
+        cluster_info: Clustering information (if clusters enabled)
     """
     
     def __init__(
@@ -139,6 +168,9 @@ class TransportEnvWrapper:
         max_nodes: int = 20,
         max_edges_per_node: int = 10,
         max_vehicles_per_node: int = 10,
+        num_clusters: int = 0,
+        clustering_method: str = 'kmeans',
+        clustering_seed: int = 42,
     ):
         """
         Initialize the transport environment wrapper.
@@ -157,6 +189,9 @@ class TransportEnvWrapper:
             max_nodes: Maximum number of nodes (for action space sizing)
             max_edges_per_node: Maximum outgoing edges per node
             max_vehicles_per_node: Maximum vehicles at a node for boarding
+            num_clusters: Number of clusters for cluster-based routing (0 = use nodes)
+            clustering_method: Clustering method ('kmeans' or 'spectral')
+            clustering_seed: Random seed for clustering
         """
         self.num_humans = num_humans
         self.num_vehicles = num_vehicles
@@ -164,6 +199,17 @@ class TransportEnvWrapper:
         self.max_nodes = max_nodes
         self.max_edges_per_node = max_edges_per_node
         self.max_vehicles_per_node = max_vehicles_per_node
+        self.num_clusters = num_clusters
+        self.clustering_method = clustering_method
+        self.clustering_seed = clustering_seed
+        
+        # Cluster-based routing is enabled if num_clusters > 0
+        self.use_clusters = num_clusters > 0
+        self.cluster_info = None
+        
+        # Vehicle destination clusters (for cluster-based routing)
+        # Maps vehicle agent ID to cluster ID (or None)
+        self.vehicle_destination_clusters: Dict[str, Optional[int]] = {}
         
         # Create underlying environment
         self.env = TransportParallelEnv(
@@ -178,6 +224,10 @@ class TransportEnvWrapper:
             render_mode=render_mode,
         )
         
+        # Initialize clustering if enabled (requires network)
+        if self.use_clusters and self.env.network is not None:
+            self._init_clustering()
+        
         # Store agent list in fixed order (humans first, then vehicles)
         self.agents = list(self.env.possible_agents)
         self.num_agents = len(self.agents)
@@ -190,11 +240,40 @@ class TransportEnvWrapper:
         self.human_agent_indices = [i for i, a in enumerate(self.agents) if a.startswith('human_')]
         self.vehicle_agent_indices = [i for i, a in enumerate(self.agents) if a.startswith('vehicle_')]
         
+        # Initialize vehicle destination clusters
+        for agent in self.env.vehicle_agents:
+            self.vehicle_destination_clusters[agent] = None
+        
         # Step counter
         self.step_count = 0
         
         # Store last observations for action mask computation
         self._last_obs = None
+    
+    def _init_clustering(self):
+        """Initialize clustering on the network."""
+        if self.env.network is None or len(self.env.network.nodes()) == 0:
+            self.cluster_info = None
+            return
+        
+        # Check if network has coordinates
+        sample_node = list(self.env.network.nodes())[0]
+        node_data = self.env.network.nodes[sample_node]
+        has_coords = ('x' in node_data and 'y' in node_data) or 'pos' in node_data
+        
+        if not has_coords:
+            # Network doesn't have coordinates yet, skip clustering
+            self.cluster_info = None
+            return
+        
+        self.cluster_info = cluster_network(
+            self.env.network,
+            k=self.num_clusters,
+            method=self.clustering_method,
+            random_state=self.clustering_seed
+        )
+        # Update num_clusters to actual number (may be less if fewer nodes)
+        self.num_clusters = self.cluster_info['num_clusters']
     
     @property
     def network(self) -> nx.DiGraph:
@@ -233,6 +312,14 @@ class TransportEnvWrapper:
         """
         self.step_count = 0
         obs_dict, info_dict = self.env.reset(seed=seed, options=options)
+        
+        # Reinitialize clustering if enabled (network may have changed)
+        if self.use_clusters:
+            self._init_clustering()
+        
+        # Reset vehicle destination clusters
+        for agent in self.env.vehicle_agents:
+            self.vehicle_destination_clusters[agent] = None
         
         # Convert dict to list ordered by agent index
         obs_list = self._obs_dict_to_list(obs_dict)
@@ -305,11 +392,17 @@ class TransportEnvWrapper:
             if step_type == 'routing':
                 # Vehicles at nodes can set destinations
                 if is_vehicle and is_at_node:
-                    nodes = list(self.env.network.nodes())
-                    # DEST_0 = None destination, DEST_1..N = node 0..N-1
                     masks[i, TransportActions.DEST_START] = True  # None destination
-                    for node_idx in range(min(len(nodes), self.max_nodes)):
-                        masks[i, TransportActions.DEST_START + 1 + node_idx] = True
+                    
+                    if self.use_clusters and self.cluster_info is not None:
+                        # Cluster-based routing: DEST_1..N = cluster 0..N-1
+                        for cluster_idx in range(min(self.num_clusters, self.max_nodes)):
+                            masks[i, TransportActions.DEST_START + 1 + cluster_idx] = True
+                    else:
+                        # Node-based routing: DEST_1..N = node 0..N-1
+                        nodes = list(self.env.network.nodes())
+                        for node_idx in range(min(len(nodes), self.max_nodes)):
+                            masks[i, TransportActions.DEST_START + 1 + node_idx] = True
             
             elif step_type == 'unboarding':
                 # Humans aboard vehicles at nodes can unboard
@@ -400,13 +493,35 @@ class TransportEnvWrapper:
             elif TransportActions.DEST_START <= action <= TransportActions.DEST_END:
                 if step_type == 'routing' and is_vehicle and is_at_node:
                     dest_idx = action - TransportActions.DEST_START
-                    # dest_idx 0 = None, 1..N = node 0..N-1
-                    # In env: action 0 = None, action 1..N = node 0..N-1
-                    nodes = list(self.env.network.nodes())
-                    if dest_idx == 0:
-                        env_action = 0  # None destination
-                    elif dest_idx - 1 < len(nodes):
-                        env_action = dest_idx  # Node destination
+                    
+                    if self.use_clusters and self.cluster_info is not None:
+                        # Cluster-based routing
+                        # dest_idx 0 = None, 1..N = cluster 0..N-1
+                        if dest_idx == 0:
+                            env_action = 0  # None destination
+                            self.vehicle_destination_clusters[agent] = None
+                        else:
+                            cluster_idx = dest_idx - 1
+                            if cluster_idx < self.num_clusters:
+                                # Store the destination cluster
+                                self.vehicle_destination_clusters[agent] = cluster_idx
+                                # Set destination to cluster centroid node
+                                centroid = self.cluster_info['centroids'].get(cluster_idx)
+                                if centroid is not None:
+                                    nodes = list(self.env.network.nodes())
+                                    try:
+                                        node_action = nodes.index(centroid) + 1
+                                        env_action = node_action
+                                    except ValueError:
+                                        env_action = 0  # Centroid not found, pass
+                    else:
+                        # Node-based routing
+                        # dest_idx 0 = None, 1..N = node 0..N-1
+                        nodes = list(self.env.network.nodes())
+                        if dest_idx == 0:
+                            env_action = 0  # None destination
+                        elif dest_idx - 1 < len(nodes):
+                            env_action = dest_idx  # Node destination
             
             elif TransportActions.DEPART_START <= action <= TransportActions.DEPART_END:
                 if step_type == 'departing' and is_at_node:
@@ -435,6 +550,9 @@ class TransportEnvWrapper:
         - All fields from the underlying environment
         - step_type_idx: Integer encoding of current step type
         - action_mask: Boolean array of valid actions for this agent
+        - use_clusters: Whether cluster-based routing is enabled
+        - num_clusters: Number of clusters (if enabled)
+        - my_cluster: Current cluster ID (if at a node and clusters enabled)
         """
         # Compute action masks once for all agents
         masks = self.action_masks()
@@ -447,13 +565,32 @@ class TransportEnvWrapper:
                 obs['step_type_idx'] = StepType.from_name(obs.get('step_type', 'routing'))
                 # Add action mask to observation
                 obs['action_mask'] = masks[i]
+                
+                # Add cluster information
+                obs['use_clusters'] = self.use_clusters
+                obs['num_clusters'] = self.num_clusters if self.use_clusters else 0
+                
+                if self.use_clusters and self.cluster_info is not None:
+                    # Add agent's current cluster (if at a node)
+                    pos = self.env.agent_positions.get(agent)
+                    if pos is not None and not isinstance(pos, tuple):
+                        obs['my_cluster'] = get_cluster_for_node(pos, self.cluster_info)
+                    else:
+                        obs['my_cluster'] = None
+                    
+                    # Add destination cluster for vehicles
+                    if agent in self.env.vehicle_agents:
+                        obs['destination_cluster'] = self.vehicle_destination_clusters.get(agent)
+                
                 obs_list.append(obs)
             else:
                 # Agent not present (shouldn't happen in parallel env)
                 obs_list.append({
                     'step_type': self.env.step_type, 
                     'step_type_idx': self.step_type_idx,
-                    'action_mask': masks[i]
+                    'action_mask': masks[i],
+                    'use_clusters': self.use_clusters,
+                    'num_clusters': self.num_clusters if self.use_clusters else 0,
                 })
         return obs_list
     
@@ -491,6 +628,42 @@ class TransportEnvWrapper:
         if agent in self.env.vehicle_agents:
             return self.env.vehicle_destinations.get(agent)
         return None
+    
+    def get_vehicle_destination_cluster(self, agent_idx: int) -> Optional[int]:
+        """
+        Get destination cluster for vehicle agent (cluster-based routing only).
+        
+        Returns cluster ID or None. Only valid when use_clusters=True.
+        """
+        agent = self.agents[agent_idx]
+        if agent in self.env.vehicle_agents:
+            return self.vehicle_destination_clusters.get(agent)
+        return None
+    
+    def get_cluster_for_position(self, position: Any) -> Optional[int]:
+        """
+        Get the cluster ID for a given position.
+        
+        Args:
+            position: Node ID or (edge, coord) tuple
+            
+        Returns:
+            Cluster ID or None if position is on an edge or clusters not enabled
+        """
+        if not self.use_clusters or self.cluster_info is None:
+            return None
+        
+        # If position is a node (not on an edge)
+        if position is not None and not isinstance(position, tuple):
+            return get_cluster_for_node(position, self.cluster_info)
+        
+        return None
+    
+    def get_nodes_in_cluster(self, cluster_id: int) -> List:
+        """Get all nodes in a cluster."""
+        if not self.use_clusters or self.cluster_info is None:
+            return []
+        return get_nodes_in_cluster(cluster_id, self.cluster_info)
 
 
 def create_transport_env(
@@ -699,4 +872,177 @@ class TransportGoalSampler(PossibleGoalSampler):
         nodes = list(self.env.network.nodes())
         target_node = self.rng.choice(nodes)
         goal = TransportGoal(self.env, agent_idx=human_agent_index, target_node=target_node)
+        return goal, 1.0
+
+
+# =============================================================================
+# Cluster-Based Goal Classes
+# =============================================================================
+
+class TransportClusterGoal(PossibleGoal):
+    """
+    Goal that an agent reaches any node within a particular cluster.
+    
+    This goal is achieved when the specified agent is at any node
+    belonging to the target cluster. This is more flexible than
+    TransportGoal as it allows reaching any node in a region.
+    
+    Attributes:
+        env: The TransportEnvWrapper environment (inherited from PossibleGoal)
+        agent_idx: Index of the agent this goal applies to
+        target_cluster: The cluster ID that the agent should reach
+    
+    Example:
+        >>> env = create_transport_env(num_humans=2, num_vehicles=1, num_nodes=20, num_clusters=5)
+        >>> goal = TransportClusterGoal(env, agent_idx=0, target_cluster=2)
+        >>> # Goal is achieved when human_0 is at any node in cluster 2
+    """
+    
+    def __init__(self, env: TransportEnvWrapper, agent_idx: int, target_cluster: int):
+        """
+        Initialize the cluster goal.
+        
+        Args:
+            env: The TransportEnvWrapper environment
+            agent_idx: Index of the agent this goal applies to
+            target_cluster: The target cluster ID the agent should reach
+        """
+        super().__init__(env=env)
+        self.agent_idx = agent_idx
+        self.target_cluster = target_cluster
+        # Store target_pos for compatibility (use cluster centroid if available)
+        if env.use_clusters and env.cluster_info is not None:
+            self.target_pos = env.cluster_info['centroids'].get(target_cluster)
+        else:
+            self.target_pos = None
+    
+    def is_achieved(self, state) -> int:
+        """
+        Check if this goal is achieved.
+        
+        The goal is achieved if the agent at agent_idx is currently at
+        any node belonging to the target_cluster.
+        
+        Args:
+            state: Ignored (uses current env state)
+        
+        Returns:
+            int: 1 if the agent is at any node in the target cluster, 0 otherwise
+        """
+        pos = self.env.get_agent_position(self.agent_idx)
+        
+        # Agent must be at a node (not on an edge)
+        if pos is None or isinstance(pos, tuple):
+            return 0
+        
+        # Check if the node belongs to the target cluster
+        if self.env.use_clusters and self.env.cluster_info is not None:
+            node_cluster = get_cluster_for_node(pos, self.env.cluster_info)
+            if node_cluster == self.target_cluster:
+                return 1
+        
+        return 0
+    
+    def __hash__(self) -> int:
+        """Return hash based on agent index and target cluster."""
+        return hash((self.agent_idx, self.target_cluster, 'cluster'))
+    
+    def __eq__(self, other) -> bool:
+        """Check equality with another TransportClusterGoal."""
+        return (isinstance(other, TransportClusterGoal) and 
+                self.agent_idx == other.agent_idx and 
+                self.target_cluster == other.target_cluster)
+    
+    def __repr__(self) -> str:
+        return f"TransportClusterGoal(agent={self.agent_idx}, cluster={self.target_cluster})"
+
+
+class TransportClusterGoalGenerator(PossibleGoalGenerator):
+    """
+    Generator that yields all possible cluster goals for an agent.
+    
+    Iterates over all clusters in the transport network, yielding a
+    TransportClusterGoal for each cluster with weight 1.0.
+    
+    Example:
+        >>> env = create_transport_env(num_humans=2, num_vehicles=1, num_nodes=20, num_clusters=5)
+        >>> generator = TransportClusterGoalGenerator(env)
+        >>> for goal, weight in generator.generate(state=None, human_agent_index=0):
+        ...     print(f"{goal} with weight {weight}")
+    """
+    
+    def __init__(self, env: TransportEnvWrapper):
+        """
+        Initialize the cluster goal generator.
+        
+        Args:
+            env: The TransportEnvWrapper environment
+        """
+        super().__init__(env=env)
+    
+    def generate(self, state, human_agent_index: int) -> Iterator[Tuple[PossibleGoal, float]]:
+        """
+        Generate all possible cluster goals for the specified agent.
+        
+        Yields one TransportClusterGoal for each cluster, all with weight 1.0.
+        
+        Args:
+            state: Current state (ignored, uses env's clustering)
+            human_agent_index: Index of the agent whose goals to generate
+        
+        Yields:
+            Tuple[TransportClusterGoal, float]: Pairs of (goal, weight=1.0)
+        """
+        if not self.env.use_clusters or self.env.cluster_info is None:
+            return
+        
+        for cluster_id in range(self.env.num_clusters):
+            goal = TransportClusterGoal(self.env, agent_idx=human_agent_index, target_cluster=cluster_id)
+            yield goal, 1.0
+
+
+class TransportClusterGoalSampler(PossibleGoalSampler):
+    """
+    Sampler that uniformly samples cluster goals for an agent.
+    
+    Randomly selects a cluster and returns a TransportClusterGoal
+    for that cluster with weight 1.0.
+    
+    Example:
+        >>> env = create_transport_env(num_humans=2, num_vehicles=1, num_nodes=50, num_clusters=10)
+        >>> sampler = TransportClusterGoalSampler(env)
+        >>> goal, weight = sampler.sample(state=None, human_agent_index=0)
+        >>> print(f"Sampled {goal} with weight {weight}")
+    """
+    
+    def __init__(self, env: TransportEnvWrapper, seed: Optional[int] = None):
+        """
+        Initialize the cluster goal sampler.
+        
+        Args:
+            env: The TransportEnvWrapper environment
+            seed: Optional random seed for reproducibility
+        """
+        super().__init__(env=env)
+        self.rng = np.random.RandomState(seed)
+    
+    def sample(self, state, human_agent_index: int) -> Tuple[PossibleGoal, float]:
+        """
+        Sample a random cluster goal for the specified agent.
+        
+        Args:
+            state: Current state (ignored, uses env's clustering)
+            human_agent_index: Index of the agent whose goal to sample
+        
+        Returns:
+            Tuple[TransportClusterGoal, float]: (goal, weight=1.0)
+        """
+        if not self.env.use_clusters or self.env.num_clusters == 0:
+            # Fall back to node-based sampling if clusters not enabled
+            nodes = list(self.env.network.nodes())
+            target_node = self.rng.choice(nodes)
+            return TransportGoal(self.env, agent_idx=human_agent_index, target_node=target_node), 1.0
+        
+        target_cluster = self.rng.randint(0, self.env.num_clusters)
+        goal = TransportClusterGoal(self.env, agent_idx=human_agent_index, target_cluster=target_cluster)
         return goal, 1.0
