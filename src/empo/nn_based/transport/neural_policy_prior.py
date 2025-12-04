@@ -10,7 +10,7 @@ import torch.optim as optim
 import random
 from typing import Any, Dict, List, Optional
 
-from empo.possible_goal import PossibleGoalSampler
+from empo.possible_goal import PossibleGoal, PossibleGoalSampler
 
 from ..neural_policy_prior import BaseNeuralHumanPolicyPrior
 from ..replay_buffer import ReplayBuffer
@@ -144,6 +144,67 @@ class TransportNeuralHumanPolicyPrior(BaseNeuralHumanPolicyPrior):
         """
         masks = self.world_model.action_masks()
         return torch.tensor(masks[agent_idx], dtype=torch.bool, device=self.device)
+    
+    def sample(
+        self,
+        state: Any,
+        agent_idx: int,
+        goal: Optional['PossibleGoal'] = None,
+        apply_action_mask: bool = True,
+        beta: float = 5.0
+    ) -> int:
+        """
+        Sample an action from the learned policy.
+        
+        Uses the Q-network to compute action probabilities and samples
+        from the resulting Boltzmann distribution.
+        
+        Args:
+            state: Current state (ignored, uses current env state)
+            agent_idx: Index of the agent
+            goal: Goal to condition the policy on. If None, uses marginal policy.
+            apply_action_mask: If True, mask invalid actions before sampling
+            beta: Boltzmann temperature for sampling (higher = more greedy)
+        
+        Returns:
+            Sampled action index
+        """
+        import torch.nn.functional as F
+        
+        self.q_network.eval()
+        
+        with torch.no_grad():
+            if goal is not None:
+                # Goal-conditioned Q-values
+                q_values = self.q_network.encode_and_forward(
+                    state, self.world_model, agent_idx, goal, self.device
+                )
+            else:
+                # Use marginal policy (average over sampled goals)
+                probs = self._compute_marginal_policy(state, agent_idx)
+                if apply_action_mask:
+                    action_mask = self.get_action_mask(agent_idx)
+                    probs = probs * action_mask.float()
+                    probs = probs / probs.sum()  # Renormalize
+                return torch.multinomial(probs.unsqueeze(0), 1).item()
+            
+            # Apply action mask
+            if apply_action_mask:
+                action_mask = self.get_action_mask(agent_idx)
+                masked_q = q_values.clone()
+                masked_q[0, ~action_mask] = float('-inf')
+            else:
+                masked_q = q_values
+            
+            # Boltzmann policy
+            if beta == float('inf'):
+                action = torch.argmax(masked_q, dim=1).item()
+            else:
+                probs = F.softmax(beta * masked_q, dim=1)
+                probs = probs / probs.sum()  # Renormalize
+                action = torch.multinomial(probs, 1).item()
+        
+        return action
     
     @classmethod
     def _validate_network_params(

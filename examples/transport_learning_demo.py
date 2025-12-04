@@ -31,7 +31,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import networkx as nx
@@ -44,10 +43,8 @@ from empo.transport import (
     TransportActions,
 )
 from empo.nn_based.transport import (
-    TransportQNetwork,
     TransportNeuralHumanPolicyPrior,
     train_transport_neural_policy_prior,
-    NUM_TRANSPORT_ACTIONS,
 )
 
 
@@ -86,7 +83,7 @@ def create_simple_5node_network():
     """
     G = nx.DiGraph()
     
-    # Add nodes with positions
+    # Add nodes with positions and names
     positions = {
         0: (0.0, 0.0),
         1: (1.0, 0.0),
@@ -96,7 +93,7 @@ def create_simple_5node_network():
     }
     
     for node, pos in positions.items():
-        G.add_node(node, pos=pos)
+        G.add_node(node, pos=pos, name=f"node_{node}")
     
     # Add bidirectional edges with lengths
     edges = [
@@ -112,7 +109,7 @@ def create_simple_5node_network():
         pos_u = positions[u]
         pos_v = positions[v]
         length = ((pos_u[0] - pos_v[0])**2 + (pos_u[1] - pos_v[1])**2)**0.5
-        G.add_edge(u, v, length=length, speed_limit=50.0, capacity=10)
+        G.add_edge(u, v, length=length, speed=50.0, capacity=10)
     
     return G
 
@@ -193,12 +190,12 @@ def render_network_state(env, goal_node=None, value_dict=None, title=""):
                 pos_v = positions[v]
                 x = pos_u[0] + progress / network.edges[u, v]['length'] * (pos_v[0] - pos_u[0])
                 y = pos_u[1] + progress / network.edges[u, v]['length'] * (pos_v[1] - pos_u[1])
-                ax.plot(x, y, 'o', markersize=15, color='yellow', ec='black', linewidth=2, zorder=6)
+                ax.plot(x, y, 'o', markersize=15, color='yellow', markeredgecolor='black', markeredgewidth=2, zorder=6)
                 ax.text(x, y, 'H', ha='center', va='center', fontsize=10, fontweight='bold', zorder=7)
             else:
                 # At node
                 pos = positions[agent_pos]
-                ax.plot(pos[0], pos[1], 'o', markersize=20, color='yellow', ec='black', linewidth=2, zorder=6)
+                ax.plot(pos[0], pos[1], 'o', markersize=20, color='yellow', markeredgecolor='black', markeredgewidth=2, zorder=6)
                 ax.text(pos[0], pos[1], 'H', ha='center', va='center', fontsize=10, fontweight='bold', zorder=7)
     
     ax.set_xlim(-0.5, 2.5)
@@ -259,40 +256,11 @@ def compute_value_for_nodes(q_network, env, agent_idx, goal_node, device='cpu'):
     return values
 
 
-def get_action_from_qnetwork(q_network, env, agent_idx, goal, beta=5.0, device='cpu'):
-    """
-    Sample action from learned Boltzmann policy.
-    """
-    with torch.no_grad():
-        q_values = q_network.encode_and_forward(
-            None, env, agent_idx, goal, device
-        )
-        
-        # Apply action mask
-        action_mask = torch.tensor(
-            env.action_masks()[agent_idx],
-            dtype=torch.bool,
-            device=device
-        )
-        masked_q = q_values.clone()
-        masked_q[0, ~action_mask] = float('-inf')
-        
-        # Boltzmann policy
-        if beta == float('inf'):
-            action = torch.argmax(masked_q, dim=1).item()
-        else:
-            probs = F.softmax(beta * masked_q, dim=1)
-            probs = probs / probs.sum()  # Renormalize
-            action = torch.multinomial(probs, 1).item()
-    
-    return action
-
-
 # ============================================================================
 # Rollout
 # ============================================================================
 
-def run_rollout(env, q_network, goal_node, agent_idx=0, beta=5.0, device='cpu'):
+def run_rollout(env, neural_prior, goal_node, agent_idx=0, beta=5.0, device='cpu'):
     """
     Run a single rollout with the learned policy.
     
@@ -304,7 +272,7 @@ def run_rollout(env, q_network, goal_node, agent_idx=0, beta=5.0, device='cpu'):
     
     for step in range(MAX_STEPS):
         # Compute values for visualization
-        value_dict = compute_value_for_nodes(q_network, env, agent_idx, goal_node, device)
+        value_dict = compute_value_for_nodes(neural_prior.q_network, env, agent_idx, goal_node, device)
         
         # Check if at goal
         agent_name = env.agents[agent_idx]
@@ -321,15 +289,15 @@ def run_rollout(env, q_network, goal_node, agent_idx=0, beta=5.0, device='cpu'):
         if at_goal:
             break
         
-        # Get action from Q-network
-        action = get_action_from_qnetwork(q_network, env, agent_idx, goal, beta, device)
+        # Sample action from the neural policy prior
+        action = neural_prior.sample(None, agent_idx, goal, apply_action_mask=True, beta=beta)
         
         # Execute action for all agents (only 1 human, no vehicles)
         actions = [action]  # Only one agent
         env.step(actions)
     
     # Final frame
-    value_dict = compute_value_for_nodes(q_network, env, agent_idx, goal_node, device)
+    value_dict = compute_value_for_nodes(neural_prior.q_network, env, agent_idx, goal_node, device)
     agent_pos = env.env.agent_positions.get(env.agents[agent_idx])
     at_goal = agent_pos == goal_node
     title = f"Step {MAX_STEPS} | Goal: node {goal_node}"
@@ -426,26 +394,23 @@ def main(quick_mode=False):
     
     # Create environment with custom network
     print("Creating transport environment...")
-    from ai_transport import parallel_env
     
-    base_env = parallel_env(
+    env = TransportEnvWrapper(
         num_humans=1,
         num_vehicles=0,
         network=network,
-        max_steps=MAX_STEPS,
+        num_clusters=0,
         render_mode=None,
     )
-    
-    env = TransportEnvWrapper(base_env, num_clusters=0)
     env.reset(seed=42)
     
     print(f"  Agents: {env.agents}")
-    print(f"  Number of nodes: {len(network.nodes())}")
+    print(f"  Number of nodes: {len(env.env.network.nodes())}")
     print(f"  Max steps: {MAX_STEPS}")
     print()
     
     # Get goal nodes (all 5 nodes)
-    goal_nodes = list(network.nodes())
+    goal_nodes = list(env.env.network.nodes())
     print(f"Possible goal nodes: {goal_nodes}")
     print()
     
@@ -489,7 +454,6 @@ def main(quick_mode=False):
         num_clusters=0,
     )
     
-    q_network = neural_prior.q_network
     elapsed = time.time() - t0
     print(f"  Training completed in {elapsed:.2f} seconds")
     print()
@@ -509,7 +473,7 @@ def main(quick_mode=False):
         
         frames, reached = run_rollout(
             env=env,
-            q_network=q_network,
+            neural_prior=neural_prior,
             goal_node=goal_node,
             agent_idx=0,
             beta=beta,
