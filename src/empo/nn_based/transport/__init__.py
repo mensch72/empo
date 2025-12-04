@@ -56,6 +56,7 @@ from .constants import (
     MAX_VEHICLES_AT_NODE,
     MAX_OUTGOING_EDGES,
     MAX_CLUSTERS,
+    MAX_PARKING_SLOTS,
 )
 
 from .feature_extraction import (
@@ -88,6 +89,7 @@ __all__ = [
     'MAX_VEHICLES_AT_NODE',
     'MAX_OUTGOING_EDGES',
     'MAX_CLUSTERS',
+    'MAX_PARKING_SLOTS',
     'DEFAULT_TRANSPORT_ACTION_ENCODING',
     # Feature extraction
     'extract_node_features',

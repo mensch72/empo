@@ -16,6 +16,7 @@ from .constants import (
     STEP_TYPE_TO_IDX,
     NUM_STEP_TYPES,
     MAX_CLUSTERS,
+    MAX_PARKING_SLOTS,
     NODE_FEATURE_DIM,
     EDGE_FEATURE_DIM,
     GLOBAL_FEATURE_DIM,
@@ -31,6 +32,10 @@ def extract_node_features(
     """
     Extract features for each node in the network.
     
+    This function is designed to scale for hundreds of agents:
+    - Human counts are aggregated using log(1 + count) to handle many humans
+    - Vehicles are tracked individually in parking slots (limited slots per node)
+    
     Args:
         env: TransportEnvWrapper instance
         query_agent_idx: Index of the agent being queried
@@ -39,6 +44,8 @@ def extract_node_features(
     Returns:
         Tensor of shape (num_nodes, NODE_FEATURE_DIM)
     """
+    import math
+    
     network = env.env.network
     nodes = list(network.nodes())
     num_nodes = len(nodes)
@@ -59,6 +66,22 @@ def extract_node_features(
     if query_agent in env.env.vehicle_agents:
         query_destination = env.env.vehicle_destinations.get(query_agent)
     
+    # Get sorted vehicle names for consistent slot assignment
+    vehicle_agents = sorted(env.env.vehicle_agents)
+    vehicle_to_slot = {v: i for i, v in enumerate(vehicle_agents) if i < MAX_PARKING_SLOTS}
+    
+    # Pre-compute agents at each node for efficiency
+    humans_at_node = {node: 0 for node in nodes}
+    vehicles_at_node = {node: [] for node in nodes}
+    
+    for agent_name, pos in agent_positions.items():
+        if pos is not None and not isinstance(pos, tuple):
+            if pos in humans_at_node:
+                if agent_name in env.env.human_agents:
+                    humans_at_node[pos] += 1
+                else:
+                    vehicles_at_node[pos].append(agent_name)
+    
     for i, node in enumerate(nodes):
         node_data = network.nodes[node]
         
@@ -75,20 +98,20 @@ def extract_node_features(
             features[i, feature_offset] = 1.0
         feature_offset += 1
         
-        # Count humans and vehicles at this node
-        num_humans = 0
-        num_vehicles = 0
-        for agent_name, pos in agent_positions.items():
-            if pos is not None and not isinstance(pos, tuple) and pos == node:
-                if agent_name in env.env.human_agents:
-                    num_humans += 1
-                else:
-                    num_vehicles += 1
+        # Aggregate human count using log scale for scalability with hundreds of humans
+        num_humans = humans_at_node[node]
+        # log(1 + count) normalized by log(1 + 1000) to handle up to ~1000 humans
+        features[i, feature_offset] = math.log1p(num_humans) / math.log1p(1000)
+        feature_offset += 1
         
-        features[i, feature_offset] = float(num_humans) / max(1, len(env.env.human_agents))
-        feature_offset += 1
-        features[i, feature_offset] = float(num_vehicles) / max(1, len(env.env.vehicle_agents))
-        feature_offset += 1
+        # Individual vehicle slots (up to MAX_PARKING_SLOTS per node)
+        # Each vehicle has a consistent slot index across all nodes
+        for vehicle_name in vehicles_at_node[node]:
+            if vehicle_name in vehicle_to_slot:
+                slot_idx = vehicle_to_slot[vehicle_name]
+                if slot_idx < MAX_PARKING_SLOTS:
+                    features[i, feature_offset + slot_idx] = 1.0
+        feature_offset += MAX_PARKING_SLOTS
         
         # Is destination?
         if query_destination is not None and query_destination == node:
@@ -114,6 +137,9 @@ def extract_edge_features(
     """
     Extract features for each edge in the network.
     
+    This function is designed to scale for hundreds of agents using
+    log-scaled agent counts on edges.
+    
     Args:
         env: TransportEnvWrapper instance
         query_agent_idx: Index of the agent being queried
@@ -124,6 +150,8 @@ def extract_edge_features(
         - edge_index: Tensor of shape (2, num_edges) with source/target node indices
         - edge_features: Tensor of shape (num_edges, EDGE_FEATURE_DIM)
     """
+    import math
+    
     network = env.env.network
     nodes = list(network.nodes())
     node_to_idx = {node: i for i, node in enumerate(nodes)}
@@ -146,6 +174,24 @@ def extract_edge_features(
         if length > max_length:
             max_length = length
     
+    # Pre-compute agents on each edge for efficiency with many agents
+    edge_to_key = {(u, v): i for i, (u, v) in enumerate(edges)}
+    agents_on_edge = {i: 0 for i in range(num_edges)}
+    query_on_edge_idx = None
+    
+    for agent_name, pos in agent_positions.items():
+        if isinstance(pos, tuple):
+            edge_info, progress = pos
+            if len(edge_info) >= 2:
+                edge_u = edge_info[0]
+                edge_v = edge_info[1] if isinstance(edge_info[1], int) else edge_info[1].item()
+                key = (edge_u, edge_v)
+                if key in edge_to_key:
+                    edge_idx = edge_to_key[key]
+                    agents_on_edge[edge_idx] += 1
+                    if agent_name == query_agent:
+                        query_on_edge_idx = edge_idx
+    
     for i, (u, v) in enumerate(edges):
         edge_data = network.edges[u, v]
         
@@ -165,21 +211,12 @@ def extract_edge_features(
         capacity = edge_data.get('capacity', 1.0)
         edge_features[i, 2] = min(capacity / 10.0, 1.0)
         
-        # Count agents on this edge
-        num_on_edge = 0
-        query_on_edge = False
-        for agent_name, pos in agent_positions.items():
-            if isinstance(pos, tuple):
-                edge_info, progress = pos
-                if len(edge_info) >= 2:
-                    edge_u, edge_v = edge_info[0], edge_info[1] if isinstance(edge_info[1], int) else edge_info[1].item()
-                    if edge_u == u and edge_v == v:
-                        num_on_edge += 1
-                        if agent_name == query_agent:
-                            query_on_edge = True
+        # Log-scaled agent count for scalability with hundreds of agents
+        num_on_edge = agents_on_edge[i]
+        edge_features[i, 3] = math.log1p(num_on_edge) / math.log1p(100)  # Normalize for up to ~100 agents per edge
         
-        edge_features[i, 3] = float(num_on_edge) / max(1, len(env.agents))
-        edge_features[i, 4] = 1.0 if query_on_edge else 0.0
+        # Query agent on edge
+        edge_features[i, 4] = 1.0 if query_on_edge_idx == i else 0.0
     
     return edge_index, edge_features
 

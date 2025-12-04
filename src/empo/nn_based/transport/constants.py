@@ -32,16 +32,17 @@ NUM_STEP_TYPES = len(STEP_TYPE_TO_IDX)
 # Node features (per network node):
 # - cluster_id_onehot (MAX_CLUSTERS)
 # - is_agent_here (1) - whether query agent is at this node
-# - num_humans (1) - number of humans at this node
-# - num_vehicles (1) - number of vehicles at this node
+# - num_humans_log (1) - log(1 + num_humans) normalized, scalable for hundreds of humans
+# - vehicle_slot_occupancy (MAX_PARKING_SLOTS) - individual vehicle slot presence
 # - is_destination (1) - whether this is the query agent's destination
 # - num_outgoing_edges (1) - number of outgoing edges
 # - num_incoming_edges (1) - number of incoming edges
-# Total base: 6 + MAX_CLUSTERS
+# Total base: 5 + MAX_CLUSTERS + MAX_PARKING_SLOTS
 
 MAX_CLUSTERS = 20
-NODE_BASE_FEATURES = 6
-NODE_FEATURE_DIM = NODE_BASE_FEATURES + MAX_CLUSTERS  # 26
+MAX_PARKING_SLOTS = 10  # Maximum vehicle parking slots per node
+NODE_BASE_FEATURES = 5  # is_agent_here, num_humans_log, is_destination, out_edges, in_edges
+NODE_FEATURE_DIM = NODE_BASE_FEATURES + MAX_CLUSTERS + MAX_PARKING_SLOTS  # 35
 
 
 # Edge features (per network edge):
