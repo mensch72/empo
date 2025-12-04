@@ -606,7 +606,8 @@ def main(quick_mode=False):
     print()
     
     # Create goal sampler using MultiGridGoalSampler from empo.multigrid
-    # It samples rectangle goals with weight-proportional probability
+    # All goals are bounding boxes (x1, y1, x2, y2) - point goals are represented as (x, y, x, y)
+    # The sampler uses weight-proportional sampling based on goal area
     goal_sampler = MultiGridGoalSampler(env)
     
     # Train neural network using the module's function
