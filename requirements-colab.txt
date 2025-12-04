@@ -10,8 +10,8 @@
 # For CPU-only environments, you may need to install PyTorch separately:
 #   !pip install torch --index-url https://download.pytorch.org/whl/cpu
 
-# Core scientific computing (numpy is pre-installed in Colab)
-numpy>=1.24.0
+# Core scientific computing
+# Note: numpy is pre-installed in Colab but included here for version constraint
 scipy>=1.10.0
 
 # Reinforcement Learning frameworks
