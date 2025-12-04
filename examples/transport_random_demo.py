@@ -8,13 +8,15 @@ This script demonstrates the ai_transport PettingZoo environment with:
 3. Random vehicle policies
 4. No neural network learning - just basic random agent behavior
 
-This serves as a first work package for the TRANSPORT_ENVIRONMENT.md plan,
-validating that the ai_transport environment is properly vendored and functional.
+The script showcases two modes:
+- Using the raw ai_transport parallel_env with policy classes
+- Using the TransportEnvWrapper with action masking (gym-like interface)
 
 Usage:
     python transport_random_demo.py           # Full run (100 steps)
     python transport_random_demo.py --quick   # Quick test run (20 steps)
     python transport_random_demo.py --render  # Enable graphical rendering
+    python transport_random_demo.py --wrapper # Use TransportEnvWrapper with action masking
 
 Requirements:
     - ai_transport (vendored in vendor/ai_transport)
@@ -40,6 +42,14 @@ from ai_transport.policies import (
     TargetDestinationHumanPolicy,
     RandomVehiclePolicy,
     ShortestPathVehiclePolicy
+)
+
+# Import the EMPO wrapper for gym-style interface
+from empo.transport import (
+    TransportEnvWrapper,
+    TransportActions,
+    StepType,
+    create_transport_env,
 )
 
 
@@ -112,6 +122,11 @@ def parse_args():
         type=int,
         default=NUM_NODES,
         help=f'Number of network nodes (default: {NUM_NODES})'
+    )
+    parser.add_argument(
+        '--wrapper', '-w',
+        action='store_true',
+        help='Use TransportEnvWrapper with action masking (gym-like interface)'
     )
     return parser.parse_args()
 

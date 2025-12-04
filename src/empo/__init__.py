@@ -44,6 +44,18 @@ from empo.possible_goal import PossibleGoal, PossibleGoalGenerator, PossibleGoal
 from empo.human_policy_prior import HumanPolicyPrior, TabularHumanPolicyPrior
 from empo.backward_induction import compute_human_policy_prior
 
+# Transport environment wrapper (optional import - requires ai_transport)
+try:
+    from empo.transport import (
+        TransportEnvWrapper,
+        TransportActions,
+        StepType,
+        create_transport_env,
+    )
+    _HAS_TRANSPORT = True
+except ImportError:
+    _HAS_TRANSPORT = False
+
 __version__ = "0.1.0"
 
 __all__ = [
@@ -59,3 +71,12 @@ __all__ = [
     # Backward Induction
     "compute_human_policy_prior",
 ]
+
+# Add transport exports if available
+if _HAS_TRANSPORT:
+    __all__.extend([
+        "TransportEnvWrapper",
+        "TransportActions",
+        "StepType",
+        "create_transport_env",
+    ])
