@@ -546,7 +546,7 @@ class TransportGoal(PossibleGoal):
     (not on an edge, but actually at the node).
     
     Attributes:
-        env: The TransportEnvWrapper environment
+        env: The TransportEnvWrapper environment (inherited from PossibleGoal)
         agent_idx: Index of the agent this goal applies to
         target_node: The node ID that the agent should reach
     
@@ -565,10 +565,7 @@ class TransportGoal(PossibleGoal):
             agent_idx: Index of the agent this goal applies to
             target_node: The target node ID the agent should reach
         """
-        # Note: TransportEnvWrapper is not a WorldModel, so we pass None
-        # and store the env separately
-        super().__init__(world_model=None)
-        self.env = env
+        super().__init__(env=env)
         self.agent_idx = agent_idx
         self.target_node = target_node
         # Store target_pos for compatibility with existing goal rendering code
@@ -635,8 +632,7 @@ class TransportGoalGenerator(PossibleGoalGenerator):
         Args:
             env: The TransportEnvWrapper environment
         """
-        super().__init__(world_model=None)
-        self.env = env
+        super().__init__(env=env)
     
     def generate(self, state, human_agent_index: int) -> Iterator[Tuple[PossibleGoal, float]]:
         """
@@ -683,8 +679,7 @@ class TransportGoalSampler(PossibleGoalSampler):
             env: The TransportEnvWrapper environment
             seed: Optional random seed for reproducibility
         """
-        super().__init__(world_model=None)
-        self.env = env
+        super().__init__(env=env)
         self.rng = np.random.RandomState(seed)
     
     def sample(self, state, human_agent_index: int) -> Tuple[PossibleGoal, float]:
