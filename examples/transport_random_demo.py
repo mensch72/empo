@@ -35,6 +35,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'ai_t
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
 
 from ai_transport import parallel_env
 from ai_transport.policies import (
@@ -97,7 +99,7 @@ def parse_args():
         '--save-video', '-v',
         type=str,
         default=None,
-        help='Save simulation to video file (requires imageio[ffmpeg])'
+        help='Save simulation to video file (MP4 or GIF)'
     )
     parser.add_argument(
         '--seed',
@@ -129,6 +131,57 @@ def parse_args():
         help='Use TransportEnvWrapper with action masking (gym-like interface)'
     )
     return parser.parse_args()
+
+
+def save_video_matplotlib(frames, output_path: str, fps: int = 5):
+    """
+    Save frames as video using matplotlib animation.
+    
+    This approach works without imageio[ffmpeg] by using matplotlib's
+    animation module, which can save to MP4 via FFMpegWriter or fall back to GIF.
+    
+    Args:
+        frames: List of numpy arrays (RGB images)
+        output_path: Path to save the video
+        fps: Frames per second
+    """
+    if not frames:
+        print("No frames to save!")
+        return
+    
+    print(f"Creating video with {len(frames)} frames...")
+    
+    fig, ax = plt.subplots(figsize=(10, 8))
+    ax.axis('off')
+    
+    im = ax.imshow(frames[0])
+    title = ax.set_title('Transport Simulation', fontsize=12)
+    
+    def update(frame_idx):
+        im.set_array(frames[frame_idx])
+        title.set_text(f'Transport Simulation - Frame {frame_idx + 1}/{len(frames)}')
+        return [im, title]
+    
+    anim = animation.FuncAnimation(
+        fig, update, frames=len(frames),
+        interval=1000 // fps, blit=True, repeat=True
+    )
+    
+    # Try to save as MP4 first, fall back to GIF
+    try:
+        writer = animation.FFMpegWriter(fps=fps, bitrate=2000)
+        anim.save(output_path, writer=writer)
+        print(f"✓ Video saved to {output_path}")
+    except Exception as e:
+        print(f"Could not save MP4 ({e}), trying GIF...")
+        gif_path = output_path.replace('.mp4', '.gif')
+        try:
+            anim.save(gif_path, writer='pillow', fps=fps)
+            print(f"✓ Video saved as GIF to {gif_path}")
+        except Exception as e2:
+            print(f"Error saving video: {e2}")
+    
+    plt.close(fig)
 
 
 def create_random_network(env, num_nodes: int, seed: int = 42):
@@ -282,22 +335,25 @@ def run_simulation(args):
     print("3. Initializing environment...")
     obs, info = env.reset(seed=args.seed)
     
-    # Enable video recording if requested
-    # Note: Video recording requires graphical rendering to be enabled
-    if args.save_video:
-        try:
-            env.start_video_recording()  # This also enables graphical rendering
-            print(f"   Video recording enabled: {args.save_video}")
-        except Exception as e:
-            print(f"   Warning: Could not enable video recording: {e}")
-            args.save_video = None
+    # Initialize frame collection for video
+    frames = []
     
-    # Render initial state
-    if args.render or args.save_video:
-        if not args.save_video:  # Only enable if not already enabled by video recording
-            print("   Enabling graphical rendering...")
-            env.enable_rendering('graphical')
-        env.render()
+    # Enable graphical rendering if needed for video or display
+    if args.save_video or args.render:
+        print("   Enabling graphical rendering...")
+        env.enable_rendering('graphical')
+        if args.save_video:
+            print(f"   Video will be saved to: {args.save_video}")
+    
+    # Capture initial frame
+    if args.save_video or args.render:
+        fig = env.render()
+        if args.save_video and fig is not None:
+            # Convert matplotlib figure to numpy array
+            fig.canvas.draw()
+            buf = np.asarray(fig.canvas.buffer_rgba())
+            frame = buf[:, :, :3]  # Convert RGBA to RGB
+            frames.append(frame.copy())
     
     # Run simulation
     print(f"\n4. Running simulation for {num_steps} steps...")
@@ -340,9 +396,15 @@ def run_simulation(args):
         # Take step
         obs, rewards, terminations, truncations, infos = env.step(actions)
         
-        # Render if enabled or if recording video
+        # Render and capture frame if needed
         if args.render or args.save_video:
-            env.render()
+            fig = env.render()
+            if args.save_video and fig is not None:
+                # Convert matplotlib figure to numpy array
+                fig.canvas.draw()
+                buf = np.asarray(fig.canvas.buffer_rgba())
+                frame = buf[:, :, :3]  # Convert RGBA to RGB
+                frames.append(frame.copy())
         
         # Check for termination
         if any(terminations.values()) or any(truncations.values()):
@@ -382,11 +444,10 @@ def run_simulation(args):
     
     # Save video if recording
     if args.save_video:
-        try:
-            env.save_video(args.save_video, fps=5)
-            print(f"\n✓ Video saved to {args.save_video}")
-        except Exception as e:
-            print(f"\nWarning: Could not save video: {e}")
+        if frames:
+            save_video_matplotlib(frames, args.save_video, fps=5)
+        else:
+            print("\nWarning: No frames were captured for video")
     
     # Clean up
     env.close()
