@@ -283,18 +283,20 @@ def run_simulation(args):
     obs, info = env.reset(seed=args.seed)
     
     # Enable video recording if requested
+    # Note: Video recording requires graphical rendering to be enabled
     if args.save_video:
         try:
-            env.start_video_recording()
+            env.start_video_recording()  # This also enables graphical rendering
             print(f"   Video recording enabled: {args.save_video}")
         except Exception as e:
             print(f"   Warning: Could not enable video recording: {e}")
             args.save_video = None
     
     # Render initial state
-    if args.render:
-        print("   Enabling graphical rendering...")
-        env.enable_rendering('graphical')
+    if args.render or args.save_video:
+        if not args.save_video:  # Only enable if not already enabled by video recording
+            print("   Enabling graphical rendering...")
+            env.enable_rendering('graphical')
         env.render()
     
     # Run simulation
@@ -338,8 +340,8 @@ def run_simulation(args):
         # Take step
         obs, rewards, terminations, truncations, infos = env.step(actions)
         
-        # Render if enabled
-        if args.render:
+        # Render if enabled or if recording video
+        if args.render or args.save_video:
             env.render()
         
         # Check for termination
