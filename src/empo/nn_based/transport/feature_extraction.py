@@ -33,7 +33,7 @@ def extract_node_features(
     Extract features for each node in the network.
     
     This function is designed to scale for hundreds of agents:
-    - Human counts are aggregated using log(1 + count) to handle many humans
+    - Human counts are aggregated per node
     - Vehicles are tracked individually in parking slots (limited slots per node)
     
     Args:
@@ -44,8 +44,6 @@ def extract_node_features(
     Returns:
         Tensor of shape (num_nodes, NODE_FEATURE_DIM)
     """
-    import math
-    
     network = env.env.network
     nodes = list(network.nodes())
     num_nodes = len(nodes)
@@ -98,10 +96,9 @@ def extract_node_features(
             features[i, feature_offset] = 1.0
         feature_offset += 1
         
-        # Aggregate human count using log scale for scalability with hundreds of humans
+        # Aggregate human count at this node
         num_humans = humans_at_node[node]
-        # log(1 + count) normalized by log(1 + 1000) to handle up to ~1000 humans
-        features[i, feature_offset] = math.log1p(num_humans) / math.log1p(1000)
+        features[i, feature_offset] = float(num_humans)
         feature_offset += 1
         
         # Individual vehicle slots (up to MAX_PARKING_SLOTS per node)
@@ -118,13 +115,12 @@ def extract_node_features(
             features[i, feature_offset] = 1.0
         feature_offset += 1
         
-        # Number of outgoing and incoming edges (normalized)
+        # Number of outgoing and incoming edges
         out_edges = network.out_degree(node)
         in_edges = network.in_degree(node)
-        max_degree = max(1, max(d for n, d in network.degree()))
-        features[i, feature_offset] = float(out_edges) / max_degree
+        features[i, feature_offset] = float(out_edges)
         feature_offset += 1
-        features[i, feature_offset] = float(in_edges) / max_degree
+        features[i, feature_offset] = float(in_edges)
     
     return features
 
@@ -138,7 +134,7 @@ def extract_edge_features(
     Extract features for each edge in the network.
     
     This function is designed to scale for hundreds of agents using
-    log-scaled agent counts on edges.
+    raw agent counts on edges.
     
     Args:
         env: TransportEnvWrapper instance
@@ -150,8 +146,6 @@ def extract_edge_features(
         - edge_index: Tensor of shape (2, num_edges) with source/target node indices
         - edge_features: Tensor of shape (num_edges, EDGE_FEATURE_DIM)
     """
-    import math
-    
     network = env.env.network
     nodes = list(network.nodes())
     node_to_idx = {node: i for i, node in enumerate(nodes)}
@@ -166,13 +160,6 @@ def extract_edge_features(
     agent_positions = env.env.agent_positions
     query_agent = env.agents[query_agent_idx]
     query_pos = agent_positions.get(query_agent)
-    
-    # Find max edge length for normalization
-    max_length = 1.0
-    for u, v, data in network.edges(data=True):
-        length = data.get('length', 1.0)
-        if length > max_length:
-            max_length = length
     
     # Pre-compute agents on each edge for efficiency with many agents
     edge_to_key = {(u, v): i for i, (u, v) in enumerate(edges)}
@@ -199,21 +186,21 @@ def extract_edge_features(
         edge_index[0, i] = node_to_idx[u]
         edge_index[1, i] = node_to_idx[v]
         
-        # Edge length (normalized)
+        # Edge length
         length = edge_data.get('length', 1.0)
-        edge_features[i, 0] = length / max_length
+        edge_features[i, 0] = float(length)
         
-        # Speed limit (normalized, assume max 100)
+        # Speed limit
         speed = edge_data.get('speed_limit', edge_data.get('speed', 50.0))
-        edge_features[i, 1] = speed / 100.0
+        edge_features[i, 1] = float(speed)
         
-        # Capacity (normalized, assume max 10)
+        # Capacity
         capacity = edge_data.get('capacity', 1.0)
-        edge_features[i, 2] = min(capacity / 10.0, 1.0)
+        edge_features[i, 2] = float(capacity)
         
-        # Log-scaled agent count for scalability with hundreds of agents
+        # Agent count on this edge
         num_on_edge = agents_on_edge[i]
-        edge_features[i, 3] = math.log1p(num_on_edge) / math.log1p(100)  # Normalize for up to ~100 agents per edge
+        edge_features[i, 3] = float(num_on_edge)
         
         # Query agent on edge
         edge_features[i, 4] = 1.0 if query_on_edge_idx == i else 0.0
@@ -246,21 +233,21 @@ def extract_global_features(
     
     feature_offset = NUM_STEP_TYPES
     
-    # Real time (normalized, assume max 1000 time units)
+    # Real time
     real_time = env.env.real_time
-    features[feature_offset] = min(real_time / 1000.0, 1.0)
+    features[feature_offset] = float(real_time)
     feature_offset += 1
     
-    # Number of humans and vehicles (normalized)
-    features[feature_offset] = len(env.env.human_agents) / max(1, len(env.agents))
+    # Number of humans and vehicles
+    features[feature_offset] = float(len(env.env.human_agents))
     feature_offset += 1
-    features[feature_offset] = len(env.env.vehicle_agents) / max(1, len(env.agents))
+    features[feature_offset] = float(len(env.env.vehicle_agents))
     feature_offset += 1
     
     # Cluster mode
     features[feature_offset] = 1.0 if env.use_clusters else 0.0
     feature_offset += 1
-    features[feature_offset] = env.num_clusters / MAX_CLUSTERS if env.use_clusters else 0.0
+    features[feature_offset] = float(env.num_clusters) if env.use_clusters else 0.0
     
     return features
 
