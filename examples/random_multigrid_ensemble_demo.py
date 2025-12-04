@@ -89,14 +89,16 @@ NUM_ROLLOUTS_QUICK = 3
 
 # Object placement probabilities
 WALL_PROBABILITY = 0.15      # Probability of placing internal walls
-KEY_PROBABILITY = 0.03       # Probability of placing a key
+DOOR_PROBABILITY = 0.03      # Probability of placing a door (also places matching key)
 BALL_PROBABILITY = 0.0       # Probability of placing a ball
 BOX_PROBABILITY = 0.0        # Probability of placing a box
-DOOR_PROBABILITY = 0.03      # Probability of placing a door
 LAVA_PROBABILITY = 0.0       # Probability of placing lava
 BLOCK_PROBABILITY = 0.03     # Probability of placing a block
 ROCK_PROBABILITY = 0.02      # Probability of placing a rock
 UNSTEADY_GROUND_PROBABILITY = 0.10  # Probability of placing unsteady ground
+
+# Door/Key color (single color for both)
+DOOR_KEY_COLOR = 'r'  # Red
 
 
 def parse_args():
@@ -143,6 +145,8 @@ class RandomMultigridEnv(MultiGridEnv):
     - Random internal walls and obstacles
     - Random objects (keys, balls, boxes, doors, lava, blocks, rocks, unsteady ground)
     - Specified number of human (yellow) and robot (grey) agents
+    
+    Doors and keys are paired: when a door is placed, a matching key is also placed.
     """
     
     def __init__(
@@ -153,14 +157,14 @@ class RandomMultigridEnv(MultiGridEnv):
         max_steps: int = 50,
         seed: Optional[int] = None,
         wall_prob: float = 0.15,
-        key_prob: float = 0.03,
         ball_prob: float = 0.0,
         box_prob: float = 0.0,
         door_prob: float = 0.03,
         lava_prob: float = 0.0,
         block_prob: float = 0.03,
         rock_prob: float = 0.02,
-        unsteady_prob: float = 0.10
+        unsteady_prob: float = 0.10,
+        door_key_color: str = 'r'
     ):
         """
         Initialize the random multigrid environment.
@@ -172,20 +176,19 @@ class RandomMultigridEnv(MultiGridEnv):
             max_steps: Maximum steps per episode.
             seed: Random seed for reproducibility.
             wall_prob: Probability of internal walls.
-            key_prob: Probability of placing keys.
             ball_prob: Probability of placing balls.
             box_prob: Probability of placing boxes.
-            door_prob: Probability of placing doors.
+            door_prob: Probability of placing doors (also places matching key).
             lava_prob: Probability of placing lava.
             block_prob: Probability of placing blocks.
             rock_prob: Probability of placing rocks.
             unsteady_prob: Probability of placing unsteady ground.
+            door_key_color: Color code for doors and keys (single color).
         """
         self.grid_size = grid_size
         self.num_humans = num_humans
         self.num_robots = num_robots
         self.wall_prob = wall_prob
-        self.key_prob = key_prob
         self.ball_prob = ball_prob
         self.box_prob = box_prob
         self.door_prob = door_prob
@@ -193,6 +196,7 @@ class RandomMultigridEnv(MultiGridEnv):
         self.block_prob = block_prob
         self.rock_prob = rock_prob
         self.unsteady_prob = unsteady_prob
+        self.door_key_color = door_key_color
         
         if seed is not None:
             random.seed(seed)
@@ -210,15 +214,20 @@ class RandomMultigridEnv(MultiGridEnv):
         )
     
     def _generate_random_map(self) -> str:
-        """Generate a random map string for the environment."""
-        lines = []
+        """
+        Generate a random map string for the environment.
         
-        # Valid color codes: r=red, g=green, b=blue, p=purple, y=yellow, e=grey
-        colors = ['r', 'g', 'b', 'p']  # Not using y or e as they're for agents
-        
+        Doors and keys are paired: when a door is placed, a matching key
+        is also placed in a random available cell. They use the same color.
+        """
         # Track which cells are available for agents
         available_cells = []
         
+        # Track cells where we'll place keys (for doors placed)
+        pending_keys = []
+        
+        # First pass: generate the grid without keys
+        grid = []
         for y in range(self.grid_size):
             row = []
             for x in range(self.grid_size):
@@ -245,23 +254,25 @@ class RandomMultigridEnv(MultiGridEnv):
                         row.append('Ro')  # Rock
                         continue
                     
-                    cumulative += self.key_prob
+                    cumulative += self.door_prob
                     if r < cumulative:
-                        color = random.choice(colors)
-                        row.append(f'K{color}')  # Key
+                        # Place door and schedule a matching key
+                        row.append(f'D{self.door_key_color}')  # Door
+                        pending_keys.append(self.door_key_color)
+                        # Doors can be passed through (when open), so add to available
                         available_cells.append((x, y))
                         continue
                     
                     cumulative += self.ball_prob
                     if r < cumulative:
-                        color = random.choice(colors)
+                        color = random.choice(['r', 'g', 'b', 'p'])
                         row.append(f'B{color}')  # Ball
                         available_cells.append((x, y))
                         continue
                     
                     cumulative += self.box_prob
                     if r < cumulative:
-                        color = random.choice(colors)
+                        color = random.choice(['r', 'g', 'b', 'p'])
                         row.append(f'X{color}')  # Box
                         available_cells.append((x, y))
                         continue
@@ -282,27 +293,35 @@ class RandomMultigridEnv(MultiGridEnv):
                     row.append('..')
                     available_cells.append((x, y))
             
-            lines.append(' '.join(row))
+            grid.append(row)
         
-        # Convert to grid for agent placement
-        grid_lines = [line.split() for line in lines]
+        # Second pass: place keys for each door in random empty cells
+        # Find all empty cells for key placement
+        empty_cells_for_keys = [(x, y) for (x, y) in available_cells 
+                                if grid[y][x] == '..']
+        
+        random.shuffle(empty_cells_for_keys)
+        for i, key_color in enumerate(pending_keys):
+            if i < len(empty_cells_for_keys):
+                kx, ky = empty_cells_for_keys[i]
+                grid[ky][kx] = f'K{key_color}'  # Place key
         
         # Ensure we have enough cells for agents
         num_agents = self.num_humans + self.num_robots
         
-        # Find all empty cells (not walls, lava, or objects)
+        # Find all empty cells (not walls, lava, or blocking objects)
         empty_cells = []
         for y in range(1, self.grid_size - 1):
             for x in range(1, self.grid_size - 1):
-                if grid_lines[y][x] == '..':
+                if grid[y][x] == '..':
                     empty_cells.append((x, y))
         
         # If not enough empty cells, clear some wall/object cells
         while len(empty_cells) < num_agents:
             for y in range(1, self.grid_size - 1):
                 for x in range(1, self.grid_size - 1):
-                    if grid_lines[y][x] != '..' and (x, y) not in empty_cells:
-                        grid_lines[y][x] = '..'
+                    if grid[y][x] != '..' and (x, y) not in empty_cells:
+                        grid[y][x] = '..'
                         empty_cells.append((x, y))
                         if len(empty_cells) >= num_agents:
                             break
@@ -316,15 +335,15 @@ class RandomMultigridEnv(MultiGridEnv):
         # Place human agents (yellow)
         for i in range(self.num_humans):
             x, y = agent_positions[i]
-            grid_lines[y][x] = 'Ay'  # Yellow agent
+            grid[y][x] = 'Ay'  # Yellow agent
         
         # Place robot agents (grey)
         for i in range(self.num_robots):
             x, y = agent_positions[self.num_humans + i]
-            grid_lines[y][x] = 'Ae'  # Grey agent (e = grey)
+            grid[y][x] = 'Ae'  # Grey agent (e = grey)
         
-        # Rebuild map string
-        return '\n'.join(' '.join(row) for row in grid_lines)
+        # Build map string
+        return '\n'.join(' '.join(row) for row in grid)
 
 
 # ============================================================================
@@ -340,14 +359,14 @@ def create_random_env(seed: int) -> RandomMultigridEnv:
         max_steps=MAX_STEPS,
         seed=seed,
         wall_prob=WALL_PROBABILITY,
-        key_prob=KEY_PROBABILITY,
         ball_prob=BALL_PROBABILITY,
         box_prob=BOX_PROBABILITY,
         door_prob=DOOR_PROBABILITY,
         lava_prob=LAVA_PROBABILITY,
         block_prob=BLOCK_PROBABILITY,
         rock_prob=ROCK_PROBABILITY,
-        unsteady_prob=UNSTEADY_GROUND_PROBABILITY
+        unsteady_prob=UNSTEADY_GROUND_PROBABILITY,
+        door_key_color=DOOR_KEY_COLOR
     )
 
 
