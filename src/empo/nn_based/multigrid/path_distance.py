@@ -73,7 +73,7 @@ class PathDistanceCalculator:
             self._wall_grid = self._create_wall_grid(world_model)
             self._shortest_paths = self._precompute_shortest_paths()
         
-        self.feasible_range = (-1.0, 2.0)
+        self.feasible_range = (-1.0, 1.0) # because potentials are normalized to [-1,0]
 
         # Compute max nonnormalized cost for potential function normalization
         self.max_nonnormalized_cost = self._compute_max_nonnormalized_cost()
