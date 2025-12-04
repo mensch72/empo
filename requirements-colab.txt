@@ -1,0 +1,33 @@
+# EMPO - Minimal requirements for Google Colab
+# 
+# This file contains the minimum required dependencies to run EMPO in Google Colab.
+# For full functionality, see requirements.txt.
+#
+# Installation in Colab:
+#   !pip install -q -r requirements-colab.txt
+#
+# Note: PyTorch is NOT included here because Colab pre-installs it.
+# For CPU-only environments, you may need to install PyTorch separately:
+#   !pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+# Core scientific computing (numpy is pre-installed in Colab)
+numpy>=1.24.0
+scipy>=1.10.0
+
+# Reinforcement Learning frameworks
+gymnasium>=0.28.0
+pettingzoo>=1.24.0
+
+# Utilities
+cloudpickle>=3.0.0
+PyYAML>=6.0
+matplotlib>=3.7.0
+
+# Optional: graphviz for DAG visualization (also needs apt-get install graphviz)
+graphviz>=0.20.0
+
+# Note: The following are OPTIONAL and NOT included by default:
+# - tensorboard>=2.13.0  (uncomment if needed for logging)
+# - wandb>=0.15.0        (uncomment if needed for experiment tracking)
+# - mpi4py>=3.1.0        (NOT recommended for Colab - MPI not supported)
+# - line_profiler>=4.0.0 (uncomment if needed for profiling)
