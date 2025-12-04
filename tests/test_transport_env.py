@@ -816,5 +816,146 @@ def test_render_clusters_without_clustering_raises():
         env.render_clusters()
 
 
+def test_transport_policy_prior_network():
+    """Test TransportPolicyPriorNetwork computes marginal correctly."""
+    from empo.transport import create_transport_env, TransportGoal
+    from empo.nn_based.transport import (
+        TransportQNetwork,
+        TransportPolicyPriorNetwork,
+    )
+    
+    env = create_transport_env(
+        num_humans=2,
+        num_vehicles=1,
+        num_nodes=10,
+        num_clusters=3,
+        seed=42
+    )
+    env.reset(seed=42)
+    
+    q_network = TransportQNetwork(
+        max_nodes=20,
+        num_clusters=3,
+        num_actions=42,
+        hidden_dim=32,
+        state_feature_dim=32,
+        goal_feature_dim=16,
+        num_gnn_layers=1,
+    )
+    
+    policy_network = TransportPolicyPriorNetwork(q_network)
+    
+    # Create some goals
+    goals = [
+        TransportGoal(env, agent_idx=0, target_node=i)
+        for i in range(3)
+    ]
+    
+    # Compute marginal
+    marginal = policy_network.compute_marginal(
+        state=None,
+        world_model=env,
+        query_agent_idx=0,
+        goals=goals,
+        device='cpu'
+    )
+    
+    assert marginal.shape == (42,)
+    assert abs(marginal.sum().item() - 1.0) < 1e-5
+
+
+def test_transport_neural_policy_prior():
+    """Test TransportNeuralHumanPolicyPrior basic functionality."""
+    from empo.transport import create_transport_env, TransportGoal, TransportGoalSampler
+    from empo.nn_based.transport import TransportNeuralHumanPolicyPrior
+    
+    env = create_transport_env(
+        num_humans=2,
+        num_vehicles=1,
+        num_nodes=10,
+        num_clusters=3,
+        seed=42
+    )
+    env.reset(seed=42)
+    
+    goal_sampler = TransportGoalSampler(env, seed=42)
+    
+    # Create via convenience method
+    prior = TransportNeuralHumanPolicyPrior.create(
+        world_model=env,
+        human_agent_indices=[0, 1],
+        max_nodes=20,
+        num_clusters=3,
+        hidden_dim=32,
+        state_feature_dim=32,
+        goal_feature_dim=16,
+        num_gnn_layers=1,
+        goal_sampler=goal_sampler,
+    )
+    
+    # Test goal-specific policy
+    goal = TransportGoal(env, agent_idx=0, target_node=3)
+    probs = prior(state=None, agent_idx=0, goal=goal)
+    
+    assert len(probs) == 42
+    assert abs(sum(probs.values()) - 1.0) < 1e-5
+    
+    # Test marginal policy
+    probs_marginal = prior(state=None, agent_idx=0, goal=None)
+    
+    assert len(probs_marginal) == 42
+    assert abs(sum(probs_marginal.values()) - 1.0) < 1e-5
+
+
+def test_transport_neural_policy_prior_save_load():
+    """Test TransportNeuralHumanPolicyPrior save and load."""
+    import tempfile
+    import os
+    from empo.transport import create_transport_env, TransportGoal, TransportGoalSampler
+    from empo.nn_based.transport import TransportNeuralHumanPolicyPrior
+    
+    env = create_transport_env(
+        num_humans=2,
+        num_vehicles=1,
+        num_nodes=10,
+        num_clusters=3,
+        seed=42
+    )
+    env.reset(seed=42)
+    
+    goal_sampler = TransportGoalSampler(env, seed=42)
+    
+    prior = TransportNeuralHumanPolicyPrior.create(
+        world_model=env,
+        human_agent_indices=[0, 1],
+        max_nodes=20,
+        num_clusters=3,
+        hidden_dim=32,
+        state_feature_dim=32,
+        goal_feature_dim=16,
+        num_gnn_layers=1,
+    )
+    
+    with tempfile.TemporaryDirectory() as tmpdir:
+        filepath = os.path.join(tmpdir, 'test_model.pt')
+        prior.save(filepath)
+        
+        # Load and verify
+        prior_loaded = TransportNeuralHumanPolicyPrior.load(
+            filepath=filepath,
+            world_model=env,
+            human_agent_indices=[0, 1],
+            goal_sampler=goal_sampler,
+            device='cpu'
+        )
+        
+        # Check loaded model works
+        goal = TransportGoal(env, agent_idx=0, target_node=3)
+        probs = prior_loaded(state=None, agent_idx=0, goal=goal)
+        
+        assert len(probs) == 42
+        assert abs(sum(probs.values()) - 1.0) < 1e-5
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

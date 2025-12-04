@@ -15,27 +15,30 @@ Main components:
     - state_encoder: GNN-based state encoder for network topology
     - goal_encoder: Encode node/cluster goals
     - q_network: Q-network combining state and goal encoders
+    - policy_prior_network: Compute marginal action probabilities
+    - neural_policy_prior: Human policy prior using GNN-based Q-network
 
 Example usage:
     >>> from empo.nn_based.transport import (
-    ...     TransportStateEncoder,
-    ...     TransportGoalEncoder,
     ...     TransportQNetwork,
+    ...     TransportNeuralHumanPolicyPrior,
     ...     observation_to_graph_data,
     ... )
     >>> 
-    >>> # Create encoders
-    >>> state_encoder = TransportStateEncoder(
-    ...     num_clusters=10, max_nodes=100, feature_dim=128
-    ... )
-    >>> goal_encoder = TransportGoalEncoder(max_nodes=100, num_clusters=10)
-    >>> 
     >>> # Create Q-network
     >>> q_network = TransportQNetwork(
-    ...     state_encoder=state_encoder,
-    ...     goal_encoder=goal_encoder,
-    ...     num_actions=42
+    ...     max_nodes=100, num_clusters=10, num_actions=42
     ... )
+    >>> 
+    >>> # Create policy prior
+    >>> prior = TransportNeuralHumanPolicyPrior.create(
+    ...     world_model=env,
+    ...     human_agent_indices=[0, 1, 2, 3],
+    ...     num_clusters=10,
+    ... )
+    >>> 
+    >>> # Get action probabilities
+    >>> probs = prior(state=None, agent_idx=0, goal=goal)
 """
 
 from .constants import (
@@ -66,6 +69,11 @@ from .feature_extraction import (
 from .state_encoder import TransportStateEncoder
 from .goal_encoder import TransportGoalEncoder
 from .q_network import TransportQNetwork
+from .policy_prior_network import TransportPolicyPriorNetwork
+from .neural_policy_prior import (
+    TransportNeuralHumanPolicyPrior,
+    DEFAULT_TRANSPORT_ACTION_ENCODING,
+)
 
 __all__ = [
     # Constants
@@ -80,6 +88,7 @@ __all__ = [
     'MAX_VEHICLES_AT_NODE',
     'MAX_OUTGOING_EDGES',
     'MAX_CLUSTERS',
+    'DEFAULT_TRANSPORT_ACTION_ENCODING',
     # Feature extraction
     'extract_node_features',
     'extract_edge_features',
@@ -91,4 +100,6 @@ __all__ = [
     'TransportGoalEncoder',
     # Networks
     'TransportQNetwork',
+    'TransportPolicyPriorNetwork',
+    'TransportNeuralHumanPolicyPrior',
 ]

@@ -11,16 +11,20 @@ on the action mask from the environment.
 
 import torch
 import torch.nn as nn
-from typing import Any, Dict, Optional
+import numpy as np
+from typing import Any, Dict, Optional, Tuple
 
+from ..q_network import BaseQNetwork
 from .state_encoder import TransportStateEncoder
 from .goal_encoder import TransportGoalEncoder
 from .constants import NUM_TRANSPORT_ACTIONS, DEFAULT_OUTPUT_FEATURE_DIM
 
 
-class TransportQNetwork(nn.Module):
+class TransportQNetwork(BaseQNetwork):
     """
     Q-Network for transport environment using GNN-based state encoding.
+    
+    Extends BaseQNetwork with transport-specific GNN encoding.
     
     Architecture:
     1. State encoder (GNN) -> state features
@@ -31,35 +35,67 @@ class TransportQNetwork(nn.Module):
     agent state.
     
     Args:
-        state_encoder: TransportStateEncoder instance
-        goal_encoder: TransportGoalEncoder instance
+        state_encoder: TransportStateEncoder instance (or None to create default)
+        goal_encoder: TransportGoalEncoder instance (or None to create default)
         num_actions: Number of actions in action space
         hidden_dim: Hidden dimension for Q-value MLP
+        beta: Temperature for Boltzmann policy
+        feasible_range: Optional tuple (a, b) for Q-value bounds
+        max_nodes: Max nodes (used if state_encoder is None)
+        num_clusters: Number of clusters (used if encoders are None)
+        state_feature_dim: State encoder output dim (used if state_encoder is None)
+        goal_feature_dim: Goal encoder output dim (used if goal_encoder is None)
     
     Example:
-        >>> state_encoder = TransportStateEncoder(num_clusters=10)
-        >>> goal_encoder = TransportGoalEncoder(max_nodes=100, num_clusters=10)
-        >>> q_network = TransportQNetwork(state_encoder, goal_encoder)
-        >>> 
-        >>> # Get Q-values
+        >>> q_network = TransportQNetwork(
+        ...     max_nodes=100, num_clusters=10, num_actions=42
+        ... )
         >>> graph_data = observation_to_graph_data(env, query_agent_idx=0)
-        >>> goal_tensor = goal_encoder.encode_goal(goal)
-        >>> q_values = q_network(graph_data, goal_tensor)
-        >>> print(q_values.shape)
-        torch.Size([1, 42])
+        >>> goal_tensor = q_network.goal_encoder.encode_goal(goal)
+        >>> q_values = q_network.forward_graph(graph_data, goal_tensor)
     """
     
     def __init__(
         self,
-        state_encoder: TransportStateEncoder,
-        goal_encoder: TransportGoalEncoder,
+        state_encoder: Optional[TransportStateEncoder] = None,
+        goal_encoder: Optional[TransportGoalEncoder] = None,
         num_actions: int = NUM_TRANSPORT_ACTIONS,
-        hidden_dim: int = DEFAULT_OUTPUT_FEATURE_DIM
+        hidden_dim: int = DEFAULT_OUTPUT_FEATURE_DIM,
+        beta: float = 1.0,
+        feasible_range: Optional[Tuple[float, float]] = None,
+        # Parameters for creating default encoders
+        max_nodes: int = 100,
+        num_clusters: int = 0,
+        state_feature_dim: int = 128,
+        goal_feature_dim: int = 32,
+        num_gnn_layers: int = 3,
+        gnn_type: str = 'gcn',
     ):
-        super().__init__()
+        super().__init__(num_actions, beta, feasible_range)
+        self.hidden_dim = hidden_dim
+        self.max_nodes = max_nodes
+        self._num_clusters = num_clusters
+        
+        # Create encoders if not provided
+        if state_encoder is None:
+            state_encoder = TransportStateEncoder(
+                num_clusters=num_clusters,
+                max_nodes=max_nodes,
+                feature_dim=state_feature_dim,
+                hidden_dim=hidden_dim,
+                num_gnn_layers=num_gnn_layers,
+                gnn_type=gnn_type,
+            )
+        
+        if goal_encoder is None:
+            goal_encoder = TransportGoalEncoder(
+                max_nodes=max_nodes,
+                num_clusters=num_clusters,
+                feature_dim=goal_feature_dim,
+            )
+        
         self.state_encoder = state_encoder
         self.goal_encoder = goal_encoder
-        self.num_actions = num_actions
         
         # Combine state and goal features
         combined_dim = state_encoder.feature_dim + goal_encoder.feature_dim
@@ -77,20 +113,17 @@ class TransportQNetwork(nn.Module):
         graph_data: Dict[str, torch.Tensor],
         goal_tensor: torch.Tensor,
         action_mask: Optional[torch.Tensor] = None,
-        return_features: bool = False
     ) -> torch.Tensor:
         """
-        Compute Q-values for all actions.
+        Compute Q-values for all actions (implements BaseQNetwork interface).
         
         Args:
             graph_data: Dictionary from observation_to_graph_data()
             goal_tensor: Encoded goal tensor from goal_encoder.encode_goal()
             action_mask: Optional (batch, num_actions) boolean mask, True = valid
-            return_features: If True, also return state and goal features
         
         Returns:
-            Q-values tensor (batch, num_actions)
-            If return_features: tuple of (q_values, state_features, goal_features)
+            Q-values tensor (batch, num_actions), soft-clamped if feasible_range is set
         """
         # Encode state
         state_features = self.state_encoder(
@@ -111,15 +144,43 @@ class TransportQNetwork(nn.Module):
         # Compute Q-values
         q_values = self.q_head(combined)
         
+        # Apply soft clamping if feasible_range is set
+        q_values = self.apply_soft_clamp(q_values)
+        
         # Apply action mask if provided (set invalid actions to very negative)
         if action_mask is not None:
-            # Convert mask to float and apply
             mask_float = action_mask.float()
             q_values = q_values * mask_float + (1 - mask_float) * (-1e9)
         
-        if return_features:
-            return q_values, state_features, goal_features
         return q_values
+    
+    def encode_and_forward(
+        self,
+        state: Any,
+        world_model: Any,
+        query_agent_idx: int,
+        goal: Any,
+        device: str = 'cpu'
+    ) -> torch.Tensor:
+        """
+        Encode state and compute Q-values (implements BaseQNetwork interface).
+        
+        Args:
+            state: Ignored (transport env doesn't have separate state)
+            world_model: TransportEnvWrapper instance
+            query_agent_idx: Index of the agent making decisions
+            goal: Goal object
+            device: Torch device
+        
+        Returns:
+            Q-values (1, num_actions)
+        """
+        from .feature_extraction import observation_to_graph_data
+        
+        graph_data = observation_to_graph_data(world_model, query_agent_idx, device)
+        goal_tensor = self.goal_encoder.encode_goal(goal, device, env=world_model)
+        
+        return self.forward(graph_data, goal_tensor)
     
     def get_q_value(
         self,
@@ -127,17 +188,7 @@ class TransportQNetwork(nn.Module):
         goal_tensor: torch.Tensor,
         action: int
     ) -> torch.Tensor:
-        """
-        Get Q-value for a specific action.
-        
-        Args:
-            graph_data: Dictionary from observation_to_graph_data()
-            goal_tensor: Encoded goal tensor
-            action: Action index
-        
-        Returns:
-            Q-value for the specified action
-        """
+        """Get Q-value for a specific action."""
         q_values = self.forward(graph_data, goal_tensor)
         return q_values[:, action]
     
@@ -181,9 +232,14 @@ class TransportQNetwork(nn.Module):
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for save/load."""
         return {
+            'max_nodes': self.max_nodes,
+            'num_clusters': self._num_clusters,
+            'num_actions': self.num_actions,
+            'hidden_dim': self.hidden_dim,
+            'beta': self.beta,
+            'feasible_range': self.feasible_range,
             'state_encoder_config': self.state_encoder.get_config(),
             'goal_encoder_config': self.goal_encoder.get_config(),
-            'num_actions': self.num_actions,
         }
     
     @classmethod
@@ -195,4 +251,7 @@ class TransportQNetwork(nn.Module):
             state_encoder=state_encoder,
             goal_encoder=goal_encoder,
             num_actions=config['num_actions'],
+            hidden_dim=config.get('hidden_dim', DEFAULT_OUTPUT_FEATURE_DIM),
+            beta=config.get('beta', 1.0),
+            feasible_range=config.get('feasible_range'),
         )
