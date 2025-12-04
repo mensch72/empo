@@ -1,7 +1,11 @@
 """
 Goal encoder for multigrid environments.
 
-Encodes goal positions into feature vectors.
+Encodes goal regions into feature vectors.
+All goals are represented as bounding boxes (x1, y1, x2, y2) with inclusive coordinates.
+Point goals are represented as (x, y, x, y).
+
+For goal sampling and rendering, see empo.multigrid module.
 """
 
 import torch
@@ -13,9 +17,10 @@ from ..goal_encoder import BaseGoalEncoder
 
 class MultiGridGoalEncoder(BaseGoalEncoder):
     """
-    Encoder for position-based goals in multigrid.
+    Encoder for region-based goals in multigrid.
     
-    Goals are typically target positions. Encodes raw (x, y) coordinates.
+    All goals are represented as bounding boxes (x1, y1, x2, y2) with inclusive
+    coordinates. Point goals are represented as (x, y, x, y).
     
     Args:
         grid_height: Height of the grid.
@@ -33,9 +38,10 @@ class MultiGridGoalEncoder(BaseGoalEncoder):
         self.grid_height = grid_height
         self.grid_width = grid_width
         
-        # Input: x, y coordinates (raw integers)
+        # Input: bounding box (x1, y1, x2, y2) with inclusive coordinates
+        # Point goals are (x, y, x, y)
         self.fc = nn.Sequential(
-            nn.Linear(2, feature_dim),
+            nn.Linear(4, feature_dim),
             nn.ReLU(),
         )
     
@@ -44,7 +50,7 @@ class MultiGridGoalEncoder(BaseGoalEncoder):
         Encode goal coordinates.
         
         Args:
-            goal_coords: (batch, 2) with x, y coordinates
+            goal_coords: (batch, 4) with bounding box (x1, y1, x2, y2)
         
         Returns:
             Feature tensor (batch, feature_dim)
@@ -57,24 +63,57 @@ class MultiGridGoalEncoder(BaseGoalEncoder):
         device: str = 'cpu'
     ) -> torch.Tensor:
         """
-        Encode a goal object.
+        Encode a goal object as a bounding box.
+        
+        Handles goal formats:
+        1. Rectangle goal with target_rect: (x1, y1, x2, y2)
+        2. Point goal with target_pos: (x, y) -> encoded as (x, y, x, y)
+        3. Tuple/list goal: (x1, y1, x2, y2) or (x, y) -> (x, y, x, y)
         
         Args:
-            goal: Goal object with target position.
+            goal: Goal object with target position or rectangle.
             device: Torch device.
         
         Returns:
-            Tensor (1, 2) with goal coordinates.
+            Tensor (1, 4) with bounding box (x1, y1, x2, y2)
         """
-        # Extract position from goal
-        if hasattr(goal, 'target_pos'):
+        # Extract goal coordinates as bounding box (x1, y1, x2, y2)
+        if hasattr(goal, 'target_rect'):
+            # Rectangle goal: (x1, y1, x2, y2)
+            x1, y1, x2, y2 = goal.target_rect
+            # Normalize coordinates
+            if x1 > x2:
+                x1, x2 = x2, x1
+            if y1 > y2:
+                y1, y2 = y2, y1
+        elif hasattr(goal, 'target_pos'):
+            # Point goal -> bounding box (x, y, x, y)
             x, y = goal.target_pos
+            x1, y1, x2, y2 = float(x), float(y), float(x), float(y)
         elif hasattr(goal, 'position'):
             x, y = goal.position
-        elif isinstance(goal, (tuple, list)) and len(goal) >= 2:
-            x, y = goal[0], goal[1]
+            x1, y1, x2, y2 = float(x), float(y), float(x), float(y)
+        elif isinstance(goal, (tuple, list)):
+            if len(goal) == 4:
+                # Rectangle goal
+                x1, y1, x2, y2 = goal
+                if x1 > x2:
+                    x1, x2 = x2, x1
+                if y1 > y2:
+                    y1, y2 = y2, y1
+            elif len(goal) >= 2:
+                # Point goal -> bounding box (x, y, x, y)
+                x1, y1 = float(goal[0]), float(goal[1])
+                x2, y2 = x1, y1
+            else:
+                x1, y1, x2, y2 = 0.0, 0.0, 0.0, 0.0
         else:
-            x, y = 0, 0
+            x1, y1, x2, y2 = 0.0, 0.0, 0.0, 0.0
         
-        coords = torch.tensor([[float(x), float(y)]], device=device)
+        coords = torch.tensor(
+            [[float(x1), float(y1), float(x2), float(y2)]], 
+            device=device
+        )
+        
         return coords
+    

@@ -6,7 +6,7 @@ Combines state encoder and goal encoder to predict action Q-values.
 
 import torch
 import torch.nn as nn
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from ..q_network import BaseQNetwork
 from .state_encoder import MultiGridStateEncoder
@@ -20,6 +20,8 @@ class MultiGridQNetwork(BaseQNetwork):
     Uses unified MultiGridStateEncoder for complete state encoding
     and MultiGridGoalEncoder for goal encoding.
     
+    All goals are rectangles (x1, y1, x2, y2). Point goals are (x, y, x, y).
+    
     Args:
         grid_height: Height of the grid.
         grid_width: Width of the grid.
@@ -30,6 +32,7 @@ class MultiGridQNetwork(BaseQNetwork):
         goal_feature_dim: Goal encoder output dim.
         hidden_dim: Hidden layer dimension.
         beta: Temperature for Boltzmann policy.
+        feasible_range: Optional tuple (a, b) for Q-value bounds.
         max_kill_buttons: Max KillButtons.
         max_pause_switches: Max PauseSwitches.
         max_disabling_switches: Max DisablingSwitches.
@@ -47,12 +50,13 @@ class MultiGridQNetwork(BaseQNetwork):
         goal_feature_dim: int = 32,
         hidden_dim: int = 256,
         beta: float = 1.0,
+        feasible_range: Optional[Tuple[float, float]] = None,
         max_kill_buttons: int = 4,
         max_pause_switches: int = 4,
         max_disabling_switches: int = 4,
         max_control_buttons: int = 4
     ):
-        super().__init__(num_actions, beta)
+        super().__init__(num_actions, beta, feasible_range)
         self.grid_height = grid_height
         self.grid_width = grid_width
         self.hidden_dim = hidden_dim
@@ -71,6 +75,7 @@ class MultiGridQNetwork(BaseQNetwork):
         )
         
         # Goal encoder (separate from state - not part of world state)
+        # All goals are rectangles (x1, y1, x2, y2). Point goals are (x, y, x, y).
         self.goal_encoder = MultiGridGoalEncoder(
             grid_height, grid_width, goal_feature_dim
         )
@@ -103,10 +108,10 @@ class MultiGridQNetwork(BaseQNetwork):
             global_features: (batch, 4)
             agent_features: (batch, agent_input_size)
             interactive_features: (batch, interactive_input_size)
-            goal_coords: (batch, 2)
+            goal_coords: (batch, 4) bounding box
         
         Returns:
-            Q-values (batch, num_actions)
+            Q-values (batch, num_actions), soft-clamped if feasible_range is set.
         """
         state_features = self.state_encoder(
             grid_tensor, global_features, agent_features, interactive_features
@@ -114,7 +119,10 @@ class MultiGridQNetwork(BaseQNetwork):
         goal_emb = self.goal_encoder(goal_coords)
         
         combined = torch.cat([state_features, goal_emb], dim=1)
-        return self.q_head(combined)
+        q_values = self.q_head(combined)
+        
+        # Apply soft clamping during training if feasible_range is set
+        return self.apply_soft_clamp(q_values)
     
     def encode_and_forward(
         self,
@@ -155,5 +163,6 @@ class MultiGridQNetwork(BaseQNetwork):
             'goal_feature_dim': self.goal_encoder.feature_dim,
             'hidden_dim': self.hidden_dim,
             'beta': self.beta,
+            'feasible_range': self.feasible_range,
         })
         return config

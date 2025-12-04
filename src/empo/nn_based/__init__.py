@@ -28,6 +28,7 @@ Base classes for custom implementations:
 from .state_encoder import BaseStateEncoder
 from .goal_encoder import BaseGoalEncoder
 from .q_network import BaseQNetwork
+from .soft_clamp import SoftClamp
 from .policy_prior_network import BasePolicyPriorNetwork
 from .neural_policy_prior import BaseNeuralHumanPolicyPrior
 from .replay_buffer import ReplayBuffer
@@ -40,6 +41,7 @@ __all__ = [
     'BaseStateEncoder',
     'BaseGoalEncoder',
     'BaseQNetwork',
+    'SoftClamp',
     'BasePolicyPriorNetwork',
     'BaseNeuralHumanPolicyPrior',
     # Utilities

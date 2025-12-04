@@ -948,6 +948,7 @@ def train_and_rollout_with_learned_policy(quick_mode=False):
             updates_per_episode=4,
             train_phi_network=False,
             epsilon=0.3,
+            reward_shaping=True,  # Use path-based reward shaping with passing costs
             device=device,
             verbose=True
         )

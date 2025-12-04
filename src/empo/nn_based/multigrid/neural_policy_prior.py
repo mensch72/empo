@@ -167,6 +167,7 @@ class MultiGridNeuralHumanPolicyPrior(BaseNeuralHumanPolicyPrior):
             goal_feature_dim=config.get('goal_feature_dim', 32),
             hidden_dim=config.get('hidden_dim', 256),
             beta=config.get('beta', 1.0),
+            feasible_range=config.get('feasible_range', None),
             max_kill_buttons=config.get('max_kill_buttons', 4),
             max_pause_switches=config.get('max_pause_switches', 4),
             max_disabling_switches=config.get('max_disabling_switches', 4),
@@ -241,6 +242,9 @@ def train_multigrid_neural_policy_prior(
     
     Uses Q-learning with experience replay. Optionally trains a direct phi network
     that can predict marginal policies without iterating over goals.
+    
+    All goals are represented as bounding boxes (x1, y1, x2, y2).
+    Point goals are (x, y, x, y).
     
     The phi network (h_phi) is trained jointly with the Q-network in the same
     training loop. This is more accurate than distillation because:
@@ -318,7 +322,28 @@ def train_multigrid_neural_policy_prior(
     
     num_agent_colors = len(set(num_agents_per_color.keys()))
     
+    # Create path calculator for reward shaping (with world_model for path precomputation)
+    path_calc = PathDistanceCalculator(
+        grid_height, grid_width, 
+        world_model=env,
+        passing_costs=None  # Use default passing costs
+    ) if reward_shaping else None
+    
+    # Compute feasible range for Q-values based on reward shaping
+    # When using path-based shaping, the feasible range is determined by the
+    # maximum possible path cost (grid diagonal * max passing cost)
+    if reward_shaping and path_calc is not None:
+        # Use the feasible_range computed by PathDistanceCalculator
+        # which accounts for passing difficulty scores
+        feasible_range = path_calc.feasible_range
+        # Add small margin for the base reward [0, 1]
+        feasible_range = (feasible_range[0], feasible_range[1] + 1.0)
+    else:
+        # Without shaping, Q-values are bounded by discounted rewards in [0, 1]
+        feasible_range = (0.0, 1.0)
+    
     # Create Q-network with unified state encoder
+    # All goals are rectangles (x1, y1, x2, y2). Point goals are (x, y, x, y).
     q_network = MultiGridQNetwork(
         grid_height=grid_height,
         grid_width=grid_width,
@@ -328,10 +353,11 @@ def train_multigrid_neural_policy_prior(
         state_feature_dim=state_feature_dim,
         goal_feature_dim=goal_feature_dim,
         hidden_dim=hidden_dim,
-        beta=beta
+        beta=beta,
+        feasible_range=feasible_range
     ).to(device)
     
-    # Target network
+    # Target network (same feasible_range)
     target_network = MultiGridQNetwork(
         grid_height=grid_height,
         grid_width=grid_width,
@@ -341,7 +367,8 @@ def train_multigrid_neural_policy_prior(
         state_feature_dim=state_feature_dim,
         goal_feature_dim=goal_feature_dim,
         hidden_dim=hidden_dim,
-        beta=beta
+        beta=beta,
+        feasible_range=feasible_range
     ).to(device)
     target_network.load_state_dict(q_network.state_dict())
     
@@ -368,7 +395,69 @@ def train_multigrid_neural_policy_prior(
         if hasattr(exploration_policy, 'tolist'):
             exploration_policy = exploration_policy.tolist()
     
-    # Use generic Trainer with exploration_policy
+    # Track current world_model for reward shaping (updated in ensemble training)
+    current_world_model = [env]  # Use list to allow modification in closure
+    
+    # Create reward function with potential-based shaping (Ng et al. 1999)
+    # F(s,a,s') = γ * Φ(s') - Φ(s) where Φ(s) = -path_cost(agent, goal) / max_cost
+    # Path cost sums passing difficulty scores along the shortest path
+    def compute_shaped_reward(state, action, next_state, agent_idx, goal):
+        """Compute reward with path-based potential shaping."""
+        # Extract goal target (point or rectangle)
+        if hasattr(goal, 'target_rect'):
+            target = goal.target_rect  # Rectangle goal (x1, y1, x2, y2)
+        elif hasattr(goal, 'target_pos'):
+            target = goal.target_pos  # Point goal (x, y)
+        else:
+            # No target position - just use goal achievement
+            if hasattr(goal, 'is_achieved'):
+                return float(goal.is_achieved(next_state))
+            return 0.0
+        
+        # Base reward: goal achievement
+        base_reward = 0.0
+        if hasattr(goal, 'is_achieved'):
+            base_reward = float(goal.is_achieved(next_state))
+        else:
+            # Check if agent is at/in the goal
+            _, next_agent_states, _, _ = next_state
+            if agent_idx < len(next_agent_states):
+                next_pos = (int(next_agent_states[agent_idx][0]), 
+                           int(next_agent_states[agent_idx][1]))
+                if path_calc is not None:
+                    base_reward = 1.0 if path_calc.is_in_goal(next_pos, target) else 0.0
+        
+        # If no path calculator, just return base reward
+        if path_calc is None:
+            return base_reward
+        
+        # Compute potential-based shaping reward using path costs
+        _, curr_agent_states, _, _ = state
+        _, next_agent_states, _, _ = next_state
+        
+        if agent_idx >= len(curr_agent_states) or agent_idx >= len(next_agent_states):
+            return base_reward
+        
+        curr_pos = (int(curr_agent_states[agent_idx][0]), 
+                   int(curr_agent_states[agent_idx][1]))
+        next_pos = (int(next_agent_states[agent_idx][0]), 
+                   int(next_agent_states[agent_idx][1]))
+        
+        # Use world_model for path cost computation with passing difficulty scores
+        wm = current_world_model[0]
+        
+        # Φ(s) = -path_cost(agent, goal) / max_cost
+        phi_s = path_calc.compute_potential(curr_pos, target, wm)
+        phi_s_prime = path_calc.compute_potential(next_pos, target, wm)
+        
+        # Shaping: F(s,a,s') = γ * Φ(s') - Φ(s)
+        shaping_reward = gamma * phi_s_prime - phi_s
+        
+        return base_reward + shaping_reward
+    
+    reward_fn = compute_shaped_reward if reward_shaping else None
+    
+    # Use generic Trainer with exploration_policy and reward function
     from ..trainer import Trainer
     trainer = Trainer(
         q_network=q_network,
@@ -378,10 +467,9 @@ def train_multigrid_neural_policy_prior(
         gamma=gamma,
         target_update_freq=target_update_freq,
         device=device,
-        exploration_policy=exploration_policy
+        exploration_policy=exploration_policy,
+        reward_fn=reward_fn
     )
-    
-    path_calc = PathDistanceCalculator(grid_height, grid_width) if reward_shaping else None
     
     # Handle environment ensemble training
     current_env = env
@@ -409,6 +497,9 @@ def train_multigrid_neural_policy_prior(
                 # Update goal sampler if it has set_world_model method
                 if hasattr(goal_sampler, 'set_world_model'):
                     goal_sampler.set_world_model(current_env)
+        
+        # Update current_world_model for reward shaping closure
+        current_world_model[0] = current_env
         
         current_env.reset()
         state = current_env.get_state()
@@ -512,9 +603,14 @@ def _train_phi_network_step(
     
     Training procedure:
     1. Sample a batch of states from the buffer
-    2. For each state, sample multiple goals and compute the Q-network's 
-       average policy (stochastic approximation of the marginal)
-    3. Train phi to match this marginal via cross-entropy loss
+    2. For each state, sample multiple goals using weight-proportional sampling
+       (goals are sampled with probability proportional to their area weight)
+    3. Average the Q-network policies (simple average since sampling already accounts for weights)
+    4. Train phi to match this marginal via cross-entropy loss
+    
+    IMPORTANT: The goal sampler should sample goals with probability proportional
+    to their weight (1+x2-x1)*(1+y2-y1). If it does, we use simple averaging.
+    If it samples uniformly, the marginal will be biased toward smaller goals.
     
     Joint training with Q-network ensures:
     - Both networks see the same state distribution
@@ -526,7 +622,7 @@ def _train_phi_network_step(
         phi_optimizer: Optimizer for phi network.
         q_network: Current Q-network (used to compute target marginals).
         state_buffer: Buffer of (state, agent_idx, world_model) tuples.
-        goal_sampler: Goal sampler for computing marginals.
+        goal_sampler: Goal sampler that samples with weight-proportional probabilities.
         batch_size: Batch size.
         num_goal_samples: Number of goals to sample per state for marginal computation.
         device: Torch device.
@@ -552,11 +648,13 @@ def _train_phi_network_step(
         world_model = item['world_model']
         
         # Compute Q-network's marginal policy over sampled goals
+        # Goals are sampled with weight-proportional probabilities, so we use simple averaging
         with torch.no_grad():
             marginal_probs = torch.zeros(q_network.num_actions, device=device)
-            valid_goals = 0
+            valid_samples = 0
             
             # Sample multiple goals and average their policies
+            # The sampler samples with P(goal) ∝ weight, so simple average gives correct marginal
             for _ in range(num_goal_samples):
                 try:
                     goal, _ = goal_sampler.sample(state, agent_idx)
@@ -568,16 +666,17 @@ def _train_phi_network_step(
                     )
                     policy = q_network.get_policy(q_values).squeeze(0)
                     marginal_probs += policy
-                    valid_goals += 1
+                    valid_samples += 1
                 except (ValueError, RuntimeError, IndexError):
                     # Goal sampling or Q-network forward can fail for edge cases
                     continue
             
-            if valid_goals == 0:
+            if valid_samples == 0:
                 continue
             
-            # Average to get marginal (target for phi network)
-            target_marginal = marginal_probs / valid_goals
+            # Simple average to get marginal (target for phi network)
+            # This is correct because goals are sampled with weight-proportional probabilities
+            target_marginal = marginal_probs / valid_samples
         
         # Get phi network's prediction
         phi_probs = phi_network.encode_and_forward(

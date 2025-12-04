@@ -189,21 +189,60 @@ def test_multigrid_goal_encoder():
     """Test the MultiGridGoalEncoder."""
     print("Testing MultiGridGoalEncoder...")
     
+    # All goals are rectangles (x1, y1, x2, y2). Point goals are (x, y, x, y).
     encoder = MultiGridGoalEncoder(
         grid_height=10,
         grid_width=10,
         feature_dim=32
     )
     
-    # Create dummy input
+    # Create dummy input with 4 coordinates (bounding box: x1, y1, x2, y2)
     batch_size = 4
-    goal_coords = torch.randn(batch_size, 2)
+    goal_coords = torch.randn(batch_size, 4)
     
     # Forward pass
     features = encoder(goal_coords)
     
     assert features.shape == (batch_size, 32), f"Expected (4, 32), got {features.shape}"
     print(f"  ✓ Output shape: {features.shape}")
+    
+    # Test encode_goal with rectangle
+    class RectGoal:
+        def __init__(self):
+            self.target_rect = (2, 3, 5, 7)
+    
+    rect_goal = RectGoal()
+    encoded = encoder.encode_goal(rect_goal)
+    assert encoded.shape == (1, 4), f"Expected (1, 4), got {encoded.shape}"
+    # Verify bounding box encoding (x1, y1, x2, y2)
+    assert encoded[0, 0] == 2 and encoded[0, 1] == 3  # x1, y1
+    assert encoded[0, 2] == 5 and encoded[0, 3] == 7  # x2, y2
+    print(f"  ✓ Rectangle goal encoding: {encoded.tolist()}")
+    
+    # Test encode_goal with point goal (encoded as (x, y, x, y))
+    class PointGoal:
+        def __init__(self):
+            self.target_pos = (5, 5)
+    
+    point_goal = PointGoal()
+    encoded = encoder.encode_goal(point_goal)
+    assert encoded.shape == (1, 4), f"Expected (1, 4), got {encoded.shape}"
+    # For point goals, bounding box is (x, y, x, y)
+    assert encoded[0, 0] == 5 and encoded[0, 1] == 5  # x1, y1
+    assert encoded[0, 2] == 5 and encoded[0, 3] == 5  # x2, y2
+    print(f"  ✓ Point goal encoding as bbox: {encoded.tolist()}")
+    
+    # Test compute_goal_weight for rectangle (area)
+    weight = MultiGridGoalEncoder.compute_goal_weight(rect_goal)
+    expected_area = (1 + 5 - 2) * (1 + 7 - 3)  # (1+x2-x1)*(1+y2-y1) = 4 * 5 = 20
+    assert weight == expected_area, f"Expected {expected_area}, got {weight}"
+    print(f"  ✓ Rectangle goal weight (area): {weight}")
+    
+    # Test compute_goal_weight for point goal (area = 1)
+    weight = MultiGridGoalEncoder.compute_goal_weight(point_goal)
+    assert weight == 1.0, f"Expected 1.0, got {weight}"
+    print(f"  ✓ Point goal weight (area): {weight}")
+    
     print("  ✓ MultiGridGoalEncoder test passed!")
 
 
@@ -479,6 +518,233 @@ def test_load_action_conflict():
     print("  ✓ load action conflict test passed!")
 
 
+def test_soft_clamp():
+    """Test the SoftClamp module."""
+    from empo.nn_based.soft_clamp import SoftClamp
+
+    print("Testing SoftClamp...")    # Test with default range [0.5, 1.5]
+    soft_clamp = SoftClamp(a=0.5, b=1.5)
+    
+    # Values in range should be unchanged
+    x_in_range = torch.tensor([0.5, 1.0, 1.5])
+    y = soft_clamp(x_in_range)
+    assert torch.allclose(y, x_in_range, atol=1e-5), f"In-range values should be unchanged"
+    print("  ✓ In-range values are linear")
+    
+    # Values outside range should be soft-clamped
+    x_above = torch.tensor([2.0, 3.0, 10.0])
+    y_above = soft_clamp(x_above)
+    
+    # Should be less than actual values but greater than upper bound
+    R = 1.5 - 0.5  # = 1.0
+    for i, (orig, clamped) in enumerate(zip(x_above.tolist(), y_above.tolist())):
+        assert clamped < orig, f"Clamped should be < original for above-range"
+        assert clamped < 1.5 + R, f"Clamped should approach b + R asymptotically"
+    print("  ✓ Above-range values are soft-clamped")
+    
+    x_below = torch.tensor([0.0, -1.0, -10.0])
+    y_below = soft_clamp(x_below)
+    
+    for i, (orig, clamped) in enumerate(zip(x_below.tolist(), y_below.tolist())):
+        assert clamped > orig, f"Clamped should be > original for below-range"
+        assert clamped > 0.5 - R, f"Clamped should approach a - R asymptotically"
+    print("  ✓ Below-range values are soft-clamped")
+    
+    # Test gradient flow
+    x = torch.tensor([0.0, 1.0, 2.0], requires_grad=True)
+    y = soft_clamp(x)
+    loss = y.sum()
+    loss.backward()
+    assert x.grad is not None and x.grad.abs().sum() > 0, "Gradients should flow"
+    print("  ✓ Gradients flow correctly")
+    
+    # Test with feasible_range in Q-network
+    q_network = MultiGridQNetwork(
+        grid_height=10,
+        grid_width=10,
+        num_actions=4,
+        num_agents_per_color={'grey': 2},
+        num_agent_colors=7,
+        feasible_range=(-1.0, 2.0)
+    )
+    assert q_network.soft_clamp is not None
+    assert q_network.feasible_range == (-1.0, 2.0)
+    print("  ✓ Q-network correctly initializes SoftClamp with feasible_range")
+    
+    print("  ✓ SoftClamp test passed!")
+
+
+def test_weight_proportional_sampling():
+    """Test that weight-proportional rectangle sampling works correctly."""
+    print("Testing weight-proportional sampling...")
+    
+    # Test sample_coordinate_pair_weighted
+    n = 5  # Coordinates 0-4
+    counts = {}
+    num_samples = 100000
+    rng = np.random.default_rng(42)
+    
+    for _ in range(num_samples):
+        c1, c2 = MultiGridGoalEncoder.sample_coordinate_pair_weighted(n, rng)
+        key = (c1, c2)
+        counts[key] = counts.get(key, 0) + 1
+    
+    # Verify that weights are proportional to (1 + c2 - c1)
+    # Expected weight for (c1, c2) is (1 + c2 - c1)
+    total_weight = 0
+    for c1 in range(n):
+        for c2 in range(c1, n):
+            total_weight += (1 + c2 - c1)
+    
+    for c1 in range(n):
+        for c2 in range(c1, n):
+            key = (c1, c2)
+            expected_weight = (1 + c2 - c1)
+            expected_prob = expected_weight / total_weight
+            observed_prob = counts.get(key, 0) / num_samples
+            
+            # Allow 20% relative error due to sampling variance
+            relative_error = abs(observed_prob - expected_prob) / expected_prob
+            assert relative_error < 0.2, f"Pair {key}: expected prob {expected_prob:.4f}, got {observed_prob:.4f}"
+    
+    print("  ✓ sample_coordinate_pair_weighted produces correct distribution")
+    
+    # Test sample_rectangle_weighted
+    x_range = (1, 4)  # x in [1, 4]
+    y_range = (2, 5)  # y in [2, 5]
+    
+    rect_counts = {}
+    for _ in range(num_samples):
+        rect = MultiGridGoalEncoder.sample_rectangle_weighted(x_range, y_range, rng)
+        rect_counts[rect] = rect_counts.get(rect, 0) + 1
+    
+    # Verify a few samples have correct relative frequencies
+    # Weight = (1+x2-x1)*(1+y2-y1)
+    # Point goal (2, 3, 2, 3): weight = 1*1 = 1
+    # Small rect (2, 3, 3, 4): weight = 2*2 = 4
+    # The ratio should be approximately 1:4
+    
+    point_count = rect_counts.get((2, 3, 2, 3), 0)
+    small_rect_count = rect_counts.get((2, 3, 3, 4), 0)
+    
+    if point_count > 0 and small_rect_count > 0:
+        ratio = small_rect_count / point_count
+        # Expected ratio is 4.0, allow some variance
+        assert 2.0 < ratio < 8.0, f"Ratio should be ~4.0, got {ratio:.2f}"
+        print(f"  ✓ sample_rectangle_weighted: ratio of (2,3,3,4) to (2,3,2,3) is {ratio:.2f} (expected ~4.0)")
+    
+    # Verify edges
+    for _ in range(1000):
+        x1, y1, x2, y2 = MultiGridGoalEncoder.sample_rectangle_weighted(x_range, y_range, rng)
+        assert x_range[0] <= x1 <= x2 <= x_range[1], f"x coords out of range: {x1}, {x2}"
+        assert y_range[0] <= y1 <= y2 <= y_range[1], f"y coords out of range: {y1}, {y2}"
+    
+    print("  ✓ sample_rectangle_weighted respects coordinate ranges")
+    
+    print("  ✓ weight-proportional sampling test passed!")
+
+
+def test_goal_rendering():
+    """Test the goal rendering methods."""
+    import matplotlib
+    matplotlib.use('Agg')  # Use non-interactive backend for tests
+    import matplotlib.pyplot as plt
+    
+    print("Testing goal rendering...")
+    
+    # Test get_goal_bounding_box
+    # 1. Rectangle goal with target_rect
+    class RectGoal:
+        def __init__(self, rect):
+            self.target_rect = rect
+    
+    goal = RectGoal((2, 3, 5, 6))
+    bb = MultiGridGoalEncoder.get_goal_bounding_box(goal)
+    assert bb == (2, 3, 5, 6), f"Expected (2, 3, 5, 6), got {bb}"
+    print("  ✓ get_goal_bounding_box works with target_rect")
+    
+    # 2. Point goal with target_pos
+    class PointGoal:
+        def __init__(self, pos):
+            self.target_pos = pos
+    
+    goal = PointGoal((4, 5))
+    bb = MultiGridGoalEncoder.get_goal_bounding_box(goal)
+    assert bb == (4, 5, 4, 5), f"Expected (4, 5, 4, 5), got {bb}"
+    print("  ✓ get_goal_bounding_box works with target_pos")
+    
+    # 3. Tuple goal
+    bb = MultiGridGoalEncoder.get_goal_bounding_box((1, 2, 3, 4))
+    assert bb == (1, 2, 3, 4), f"Expected (1, 2, 3, 4), got {bb}"
+    print("  ✓ get_goal_bounding_box works with tuple")
+    
+    # 4. Reversed coordinates should be normalized
+    bb = MultiGridGoalEncoder.get_goal_bounding_box((5, 6, 2, 3))
+    assert bb == (2, 3, 5, 6), f"Expected (2, 3, 5, 6), got {bb}"
+    print("  ✓ get_goal_bounding_box normalizes reversed coordinates")
+    
+    # Test closest_point_on_rectangle
+    rect = (2, 2, 4, 4)
+    tile_size = 32
+    inset = 0.08
+    
+    # Point outside rectangle (agent at 1, 1)
+    agent_px = 1 * tile_size + tile_size / 2
+    agent_py = 1 * tile_size + tile_size / 2
+    closest = MultiGridGoalEncoder.closest_point_on_rectangle(rect, agent_px, agent_py, tile_size, inset)
+    
+    # Closest point should be top-left corner of rectangle (with inset)
+    expected_x = 2 * tile_size + tile_size * inset
+    expected_y = 2 * tile_size + tile_size * inset
+    assert abs(closest[0] - expected_x) < 0.01 and abs(closest[1] - expected_y) < 0.01, \
+        f"Expected ({expected_x}, {expected_y}), got {closest}"
+    print("  ✓ closest_point_on_rectangle works for outside point")
+    
+    # Point inside rectangle (agent at 3, 3)
+    agent_px = 3 * tile_size + tile_size / 2
+    agent_py = 3 * tile_size + tile_size / 2
+    closest = MultiGridGoalEncoder.closest_point_on_rectangle(rect, agent_px, agent_py, tile_size, inset)
+    
+    # Should return a point on the rectangle boundary
+    left = 2 * tile_size + tile_size * inset
+    right = (4 + 1) * tile_size - tile_size * inset
+    top = 2 * tile_size + tile_size * inset
+    bottom = (4 + 1) * tile_size - tile_size * inset
+    
+    # Point should be on one of the edges
+    on_edge = (abs(closest[0] - left) < 0.01 or abs(closest[0] - right) < 0.01 or
+               abs(closest[1] - top) < 0.01 or abs(closest[1] - bottom) < 0.01)
+    assert on_edge, f"Point inside rectangle should return edge point, got {closest}"
+    print("  ✓ closest_point_on_rectangle works for inside point")
+    
+    # Test render_goal_overlay
+    fig, ax = plt.subplots()
+    ax.set_xlim(0, 200)
+    ax.set_ylim(200, 0)
+    
+    goal = (2, 2, 4, 4)
+    agent_pos = (1, 1)
+    
+    MultiGridGoalEncoder.render_goal_overlay(
+        ax=ax,
+        goal=goal,
+        agent_pos=agent_pos,
+        agent_idx=0,
+        tile_size=32,
+        goal_color=(0.0, 0.4, 1.0, 0.7),
+        line_width=2.5
+    )
+    
+    # Check that patches and lines were added
+    assert len(ax.patches) == 1, f"Expected 1 patch (rectangle), got {len(ax.patches)}"
+    assert len(ax.lines) == 1, f"Expected 1 line (connection), got {len(ax.lines)}"
+    print("  ✓ render_goal_overlay adds rectangle and line")
+    
+    plt.close(fig)
+    
+    print("  ✓ goal rendering test passed!")
+
+
 def run_all_tests():
     """Run all tests."""
     print("=" * 60)
@@ -510,6 +776,15 @@ def run_all_tests():
     print()
     
     test_load_action_conflict()
+    print()
+    
+    test_soft_clamp()
+    print()
+    
+    test_weight_proportional_sampling()
+    print()
+    
+    test_goal_rendering()
     print()
     
     print("=" * 60)

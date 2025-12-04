@@ -390,8 +390,13 @@ def render_with_value_overlay(
     tile_size: int = 32
 ) -> np.ndarray:
     """
-    Render the environment with value function overlay.
+    Render the environment with value function overlay and goal rectangle.
+    
+    Uses MultiGridGoalEncoder.render_goal_overlay for dashed blue rectangle
+    boundaries and agent-to-goal connection lines.
     """
+    from empo.nn_based.multigrid.goal_encoder import MultiGridGoalEncoder
+    
     img = env.render(mode='rgb_array', highlight=False)
     
     fig, ax = plt.subplots(figsize=(8, 8))
@@ -418,25 +423,29 @@ def render_with_value_overlay(
         ax.text(px, py, f'{val:.2f}', ha='center', va='center', 
                 fontsize=7, fontweight='bold', color='black')
     
-    # Mark actual goal with a star
-    if actual_goal:
-        gx = actual_goal[0] * tile_size + tile_size // 2
-        gy = actual_goal[1] * tile_size + tile_size // 2
-        ax.plot(gx, gy, marker='*', markersize=20, color='blue', 
-                markeredgecolor='white', markeredgewidth=2)
-    
-    # Mark first human (agent index 0) with a cyan border/ring
-    # This helps identify which human's value function is being visualized
+    # Mark first human and render goal with dashed rectangle and connection line
     step_count, agent_states, _, _ = env.get_state()
-    if len(agent_states) > 0:
+    if len(agent_states) > 0 and actual_goal:
         first_human_pos = agent_states[0]
+        agent_pos = (float(first_human_pos[0]), float(first_human_pos[1]))
+        
+        # Point goal represented as (x, y, x, y)
+        goal = (actual_goal[0], actual_goal[1], actual_goal[0], actual_goal[1])
+        
+        MultiGridGoalEncoder.render_goal_overlay(
+            ax=ax,
+            goal=goal,
+            agent_pos=agent_pos,
+            agent_idx=0,
+            tile_size=tile_size,
+            goal_color=(0.0, 0.4, 1.0, 0.7),  # Blue, semi-transparent
+            line_width=2.5,
+            inset=0.08
+        )
+        
         hx = int(first_human_pos[0]) * tile_size + tile_size // 2
         hy = int(first_human_pos[1]) * tile_size + tile_size // 2
-        # Draw a cyan ring around the first human
-        ring = plt.Circle((hx, hy), tile_size * 0.45, fill=False, 
-                          color='cyan', linewidth=3)
-        ax.add_patch(ring)
-        # Also add "H1" label
+        # Add "H1" label
         ax.text(hx, hy - tile_size * 0.3, 'H1', ha='center', va='center',
                 fontsize=9, fontweight='bold', color='cyan',
                 bbox=dict(boxstyle='round,pad=0.1', facecolor='black', alpha=0.7))
