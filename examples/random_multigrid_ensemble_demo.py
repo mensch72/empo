@@ -566,14 +566,12 @@ def render_with_goal_overlay(
     """
     Render the environment with goal and human indicators.
     
-    Uses MultiGridGoalEncoder.render_goal_overlay for dashed blue rectangle
+    Uses render_goal_overlay from empo.multigrid for dashed blue rectangle
     boundaries and agent-to-goal connection lines.
     
     - Blue dashed rectangle around the goal area (slightly inside cell bounds)
     - Blue dashed line connecting the agent to the closest point on the goal boundary
     """
-    from empo.nn_based.multigrid.goal_encoder import MultiGridGoalEncoder
-    
     img = env.render(mode='rgb_array', highlight=False)
     
     fig, ax = plt.subplots(figsize=(8, 8))
@@ -583,7 +581,7 @@ def render_with_goal_overlay(
     state = env.get_state()
     _, agent_states, _, _ = state
     
-    # Render goal using the new goal overlay method
+    # Render goal using the goal overlay function from empo.multigrid
     if first_human_goal and first_human_idx < len(agent_states):
         human_pos = agent_states[first_human_idx]
         agent_pos = (float(human_pos[0]), float(human_pos[1]))
@@ -592,7 +590,7 @@ def render_with_goal_overlay(
         goal = (first_human_goal[0], first_human_goal[1], 
                 first_human_goal[0], first_human_goal[1])
         
-        MultiGridGoalEncoder.render_goal_overlay(
+        render_goal_overlay(
             ax=ax,
             goal=goal,
             agent_pos=agent_pos,

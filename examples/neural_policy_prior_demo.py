@@ -38,7 +38,7 @@ from typing import Iterator, Tuple, Dict, List, Any, Optional
 
 from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, Wall, World, SmallActions
 from empo.possible_goal import PossibleGoal, PossibleGoalSampler
-from empo.multigrid import ReachCellGoal, MultiGridGoalSampler
+from empo.multigrid import ReachCellGoal, MultiGridGoalSampler, render_goal_overlay
 from empo.nn_based.multigrid import (
     MultiGridStateEncoder as StateEncoder,
     MultiGridGoalEncoder as GoalEncoder,
@@ -321,11 +321,9 @@ def render_with_value_overlay(
     """
     Render the environment with value function overlay and goal rectangle.
     
-    Uses MultiGridGoalEncoder.render_goal_overlay for dashed blue rectangle
+    Uses render_goal_overlay from empo.multigrid for dashed blue rectangle
     boundaries and agent-to-goal connection lines.
     """
-    from empo.nn_based.multigrid.goal_encoder import MultiGridGoalEncoder
-    
     img = env.render(mode='rgb_array', highlight=False)
     
     fig, ax = plt.subplots(figsize=(8, 8))
@@ -361,7 +359,7 @@ def render_with_value_overlay(
         # Point goal represented as (x, y, x, y)
         goal = (actual_goal[0], actual_goal[1], actual_goal[0], actual_goal[1])
         
-        MultiGridGoalEncoder.render_goal_overlay(
+        render_goal_overlay(
             ax=ax,
             goal=goal,
             agent_pos=agent_pos,
