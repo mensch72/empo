@@ -250,8 +250,82 @@ Git subtree was chosen over alternatives for these reasons:
 - **Flexible modifications**: Can modify vendored code freely
 - **Upstream sync**: Can pull updates from upstream when needed
 
-## Upstream Repository
+## Upstream Repository (Multigrid)
 
 - **Repository**: https://github.com/ArnaudFickinger/gym-multigrid
 - **License**: Apache 2.0 (see vendor/multigrid/LICENSE)
 - **Description**: Multi-agent gridworld environments for reinforcement learning
+
+---
+
+## AI Transport
+
+We vendor the ai_transport library to provide a PettingZoo-based multi-agent transport environment for empowerment research.
+
+### Location
+
+The ai_transport source code is located in:
+```
+vendor/ai_transport/
+```
+
+The main Python package is at:
+```
+vendor/ai_transport/ai_transport/
+```
+
+### Source Repository
+
+- **Repository**: https://github.com/pik-gane/ai_transport
+- **License**: MIT
+- **Description**: A PettingZoo environment for multi-agent transport systems
+
+### How It Works
+
+Like Multigrid, the vendored ai_transport is imported via **PYTHONPATH**:
+
+- The Dockerfile sets: `PYTHONPATH=/workspace:/workspace/vendor/multigrid:/workspace/vendor/ai_transport`
+- This allows Python to import `ai_transport` directly from the vendored source
+- **No container rebuild needed** when you modify the source code
+
+### Purpose
+
+The ai_transport environment is used for studying empowerment in transport scenarios:
+
+- **Humans (passengers)**: Agents that can walk, board vehicles, and ride to destinations
+- **Vehicles**: Agents that can carry passengers, set destinations, and navigate the road network
+- **Network**: A NetworkX directed graph representing road infrastructure with nodes and edges
+
+Key features for EMPO research:
+- Dynamic action spaces based on step type (routing, boarding, unboarding, departing)
+- Multiple observation scenarios (full, local, statistical)
+- Random 2D network generation
+- Built-in policy classes for human and vehicle agents
+
+### Pulling Updates
+
+```bash
+git subtree pull --prefix=vendor/ai_transport https://github.com/pik-gane/ai_transport.git main --squash
+```
+
+### For Local Development (Outside Docker)
+
+```bash
+# Option 1: Set PYTHONPATH
+export PYTHONPATH=/path/to/empo/src:/path/to/empo/vendor/multigrid:/path/to/empo/vendor/ai_transport:$PYTHONPATH
+
+# Option 2: Install in editable mode
+pip install -e ./vendor/ai_transport
+```
+
+### Dependencies
+
+The ai_transport environment requires:
+- pettingzoo>=1.24.0
+- gymnasium>=0.28.0
+- numpy>=1.21.0
+- networkx>=2.6.0
+- scipy>=1.7.0
+- matplotlib>=3.5.0
+
+These are already included in the main requirements.txt.
