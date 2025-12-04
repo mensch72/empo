@@ -51,6 +51,9 @@ try:
         TransportActions,
         StepType,
         create_transport_env,
+        TransportGoal,
+        TransportGoalGenerator,
+        TransportGoalSampler,
     )
     _HAS_TRANSPORT = True
 except ImportError:
@@ -79,4 +82,7 @@ if _HAS_TRANSPORT:
         "TransportActions",
         "StepType",
         "create_transport_env",
+        "TransportGoal",
+        "TransportGoalGenerator",
+        "TransportGoalSampler",
     ])

@@ -9,24 +9,34 @@ Key Features:
 1. step() accepts a list of actions by agent index (not a dict)
 2. Returns observations as a list by agent index
 3. Provides action masking for handling invalid actions across step types
-4. Compatible with existing training code used for multigrid
+4. Action mask included in observations AND available via action_masks() method
+5. Compatible with existing training code used for multigrid
+
+Goal Classes:
+- TransportGoal: Goal that an agent reaches a particular node
+- TransportGoalGenerator: Iterates over all node goals for an agent
+- TransportGoalSampler: Samples node goals uniformly
 
 Usage:
     >>> from empo.transport import TransportEnvWrapper
     >>> env = TransportEnvWrapper(num_humans=4, num_vehicles=2)
     >>> obs = env.reset(seed=42)
-    >>> # Get valid actions for each agent
+    >>> # Action mask is in observation AND available via method
     >>> masks = env.action_masks()
+    >>> print(obs[0]['action_mask'])  # Same as masks[0]
     >>> # Step with a list of actions
     >>> obs, rewards, done, info = env.step([0, 1, 0, 2, 0, 1])
 """
 
-from typing import List, Dict, Tuple, Any, Optional, Union
+from typing import List, Dict, Tuple, Any, Optional, Union, Iterator
 import numpy as np
 import networkx as nx
 
 # Import the ai_transport parallel environment
 from ai_transport import parallel_env as TransportParallelEnv
+
+# Import goal base classes
+from empo.possible_goal import PossibleGoal, PossibleGoalGenerator, PossibleGoalSampler
 
 
 # Fixed action space definition for consistent interface across all step types
@@ -419,17 +429,32 @@ class TransportEnvWrapper:
         return actions_dict
     
     def _obs_dict_to_list(self, obs_dict: Dict[str, Any]) -> List[Dict]:
-        """Convert observation dictionary to list ordered by agent index."""
+        """Convert observation dictionary to list ordered by agent index.
+        
+        Each observation includes:
+        - All fields from the underlying environment
+        - step_type_idx: Integer encoding of current step type
+        - action_mask: Boolean array of valid actions for this agent
+        """
+        # Compute action masks once for all agents
+        masks = self.action_masks()
+        
         obs_list = []
-        for agent in self.agents:
+        for i, agent in enumerate(self.agents):
             if agent in obs_dict:
                 obs = dict(obs_dict[agent])
                 # Add step_type_idx to observation for neural network encoding
                 obs['step_type_idx'] = StepType.from_name(obs.get('step_type', 'routing'))
+                # Add action mask to observation
+                obs['action_mask'] = masks[i]
                 obs_list.append(obs)
             else:
                 # Agent not present (shouldn't happen in parallel env)
-                obs_list.append({'step_type': self.env.step_type, 'step_type_idx': self.step_type_idx})
+                obs_list.append({
+                    'step_type': self.env.step_type, 
+                    'step_type_idx': self.step_type_idx,
+                    'action_mask': masks[i]
+                })
         return obs_list
     
     def render(self):
@@ -507,3 +532,176 @@ def create_transport_env(
     )
     
     return wrapper
+
+
+# =============================================================================
+# Transport Goal Classes
+# =============================================================================
+
+class TransportGoal(PossibleGoal):
+    """
+    Goal that an agent reaches a particular node in the transport network.
+    
+    This goal is achieved when the specified agent is at the target node
+    (not on an edge, but actually at the node).
+    
+    Attributes:
+        env: The TransportEnvWrapper environment
+        agent_idx: Index of the agent this goal applies to
+        target_node: The node ID that the agent should reach
+    
+    Example:
+        >>> env = create_transport_env(num_humans=2, num_vehicles=1, num_nodes=5)
+        >>> goal = TransportGoal(env, agent_idx=0, target_node=3)
+        >>> # Goal is achieved when human_0 is at node 3
+    """
+    
+    def __init__(self, env: TransportEnvWrapper, agent_idx: int, target_node: Any):
+        """
+        Initialize the transport goal.
+        
+        Args:
+            env: The TransportEnvWrapper environment
+            agent_idx: Index of the agent this goal applies to
+            target_node: The target node ID the agent should reach
+        """
+        # Note: TransportEnvWrapper is not a WorldModel, so we pass None
+        # and store the env separately
+        super().__init__(world_model=None)
+        self.env = env
+        self.agent_idx = agent_idx
+        self.target_node = target_node
+        # Store target_pos for compatibility with existing goal rendering code
+        self.target_pos = target_node
+    
+    def is_achieved(self, state) -> int:
+        """
+        Check if this goal is achieved.
+        
+        For TransportEnvWrapper, we check if the agent at agent_idx
+        is currently at the target_node (not on an edge).
+        
+        Note: Since TransportEnvWrapper doesn't have a get_state/set_state
+        interface like WorldModel, this method checks the current env state.
+        The state parameter is ignored for now.
+        
+        Args:
+            state: Ignored (uses current env state)
+        
+        Returns:
+            int: 1 if the agent is at the target node, 0 otherwise
+        """
+        pos = self.env.get_agent_position(self.agent_idx)
+        # Agent is at a node (not on an edge) and it's the target node
+        if pos is not None and not isinstance(pos, tuple) and pos == self.target_node:
+            return 1
+        return 0
+    
+    def __hash__(self) -> int:
+        """Return hash based on agent index and target node."""
+        return hash((self.agent_idx, self.target_node))
+    
+    def __eq__(self, other) -> bool:
+        """Check equality with another TransportGoal."""
+        return (isinstance(other, TransportGoal) and 
+                self.agent_idx == other.agent_idx and 
+                self.target_node == other.target_node)
+    
+    def __repr__(self) -> str:
+        return f"TransportGoal(agent={self.agent_idx}, node={self.target_node})"
+
+
+class TransportGoalGenerator(PossibleGoalGenerator):
+    """
+    Generator that yields all possible node goals for an agent.
+    
+    Iterates over all nodes in the transport network, yielding a
+    TransportGoal for each node with weight 1.0.
+    
+    This is useful for exact computation of integrals over the goal space
+    when the network is small enough to enumerate all nodes.
+    
+    Example:
+        >>> env = create_transport_env(num_humans=2, num_vehicles=1, num_nodes=5)
+        >>> generator = TransportGoalGenerator(env)
+        >>> for goal, weight in generator.generate(state=None, human_agent_index=0):
+        ...     print(f"{goal} with weight {weight}")
+    """
+    
+    def __init__(self, env: TransportEnvWrapper):
+        """
+        Initialize the goal generator.
+        
+        Args:
+            env: The TransportEnvWrapper environment
+        """
+        super().__init__(world_model=None)
+        self.env = env
+    
+    def generate(self, state, human_agent_index: int) -> Iterator[Tuple[PossibleGoal, float]]:
+        """
+        Generate all possible node goals for the specified agent.
+        
+        Yields one TransportGoal for each node in the network, all with
+        weight 1.0 (uniform weighting).
+        
+        Args:
+            state: Current state (ignored, uses env's network)
+            human_agent_index: Index of the agent whose goals to generate
+        
+        Yields:
+            Tuple[TransportGoal, float]: Pairs of (goal, weight=1.0)
+        """
+        nodes = list(self.env.network.nodes())
+        for node in nodes:
+            goal = TransportGoal(self.env, agent_idx=human_agent_index, target_node=node)
+            yield goal, 1.0
+
+
+class TransportGoalSampler(PossibleGoalSampler):
+    """
+    Sampler that uniformly samples node goals for an agent.
+    
+    Randomly selects a node from the transport network and returns
+    a TransportGoal for that node with weight 1.0.
+    
+    This is useful for Monte Carlo approximation when the network
+    is too large for exact enumeration.
+    
+    Example:
+        >>> env = create_transport_env(num_humans=2, num_vehicles=1, num_nodes=100)
+        >>> sampler = TransportGoalSampler(env)
+        >>> goal, weight = sampler.sample(state=None, human_agent_index=0)
+        >>> print(f"Sampled {goal} with weight {weight}")
+    """
+    
+    def __init__(self, env: TransportEnvWrapper, seed: Optional[int] = None):
+        """
+        Initialize the goal sampler.
+        
+        Args:
+            env: The TransportEnvWrapper environment
+            seed: Optional random seed for reproducibility
+        """
+        super().__init__(world_model=None)
+        self.env = env
+        self.rng = np.random.RandomState(seed)
+    
+    def sample(self, state, human_agent_index: int) -> Tuple[PossibleGoal, float]:
+        """
+        Sample a random node goal for the specified agent.
+        
+        Uniformly samples a node from the network and returns a
+        TransportGoal for that node with weight 1.0.
+        
+        Args:
+            state: Current state (ignored, uses env's network)
+            human_agent_index: Index of the agent whose goal to sample
+        
+        Returns:
+            Tuple[TransportGoal, float]: (goal, weight=1.0)
+        """
+        nodes = list(self.env.network.nodes())
+        target_node = self.rng.choice(nodes)
+        goal = TransportGoal(self.env, agent_idx=human_agent_index, target_node=target_node)
+        return goal, 1.0

@@ -201,5 +201,106 @@ def test_observation_scenarios():
             assert 'real_time' in agent_obs
 
 
+# =============================================================================
+# Tests for TransportEnvWrapper and Goal Classes
+# =============================================================================
+
+def test_wrapper_action_mask_in_observation():
+    """Test that action mask is included in observations."""
+    from empo.transport import create_transport_env, TransportActions
+    import numpy as np
+    
+    env = create_transport_env(num_humans=2, num_vehicles=1, num_nodes=5, seed=42)
+    obs = env.reset(seed=42)
+    
+    # Each observation should have an action_mask
+    for i, agent_obs in enumerate(obs):
+        assert 'action_mask' in agent_obs
+        mask = agent_obs['action_mask']
+        assert isinstance(mask, np.ndarray)
+        assert mask.shape == (TransportActions.NUM_ACTIONS,)
+        assert mask.dtype == bool
+        # PASS action should always be valid
+        assert mask[TransportActions.PASS] == True
+
+
+def test_wrapper_action_mask_matches_method():
+    """Test that action mask in observation matches action_masks() method."""
+    from empo.transport import create_transport_env
+    import numpy as np
+    
+    env = create_transport_env(num_humans=2, num_vehicles=1, num_nodes=5, seed=42)
+    obs = env.reset(seed=42)
+    
+    # Get masks from method
+    masks_from_method = env.action_masks()
+    
+    # Compare with masks in observations
+    for i, agent_obs in enumerate(obs):
+        assert np.array_equal(agent_obs['action_mask'], masks_from_method[i])
+
+
+def test_transport_goal():
+    """Test TransportGoal class."""
+    from empo.transport import create_transport_env, TransportGoal
+    
+    env = create_transport_env(num_humans=2, num_vehicles=1, num_nodes=5, seed=42)
+    env.reset(seed=42)
+    
+    # Create a goal
+    goal = TransportGoal(env, agent_idx=0, target_node=2)
+    
+    assert goal.agent_idx == 0
+    assert goal.target_node == 2
+    assert goal.target_pos == 2  # For compatibility
+    
+    # Test hash and equality
+    goal2 = TransportGoal(env, agent_idx=0, target_node=2)
+    goal3 = TransportGoal(env, agent_idx=0, target_node=3)
+    
+    assert hash(goal) == hash(goal2)
+    assert goal == goal2
+    assert goal != goal3
+
+
+def test_transport_goal_generator():
+    """Test TransportGoalGenerator class."""
+    from empo.transport import create_transport_env, TransportGoalGenerator, TransportGoal
+    
+    env = create_transport_env(num_humans=2, num_vehicles=1, num_nodes=5, seed=42)
+    env.reset(seed=42)
+    
+    generator = TransportGoalGenerator(env)
+    goals = list(generator.generate(state=None, human_agent_index=0))
+    
+    # Should generate one goal per node
+    assert len(goals) == 5
+    
+    # Each goal should be a TransportGoal with weight 1.0
+    for goal, weight in goals:
+        assert isinstance(goal, TransportGoal)
+        assert goal.agent_idx == 0
+        assert weight == 1.0
+
+
+def test_transport_goal_sampler():
+    """Test TransportGoalSampler class."""
+    from empo.transport import create_transport_env, TransportGoalSampler, TransportGoal
+    
+    env = create_transport_env(num_humans=2, num_vehicles=1, num_nodes=5, seed=42)
+    env.reset(seed=42)
+    
+    sampler = TransportGoalSampler(env, seed=42)
+    
+    # Sample multiple goals
+    for _ in range(10):
+        goal, weight = sampler.sample(state=None, human_agent_index=0)
+        assert isinstance(goal, TransportGoal)
+        assert goal.agent_idx == 0
+        assert weight == 1.0
+        # Target node should be in the network
+        assert goal.target_node in env.network.nodes()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
