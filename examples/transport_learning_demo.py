@@ -1,0 +1,546 @@
+#!/usr/bin/env python3
+"""
+Transport Environment Learning Demo.
+
+This script demonstrates neural network-based policy learning for a minimal
+transport environment:
+- 5 nodes forming a small road network
+- 1 human agent (learns to walk to goal)
+- 0 vehicles
+- Goal: human reaches a target node
+
+The demo uses the nn_based.transport module to:
+1. Create a small transport environment
+2. Train neural network (Q-network) to learn human policy for reaching goals
+3. Run rollouts showing the learned policy
+
+This is a minimal example to verify that the learning infrastructure works.
+No vehicles or complex routing - just a human learning to navigate to a goal.
+"""
+
+import sys
+import os
+import time
+import random
+import argparse
+
+# Add paths for imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'ai_transport'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+import networkx as nx
+
+from empo.transport import (
+    create_transport_env,
+    TransportEnvWrapper,
+    TransportGoal,
+    TransportGoalSampler,
+    TransportActions,
+)
+from empo.nn_based.transport import (
+    TransportQNetwork,
+    TransportNeuralHumanPolicyPrior,
+    train_transport_neural_policy_prior,
+    NUM_TRANSPORT_ACTIONS,
+)
+
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+# Quick vs full mode
+N_EPISODES_QUICK = 50
+N_EPISODES_FULL = 500
+N_ROLLOUTS_QUICK = 3
+N_ROLLOUTS_FULL = 10
+MAX_STEPS = 20
+
+
+# ============================================================================
+# Create minimal network
+# ============================================================================
+
+def create_simple_5node_network():
+    """
+    Create a simple 5-node network for testing.
+    
+    Layout:
+        0 --- 1 --- 2
+        |     |     |
+        3 --- 4 ----+
+        
+    Node 0 is at (0, 0)
+    Node 1 is at (1, 0)  
+    Node 2 is at (2, 0)
+    Node 3 is at (0, 1)
+    Node 4 is at (1, 1)
+    
+    All edges are bidirectional.
+    """
+    G = nx.DiGraph()
+    
+    # Add nodes with positions
+    positions = {
+        0: (0.0, 0.0),
+        1: (1.0, 0.0),
+        2: (2.0, 0.0),
+        3: (0.0, 1.0),
+        4: (1.0, 1.0),
+    }
+    
+    for node, pos in positions.items():
+        G.add_node(node, pos=pos)
+    
+    # Add bidirectional edges with lengths
+    edges = [
+        (0, 1), (1, 0),  # 0-1
+        (1, 2), (2, 1),  # 1-2
+        (0, 3), (3, 0),  # 0-3
+        (1, 4), (4, 1),  # 1-4
+        (3, 4), (4, 3),  # 3-4
+        (2, 4), (4, 2),  # 2-4 (diagonal)
+    ]
+    
+    for u, v in edges:
+        pos_u = positions[u]
+        pos_v = positions[v]
+        length = ((pos_u[0] - pos_v[0])**2 + (pos_u[1] - pos_v[1])**2)**0.5
+        G.add_edge(u, v, length=length, speed_limit=50.0, capacity=10)
+    
+    return G
+
+
+# ============================================================================
+# Visualization
+# ============================================================================
+
+def render_network_state(env, goal_node=None, value_dict=None, title=""):
+    """
+    Render the network state with optional value overlay.
+    
+    Args:
+        env: TransportEnvWrapper
+        goal_node: Target node (highlighted)
+        value_dict: Optional dict mapping nodes to V-values
+        title: Plot title
+    
+    Returns:
+        RGB array of the rendered image
+    """
+    fig, ax = plt.subplots(figsize=(8, 6))
+    
+    network = env.env.network
+    positions = {node: data['pos'] for node, data in network.nodes(data=True)}
+    
+    # Draw edges
+    for u, v in network.edges():
+        pos_u = positions[u]
+        pos_v = positions[v]
+        ax.plot([pos_u[0], pos_v[0]], [pos_u[1], pos_v[1]], 
+                'gray', linewidth=2, alpha=0.5, zorder=1)
+    
+    # Draw nodes with value colors
+    if value_dict:
+        values = list(value_dict.values())
+        vmin, vmax = min(values), max(values)
+        if vmax > vmin:
+            norm = plt.Normalize(vmin=vmin, vmax=vmax)
+        else:
+            norm = plt.Normalize(vmin=0, vmax=1)
+        cmap = plt.cm.RdYlGn
+    
+    for node, pos in positions.items():
+        if value_dict and node in value_dict:
+            color = cmap(norm(value_dict[node]))
+        else:
+            color = 'lightblue'
+        
+        circle = plt.Circle(pos, 0.15, color=color, ec='black', linewidth=2, zorder=2)
+        ax.add_patch(circle)
+        ax.text(pos[0], pos[1], str(node), ha='center', va='center', 
+                fontsize=12, fontweight='bold', zorder=3)
+        
+        # Show value
+        if value_dict and node in value_dict:
+            ax.text(pos[0], pos[1] - 0.25, f'{value_dict[node]:.2f}', 
+                    ha='center', va='top', fontsize=9, color='darkblue')
+    
+    # Highlight goal node
+    if goal_node is not None and goal_node in positions:
+        pos = positions[goal_node]
+        star = plt.Circle(pos, 0.2, color='none', ec='gold', linewidth=4, zorder=4)
+        ax.add_patch(star)
+        ax.plot(pos[0], pos[1], '*', markersize=20, color='gold', zorder=5)
+    
+    # Draw agent (human)
+    agent_positions = env.env.agent_positions
+    for agent_name, agent_pos in agent_positions.items():
+        if agent_pos is not None:
+            if isinstance(agent_pos, tuple):
+                # On edge
+                edge_info, progress = agent_pos
+                u, v = edge_info[0], edge_info[1]
+                if isinstance(v, np.integer):
+                    v = int(v)
+                pos_u = positions[u]
+                pos_v = positions[v]
+                x = pos_u[0] + progress / network.edges[u, v]['length'] * (pos_v[0] - pos_u[0])
+                y = pos_u[1] + progress / network.edges[u, v]['length'] * (pos_v[1] - pos_u[1])
+                ax.plot(x, y, 'o', markersize=15, color='yellow', ec='black', linewidth=2, zorder=6)
+                ax.text(x, y, 'H', ha='center', va='center', fontsize=10, fontweight='bold', zorder=7)
+            else:
+                # At node
+                pos = positions[agent_pos]
+                ax.plot(pos[0], pos[1], 'o', markersize=20, color='yellow', ec='black', linewidth=2, zorder=6)
+                ax.text(pos[0], pos[1], 'H', ha='center', va='center', fontsize=10, fontweight='bold', zorder=7)
+    
+    ax.set_xlim(-0.5, 2.5)
+    ax.set_ylim(-0.5, 1.5)
+    ax.set_aspect('equal')
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    ax.axis('off')
+    
+    fig.tight_layout()
+    fig.canvas.draw()
+    
+    buf = np.asarray(fig.canvas.buffer_rgba())
+    buf = buf[:, :, :3]
+    
+    plt.close(fig)
+    return buf
+
+
+def compute_value_for_nodes(q_network, env, agent_idx, goal_node, device='cpu'):
+    """
+    Compute V-values for all nodes using the Q-network.
+    
+    V(s) = Σ_a π(a|s,g) * Q(s,a,g) where π = softmax(β*Q)
+    """
+    values = {}
+    network = env.env.network
+    
+    # Create goal object
+    goal = TransportGoal(env, agent_idx, goal_node)
+    
+    # Save current agent position
+    agent_name = env.agents[agent_idx]
+    original_pos = env.env.agent_positions.get(agent_name)
+    
+    with torch.no_grad():
+        for node in network.nodes():
+            # Temporarily move agent to this node to compute value
+            env.env.agent_positions[agent_name] = node
+            
+            # If agent is at goal, value is 1.0
+            if node == goal_node:
+                values[node] = 1.0
+                continue
+            
+            # Get Q-values
+            q_values = q_network.encode_and_forward(
+                None, env, agent_idx, goal, device
+            )
+            
+            # V = E_π[Q]
+            probs = q_network.get_policy(q_values)
+            v_value = (probs * q_values).sum().item()
+            values[node] = v_value
+    
+    # Restore original position
+    env.env.agent_positions[agent_name] = original_pos
+    
+    return values
+
+
+def get_action_from_qnetwork(q_network, env, agent_idx, goal, beta=5.0, device='cpu'):
+    """
+    Sample action from learned Boltzmann policy.
+    """
+    with torch.no_grad():
+        q_values = q_network.encode_and_forward(
+            None, env, agent_idx, goal, device
+        )
+        
+        # Apply action mask
+        action_mask = torch.tensor(
+            env.action_masks()[agent_idx],
+            dtype=torch.bool,
+            device=device
+        )
+        masked_q = q_values.clone()
+        masked_q[0, ~action_mask] = float('-inf')
+        
+        # Boltzmann policy
+        if beta == float('inf'):
+            action = torch.argmax(masked_q, dim=1).item()
+        else:
+            probs = F.softmax(beta * masked_q, dim=1)
+            probs = probs / probs.sum()  # Renormalize
+            action = torch.multinomial(probs, 1).item()
+    
+    return action
+
+
+# ============================================================================
+# Rollout
+# ============================================================================
+
+def run_rollout(env, q_network, goal_node, agent_idx=0, beta=5.0, device='cpu'):
+    """
+    Run a single rollout with the learned policy.
+    
+    Returns list of frames and whether goal was reached.
+    """
+    env.reset()
+    frames = []
+    goal = TransportGoal(env, agent_idx, goal_node)
+    
+    for step in range(MAX_STEPS):
+        # Compute values for visualization
+        value_dict = compute_value_for_nodes(q_network, env, agent_idx, goal_node, device)
+        
+        # Check if at goal
+        agent_name = env.agents[agent_idx]
+        agent_pos = env.env.agent_positions.get(agent_name)
+        at_goal = agent_pos == goal_node
+        
+        title = f"Step {step} | Goal: node {goal_node}"
+        if at_goal:
+            title += " | GOAL REACHED!"
+        
+        frame = render_network_state(env, goal_node=goal_node, value_dict=value_dict, title=title)
+        frames.append(frame)
+        
+        if at_goal:
+            break
+        
+        # Get action from Q-network
+        action = get_action_from_qnetwork(q_network, env, agent_idx, goal, beta, device)
+        
+        # Execute action for all agents (only 1 human, no vehicles)
+        actions = [action]  # Only one agent
+        env.step(actions)
+    
+    # Final frame
+    value_dict = compute_value_for_nodes(q_network, env, agent_idx, goal_node, device)
+    agent_pos = env.env.agent_positions.get(env.agents[agent_idx])
+    at_goal = agent_pos == goal_node
+    title = f"Step {MAX_STEPS} | Goal: node {goal_node}"
+    if at_goal:
+        title += " | GOAL REACHED!"
+    frame = render_network_state(env, goal_node=goal_node, value_dict=value_dict, title=title)
+    frames.append(frame)
+    
+    return frames, at_goal
+
+
+# ============================================================================
+# Movie Creation
+# ============================================================================
+
+def create_movie(all_frames, goal_nodes, output_path, n_rollouts):
+    """Create animation from rollout frames."""
+    print(f"Creating movie with {len(all_frames)} rollouts...")
+    
+    frames = []
+    frame_info = []
+    
+    for rollout_idx, (rollout_frames, goal_node) in enumerate(zip(all_frames, goal_nodes)):
+        for frame_idx, frame in enumerate(rollout_frames):
+            frames.append(frame)
+            frame_info.append((rollout_idx, frame_idx, goal_node))
+    
+    if len(frames) == 0:
+        print("No frames to create movie!")
+        return
+    
+    fig, ax = plt.subplots(figsize=(10, 8))
+    ax.axis('off')
+    
+    im = ax.imshow(frames[0])
+    title = ax.set_title('', fontsize=14, fontweight='bold')
+    
+    def update(frame_idx):
+        rollout_idx, step_idx, goal_node = frame_info[frame_idx]
+        im.set_array(frames[frame_idx])
+        title.set_text(f'Rollout {rollout_idx + 1}/{n_rollouts} | Step {step_idx} | '
+                      f'Goal: node {goal_node}\n'
+                      f'Colors = learned V-values | ★ = goal | H = human')
+        return [im, title]
+    
+    anim = animation.FuncAnimation(
+        fig, update, frames=len(frames),
+        interval=500, blit=True, repeat=True
+    )
+    
+    try:
+        writer = animation.FFMpegWriter(fps=2, bitrate=2000)
+        anim.save(output_path, writer=writer)
+        print(f"✓ Movie saved to {output_path}")
+    except Exception as e:
+        print(f"Could not save MP4 ({e}), trying GIF...")
+        gif_path = output_path.replace('.mp4', '.gif')
+        try:
+            anim.save(gif_path, writer='pillow', fps=2)
+            print(f"✓ Movie saved as GIF to {gif_path}")
+        except Exception as e2:
+            print(f"Error saving movie: {e2}")
+    
+    plt.close()
+
+
+# ============================================================================
+# Main
+# ============================================================================
+
+def main(quick_mode=False):
+    n_episodes = N_EPISODES_QUICK if quick_mode else N_EPISODES_FULL
+    n_rollouts = N_ROLLOUTS_QUICK if quick_mode else N_ROLLOUTS_FULL
+    mode_str = "QUICK TEST MODE" if quick_mode else "FULL MODE"
+    
+    print("=" * 70)
+    print("Transport Environment Learning Demo")
+    print(f"  [{mode_str}]")
+    print("Minimal example: 5 nodes, 1 human, no vehicles")
+    print("Goal: Human learns to walk to target node")
+    print("=" * 70)
+    print()
+    
+    # Create output directory
+    output_dir = os.path.join(os.path.dirname(__file__), '..', 'outputs')
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Create custom network
+    print("Creating simple 5-node network...")
+    network = create_simple_5node_network()
+    print(f"  Nodes: {list(network.nodes())}")
+    print(f"  Edges: {list(network.edges())}")
+    print()
+    
+    # Create environment with custom network
+    print("Creating transport environment...")
+    from ai_transport import parallel_env
+    
+    base_env = parallel_env(
+        num_humans=1,
+        num_vehicles=0,
+        network=network,
+        max_steps=MAX_STEPS,
+        render_mode=None,
+    )
+    
+    env = TransportEnvWrapper(base_env, num_clusters=0)
+    env.reset(seed=42)
+    
+    print(f"  Agents: {env.agents}")
+    print(f"  Number of nodes: {len(network.nodes())}")
+    print(f"  Max steps: {MAX_STEPS}")
+    print()
+    
+    # Get goal nodes (all 5 nodes)
+    goal_nodes = list(network.nodes())
+    print(f"Possible goal nodes: {goal_nodes}")
+    print()
+    
+    # Create goal sampler
+    goal_sampler = TransportGoalSampler(env, seed=42)
+    human_agent_indices = [0]  # Only one human
+    
+    # Train neural network
+    print(f"Training neural network for {n_episodes} episodes...")
+    print("  Learning: Q-values for reaching each goal node")
+    print("  Using: GNN-based state encoding")
+    print()
+    
+    device = 'cpu'
+    beta = 5.0
+    
+    t0 = time.time()
+    neural_prior = train_transport_neural_policy_prior(
+        env=env,
+        human_agent_indices=human_agent_indices,
+        goal_sampler=goal_sampler,
+        num_episodes=n_episodes,
+        steps_per_episode=MAX_STEPS,
+        batch_size=32,
+        learning_rate=1e-3,
+        gamma=0.99,
+        beta=beta,
+        buffer_capacity=10000,
+        target_update_freq=50,
+        state_feature_dim=64,
+        goal_feature_dim=16,
+        hidden_dim=64,
+        num_gnn_layers=2,
+        gnn_type='gcn',
+        device=device,
+        verbose=True,
+        reward_shaping=True,
+        epsilon=0.3,
+        updates_per_episode=2,
+        max_nodes=10,
+        num_clusters=0,
+    )
+    
+    q_network = neural_prior.q_network
+    elapsed = time.time() - t0
+    print(f"  Training completed in {elapsed:.2f} seconds")
+    print()
+    
+    # Select goal nodes for rollouts
+    print(f"Running {n_rollouts} rollouts with learned policy...")
+    random.seed(42)
+    selected_goals = random.choices(goal_nodes, k=n_rollouts)
+    print(f"  Selected goals: {selected_goals}")
+    print()
+    
+    all_frames = []
+    successes = 0
+    
+    for i, goal_node in enumerate(selected_goals):
+        print(f"  Rollout {i + 1}/{n_rollouts}: Goal = node {goal_node}")
+        
+        frames, reached = run_rollout(
+            env=env,
+            q_network=q_network,
+            goal_node=goal_node,
+            agent_idx=0,
+            beta=beta,
+            device=device
+        )
+        all_frames.append(frames)
+        
+        if reached:
+            successes += 1
+            print(f"    ✓ Goal reached in {len(frames) - 1} steps")
+        else:
+            print(f"    ✗ Goal not reached")
+    
+    print()
+    print(f"Success rate: {successes}/{n_rollouts} ({100*successes/n_rollouts:.1f}%)")
+    print()
+    
+    # Create movie
+    movie_path = os.path.join(output_dir, 'transport_learning_demo.mp4')
+    create_movie(all_frames, selected_goals, movie_path, n_rollouts=n_rollouts)
+    
+    print()
+    print("=" * 70)
+    print("Demo completed!")
+    print(f"Output: {os.path.abspath(movie_path)}")
+    print("=" * 70)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Transport Learning Demo')
+    parser.add_argument('--quick', '-q', action='store_true',
+                        help='Run in quick test mode with fewer episodes')
+    args = parser.parse_args()
+    main(quick_mode=args.quick)
