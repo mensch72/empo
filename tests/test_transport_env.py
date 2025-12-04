@@ -302,5 +302,143 @@ def test_transport_goal_sampler():
         assert goal.target_node in env.network.nodes()
 
 
+# =============================================================================
+# Tests for Network Clustering
+# =============================================================================
+
+def test_import_clustering():
+    """Test that clustering module can be imported."""
+    from ai_transport import cluster_network
+    assert callable(cluster_network)
+
+
+def test_cluster_network_basic():
+    """Test basic network clustering."""
+    from ai_transport import cluster_network
+    import networkx as nx
+    
+    # Create a simple network with 2D positions
+    G = nx.DiGraph()
+    for i in range(12):
+        G.add_node(i, x=float(i % 4), y=float(i // 4))
+    
+    # Add some edges
+    for i in range(11):
+        G.add_edge(i, i + 1)
+    
+    # Cluster into 3 regions
+    cluster_info = cluster_network(G, k=3)
+    
+    assert 'node_to_cluster' in cluster_info
+    assert 'cluster_to_nodes' in cluster_info
+    assert 'centroids' in cluster_info
+    assert 'cluster_centers' in cluster_info
+    assert 'num_clusters' in cluster_info
+    
+    # All nodes should be assigned to a cluster
+    assert len(cluster_info['node_to_cluster']) == 12
+    
+    # Number of clusters should match
+    assert cluster_info['num_clusters'] == 3
+
+
+def test_cluster_network_with_transport_env():
+    """Test clustering on a transport environment network."""
+    from ai_transport import parallel_env, cluster_network
+    
+    # Create environment with network
+    env = parallel_env(num_humans=2, num_vehicles=1)
+    network = env.create_random_2d_network(
+        num_nodes=20,
+        bidirectional_prob=0.5,
+        speed_mean=3.0,
+        capacity_mean=10.0,
+        coord_std=10.0,
+        seed=42
+    )
+    
+    # Cluster into 4 regions
+    cluster_info = cluster_network(network, k=4)
+    
+    # All nodes should be assigned
+    assert len(cluster_info['node_to_cluster']) == 20
+    
+    # Should have 4 clusters
+    assert cluster_info['num_clusters'] == 4
+    
+    # Each cluster should have at least one node
+    for cluster_id in range(4):
+        nodes = cluster_info['cluster_to_nodes'].get(cluster_id, [])
+        assert len(nodes) > 0, f"Cluster {cluster_id} is empty"
+
+
+def test_cluster_helper_functions():
+    """Test cluster helper functions."""
+    from ai_transport import (
+        cluster_network,
+        get_cluster_for_node,
+        get_nodes_in_cluster,
+        get_cluster_centroid
+    )
+    import networkx as nx
+    
+    # Create a simple network
+    G = nx.DiGraph()
+    for i in range(9):
+        G.add_node(i, x=float(i % 3), y=float(i // 3))
+    
+    cluster_info = cluster_network(G, k=3)
+    
+    # Test get_cluster_for_node
+    for node in G.nodes():
+        cluster_id = get_cluster_for_node(node, cluster_info)
+        assert cluster_id is not None
+        assert 0 <= cluster_id < 3
+    
+    # Test get_nodes_in_cluster
+    all_nodes = set()
+    for cluster_id in range(3):
+        nodes = get_nodes_in_cluster(cluster_id, cluster_info)
+        assert len(nodes) > 0
+        all_nodes.update(nodes)
+    assert all_nodes == set(G.nodes())
+    
+    # Test get_cluster_centroid
+    for cluster_id in range(3):
+        centroid = get_cluster_centroid(cluster_id, cluster_info)
+        assert centroid is not None
+        assert centroid in G.nodes()
+
+
+def test_cluster_empty_network():
+    """Test clustering handles empty network."""
+    from ai_transport import cluster_network
+    import networkx as nx
+    
+    G = nx.DiGraph()
+    cluster_info = cluster_network(G, k=5)
+    
+    assert cluster_info['num_clusters'] == 0
+    assert len(cluster_info['node_to_cluster']) == 0
+    assert len(cluster_info['cluster_to_nodes']) == 0
+
+
+def test_cluster_k_larger_than_nodes():
+    """Test clustering when k > number of nodes."""
+    from ai_transport import cluster_network
+    import networkx as nx
+    
+    # Create network with only 3 nodes
+    G = nx.DiGraph()
+    for i in range(3):
+        G.add_node(i, x=float(i), y=0.0)
+    
+    # Request 10 clusters
+    cluster_info = cluster_network(G, k=10)
+    
+    # Should only have 3 clusters (one per node)
+    assert cluster_info['num_clusters'] == 3
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
