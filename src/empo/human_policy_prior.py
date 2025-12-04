@@ -105,18 +105,30 @@ class HumanPolicyPrior(ABC):
         
         Handles both dict (from neural policy priors) and array returns.
         For dict input, assumes keys are consecutive integers starting from 0.
+        Ensures the probabilities sum to 1.0.
         
         Args:
             action_distribution: Either a dict mapping action index to probability,
                                or a numpy array of probabilities.
         
         Returns:
-            np.ndarray: Probability array indexed by action.
+            np.ndarray: Probability array indexed by action, normalized to sum to 1.0.
         """
         if isinstance(action_distribution, dict):
             num_actions = len(action_distribution)
-            return np.array([action_distribution[i] for i in range(num_actions)])
-        return action_distribution
+            probs = np.array([action_distribution[i] for i in range(num_actions)])
+        else:
+            probs = np.asarray(action_distribution)
+        
+        # Ensure probabilities sum to 1.0 (handle floating-point errors and edge cases)
+        prob_sum = probs.sum()
+        if prob_sum > 0:
+            probs = probs / prob_sum
+        else:
+            # If all probabilities are zero, use uniform distribution
+            probs = np.ones_like(probs) / len(probs)
+        
+        return probs
 
     def sample(
         self, 
