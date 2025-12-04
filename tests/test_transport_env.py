@@ -634,5 +634,187 @@ def test_wrapper_cluster_vs_node_routing():
     assert obs_clusters[0]['num_clusters'] == 4
 
 
+# =============================================================================
+# Neural Network Encoder Tests
+# =============================================================================
+
+def test_import_transport_encoders():
+    """Test that transport neural network encoders can be imported."""
+    from empo.nn_based.transport import (
+        TransportStateEncoder,
+        TransportGoalEncoder,
+        TransportQNetwork,
+        observation_to_graph_data,
+        STEP_TYPE_TO_IDX,
+        NODE_FEATURE_DIM,
+        EDGE_FEATURE_DIM,
+    )
+    
+    assert callable(TransportStateEncoder)
+    assert callable(TransportGoalEncoder)
+    assert callable(TransportQNetwork)
+    assert callable(observation_to_graph_data)
+    assert len(STEP_TYPE_TO_IDX) == 4
+    assert NODE_FEATURE_DIM > 0
+    assert EDGE_FEATURE_DIM > 0
+
+
+def test_transport_state_encoder_creation():
+    """Test TransportStateEncoder can be created."""
+    from empo.nn_based.transport import TransportStateEncoder
+    
+    encoder = TransportStateEncoder(
+        num_clusters=10,
+        max_nodes=100,
+        feature_dim=128,
+        hidden_dim=64,
+        num_gnn_layers=2,
+    )
+    
+    assert encoder.num_clusters == 10
+    assert encoder.max_nodes == 100
+    assert encoder.feature_dim == 128
+    assert encoder.hidden_dim == 64
+
+
+def test_transport_goal_encoder_creation():
+    """Test TransportGoalEncoder can be created."""
+    from empo.nn_based.transport import TransportGoalEncoder
+    
+    encoder = TransportGoalEncoder(
+        max_nodes=100,
+        num_clusters=10,
+        feature_dim=32,
+    )
+    
+    assert encoder.max_nodes == 100
+    assert encoder.num_clusters == 10
+    assert encoder.feature_dim == 32
+
+
+def test_observation_to_graph_data():
+    """Test observation_to_graph_data extracts features correctly."""
+    from empo.transport import create_transport_env
+    from empo.nn_based.transport import (
+        observation_to_graph_data,
+        NODE_FEATURE_DIM,
+        EDGE_FEATURE_DIM,
+        GLOBAL_FEATURE_DIM,
+        AGENT_FEATURE_DIM,
+    )
+    
+    env = create_transport_env(
+        num_humans=2, 
+        num_vehicles=1, 
+        num_nodes=10, 
+        num_clusters=3,
+        seed=42
+    )
+    env.reset(seed=42)
+    
+    graph_data = observation_to_graph_data(env, query_agent_idx=0)
+    
+    # Check shapes
+    assert graph_data['node_features'].shape == (10, NODE_FEATURE_DIM)
+    assert graph_data['edge_index'].shape[0] == 2  # source/target
+    assert graph_data['edge_features'].shape[1] == EDGE_FEATURE_DIM
+    assert graph_data['global_features'].shape == (GLOBAL_FEATURE_DIM,)
+    assert graph_data['agent_features'].shape == (AGENT_FEATURE_DIM,)
+    assert graph_data['num_nodes'] == 10
+    assert graph_data['num_edges'] > 0
+
+
+def test_transport_q_network_forward():
+    """Test TransportQNetwork forward pass."""
+    import torch
+    from empo.transport import create_transport_env
+    from empo.nn_based.transport import (
+        TransportStateEncoder,
+        TransportGoalEncoder,
+        TransportQNetwork,
+        observation_to_graph_data,
+        NUM_TRANSPORT_ACTIONS,
+    )
+    
+    # Create encoders with small dimensions for testing
+    state_encoder = TransportStateEncoder(
+        num_clusters=3,
+        max_nodes=20,
+        feature_dim=32,
+        hidden_dim=32,
+        num_gnn_layers=1,
+    )
+    goal_encoder = TransportGoalEncoder(
+        max_nodes=20,
+        num_clusters=3,
+        feature_dim=16,
+    )
+    q_network = TransportQNetwork(
+        state_encoder,
+        goal_encoder,
+        num_actions=NUM_TRANSPORT_ACTIONS,
+        hidden_dim=32,
+    )
+    
+    # Create environment and get graph data
+    env = create_transport_env(
+        num_humans=2, 
+        num_vehicles=1, 
+        num_nodes=10, 
+        num_clusters=3,
+        seed=42
+    )
+    env.reset(seed=42)
+    
+    graph_data = observation_to_graph_data(env, query_agent_idx=0)
+    
+    # Create a simple goal tensor
+    goal_tensor = goal_encoder.encode_goal(0, device='cpu', env=env)
+    
+    # Forward pass
+    with torch.no_grad():
+        q_values = q_network(graph_data, goal_tensor)
+    
+    assert q_values.shape == (1, NUM_TRANSPORT_ACTIONS)
+
+
+def test_render_clusters():
+    """Test render_clusters method."""
+    import matplotlib
+    matplotlib.use('Agg')  # Non-interactive backend
+    
+    from empo.transport import create_transport_env
+    
+    env = create_transport_env(
+        num_humans=2, 
+        num_vehicles=1, 
+        num_nodes=12, 
+        num_clusters=4,
+        seed=42
+    )
+    env.reset(seed=42)
+    
+    # Should not raise any errors
+    ax = env.render_clusters()
+    assert ax is not None
+
+
+def test_render_clusters_without_clustering_raises():
+    """Test that render_clusters raises error when clustering not enabled."""
+    from empo.transport import create_transport_env
+    import pytest
+    
+    env = create_transport_env(
+        num_humans=2, 
+        num_vehicles=1, 
+        num_nodes=12,  # No clusters
+        seed=42
+    )
+    env.reset(seed=42)
+    
+    with pytest.raises(ValueError):
+        env.render_clusters()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

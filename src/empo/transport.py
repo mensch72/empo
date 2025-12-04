@@ -602,6 +602,177 @@ class TransportEnvWrapper:
         """Close the environment."""
         return self.env.close()
     
+    def render_clusters(
+        self,
+        ax=None,
+        node_size: int = 100,
+        show_labels: bool = True,
+        show_centroids: bool = True,
+        show_agents: bool = True,
+        cmap: str = 'tab20'
+    ):
+        """
+        Render the network with cluster coloring.
+        
+        This method visualizes the transport network colored by cluster assignments.
+        Useful for understanding the cluster structure and agent positions.
+        
+        Args:
+            ax: Matplotlib axes (created if None).
+            node_size: Size of node markers.
+            show_labels: Whether to show node labels.
+            show_centroids: Whether to highlight centroid nodes with stars.
+            show_agents: Whether to show agent positions.
+            cmap: Colormap name for cluster colors.
+        
+        Returns:
+            Matplotlib axes object.
+        
+        Raises:
+            ValueError: If clustering is not enabled (num_clusters=0).
+        
+        Example:
+            >>> env = create_transport_env(num_humans=4, num_vehicles=2, num_nodes=20, num_clusters=5)
+            >>> env.reset(seed=42)
+            >>> ax = env.render_clusters()
+            >>> plt.show()
+        """
+        import matplotlib.pyplot as plt
+        import numpy as np
+        
+        if not self.use_clusters or self.cluster_info is None:
+            raise ValueError(
+                "Clustering is not enabled. Create environment with num_clusters > 0."
+            )
+        
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(12, 10))
+        
+        G = self.env.network
+        nodes = list(G.nodes())
+        
+        # Extract coordinates
+        coords = []
+        for node in nodes:
+            node_data = G.nodes[node]
+            if 'x' in node_data and 'y' in node_data:
+                coords.append([float(node_data['x']), float(node_data['y'])])
+            elif 'pos' in node_data:
+                pos = node_data['pos']
+                coords.append([float(pos[0]), float(pos[1])])
+            else:
+                coords.append([0.0, 0.0])
+        coords = np.array(coords)
+        
+        node_to_cluster = self.cluster_info['node_to_cluster']
+        num_clusters = self.cluster_info['num_clusters']
+        centroids = self.cluster_info['centroids']
+        
+        # Create color map
+        colormap = plt.colormaps.get_cmap(cmap)
+        colors = [colormap(node_to_cluster.get(node, 0) / max(1, num_clusters - 1)) 
+                  for node in nodes]
+        
+        # Draw edges
+        for u, v in G.edges():
+            if u in nodes and v in nodes:
+                u_idx = nodes.index(u)
+                v_idx = nodes.index(v)
+                ax.plot(
+                    [coords[u_idx, 0], coords[v_idx, 0]],
+                    [coords[u_idx, 1], coords[v_idx, 1]],
+                    'k-', alpha=0.2, linewidth=0.5
+                )
+        
+        # Draw nodes
+        ax.scatter(coords[:, 0], coords[:, 1], c=colors, s=node_size, zorder=2)
+        
+        # Highlight centroids
+        if show_centroids:
+            for cluster_id, centroid_node in centroids.items():
+                if centroid_node in nodes:
+                    idx = nodes.index(centroid_node)
+                    ax.scatter(
+                        coords[idx, 0], coords[idx, 1],
+                        c='black', s=node_size * 2, marker='*', zorder=3,
+                        edgecolors='white', linewidths=1
+                    )
+        
+        # Draw agents
+        if show_agents:
+            for i, agent in enumerate(self.agents):
+                pos = self.env.agent_positions.get(agent)
+                if pos is None:
+                    continue
+                
+                agent_type = self.get_agent_type(i)
+                
+                # Determine agent coordinates
+                if isinstance(pos, tuple):
+                    # Agent is on an edge - interpolate position
+                    edge, progress = pos
+                    if len(edge) >= 2:
+                        u, v = edge[0], edge[1]
+                        if u in nodes and v in nodes:
+                            u_idx = nodes.index(u)
+                            v_idx = nodes.index(v)
+                            # Get edge length
+                            edge_data = G.edges.get((u, v), {})
+                            edge_length = edge_data.get('length', 1.0)
+                            frac = progress / edge_length if edge_length > 0 else 0
+                            frac = min(max(frac, 0), 1)
+                            ax_pos = coords[u_idx] + frac * (coords[v_idx] - coords[u_idx])
+                        else:
+                            continue
+                    else:
+                        continue
+                else:
+                    # Agent is at a node
+                    if pos not in nodes:
+                        continue
+                    idx = nodes.index(pos)
+                    ax_pos = coords[idx]
+                
+                # Draw agent marker
+                if agent_type == 'human':
+                    marker = 'o'
+                    color = 'blue'
+                    size = node_size * 1.5
+                else:  # vehicle
+                    marker = 's'
+                    color = 'red'
+                    size = node_size * 2
+                
+                ax.scatter(
+                    ax_pos[0], ax_pos[1],
+                    c=color, s=size, marker=marker, zorder=4,
+                    edgecolors='white', linewidths=2, label=agent
+                )
+        
+        # Add labels
+        if show_labels:
+            for i, node in enumerate(nodes):
+                cluster_id = node_to_cluster.get(node, '?')
+                ax.annotate(
+                    f'{node}\n(C{cluster_id})',
+                    (coords[i, 0], coords[i, 1]),
+                    fontsize=6, ha='center', va='bottom'
+                )
+        
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.set_title(f'Transport Network Clusters (k={num_clusters})')
+        ax.set_aspect('equal')
+        
+        # Add legend for agents if shown
+        if show_agents and len(self.agents) > 0:
+            handles, labels = ax.get_legend_handles_labels()
+            if handles:
+                ax.legend(handles[:min(6, len(handles))], labels[:min(6, len(labels))],
+                         loc='upper left', fontsize=8)
+        
+        return ax
+    
     def get_agent_type(self, agent_idx: int) -> str:
         """Get the type of agent at given index ('human' or 'vehicle')."""
         agent = self.agents[agent_idx]
