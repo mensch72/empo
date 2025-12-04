@@ -74,6 +74,7 @@ from .policy_prior_network import TransportPolicyPriorNetwork
 from .neural_policy_prior import (
     TransportNeuralHumanPolicyPrior,
     DEFAULT_TRANSPORT_ACTION_ENCODING,
+    train_transport_neural_policy_prior,
 )
 
 __all__ = [
@@ -104,4 +105,6 @@ __all__ = [
     'TransportQNetwork',
     'TransportPolicyPriorNetwork',
     'TransportNeuralHumanPolicyPrior',
+    # Training
+    'train_transport_neural_policy_prior',
 ]

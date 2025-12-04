@@ -957,5 +957,45 @@ def test_transport_neural_policy_prior_save_load():
         assert abs(sum(probs.values()) - 1.0) < 1e-5
 
 
+def test_train_transport_neural_policy_prior():
+    """Test train_transport_neural_policy_prior function (minimal training)."""
+    from empo.transport import create_transport_env, TransportGoalSampler, TransportGoal
+    from empo.nn_based.transport import train_transport_neural_policy_prior
+    
+    env = create_transport_env(
+        num_humans=2,
+        num_vehicles=1,
+        num_nodes=8,
+        num_clusters=0,  # Node-based routing for simplicity
+        seed=42
+    )
+    env.reset(seed=42)
+    
+    goal_sampler = TransportGoalSampler(env, seed=42)
+    
+    # Train for just a few episodes (minimal test)
+    prior = train_transport_neural_policy_prior(
+        env=env,
+        human_agent_indices=[0, 1],
+        goal_sampler=goal_sampler,
+        num_episodes=3,
+        steps_per_episode=5,
+        batch_size=2,
+        hidden_dim=32,
+        state_feature_dim=32,
+        goal_feature_dim=16,
+        num_gnn_layers=1,
+        verbose=False,
+        reward_shaping=False,  # Disable for faster test
+    )
+    
+    # Check that the prior works
+    goal = TransportGoal(env, agent_idx=0, target_node=2)
+    probs = prior(state=None, agent_idx=0, goal=goal)
+    
+    assert len(probs) == 42
+    assert abs(sum(probs.values()) - 1.0) < 1e-5
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
