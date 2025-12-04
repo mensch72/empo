@@ -306,7 +306,8 @@ def run_simulation(args):
     print(f"   Network: {network.number_of_nodes()} nodes, {network.number_of_edges()} edges")
     
     # Create environment with the network
-    render_mode = 'human' if args.render else None
+    # Enable render_mode if rendering or video recording is requested
+    render_mode = 'human' if (args.render or args.save_video) else None
     env = parallel_env(
         num_humans=args.humans,
         num_vehicles=args.vehicles,
@@ -344,16 +345,12 @@ def run_simulation(args):
         env.enable_rendering('graphical')
         if args.save_video:
             print(f"   Video will be saved to: {args.save_video}")
+            # Use built-in recording to capture frames
+            env.start_video_recording()
     
     # Capture initial frame
     if args.save_video or args.render:
-        fig = env.render()
-        if args.save_video and fig is not None:
-            # Convert matplotlib figure to numpy array
-            fig.canvas.draw()
-            buf = np.asarray(fig.canvas.buffer_rgba())
-            frame = buf[:, :, :3]  # Convert RGBA to RGB
-            frames.append(frame.copy())
+        env.render()
     
     # Run simulation
     print(f"\n4. Running simulation for {num_steps} steps...")
@@ -398,13 +395,7 @@ def run_simulation(args):
         
         # Render and capture frame if needed
         if args.render or args.save_video:
-            fig = env.render()
-            if args.save_video and fig is not None:
-                # Convert matplotlib figure to numpy array
-                fig.canvas.draw()
-                buf = np.asarray(fig.canvas.buffer_rgba())
-                frame = buf[:, :, :3]  # Convert RGBA to RGB
-                frames.append(frame.copy())
+            env.render()  # Frames are captured internally if recording is enabled
         
         # Check for termination
         if any(terminations.values()) or any(truncations.values()):
@@ -444,8 +435,9 @@ def run_simulation(args):
     
     # Save video if recording
     if args.save_video:
-        if frames:
-            save_video_matplotlib(frames, args.save_video, fps=5)
+        # Get frames captured by the environment's internal recording
+        if hasattr(env, 'frames') and env.frames:
+            save_video_matplotlib(env.frames, args.save_video, fps=5)
         else:
             print("\nWarning: No frames were captured for video")
     
