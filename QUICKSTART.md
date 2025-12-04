@@ -2,7 +2,33 @@
 
 Get up and running with EMPO in under 5 minutes!
 
-## Prerequisites Check
+## Google Colab (Quickest Option)
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mensch72/empo/blob/main/notebooks/empo_colab_demo.ipynb)
+
+**No installation required!** Click the badge above to run EMPO directly in your browser.
+
+For manual Colab setup:
+
+```python
+# Clone repository
+!git clone --depth 1 https://github.com/mensch72/empo.git
+%cd empo
+
+# Install dependencies
+!apt-get update -qq && apt-get install -qq graphviz > /dev/null 2>&1
+!pip install -q -r requirements-colab.txt
+
+# Configure Python path
+import sys, os
+sys.path.insert(0, os.path.join(os.getcwd(), 'src'))
+sys.path.insert(0, os.path.join(os.getcwd(), 'vendor', 'multigrid'))
+
+# You're ready!
+from empo import WorldModel, PossibleGoal
+```
+
+## Prerequisites Check (for Local Development)
 
 ```bash
 # Verify Docker is installed

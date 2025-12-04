@@ -63,6 +63,41 @@ git clone https://github.com/mensch72/empo.git
 cd empo
 ```
 
+## Google Colab (Recommended for Quick Start)
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mensch72/empo/blob/main/notebooks/empo_colab_demo.ipynb)
+
+The fastest way to try EMPO is via Google Colab. Click the badge above or follow these steps:
+
+```python
+# 1. Clone the repository
+!git clone --depth 1 https://github.com/mensch72/empo.git
+%cd empo
+
+# 2. Install system dependencies (for DAG visualization)
+!apt-get update -qq && apt-get install -qq graphviz > /dev/null 2>&1
+
+# 3. Install Python dependencies
+!pip install -q -r requirements-colab.txt
+
+# 4. Set up Python paths
+import sys, os
+sys.path.insert(0, os.path.join(os.getcwd(), 'src'))
+sys.path.insert(0, os.path.join(os.getcwd(), 'vendor', 'multigrid'))
+
+# 5. Verify installation
+from empo import WorldModel, PossibleGoal
+from envs.one_or_three_chambers import SmallOneOrThreeChambersMapEnv
+print("✓ EMPO is ready!")
+```
+
+See [notebooks/empo_colab_demo.ipynb](notebooks/empo_colab_demo.ipynb) for a complete interactive tutorial.
+
+**Colab Limitations:**
+- MPI distributed training is not supported (use `parallel=False`)
+- Docker is not available in Colab
+- Sessions timeout after ~12 hours
+
 ## Local Development
 
 ### 1. Build and Start the Development Environment
