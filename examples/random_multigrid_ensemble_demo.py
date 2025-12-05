@@ -386,8 +386,8 @@ class RandomMultigridEnv(MultiGridEnv):
                     
                     cumulative += self.door_prob
                     if r < cumulative:
-                        # Place door and schedule a matching key
-                        row.append(f'D{self.door_key_color}')  # Door
+                        # Place closed door and schedule a matching key
+                        row.append(f'C{self.door_key_color}')  # Closed door
                         pending_keys.append(self.door_key_color)
                         # Doors can be passed through (when open), so add to available
                         available_cells.append((x, y))
