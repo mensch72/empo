@@ -8,6 +8,16 @@
         "category": "puzzles",
         "tags": ["multi-agent", "chambers", "human-robot", "small", "dag"]
     },
-    "map": "We We We We We .. .. .. .. ..\nWe .. We Ay We .. .. .. .. ..\nWe .. We Ay We We We .. .. ..\nWe Ae Ro .. .. .. We .. .. ..\nWe .. We We We .. We We We ..\nWe .. .. .. We .. .. .. We We\nWe .. .. We .. .. Bl .. .. We\nWe .. .. .. We We .. We We We\nWe We We We .. We We We .. ..",
+    "map": [
+        "We We We We We .. .. .. .. ..",
+        "We .. We Ay We .. .. .. .. ..",
+        "We .. We Ay We We We .. .. ..",
+        "We Ae Ro .. .. .. We .. .. ..",
+        "We .. We We We .. We We We ..",
+        "We .. .. .. We .. .. .. We We",
+        "We .. .. We .. .. Bl .. .. We",
+        "We .. .. .. We We .. We We We",
+        "We We We We .. We We We .. .."
+    ],
     "max_steps": 8
 }

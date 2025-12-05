@@ -8,6 +8,12 @@
         "category": "obstacles",
         "tags": ["multi-agent", "unsteady-ground", "probabilistic"]
     },
-    "map": "We We We We We\nWe Ar .. .. We\nWe Un Un .. We\nWe .. .. .. We\nWe We We We We",
+    "map": [
+        "We We We We We",
+        "We Ar .. .. We",
+        "We Un Un .. We",
+        "We .. .. .. We",
+        "We We We We We"
+    ],
     "max_steps": 100
 }

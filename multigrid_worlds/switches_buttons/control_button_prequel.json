@@ -8,7 +8,15 @@
         "category": "switches_buttons",
         "tags": ["control-button", "human-robot", "programming"]
     },
-    "map": "We We We We We We We We\nWe Ay .. .. .. .. .. We\nWe .. CB .. .. Ro .. We\nWe .. Ae CB .. Ro We We\nWe .. CB .. .. Ro .. We\nWe .. .. .. .. .. .. We\nWe We We We We We We We",
+    "map": [
+        "We We We We We We We We",
+        "We Ay .. .. .. .. .. We",
+        "We .. CB .. .. Ro .. We",
+        "We .. Ae CB .. Ro We We",
+        "We .. CB .. .. Ro .. We",
+        "We .. .. .. .. .. .. We",
+        "We We We We We We We We"
+    ],
     "max_steps": 100,
     "can_push_rocks": "e"
 }

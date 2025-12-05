@@ -8,6 +8,16 @@
         "category": "obstacles",
         "tags": ["multi-agent", "obstacles", "path-planning", "blocks", "rocks"]
     },
-    "map": "We We We We We We We We We\nWe .. .. .. We .. .. .. We\nWe .. Ay .. We .. .. .. We\nWe .. .. .. .. .. Bl .. We\nWe We We .. We We We .. We\nWe .. .. .. .. .. .. .. We\nWe .. Ro .. .. Ay .. .. We\nWe .. .. .. .. .. .. Ae We\nWe We We We We We We We We",
+    "map": [
+        "We We We We We We We We We",
+        "We .. .. .. We .. .. .. We",
+        "We .. Ay .. We .. .. .. We",
+        "We .. .. .. .. .. Bl .. We",
+        "We We We .. We We We .. We",
+        "We .. .. .. .. .. .. .. We",
+        "We .. Ro .. .. Ay .. .. We",
+        "We .. .. .. .. .. .. Ae We",
+        "We We We We We We We We We"
+    ],
     "max_steps": 50
 }

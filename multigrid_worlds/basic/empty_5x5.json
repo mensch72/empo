@@ -8,7 +8,13 @@
         "category": "basic",
         "tags": ["single-agent", "neural-policy", "minimal"]
     },
-    "map": "We We We We We\nWe .. .. .. We\nWe .. Ar .. We\nWe .. .. .. We\nWe We We We We",
+    "map": [
+        "We We We We We",
+        "We .. .. .. We",
+        "We .. Ar .. We",
+        "We .. .. .. We",
+        "We We We We We"
+    ],
     "max_steps": 100,
     "orientations": ["e"]
 }

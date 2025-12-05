@@ -8,6 +8,12 @@
         "category": "basic",
         "tags": ["multi-agent", "minimal"]
     },
-    "map": "We We We We We We We\nWe .. .. .. .. .. We\nWe .. Ar .. Ag .. We\nWe .. .. .. .. .. We\nWe We We We We We We",
+    "map": [
+        "We We We We We We We",
+        "We .. .. .. .. .. We",
+        "We .. Ar .. Ag .. We",
+        "We .. .. .. .. .. We",
+        "We We We We We We We"
+    ],
     "max_steps": 100
 }

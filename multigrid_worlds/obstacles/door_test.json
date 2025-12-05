@@ -8,6 +8,13 @@
         "category": "obstacles",
         "tags": ["single-agent", "doors"]
     },
-    "map": "We We We We We We We\nWe Lr .. Cr .. Or We\nWe .. .. .. .. .. We\nWe .. .. Ar .. .. We\nWe .. .. .. .. .. We\nWe We We We We We We",
+    "map": [
+        "We We We We We We We",
+        "We Lr .. Cr .. Or We",
+        "We .. .. .. .. .. We",
+        "We .. .. Ar .. .. We",
+        "We .. .. .. .. .. We",
+        "We We We We We We We"
+    ],
     "max_steps": 100
 }

@@ -8,7 +8,15 @@
         "category": "basic",
         "tags": ["single-agent", "value-function", "unsteady-ground"]
     },
-    "map": "We We We We We We We\nWe .. .. .. Un Un We\nWe .. .. .. Un Un We\nWe .. .. Ay Un Un We\nWe .. .. .. Un Un We\nWe .. .. .. Un Un We\nWe We We We We We We",
+    "map": [
+        "We We We We We We We",
+        "We .. .. .. Un Un We",
+        "We .. .. .. Un Un We",
+        "We .. .. Ay Un Un We",
+        "We .. .. .. Un Un We",
+        "We .. .. .. Un Un We",
+        "We We We We We We We"
+    ],
     "max_steps": 5,
     "orientations": ["e"]
 }

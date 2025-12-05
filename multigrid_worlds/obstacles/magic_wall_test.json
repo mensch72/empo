@@ -8,6 +8,13 @@
         "category": "obstacles",
         "tags": ["single-agent", "magic-walls"]
     },
-    "map": "We We We We We We\nWe Mn .. Ms .. We\nWe .. .. .. .. We\nWe Mw .. Me .. We\nWe .. Ar .. .. We\nWe We We We We We",
+    "map": [
+        "We We We We We We",
+        "We Mn .. Ms .. We",
+        "We .. .. .. .. We",
+        "We Mw .. Me .. We",
+        "We .. Ar .. .. We",
+        "We We We We We We"
+    ],
     "max_steps": 100
 }

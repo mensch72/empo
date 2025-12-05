@@ -8,6 +8,10 @@
         "category": "basic",
         "tags": ["multi-agent", "colors"]
     },
-    "map": "We We We We We We We We\nWe Ar Ag Ab Ap Ay Ae We\nWe We We We We We We We",
+    "map": [
+        "We We We We We We We We",
+        "We Ar Ag Ab Ap Ay Ae We",
+        "We We We We We We We We"
+    ],
     "max_steps": 100
 }

@@ -8,6 +8,23 @@
         "category": "puzzles",
         "tags": ["multi-agent", "chambers", "human-robot", "blocks", "rocks"]
     },
-    "map": "WeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWe\nWe................WeAyAyAyAyAyAyAyWe..................We\nWe................WeAyAyAyAyAyAyAyWe..................We\nWe................WeWeWeWeAyWeWeWeWe..................We\nWe................We....AeRoAe....We..................We\nWe................We..WeWeWeWeWe..WeWeWe..............We\nWe....................We....WeWe......We..............We\nWe................WeWeWe....We....Bl......We..........We\nWe................We............We..WeWeWeWeWeWeWeWeWeWe\nWe................We............We....................We\nWe................We............We....................We\nWe................We............We....................We\nWe................We............We....................We\nWe................We............We....................We\nWe................We............We....................We\nWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWe",
+    "map": [
+        "WeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWe",
+        "We................WeAyAyAyAyAyAyAyWe..................We",
+        "We................WeAyAyAyAyAyAyAyWe..................We",
+        "We................WeWeWeWeAyWeWeWeWe..................We",
+        "We................We....AeRoAe....We..................We",
+        "We................We..WeWeWeWeWe..WeWeWe..............We",
+        "We....................We....WeWe......We..............We",
+        "We................WeWeWe....We....Bl......We..........We",
+        "We................We............We..WeWeWeWeWeWeWeWeWeWe",
+        "We................We............We....................We",
+        "We................We............We....................We",
+        "We................We............We....................We",
+        "We................We............We....................We",
+        "We................We............We....................We",
+        "We................We............We....................We",
+        "WeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWe"
+    ],
     "max_steps": 1000
 }
