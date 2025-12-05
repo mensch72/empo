@@ -1,4 +1,5 @@
 import math
+import json
 import gymnasium as gym
 from enum import IntEnum
 import numpy as np
@@ -2019,21 +2020,25 @@ class MultiGridEnv(WorldModel):
             config = self._load_config_file(config_file)
             
             # Apply config values as defaults (explicit params override config)
+            # Note: We check against the default values to determine if a parameter
+            # was explicitly passed. This ensures backward compatibility with existing
+            # code that relies on default values. If the signature defaults change,
+            # update these checks accordingly.
             if map is None and 'map' in config:
                 map = config['map']
-            if max_steps == 100 and 'max_steps' in config:
+            if max_steps == 100 and 'max_steps' in config:  # default: 100
                 max_steps = config['max_steps']
-            if seed == 2 and 'seed' in config:
+            if seed == 2 and 'seed' in config:  # default: 2
                 seed = config['seed']
-            if partial_obs == True and 'partial_obs' in config:
+            if partial_obs is True and 'partial_obs' in config:  # default: True
                 partial_obs = config['partial_obs']
-            if agent_view_size == 7 and 'agent_view_size' in config:
+            if agent_view_size == 7 and 'agent_view_size' in config:  # default: 7
                 agent_view_size = config['agent_view_size']
-            if see_through_walls == False and 'see_through_walls' in config:
+            if see_through_walls is False and 'see_through_walls' in config:  # default: False
                 see_through_walls = config['see_through_walls']
             if orientations is None and 'orientations' in config:
                 orientations = config['orientations']
-            if can_push_rocks == 'e' and 'can_push_rocks' in config:
+            if can_push_rocks == 'e' and 'can_push_rocks' in config:  # default: 'e'
                 can_push_rocks = config['can_push_rocks']
             if grid_size is None and 'grid_size' in config:
                 grid_size = config['grid_size']
@@ -2213,8 +2218,6 @@ class MultiGridEnv(WorldModel):
             FileNotFoundError: If config file doesn't exist
             ValueError: If config file is invalid JSON or missing required fields
         """
-        import json
-        
         try:
             with open(config_path, 'r') as f:
                 config = json.load(f)
