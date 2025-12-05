@@ -13,11 +13,13 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from empo.env_utils import get_dag
+from empo.world_model import WorldModel
+from gymnasium import spaces
 
 
-class SimpleMockEnv:
+class SimpleMockEnv(WorldModel):
     """
-    A minimal mock environment for testing get_dag.
+    A minimal environment for testing get_dag.
     
     This creates a DAG structure with DIFFERENT PATH LENGTHS:
         State 0 (root)
@@ -33,13 +35,23 @@ class SimpleMockEnv:
     """
     
     def __init__(self):
+        super().__init__()
         self.current_state = 0
         self.agents = [None]  # Single agent
-        self.action_space = MockActionSpace()
+        self.action_space = spaces.Discrete(2)
+        self.observation_space = spaces.Discrete(4)
     
-    def reset(self):
+    def reset(self, seed=None, options=None):
+        super().reset(seed=seed)
         self.current_state = 0
-        return self.current_state
+        return self.current_state, {}
+    
+    def step(self, action):
+        trans = self.transition_probabilities(self.current_state, [action])
+        if trans is not None and len(trans) > 0:
+            self.current_state = trans[0][1]
+        done = self.current_state == 1
+        return self.current_state, 0, done, False, {}
     
     def get_state(self):
         return self.current_state
@@ -75,14 +87,8 @@ class SimpleMockEnv:
             return None
 
 
-class MockActionSpace:
-    """Mock action space with 2 actions."""
-    def __init__(self):
-        self.n = 2
-
-
 def create_tiny_env():
-    """Create a very simple mock environment for testing."""
+    """Create a very simple environment for testing."""
     return SimpleMockEnv()
 
 
