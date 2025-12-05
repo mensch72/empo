@@ -40,10 +40,18 @@ You can pull and use the pre-built image directly:
 docker pull ghcr.io/mensch72/empo:main
 
 # Run interactively with your local code mounted
+# On Linux/macOS (bash/zsh):
 docker run -it --rm \
-  -v $(pwd):/workspace \
+  -v "$(pwd)":/workspace \
   -e PYTHONPATH=/workspace/src:/workspace/vendor/multigrid \
   ghcr.io/mensch72/empo:main \
+  bash
+
+# On Windows (PowerShell):
+docker run -it --rm `
+  -v "${PWD}:/workspace" `
+  -e PYTHONPATH=/workspace/src:/workspace/vendor/multigrid `
+  ghcr.io/mensch72/empo:main `
   bash
 ```
 
@@ -116,20 +124,16 @@ If the image hasn't been built yet for your branch, you can:
 2. Build locally with `make build`
 3. Use the `main` branch image as a fallback
 
-### Permission Denied
+### Permission Denied (Private Repositories Only)
 
-If pulling from GHCR fails with authentication errors:
+**Note:** The EMPO images are public and don't require authentication to pull.
+
+If you're working with a private fork and encounter authentication errors:
 
 ```bash
-# Authenticate with GitHub
+# Authenticate with GitHub using a Personal Access Token
 echo $GITHUB_TOKEN | docker login ghcr.io -u USERNAME --password-stdin
-
-# Or use Docker's credential helper
-docker logout ghcr.io
-docker pull ghcr.io/mensch72/empo:main
 ```
-
-Note: Public images don't require authentication to pull.
 
 ### Outdated Image
 

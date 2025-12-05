@@ -24,7 +24,7 @@
       ]
     }
   },
-  "postCreateCommand": "pip install -e . --no-deps 2>/dev/null || true",
+  "postCreateCommand": "pip install -e . --no-deps || echo 'Note: Editable install skipped, using pre-installed packages'",
   "remoteUser": "appuser",
   "containerEnv": {
     "PYTHONPATH": "/workspaces/empo/src:/workspaces/empo/vendor/multigrid"
