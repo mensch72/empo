@@ -500,6 +500,35 @@ def create_random_env(seed: int) -> RandomMultigridEnv:
     )
 
 
+def get_agent_indices(env: RandomMultigridEnv) -> Tuple[List[int], Optional[int]]:
+    """
+    Identify human (yellow) and robot (grey) agent indices for a given environment.
+    
+    Agent indices depend on the order agents appear in the map string (top-to-bottom,
+    left-to-right), which varies between randomly generated environments. This function
+    must be called for each environment to get correct agent indices.
+    
+    Note: This function assumes at most one grey (robot) agent. If multiple grey agents
+    exist (NUM_ROBOTS > 1), only the last one's index will be returned.
+    
+    Args:
+        env: The multigrid environment.
+    
+    Returns:
+        Tuple of (human_agent_indices, robot_index) where:
+            - human_agent_indices: List of indices for yellow (human) agents
+            - robot_index: Index of the grey (robot) agent, or None if not found
+    """
+    human_agent_indices = []
+    robot_index = None
+    for i, agent in enumerate(env.agents):
+        if agent.color == 'yellow':
+            human_agent_indices.append(i)
+        elif agent.color == 'grey':
+            robot_index = i
+    return human_agent_indices, robot_index
+
+
 def train_on_ensemble(
     human_agent_indices: List[int],
     num_episodes: int = NUM_TRAINING_EPISODES_FULL,
@@ -806,18 +835,13 @@ def main():
     sample_env = create_random_env(seed=42)
     sample_env.reset()
     
-    # Identify agent types (yellow = human, grey = robot)
-    human_agent_indices = []
-    robot_index = None
-    for i, agent in enumerate(sample_env.agents):
-        if agent.color == 'yellow':
-            human_agent_indices.append(i)
-        elif agent.color == 'grey':
-            robot_index = i
+    # Identify agent types (yellow = human, grey = robot) for sample_env
+    # Note: This is only used for training. Each test environment will have its own indices.
+    sample_human_indices, sample_robot_index = get_agent_indices(sample_env)
     
     print(f"Grid size: {GRID_SIZE}x{GRID_SIZE}")
-    print(f"Human agents (yellow): {human_agent_indices}")
-    print(f"Robot agent (grey): {robot_index}")
+    print(f"Sample env - Human agents (yellow): {sample_human_indices}")
+    print(f"Sample env - Robot agent (grey): {sample_robot_index}")
     print()
     
     # Load or train policy
@@ -828,7 +852,7 @@ def main():
         policy = MultiGridNeuralHumanPolicyPrior.load(
             filepath=args.load_policy,
             world_model=sample_env,
-            human_agent_indices=human_agent_indices,
+            human_agent_indices=sample_human_indices,
             goal_sampler=goal_sampler,
             device=device
         )
@@ -840,7 +864,7 @@ def main():
             print(f"Continuing training for {num_episodes} additional episodes...")
             t0 = time.time()
             policy, base_env = train_on_ensemble(
-                human_agent_indices=human_agent_indices,
+                human_agent_indices=sample_human_indices,
                 num_episodes=num_episodes,
                 episodes_per_env=1,
                 device=device,
@@ -857,7 +881,7 @@ def main():
         # Train from scratch
         t0 = time.time()
         policy, base_env = train_on_ensemble(
-            human_agent_indices=human_agent_indices,
+            human_agent_indices=sample_human_indices,
             num_episodes=num_episodes,
             episodes_per_env=1,
             device=device,
@@ -892,36 +916,42 @@ def main():
     all_frames = []
     env_indices = []
     
-    # First human is the one whose goal we'll visualize
-    first_human_idx = human_agent_indices[0] if human_agent_indices else 0
-    
     for rollout_idx in range(num_rollouts):
         # Select a test environment for this rollout
         env_idx = rollout_idx % len(test_environments)
         env = test_environments[env_idx]
         env.reset()
         
+        # Get agent indices for THIS environment (may differ from sample_env)
+        # Agent indices depend on map parsing order, which varies between random envs
+        env_human_indices, env_robot_index = get_agent_indices(env)
+        
+        # First human is the one whose goal we'll visualize (first yellow agent in this env)
+        first_human_idx = env_human_indices[0] if env_human_indices else 0
+        
         # Use SmallGoalSampler to sample small rectangle goals (at most 3x3)
         goal_sampler = SmallGoalSampler(env)
         state = env.get_state()
         
         # Assign random rectangle goals to humans using the sampler
+        # Use the correct human indices for THIS environment
         human_goals = {}
-        for h_idx in human_agent_indices:
+        for h_idx in env_human_indices:
             # sample() returns (ReachRectangleGoal, weight)
             goal, _ = goal_sampler.sample(state, h_idx)
             human_goals[h_idx] = goal
         
         first_human_goal = human_goals.get(first_human_idx, None)
         goal_rect = first_human_goal.target_rect if first_human_goal else None
-        print(f"  Rollout {rollout_idx + 1}: Env {env_idx + 1}, H1 Goal rect: {goal_rect}")
+        print(f"  Rollout {rollout_idx + 1}: Env {env_idx + 1}, H1 Goal rect: {goal_rect}, "
+              f"humans={env_human_indices}, robot={env_robot_index}")
         
         frames = run_rollout(
             env=env,
             policy=policy,
-            human_agent_indices=human_agent_indices,
+            human_agent_indices=env_human_indices,
             human_goals=human_goals,
-            robot_index=robot_index,
+            robot_index=env_robot_index,
             first_human_idx=first_human_idx,
             max_steps=ROLLOUT_STEPS
         )
