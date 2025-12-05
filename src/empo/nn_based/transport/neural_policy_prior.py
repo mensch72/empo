@@ -494,12 +494,15 @@ def train_transport_neural_policy_prior(
                 max_path_length = length
     
     # Set feasible range based on whether reward shaping is used
+    # Following multigrid pattern:
+    # - Shaping reward class returns (-1, 1) as the potential range
+    # - We then add 1.0 to upper bound for base reward [0, 1]
     # Without shaping: Q ∈ [0, 1] (base reward only)
-    # With shaping: Q ∈ [-1, 2] (base reward + potential in [-1, 0])
-    #   - Min Q: 0 + γ*(-1) - 0 = -γ ≈ -1 when moving away from distant goal
-    #   - Max Q: 1 + γ*0 - (-1) = 2 when reaching goal from far away
+    # With shaping: Q ∈ [-1, 2] = shaping_range + (0, 1) for base reward
     if reward_shaping:
-        feasible_range = (-1.0, 2.0)
+        # Shaping potential range is (-1, 1), add 1.0 for base reward
+        shaping_range = (-1.0, 1.0)
+        feasible_range = (shaping_range[0], shaping_range[1] + 1.0)
     else:
         feasible_range = (0.0, 1.0)
     
