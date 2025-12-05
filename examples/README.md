@@ -9,6 +9,11 @@ Most examples can be run with:
 PYTHONPATH=src:vendor/multigrid python examples/<script_name>.py
 ```
 
+For transport environment examples:
+```bash
+PYTHONPATH=src:vendor/multigrid:vendor/ai_transport python examples/transport_random_demo.py
+```
+
 ## Development Guidelines
 
 ### Quick Test Mode
@@ -61,6 +66,8 @@ These examples take longer to run in full mode. Use `--quick` for faster testing
 | `random_multigrid_ensemble_demo.py` | 500 episodes | 50 episodes | Random multigrid ensemble |
 | `dag_and_episode_example.py` | Full DAG | Full DAG | DAG computation + episode GIF |
 | `single_agent_value_function.py` | 5 beta values | 5 beta values | Value function visualization |
+| `transport_random_demo.py` | 100 steps | 20 steps | AI transport environment demo |
+| `transport_learning_demo.py` | 500 episodes | 50 episodes | Transport human policy learning |
 
 ### Usage Examples
 
@@ -69,6 +76,11 @@ These examples take longer to run in full mode. Use `--quick` for faster testing
 PYTHONPATH=src:vendor/multigrid python examples/bellman_backward_induction.py --quick
 PYTHONPATH=src:vendor/multigrid python examples/neural_policy_prior_demo.py --quick
 PYTHONPATH=src:vendor/multigrid python examples/control_button_demo.py --quick
+
+# Transport environment demo
+PYTHONPATH=src:vendor/multigrid:vendor/ai_transport python examples/transport_random_demo.py --quick
+PYTHONPATH=src:vendor/multigrid:vendor/ai_transport python examples/transport_random_demo.py --render  # with visualization
+PYTHONPATH=src:vendor/multigrid:vendor/ai_transport python examples/transport_learning_demo.py --quick  # policy learning
 
 # Run full examples (takes longer)
 PYTHONPATH=src:vendor/multigrid python examples/bellman_backward_induction.py

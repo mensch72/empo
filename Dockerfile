@@ -9,7 +9,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
-    PYTHONPATH=/workspace:/workspace/vendor/multigrid
+    PYTHONPATH=/workspace/src:/workspace/vendor/multigrid:/workspace/vendor/ai_transport
 
 # Set working directory
 WORKDIR /workspace
