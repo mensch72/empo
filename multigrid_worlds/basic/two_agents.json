@@ -1,0 +1,13 @@
+{
+    "metadata": {
+        "name": "Two Agents Basic",
+        "description": "Simple 5x5 grid with two agents (red and green). Used for testing basic multi-agent movement and interactions.",
+        "author": "EMPO Framework",
+        "version": "1.0.0",
+        "created": "2025-01-01T00:00:00Z",
+        "category": "basic",
+        "tags": ["multi-agent", "minimal"]
+    },
+    "map": "We We We We We We We\nWe .. .. .. .. .. We\nWe .. Ar .. Ag .. We\nWe .. .. .. .. .. We\nWe We We We We We We",
+    "max_steps": 100
+}

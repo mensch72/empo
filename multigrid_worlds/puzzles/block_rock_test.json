@@ -1,0 +1,14 @@
+{
+    "metadata": {
+        "name": "Block Rock Test",
+        "description": "7x7 grid with two agents, a block, and a rock. Used for testing block and rock pushing mechanics.",
+        "author": "EMPO Framework",
+        "version": "1.0.0",
+        "created": "2025-01-01T00:00:00Z",
+        "category": "puzzles",
+        "tags": ["multi-agent", "blocks", "rocks", "pushing"]
+    },
+    "map": "We We We We We We We\nWe .. .. .. .. .. We\nWe .. Ar .. Ag .. We\nWe .. .. .. .. .. We\nWe .. Bl .. Ro .. We\nWe .. .. .. .. .. We\nWe We We We We We We",
+    "max_steps": 100,
+    "can_push_rocks": "e"
+}

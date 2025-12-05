@@ -1,0 +1,14 @@
+{
+    "metadata": {
+        "name": "Single Agent 7x7",
+        "description": "Simple 7x7 gridworld with a single agent in the center and unsteady ground on the right side. Used for testing backward induction and value function computation.",
+        "author": "EMPO Framework",
+        "version": "1.0.0",
+        "created": "2025-01-01T00:00:00Z",
+        "category": "basic",
+        "tags": ["single-agent", "value-function", "unsteady-ground"]
+    },
+    "map": "We We We We We We We\nWe .. .. .. Un Un We\nWe .. .. .. Un Un We\nWe .. .. Ay Un Un We\nWe .. .. .. Un Un We\nWe .. .. .. Un Un We\nWe We We We We We We",
+    "max_steps": 5,
+    "orientations": ["e"]
+}

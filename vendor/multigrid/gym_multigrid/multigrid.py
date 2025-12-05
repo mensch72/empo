@@ -1989,8 +1989,66 @@ class MultiGridEnv(WorldModel):
             objects_set = World,
             map=None,
             orientations=None,
-            can_push_rocks='e'
+            can_push_rocks='e',
+            config_file=None
     ):
+        """
+        Initialize a MultiGridEnv.
+        
+        Args:
+            grid_size: Size of the square grid (mutually exclusive with width/height)
+            width: Width of the grid
+            height: Height of the grid
+            max_steps: Maximum number of steps per episode
+            see_through_walls: Whether agents can see through walls
+            seed: Random seed
+            agents: List of Agent objects (auto-created from map if not provided)
+            partial_obs: Whether to use partial observations
+            agent_view_size: Size of agent's partial observation view
+            actions_set: Set of available actions (default: Actions)
+            objects_set: Set of available objects (default: World)
+            map: ASCII map string defining the grid layout
+            orientations: List of orientation codes ('n', 's', 'e', 'w') for agents
+            can_push_rocks: Color codes of agents that can push rocks (default: 'e' for grey)
+            config_file: Path to JSON config file containing all init parameters.
+                        If provided, loads map and other parameters from the file.
+                        Parameters passed explicitly to __init__ override config file values.
+        """
+        # Load config from JSON file if provided
+        if config_file is not None:
+            config = self._load_config_file(config_file)
+            
+            # Apply config values as defaults (explicit params override config)
+            if map is None and 'map' in config:
+                map = config['map']
+            if max_steps == 100 and 'max_steps' in config:
+                max_steps = config['max_steps']
+            if seed == 2 and 'seed' in config:
+                seed = config['seed']
+            if partial_obs == True and 'partial_obs' in config:
+                partial_obs = config['partial_obs']
+            if agent_view_size == 7 and 'agent_view_size' in config:
+                agent_view_size = config['agent_view_size']
+            if see_through_walls == False and 'see_through_walls' in config:
+                see_through_walls = config['see_through_walls']
+            if orientations is None and 'orientations' in config:
+                orientations = config['orientations']
+            if can_push_rocks == 'e' and 'can_push_rocks' in config:
+                can_push_rocks = config['can_push_rocks']
+            if grid_size is None and 'grid_size' in config:
+                grid_size = config['grid_size']
+            if width is None and 'width' in config:
+                width = config['width']
+            if height is None and 'height' in config:
+                height = config['height']
+            
+            # Store config file path for reference
+            self._config_file = config_file
+            self._config_metadata = config.get('metadata', {})
+        else:
+            self._config_file = None
+            self._config_metadata = {}
+        
         # Store map specification for use in _gen_grid
         self._map_spec = map
         self._map_parsed = None
@@ -2127,8 +2185,49 @@ class MultiGridEnv(WorldModel):
             'objects_set': self.objects,
             'map': self._map_spec,
             'orientations': getattr(self, '_init_orientations', None),
-            'can_push_rocks': getattr(self, '_init_can_push_rocks', 'e')
+            'can_push_rocks': getattr(self, '_init_can_push_rocks', 'e'),
+            'config_file': getattr(self, '_config_file', None)
         }
+    
+    @staticmethod
+    def _load_config_file(config_path: str) -> dict:
+        """
+        Load environment configuration from a JSON file.
+        
+        Args:
+            config_path: Path to the JSON config file
+            
+        Returns:
+            dict: Configuration dictionary with keys:
+                - map: ASCII map string
+                - max_steps: Maximum steps per episode
+                - seed: Random seed
+                - orientations: List of orientation codes
+                - can_push_rocks: Color codes for rock-pushing agents
+                - partial_obs: Whether to use partial observations
+                - agent_view_size: Size of partial observation view
+                - see_through_walls: Whether agents can see through walls
+                - metadata: Optional metadata dict (name, description, author, etc.)
+                
+        Raises:
+            FileNotFoundError: If config file doesn't exist
+            ValueError: If config file is invalid JSON or missing required fields
+        """
+        import json
+        
+        try:
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in config file {config_path}: {e}")
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Config file not found: {config_path}")
+        
+        # Validate required fields
+        if 'map' not in config:
+            raise ValueError(f"Config file {config_path} must contain a 'map' field")
+        
+        return config
 
     def reset(self):
 

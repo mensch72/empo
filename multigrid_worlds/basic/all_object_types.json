@@ -1,0 +1,13 @@
+{
+    "metadata": {
+        "name": "All Object Types",
+        "description": "10x7 grid showcasing all object types available in the multigrid environment: blocks, rocks, lava, switches, unsteady ground, goals, keys, balls, boxes, and doors.",
+        "author": "EMPO Framework",
+        "version": "1.0.0",
+        "created": "2025-01-01T00:00:00Z",
+        "category": "basic",
+        "tags": ["reference", "all-objects"]
+    },
+    "map": "We We We We We We We We We We\nWe Bl Ro La Sw Un .. .. .. We\nWe Gr Kr Br Xr .. .. .. .. We\nWe Lr Cr Or .. .. .. .. .. We\nWe Mn Ms Mw Me .. .. .. .. We\nWe .. Ar .. .. .. .. .. .. We\nWe We We We We We We We We We",
+    "max_steps": 100
+}

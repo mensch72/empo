@@ -1,0 +1,13 @@
+{
+    "metadata": {
+        "name": "Small One Or Three Chambers",
+        "description": "Smaller version of the multi-chamber environment with 2 human agents and 1 robot agent. Features internal walls, a rock, and a block. Suitable for DAG computation and backward induction.",
+        "author": "EMPO Framework",
+        "version": "1.0.0",
+        "created": "2025-01-01T00:00:00Z",
+        "category": "puzzles",
+        "tags": ["multi-agent", "chambers", "human-robot", "small", "dag"]
+    },
+    "map": "We We We We We .. .. .. .. ..\nWe .. We Ay We .. .. .. .. ..\nWe .. We Ay We We We .. .. ..\nWe Ae Ro .. .. .. We .. .. ..\nWe .. We We We .. We We We ..\nWe .. .. .. We .. .. .. We We\nWe .. .. We .. .. Bl .. .. We\nWe .. .. .. We We .. We We We\nWe We We We .. We We We .. ..",
+    "max_steps": 8
+}
