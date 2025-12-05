@@ -1,0 +1,22 @@
+# Simple 8x8 world with human and robot - block as stepping stone
+# Challenge: Robot can push block to create access to different areas
+metadata:
+  name: "Block Bridge"
+  description: "A block can be pushed by any agent. The robot (grey) can position the block to help the human (yellow) reach different corners. The robot doesn't know which corner the human wants."
+  author: "EMPO Framework"
+  version: "1.0.0"
+  created: "2025-01-01T00:00:00Z"
+  category: "copilot_challenges"
+  tags: ["human-robot", "block", "empowerment", "simple"]
+
+map: |
+  We We We We We We We We
+  We .. .. .. .. .. .. We
+  We .. Ay .. .. .. .. We
+  We .. .. Bl .. .. .. We
+  We .. .. .. .. .. .. We
+  We .. .. .. .. Ae .. We
+  We .. .. .. .. .. .. We
+  We We We We We We We We
+
+max_steps: 50

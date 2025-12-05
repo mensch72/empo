@@ -1,0 +1,22 @@
+# 9x9 grid with various obstacles
+metadata:
+  name: "Obstacle Grid 9x9"
+  description: "9x9 grid with walls, blocks, rocks, and multiple agents. Used for path distance visualization and testing obstacle navigation."
+  author: "EMPO Framework"
+  version: "1.0.0"
+  created: "2025-01-01T00:00:00Z"
+  category: "obstacles"
+  tags: ["multi-agent", "obstacles", "path-planning", "blocks", "rocks"]
+
+map: |
+  We We We We We We We We We
+  We .. .. .. We .. .. .. We
+  We .. Ay .. We .. .. .. We
+  We .. .. .. .. .. Bl .. We
+  We We We .. We We We .. We
+  We .. .. .. .. .. .. .. We
+  We .. Ro .. .. Ay .. .. We
+  We .. .. .. .. .. .. Ae We
+  We We We We We We We We We
+
+max_steps: 50

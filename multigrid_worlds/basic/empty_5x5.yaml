@@ -1,0 +1,19 @@
+# Simple 5x5 empty grid with a single agent in the center
+metadata:
+  name: "Empty 5x5"
+  description: "Simple 5x5 empty grid with a single agent in the center. Used for basic neural policy learning and testing."
+  author: "EMPO Framework"
+  version: "1.0.0"
+  created: "2025-01-01T00:00:00Z"
+  category: "basic"
+  tags: ["single-agent", "neural-policy", "minimal"]
+
+map: |
+  We We We We We
+  We .. .. .. We
+  We .. Ar .. We
+  We .. .. .. We
+  We We We We We
+
+max_steps: 100
+orientations: ["e"]

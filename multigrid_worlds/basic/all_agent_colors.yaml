@@ -1,0 +1,16 @@
+# Grid with all six agent colors
+metadata:
+  name: "All Agent Colors"
+  description: "Grid with all six agent colors (red, green, blue, purple, yellow, grey). Used for testing color-based mechanics."
+  author: "EMPO Framework"
+  version: "1.0.0"
+  created: "2025-01-01T00:00:00Z"
+  category: "basic"
+  tags: ["multi-agent", "colors"]
+
+map: |
+  We We We We We We We We
+  We Ar Ag Ab Ap Ay Ae We
+  We We We We We We We We
+
+max_steps: 100

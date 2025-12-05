@@ -1,0 +1,22 @@
+# Simple 8x8 world with a ball that can be moved
+# Challenge: Robot can move ball out of the way or to a useful position
+metadata:
+  name: "Ball Mover"
+  description: "A ball sits in a narrow corridor. The robot (grey) can push the ball to clear or block paths for the human (yellow). The robot doesn't know where the human wants to go."
+  author: "EMPO Framework"
+  version: "1.0.0"
+  created: "2025-01-01T00:00:00Z"
+  category: "copilot_challenges"
+  tags: ["human-robot", "ball", "empowerment", "simple"]
+
+map: |
+  We We We We We We We We
+  We .. .. .. .. .. .. We
+  We .. Ay .. We .. .. We
+  We .. .. .. Br .. .. We
+  We .. .. .. We .. .. We
+  We .. .. .. .. Ae .. We
+  We .. .. .. .. .. .. We
+  We We We We We We We We
+
+max_steps: 50

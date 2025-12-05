@@ -1,0 +1,21 @@
+# Two humans, one robot - corridor control
+# Challenge: Robot in narrow corridor can move to let one human pass or block them
+metadata:
+  name: "Corridor Control"
+  description: "Two humans approach a narrow corridor from opposite ends. The robot in the middle can position itself to let one through while blocking the other, or find a fair solution."
+  author: "EMPO Framework"
+  version: "1.0.0"
+  created: "2025-01-01T00:00:00Z"
+  category: "copilot_challenges"
+  tags: ["two-humans", "robot", "positioning", "empowerment", "distribution"]
+
+map: |
+  We We We We We We We
+  We Ay .. .. .. .. We
+  We We We .. We We We
+  We .. .. Ae .. .. We
+  We We We .. We We We
+  We .. .. .. .. Ay We
+  We We We We We We We
+
+max_steps: 30
