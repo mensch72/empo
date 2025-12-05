@@ -103,6 +103,10 @@ DOOR_PROBABILITY = 0.03      # Probability of placing a door
 LAVA_PROBABILITY = 0.02      # Probability of placing lava
 BLOCK_PROBABILITY = 0.03     # Probability of placing a block
 
+# Default values for neural network configuration
+DEFAULT_NUM_AGENT_COLORS = 7  # Number of possible agent colors in World
+MAX_REJECTION_SAMPLING_ATTEMPTS = 1000  # Maximum attempts for rejection sampling
+
 
 # ============================================================================
 # Custom Goal Sampler (Small Goals for Better Learning)
@@ -174,8 +178,7 @@ class SmallGoalSampler(PossibleGoalSampler):
         x_min, x_max = self._x_range
         y_min, y_max = self._y_range
         
-        max_attempts = 1000
-        for _ in range(max_attempts):
+        for _ in range(MAX_REJECTION_SAMPLING_ATTEMPTS):
             # Draw all coordinates uniformly at random
             x1 = self._rng.integers(x_min, x_max + 1)
             y1 = self._rng.integers(y_min, y_max + 1)
@@ -901,7 +904,11 @@ def save_policy(q_network: QNetwork, path: str, config: Dict[str, Any]):
 
 
 def load_policy(path: str, device: str = 'cpu') -> Tuple[QNetwork, Dict[str, Any]]:
-    """Load policy from file."""
+    """Load policy from file.
+    
+    Note: Uses weights_only=False because config dict contains nested dicts
+    (num_agents_per_color). The saved file is trusted as it comes from this script.
+    """
     checkpoint = torch.load(path, map_location=device, weights_only=False)
     config = checkpoint['config']
     
@@ -910,7 +917,7 @@ def load_policy(path: str, device: str = 'cpu') -> Tuple[QNetwork, Dict[str, Any
         grid_width=config['grid_width'],
         num_actions=config['num_actions'],
         num_agents_per_color=config['num_agents_per_color'],
-        num_agent_colors=config.get('num_agent_colors', 7),
+        num_agent_colors=config.get('num_agent_colors', DEFAULT_NUM_AGENT_COLORS),
         state_feature_dim=config.get('state_feature_dim', 256),
         goal_feature_dim=config.get('goal_feature_dim', 32),
         hidden_dim=config.get('hidden_dim', 256),
@@ -997,7 +1004,7 @@ def main():
             print(f"\nAdditional training completed in {elapsed:.2f} seconds")
             print()
     elif args.no_train:
-        print("ERROR: --no-train requires --load-policy to specify a policy file.")
+        print("Error: --no-train flag requires --load-policy to specify a saved policy file to load.")
         return
     else:
         # Train from scratch
@@ -1031,7 +1038,7 @@ def main():
             'grid_width': base_env.width,
             'num_actions': base_env.action_space.n,
             'num_agents_per_color': num_agents_per_color,
-            'num_agent_colors': len(set(num_agents_per_color.keys())) if num_agents_per_color else 7,
+            'num_agent_colors': len(set(num_agents_per_color.keys())) if num_agents_per_color else DEFAULT_NUM_AGENT_COLORS,
             'state_feature_dim': 256,
             'goal_feature_dim': 32,
             'hidden_dim': 256,
