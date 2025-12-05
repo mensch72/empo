@@ -122,7 +122,7 @@ class PossibleGoalSampler(ABC):
         Args:
             env: The gymnasium environment (or compatible) this sampler applies to.
         """
-        self.env = env
+        self.env = self.world_model = env
 
     @abstractmethod
     def sample(self, state, human_agent_index: int) -> Tuple['PossibleGoal', float]:
