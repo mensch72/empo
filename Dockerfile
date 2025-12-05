@@ -147,5 +147,10 @@ USER appuser
 # Create common output directories
 RUN mkdir -p /workspace/outputs /workspace/logs
 
+# Copy project files (required for CI testing)
+# In development, this is typically overridden by volume mounts via docker-compose
+# Security: relies on .dockerignore to exclude sensitive files (.env, .git, etc.)
+COPY --chown=appuser:appuser . /workspace/
+
 # Default command (can be overridden)
 CMD ["/bin/bash"]

@@ -34,12 +34,32 @@ See [docs/API.md](docs/API.md) for complete API reference.
 ## Features
 
 - Unified Docker image for development and cluster deployment
+- **Pre-built container images** on GitHub Container Registry for instant setup
 - Exact planning algorithms via backward induction on state DAGs
 - Multi-Agent Reinforcement Learning support (work in progress)
 - Easy local development with Docker Compose
 - Cluster-ready with Singularity/Apptainer support
 - GPU acceleration support (NVIDIA CUDA)
 - Integration with TensorBoard and Weights & Biases
+
+## Pre-built Container Images
+
+For instant development setup without rebuilding, use our pre-built Docker images:
+
+```bash
+# Pull the latest image from GitHub Container Registry
+docker pull ghcr.io/mensch72/empo:main
+
+# Run with your local code mounted
+docker run -it --rm -v $(pwd):/workspace ghcr.io/mensch72/empo:main bash
+```
+
+The repository also includes a `.devcontainer` configuration for:
+- **GitHub Codespaces**: Click "Code" → "Codespaces" → "Create codespace on main"
+- **VS Code Dev Containers**: Open repo and select "Reopen in Container"
+- **AI Coding Assistants**: Automatically detected for faster session startup
+
+See [docs/PREBUILT_IMAGES.md](docs/PREBUILT_IMAGES.md) for more details.
 
 ## Quick Start
 
@@ -62,6 +82,41 @@ Clone the repository:
 git clone https://github.com/mensch72/empo.git
 cd empo
 ```
+
+## Google Colab (Recommended for Quick Start)
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mensch72/empo/blob/main/notebooks/empo_colab_demo.ipynb)
+
+The fastest way to try EMPO is via Google Colab. Click the badge above or follow these steps:
+
+```python
+# 1. Clone the repository
+!git clone --depth 1 https://github.com/mensch72/empo.git
+%cd empo
+
+# 2. Install system dependencies (for DAG visualization)
+!apt-get update -qq && apt-get install -qq graphviz > /dev/null 2>&1
+
+# 3. Install Python dependencies
+!pip install -q -r requirements-colab.txt
+
+# 4. Set up Python paths
+import sys, os
+sys.path.insert(0, os.path.join(os.getcwd(), 'src'))
+sys.path.insert(0, os.path.join(os.getcwd(), 'vendor', 'multigrid'))
+
+# 5. Verify installation
+from empo import WorldModel, PossibleGoal
+from envs.one_or_three_chambers import SmallOneOrThreeChambersMapEnv
+print("✓ EMPO is ready!")
+```
+
+See [notebooks/empo_colab_demo.ipynb](notebooks/empo_colab_demo.ipynb) for a complete interactive tutorial.
+
+**Colab Limitations:**
+- MPI distributed training is not supported (use `parallel=False`)
+- Docker is not available in Colab
+- Sessions timeout after ~12 hours
 
 ## Local Development
 
@@ -541,6 +596,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
 - **[IMPLEMENTATION.md](IMPLEMENTATION.md)** - Detailed implementation notes
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** - Contribution guidelines
 - **[VENDOR.md](VENDOR.md)** - Managing vendored dependencies (Multigrid)
+- **[docs/PREBUILT_IMAGES.md](docs/PREBUILT_IMAGES.md)** - Using pre-built container images
 - **[.env.example](.env.example)** - Environment variables template
 
 ## License

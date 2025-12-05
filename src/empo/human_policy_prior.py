@@ -98,6 +98,38 @@ class HumanPolicyPrior(ABC):
         """
         pass
 
+    @staticmethod
+    def _to_probability_array(action_distribution) -> np.ndarray:
+        """
+        Convert action distribution to numpy array.
+        
+        Handles both dict (from neural policy priors) and array returns.
+        For dict input, assumes keys are consecutive integers starting from 0.
+        Ensures the probabilities sum to 1.0.
+        
+        Args:
+            action_distribution: Either a dict mapping action index to probability,
+                               or a numpy array of probabilities.
+        
+        Returns:
+            np.ndarray: Probability array indexed by action, normalized to sum to 1.0.
+        """
+        if isinstance(action_distribution, dict):
+            num_actions = len(action_distribution)
+            probs = np.array([action_distribution[i] for i in range(num_actions)])
+        else:
+            probs = np.asarray(action_distribution)
+        
+        # Ensure probabilities sum to 1.0 (handle floating-point errors and edge cases)
+        prob_sum = probs.sum()
+        if prob_sum > 0:
+            probs = probs / prob_sum
+        else:
+            # If all probabilities are zero, use uniform distribution
+            probs = np.ones_like(probs) / len(probs)
+        
+        return probs
+
     def sample(
         self, 
         state, 
@@ -128,14 +160,16 @@ class HumanPolicyPrior(ABC):
         """
         if human_agent_index is not None:
             action_distribution = self(state, human_agent_index, possible_goal)
-            return int(np.random.choice(len(action_distribution), p=action_distribution))
+            probs = self._to_probability_array(action_distribution)
+            return int(np.random.choice(len(probs), p=probs))
         else:
             assert possible_goal is None, \
                 "When sampling actions for all human agents, no possible goal can be given."
             actions = []
             for agent_index in self.human_agent_indices:
                 action_distribution = self(state, agent_index)
-                action = int(np.random.choice(len(action_distribution), p=action_distribution))
+                probs = self._to_probability_array(action_distribution)
+                action = int(np.random.choice(len(probs), p=probs))
                 actions.append(action)
             return actions
 
