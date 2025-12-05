@@ -508,6 +508,9 @@ def get_agent_indices(env: RandomMultigridEnv) -> Tuple[List[int], Optional[int]
     left-to-right), which varies between randomly generated environments. This function
     must be called for each environment to get correct agent indices.
     
+    Note: This function assumes at most one grey (robot) agent. If multiple grey agents
+    exist (NUM_ROBOTS > 1), only the last one's index will be returned.
+    
     Args:
         env: The multigrid environment.
     
