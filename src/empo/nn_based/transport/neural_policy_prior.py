@@ -714,16 +714,23 @@ def train_transport_neural_policy_prior(
                     )
                     current_q = q_values[0, action]
                     
-                    # Compute target (simplified: use goal achievement reward)
-                    reward = 1.0 if goal.is_achieved(None) else 0.0
+                    # Compute target
+                    # Goal achievement (reward=1) is treated as terminal state
+                    # so no future value is added when goal is reached
+                    goal_achieved = goal.is_achieved(None)
                     
-                    with torch.no_grad():
-                        next_q = target_network.encode_and_forward(
-                            None, env, agent_idx, goal, device
-                        )
-                        next_v = q_network.get_value(next_q)
+                    if goal_achieved:
+                        # Terminal state: target = reward = 1.0
+                        target = torch.tensor(1.0, device=device)
+                    else:
+                        # Non-terminal: target = 0 + γ * V(s')
+                        with torch.no_grad():
+                            next_q = target_network.encode_and_forward(
+                                None, env, agent_idx, goal, device
+                            )
+                            next_v = q_network.get_value(next_q)
+                        target = gamma * next_v
                     
-                    target = reward + gamma * next_v
                     loss = (current_q - target) ** 2
                     total_loss = total_loss + loss
                 
