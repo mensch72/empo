@@ -1,0 +1,23 @@
+# Simple 8x8 world with human and robot - rock blocking passage
+# Challenge: Robot can push rock to open path for human to reach either side
+metadata:
+  name: "Rock Gateway"
+  description: "A rock blocks a narrow passage. The robot (grey) can push the rock to let the human (yellow) pass. The robot doesn't know which side the human wants to reach."
+  author: "EMPO Framework"
+  version: "1.0.0"
+  created: "2025-01-01T00:00:00Z"
+  category: "copilot_challenges"
+  tags: ["human-robot", "rock", "empowerment", "simple"]
+
+map: |
+  We We We We We We We We
+  We .. .. .. .. .. .. We
+  We .. Ay .. .. .. .. We
+  We We We Ro We We .. We
+  We .. .. .. .. .. .. We
+  We .. .. .. .. Ae .. We
+  We .. .. .. .. .. .. We
+  We We We We We We We We
+
+max_steps: 50
+can_push_rocks: "e"

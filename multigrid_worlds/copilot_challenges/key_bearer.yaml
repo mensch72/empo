@@ -1,0 +1,22 @@
+# Simple 8x8 world with door and key
+# Challenge: Robot can pick up key and open door to give human access to new area
+metadata:
+  name: "Key Bearer"
+  description: "A locked door blocks access to part of the grid. The robot (grey) can pick up the key and unlock the door for the human (yellow). The robot doesn't know if the human wants to go through."
+  author: "EMPO Framework"
+  version: "1.0.0"
+  created: "2025-01-01T00:00:00Z"
+  category: "copilot_challenges"
+  tags: ["human-robot", "door", "key", "empowerment", "simple"]
+
+map: |
+  We We We We We We We We
+  We .. .. .. Lr .. .. We
+  We .. Ay .. We .. .. We
+  We .. .. .. We .. .. We
+  We .. .. .. We .. .. We
+  We .. Ae .. Kr .. .. We
+  We .. .. .. .. .. .. We
+  We We We We We We We We
+
+max_steps: 50

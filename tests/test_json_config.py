@@ -1,5 +1,5 @@
 """
-Test JSON config file loading for MultiGridEnv.
+Test config file loading for MultiGridEnv (JSON and YAML).
 """
 import sys
 import os
@@ -16,7 +16,7 @@ from gym_multigrid.multigrid import MultiGridEnv, World
 def test_load_config_file_basic():
     """Test loading a basic config file."""
     config_path = os.path.join(
-        os.path.dirname(__file__), '..', 'multigrid_worlds', 'basic', 'empty_5x5.json'
+        os.path.dirname(__file__), '..', 'multigrid_worlds', 'basic', 'empty_5x5.yaml'
     )
     
     env = MultiGridEnv(config_file=config_path)
@@ -36,7 +36,7 @@ def test_load_config_file_basic():
 def test_load_config_file_with_override():
     """Test that __init__ params override config file values."""
     config_path = os.path.join(
-        os.path.dirname(__file__), '..', 'multigrid_worlds', 'basic', 'empty_5x5.json'
+        os.path.dirname(__file__), '..', 'multigrid_worlds', 'basic', 'empty_5x5.yaml'
     )
     
     # Override max_steps from config
@@ -50,7 +50,7 @@ def test_load_config_file_with_override():
 def test_load_config_file_multiagent():
     """Test loading a multi-agent config file."""
     config_path = os.path.join(
-        os.path.dirname(__file__), '..', 'multigrid_worlds', 'basic', 'two_agents.json'
+        os.path.dirname(__file__), '..', 'multigrid_worlds', 'basic', 'two_agents.yaml'
     )
     
     env = MultiGridEnv(config_file=config_path)
@@ -68,7 +68,7 @@ def test_load_config_file_multiagent():
 def test_load_config_file_with_objects():
     """Test loading a config file with blocks and rocks."""
     config_path = os.path.join(
-        os.path.dirname(__file__), '..', 'multigrid_worlds', 'puzzles', 'block_rock_test.json'
+        os.path.dirname(__file__), '..', 'multigrid_worlds', 'puzzles', 'block_rock_test.yaml'
     )
     
     env = MultiGridEnv(config_file=config_path)
@@ -94,7 +94,7 @@ def test_load_config_file_with_objects():
 def test_load_config_file_large():
     """Test loading a larger multi-chamber config file."""
     config_path = os.path.join(
-        os.path.dirname(__file__), '..', 'multigrid_worlds', 'puzzles', 'small_one_or_three_chambers.json'
+        os.path.dirname(__file__), '..', 'multigrid_worlds', 'puzzles', 'small_one_or_three_chambers.yaml'
     )
     
     env = MultiGridEnv(config_file=config_path)
@@ -114,7 +114,7 @@ def test_load_config_file_large():
 def test_load_config_file_not_found():
     """Test that FileNotFoundError is raised for missing config file."""
     try:
-        env = MultiGridEnv(config_file='/nonexistent/path/config.json')
+        env = MultiGridEnv(config_file='/nonexistent/path/config.yaml')
         assert False, "Expected FileNotFoundError"
     except FileNotFoundError:
         pass
@@ -165,7 +165,7 @@ def test_config_file_all_worlds():
     count = 0
     for root, dirs, files in os.walk(worlds_dir):
         for filename in files:
-            if filename.endswith('.json'):
+            if filename.endswith('.yaml') or filename.endswith('.yml') or filename.endswith('.json'):
                 config_path = os.path.join(root, filename)
                 try:
                     env = MultiGridEnv(config_file=config_path)

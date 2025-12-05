@@ -1,0 +1,29 @@
+# Large multi-chamber environment
+metadata:
+  name: "One Or Three Chambers (Full)"
+  description: "Large multi-chamber environment with 15 human agents and 2 robot agents. Features internal walls creating chamber structure, a rock, and a block."
+  author: "EMPO Framework"
+  version: "1.0.0"
+  created: "2025-01-01T00:00:00Z"
+  category: "puzzles"
+  tags: ["multi-agent", "chambers", "human-robot", "blocks", "rocks"]
+
+map: |
+  WeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWe
+  We................WeAyAyAyAyAyAyAyWe..................We
+  We................WeAyAyAyAyAyAyAyWe..................We
+  We................WeWeWeWeAyWeWeWeWe..................We
+  We................We....AeRoAe....We..................We
+  We................We..WeWeWeWeWe..WeWeWe..............We
+  We....................We....WeWe......We..............We
+  We................WeWeWe....We....Bl......We..........We
+  We................We............We..WeWeWeWeWeWeWeWeWeWe
+  We................We............We....................We
+  We................We............We....................We
+  We................We............We....................We
+  We................We............We....................We
+  We................We............We....................We
+  We................We............We....................We
+  WeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWeWe
+
+max_steps: 1000

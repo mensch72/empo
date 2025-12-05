@@ -1,5 +1,10 @@
 import math
 import json
+try:
+    import yaml
+    YAML_AVAILABLE = True
+except ImportError:
+    YAML_AVAILABLE = False
 import gymnasium as gym
 from enum import IntEnum
 import numpy as np
@@ -2011,11 +2016,12 @@ class MultiGridEnv(WorldModel):
             map: ASCII map string defining the grid layout
             orientations: List of orientation codes ('n', 's', 'e', 'w') for agents
             can_push_rocks: Color codes of agents that can push rocks (default: 'e' for grey)
-            config_file: Path to JSON config file containing all init parameters.
+            config_file: Path to JSON or YAML config file containing all init parameters.
                         If provided, loads map and other parameters from the file.
+                        YAML files (.yaml, .yml) use PyYAML; JSON files use standard json.
                         Parameters passed explicitly to __init__ override config file values.
         """
-        # Load config from JSON file if provided
+        # Load config from config file if provided
         if config_file is not None:
             config = self._load_config_file(config_file)
             
@@ -2197,14 +2203,14 @@ class MultiGridEnv(WorldModel):
     @staticmethod
     def _load_config_file(config_path: str) -> dict:
         """
-        Load environment configuration from a JSON file.
+        Load environment configuration from a JSON or YAML file.
         
         Args:
-            config_path: Path to the JSON config file
+            config_path: Path to the config file (JSON or YAML)
             
         Returns:
             dict: Configuration dictionary with keys:
-                - map: ASCII map string
+                - map: ASCII map string or list of strings
                 - max_steps: Maximum steps per episode
                 - seed: Random seed
                 - orientations: List of orientation codes
@@ -2216,13 +2222,28 @@ class MultiGridEnv(WorldModel):
                 
         Raises:
             FileNotFoundError: If config file doesn't exist
-            ValueError: If config file is invalid JSON or missing required fields
+            ValueError: If config file is invalid or missing required fields
+            ImportError: If YAML file is requested but PyYAML is not installed
         """
         try:
             with open(config_path, 'r') as f:
-                config = json.load(f)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON in config file {config_path}: {e}")
+                # Determine format based on file extension
+                if config_path.endswith('.yaml') or config_path.endswith('.yml'):
+                    if not YAML_AVAILABLE:
+                        raise ImportError(
+                            f"PyYAML is required to load YAML config files. "
+                            f"Install it with: pip install pyyaml"
+                        )
+                    try:
+                        config = yaml.safe_load(f)
+                    except yaml.YAMLError as e:
+                        raise ValueError(f"Invalid YAML in config file {config_path}: {e}")
+                else:
+                    # Default to JSON for .json or unknown extensions
+                    try:
+                        config = json.load(f)
+                    except json.JSONDecodeError as e:
+                        raise ValueError(f"Invalid JSON in config file {config_path}: {e}")
         except FileNotFoundError:
             raise FileNotFoundError(f"Config file not found: {config_path}")
         
