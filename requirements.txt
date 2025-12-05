@@ -24,5 +24,8 @@ wandb>=0.15.0
 graphviz>=0.20.0
 line_profiler>=4.0.0
 
+# Machine learning utilities
+scikit-learn>=1.2.0
+
 # MPI for distributed training (optional)
 mpi4py>=3.1.0
