@@ -66,6 +66,7 @@ from empo.multigrid import (
 from empo.nn_based.multigrid import (
     MultiGridQNetwork as QNetwork,
     train_multigrid_neural_policy_prior as train_neural_policy_prior,
+    MultiGridNeuralHumanPolicyPrior,
     OBJECT_TYPE_TO_CHANNEL,
     NUM_OBJECT_TYPE_CHANNELS,
     OVERLAPPABLE_OBJECTS,
@@ -103,9 +104,8 @@ DOOR_PROBABILITY = 0.03      # Probability of placing a door
 LAVA_PROBABILITY = 0.02      # Probability of placing lava
 BLOCK_PROBABILITY = 0.03     # Probability of placing a block
 
-# Default values for neural network configuration
-DEFAULT_NUM_AGENT_COLORS = 7  # Number of possible agent colors in World
-MAX_REJECTION_SAMPLING_ATTEMPTS = 1000  # Maximum attempts for rejection sampling
+# Maximum attempts for rejection sampling
+MAX_REJECTION_SAMPLING_ATTEMPTS = 1000
 
 
 # ============================================================================
@@ -474,7 +474,7 @@ def train_on_ensemble(
     device: str = 'cpu',
     verbose: bool = True,
     base_seed: int = 42
-) -> Tuple[QNetwork, RandomMultigridEnv]:
+) -> Tuple[MultiGridNeuralHumanPolicyPrior, RandomMultigridEnv]:
     """
     Train a SINGLE Q-network on an ensemble of randomly generated environments.
     
@@ -490,7 +490,7 @@ def train_on_ensemble(
         base_seed: Base random seed for reproducibility.
     
     Returns:
-        Tuple of (trained_q_network, sample_environment_for_testing)
+        Tuple of (trained_neural_prior, sample_environment_for_testing)
     """
     if verbose:
         print(f"Training SINGLE Q-network on random environment ensemble...")
@@ -535,7 +535,7 @@ def train_on_ensemble(
         episodes_per_model=episodes_per_env
     )
     
-    return neural_prior.q_network, base_env
+    return neural_prior, base_env
 
 
 # ============================================================================
@@ -894,42 +894,6 @@ def create_rollout_movie(
 # Main
 # ============================================================================
 
-def save_policy(q_network: QNetwork, path: str, config: Dict[str, Any]):
-    """Save trained policy to file."""
-    torch.save({
-        'q_network_state_dict': q_network.state_dict(),
-        'config': config
-    }, path)
-    print(f"Policy saved to {path}")
-
-
-def load_policy(path: str, device: str = 'cpu') -> Tuple[QNetwork, Dict[str, Any]]:
-    """Load policy from file.
-    
-    Note: Uses weights_only=False because config dict contains nested dicts
-    (num_agents_per_color). The saved file is trusted as it comes from this script.
-    """
-    checkpoint = torch.load(path, map_location=device, weights_only=False)
-    config = checkpoint['config']
-    
-    q_network = QNetwork(
-        grid_height=config['grid_height'],
-        grid_width=config['grid_width'],
-        num_actions=config['num_actions'],
-        num_agents_per_color=config['num_agents_per_color'],
-        num_agent_colors=config.get('num_agent_colors', DEFAULT_NUM_AGENT_COLORS),
-        state_feature_dim=config.get('state_feature_dim', 256),
-        goal_feature_dim=config.get('goal_feature_dim', 32),
-        hidden_dim=config.get('hidden_dim', 256),
-        beta=config.get('beta', 100.0),
-    ).to(device)
-    
-    q_network.load_state_dict(checkpoint['q_network_state_dict'])
-    print(f"Policy loaded from {path}")
-    
-    return q_network, config
-
-
 def main():
     # Parse command-line arguments
     args = parse_args()
@@ -983,16 +947,26 @@ def main():
     
     # Load or train policy
     if args.load_policy:
-        # Load existing policy
+        # Load existing policy using MultiGridNeuralHumanPolicyPrior.load()
         print(f"Loading policy from {args.load_policy}...")
-        q_network, saved_config = load_policy(args.load_policy, device=device)
+        # Create goal sampler for loading (only needed when loading)
+        goal_sampler = SmallGoalSampler(sample_env)
+        neural_prior = MultiGridNeuralHumanPolicyPrior.load(
+            filepath=args.load_policy,
+            world_model=sample_env,
+            human_agent_indices=human_agent_indices,
+            goal_sampler=goal_sampler,
+            device=device
+        )
+        q_network = neural_prior.q_network
         base_env = sample_env  # Use sample environment for rollouts
+        print(f"Policy loaded from {args.load_policy}")
         
         # Optionally train more episodes on top of loaded policy
         if num_episodes > 0 and not args.no_train:
             print(f"Continuing training for {num_episodes} additional episodes...")
             t0 = time.time()
-            q_network, base_env = train_on_ensemble(
+            neural_prior, base_env = train_on_ensemble(
                 human_agent_indices=human_agent_indices,
                 num_episodes=num_episodes,
                 episodes_per_env=1,
@@ -1000,6 +974,7 @@ def main():
                 verbose=True,
                 base_seed=42
             )
+            q_network = neural_prior.q_network
             elapsed = time.time() - t0
             print(f"\nAdditional training completed in {elapsed:.2f} seconds")
             print()
@@ -1009,7 +984,7 @@ def main():
     else:
         # Train from scratch
         t0 = time.time()
-        q_network, base_env = train_on_ensemble(
+        neural_prior, base_env = train_on_ensemble(
             human_agent_indices=human_agent_indices,
             num_episodes=num_episodes,
             episodes_per_env=1,  # New environment each episode for maximum diversity
@@ -1017,6 +992,7 @@ def main():
             verbose=True,
             base_seed=42
         )
+        q_network = neural_prior.q_network
         elapsed = time.time() - t0
         print(f"\nTraining completed in {elapsed:.2f} seconds")
         print()
@@ -1029,22 +1005,9 @@ def main():
     
     # Always save the policy (unless loading without additional training)
     if not (args.load_policy and args.no_train):
-        # Get agent configuration from environment
-        from empo.nn_based.multigrid.feature_extraction import get_num_agents_per_color
-        num_agents_per_color = get_num_agents_per_color(base_env)
-        
-        policy_config = {
-            'grid_height': base_env.height,
-            'grid_width': base_env.width,
-            'num_actions': base_env.action_space.n,
-            'num_agents_per_color': num_agents_per_color,
-            'num_agent_colors': len(set(num_agents_per_color.keys())) if num_agents_per_color else DEFAULT_NUM_AGENT_COLORS,
-            'state_feature_dim': 256,
-            'goal_feature_dim': 32,
-            'hidden_dim': 256,
-            'beta': 100.0,
-        }
-        save_policy(q_network, policy_save_path, policy_config)
+        # Use the NeuralPolicyPrior's save method
+        neural_prior.save(policy_save_path)
+        print(f"Policy saved to {policy_save_path}")
     
     # Generate test environments for rollouts
     print(f"Generating {num_test_envs} test environments for rollouts...")
