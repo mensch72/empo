@@ -56,3 +56,7 @@ docker-compose.yml
 tmp/
 temp/
 *.tmp
+
+# Environment files
+.env
+.env.*

@@ -37,12 +37,14 @@ from matplotlib.colors import Normalize
 from typing import Iterator, Tuple, Dict, List, Any, Optional
 
 from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, Wall, World, SmallActions
-from empo.possible_goal import PossibleGoal, PossibleGoalGenerator, PossibleGoalSampler
+from empo.possible_goal import PossibleGoal, PossibleGoalSampler
+from empo.multigrid import ReachCellGoal, MultiGridGoalSampler, RandomPolicy, render_goal_overlay
 from empo.nn_based.multigrid import (
     MultiGridStateEncoder as StateEncoder,
     MultiGridGoalEncoder as GoalEncoder,
     MultiGridQNetwork as QNetwork,
     MultiGridPolicyPriorNetwork as PolicyPriorNetwork,
+    MultiGridNeuralHumanPolicyPrior as NeuralHumanPolicyPrior,
     train_multigrid_neural_policy_prior as train_neural_policy_prior,
     NUM_OBJECT_TYPE_CHANNELS,
     OBJECT_TYPE_TO_CHANNEL,
@@ -86,78 +88,6 @@ class Empty5x5Env(MultiGridEnv):
         )
         self.num_humans = sum(1 for a in self.agents if a.color == 'yellow')
         self.num_robots = sum(1 for a in self.agents if a.color == 'grey')
-
-
-# ============================================================================
-# Goal Definitions
-# ============================================================================
-
-class ReachCellGoal(PossibleGoal):
-    """A goal where a specific human agent tries to reach a specific cell."""
-    
-    def __init__(self, world_model, human_agent_index: int, target_pos: tuple):
-        super().__init__(world_model)
-        self.human_agent_index = human_agent_index
-        self.target_pos = tuple(target_pos)
-    
-    def is_achieved(self, state) -> int:
-        """Returns 1 if the specific human agent is at the target position."""
-        step_count, agent_states, mobile_objects, mutable_objects = state
-        if self.human_agent_index < len(agent_states):
-            agent_state = agent_states[self.human_agent_index]
-            pos_x, pos_y = agent_state[0], agent_state[1]
-            if pos_x == self.target_pos[0] and pos_y == self.target_pos[1]:
-                return 1
-        return 0
-    
-    def __str__(self):
-        return f"ReachCell({self.target_pos[0]},{self.target_pos[1]})"
-    
-    def __repr__(self):
-        return self.__str__()
-    
-    def __hash__(self):
-        return hash((self.human_agent_index, self.target_pos[0], self.target_pos[1]))
-    
-    def __eq__(self, other):
-        if not isinstance(other, ReachCellGoal):
-            return False
-        return (self.human_agent_index == other.human_agent_index and 
-                self.target_pos == other.target_pos)
-
-
-class ReachCellGoalSampler(PossibleGoalSampler):
-    """
-    A goal sampler that samples uniformly from a list of target cell positions.
-    
-    This sampler creates ReachCellGoal instances for randomly selected cells.
-    """
-    
-    def __init__(self, world_model, goal_cells: List[Tuple[int, int]]):
-        """
-        Initialize the goal sampler.
-        
-        Args:
-            world_model: The environment.
-            goal_cells: List of (x, y) tuples representing possible goal positions.
-        """
-        super().__init__(world_model)
-        self.goal_cells = goal_cells
-    
-    def sample(self, state, human_agent_index: int) -> Tuple[PossibleGoal, float]:
-        """
-        Sample a random goal cell uniformly.
-        
-        Args:
-            state: Current world state.
-            human_agent_index: Index of the human agent.
-        
-        Returns:
-            Tuple of (ReachCellGoal, weight=1.0).
-        """
-        target_pos = random.choice(self.goal_cells)
-        goal = ReachCellGoal(self.world_model, human_agent_index, target_pos)
-        return goal, 1.0
 
 
 # ============================================================================
@@ -341,44 +271,6 @@ def compute_value_for_goals(
     return values
 
 
-def get_boltzmann_action(
-    q_network: QNetwork,
-    state,
-    human_idx: int,
-    goal_pos: Tuple[int, int],
-    grid_width: int,
-    grid_height: int,
-    num_agents: int,
-    beta: float = 5.0,
-    device: str = 'cpu',
-    world_model: Any = None,
-    human_agent_indices: Optional[List[int]] = None
-) -> int:
-    """
-    Sample an action from the learned Boltzmann policy.
-    """
-    # Create simple goal object for encode_and_forward
-    class SimpleGoal:
-        def __init__(self, pos):
-            self.target_pos = pos
-    
-    goal = SimpleGoal(goal_pos)
-    
-    with torch.no_grad():
-        q_values = q_network.encode_and_forward(
-            state, world_model, human_idx, goal, device
-        )  # shape: (1, num_actions)
-        if beta == float('inf'):
-            # Greedy action
-            action = torch.argmax(q_values, dim=1).item()
-        else:
-            q_values -= torch.max(q_values, dim=1, keepdim=True).values  # For numerical stability
-            policy = F.softmax(beta * q_values, dim=1)
-            action = torch.multinomial(policy, 1).item()
-    
-    return action
-
-
 # ============================================================================
 # Rendering with Value Function Overlay
 # ============================================================================
@@ -392,11 +284,9 @@ def render_with_value_overlay(
     """
     Render the environment with value function overlay and goal rectangle.
     
-    Uses MultiGridGoalEncoder.render_goal_overlay for dashed blue rectangle
+    Uses render_goal_overlay from empo.multigrid for dashed blue rectangle
     boundaries and agent-to-goal connection lines.
     """
-    from empo.nn_based.multigrid.goal_encoder import MultiGridGoalEncoder
-    
     img = env.render(mode='rgb_array', highlight=False)
     
     fig, ax = plt.subplots(figsize=(8, 8))
@@ -432,7 +322,7 @@ def render_with_value_overlay(
         # Point goal represented as (x, y, x, y)
         goal = (actual_goal[0], actual_goal[1], actual_goal[0], actual_goal[1])
         
-        MultiGridGoalEncoder.render_goal_overlay(
+        render_goal_overlay(
             ax=ax,
             goal=goal,
             agent_pos=agent_pos,
@@ -470,9 +360,9 @@ def render_with_value_overlay(
 
 def run_rollout_with_learned_policies(
     env: MultiGridEnv,
-    q_network: QNetwork,
+    neural_prior: NeuralHumanPolicyPrior,
     goal_cells: List[Tuple[int, int]],
-    human_goals: Dict[int, Tuple[int, int]],  # goal for each human
+    human_goals: Dict[int, ReachCellGoal],  # ReachCellGoal for each human
     human_agent_indices: List[int],
     robot_index: int,
     first_human_idx: int,  # which human's value function to visualize
@@ -481,8 +371,8 @@ def run_rollout_with_learned_policies(
 ) -> List[np.ndarray]:
     """
     Run a single rollout where:
-    - Each human follows their learned goal-specific Boltzmann policy
-    - Robot uses random policy
+    - Each human follows their learned goal-specific policy using neural_prior.sample()
+    - Robot uses RandomPolicy
     - Visualization shows first human's value function
     """
     env.reset()
@@ -491,14 +381,21 @@ def run_rollout_with_learned_policies(
     grid_width = env.width
     grid_height = env.height
     num_agents = len(env.agents)
-    num_actions = env.action_space.n
     
+    # Get first human's goal position for visualization
     first_human_goal = human_goals[first_human_idx]
+    first_human_goal_pos = first_human_goal.target_pos
+    
+    # Robot uses RandomPolicy
+    robot_policy = RandomPolicy()
+    
+    # Get Q-network for value visualization
+    q_network = neural_prior.q_network
     
     for step in range(env.max_steps):
         state = env.get_state()
         
-        # Compute value function for first human across all goals
+        # Compute value function for first human across all goals (for visualization)
         value_dict = compute_value_for_goals(
             q_network, state, first_human_idx, goal_cells,
             grid_width, grid_height, num_agents, beta, device,
@@ -506,23 +403,19 @@ def run_rollout_with_learned_policies(
         )
         
         # Render with overlay (showing first human's actual goal)
-        frame = render_with_value_overlay(env, value_dict, first_human_goal)
+        frame = render_with_value_overlay(env, value_dict, first_human_goal_pos)
         frames.append(frame)
         
         # Get actions for all agents
         actions = []
         for agent_idx in range(num_agents):
             if agent_idx in human_agent_indices:
-                # Human uses learned Boltzmann policy
-                goal_pos = human_goals[agent_idx]
-                action = get_boltzmann_action(
-                    q_network, state, agent_idx, goal_pos,
-                    grid_width, grid_height, num_agents, beta, device,
-                    world_model=env, human_agent_indices=human_agent_indices
-                )
+                # Human uses learned policy via neural_prior.sample()
+                goal = human_goals[agent_idx]
+                action = neural_prior.sample(state, agent_idx, goal)
             else:
                 # Robot uses random policy
-                action = random.randint(0, num_actions - 1)
+                action = robot_policy.sample()
             actions.append(action)
         
         # Take step
@@ -538,7 +431,7 @@ def run_rollout_with_learned_policies(
         grid_width, grid_height, num_agents, beta, device,
         world_model=env, human_agent_indices=human_agent_indices
     )
-    frame = render_with_value_overlay(env, value_dict, first_human_goal)
+    frame = render_with_value_overlay(env, value_dict, first_human_goal_pos)
     frames.append(frame)
     
     return frames
@@ -676,8 +569,10 @@ def main(quick_mode=False):
     print("  Using batch learning with replay buffer")
     print()
     
-    # Create goal sampler for the training function
-    goal_sampler = ReachCellGoalSampler(env, goal_cells)
+    # Create goal sampler using MultiGridGoalSampler from empo.multigrid
+    # All goals are bounding boxes (x1, y1, x2, y2) - point goals are represented as (x, y, x, y)
+    # The sampler uses weight-proportional sampling based on goal area
+    goal_sampler = MultiGridGoalSampler(env)
     
     # Train neural network using the module's function
     # Hyperparameters tuned for this demo (5x5 grid, 25 goal cells)
@@ -704,8 +599,6 @@ def main(quick_mode=False):
         use_path_based_shaping=True,
         verbose=True
     )
-    # Extract the Q-network from the trained policy prior
-    q_network = neural_prior.q_network
     elapsed = time.time() - t0
     print(f"  Training completed in {elapsed:.2f} seconds")
     print()
@@ -719,8 +612,8 @@ def main(quick_mode=False):
     
     # Run n_rollouts rollouts with visualization
     print(f"Running {n_rollouts} rollouts:")
-    print("  - Humans follow learned goal-specific Boltzmann policies")
-    print("  - Robot uses random policy")
+    print("  - Humans follow learned goal-specific policies using neural_prior.sample()")
+    print("  - Robot uses RandomPolicy")
     print("  - Visualization shows human 0's value function")
     print()
     
@@ -729,16 +622,20 @@ def main(quick_mode=False):
     
     for i, goal_pos in enumerate(selected_goals):
         # Assign goals: first human gets the selected goal, second human gets random goal
-        human_goals = {first_human_idx: goal_pos}
+        # Create ReachCellGoal objects for each human
+        human_goals = {first_human_idx: ReachCellGoal(env, first_human_idx, goal_pos)}
         for h_idx in human_agent_indices:
             if h_idx != first_human_idx:
-                human_goals[h_idx] = random.choice(goal_cells)
+                other_goal_pos = random.choice(goal_cells)
+                human_goals[h_idx] = ReachCellGoal(env, h_idx, other_goal_pos)
         
-        print(f"  Rollout {i + 1}/{n_rollouts}: Human 0 goal = {goal_pos}, Human 1 goal = {human_goals.get(human_agent_indices[1], 'N/A')}")
+        first_goal = human_goals[first_human_idx]
+        other_goals_str = {h: human_goals[h].target_pos for h in human_agent_indices if h != first_human_idx}
+        print(f"  Rollout {i + 1}/{n_rollouts}: Human 0 goal = {goal_pos}, Others = {other_goals_str}")
         
         frames = run_rollout_with_learned_policies(
             env=env,
-            q_network=q_network,
+            neural_prior=neural_prior,
             goal_cells=goal_cells,
             human_goals=human_goals,
             human_agent_indices=human_agent_indices,

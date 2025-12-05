@@ -47,7 +47,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from matplotlib.colors import Normalize
@@ -58,20 +57,14 @@ from gym_multigrid.multigrid import (
 )
 from empo.possible_goal import PossibleGoal, PossibleGoalSampler
 from empo.multigrid import (
-    ReachCellGoal,
     ReachRectangleGoal,
     MultiGridGoalSampler,
+    RandomPolicy,
     render_goal_overlay,
 )
 from empo.nn_based.multigrid import (
-    MultiGridQNetwork as QNetwork,
-    train_multigrid_neural_policy_prior as train_neural_policy_prior,
     MultiGridNeuralHumanPolicyPrior,
-    OBJECT_TYPE_TO_CHANNEL,
-    NUM_OBJECT_TYPE_CHANNELS,
-    OVERLAPPABLE_OBJECTS,
-    NON_OVERLAPPABLE_IMMOBILE_OBJECTS,
-    NON_OVERLAPPABLE_MOBILE_OBJECTS,
+    train_multigrid_neural_policy_prior as train_neural_policy_prior,
 )
 
 
@@ -80,15 +73,15 @@ from empo.nn_based.multigrid import (
 # ============================================================================
 
 GRID_SIZE = 7           # 7x7 grid (including outer walls)
-NUM_HUMANS = 3          # 3 human agents (yellow)
+NUM_HUMANS = 2          # 2 human agents (yellow)
 NUM_ROBOTS = 1          # 1 robot agent (grey)
-MAX_STEPS = 20          # Maximum steps per episode
+MAX_STEPS = 50          # Maximum steps per episode
 ROLLOUT_STEPS = 15      # Steps per rollout (shorter than training episodes)
-NUM_TEST_ENVS = 10      # Number of test environments for rollout evaluation
-NUM_ROLLOUTS = 10       # Number of rollouts for the movie
+NUM_TEST_ENVS = 50      # Number of test environments for rollout evaluation
+NUM_ROLLOUTS = 50       # Number of rollouts for the movie
 
 # Full training configuration (default)
-NUM_TRAINING_EPISODES_FULL = 500
+NUM_TRAINING_EPISODES_FULL = 10000
 
 # Quick test configuration (for --quick flag)
 NUM_TRAINING_EPISODES_QUICK = 50
@@ -97,12 +90,16 @@ NUM_ROLLOUTS_QUICK = 3
 
 # Object placement probabilities
 WALL_PROBABILITY = 0.15      # Probability of placing internal walls
-KEY_PROBABILITY = 0.05       # Probability of placing a key
-BALL_PROBABILITY = 0.05      # Probability of placing a ball
-BOX_PROBABILITY = 0.03       # Probability of placing a box
-DOOR_PROBABILITY = 0.03      # Probability of placing a door
-LAVA_PROBABILITY = 0.02      # Probability of placing lava
+DOOR_PROBABILITY = 0.03      # Probability of placing a door (also places matching key)
+BALL_PROBABILITY = 0.0       # Probability of placing a ball
+BOX_PROBABILITY = 0.0        # Probability of placing a box
+LAVA_PROBABILITY = 0.0       # Probability of placing lava
 BLOCK_PROBABILITY = 0.03     # Probability of placing a block
+ROCK_PROBABILITY = 0.02      # Probability of placing a rock
+UNSTEADY_GROUND_PROBABILITY = 0.10  # Probability of placing unsteady ground
+
+# Door/Key color (single color for both)
+DOOR_KEY_COLOR = 'r'  # Red
 
 # Maximum attempts for rejection sampling
 MAX_REJECTION_SAMPLING_ATTEMPTS = 1000
@@ -276,24 +273,28 @@ class RandomMultigridEnv(MultiGridEnv):
     The environment creates a grid with:
     - Outer walls on all edges
     - Random internal walls and obstacles
-    - Random objects (keys, balls, boxes, doors, lava, blocks)
+    - Random objects (keys, balls, boxes, doors, lava, blocks, rocks, unsteady ground)
     - Specified number of human (yellow) and robot (grey) agents
+    
+    Doors and keys are paired: when a door is placed, a matching key is also placed.
     """
     
     def __init__(
         self,
         grid_size: int = 7,
-        num_humans: int = 3,
+        num_humans: int = 2,
         num_robots: int = 1,
-        max_steps: int = 20,
+        max_steps: int = 50,
         seed: Optional[int] = None,
         wall_prob: float = 0.15,
-        key_prob: float = 0.05,
-        ball_prob: float = 0.05,
-        box_prob: float = 0.03,
+        ball_prob: float = 0.0,
+        box_prob: float = 0.0,
         door_prob: float = 0.03,
-        lava_prob: float = 0.02,
-        block_prob: float = 0.03
+        lava_prob: float = 0.0,
+        block_prob: float = 0.03,
+        rock_prob: float = 0.02,
+        unsteady_prob: float = 0.10,
+        door_key_color: str = 'r'
     ):
         """
         Initialize the random multigrid environment.
@@ -305,23 +306,27 @@ class RandomMultigridEnv(MultiGridEnv):
             max_steps: Maximum steps per episode.
             seed: Random seed for reproducibility.
             wall_prob: Probability of internal walls.
-            key_prob: Probability of placing keys.
             ball_prob: Probability of placing balls.
             box_prob: Probability of placing boxes.
-            door_prob: Probability of placing doors.
+            door_prob: Probability of placing doors (also places matching key).
             lava_prob: Probability of placing lava.
             block_prob: Probability of placing blocks.
+            rock_prob: Probability of placing rocks.
+            unsteady_prob: Probability of placing unsteady ground.
+            door_key_color: Color code for doors and keys (single color).
         """
         self.grid_size = grid_size
         self.num_humans = num_humans
         self.num_robots = num_robots
         self.wall_prob = wall_prob
-        self.key_prob = key_prob
         self.ball_prob = ball_prob
         self.box_prob = box_prob
         self.door_prob = door_prob
         self.lava_prob = lava_prob
         self.block_prob = block_prob
+        self.rock_prob = rock_prob
+        self.unsteady_prob = unsteady_prob
+        self.door_key_color = door_key_color
         
         if seed is not None:
             random.seed(seed)
@@ -339,15 +344,20 @@ class RandomMultigridEnv(MultiGridEnv):
         )
     
     def _generate_random_map(self) -> str:
-        """Generate a random map string for the environment."""
-        lines = []
+        """
+        Generate a random map string for the environment.
         
-        # Valid color codes: r=red, g=green, b=blue, p=purple, y=yellow, e=grey
-        colors = ['r', 'g', 'b', 'p']  # Not using y or e as they're for agents
-        
+        Doors and keys are paired: when a door is placed, a matching key
+        is also placed in a random available cell. They use the same color.
+        """
         # Track which cells are available for agents
         available_cells = []
         
+        # Track cells where we'll place keys (for doors placed)
+        pending_keys = []
+        
+        # First pass: generate the grid without keys
+        grid = []
         for y in range(self.grid_size):
             row = []
             for x in range(self.grid_size):
@@ -369,30 +379,43 @@ class RandomMultigridEnv(MultiGridEnv):
                         row.append('La')  # Lava
                         continue
                     
-                    cumulative += self.key_prob
+                    cumulative += self.rock_prob
                     if r < cumulative:
-                        color = random.choice(colors)
-                        row.append(f'K{color}')  # Key
+                        row.append('Ro')  # Rock
+                        continue
+                    
+                    cumulative += self.door_prob
+                    if r < cumulative:
+                        # Place door and schedule a matching key
+                        row.append(f'D{self.door_key_color}')  # Door
+                        pending_keys.append(self.door_key_color)
+                        # Doors can be passed through (when open), so add to available
                         available_cells.append((x, y))
                         continue
                     
                     cumulative += self.ball_prob
                     if r < cumulative:
-                        color = random.choice(colors)
+                        color = random.choice(['r', 'g', 'b', 'p'])
                         row.append(f'B{color}')  # Ball
                         available_cells.append((x, y))
                         continue
                     
                     cumulative += self.box_prob
                     if r < cumulative:
-                        color = random.choice(colors)
+                        color = random.choice(['r', 'g', 'b', 'p'])
                         row.append(f'X{color}')  # Box
                         available_cells.append((x, y))
                         continue
                     
                     cumulative += self.block_prob
                     if r < cumulative:
-                        row.append('Bl')  # Block (no color code)
+                        row.append('Bl')  # Block (non-overlappable)
+                        # Blocks cannot be overlapped, don't add to available cells
+                        continue
+                    
+                    cumulative += self.unsteady_prob
+                    if r < cumulative:
+                        row.append('Un')  # Unsteady ground (overlappable)
                         available_cells.append((x, y))
                         continue
                     
@@ -400,27 +423,35 @@ class RandomMultigridEnv(MultiGridEnv):
                     row.append('..')
                     available_cells.append((x, y))
             
-            lines.append(' '.join(row))
+            grid.append(row)
         
-        # Convert to grid for agent placement
-        grid_lines = [line.split() for line in lines]
+        # Second pass: place keys for each door in random empty cells
+        # Find all empty cells for key placement
+        empty_cells_for_keys = [(x, y) for (x, y) in available_cells 
+                                if grid[y][x] == '..']
+        
+        random.shuffle(empty_cells_for_keys)
+        for i, key_color in enumerate(pending_keys):
+            if i < len(empty_cells_for_keys):
+                kx, ky = empty_cells_for_keys[i]
+                grid[ky][kx] = f'K{key_color}'  # Place key
         
         # Ensure we have enough cells for agents
         num_agents = self.num_humans + self.num_robots
         
-        # Find all empty cells (not walls, lava, or objects)
+        # Find all empty cells (not walls, lava, or blocking objects)
         empty_cells = []
         for y in range(1, self.grid_size - 1):
             for x in range(1, self.grid_size - 1):
-                if grid_lines[y][x] == '..':
+                if grid[y][x] == '..':
                     empty_cells.append((x, y))
         
         # If not enough empty cells, clear some wall/object cells
         while len(empty_cells) < num_agents:
             for y in range(1, self.grid_size - 1):
                 for x in range(1, self.grid_size - 1):
-                    if grid_lines[y][x] != '..' and (x, y) not in empty_cells:
-                        grid_lines[y][x] = '..'
+                    if grid[y][x] != '..' and (x, y) not in empty_cells:
+                        grid[y][x] = '..'
                         empty_cells.append((x, y))
                         if len(empty_cells) >= num_agents:
                             break
@@ -434,15 +465,15 @@ class RandomMultigridEnv(MultiGridEnv):
         # Place human agents (yellow)
         for i in range(self.num_humans):
             x, y = agent_positions[i]
-            grid_lines[y][x] = 'Ay'  # Yellow agent
+            grid[y][x] = 'Ay'  # Yellow agent
         
         # Place robot agents (grey)
         for i in range(self.num_robots):
             x, y = agent_positions[self.num_humans + i]
-            grid_lines[y][x] = 'Ae'  # Grey agent (e = grey)
+            grid[y][x] = 'Ae'  # Grey agent (e = grey)
         
-        # Rebuild map string
-        return '\n'.join(' '.join(row) for row in grid_lines)
+        # Build map string
+        return '\n'.join(' '.join(row) for row in grid)
 
 
 # ============================================================================
@@ -458,12 +489,14 @@ def create_random_env(seed: int) -> RandomMultigridEnv:
         max_steps=MAX_STEPS,
         seed=seed,
         wall_prob=WALL_PROBABILITY,
-        key_prob=KEY_PROBABILITY,
         ball_prob=BALL_PROBABILITY,
         box_prob=BOX_PROBABILITY,
         door_prob=DOOR_PROBABILITY,
         lava_prob=LAVA_PROBABILITY,
-        block_prob=BLOCK_PROBABILITY
+        block_prob=BLOCK_PROBABILITY,
+        rock_prob=ROCK_PROBABILITY,
+        unsteady_prob=UNSTEADY_GROUND_PROBABILITY,
+        door_key_color=DOOR_KEY_COLOR
     )
 
 
@@ -474,9 +507,9 @@ def train_on_ensemble(
     device: str = 'cpu',
     verbose: bool = True,
     base_seed: int = 42
-) -> Tuple[MultiGridNeuralHumanPolicyPrior, RandomMultigridEnv]:
+) -> Tuple['MultiGridNeuralHumanPolicyPrior', RandomMultigridEnv]:
     """
-    Train a SINGLE Q-network on an ensemble of randomly generated environments.
+    Train a neural policy prior on an ensemble of randomly generated environments.
     
     Uses the world_model_generator feature of train_neural_policy_prior to
     generate new environments during training, enabling generalization.
@@ -490,10 +523,10 @@ def train_on_ensemble(
         base_seed: Base random seed for reproducibility.
     
     Returns:
-        Tuple of (trained_neural_prior, sample_environment_for_testing)
+        Tuple of (trained_policy, sample_environment_for_testing)
     """
     if verbose:
-        print(f"Training SINGLE Q-network on random environment ensemble...")
+        print(f"Training neural policy prior on random environment ensemble...")
         print(f"  Grid size: {GRID_SIZE}x{GRID_SIZE}")
         print(f"  Agents: {NUM_HUMANS} humans + {NUM_ROBOTS} robot")
         print(f"  Training episodes: {num_episodes}")
@@ -513,7 +546,7 @@ def train_on_ensemble(
         return env
     
     # Use train_neural_policy_prior with world_model_generator
-    neural_prior = train_neural_policy_prior(
+    policy = train_neural_policy_prior(
         world_model=base_env,
         human_agent_indices=human_agent_indices,
         goal_sampler=goal_sampler,
@@ -535,164 +568,17 @@ def train_on_ensemble(
         episodes_per_model=episodes_per_env
     )
     
-    return neural_prior, base_env
+    return policy, base_env
 
 
 # ============================================================================
 # Rollout and Visualization
 # ============================================================================
 
-def state_to_grid_tensor(
-    state, 
-    env: RandomMultigridEnv,
-    query_agent_index: int,
-    human_agent_indices: List[int],
-    device: str = 'cpu'
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Convert a state to tensor representation for the neural network.
-    
-    Uses the same channel structure as StateEncoder:
-    - num_object_types: explicit object type channels
-    - 3: "other" object channels (overlappable, immobile, mobile)
-    - 1: per-color agent channel (backward compatibility mode)
-    - 1: query agent channel
-    """
-    step_count, agent_states, mobile_objects, mutable_objects = state
-    
-    grid_width = env.width
-    grid_height = env.height
-    num_agents = len(env.agents)
-    num_object_types = NUM_OBJECT_TYPE_CHANNELS
-    
-    # Channel structure (matching StateEncoder with num_agents_per_color=None)
-    num_other_object_channels = 3
-    num_color_channels = 1  # Backward compatibility: single channel for all agents
-    num_channels = num_object_types + num_other_object_channels + num_color_channels + 1
-    
-    # Channel indices
-    other_overlappable_idx = num_object_types
-    other_immobile_idx = num_object_types + 1
-    other_mobile_idx = num_object_types + 2
-    color_channels_start = num_object_types + num_other_object_channels
-    query_agent_channel_idx = color_channels_start + num_color_channels
-    
-    grid_tensor = torch.zeros(1, num_channels, grid_height, grid_width, device=device)
-    
-    # 1. Encode object-type channels from the persistent world grid
-    for y in range(grid_height):
-        for x in range(grid_width):
-            cell = env.grid.get(x, y)
-            if cell is not None:
-                cell_type = getattr(cell, 'type', None)
-                if cell_type is not None:
-                    if cell_type in OBJECT_TYPE_TO_CHANNEL:
-                        channel_idx = OBJECT_TYPE_TO_CHANNEL[cell_type]
-                        if channel_idx < num_object_types:
-                            grid_tensor[0, channel_idx, y, x] = 1.0
-                    else:
-                        # Object type not in explicit channels - use "other" channels
-                        if cell_type in OVERLAPPABLE_OBJECTS:
-                            grid_tensor[0, other_overlappable_idx, y, x] = 1.0
-                        elif cell_type in NON_OVERLAPPABLE_MOBILE_OBJECTS:
-                            grid_tensor[0, other_mobile_idx, y, x] = 1.0
-                        else:
-                            grid_tensor[0, other_immobile_idx, y, x] = 1.0
-    
-    # 2. Encode all agent positions in single color channel (backward compatibility)
-    for i, agent_state in enumerate(agent_states):
-        x, y = int(agent_state[0]), int(agent_state[1])
-        if 0 <= x < grid_width and 0 <= y < grid_height:
-            grid_tensor[0, color_channels_start, y, x] = 1.0
-    
-    # 3. Encode query agent channel
-    if query_agent_index < len(agent_states):
-        agent_state = agent_states[query_agent_index]
-        x, y = int(agent_state[0]), int(agent_state[1])
-        if 0 <= x < grid_width and 0 <= y < grid_height:
-            grid_tensor[0, query_agent_channel_idx, y, x] = 1.0
-    
-    # Normalize step count
-    step_tensor = torch.tensor([[step_count / env.max_steps]], device=device, dtype=torch.float32)
-    
-    return grid_tensor, step_tensor
-
-
-def get_agent_tensors(
-    state,
-    human_idx: int,
-    grid_width: int,
-    grid_height: int,
-    device: str = 'cpu'
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Extract agent position, direction, and index tensors from state."""
-    _, agent_states, _, _ = state
-    agent_state = agent_states[human_idx]
-    
-    position = torch.tensor([[
-        agent_state[0] / grid_width,
-        agent_state[1] / grid_height
-    ]], device=device, dtype=torch.float32)
-    
-    direction = torch.zeros(1, 4, device=device)
-    dir_idx = int(agent_state[2]) % 4
-    direction[0, dir_idx] = 1.0
-    
-    agent_idx_tensor = torch.tensor([human_idx], device=device)
-    
-    return position, direction, agent_idx_tensor
-
-
-def get_goal_tensor(
-    goal_pos: Tuple[int, int],
-    grid_width: int,
-    grid_height: int,
-    device: str = 'cpu'
-) -> torch.Tensor:
-    """Convert goal position to normalized tensor."""
-    return torch.tensor([[
-        goal_pos[0] / grid_width,
-        goal_pos[1] / grid_height,
-        goal_pos[0] / grid_width,
-        goal_pos[1] / grid_height
-    ]], device=device, dtype=torch.float32)
-
-
-def get_boltzmann_action(
-    q_network: QNetwork,
-    state,
-    env: RandomMultigridEnv,
-    human_idx: int,
-    human_agent_indices: List[int],
-    goal_pos: Tuple[int, int],
-    beta: float = 100.0,
-    device: str = 'cpu'
-) -> int:
-    """Sample an action from the learned Boltzmann policy."""
-    # Create a simple goal object with target_pos attribute
-    class SimpleGoal:
-        def __init__(self, pos):
-            self.target_pos = pos
-    
-    goal = SimpleGoal(goal_pos)
-    
-    with torch.no_grad():
-        q_values = q_network.encode_and_forward(
-            state, env, human_idx, goal, device
-        )
-        if beta == float('inf'):
-            action = torch.argmax(q_values, dim=1).item()
-        else:
-            q_values -= torch.max(q_values, dim=1, keepdim=True).values
-            policy = F.softmax(beta * q_values, dim=1)
-            action = torch.multinomial(policy, 1).item()
-    
-    return action
-
-
 def render_with_goal_overlay(
     env: RandomMultigridEnv,
     first_human_idx: int,
-    first_human_goal: Tuple[int, int],
+    first_human_goal: ReachRectangleGoal,
     tile_size: int = 32
 ) -> np.ndarray:
     """
@@ -714,17 +600,14 @@ def render_with_goal_overlay(
     _, agent_states, _, _ = state
     
     # Render goal using the goal overlay function from empo.multigrid
-    if first_human_goal and first_human_idx < len(agent_states):
+    if first_human_goal is not None and first_human_idx < len(agent_states):
         human_pos = agent_states[first_human_idx]
         agent_pos = (float(human_pos[0]), float(human_pos[1]))
         
-        # Point goal represented as (x, y, x, y)
-        goal = (first_human_goal[0], first_human_goal[1], 
-                first_human_goal[0], first_human_goal[1])
-        
+        # Use the goal object directly - it has target_rect attribute
         render_goal_overlay(
             ax=ax,
-            goal=goal,
+            goal=first_human_goal,
             agent_pos=agent_pos,
             agent_idx=first_human_idx,
             tile_size=tile_size,
@@ -759,43 +642,38 @@ def render_with_goal_overlay(
 
 def run_rollout(
     env: RandomMultigridEnv,
-    q_network: QNetwork,
+    policy: 'MultiGridNeuralHumanPolicyPrior',
     human_agent_indices: List[int],
-    human_goals: Dict[int, Tuple[int, int]],
+    human_goals: Dict[int, ReachRectangleGoal],
     robot_index: int,
     first_human_idx: int,
-    beta: float = 100.0,
-    device: str = 'cpu',
+    robot_policy: Optional[RandomPolicy] = None,
     max_steps: int = ROLLOUT_STEPS
 ) -> List[np.ndarray]:
     """
     Run a single rollout and return frames for animation.
     
-    The learned policy is applied to yellow (human) agents only.
-    The grey (robot) agent follows a random policy.
-    
-    Visualization includes:
-    - Blue circle around the first human agent (H1)
-    - Blue star marking the first human's goal
-    
     Args:
-        env: The environment to roll out in.
-        q_network: The trained Q-network for the learned policy.
-        human_agent_indices: Indices of human (yellow) agents that use learned policy.
-        human_goals: Dictionary mapping human agent indices to their goal positions.
-        robot_index: Index of the robot (grey) agent that uses random policy.
-        first_human_idx: Index of the first human agent whose goal we visualize.
-        beta: Boltzmann temperature for policy sampling.
-        device: Torch device.
+        env: The environment.
+        policy: Trained neural policy prior.
+        human_agent_indices: List of human agent indices.
+        human_goals: Dict mapping agent index to ReachRectangleGoal.
+        robot_index: Index of the robot agent.
+        first_human_idx: Index of the first human (for visualization).
+        robot_policy: Optional RandomPolicy for robot actions.
+                     If None, creates one with default distribution.
         max_steps: Maximum number of steps for the rollout (default: ROLLOUT_STEPS).
     
     Returns:
-        List of rendered frames.
+        List of frames for animation.
     """
     env.reset()
     frames = []
-    num_actions = env.action_space.n
     first_human_goal = human_goals.get(first_human_idx)
+    
+    # Create robot policy if not provided
+    if robot_policy is None:
+        robot_policy = RandomPolicy()
     
     for step in range(max_steps):
         state = env.get_state()
@@ -808,15 +686,12 @@ def run_rollout(
         actions = []
         for agent_idx in range(len(env.agents)):
             if agent_idx in human_agent_indices:
-                # Human agents use learned policy
-                goal_pos = human_goals[agent_idx]
-                action = get_boltzmann_action(
-                    q_network, state, env, agent_idx, human_agent_indices,
-                    goal_pos, beta, device
-                )
+                goal = human_goals[agent_idx]
+                # Use policy.sample() directly with the goal
+                action = policy.sample(state, agent_idx, goal)
             else:
-                # Robot (grey) agent uses random policy
-                action = random.randint(0, num_actions - 1)
+                # Robot uses random policy
+                action = robot_policy.sample()
             actions.append(action)
         
         # Take step
@@ -949,24 +824,22 @@ def main():
     if args.load_policy:
         # Load existing policy using MultiGridNeuralHumanPolicyPrior.load()
         print(f"Loading policy from {args.load_policy}...")
-        # Create goal sampler for loading (only needed when loading)
         goal_sampler = SmallGoalSampler(sample_env)
-        neural_prior = MultiGridNeuralHumanPolicyPrior.load(
+        policy = MultiGridNeuralHumanPolicyPrior.load(
             filepath=args.load_policy,
             world_model=sample_env,
             human_agent_indices=human_agent_indices,
             goal_sampler=goal_sampler,
             device=device
         )
-        q_network = neural_prior.q_network
-        base_env = sample_env  # Use sample environment for rollouts
+        base_env = sample_env
         print(f"Policy loaded from {args.load_policy}")
         
         # Optionally train more episodes on top of loaded policy
         if num_episodes > 0 and not args.no_train:
             print(f"Continuing training for {num_episodes} additional episodes...")
             t0 = time.time()
-            neural_prior, base_env = train_on_ensemble(
+            policy, base_env = train_on_ensemble(
                 human_agent_indices=human_agent_indices,
                 num_episodes=num_episodes,
                 episodes_per_env=1,
@@ -974,7 +847,6 @@ def main():
                 verbose=True,
                 base_seed=42
             )
-            q_network = neural_prior.q_network
             elapsed = time.time() - t0
             print(f"\nAdditional training completed in {elapsed:.2f} seconds")
             print()
@@ -984,15 +856,14 @@ def main():
     else:
         # Train from scratch
         t0 = time.time()
-        neural_prior, base_env = train_on_ensemble(
+        policy, base_env = train_on_ensemble(
             human_agent_indices=human_agent_indices,
             num_episodes=num_episodes,
-            episodes_per_env=1,  # New environment each episode for maximum diversity
+            episodes_per_env=1,
             device=device,
             verbose=True,
             base_seed=42
         )
-        q_network = neural_prior.q_network
         elapsed = time.time() - t0
         print(f"\nTraining completed in {elapsed:.2f} seconds")
         print()
@@ -1000,13 +871,11 @@ def main():
     # Save policy if requested
     policy_save_path = args.save_policy
     if policy_save_path is None:
-        # Default save path
         policy_save_path = os.path.join(output_dir, 'random_multigrid_policy.pt')
     
     # Always save the policy (unless loading without additional training)
     if not (args.load_policy and args.no_train):
-        # Use the NeuralPolicyPrior's save method
-        neural_prior.save(policy_save_path)
+        policy.save(policy_save_path)
         print(f"Policy saved to {policy_save_path}")
     
     # Generate test environments for rollouts
@@ -1032,47 +901,28 @@ def main():
         env = test_environments[env_idx]
         env.reset()
         
-        # Re-identify human and robot indices for this specific environment
-        # (agent order may differ across environments)
-        env_human_indices = []
-        env_robot_index = None
-        for i, agent in enumerate(env.agents):
-            if agent.color == 'yellow':
-                env_human_indices.append(i)
-            elif agent.color == 'grey':
-                env_robot_index = i
+        # Use SmallGoalSampler to sample small rectangle goals (at most 3x3)
+        goal_sampler = SmallGoalSampler(env)
+        state = env.get_state()
         
-        # Use first human from this environment for visualization
-        env_first_human_idx = env_human_indices[0] if env_human_indices else 0
-        
-        # Get walkable cells for goal sampling
-        goal_cells = []
-        for x in range(1, env.width - 1):
-            for y in range(1, env.height - 1):
-                cell = env.grid.get(x, y)
-                if cell is None or (hasattr(cell, 'can_overlap') and cell.can_overlap()):
-                    goal_cells.append((x, y))
-        
-        # Assign random goals to humans ONLY (not to robot)
+        # Assign random rectangle goals to humans using the sampler
         human_goals = {}
-        for h_idx in env_human_indices:
-            if goal_cells:
-                human_goals[h_idx] = random.choice(goal_cells)
-            else:
-                human_goals[h_idx] = (env.width // 2, env.height // 2)
+        for h_idx in human_agent_indices:
+            # sample() returns (ReachRectangleGoal, weight)
+            goal, _ = goal_sampler.sample(state, h_idx)
+            human_goals[h_idx] = goal
         
-        first_human_goal = human_goals.get(env_first_human_idx, None)
-        print(f"  Rollout {rollout_idx + 1}: Env {env_idx + 1}, H1 Goal: {first_human_goal}")
+        first_human_goal = human_goals.get(first_human_idx, None)
+        goal_rect = first_human_goal.target_rect if first_human_goal else None
+        print(f"  Rollout {rollout_idx + 1}: Env {env_idx + 1}, H1 Goal rect: {goal_rect}")
         
         frames = run_rollout(
             env=env,
-            q_network=q_network,
-            human_agent_indices=env_human_indices,  # Use env-specific human indices
+            policy=policy,
+            human_agent_indices=human_agent_indices,
             human_goals=human_goals,
-            robot_index=env_robot_index,  # Use env-specific robot index
-            first_human_idx=env_first_human_idx,  # Use env-specific first human
-            beta=100.0,
-            device=device,
+            robot_index=robot_index,
+            first_human_idx=first_human_idx,
             max_steps=ROLLOUT_STEPS
         )
         all_frames.append(frames)
