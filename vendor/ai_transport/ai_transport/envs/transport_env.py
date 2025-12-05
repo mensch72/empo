@@ -442,12 +442,25 @@ class parallel_env(ParallelEnv):
         # Default fallback
         return Discrete(1, seed=self.np_random_seed)
 
-    def render(self):
+    def render(self, goal_info=None, value_dict=None, title=None):
         """
         Renders the environment using the node coordinates.
-        - Vehicles shown as blue rectangles
+        - Vehicles shown as blue rectangles with human passengers inside
         - Humans shown as red dots
-        - Bidirectional roads shown with two separate arrows
+        - Bidirectional roads shown with two separate lanes
+        - Goal node shown with dashed outline and star marker
+        - Dashed line connects agent to their goal
+        
+        Args:
+            goal_info: Optional dict with goal visualization info:
+                - 'agent': agent name who has the goal
+                - 'node': target node for the goal
+                - 'type': 'node' or 'cluster'
+            value_dict: Optional dict mapping nodes to V-values for coloring
+            title: Optional custom title (overrides default)
+        
+        Returns:
+            matplotlib figure (if graphical rendering) or None
         """
         if self.render_mode is None:
             gymnasium.logger.warn(
@@ -464,7 +477,7 @@ class parallel_env(ParallelEnv):
             return
         
         # Graphical rendering
-        return self._render_graphical()
+        return self._render_graphical(goal_info=goal_info, value_dict=value_dict, title=title)
     
     def _render_text(self):
         """Original text-based rendering"""
@@ -486,8 +499,18 @@ class parallel_env(ParallelEnv):
         else:
             print("Environment terminated")
     
-    def _render_graphical(self):
-        """Graphical rendering using matplotlib"""
+    def _render_graphical(self, goal_info=None, value_dict=None, title=None):
+        """
+        Graphical rendering using matplotlib.
+        
+        Args:
+            goal_info: Optional dict with goal visualization info:
+                - 'agent': agent name who has the goal
+                - 'node': target node for the goal
+                - 'type': 'node' or 'cluster'
+            value_dict: Optional dict mapping nodes to V-values for coloring
+            title: Optional custom title (overrides default)
+        """
         # Import matplotlib only when needed
         try:
             import matplotlib
@@ -557,12 +580,52 @@ class parallel_env(ParallelEnv):
                 )
                 self.ax.add_patch(arrow)
         
+        # Determine node colors (from value_dict if provided)
+        if value_dict:
+            values = list(value_dict.values())
+            vmin, vmax = min(values), max(values)
+            if vmax > vmin:
+                norm = plt.Normalize(vmin=vmin, vmax=vmax)
+            else:
+                norm = plt.Normalize(vmin=0, vmax=1)
+            cmap = plt.cm.RdYlGn
+        
         # Draw nodes (larger, without labels)
         for node in self.network.nodes():
             x, y = pos[node]
-            circle = Circle((x, y), radius=1.0, color='lightblue', 
+            
+            # Use value-based color if available
+            if value_dict and node in value_dict:
+                node_color = cmap(norm(value_dict[node]))
+            else:
+                node_color = 'lightblue'
+            
+            circle = Circle((x, y), radius=1.0, color=node_color, 
                           ec='black', linewidth=2, zorder=2)
             self.ax.add_patch(circle)
+            
+            # Draw node label
+            self.ax.text(x, y, str(node), ha='center', va='center',
+                        fontsize=10, fontweight='bold', zorder=3)
+            
+            # Show value below node if value_dict provided
+            if value_dict and node in value_dict:
+                self.ax.text(x, y - 1.2, f'{value_dict[node]:.2f}',
+                            ha='center', va='top', fontsize=8, color='darkblue')
+        
+        # Highlight goal node with dashed outline (like multigrid)
+        if goal_info and 'node' in goal_info:
+            goal_node = goal_info['node']
+            if goal_node in pos:
+                gx, gy = pos[goal_node]
+                # Dashed outline circle around goal
+                goal_outline = Circle((gx, gy), radius=1.3, 
+                                      color='none', ec='gold', 
+                                      linewidth=4, linestyle='--', zorder=3)
+                self.ax.add_patch(goal_outline)
+                # Star marker at goal
+                self.ax.plot(gx, gy, '*', markersize=25, color='gold', 
+                           markeredgecolor='darkorange', markeredgewidth=1, zorder=4)
         
         # Collect agent positions and add perturbation for overlapping agents
         agent_display_positions = {}
@@ -654,9 +717,24 @@ class parallel_env(ParallelEnv):
                     self.ax.add_patch(circle)
                 # If aboard, don't draw separately (they're with the vehicle)
         
-        # Add title with time and step type
-        self.ax.set_title(f'Transport Network - Time: {self.real_time:.2f}, Step: {self.step_type}',
-                         fontsize=14, fontweight='bold')
+        # Draw dashed line from agent to their goal (like multigrid)
+        if goal_info and 'agent' in goal_info and 'node' in goal_info:
+            goal_agent = goal_info['agent']
+            goal_node = goal_info['node']
+            if goal_agent in agent_display_positions and goal_node in pos:
+                ax, ay = agent_display_positions[goal_agent]
+                gx, gy = pos[goal_node]
+                # Dashed line connecting agent to goal
+                self.ax.plot([ax, gx], [ay, gy], 
+                           color='gold', linestyle='--', linewidth=2, 
+                           alpha=0.7, zorder=2)
+        
+        # Add title with time and step type (or custom title)
+        if title is not None:
+            self.ax.set_title(title, fontsize=14, fontweight='bold')
+        else:
+            self.ax.set_title(f'Transport Network - Time: {self.real_time:.2f}, Step: {self.step_type}',
+                             fontsize=14, fontweight='bold')
         
         self.ax.set_aspect('equal')
         self.ax.axis('off')
@@ -676,6 +754,14 @@ class parallel_env(ParallelEnv):
             Patch(facecolor='red', edgecolor='darkred', label='Human'),
             Patch(facecolor='lightblue', edgecolor='black', label='Node')
         ]
+        # Add goal to legend if goal_info provided
+        if goal_info:
+            from matplotlib.lines import Line2D
+            legend_elements.append(
+                Line2D([0], [0], marker='*', color='w', label='Goal',
+                      markerfacecolor='gold', markersize=15,
+                      markeredgecolor='darkorange', markeredgewidth=1)
+            )
         self.ax.legend(handles=legend_elements, loc='upper right')
         
         plt.tight_layout()
@@ -693,6 +779,49 @@ class parallel_env(ParallelEnv):
             self.frames.append(frame)
         
         return self.fig
+    
+    def render_frame(self, goal_info=None, value_dict=None, title=None):
+        """
+        Render the current state and return as RGB array.
+        
+        This is useful for creating videos or animations outside of the
+        built-in video recording system.
+        
+        Args:
+            goal_info: Optional dict with goal visualization info:
+                - 'agent': agent name who has the goal
+                - 'node': target node for the goal
+                - 'type': 'node' or 'cluster'
+            value_dict: Optional dict mapping nodes to V-values for coloring
+            title: Optional custom title (overrides default)
+        
+        Returns:
+            RGB numpy array of the rendered frame
+        """
+        # Temporarily enable graphical rendering
+        old_render_mode = self.render_mode
+        old_use_graphical = getattr(self, '_use_graphical', False)
+        
+        self.render_mode = 'human'
+        self._use_graphical = True
+        
+        # Render
+        self._render_graphical(goal_info=goal_info, value_dict=value_dict, title=title)
+        
+        # Convert figure to RGB array
+        if self.fig is not None:
+            self.fig.canvas.draw()
+            buf = self.fig.canvas.buffer_rgba()
+            frame = np.asarray(buf)
+            frame = frame[:, :, :3]  # Convert RGBA to RGB
+        else:
+            frame = None
+        
+        # Restore original state
+        self.render_mode = old_render_mode
+        self._use_graphical = old_use_graphical
+        
+        return frame
     
     def enable_rendering(self, mode='graphical'):
         """Enable graphical or text rendering"""

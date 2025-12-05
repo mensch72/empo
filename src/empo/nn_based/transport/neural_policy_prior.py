@@ -398,7 +398,7 @@ def train_transport_neural_policy_prior(
     gnn_type: str = 'gcn',
     device: str = 'cpu',
     verbose: bool = True,
-    reward_shaping: bool = True,
+    reward_shaping: bool = False,
     epsilon: float = 0.3,
     exploration_policy: Optional[List[float]] = None,
     updates_per_episode: int = 1,
@@ -413,6 +413,19 @@ def train_transport_neural_policy_prior(
     
     Goals can be either node-based (TransportGoal) or cluster-based 
     (TransportClusterGoal) depending on the goal_sampler provided.
+    
+    Reward shaping (optional):
+        When reward_shaping=True, uses potential-based shaping where the potential
+        is based on the shortest path distance in the road network, normalized to [-1, 0]:
+            Φ(s) = -d(s, goal) / max_distance
+        The shaping reward is: F(s, a, s') = γ * Φ(s') - Φ(s)
+        
+        This ensures the optimal policy is unchanged (potential-based shaping
+        preserves optimality) while providing denser reward signals.
+    
+    Q-value bounds:
+        - Without reward_shaping: Q ∈ [0, 1] (goal achievement reward only)
+        - With reward_shaping: Q ∈ [-1, 2] (base reward + potential-based shaping)
     
     Args:
         env: TransportEnvWrapper instance
@@ -433,7 +446,7 @@ def train_transport_neural_policy_prior(
         gnn_type: GNN layer type ('gcn', 'gat', 'gin')
         device: Torch device
         verbose: Print progress
-        reward_shaping: Use distance-based reward shaping
+        reward_shaping: Use distance-based reward shaping (default False)
         epsilon: Exploration rate for epsilon-greedy
         exploration_policy: Optional action probability weights for exploration
         updates_per_episode: Number of training updates per episode
@@ -459,6 +472,8 @@ def train_transport_neural_policy_prior(
         >>> # Save the trained model
         >>> prior.save("transport_prior.pt")
     """
+    import networkx as nx
+    
     # Get network parameters from environment
     network = env.env.network
     env_num_nodes = len(network.nodes())
@@ -469,15 +484,23 @@ def train_transport_neural_policy_prior(
     if num_clusters is None:
         num_clusters = env.num_clusters if env.use_clusters else 0
     
-    # Compute feasible range for Q-values
+    # Compute shortest path lengths for all pairs (used for reward shaping)
+    # This is the maximum possible path length in the network
+    all_pairs_lengths = dict(nx.all_pairs_shortest_path_length(network))
+    max_path_length = 0
+    for source in all_pairs_lengths:
+        for target, length in all_pairs_lengths[source].items():
+            if length > max_path_length:
+                max_path_length = length
+    
+    # Set feasible range based on whether reward shaping is used
+    # Without shaping: Q ∈ [0, 1] (base reward only)
+    # With shaping: Q ∈ [-1, 2] (base reward + potential in [-1, 0])
+    #   - Min Q: 0 + γ*(-1) - 0 = -γ ≈ -1 when moving away from distant goal
+    #   - Max Q: 1 + γ*0 - (-1) = 2 when reaching goal from far away
     if reward_shaping:
-        # With distance-based shaping, Q-values can be negative (distance penalty)
-        # Range based on max possible path length in network
-        import math
-        max_dist = math.sqrt(2) * env_num_nodes  # Rough estimate
-        feasible_range = (-max_dist, 1.0)
+        feasible_range = (-1.0, 2.0)
     else:
-        # Without shaping, Q-values are bounded by discounted rewards in [0, 1]
         feasible_range = (0.0, 1.0)
     
     # Create Q-network
@@ -517,19 +540,50 @@ def train_transport_neural_policy_prior(
         if hasattr(exploration_policy, 'tolist'):
             exploration_policy = exploration_policy.tolist()
     
-    # Create reward function with potential-based shaping
-    def compute_shaped_reward(state, action, next_state, agent_idx, goal):
-        """Compute reward with distance-based potential shaping."""
+    def get_agent_node(positions, agent_name):
+        """Get agent's current node or nearest node if on edge."""
+        pos = positions.get(agent_name)
+        if pos is None:
+            return None
+        if isinstance(pos, tuple):
+            # On edge - return source node
+            edge_info, progress = pos
+            return edge_info[0]
+        return pos
+    
+    def compute_potential(agent_pos, target_node):
+        """
+        Compute potential function Φ(s) = -d(s, goal) / max_distance.
+        
+        Returns value in [-1, 0] where:
+        - 0 when at goal
+        - -1 when maximally far from goal
+        """
+        if agent_pos is None or target_node is None:
+            return -1.0
+        
+        if agent_pos == target_node:
+            return 0.0
+        
+        # Get shortest path length
+        if agent_pos in all_pairs_lengths and target_node in all_pairs_lengths[agent_pos]:
+            dist = all_pairs_lengths[agent_pos][target_node]
+        else:
+            # No path - return minimum potential
+            return -1.0
+        
+        # Normalize to [-1, 0]
+        if max_path_length > 0:
+            return -dist / max_path_length
+        return 0.0
+    
+    def compute_reward(pre_positions, post_positions, agent_name, goal):
+        """Compute reward with optional potential-based shaping."""
         # Base reward: goal achievement
-        base_reward = 0.0
-        if hasattr(goal, 'is_achieved'):
-            base_reward = 1.0 if goal.is_achieved(next_state) else 0.0
+        base_reward = 1.0 if goal.is_achieved(None) else 0.0
         
         if not reward_shaping:
             return base_reward
-        
-        # Get agent positions
-        agent_name = env.agents[agent_idx]
         
         # Get target node from goal
         target_node = None
@@ -539,54 +593,21 @@ def train_transport_neural_policy_prior(
             # For cluster goals, use centroid
             target_nodes = list(goal.get_target_nodes())
             if target_nodes:
-                target_node = target_nodes[0]  # Use first node in cluster
+                target_node = target_nodes[0]
         
         if target_node is None:
             return base_reward
         
-        # Compute distance-based potential shaping
-        # Using simple node distance in the network
-        import networkx as nx
+        # Compute potential-based shaping: F(s,a,s') = γ * Φ(s') - Φ(s)
+        curr_node = get_agent_node(pre_positions, agent_name)
+        next_node = get_agent_node(post_positions, agent_name)
         
-        def get_agent_node(positions, agent_name):
-            """Get agent's current node or nearest node if on edge."""
-            pos = positions.get(agent_name)
-            if pos is None:
-                return None
-            if isinstance(pos, tuple):
-                # On edge - return source node
-                edge_info, progress = pos
-                return edge_info[0]
-            return pos
+        phi_s = compute_potential(curr_node, target_node)
+        phi_s_prime = compute_potential(next_node, target_node)
         
-        curr_node = get_agent_node(state.get('agent_positions', {}), agent_name)
-        next_node = get_agent_node(next_state.get('agent_positions', {}), agent_name)
-        
-        if curr_node is None or next_node is None:
-            return base_reward
-        
-        # Compute shortest path distances to goal
-        try:
-            curr_dist = nx.shortest_path_length(network, curr_node, target_node)
-        except nx.NetworkXNoPath:
-            curr_dist = env_num_nodes
-        
-        try:
-            next_dist = nx.shortest_path_length(network, next_node, target_node)
-        except nx.NetworkXNoPath:
-            next_dist = env_num_nodes
-        
-        # Potential: Φ(s) = -distance / max_distance
-        max_dist = env_num_nodes
-        phi_s = -curr_dist / max_dist
-        phi_s_prime = -next_dist / max_dist
-        
-        # Shaping: F(s,a,s') = γ * Φ(s') - Φ(s)
         shaping_reward = gamma * phi_s_prime - phi_s
         
         return base_reward + shaping_reward
-    
-    reward_fn = compute_shaped_reward if reward_shaping else None
     
     # Custom replay buffer that keeps env reference
     replay_buffer = ReplayBuffer(buffer_capacity)
@@ -641,6 +662,7 @@ def train_transport_neural_policy_prior(
             
             # Store pre-step state info for reward computation
             pre_step_positions = dict(env.env.agent_positions)
+            agent_name = env.agents[agent_idx]
             
             # Execute action - use integers directly (TransportActions.PASS = 0)
             from empo.transport import TransportActions
@@ -651,14 +673,7 @@ def train_transport_neural_policy_prior(
             
             # Compute reward
             post_step_positions = dict(env.env.agent_positions)
-            
-            if reward_fn is not None:
-                pre_state = {'agent_positions': pre_step_positions}
-                post_state = {'agent_positions': post_step_positions}
-                reward = reward_fn(pre_state, action, post_state, agent_idx, goal)
-            else:
-                # Default: goal achievement
-                reward = 1.0 if goal.is_achieved(None) else 0.0
+            reward = compute_reward(pre_step_positions, post_step_positions, agent_name, goal)
             
             # Store transition in replay buffer
             # For transport, we store the full env state snapshot since

@@ -84,6 +84,7 @@ def create_simple_5node_network():
     G = nx.DiGraph()
     
     # Add nodes with positions and names
+    # Use 'x' and 'y' attributes for the vendored renderer
     positions = {
         0: (0.0, 0.0),
         1: (1.0, 0.0),
@@ -93,7 +94,7 @@ def create_simple_5node_network():
     }
     
     for node, pos in positions.items():
-        G.add_node(node, pos=pos, name=f"node_{node}")
+        G.add_node(node, x=pos[0], y=pos[1], name=f"node_{node}")
     
     # Add bidirectional edges with lengths
     edges = [
@@ -118,12 +119,21 @@ def create_simple_5node_network():
 # Visualization
 # ============================================================================
 
-def render_network_state(env, goal_node=None, value_dict=None, title=""):
+def render_network_state(env, agent_name='human_0', goal_node=None, value_dict=None, title=""):
     """
-    Render the network state with optional value overlay.
+    Render the network state using the vendored ai_transport rendering.
+    
+    This method uses the improved rendering in the ai_transport environment which:
+    - Shows agents moving continuously along roads
+    - Shows bidirectional roads as separate lanes
+    - Shows vehicles as blue rectangles with passengers
+    - Shows humans as red dots
+    - Highlights goal with dashed outline and star marker
+    - Draws dashed line from agent to goal (like multigrid)
     
     Args:
         env: TransportEnvWrapper
+        agent_name: Name of agent with the goal
         goal_node: Target node (highlighted)
         value_dict: Optional dict mapping nodes to V-values
         title: Plot title
@@ -131,87 +141,23 @@ def render_network_state(env, goal_node=None, value_dict=None, title=""):
     Returns:
         RGB array of the rendered image
     """
-    fig, ax = plt.subplots(figsize=(8, 6))
+    # Use the vendored render_frame method with goal info
+    goal_info = None
+    if goal_node is not None:
+        goal_info = {
+            'agent': agent_name,
+            'node': goal_node,
+            'type': 'node'
+        }
     
-    network = env.env.network
-    positions = {node: data['pos'] for node, data in network.nodes(data=True)}
+    # Render using the underlying env's render_frame method
+    frame = env.env.render_frame(
+        goal_info=goal_info,
+        value_dict=value_dict,
+        title=title
+    )
     
-    # Draw edges
-    for u, v in network.edges():
-        pos_u = positions[u]
-        pos_v = positions[v]
-        ax.plot([pos_u[0], pos_v[0]], [pos_u[1], pos_v[1]], 
-                'gray', linewidth=2, alpha=0.5, zorder=1)
-    
-    # Draw nodes with value colors
-    if value_dict:
-        values = list(value_dict.values())
-        vmin, vmax = min(values), max(values)
-        if vmax > vmin:
-            norm = plt.Normalize(vmin=vmin, vmax=vmax)
-        else:
-            norm = plt.Normalize(vmin=0, vmax=1)
-        cmap = plt.cm.RdYlGn
-    
-    for node, pos in positions.items():
-        if value_dict and node in value_dict:
-            color = cmap(norm(value_dict[node]))
-        else:
-            color = 'lightblue'
-        
-        circle = plt.Circle(pos, 0.15, color=color, ec='black', linewidth=2, zorder=2)
-        ax.add_patch(circle)
-        ax.text(pos[0], pos[1], str(node), ha='center', va='center', 
-                fontsize=12, fontweight='bold', zorder=3)
-        
-        # Show value
-        if value_dict and node in value_dict:
-            ax.text(pos[0], pos[1] - 0.25, f'{value_dict[node]:.2f}', 
-                    ha='center', va='top', fontsize=9, color='darkblue')
-    
-    # Highlight goal node
-    if goal_node is not None and goal_node in positions:
-        pos = positions[goal_node]
-        star = plt.Circle(pos, 0.2, color='none', ec='gold', linewidth=4, zorder=4)
-        ax.add_patch(star)
-        ax.plot(pos[0], pos[1], '*', markersize=20, color='gold', zorder=5)
-    
-    # Draw agent (human)
-    agent_positions = env.env.agent_positions
-    for agent_name, agent_pos in agent_positions.items():
-        if agent_pos is not None:
-            if isinstance(agent_pos, tuple):
-                # On edge
-                edge_info, progress = agent_pos
-                u, v = edge_info[0], edge_info[1]
-                if isinstance(v, np.integer):
-                    v = int(v)
-                pos_u = positions[u]
-                pos_v = positions[v]
-                x = pos_u[0] + progress / network.edges[u, v]['length'] * (pos_v[0] - pos_u[0])
-                y = pos_u[1] + progress / network.edges[u, v]['length'] * (pos_v[1] - pos_u[1])
-                ax.plot(x, y, 'o', markersize=15, color='yellow', markeredgecolor='black', markeredgewidth=2, zorder=6)
-                ax.text(x, y, 'H', ha='center', va='center', fontsize=10, fontweight='bold', zorder=7)
-            else:
-                # At node
-                pos = positions[agent_pos]
-                ax.plot(pos[0], pos[1], 'o', markersize=20, color='yellow', markeredgecolor='black', markeredgewidth=2, zorder=6)
-                ax.text(pos[0], pos[1], 'H', ha='center', va='center', fontsize=10, fontweight='bold', zorder=7)
-    
-    ax.set_xlim(-0.5, 2.5)
-    ax.set_ylim(-0.5, 1.5)
-    ax.set_aspect('equal')
-    ax.set_title(title, fontsize=14, fontweight='bold')
-    ax.axis('off')
-    
-    fig.tight_layout()
-    fig.canvas.draw()
-    
-    buf = np.asarray(fig.canvas.buffer_rgba())
-    buf = buf[:, :, :3]
-    
-    plt.close(fig)
-    return buf
+    return frame
 
 
 def compute_value_for_nodes(q_network, env, agent_idx, goal_node, device='cpu'):
@@ -269,13 +215,13 @@ def run_rollout(env, neural_prior, goal_node, agent_idx=0, beta=5.0, device='cpu
     env.reset()
     frames = []
     goal = TransportGoal(env, agent_idx, goal_node)
+    agent_name = env.agents[agent_idx]
     
     for step in range(MAX_STEPS):
         # Compute values for visualization
         value_dict = compute_value_for_nodes(neural_prior.q_network, env, agent_idx, goal_node, device)
         
         # Check if at goal
-        agent_name = env.agents[agent_idx]
         agent_pos = env.env.agent_positions.get(agent_name)
         at_goal = agent_pos == goal_node
         
@@ -283,7 +229,7 @@ def run_rollout(env, neural_prior, goal_node, agent_idx=0, beta=5.0, device='cpu
         if at_goal:
             title += " | GOAL REACHED!"
         
-        frame = render_network_state(env, goal_node=goal_node, value_dict=value_dict, title=title)
+        frame = render_network_state(env, agent_name=agent_name, goal_node=goal_node, value_dict=value_dict, title=title)
         frames.append(frame)
         
         if at_goal:
@@ -298,12 +244,12 @@ def run_rollout(env, neural_prior, goal_node, agent_idx=0, beta=5.0, device='cpu
     
     # Final frame
     value_dict = compute_value_for_nodes(neural_prior.q_network, env, agent_idx, goal_node, device)
-    agent_pos = env.env.agent_positions.get(env.agents[agent_idx])
+    agent_pos = env.env.agent_positions.get(agent_name)
     at_goal = agent_pos == goal_node
     title = f"Step {MAX_STEPS} | Goal: node {goal_node}"
     if at_goal:
         title += " | GOAL REACHED!"
-    frame = render_network_state(env, goal_node=goal_node, value_dict=value_dict, title=title)
+    frame = render_network_state(env, agent_name=agent_name, goal_node=goal_node, value_dict=value_dict, title=title)
     frames.append(frame)
     
     return frames, at_goal
@@ -447,7 +393,7 @@ def main(quick_mode=False):
         gnn_type='gcn',
         device=device,
         verbose=True,
-        reward_shaping=True,
+        reward_shaping=False,  # Use base reward only, Q-values bounded in [0, 1]
         epsilon=0.3,
         updates_per_episode=2,
         max_nodes=10,
