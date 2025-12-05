@@ -76,6 +76,7 @@ GRID_SIZE = 7           # 7x7 grid (including outer walls)
 NUM_HUMANS = 2          # 2 human agents (yellow)
 NUM_ROBOTS = 1          # 1 robot agent (grey)
 MAX_STEPS = 50          # Maximum steps per episode
+ROLLOUT_STEPS = 15      # Steps per rollout (shorter than training episodes)
 NUM_TEST_ENVS = 50      # Number of test environments for rollout evaluation
 NUM_ROLLOUTS = 50       # Number of rollouts for the movie
 
@@ -99,6 +100,118 @@ UNSTEADY_GROUND_PROBABILITY = 0.10  # Probability of placing unsteady ground
 
 # Door/Key color (single color for both)
 DOOR_KEY_COLOR = 'r'  # Red
+
+# Maximum attempts for rejection sampling
+MAX_REJECTION_SAMPLING_ATTEMPTS = 1000
+
+
+# ============================================================================
+# Custom Goal Sampler (Small Goals for Better Learning)
+# ============================================================================
+
+class SmallGoalSampler(PossibleGoalSampler):
+    """
+    Goal sampler with modified weight function that samples goals of at most size (3,3).
+    
+    Goals are sampled by rejection sampling: draw x1,y1,x2,y2 uniformly at random,
+    reject if x2 < x1 or y2 < y1 or x2-x1 > 2 or y2-y1 > 2.
+    This produces goals of at most size (3,3) cells to improve learning efficiency.
+    
+    Args:
+        world_model: The multigrid environment.
+        valid_x_range: Optional (x_min, x_max) for valid goal coordinates.
+                       Defaults to (1, width-2) to exclude outer walls.
+        valid_y_range: Optional (y_min, y_max) for valid goal coordinates.
+                       Defaults to (1, height-2) to exclude outer walls.
+        seed: Optional random seed for reproducibility.
+    """
+    
+    def __init__(
+        self,
+        world_model,
+        valid_x_range: Optional[Tuple[int, int]] = None,
+        valid_y_range: Optional[Tuple[int, int]] = None,
+        seed: Optional[int] = None
+    ):
+        super().__init__(world_model)
+        self._rng = np.random.default_rng(seed)
+        self._custom_x_range = valid_x_range
+        self._custom_y_range = valid_y_range
+        self._update_valid_range()
+    
+    def _update_valid_range(self):
+        """Update valid coordinate ranges for goal placement."""
+        env = self.world_model
+        if self._custom_x_range is not None:
+            self._x_range = self._custom_x_range
+        else:
+            self._x_range = (1, env.width - 2)
+        
+        if self._custom_y_range is not None:
+            self._y_range = self._custom_y_range
+        else:
+            self._y_range = (1, env.height - 2)
+    
+    def set_world_model(self, world_model):
+        """Update world model and refresh valid ranges."""
+        self.world_model = world_model
+        self._update_valid_range()
+    
+    def set_seed(self, seed: int):
+        """Set random seed for reproducibility."""
+        self._rng = np.random.default_rng(seed)
+    
+    def sample_rectangle(self) -> Tuple[int, int, int, int]:
+        """
+        Sample a rectangle (x1, y1, x2, y2) with rejection sampling.
+        
+        Draws x1, y1, x2, y2 uniformly at random and rejects if:
+        - x2 < x1 or y2 < y1 (invalid rectangle)
+        - x2 - x1 > 2 or y2 - y1 > 2 (goal too large, at most size 3x3)
+        
+        Returns:
+            Tuple (x1, y1, x2, y2) with valid small goal coordinates.
+        """
+        x_min, x_max = self._x_range
+        y_min, y_max = self._y_range
+        
+        for _ in range(MAX_REJECTION_SAMPLING_ATTEMPTS):
+            # Draw all coordinates uniformly at random
+            x1 = self._rng.integers(x_min, x_max + 1)
+            y1 = self._rng.integers(y_min, y_max + 1)
+            x2 = self._rng.integers(x_min, x_max + 1)
+            y2 = self._rng.integers(y_min, y_max + 1)
+            
+            # Rejection conditions
+            if x2 < x1 or y2 < y1:
+                continue
+            if x2 - x1 > 2 or y2 - y1 > 2:
+                continue
+            
+            return (x1, y1, x2, y2)
+        
+        # Fallback: return a point goal
+        x = self._rng.integers(x_min, x_max + 1)
+        y = self._rng.integers(y_min, y_max + 1)
+        return (x, y, x, y)
+    
+    def sample(self, state, human_agent_index: int) -> Tuple['PossibleGoal', float]:
+        """
+        Sample a small rectangle goal with uniform weight.
+        
+        The returned weight is 1.0 since all sampled goals have equal probability
+        under this rejection sampling scheme.
+        
+        Args:
+            state: Current world state (not used for sampling).
+            human_agent_index: Index of the human agent for the goal.
+        
+        Returns:
+            Tuple of (goal, weight) where weight is always 1.0.
+        """
+        x1, y1, x2, y2 = self.sample_rectangle()
+        goal = ReachRectangleGoal(self.world_model, human_agent_index, (x1, y1, x2, y2))
+        return goal, 1.0
 
 
 def parse_args():
@@ -128,6 +241,23 @@ def parse_args():
         type=int,
         default=None,
         help='Number of rollouts for the movie (overrides default)'
+    )
+    parser.add_argument(
+        '--load-policy',
+        type=str,
+        default=None,
+        help='Path to a saved policy file to load instead of training from scratch'
+    )
+    parser.add_argument(
+        '--save-policy',
+        type=str,
+        default=None,
+        help='Path to save the trained policy (default: outputs/random_multigrid_policy.pt)'
+    )
+    parser.add_argument(
+        '--no-train',
+        action='store_true',
+        help='Skip training (useful when loading a saved policy for rollouts only)'
     )
     return parser.parse_args()
 
@@ -256,8 +386,8 @@ class RandomMultigridEnv(MultiGridEnv):
                     
                     cumulative += self.door_prob
                     if r < cumulative:
-                        # Place door and schedule a matching key
-                        row.append(f'D{self.door_key_color}')  # Door
+                        # Place closed door and schedule a matching key
+                        row.append(f'C{self.door_key_color}')  # Closed door
                         pending_keys.append(self.door_key_color)
                         # Doors can be passed through (when open), so add to available
                         available_cells.append((x, y))
@@ -406,8 +536,8 @@ def train_on_ensemble(
     base_env = create_random_env(seed=base_seed)
     base_env.reset()
     
-    # Use MultiGridGoalSampler for weight-proportional sampling
-    goal_sampler = MultiGridGoalSampler(base_env)
+    # Use SmallGoalSampler for small goals (at most 3x3) to improve learning
+    goal_sampler = SmallGoalSampler(base_env)
     
     # World model generator: creates new random environment for each batch of episodes
     def world_model_generator(episode: int) -> RandomMultigridEnv:
@@ -517,7 +647,8 @@ def run_rollout(
     human_goals: Dict[int, ReachRectangleGoal],
     robot_index: int,
     first_human_idx: int,
-    robot_policy: Optional[RandomPolicy] = None
+    robot_policy: Optional[RandomPolicy] = None,
+    max_steps: int = ROLLOUT_STEPS
 ) -> List[np.ndarray]:
     """
     Run a single rollout and return frames for animation.
@@ -531,6 +662,7 @@ def run_rollout(
         first_human_idx: Index of the first human (for visualization).
         robot_policy: Optional RandomPolicy for robot actions.
                      If None, creates one with default distribution.
+        max_steps: Maximum number of steps for the rollout (default: ROLLOUT_STEPS).
     
     Returns:
         List of frames for animation.
@@ -543,10 +675,10 @@ def run_rollout(
     if robot_policy is None:
         robot_policy = RandomPolicy()
     
-    for step in range(env.max_steps):
+    for step in range(max_steps):
         state = env.get_state()
         
-        # Render current frame with goal overlay
+        # Render current frame with goal overlay for first human
         frame = render_with_goal_overlay(env, first_human_idx, first_human_goal)
         frames.append(frame)
         
@@ -674,7 +806,7 @@ def main():
     sample_env = create_random_env(seed=42)
     sample_env.reset()
     
-    # Identify agent types
+    # Identify agent types (yellow = human, grey = robot)
     human_agent_indices = []
     robot_index = None
     for i, agent in enumerate(sample_env.agents):
@@ -688,19 +820,63 @@ def main():
     print(f"Robot agent (grey): {robot_index}")
     print()
     
-    # Train on ensemble (new env generated each episode)
-    t0 = time.time()
-    policy, base_env = train_on_ensemble(
-        human_agent_indices=human_agent_indices,
-        num_episodes=num_episodes,
-        episodes_per_env=1,  # New environment each episode for maximum diversity
-        device=device,
-        verbose=True,
-        base_seed=42
-    )
-    elapsed = time.time() - t0
-    print(f"\nTraining completed in {elapsed:.2f} seconds")
-    print()
+    # Load or train policy
+    if args.load_policy:
+        # Load existing policy using MultiGridNeuralHumanPolicyPrior.load()
+        print(f"Loading policy from {args.load_policy}...")
+        goal_sampler = SmallGoalSampler(sample_env)
+        policy = MultiGridNeuralHumanPolicyPrior.load(
+            filepath=args.load_policy,
+            world_model=sample_env,
+            human_agent_indices=human_agent_indices,
+            goal_sampler=goal_sampler,
+            device=device
+        )
+        base_env = sample_env
+        print(f"Policy loaded from {args.load_policy}")
+        
+        # Optionally train more episodes on top of loaded policy
+        if num_episodes > 0 and not args.no_train:
+            print(f"Continuing training for {num_episodes} additional episodes...")
+            t0 = time.time()
+            policy, base_env = train_on_ensemble(
+                human_agent_indices=human_agent_indices,
+                num_episodes=num_episodes,
+                episodes_per_env=1,
+                device=device,
+                verbose=True,
+                base_seed=42
+            )
+            elapsed = time.time() - t0
+            print(f"\nAdditional training completed in {elapsed:.2f} seconds")
+            print()
+    elif args.no_train:
+        print("Error: --no-train flag requires --load-policy to specify a saved policy file to load.")
+        return
+    else:
+        # Train from scratch
+        t0 = time.time()
+        policy, base_env = train_on_ensemble(
+            human_agent_indices=human_agent_indices,
+            num_episodes=num_episodes,
+            episodes_per_env=1,
+            device=device,
+            verbose=True,
+            base_seed=42
+        )
+        elapsed = time.time() - t0
+        print(f"\nTraining completed in {elapsed:.2f} seconds")
+        print()
+    
+    # Save policy if requested
+    policy_save_path = args.save_policy
+    if policy_save_path is None:
+        policy_save_path = os.path.join(output_dir, 'random_multigrid_policy.pt')
+    
+    # Always save the policy (unless loading without additional training)
+    if not (args.load_policy and args.no_train):
+        policy.save(policy_save_path)
+        print(f"Policy saved to {policy_save_path}")
     
     # Generate test environments for rollouts
     print(f"Generating {num_test_envs} test environments for rollouts...")
@@ -710,6 +886,9 @@ def main():
     
     # Run rollouts across different test environments
     print(f"Running {num_rollouts} rollouts across test environments...")
+    print(f"  Rollout steps: {ROLLOUT_STEPS}")
+    print(f"  Yellow (human) agents: learned policy")
+    print(f"  Grey (robot) agent: random policy")
     all_frames = []
     env_indices = []
     
@@ -722,8 +901,8 @@ def main():
         env = test_environments[env_idx]
         env.reset()
         
-        # Use MultiGridGoalSampler to sample rectangle goals
-        goal_sampler = MultiGridGoalSampler(env)
+        # Use SmallGoalSampler to sample small rectangle goals (at most 3x3)
+        goal_sampler = SmallGoalSampler(env)
         state = env.get_state()
         
         # Assign random rectangle goals to humans using the sampler
@@ -743,7 +922,8 @@ def main():
             human_agent_indices=human_agent_indices,
             human_goals=human_goals,
             robot_index=robot_index,
-            first_human_idx=first_human_idx
+            first_human_idx=first_human_idx,
+            max_steps=ROLLOUT_STEPS
         )
         all_frames.append(frames)
         env_indices.append(env_idx)
@@ -758,7 +938,8 @@ def main():
     print()
     print("=" * 70)
     print("Demo completed!")
-    print(f"Output: {os.path.abspath(movie_path)}")
+    print(f"Policy saved: {os.path.abspath(policy_save_path)}")
+    print(f"Movie output: {os.path.abspath(movie_path)}")
     print("=" * 70)
 
 
