@@ -1,0 +1,34 @@
+{
+  "name": "EMPO Development Container",
+  "image": "ghcr.io/mensch72/empo:main",
+  "features": {},
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "python.defaultInterpreterPath": "/usr/local/bin/python",
+        "python.linting.enabled": true,
+        "python.linting.ruffEnabled": true,
+        "python.formatting.provider": "black",
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "ms-python.black-formatter",
+        "[python]": {
+          "editor.defaultFormatter": "ms-python.black-formatter"
+        }
+      },
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-python.black-formatter",
+        "charliermarsh.ruff",
+        "ms-toolsai.jupyter"
+      ]
+    }
+  },
+  "postCreateCommand": "pip install -e . --no-deps 2>/dev/null || true",
+  "remoteUser": "appuser",
+  "containerEnv": {
+    "PYTHONPATH": "/workspaces/empo/src:/workspaces/empo/vendor/multigrid"
+  },
+  "mounts": [],
+  "forwardPorts": [8888, 6006, 5678]
+}

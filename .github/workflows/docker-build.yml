@@ -35,6 +35,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     needs: test
+    # Grant permissions to push to GHCR
+    permissions:
+      contents: read
+      packages: write
     
     steps:
     - name: Checkout code
@@ -87,5 +91,6 @@ jobs:
         push: true
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
+        build-args: DEV_MODE=true
         cache-from: type=gha
         cache-to: type=gha,mode=max
