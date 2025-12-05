@@ -2325,8 +2325,13 @@ class MultiGridEnv(WorldModel):
         """
         Handle special effects when an agent moves to a cell.
         
-        This includes handling KillButton effects when an agent steps onto one.
+        This includes handling KillButton effects when an agent steps onto one,
+        and deactivating agents when they step on lava.
         """
+        # Handle Lava effects - agent gets deactivated (terminated)
+        if fwd_cell is not None and fwd_cell.type == 'lava':
+            self.agents[i].terminated = True
+        
         # Handle KillButton effects
         if fwd_cell is not None and fwd_cell.type == 'killbutton':
             if fwd_cell.enabled and self.agents[i].color == fwd_cell.trigger_color:
