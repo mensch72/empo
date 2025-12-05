@@ -54,7 +54,7 @@ class SimpleGoalGenerator(PossibleGoalGenerator):
     
     def generate(self, state, human_agent_index: int):
         for pos in self.target_cells:
-            goal = ReachCellGoal(self.world_model, human_agent_index, pos)
+            goal = ReachCellGoal(self.env, human_agent_index, pos)
             yield (goal, 1.0 / len(self.target_cells))
 
 
