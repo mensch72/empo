@@ -34,12 +34,32 @@ See [docs/API.md](docs/API.md) for complete API reference.
 ## Features
 
 - Unified Docker image for development and cluster deployment
+- **Pre-built container images** on GitHub Container Registry for instant setup
 - Exact planning algorithms via backward induction on state DAGs
 - Multi-Agent Reinforcement Learning support (work in progress)
 - Easy local development with Docker Compose
 - Cluster-ready with Singularity/Apptainer support
 - GPU acceleration support (NVIDIA CUDA)
 - Integration with TensorBoard and Weights & Biases
+
+## Pre-built Container Images
+
+For instant development setup without rebuilding, use our pre-built Docker images:
+
+```bash
+# Pull the latest image from GitHub Container Registry
+docker pull ghcr.io/mensch72/empo:main
+
+# Run with your local code mounted
+docker run -it --rm -v $(pwd):/workspace ghcr.io/mensch72/empo:main bash
+```
+
+The repository also includes a `.devcontainer` configuration for:
+- **GitHub Codespaces**: Click "Code" → "Codespaces" → "Create codespace on main"
+- **VS Code Dev Containers**: Open repo and select "Reopen in Container"
+- **AI Coding Assistants**: Automatically detected for faster session startup
+
+See [docs/PREBUILT_IMAGES.md](docs/PREBUILT_IMAGES.md) for more details.
 
 ## Quick Start
 
@@ -576,6 +596,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
 - **[IMPLEMENTATION.md](IMPLEMENTATION.md)** - Detailed implementation notes
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** - Contribution guidelines
 - **[VENDOR.md](VENDOR.md)** - Managing vendored dependencies (Multigrid)
+- **[docs/PREBUILT_IMAGES.md](docs/PREBUILT_IMAGES.md)** - Using pre-built container images
 - **[.env.example](.env.example)** - Environment variables template
 
 ## License
