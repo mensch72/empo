@@ -446,7 +446,6 @@ def render_network_state(env, human_agent_indices, vehicle_agent_idx, goal_nodes
     
     # Convert to RGB array
     fig.canvas.draw()
-    # Use buffer_rgba() instead of tostring_rgb() for newer matplotlib
     width, height = fig.canvas.get_width_height()
     img = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
     img = img.reshape((height, width, 4))
@@ -716,14 +715,6 @@ def main(quick_mode=False):
         max_nodes=total_nodes,
         num_clusters=NUM_CLUSTERS,
     )
-    
-    # Print progress indicators
-    for i in range(0, n_episodes, max(1, n_episodes // 10)):
-        if i == 0:
-            print(f"  Episode 0/{n_episodes}...")
-        else:
-            print(f"  Episode {i}/{n_episodes}...")
-    print(f"  Episode {n_episodes}/{n_episodes}...")
     
     elapsed = time.time() - t0
     print(f"  Training completed in {elapsed:.2f} seconds")
