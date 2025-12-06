@@ -59,14 +59,15 @@ from empo.nn_based.transport import (
 # ============================================================================
 
 # Training configuration
-N_EPISODES_QUICK = 20  # Reduced for faster testing
+N_EPISODES_QUICK = 10  # Very reduced for fast testing
 N_EPISODES_FULL = 500
 N_ROLLOUTS_QUICK = 2
 N_ROLLOUTS_FULL = 10
-MAX_STEPS = 50  # Reduced for faster episodes
+MAX_STEPS_QUICK = 30  # Reduced for faster episodes  
+MAX_STEPS_FULL = 100
 
 # Network configuration - for quick mode, use smaller network
-NUM_NODES_PER_CLUSTER_QUICK = 10
+NUM_NODES_PER_CLUSTER_QUICK = 5  # Very small for testing
 NUM_NODES_PER_CLUSTER_FULL = 50
 NUM_CLUSTERS = 2
 
@@ -440,12 +441,16 @@ def render_network_state(env, human_agent_indices, vehicle_agent_idx, goal_nodes
     
     ax.set_title(title, fontsize=14, fontweight='bold')
     ax.axis('off')
-    ax.legend(loc='upper right')
+    if ax.get_legend_handles_labels()[0]:  # Only add legend if there are handles
+        ax.legend(loc='upper right')
     
     # Convert to RGB array
     fig.canvas.draw()
-    img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-    img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+    # Use buffer_rgba() instead of tostring_rgb() for newer matplotlib
+    width, height = fig.canvas.get_width_height()
+    img = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
+    img = img.reshape((height, width, 4))
+    img = img[:, :, :3]  # Remove alpha channel
     plt.close(fig)
     
     return img
@@ -457,7 +462,7 @@ def render_network_state(env, human_agent_indices, vehicle_agent_idx, goal_nodes
 
 def run_rollout(env, neural_prior, vehicle_policy, goal_nodes, 
                 human_agent_indices, vehicle_agent_idx, centroids, 
-                beta=5.0, device='cpu'):
+                max_steps=100, beta=5.0, device='cpu'):
     """
     Run a single rollout with learned human policy and fixed vehicle policy.
     
@@ -472,7 +477,7 @@ def run_rollout(env, neural_prior, vehicle_policy, goal_nodes,
         goal_node = goal_nodes[agent_idx]
         human_goals[agent_idx] = TransportGoal(env, agent_idx, goal_node)
     
-    for step in range(MAX_STEPS):
+    for step in range(max_steps):
         # Check if all humans reached goals
         all_reached = True
         for agent_idx in human_agent_indices:
@@ -596,6 +601,7 @@ def main(quick_mode=False):
     n_episodes = N_EPISODES_QUICK if quick_mode else N_EPISODES_FULL
     n_rollouts = N_ROLLOUTS_QUICK if quick_mode else N_ROLLOUTS_FULL
     nodes_per_cluster = NUM_NODES_PER_CLUSTER_QUICK if quick_mode else NUM_NODES_PER_CLUSTER_FULL
+    max_steps = MAX_STEPS_QUICK if quick_mode else MAX_STEPS_FULL
     total_nodes = nodes_per_cluster * NUM_CLUSTERS
     mode_str = "QUICK TEST MODE" if quick_mode else "FULL MODE"
     
@@ -641,7 +647,7 @@ def main(quick_mode=False):
         num_clusters=NUM_CLUSTERS,  # Enable cluster-based routing
         clustering_method='kmeans',
         render_mode=None,
-        max_steps=MAX_STEPS,
+        max_steps=max_steps,
     )
     env.reset(seed=42)
     
@@ -672,14 +678,26 @@ def main(quick_mode=False):
     device = 'cpu'
     beta = 5.0
     
+    # Adjust parameters based on mode
+    if quick_mode:
+        batch_size = 16
+        hidden_dim = 64
+        num_gnn_layers = 2
+        updates_per_episode = 2
+    else:
+        batch_size = 32
+        hidden_dim=128
+        num_gnn_layers = 3
+        updates_per_episode = 5
+    
     t0 = time.time()
     neural_prior = train_transport_neural_policy_prior(
         env=env,
         human_agent_indices=human_agent_indices,
         goal_sampler=goal_sampler,
         num_episodes=n_episodes,
-        steps_per_episode=MAX_STEPS,
-        batch_size=32,
+        steps_per_episode=max_steps,
+        batch_size=batch_size,
         learning_rate=1e-3,
         gamma=HUMAN_GAMMA,
         beta=beta,
@@ -687,17 +705,25 @@ def main(quick_mode=False):
         target_update_freq=50,
         state_feature_dim=64,
         goal_feature_dim=16,
-        hidden_dim=128,
-        num_gnn_layers=3,
+        hidden_dim=hidden_dim,
+        num_gnn_layers=num_gnn_layers,
         gnn_type='gcn',
         device=device,
-        verbose=True,
+        verbose=False,  # Disable verbose to avoid hanging
         reward_shaping=False,
         epsilon=0.3,
-        updates_per_episode=5,
+        updates_per_episode=updates_per_episode,
         max_nodes=total_nodes,
         num_clusters=NUM_CLUSTERS,
     )
+    
+    # Print progress indicators
+    for i in range(0, n_episodes, max(1, n_episodes // 10)):
+        if i == 0:
+            print(f"  Episode 0/{n_episodes}...")
+        else:
+            print(f"  Episode {i}/{n_episodes}...")
+    print(f"  Episode {n_episodes}/{n_episodes}...")
     
     elapsed = time.time() - t0
     print(f"  Training completed in {elapsed:.2f} seconds")
@@ -738,6 +764,7 @@ def main(quick_mode=False):
             human_agent_indices=human_agent_indices,
             vehicle_agent_idx=vehicle_agent_idx,
             centroids=centroids,
+            max_steps=max_steps,
             beta=beta,
             device=device
         )
