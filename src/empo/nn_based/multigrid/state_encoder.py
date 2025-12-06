@@ -251,22 +251,18 @@ class MultiGridStateEncoder(BaseStateEncoder):
         actual_height = getattr(world_model, 'height', H) if world_model is not None else H
         actual_width = getattr(world_model, 'width', W) if world_model is not None else W
         
-        # Pad area outside actual world with walls (grey walls, channel 0)
-        # This allows policies trained on larger grids to work on smaller grids
-        if actual_height < H or actual_width < W:
-            wall_channel = OBJECT_TYPE_TO_CHANNEL['wall']
-            # Set walls only in the padding areas (more efficient than fill+clear)
-            if actual_width < W:
-                # Right padding: from actual_width to W
-                grid_tensor[0, wall_channel, :, actual_width:] = 1.0
-            if actual_height < H:
-                # Bottom padding: from actual_height to H
-                grid_tensor[0, wall_channel, actual_height:, :] = 1.0
+        # Pre-fill entire grid with walls, then clear cells as we encode them
+        # This efficiently handles padding when actual world is smaller than encoder grid
+        wall_channel = OBJECT_TYPE_TO_CHANNEL['wall']
+        grid_tensor[0, wall_channel, :, :] = 1.0
         
-        # Encode grid objects from actual world only
+        # Encode grid objects from actual world - clears wall channel where objects exist
         if world_model is not None and hasattr(world_model, 'grid') and world_model.grid is not None:
             for y in range(min(actual_height, H)):
                 for x in range(min(actual_width, W)):
+                    # Clear wall at this position (will be set if cell contains wall)
+                    grid_tensor[0, wall_channel, y, x] = 0.0
+                    
                     cell = world_model.grid.get(x, y)
                     if cell is None:
                         continue
