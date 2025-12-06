@@ -49,13 +49,13 @@ def create_triangle_network():
     G = nx.DiGraph()  # Use directed graph for the transport environment
     
     # Add nodes with positions and names
-    # Scale coordinates by 15 to avoid overlapping nodes in rendering
+    # Scale coordinates and tilt to test lane rendering in general orientation
     scale = 15
     node_positions = {
-        0: (0 * scale, 1 * scale),       # Top vertex
-        1: (-1 * scale, 0 * scale),      # Bottom left
-        2: (1 * scale, 0 * scale),       # Bottom right
-        3: (2 * scale, -1 * scale),      # Extension (goal)
+        0: (0 * scale, 2 * scale),       # Top left
+        1: (1 * scale, 0 * scale),       # Bottom middle-left  
+        2: (3 * scale, 1 * scale),       # Middle right
+        3: (4 * scale, -0.5 * scale),    # Extension (goal)
     }
     
     for node, (x, y) in node_positions.items():
