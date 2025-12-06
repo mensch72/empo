@@ -551,13 +551,14 @@ class ControlButton(WorldObj):
         triggered_action: The action that was programmed (None initially)
     """
     
-    def __init__(self, world, trigger_color='yellow', controlled_color='grey', enabled=True):
+    def __init__(self, world, trigger_color='yellow', controlled_color='grey', enabled=True, actions_set=None):
         """
         Args:
             world: World object defining the environment
             trigger_color: Color of agents that trigger the programmed action
             controlled_color: Color of agents that can program the button
             enabled: Whether the button is active
+            actions_set: Actions class to use for action labels (optional, defaults to Actions)
         """
         assert trigger_color != controlled_color, "trigger_color and controlled_color must be different"
         # Use green color to distinguish control button visually
@@ -569,6 +570,8 @@ class ControlButton(WorldObj):
         self.triggered_action = None  # Action that was programmed
         self._awaiting_action = False  # Internal: waiting for action after toggle by controlled_color
         self._just_activated = False   # Internal: True on the step when programming mode was just activated
+        # Store actions_set for getting action labels, default to Actions if not provided
+        self.actions_set = actions_set if actions_set is not None else Actions
     
     def can_overlap(self):
         return False
@@ -656,18 +659,14 @@ class ControlButton(WorldObj):
                 c = np.array([50, 120, 50])  # Darker green for better label contrast
                 fill_coords(img, point_in_rect(0, 1, 0, 1), c)
                 
-                # Get the action label text (full action name)
+                # Get the action label text from the action space
                 action = self.triggered_action
-                if action == 1:  # left
-                    self._draw_text_label(img, "left")
-                elif action == 2:  # right
-                    self._draw_text_label(img, "right")
-                elif action == 3:  # forward
-                    self._draw_text_label(img, "forward")
-                elif action == 6:  # toggle
-                    self._draw_text_label(img, "toggle")
+                # Use the action name from actions_set.available if it's a valid index
+                if 0 <= action < len(self.actions_set.available):
+                    action_name = self.actions_set.available[action]
+                    self._draw_text_label(img, action_name)
                 else:
-                    # Generic action number
+                    # Fallback to action number for invalid/unknown actions
                     self._draw_text_label(img, str(action))
             else:
                 # Darker green when not programmed
@@ -1937,13 +1936,14 @@ def _parse_cell(cell_str, objects_set):
         raise ValueError(f"Unknown cell type: {cell_str}")
 
 
-def create_object_from_spec(cell_spec, objects_set):
+def create_object_from_spec(cell_spec, objects_set, actions_set=None):
     """
     Create a WorldObj from a cell specification.
     
     Args:
         cell_spec: Tuple (type, params_dict) from _parse_cell
         objects_set: The World class to use
+        actions_set: The Actions class to use (optional, needed for ControlButton)
         
     Returns:
         WorldObj or None for empty cells
@@ -1988,7 +1988,8 @@ def create_object_from_spec(cell_spec, objects_set):
         return ControlButton(objects_set,
                             trigger_color=params.get('trigger_color', 'yellow'),
                             controlled_color=params.get('controlled_color', 'grey'),
-                            enabled=params.get('enabled', True))
+                            enabled=params.get('enabled', True),
+                            actions_set=actions_set)
     elif obj_type == 'door':
         return Door(objects_set, 
                    params.get('color', 'blue'),
@@ -2479,7 +2480,7 @@ class MultiGridEnv(WorldModel):
             for x in range(map_width):
                 cell_spec = cells[y][x]
                 if cell_spec is not None and cell_spec[0] != 'agent':
-                    obj = create_object_from_spec(cell_spec, self.objects)
+                    obj = create_object_from_spec(cell_spec, self.objects, self.actions)
                     if obj is not None:
                         self.grid.set(x, y, obj)
         
