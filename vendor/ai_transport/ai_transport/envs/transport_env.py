@@ -838,10 +838,13 @@ class parallel_env(ParallelEnv):
     
     def save_video(self, filename='transport_video.mp4', fps=5):
         """
-        Save recorded frames as MP4 video.
+        Save recorded frames as video or GIF.
+        
+        Tries MP4 using matplotlib's FFMpegWriter first (like other examples),
+        falls back to GIF if ffmpeg not available.
         
         Args:
-            filename: Output filename
+            filename: Output filename (can be .mp4 or .gif)
             fps: Frames per second
         """
         if not self.frames:
@@ -849,30 +852,40 @@ class parallel_env(ParallelEnv):
             return
         
         try:
-            import imageio
-            # Use imageio.mimsave with plugin='pillow' to avoid ffmpeg interpolation
-            # Or use ffmpeg with specific codec options
-            imageio.mimsave(
-                filename, 
-                self.frames, 
-                fps=fps,
-                codec='libx264',
-                quality=8,
-                pixelformat='yuv420p',
-                macro_block_size=1  # Disable automatic resizing
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            import matplotlib.animation as animation
+            
+            fig, ax = plt.subplots(figsize=(12, 10))
+            ax.axis('off')
+            
+            im = ax.imshow(self.frames[0])
+            
+            def update(frame_idx):
+                im.set_array(self.frames[frame_idx])
+                return [im]
+            
+            anim = animation.FuncAnimation(
+                fig, update, frames=len(self.frames),
+                interval=200, blit=True, repeat=True
             )
-            print(f"Video saved to {filename} ({len(self.frames)} frames)")
-        except ImportError:
-            print("imageio package required for video recording. Install with: pip install imageio[ffmpeg]")
+            
+            # Try MP4 with FFMpegWriter first (like other example scripts)
+            try:
+                writer = animation.FFMpegWriter(fps=fps, bitrate=2000)
+                anim.save(filename, writer=writer)
+                print(f"✓ Video saved to {filename} ({len(self.frames)} frames)")
+            except Exception as e:
+                # Fall back to GIF with pillow writer
+                print(f"Could not save MP4 ({e}), trying GIF...")
+                gif_filename = filename.replace('.mp4', '.gif')
+                anim.save(gif_filename, writer='pillow', fps=fps)
+                print(f"✓ Video saved as GIF to {gif_filename} ({len(self.frames)} frames)")
+            
+            plt.close(fig)
         except Exception as e:
             print(f"Error saving video: {e}")
-            print(f"Trying alternative method...")
-            try:
-                import imageio
-                imageio.mimsave(filename, self.frames, fps=fps)
-                print(f"Video saved to {filename} ({len(self.frames)} frames)")
-            except Exception as e2:
-                print(f"Failed to save video: {e2}")
         finally:
             # Always reset state
             self._recording = False
