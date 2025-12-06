@@ -239,13 +239,31 @@ class MultiGridStateEncoder(BaseStateEncoder):
         mutable_objects: list,
         query_agent_idx: int
     ):
-        """Encode grid objects into tensor."""
+        """Encode grid objects into tensor.
+        
+        If world_model has smaller dimensions than the encoder was configured for,
+        only the actual world area is encoded and the rest is padded with walls.
+        This allows policies trained on larger grids to work on smaller grids.
+        """
         H, W = self.grid_height, self.grid_width
         
-        # Encode grid objects
+        # Get actual world dimensions (may be smaller than encoder dimensions)
+        actual_height = getattr(world_model, 'height', H) if world_model is not None else H
+        actual_width = getattr(world_model, 'width', W) if world_model is not None else W
+        
+        # Pad area outside actual world with walls (grey walls, channel 0)
+        # This allows policies trained on larger grids to work on smaller grids
+        if actual_height < H or actual_width < W:
+            wall_channel = OBJECT_TYPE_TO_CHANNEL['wall']
+            # Fill entire grid with walls first
+            grid_tensor[0, wall_channel, :, :] = 1.0
+            # Clear the actual world area (will be filled below)
+            grid_tensor[0, wall_channel, :actual_height, :actual_width] = 0.0
+        
+        # Encode grid objects from actual world only
         if world_model is not None and hasattr(world_model, 'grid') and world_model.grid is not None:
-            for y in range(H):
-                for x in range(W):
+            for y in range(min(actual_height, H)):
+                for x in range(min(actual_width, W)):
                     cell = world_model.grid.get(x, y)
                     if cell is None:
                         continue
