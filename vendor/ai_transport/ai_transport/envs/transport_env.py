@@ -707,6 +707,17 @@ class parallel_env(ParallelEnv):
                                zorder=4, alpha=0.8)
                 self.ax.add_patch(rect)
                 
+                # Count and show passengers aboard this vehicle
+                passengers = [h for h in self.human_agents if self.human_aboard.get(h) == agent]
+                if passengers:
+                    # Draw small red dot(s) on top of vehicle to show passengers
+                    for i, passenger in enumerate(passengers):
+                        offset_x = -0.15 + (i * 0.15)  # Spread passengers horizontally
+                        passenger_circle = Circle((x + offset_x, y), radius=0.08, 
+                                                 color='red', ec='darkred', 
+                                                 linewidth=1, zorder=6)
+                        self.ax.add_patch(passenger_circle)
+                
                 # Show destination if set
                 dest = self.vehicle_destinations.get(agent)
                 if dest is not None:
@@ -722,7 +733,7 @@ class parallel_env(ParallelEnv):
                     circle = Circle((x, y), radius=0.15, color='red',
                                   ec='darkred', linewidth=1.5, zorder=5)
                     self.ax.add_patch(circle)
-                # If aboard, don't draw separately (they're with the vehicle)
+                # If aboard, they will be drawn on the vehicle (see vehicle rendering above)
         
         # Draw dashed line from agent to their goal (like multigrid)
         if goal_info and 'agent' in goal_info and 'node' in goal_info:

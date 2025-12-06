@@ -49,17 +49,20 @@ def create_triangle_network():
     G = nx.DiGraph()  # Use directed graph for the transport environment
     
     # Add nodes with positions and names
+    # Scale coordinates by 15 to avoid overlapping nodes in rendering
+    scale = 15
     node_positions = {
-        0: (0, 1),      # Top vertex
-        1: (-1, 0),     # Bottom left
-        2: (1, 0),      # Bottom right
-        3: (2, -1),     # Extension (goal)
+        0: (0 * scale, 1 * scale),       # Top vertex
+        1: (-1 * scale, 0 * scale),      # Bottom left
+        2: (1 * scale, 0 * scale),       # Bottom right
+        3: (2 * scale, -1 * scale),      # Extension (goal)
     }
     
     for node, (x, y) in node_positions.items():
         G.add_node(node, x=x, y=y, name=f"Node_{node}")
     
     # Add edges (bidirectional roads) with required attributes
+    # Calculate proper edge lengths based on Euclidean distance
     edges = [
         (0, 1),  # Left edge of triangle
         (1, 0),  # Reverse
@@ -72,7 +75,10 @@ def create_triangle_network():
     ]
     
     for u, v in edges:
-        G.add_edge(u, v, length=1.0, speed=1.0, capacity=10.0)
+        x1, y1 = node_positions[u]
+        x2, y2 = node_positions[v]
+        euclidean_length = np.sqrt((x2 - x1)**2 + (y2 - y1)**2)
+        G.add_edge(u, v, length=euclidean_length, speed=1.0, capacity=10.0)
     
     return G
 
