@@ -351,7 +351,14 @@ class CentroidShuttlePolicy:
 def render_network_state(env, human_agent_indices, vehicle_agent_idx, goal_nodes, 
                          centroids, value_dict=None, title=""):
     """
-    Render the network state with humans, vehicle, goals, and centroids.
+    Render the network state using ai_transport's built-in rendering.
+    
+    The ai_transport package provides proper rendering that shows:
+    - Bidirectional roads as separate lanes with arrows
+    - Vehicles as blue rectangles  
+    - Humans as red dots with coordinate perturbation for overlapping agents
+    - Goals with dashed outlines and star markers
+    - Dashed line from agent to goal
     
     Args:
         env: TransportEnvWrapper
@@ -365,96 +372,30 @@ def render_network_state(env, human_agent_indices, vehicle_agent_idx, goal_nodes
     Returns:
         RGB array of the rendered image
     """
-    # Use the underlying env's rendering if available
-    # For now, create a simple visualization
-    fig, ax = plt.subplots(figsize=(14, 8))
+    # Use the vendored ai_transport package's render_frame method
+    # which provides proper visualization with bidirectional lanes, 
+    # vehicle rectangles, and passenger handling
     
-    G = env.network
-    pos = {node: (G.nodes[node]['x'], G.nodes[node]['y']) for node in G.nodes()}
+    # For this demo, we'll show the goal for the first human agent
+    # (ai_transport's rendering supports one goal visualization at a time)
+    goal_info = None
+    if human_agent_indices and goal_nodes:
+        agent_idx = human_agent_indices[0]
+        if agent_idx in goal_nodes:
+            goal_info = {
+                'agent': env.agents[agent_idx],
+                'node': goal_nodes[agent_idx],
+                'type': 'node'
+            }
     
-    # Draw edges
-    edge_colors = []
-    edge_widths = []
-    for u, v in G.edges():
-        is_bridge = G.edges[u, v].get('is_bridge', False)
-        if is_bridge:
-            edge_colors.append('red')
-            edge_widths.append(3.0)
-        else:
-            edge_colors.append('lightgray')
-            edge_widths.append(0.5)
+    # Use the underlying environment's render_frame method
+    frame = env.env.render_frame(
+        goal_info=goal_info,
+        value_dict=value_dict,
+        title=title
+    )
     
-    nx.draw_networkx_edges(G, pos, ax=ax, edge_color=edge_colors, 
-                          width=edge_widths, arrows=False, alpha=0.5)
-    
-    # Draw nodes colored by cluster
-    cluster_0_nodes = [n for n in G.nodes() if G.nodes[n].get('cluster') == 0]
-    cluster_1_nodes = [n for n in G.nodes() if G.nodes[n].get('cluster') == 1]
-    
-    nx.draw_networkx_nodes(G, pos, nodelist=cluster_0_nodes, 
-                          node_color='lightblue', node_size=20, ax=ax, alpha=0.6)
-    nx.draw_networkx_nodes(G, pos, nodelist=cluster_1_nodes, 
-                          node_color='lightgreen', node_size=20, ax=ax, alpha=0.6)
-    
-    # Highlight centroids with stars
-    centroid_nodes = list(centroids.values())
-    nx.draw_networkx_nodes(G, pos, nodelist=centroid_nodes,
-                          node_color='gold', node_size=300, node_shape='*', ax=ax)
-    
-    # Draw agents
-    for agent_idx in human_agent_indices:
-        agent_name = env.agents[agent_idx]
-        agent_pos = env.env.agent_positions.get(agent_name)
-        
-        # Check if human is aboard vehicle
-        aboard = env.env.human_aboard.get(agent_name)
-        
-        if aboard is None and agent_pos is not None and not isinstance(agent_pos, tuple):
-            # Human is walking at a node
-            x, y = pos[agent_pos]
-            ax.plot(x, y, 'ro', markersize=12, label=f'Human {agent_idx}')
-            
-            # Draw line to goal
-            goal_node = goal_nodes.get(agent_idx)
-            if goal_node is not None:
-                goal_x, goal_y = pos[goal_node]
-                ax.plot([x, goal_x], [y, goal_y], 'r--', alpha=0.3, linewidth=1)
-    
-    # Draw vehicle
-    vehicle_name = env.agents[vehicle_agent_idx]
-    vehicle_pos = env.env.agent_positions.get(vehicle_name)
-    if vehicle_pos is not None and not isinstance(vehicle_pos, tuple):
-        x, y = pos[vehicle_pos]
-        ax.plot(x, y, 'bs', markersize=16, label='Vehicle')
-        
-        # Show which humans are aboard
-        aboard_humans = [i for i in human_agent_indices 
-                        if env.env.human_aboard.get(env.agents[i]) == vehicle_name]
-        if aboard_humans:
-            ax.text(x, y + 2, f'Aboard: {aboard_humans}', ha='center', fontsize=8)
-    
-    # Draw goals with stars
-    for agent_idx in human_agent_indices:
-        goal_node = goal_nodes.get(agent_idx)
-        if goal_node is not None:
-            x, y = pos[goal_node]
-            ax.plot(x, y, 'r*', markersize=20, alpha=0.7)
-            ax.text(x, y - 2, f'Goal H{agent_idx}', ha='center', fontsize=8)
-    
-    ax.set_title(title, fontsize=14, fontweight='bold')
-    ax.axis('off')
-    if ax.get_legend_handles_labels()[0]:  # Only add legend if there are handles
-        ax.legend(loc='upper right')
-    
-    # Convert to RGB array
-    fig.canvas.draw()
-    width, height = fig.canvas.get_width_height()
-    img = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
-    img = img.reshape((height, width, 4))
-    img = img[:, :, :3]  # Remove alpha channel
-    plt.close(fig)
-    
-    return img
+    return frame
 
 
 # ============================================================================
