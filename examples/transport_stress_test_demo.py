@@ -248,7 +248,7 @@ class RandomStressTestPolicy:
 # Rollout Function
 # ============================================================================
 
-def run_stress_test_rollout(env, policies, max_steps=100):
+def run_stress_test_rollout(env, policies, max_steps=100, profile=True):
     """
     Run a single stress test rollout with random actions.
     
@@ -258,14 +258,21 @@ def run_stress_test_rollout(env, policies, max_steps=100):
     env.reset()
     
     # Render initial state
-    title = f"Stress Test | Step 0 (Initial) | {NUM_HUMANS} humans, {NUM_VEHICLES} vehicles"
-    env.env.render(goal_info=None, value_dict=None, title=title)
+    with Timer("Initial render", enabled=profile):
+        title = f"Stress Test | Step 0 (Initial) | {NUM_HUMANS} humans, {NUM_VEHICLES} vehicles"
+        env.env.render(goal_info=None, value_dict=None, title=title)
     
     boarding_count = 0
     unboarding_count = 0
     
+    # Profiling accumulators
+    action_time = 0.0
+    step_time = 0.0
+    render_time = 0.0
+    
     for step in range(max_steps):
         # Get actions for all agents
+        start = time.time()
         actions = []
         for agent_idx in range(env.num_agents):
             action = policies[agent_idx].get_action()
@@ -277,14 +284,19 @@ def run_stress_test_rollout(env, policies, max_steps=100):
                 boarding_count += 1
             elif step_type == 'unboarding' and action == TransportActions.UNBOARD:
                 unboarding_count += 1
+        action_time += time.time() - start
         
         # Execute actions
+        start = time.time()
         obs, rewards, done, info = env.step(actions)
+        step_time += time.time() - start
         
         # Render after step (THIS IS CRITICAL FOR VIDEO CAPTURE)
+        start = time.time()
         step_type = env.step_type
         title = f"Stress Test | Step {step + 1} | Phase: {step_type} | Boardings: {boarding_count} | Unboardings: {unboarding_count}"
         env.env.render(goal_info=None, value_dict=None, title=title)
+        render_time += time.time() - start
         
         if done:
             break
@@ -292,6 +304,17 @@ def run_stress_test_rollout(env, policies, max_steps=100):
     print(f"Rollout complete: {step + 1} steps")
     print(f"  Total boardings: {boarding_count}")
     print(f"  Total unboardings: {unboarding_count}")
+    
+    if profile:
+        print(f"\n⏱️  PERFORMANCE BREAKDOWN:")
+        print(f"  Total action selection time: {action_time:.2f}s ({action_time/(step+1)*1000:.1f}ms/step)")
+        print(f"  Total env.step() time: {step_time:.2f}s ({step_time/(step+1)*1000:.1f}ms/step)")
+        print(f"  Total rendering time: {render_time:.2f}s ({render_time/(step+1)*1000:.1f}ms/step)")
+        print(f"  Total time: {action_time + step_time + render_time:.2f}s")
+        print(f"\n  Time per step breakdown:")
+        print(f"    Action selection: {action_time/(action_time+step_time+render_time)*100:.1f}%")
+        print(f"    Environment step: {step_time/(action_time+step_time+render_time)*100:.1f}%")
+        print(f"    Rendering: {render_time/(action_time+step_time+render_time)*100:.1f}%")
 
 
 # ============================================================================
@@ -300,7 +323,7 @@ def run_stress_test_rollout(env, policies, max_steps=100):
 
 def main():
     print("=" * 70)
-    print("Transport Stress Test Demo")
+    print("Transport Stress Test Demo WITH PROFILING")
     print(f"Network: {NUM_NODES} randomly placed nodes")
     print(f"Agents: {NUM_HUMANS} humans + {NUM_VEHICLES} vehicles")
     print(f"Actions: Random with high boarding probability ({BOARDING_PROB})")
@@ -312,62 +335,70 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
     
     # Create random network
-    print(f"Creating random network with {NUM_NODES} nodes...")
-    network = create_random_network(num_nodes=NUM_NODES, seed=42)
-    print(f"  Nodes: {network.number_of_nodes()}")
-    print(f"  Edges: {network.number_of_edges()}")
+    with Timer("Network generation"):
+        print(f"Creating random network with {NUM_NODES} nodes...")
+        network = create_random_network(num_nodes=NUM_NODES, seed=42)
+        print(f"  Nodes: {network.number_of_nodes()}")
+        print(f"  Edges: {network.number_of_edges()}")
     
     # Create environment
-    print(f"\nCreating transport environment with {NUM_HUMANS} humans and {NUM_VEHICLES} vehicles...")
-    
-    human_speeds = [HUMAN_SPEED] * NUM_HUMANS
-    vehicle_speeds = [VEHICLE_SPEED] * NUM_VEHICLES
-    vehicle_capacities = [VEHICLE_CAPACITY] * NUM_VEHICLES
-    
-    env = TransportEnvWrapper(
-        num_humans=NUM_HUMANS,
-        num_vehicles=NUM_VEHICLES,
-        network=network,
-        human_speeds=human_speeds,
-        vehicle_speeds=vehicle_speeds,
-        vehicle_capacities=vehicle_capacities,
-        render_mode='human',  # Enable rendering for video recording
-        max_steps=MAX_STEPS,
-    )
-    env.reset(seed=42)
-    
-    print(f"  Total agents: {env.num_agents}")
-    print(f"    Humans: {NUM_HUMANS}")
-    print(f"    Vehicles: {NUM_VEHICLES}")
+    with Timer("Environment creation"):
+        print(f"\nCreating transport environment with {NUM_HUMANS} humans and {NUM_VEHICLES} vehicles...")
+        
+        human_speeds = [HUMAN_SPEED] * NUM_HUMANS
+        vehicle_speeds = [VEHICLE_SPEED] * NUM_VEHICLES
+        vehicle_capacities = [VEHICLE_CAPACITY] * NUM_VEHICLES
+        
+        env = TransportEnvWrapper(
+            num_humans=NUM_HUMANS,
+            num_vehicles=NUM_VEHICLES,
+            network=network,
+            human_speeds=human_speeds,
+            vehicle_speeds=vehicle_speeds,
+            vehicle_capacities=vehicle_capacities,
+            render_mode='human',  # Enable rendering for video recording
+            max_steps=MAX_STEPS,
+        )
+        env.reset(seed=42)
+        
+        print(f"  Total agents: {env.num_agents}")
+        print(f"    Humans: {NUM_HUMANS}")
+        print(f"    Vehicles: {NUM_VEHICLES}")
     
     # Create random policies for all agents
-    print("\nInitializing random policies...")
-    policies = []
-    for agent_idx in range(env.num_agents):
-        is_vehicle = agent_idx >= NUM_HUMANS  # Vehicles come after humans
-        policy = RandomStressTestPolicy(env, agent_idx, is_vehicle=is_vehicle, seed=42)
-        policies.append(policy)
+    with Timer("Policy initialization"):
+        print("\nInitializing random policies...")
+        policies = []
+        for agent_idx in range(env.num_agents):
+            is_vehicle = agent_idx >= NUM_HUMANS  # Vehicles come after humans
+            policy = RandomStressTestPolicy(env, agent_idx, is_vehicle=is_vehicle, seed=42)
+            policies.append(policy)
     
     # Start video recording
     video_path = os.path.join(output_dir, 'transport_stress_test_demo.mp4')
     print(f"\nStarting video recording to: {video_path}")
-    env.env.start_video_recording()
+    with Timer("start_video_recording()"):
+        env.env.start_video_recording()
     
     # Run rollout
     print(f"\nRunning stress test rollout ({MAX_STEPS} max steps)...")
     print("-" * 70)
-    run_stress_test_rollout(env, policies, max_steps=MAX_STEPS)
+    with Timer(f"Complete rollout ({MAX_STEPS} steps)"):
+        run_stress_test_rollout(env, policies, max_steps=MAX_STEPS, profile=True)
     print("-" * 70)
     
     # Save video
     print(f"\nSaving video to: {video_path}")
-    env.env.save_video(video_path, fps=20)
+    with Timer("save_video()"):
+        env.env.save_video(video_path, fps=20)
     print(f"Video saved successfully!")
     
     # Verify video has frames by checking file size
     if os.path.exists(video_path):
         file_size = os.path.getsize(video_path) / 1024 / 1024  # MB
+        num_frames = len(env.env._video_frames) if hasattr(env.env, '_video_frames') else 'unknown'
         print(f"Video file size: {file_size:.2f} MB")
+        print(f"Total frames captured: {num_frames}")
         if file_size < 0.1:
             print("WARNING: Video file is very small, may not contain frames!")
     
@@ -377,4 +408,40 @@ def main():
 
 
 if __name__ == '__main__':
+    # Enable Python's built-in profiler
+    import cProfile
+    import pstats
+    from io import StringIO
+    
+    print("Running with cProfile to identify bottlenecks...")
+    print()
+    
+    profiler = cProfile.Profile()
+    profiler.enable()
+    
     main()
+    
+    profiler.disable()
+    
+    # Print profiling results
+    print("\n" + "=" * 70)
+    print("DETAILED PROFILING RESULTS")
+    print("=" * 70)
+    print("\nTop 30 functions by cumulative time:")
+    print("-" * 70)
+    
+    s = StringIO()
+    stats = pstats.Stats(profiler, stream=s)
+    stats.strip_dirs()
+    stats.sort_stats('cumulative')
+    stats.print_stats(30)
+    print(s.getvalue())
+    
+    print("\nTop 30 functions by total time (self time):")
+    print("-" * 70)
+    s = StringIO()
+    stats = pstats.Stats(profiler, stream=s)
+    stats.strip_dirs()
+    stats.sort_stats('tottime')
+    stats.print_stats(30)
+    print(s.getvalue())
