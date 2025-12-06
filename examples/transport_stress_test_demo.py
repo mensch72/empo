@@ -71,13 +71,13 @@ def create_random_network(num_nodes=100, seed=42):
     # Generate random node positions in a 100x100 square
     node_positions = {}
     for i in range(num_nodes):
-        x = np.random.uniform(0, 100)
-        y = np.random.uniform(0, 100)
+        x = np.random.uniform(0, 50)
+        y = np.random.uniform(0, 50)
         node_positions[i] = (x, y)
         G.add_node(i, x=x, y=y, name=f"N{i}")
     
     # Create edges between nearby nodes (within distance threshold)
-    distance_threshold = 20.0
+    distance_threshold = 10.0
     
     # First pass: connect nearby nodes
     for i in range(num_nodes):
@@ -337,7 +337,7 @@ def main():
     
     # Save video
     print(f"\nSaving video to: {video_path}")
-    env.env.save_video(video_path, fps=10)
+    env.env.save_video(video_path, fps=20)
     print(f"Video saved successfully!")
     
     # Verify video has frames by checking file size

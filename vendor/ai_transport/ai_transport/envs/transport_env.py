@@ -178,7 +178,7 @@ class parallel_env(ParallelEnv):
         self.ax = None
         self.frames = []  # For video recording
         self._last_render_time = 0.0  # Track last "click" time for uniform frame generation
-        self._time_per_frame = 0.5  # Capture frame every 0.5 time units ("clicks")
+        self._time_per_frame = 0.02 #5  # Capture frame every 0.5 time units ("clicks")
         
         # State components (will be initialized in reset)
         self.real_time = None
@@ -1092,7 +1092,7 @@ class parallel_env(ParallelEnv):
         self.frames = []
         self.enable_rendering('graphical')
     
-    def save_video(self, filename='transport_video.mp4', fps=5):
+    def save_video(self, filename='transport_video.mp4', fps=20):
         """
         Save recorded frames as video or GIF.
         
