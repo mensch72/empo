@@ -138,9 +138,15 @@ class MultiGridNeuralHumanPolicyPrior(BaseNeuralHumanPolicyPrior):
         """
         Load a model from file.
         
+        Supports cross-grid loading: policies trained on larger grids can be loaded
+        for use on smaller grids. The encoder will pad the smaller grid with walls
+        to match the trained policy's expected dimensions. This enables transfer
+        learning and efficient policy reuse across different grid sizes.
+        
         Args:
             filepath: Path to saved model.
-            world_model: New environment.
+            world_model: New environment. Can have smaller dimensions than the saved
+                policy (will be padded with walls), but not larger dimensions.
             human_agent_indices: Human agent indices.
             goal_sampler: Goal sampler.
             infeasible_actions_become: Action to remap unsupported actions to.
@@ -150,7 +156,8 @@ class MultiGridNeuralHumanPolicyPrior(BaseNeuralHumanPolicyPrior):
             Loaded MultiGridNeuralHumanPolicyPrior instance.
         
         Raises:
-            ValueError: If grid dimensions don't match or actions conflict.
+            ValueError: If environment grid is larger than saved grid, or if
+                action encodings conflict.
         """
         checkpoint = torch.load(filepath, map_location=device, weights_only=False)
         config = checkpoint['config']

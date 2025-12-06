@@ -44,6 +44,23 @@ Goals are encoded separately by `GoalEncoder` because they represent the agent's
 1. **Absolute distances matter**: The number of steps to reach a goal depends on absolute grid distance
 2. **Scale information is useful**: The network can learn that larger grids require different strategies
 3. **Simplicity**: No need for denormalization or scaling factors during inference
+4. **Policy transfer**: Using absolute coordinates enables loading policies trained on larger grids for use on smaller grids
+
+## Cross-Grid Policy Loading
+
+Policies trained on larger grids can be loaded and used on smaller grids. This enables:
+
+- **Transfer learning**: Train once on a large grid, deploy on various smaller grids
+- **Efficient training**: Train on diverse large environments, use in constrained spaces
+- **Backward compatibility**: Upgrade to larger training environments without retraining for smaller deployments
+
+When a policy trained on a larger grid is loaded for a smaller grid:
+1. The encoder maintains the larger grid dimensions (from the trained policy)
+2. The actual smaller world area is encoded normally
+3. The area outside the smaller world is padded with grey walls (channel 0)
+4. Agents, objects, and goals use absolute integer coordinates, so they remain valid
+
+Loading a policy trained on a **smaller** grid for a **larger** grid is not supported, as coordinates would be out of bounds.
 
 ## Design Principle: Grid vs. List Encoding
 
