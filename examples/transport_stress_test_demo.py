@@ -248,6 +248,12 @@ def run_stress_test_demo():
         
         step += 1
         
+        # Render current state after each step
+        env.unwrapped.render(
+            goal_info=human_goals,
+            title=f"Stress Test Demo | Step {step}"
+        )
+        
         # Check if done
         done = all(terminations.values()) or all(truncations.values())
         
