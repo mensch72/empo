@@ -18,6 +18,10 @@ Usage:
 
 import sys
 import os
+import time
+import cProfile
+import pstats
+from io import StringIO
 
 # Add paths for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
@@ -26,6 +30,26 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 import numpy as np
 import networkx as nx
+
+# Timing utilities
+class Timer:
+    """Simple context manager for timing code blocks"""
+    def __init__(self, name, enabled=True):
+        self.name = name
+        self.enabled = enabled
+        
+    def __enter__(self):
+        if self.enabled:
+            self.start = time.time()
+        return self
+        
+    def __exit__(self, *args):
+        if self.enabled:
+            elapsed = time.time() - self.start
+            print(f"⏱️  {self.name}: {elapsed:.2f}s")
+
+# Global timing accumulator
+timing_stats = {}
 
 from empo.transport import (
     TransportEnvWrapper,
