@@ -639,16 +639,16 @@ class ControlButton(WorldObj):
                 c = np.array([50, 120, 50])  # Darker green for better label contrast
                 fill_coords(img, point_in_rect(0, 1, 0, 1), c)
                 
-                # Get the action label text
+                # Get the action label text (full action name)
                 action = self.triggered_action
                 if action == 1:  # left
-                    self._draw_text_label(img, "L")
+                    self._draw_text_label(img, "left")
                 elif action == 2:  # right
-                    self._draw_text_label(img, "R")
+                    self._draw_text_label(img, "right")
                 elif action == 3:  # forward
-                    self._draw_text_label(img, "F")
+                    self._draw_text_label(img, "forward")
                 elif action == 6:  # toggle
-                    self._draw_text_label(img, "T")
+                    self._draw_text_label(img, "toggle")
                 else:
                     # Generic action number
                     self._draw_text_label(img, str(action))
@@ -666,52 +666,90 @@ class ControlButton(WorldObj):
             fill_coords(img, point_in_rect(0, 1, 0, 1), c / 2)
     
     def _draw_text_label(self, img, text):
-        """Draw a large single-character label on the button."""
-        h, w = img.shape[:2]
-        white = np.array([255, 255, 255])
-        
-        # Define character patterns as normalized (x, y) coordinates within tile
-        # Each point will be drawn as a small filled block for visibility
-        patterns = {
-            'L': [
-                (0.2, 0.15), (0.2, 0.3), (0.2, 0.45), (0.2, 0.6), (0.2, 0.75),
-                (0.35, 0.75), (0.5, 0.75), (0.65, 0.75)
-            ],
-            'R': [
-                (0.2, 0.15), (0.2, 0.3), (0.2, 0.45), (0.2, 0.6), (0.2, 0.75),
-                (0.35, 0.15), (0.5, 0.15), (0.65, 0.25),
-                (0.35, 0.45), (0.5, 0.45),
-                (0.5, 0.6), (0.65, 0.75)
-            ],
-            'F': [
-                (0.2, 0.15), (0.2, 0.3), (0.2, 0.45), (0.2, 0.6), (0.2, 0.75),
-                (0.35, 0.15), (0.5, 0.15), (0.65, 0.15),
-                (0.35, 0.45), (0.5, 0.45)
-            ],
-            'T': [
-                (0.2, 0.15), (0.35, 0.15), (0.5, 0.15), (0.65, 0.15), (0.8, 0.15),
-                (0.5, 0.3), (0.5, 0.45), (0.5, 0.6), (0.5, 0.75)
-            ],
-            '0': [(0.3, 0.2), (0.5, 0.2), (0.7, 0.2), (0.3, 0.4), (0.7, 0.4), (0.3, 0.6), (0.7, 0.6), (0.3, 0.8), (0.5, 0.8), (0.7, 0.8)],
-            '1': [(0.5, 0.2), (0.5, 0.4), (0.5, 0.6), (0.5, 0.8)],
-            '2': [(0.3, 0.2), (0.5, 0.2), (0.7, 0.2), (0.7, 0.4), (0.3, 0.6), (0.5, 0.6), (0.7, 0.6), (0.3, 0.8), (0.5, 0.8), (0.7, 0.8)],
-            '3': [(0.3, 0.2), (0.5, 0.2), (0.7, 0.2), (0.7, 0.4), (0.5, 0.5), (0.7, 0.6), (0.3, 0.8), (0.5, 0.8), (0.7, 0.8)],
-            '4': [(0.3, 0.2), (0.7, 0.2), (0.3, 0.4), (0.7, 0.4), (0.3, 0.5), (0.5, 0.5), (0.7, 0.5), (0.7, 0.6), (0.7, 0.8)],
-            '5': [(0.3, 0.2), (0.5, 0.2), (0.7, 0.2), (0.3, 0.4), (0.3, 0.5), (0.5, 0.5), (0.7, 0.6), (0.3, 0.8), (0.5, 0.8), (0.7, 0.8)],
-            '6': [(0.3, 0.2), (0.5, 0.2), (0.7, 0.2), (0.3, 0.4), (0.3, 0.5), (0.5, 0.5), (0.7, 0.5), (0.3, 0.6), (0.7, 0.6), (0.3, 0.8), (0.5, 0.8), (0.7, 0.8)],
-        }
-        
-        char = text[0].upper() if text else '?'
-        if char in patterns:
-            # Draw each point as a small filled circle
-            for fx, fy in patterns[char]:
-                cx, cy = int(fx * w), int(fy * h)
-                # Draw a 3x3 block for visibility
-                for dx in range(-2, 3):
-                    for dy in range(-2, 3):
-                        px, py = cx + dx, cy + dy
-                        if 0 <= px < w and 0 <= py < h:
-                            img[py, px] = white
+        """Draw a text label on the button using matplotlib rendering."""
+        try:
+            import matplotlib
+            matplotlib.use('Agg')  # Use non-interactive backend
+            import matplotlib.pyplot as plt
+            import matplotlib.image as mpimg
+            from io import BytesIO
+            
+            h, w = img.shape[:2]
+            
+            # Create a figure matching the button dimensions
+            dpi = 100
+            fig_width = w / dpi
+            fig_height = h / dpi
+            fig = plt.figure(figsize=(fig_width, fig_height), dpi=dpi, facecolor='none')
+            ax = fig.add_axes([0, 0, 1, 1])
+            ax.set_xlim(0, 1)
+            ax.set_ylim(0, 1)
+            ax.axis('off')
+            ax.patch.set_alpha(0)
+            
+            # Determine font size based on text length
+            # Scale appropriately for button size
+            if len(text) <= 4:
+                fontsize = max(7, min(10, h // 3.5))
+            else:
+                fontsize = max(6, min(8, h // 4.5))
+            
+            # Draw text centered in white, similar to "H1" label style
+            ax.text(0.5, 0.5, text, ha='center', va='center',
+                   fontsize=fontsize, fontweight='bold', color='white',
+                   bbox=dict(boxstyle='round,pad=0.15', facecolor='black', 
+                            alpha=0.5, edgecolor='none'))
+            
+            # Render to buffer
+            buf = BytesIO()
+            fig.savefig(buf, format='png', dpi=dpi, bbox_inches='tight', 
+                       pad_inches=0, transparent=True)
+            buf.seek(0)
+            
+            # Read image from buffer
+            text_img = mpimg.imread(buf)
+            buf.close()
+            plt.close(fig)
+            
+            # Handle RGBA format
+            if len(text_img.shape) == 3 and text_img.shape[2] == 4:
+                # Get RGB and alpha channels
+                alpha = text_img[:, :, 3]
+                rgb = text_img[:, :, :3]
+                
+                # Convert to uint8
+                text_rgb = (rgb * 255).astype(np.uint8)
+                
+                # Resize if needed to match button dimensions
+                if text_img.shape[0] != h or text_img.shape[1] != w:
+                    from scipy.ndimage import zoom
+                    zoom_h = h / text_img.shape[0]
+                    zoom_w = w / text_img.shape[1]
+                    text_rgb = zoom(text_rgb, (zoom_h, zoom_w, 1), order=1).astype(np.uint8)
+                    alpha = zoom(alpha, (zoom_h, zoom_w), order=1)
+                
+                # Composite text onto button using alpha channel
+                # Only apply where alpha is significant (text is visible)
+                mask = alpha > 0.1
+                
+                # Ensure dimensions match
+                if text_rgb.shape[0] == h and text_rgb.shape[1] == w:
+                    for c in range(3):
+                        img[:, :, c] = np.where(mask, 
+                                               (alpha * text_rgb[:, :, c] + (1 - alpha) * img[:, :, c]).astype(np.uint8),
+                                               img[:, :, c])
+            
+        except Exception as e:
+            # Fallback: if matplotlib rendering fails, draw simple centered line
+            # This ensures the button still shows something even if rendering fails
+            h, w = img.shape[:2]
+            white = np.array([255, 255, 255])
+            
+            # Draw a simple horizontal line as a fallback indicator
+            center_y = h // 2
+            for y in range(max(0, center_y - 1), min(h, center_y + 2)):
+                for x in range(w // 4, 3 * w // 4):
+                    img[y, x] = white
 
 
 class Floor(WorldObj):
