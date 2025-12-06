@@ -15,6 +15,28 @@ from .window import Window
 import numpy as np
 from itertools import product
 
+# Optional imports for ControlButton text rendering
+try:
+    import matplotlib
+    # Only set backend if not already configured
+    if matplotlib.get_backend() == 'module://backend_interagg':
+        matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import matplotlib.image as mpimg
+    from io import BytesIO
+    from scipy.ndimage import zoom
+    MATPLOTLIB_AVAILABLE = True
+except (ImportError, RuntimeError):
+    MATPLOTLIB_AVAILABLE = False
+
+# Constants for ControlButton text rendering
+_CONTROLBUTTON_TEXT_ALPHA_THRESHOLD = 0.1  # Alpha threshold for text compositing
+_CONTROLBUTTON_TEXT_DPI = 150  # DPI for text rendering (higher = better quality)
+_CONTROLBUTTON_TEXT_FONTSIZE_SHORT = (12, 18, 2.5)  # (min, max, divisor) for short text (≤4 chars)
+_CONTROLBUTTON_TEXT_FONTSIZE_LONG = (10, 14, 3)     # (min, max, divisor) for longer text
+_CONTROLBUTTON_CORNER_RADIUS = 0.1  # Corner radius for rounded button shape
+_BLOCK_SIZE_RATIO = 0.15  # Inset ratio for blocks (0.15 = 70% size)
+
 """
 MAINTAINER NOTE - Encoder Synchronization
 =========================================
@@ -302,7 +324,7 @@ class KillButton(WorldObj):
         if self.enabled:
             # Red background for enabled kill button
             c = COLORS['red']
-            fill_coords(img, point_in_rect(0.031, 1, 0.031, 1), c / 2)
+            fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, _CONTROLBUTTON_CORNER_RADIUS), c / 2)
             # Draw an X pattern in darker red
             darker_red = np.array([150, 0, 0])
             fill_coords(img, point_in_line(0.15, 0.15, 0.85, 0.85, r=0.05), darker_red)
@@ -310,7 +332,7 @@ class KillButton(WorldObj):
         else:
             # Grey background for disabled kill button
             c = COLORS['grey']
-            fill_coords(img, point_in_rect(0.031, 1, 0.031, 1), c / 3)
+            fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, _CONTROLBUTTON_CORNER_RADIUS), c / 3)
 
 
 class PauseSwitch(WorldObj):
@@ -397,21 +419,21 @@ class PauseSwitch(WorldObj):
             if self.is_on:
                 # Bright blue when on
                 c = COLORS['blue']
-                fill_coords(img, point_in_rect(0, 1, 0, 1), c)
+                fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, _CONTROLBUTTON_CORNER_RADIUS), c)
                 # Draw pause symbol (two vertical bars)
                 fill_coords(img, point_in_rect(0.3, 0.4, 0.25, 0.75), np.array([255, 255, 255]))
                 fill_coords(img, point_in_rect(0.6, 0.7, 0.25, 0.75), np.array([255, 255, 255]))
             else:
                 # Darker blue when off
                 c = COLORS['blue'] / 2
-                fill_coords(img, point_in_rect(0, 1, 0, 1), c)
+                fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, _CONTROLBUTTON_CORNER_RADIUS), c)
                 # Draw play symbol (triangle pointing right)
                 fill_coords(img, point_in_triangle((0.3, 0.25), (0.3, 0.75), (0.7, 0.5)), 
                            np.array([200, 200, 200]))
         else:
             # Grey when disabled
             c = COLORS['grey']
-            fill_coords(img, point_in_rect(0, 1, 0, 1), c / 2)
+            fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, _CONTROLBUTTON_CORNER_RADIUS), c / 2)
 
 
 class DisablingSwitch(WorldObj):
@@ -507,7 +529,7 @@ class DisablingSwitch(WorldObj):
     def render(self, img):
         """Render the disabling switch with indication of target type."""
         c = COLORS['purple']
-        fill_coords(img, point_in_rect(0, 1, 0, 1), c)
+        fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, _CONTROLBUTTON_CORNER_RADIUS), c)
         
         # Draw a circle with a slash through it (disabled symbol)
         white = np.array([255, 255, 255])
@@ -534,13 +556,15 @@ class ControlButton(WorldObj):
         triggered_action: The action that was programmed (None initially)
     """
     
-    def __init__(self, world, trigger_color='yellow', controlled_color='grey', enabled=True):
+    def __init__(self, world, trigger_color='yellow', controlled_color='grey', enabled=True, actions_set=None):
         """
         Args:
             world: World object defining the environment
             trigger_color: Color of agents that trigger the programmed action
             controlled_color: Color of agents that can program the button
             enabled: Whether the button is active
+            actions_set: Actions class to use for action labels (optional, defaults to Actions).
+                        Must have an 'available' attribute that is a list of action names.
         """
         assert trigger_color != controlled_color, "trigger_color and controlled_color must be different"
         # Use green color to distinguish control button visually
@@ -552,6 +576,11 @@ class ControlButton(WorldObj):
         self.triggered_action = None  # Action that was programmed
         self._awaiting_action = False  # Internal: waiting for action after toggle by controlled_color
         self._just_activated = False   # Internal: True on the step when programming mode was just activated
+        # Store actions_set for getting action labels, default to Actions if not provided
+        self.actions_set = actions_set if actions_set is not None else Actions
+        # Validate that actions_set has the required 'available' attribute
+        if not hasattr(self.actions_set, 'available'):
+            raise ValueError(f"actions_set must have an 'available' attribute with action names")
     
     def can_overlap(self):
         return False
@@ -637,25 +666,21 @@ class ControlButton(WorldObj):
             if self.triggered_action is not None:
                 # Muted green when programmed (less bright for readable labels)
                 c = np.array([50, 120, 50])  # Darker green for better label contrast
-                fill_coords(img, point_in_rect(0, 1, 0, 1), c)
+                fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, _CONTROLBUTTON_CORNER_RADIUS), c)
                 
-                # Get the action label text
+                # Get the action label text from the action space
                 action = self.triggered_action
-                if action == 1:  # left
-                    self._draw_text_label(img, "L")
-                elif action == 2:  # right
-                    self._draw_text_label(img, "R")
-                elif action == 3:  # forward
-                    self._draw_text_label(img, "F")
-                elif action == 6:  # toggle
-                    self._draw_text_label(img, "T")
+                # Use the action name from actions_set.available if it's a valid index
+                if 0 <= action < len(self.actions_set.available):
+                    action_name = self.actions_set.available[action]
+                    self._draw_text_label(img, action_name)
                 else:
-                    # Generic action number
+                    # Fallback to action number for invalid/unknown actions
                     self._draw_text_label(img, str(action))
             else:
                 # Darker green when not programmed
                 c = COLORS['green'] / 2
-                fill_coords(img, point_in_rect(0, 1, 0, 1), c)
+                fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, _CONTROLBUTTON_CORNER_RADIUS), c)
                 # Draw empty circle
                 white = np.array([200, 200, 200])
                 fill_coords(img, point_in_circle(0.5, 0.5, 0.25), white)
@@ -663,55 +688,100 @@ class ControlButton(WorldObj):
         else:
             # Grey when disabled
             c = COLORS['grey']
-            fill_coords(img, point_in_rect(0, 1, 0, 1), c / 2)
+            fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, _CONTROLBUTTON_CORNER_RADIUS), c / 2)
     
     def _draw_text_label(self, img, text):
-        """Draw a large single-character label on the button."""
-        h, w = img.shape[:2]
-        white = np.array([255, 255, 255])
+        """Draw a text label on the button using matplotlib rendering."""
+        if not MATPLOTLIB_AVAILABLE:
+            # Fallback: if matplotlib is not available, draw simple centered line
+            h, w = img.shape[:2]
+            white = np.array([255, 255, 255])
+            center_y = h // 2
+            for y in range(max(0, center_y - 1), min(h, center_y + 2)):
+                for x in range(w // 4, 3 * w // 4):
+                    img[y, x] = white
+            return
         
-        # Define character patterns as normalized (x, y) coordinates within tile
-        # Each point will be drawn as a small filled block for visibility
-        patterns = {
-            'L': [
-                (0.2, 0.15), (0.2, 0.3), (0.2, 0.45), (0.2, 0.6), (0.2, 0.75),
-                (0.35, 0.75), (0.5, 0.75), (0.65, 0.75)
-            ],
-            'R': [
-                (0.2, 0.15), (0.2, 0.3), (0.2, 0.45), (0.2, 0.6), (0.2, 0.75),
-                (0.35, 0.15), (0.5, 0.15), (0.65, 0.25),
-                (0.35, 0.45), (0.5, 0.45),
-                (0.5, 0.6), (0.65, 0.75)
-            ],
-            'F': [
-                (0.2, 0.15), (0.2, 0.3), (0.2, 0.45), (0.2, 0.6), (0.2, 0.75),
-                (0.35, 0.15), (0.5, 0.15), (0.65, 0.15),
-                (0.35, 0.45), (0.5, 0.45)
-            ],
-            'T': [
-                (0.2, 0.15), (0.35, 0.15), (0.5, 0.15), (0.65, 0.15), (0.8, 0.15),
-                (0.5, 0.3), (0.5, 0.45), (0.5, 0.6), (0.5, 0.75)
-            ],
-            '0': [(0.3, 0.2), (0.5, 0.2), (0.7, 0.2), (0.3, 0.4), (0.7, 0.4), (0.3, 0.6), (0.7, 0.6), (0.3, 0.8), (0.5, 0.8), (0.7, 0.8)],
-            '1': [(0.5, 0.2), (0.5, 0.4), (0.5, 0.6), (0.5, 0.8)],
-            '2': [(0.3, 0.2), (0.5, 0.2), (0.7, 0.2), (0.7, 0.4), (0.3, 0.6), (0.5, 0.6), (0.7, 0.6), (0.3, 0.8), (0.5, 0.8), (0.7, 0.8)],
-            '3': [(0.3, 0.2), (0.5, 0.2), (0.7, 0.2), (0.7, 0.4), (0.5, 0.5), (0.7, 0.6), (0.3, 0.8), (0.5, 0.8), (0.7, 0.8)],
-            '4': [(0.3, 0.2), (0.7, 0.2), (0.3, 0.4), (0.7, 0.4), (0.3, 0.5), (0.5, 0.5), (0.7, 0.5), (0.7, 0.6), (0.7, 0.8)],
-            '5': [(0.3, 0.2), (0.5, 0.2), (0.7, 0.2), (0.3, 0.4), (0.3, 0.5), (0.5, 0.5), (0.7, 0.6), (0.3, 0.8), (0.5, 0.8), (0.7, 0.8)],
-            '6': [(0.3, 0.2), (0.5, 0.2), (0.7, 0.2), (0.3, 0.4), (0.3, 0.5), (0.5, 0.5), (0.7, 0.5), (0.3, 0.6), (0.7, 0.6), (0.3, 0.8), (0.5, 0.8), (0.7, 0.8)],
-        }
-        
-        char = text[0].upper() if text else '?'
-        if char in patterns:
-            # Draw each point as a small filled circle
-            for fx, fy in patterns[char]:
-                cx, cy = int(fx * w), int(fy * h)
-                # Draw a 3x3 block for visibility
-                for dx in range(-2, 3):
-                    for dy in range(-2, 3):
-                        px, py = cx + dx, cy + dy
-                        if 0 <= px < w and 0 <= py < h:
-                            img[py, px] = white
+        try:
+            h, w = img.shape[:2]
+            
+            # Create a figure for text rendering with higher DPI for better quality
+            dpi = _CONTROLBUTTON_TEXT_DPI
+            fig_width = w / dpi
+            fig_height = h / dpi
+            fig = plt.figure(figsize=(fig_width, fig_height), dpi=dpi, facecolor='none')
+            ax = fig.add_axes([0, 0, 1, 1])
+            ax.set_xlim(0, 1)
+            ax.set_ylim(0, 1)
+            ax.axis('off')
+            ax.patch.set_alpha(0)
+            
+            # Larger font sizes to make labels legible
+            # Scale based on button size and text length
+            if len(text) <= 4:
+                min_fs, max_fs, divisor = _CONTROLBUTTON_TEXT_FONTSIZE_SHORT
+                fontsize = max(min_fs, min(max_fs, h // divisor))
+            else:
+                min_fs, max_fs, divisor = _CONTROLBUTTON_TEXT_FONTSIZE_LONG
+                fontsize = max(min_fs, min(max_fs, h // divisor))
+            
+            # Draw text with minimal padding to use full button width
+            ax.text(0.5, 0.5, text, ha='center', va='center',
+                   fontsize=fontsize, fontweight='bold', color='white',
+                   bbox=dict(boxstyle='round,pad=0.1', facecolor='black', 
+                            alpha=0.4, edgecolor='none'))
+            
+            # Render to buffer
+            buf = BytesIO()
+            fig.savefig(buf, format='png', dpi=dpi, bbox_inches='tight', 
+                       pad_inches=0, transparent=True)
+            buf.seek(0)
+            
+            # Read image from buffer
+            text_img = mpimg.imread(buf)
+            buf.close()
+            plt.close(fig)
+            
+            # Handle RGBA format
+            if len(text_img.shape) == 3 and text_img.shape[2] == 4:
+                # Get RGB and alpha channels
+                alpha = text_img[:, :, 3]
+                rgb = text_img[:, :, :3]
+                
+                # Convert to uint8
+                text_rgb = (rgb * 255).astype(np.uint8)
+                
+                # Resize if needed to match button dimensions
+                if text_img.shape[0] != h or text_img.shape[1] != w:
+                    zoom_h = h / text_img.shape[0]
+                    zoom_w = w / text_img.shape[1]
+                    text_rgb = zoom(text_rgb, (zoom_h, zoom_w, 1), order=1).astype(np.uint8)
+                    alpha = zoom(alpha, (zoom_h, zoom_w), order=1)
+                
+                # Composite text onto button using alpha channel
+                # Only apply where alpha is significant (text is visible)
+                mask = alpha > _CONTROLBUTTON_TEXT_ALPHA_THRESHOLD
+                
+                # Ensure dimensions match
+                if text_rgb.shape[0] == h and text_rgb.shape[1] == w:
+                    # Vectorized alpha blending for all channels
+                    alpha_expanded = alpha[..., np.newaxis]
+                    img[:] = np.where(mask[..., np.newaxis], 
+                                     (alpha_expanded * text_rgb + (1 - alpha_expanded) * img).astype(np.uint8),
+                                     img)
+            
+        except Exception as e:
+            # Fallback: if rendering fails, draw simple centered line
+            # Log the error for debugging if needed
+            import sys
+            print(f"Warning: ControlButton text rendering failed: {e}", file=sys.stderr)
+            
+            h, w = img.shape[:2]
+            white = np.array([255, 255, 255])
+            center_y = h // 2
+            for y in range(max(0, center_y - 1), min(h, center_y + 2)):
+                for x in range(w // 4, 3 * w // 4):
+                    img[y, x] = white
 
 
 class Floor(WorldObj):
@@ -1093,9 +1163,11 @@ class Block(WorldObj):
         return False
 
     def render(self, img):
-        # Light brown square
+        # Render as a smaller square to show floor underneath
+        # Block takes up approximately 70% of the cell, centered
         c = COLORS[self.color]
-        fill_coords(img, point_in_rect(0, 1, 0, 1), c)
+        inset = _BLOCK_SIZE_RATIO
+        fill_coords(img, point_in_rect(inset, 1-inset, inset, 1-inset), c)
 
 
 class Rock(WorldObj):
@@ -1877,13 +1949,14 @@ def _parse_cell(cell_str, objects_set):
         raise ValueError(f"Unknown cell type: {cell_str}")
 
 
-def create_object_from_spec(cell_spec, objects_set):
+def create_object_from_spec(cell_spec, objects_set, actions_set=None):
     """
     Create a WorldObj from a cell specification.
     
     Args:
         cell_spec: Tuple (type, params_dict) from _parse_cell
         objects_set: The World class to use
+        actions_set: The Actions class to use (optional, needed for ControlButton)
         
     Returns:
         WorldObj or None for empty cells
@@ -1928,7 +2001,8 @@ def create_object_from_spec(cell_spec, objects_set):
         return ControlButton(objects_set,
                             trigger_color=params.get('trigger_color', 'yellow'),
                             controlled_color=params.get('controlled_color', 'grey'),
-                            enabled=params.get('enabled', True))
+                            enabled=params.get('enabled', True),
+                            actions_set=actions_set)
     elif obj_type == 'door':
         return Door(objects_set, 
                    params.get('color', 'blue'),
@@ -2419,7 +2493,7 @@ class MultiGridEnv(WorldModel):
             for x in range(map_width):
                 cell_spec = cells[y][x]
                 if cell_spec is not None and cell_spec[0] != 'agent':
-                    obj = create_object_from_spec(cell_spec, self.objects)
+                    obj = create_object_from_spec(cell_spec, self.objects, self.actions)
                     if obj is not None:
                         self.grid.set(x, y, obj)
         
