@@ -18,14 +18,19 @@ from itertools import product
 # Optional imports for ControlButton text rendering
 try:
     import matplotlib
-    matplotlib.use('Agg')  # Use non-interactive backend
+    # Only set backend if not already configured
+    if matplotlib.get_backend() == 'module://backend_interagg':
+        matplotlib.use('Agg')
     import matplotlib.pyplot as plt
     import matplotlib.image as mpimg
     from io import BytesIO
     from scipy.ndimage import zoom
     MATPLOTLIB_AVAILABLE = True
-except ImportError:
+except (ImportError, RuntimeError):
     MATPLOTLIB_AVAILABLE = False
+
+# Constants for ControlButton text rendering
+_CONTROLBUTTON_TEXT_ALPHA_THRESHOLD = 0.1  # Alpha threshold for text compositing
 
 """
 MAINTAINER NOTE - Encoder Synchronization
@@ -745,7 +750,7 @@ class ControlButton(WorldObj):
                 
                 # Composite text onto button using alpha channel
                 # Only apply where alpha is significant (text is visible)
-                mask = alpha > 0.1
+                mask = alpha > _CONTROLBUTTON_TEXT_ALPHA_THRESHOLD
                 
                 # Ensure dimensions match
                 if text_rgb.shape[0] == h and text_rgb.shape[1] == w:
