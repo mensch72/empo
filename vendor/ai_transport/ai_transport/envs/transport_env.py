@@ -177,6 +177,7 @@ class parallel_env(ParallelEnv):
         self.fig = None
         self.ax = None
         self.frames = []  # For video recording
+        self._last_real_time = 0.0  # Track time for frame generation
         
         # State components (will be initialized in reset)
         self.real_time = None
@@ -445,6 +446,11 @@ class parallel_env(ParallelEnv):
     def render(self, goal_info=None, value_dict=None, title=None):
         """
         Renders the environment using the node coordinates.
+        
+        When recording video, automatically generates multiple frames proportional
+        to the real time that passed since the last render call, creating smooth
+        continuous movement visualization.
+        
         - Vehicles shown as blue rectangles with human passengers inside
         - Humans shown as red dots
         - Bidirectional roads shown with two separate lanes
@@ -468,6 +474,11 @@ class parallel_env(ParallelEnv):
             )
             return
         
+        # Store render parameters for potential multi-frame rendering
+        self._last_goal_info = goal_info
+        self._last_value_dict = value_dict
+        self._last_title = title
+        
         # Check if graphical rendering is enabled
         use_graphical = getattr(self, '_use_graphical', False)
         
@@ -477,7 +488,27 @@ class parallel_env(ParallelEnv):
             return
         
         # Graphical rendering
-        return self._render_graphical(goal_info=goal_info, value_dict=value_dict, title=title)
+        # If recording and time has passed, generate multiple frames for smooth animation
+        if getattr(self, '_recording', False):
+            time_elapsed = self.real_time - self._last_real_time
+            
+            # Generate frames proportional to time elapsed (1 frame per 0.5 time units, minimum 1)
+            # This creates smooth continuous movement without too many frames
+            frames_per_time_unit = 2.0  # 2 frames per second of simulation time
+            num_frames = max(1, int(time_elapsed * frames_per_time_unit + 0.5))
+            
+            # Limit to reasonable number to avoid slowdown
+            num_frames = min(num_frames, 10)
+            
+            # Generate frames by calling _render_graphical
+            for i in range(num_frames):
+                self._render_graphical(goal_info=goal_info, value_dict=value_dict, title=title)
+            
+            # Update last render time
+            self._last_real_time = self.real_time
+        else:
+            # Single frame render when not recording
+            return self._render_graphical(goal_info=goal_info, value_dict=value_dict, title=title)
     
     def _render_text(self):
         """Original text-based rendering"""
@@ -851,6 +882,9 @@ class parallel_env(ParallelEnv):
             print("No frames recorded. Call start_video_recording() first.")
             return
         
+        print(f"Saving {len(self.frames)} frames...")
+        print(f"Frame 0 shape: {self.frames[0].shape if len(self.frames) > 0 else 'N/A'}")
+        
         try:
             import matplotlib
             matplotlib.use('Agg')
@@ -926,6 +960,7 @@ class parallel_env(ParallelEnv):
         
         # Initialize state components
         self.real_time = 0.0
+        self._last_real_time = 0.0  # For frame generation in render()
         
         # Initialize empty dictionaries first (needed by initialize_random_positions)
         self.agent_positions = {}

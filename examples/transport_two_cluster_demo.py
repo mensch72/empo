@@ -344,7 +344,7 @@ class CentroidShuttlePolicy:
 # ============================================================================
 
 def run_rollout(env, neural_prior, vehicle_policy, goal_nodes, 
-                human_agent_indices, vehicle_agent_idx, 
+                human_agent_indices, vehicle_agent_idx, rollout_num, total_rollouts,
                 max_steps=100, beta=5.0, device='cpu'):
     """
     Run a single rollout with learned human policy and fixed vehicle policy.
@@ -372,6 +372,10 @@ def run_rollout(env, neural_prior, vehicle_policy, goal_nodes,
                 'node': goal_nodes[agent_idx],
                 'type': 'node'
             }
+    
+    # Render initial state
+    title = f"Rollout {rollout_num}/{total_rollouts} | Step 0 (Initial) | Vehicle shuttles between centroids"
+    env.env.render(goal_info=goal_info, value_dict=None, title=title)
     
     for step in range(max_steps):
         # Get actions for all agents
@@ -405,7 +409,7 @@ def run_rollout(env, neural_prior, vehicle_policy, goal_nodes,
                 break
         
         # Render using package's built-in rendering (captures frame if recording)
-        title = f"Step {step + 1} | Vehicle shuttles between centroids"
+        title = f"Rollout {rollout_num}/{total_rollouts} | Step {step + 1} | Vehicle shuttles between centroids"
         if all_reached:
             title += " | ALL GOALS REACHED!"
         
@@ -583,6 +587,8 @@ def main(quick_mode=False):
             goal_nodes=goal_nodes,
             human_agent_indices=human_agent_indices,
             vehicle_agent_idx=vehicle_agent_idx,
+            rollout_num=i + 1,
+            total_rollouts=n_rollouts,
             max_steps=max_steps,
             beta=beta,
             device=device
