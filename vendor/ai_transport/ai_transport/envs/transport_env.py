@@ -177,7 +177,8 @@ class parallel_env(ParallelEnv):
         self.fig = None
         self.ax = None
         self.frames = []  # For video recording
-        self._last_real_time = 0.0  # Track time for frame generation
+        self._last_render_time = 0.0  # Track last "click" time for uniform frame generation
+        self._time_per_frame = 0.5  # Capture frame every 0.5 time units ("clicks")
         
         # State components (will be initialized in reset)
         self.real_time = None
@@ -447,6 +448,9 @@ class parallel_env(ParallelEnv):
         """
         Renders the environment using the node coordinates.
         
+        When recording video, automatically generates frames at uniform time intervals
+        (every _time_per_frame "clicks" of continuous time) to ensure smooth playback.
+        
         - Vehicles shown as blue rectangles with human passengers inside
         - Humans shown as red dots
         - Bidirectional roads shown with two separate lanes
@@ -470,7 +474,7 @@ class parallel_env(ParallelEnv):
             )
             return
         
-        # Store render parameters for use in intermediate frames during movement
+        # Store render parameters for later use
         self._last_goal_info = goal_info
         self._last_value_dict = value_dict
         self._last_title = title
@@ -483,8 +487,13 @@ class parallel_env(ParallelEnv):
             self._render_text()
             return
         
-        # Graphical rendering - single frame per call
-        return self._render_graphical(goal_info=goal_info, value_dict=value_dict, title=title)
+        # Graphical rendering with uniform time intervals for video recording
+        if hasattr(self, '_recording') and self._recording:
+            # Generate multiple frames at uniform time intervals
+            self._render_uniform_frames(goal_info=goal_info, value_dict=value_dict, title=title)
+        else:
+            # Single frame for non-recording
+            return self._render_graphical(goal_info=goal_info, value_dict=value_dict, title=title)
     
     def _render_text(self):
         """Original text-based rendering"""
@@ -506,6 +515,53 @@ class parallel_env(ParallelEnv):
         else:
             print("Environment terminated")
     
+    def _render_uniform_frames(self, goal_info=None, value_dict=None, title=None):
+        """
+        Render frames at uniform time intervals for smooth video playback.
+        
+        Generates frames at regular "clicks" (time intervals) between _last_render_time
+        and current real_time, ensuring seamless motion regardless of decision step timing.
+        
+        Args:
+            goal_info: Optional dict with goal visualization info
+            value_dict: Optional dict mapping nodes to V-values for coloring
+            title: Optional custom title (overrides default)
+        """
+        t_now = self.real_time
+        t_last = self._last_render_time
+        
+        # Calculate how many frames to render
+        # Render at t_last + X, t_last + 2X, ..., t_last + kX
+        # where t_last + (k+1)*X > t_now
+        
+        click = self._time_per_frame
+        num_frames = int((t_now - t_last) / click)
+        
+        if num_frames > 0:
+            for i in range(1, num_frames + 1):
+                frame_time = t_last + i * click
+                
+                # Count humans aboard vehicles at this frame time
+                humans_aboard = sum(1 for h in self.human_agents if self.human_aboard.get(h) is not None)
+                
+                # Create title showing continuous time and humans aboard
+                frame_title = f"Time: {frame_time:.1f}s | Humans aboard: {humans_aboard}"
+                
+                # Render this frame
+                self._render_single_frame(
+                    goal_info=goal_info,
+                    value_dict=value_dict,
+                    title=frame_title,
+                    capture_frame=True
+                )
+            
+            # Update last render time to the last click before t_now
+            self._last_render_time = t_last + num_frames * click
+        else:
+            # If not enough time has passed for a new frame, still update state
+            # but don't capture a frame
+            pass
+    
     def _render_graphical(self, goal_info=None, value_dict=None, title=None):
         """
         Graphical rendering using matplotlib.
@@ -517,6 +573,23 @@ class parallel_env(ParallelEnv):
                 - 'type': 'node' or 'cluster'
             value_dict: Optional dict mapping nodes to V-values for coloring
             title: Optional custom title (overrides default)
+        """
+        return self._render_single_frame(
+            goal_info=goal_info,
+            value_dict=value_dict,
+            title=title,
+            capture_frame=False
+        )
+    
+    def _render_single_frame(self, goal_info=None, value_dict=None, title=None, capture_frame=False):
+        """
+        Internal method to render a single frame.
+        
+        Args:
+            goal_info: Optional dict with goal visualization info
+            value_dict: Optional dict mapping nodes to V-values for coloring
+            title: Optional custom title (overrides default)
+            capture_frame: If True, captures frame for video recording
         """
         # Import matplotlib only when needed
         try:
@@ -903,9 +976,8 @@ class parallel_env(ParallelEnv):
             self.fig.canvas.draw()
             self.fig.canvas.flush_events()
         
-        # Store frame for video (only if recording and there's something interesting to show)
-        if hasattr(self, '_recording') and self._recording:
-            # Always record frames to show progression
+        # Store frame for video if requested
+        if capture_frame and hasattr(self, '_recording') and self._recording:
             # Convert plot to image
             self.fig.canvas.draw()
             # Get the RGBA buffer from the figure
@@ -1080,7 +1152,7 @@ class parallel_env(ParallelEnv):
         
         # Initialize state components
         self.real_time = 0.0
-        self._last_real_time = 0.0  # For frame generation in render()
+        self._last_render_time = 0.0  # For uniform frame generation in render()
         
         # Initialize empty dictionaries first (needed by initialize_random_positions)
         self.agent_positions = {}
