@@ -538,8 +538,14 @@ class parallel_env(ParallelEnv):
         num_frames = int((t_now - t_last) / click)
         
         if num_frames > 0:
+            # Save current agent positions (at t_now)
+            saved_positions = self.agent_positions.copy()
+            
             for i in range(1, num_frames + 1):
                 frame_time = t_last + i * click
+                
+                # Compute agent positions at this intermediate frame_time
+                self._compute_positions_at_time(frame_time)
                 
                 # Count humans aboard vehicles at this frame time
                 humans_aboard = sum(1 for h in self.human_agents if self.human_aboard.get(h) is not None)
@@ -547,7 +553,7 @@ class parallel_env(ParallelEnv):
                 # Create title showing continuous time and humans aboard
                 frame_title = f"Time: {frame_time:.1f}s | Humans aboard: {humans_aboard}"
                 
-                # Render this frame
+                # Render this frame with interpolated positions
                 self._render_single_frame(
                     goal_info=goal_info,
                     value_dict=value_dict,
@@ -555,12 +561,53 @@ class parallel_env(ParallelEnv):
                     capture_frame=True
                 )
             
+            # Restore current agent positions (at t_now)
+            self.agent_positions = saved_positions
+            
             # Update last render time to the last click before t_now
             self._last_render_time = t_last + num_frames * click
         else:
             # If not enough time has passed for a new frame, still update state
             # but don't capture a frame
             pass
+    
+    def _compute_positions_at_time(self, target_time):
+        """
+        Compute where each agent would be at a specific time point by interpolating
+        their movement along edges.
+        
+        This allows rendering frames at arbitrary intermediate times between decision steps.
+        
+        Args:
+            target_time: The time point to compute positions for
+        """
+        # For each agent that is on an edge, compute their position at target_time
+        for agent in self.agents:
+            pos = self.agent_positions.get(agent)
+            
+            if isinstance(pos, tuple):
+                # Agent is on an edge
+                edge, current_coord = pos
+                
+                # Check if agent has movement state information
+                if hasattr(self, '_agent_movement_start_time') and agent in self._agent_movement_start_time:
+                    start_time = self._agent_movement_start_time[agent]
+                    start_coord = self._agent_movement_start_coord.get(agent, 0.0)
+                    speed = self.agent_attributes.get(agent, {}).get('speed', 1.0)
+                    
+                    # Compute how far agent has traveled from start_coord at target_time
+                    elapsed = target_time - start_time
+                    distance_traveled = speed * elapsed
+                    
+                    # Interpolate position along edge
+                    interpolated_coord = start_coord + distance_traveled
+                    
+                    # Clamp to edge bounds
+                    edge_length = self.network[edge[0]][edge[1]]['length']
+                    interpolated_coord = max(0.0, min(edge_length, interpolated_coord))
+                    
+                    # Update position to interpolated value
+                    self.agent_positions[agent] = (edge, interpolated_coord)
     
     def _render_graphical(self, goal_info=None, value_dict=None, title=None):
         """
@@ -1555,11 +1602,23 @@ class parallel_env(ParallelEnv):
                         # Vehicles can always depart
                         if agent in self.vehicle_agents:
                             self.agent_positions[agent] = (chosen_edge, 0.0)
+                            # Track movement start for interpolation
+                            if not hasattr(self, '_agent_movement_start_time'):
+                                self._agent_movement_start_time = {}
+                                self._agent_movement_start_coord = {}
+                            self._agent_movement_start_time[agent] = self.real_time
+                            self._agent_movement_start_coord[agent] = 0.0
                         # Humans can only depart if not aboard
                         elif agent in self.human_agents:
                             aboard = self.human_aboard.get(agent)
                             if aboard is None:
                                 self.agent_positions[agent] = (chosen_edge, 0.0)
+                                # Track movement start for interpolation
+                                if not hasattr(self, '_agent_movement_start_time'):
+                                    self._agent_movement_start_time = {}
+                                    self._agent_movement_start_coord = {}
+                                self._agent_movement_start_time[agent] = self.real_time
+                                self._agent_movement_start_coord[agent] = 0.0
         
         # Now compute movement for all agents on edges
         # Find minimum remaining duration on edges
@@ -1663,6 +1722,12 @@ class parallel_env(ParallelEnv):
             # Set final positions
             for agent in self.agents:
                 self.agent_positions[agent] = target_positions[agent]
+                # Clear movement tracking if agent reached a node
+                if not isinstance(target_positions[agent], tuple):
+                    if hasattr(self, '_agent_movement_start_time') and agent in self._agent_movement_start_time:
+                        del self._agent_movement_start_time[agent]
+                    if hasattr(self, '_agent_movement_start_coord') and agent in self._agent_movement_start_coord:
+                        del self._agent_movement_start_coord[agent]
             
             # Update humans aboard to final positions
             for human in self.human_agents:
