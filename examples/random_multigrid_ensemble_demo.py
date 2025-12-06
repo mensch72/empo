@@ -76,7 +76,7 @@ GRID_SIZE = 7           # 7x7 grid (including outer walls)
 NUM_HUMANS = 2          # 2 human agents (yellow)
 NUM_ROBOTS = 1          # 1 robot agent (grey)
 MAX_STEPS = 50          # Maximum steps per episode
-ROLLOUT_STEPS = 15      # Steps per rollout (shorter than training episodes)
+ROLLOUT_STEPS = 30      # Steps per rollout (shorter than training episodes)
 NUM_TEST_ENVS = 50      # Number of test environments for rollout evaluation
 NUM_ROLLOUTS = 50       # Number of rollouts for the movie
 
