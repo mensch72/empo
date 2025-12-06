@@ -164,10 +164,10 @@ def run_stress_test_demo():
     
     # Start video recording
     print("\nStarting video recording...")
-    env.unwrapped.start_video_recording()
+    env.start_video_recording()
     
     # Render initial state (Step 0)
-    env.unwrapped.render(goal_info=human_goals, title="Stress Test Demo | Step 0")
+    env.render(goal_info=human_goals, title="Stress Test Demo | Step 0")
     
     # Run rollout with random actions
     print("Running rollout with random actions...")
@@ -198,8 +198,8 @@ def run_stress_test_demo():
         observations, rewards, terminations, truncations, infos = env.step(actions)
         
         # Render the new state
-        step_type = env.unwrapped.step_type if hasattr(env.unwrapped, 'step_type') else 'unknown'
-        env.unwrapped.render(goal_info=human_goals, title=f"Stress Test Demo | Step {step+1} ({step_type})")
+        step_type = env.step_type if hasattr(env, 'step_type') else 'unknown'
+        env.render(goal_info=human_goals, title=f"Stress Test Demo | Step {step+1} ({step_type})")
         
         step += 1
         
@@ -216,10 +216,13 @@ def run_stress_test_demo():
     
     print(f"\nRollout completed after {step} steps")
     
-    # Save video
-    output_filename = "transport_stress_test_demo.mp4"
-    print(f"\nSaving video to {output_filename}...")
-    env.unwrapped.save_video(output_filename)
+    # Save video to outputs folder
+    output_dir = os.path.join(os.path.dirname(__file__), '..', 'outputs')
+    os.makedirs(output_dir, exist_ok=True)
+    output_file = os.path.join(output_dir, 'transport_stress_test_demo.mp4')
+    
+    print(f"\nSaving video to {output_file}...")
+    env.save_video(output_file, fps=2)
     print(f"Video saved successfully!")
     print(f"The video shows {step} steps with many simultaneous interactions:")
     print(f"  - Vehicles moving and announcing destinations (blue arcs)")
