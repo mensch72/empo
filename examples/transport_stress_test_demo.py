@@ -183,10 +183,10 @@ def run_stress_test_demo():
     
     # Start video recording
     print("\nStarting video recording...")
-    env.start_video_recording()
+    env.unwrapped.start_video_recording()
     
     # Render initial state (Step 0)
-    env.render(goal_info=human_goals, title="Stress Test Demo | Step 0")
+    env.unwrapped.render(goal_info=human_goals, title="Stress Test Demo | Step 0")
     
     # Run rollout with biased random actions
     print("Running rollout with random actions...")
@@ -244,7 +244,7 @@ def run_stress_test_demo():
         observations, rewards, terminations, truncations, infos = env.step(actions)
         
         # Render the new state (this captures the frame if video recording is active)
-        env.render(goal_info=human_goals, title=f"Stress Test Demo | Step {step+1} ({step_type})")
+        env.unwrapped.render(goal_info=human_goals, title=f"Stress Test Demo | Step {step+1} ({step_type})")
         
         step += 1
         
@@ -270,7 +270,7 @@ def run_stress_test_demo():
     output_file = os.path.join(output_dir, 'transport_stress_test_demo.mp4')
     
     print(f"\nSaving video to {output_file}...")
-    env.save_video(output_file, fps=2)
+    env.unwrapped.save_video(output_file, fps=2)
     print(f"Video saved successfully!")
     print(f"The video shows {step} steps with many simultaneous interactions:")
     print(f"  - Vehicles moving and announcing destinations (blue arcs)")
