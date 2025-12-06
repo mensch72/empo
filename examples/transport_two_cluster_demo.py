@@ -93,13 +93,14 @@ def create_two_cluster_network(
     """
     Create a network with two clusters connected by a single road.
     
-    Each cluster is arranged in a roughly circular pattern. There is only
-    one edge connecting the two clusters, creating a bottleneck.
+    Each cluster is arranged as a 2D Gaussian distribution to represent
+    "two neighbor cities". There is only one edge connecting the two 
+    clusters, creating a bottleneck.
     
     Args:
         nodes_per_cluster: Number of nodes in each cluster
         cluster_separation: Distance between cluster centers
-        cluster_radius: Radius of each cluster
+        cluster_radius: Standard deviation of the Gaussian distribution
         seed: Random seed for reproducibility
         
     Returns:
@@ -118,17 +119,18 @@ def create_two_cluster_network(
     node_id = 0
     cluster_nodes = [[], []]
     
-    # Generate nodes for each cluster
+    # Generate nodes for each cluster using 2D Gaussian distribution
     for cluster_idx in range(2):
         center_x, center_y = cluster_centers[cluster_idx]
         
+        # Sample from 2D Gaussian (normal distribution)
+        # Use cluster_radius as the standard deviation
+        xs = np.random.normal(center_x, cluster_radius, nodes_per_cluster)
+        ys = np.random.normal(center_y, cluster_radius, nodes_per_cluster)
+        
         for i in range(nodes_per_cluster):
-            # Random position in circular cluster
-            angle = 2 * np.pi * i / nodes_per_cluster + np.random.uniform(-0.1, 0.1)
-            radius = cluster_radius * (0.5 + 0.5 * np.random.random())
-            
-            x = center_x + radius * np.cos(angle)
-            y = center_y + radius * np.sin(angle)
+            x = xs[i]
+            y = ys[i]
             
             G.add_node(node_id, x=x, y=y, name=f"node_{node_id}", cluster=cluster_idx)
             cluster_nodes[cluster_idx].append(node_id)
