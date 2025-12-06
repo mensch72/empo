@@ -713,11 +713,12 @@ class parallel_env(ParallelEnv):
                 vehicle_width = max(0.8, 0.4 + vehicle_capacity * 0.25)
                 vehicle_height = 0.3
                 
-                # Vehicle as blue rectangle (sized by capacity)
+                # Vehicle as light blue rectangle (sized by capacity)
+                # Using lighter color so passengers are more visible
                 rect = Rectangle((x - vehicle_width/2, y - vehicle_height/2), 
                                vehicle_width, vehicle_height,
-                               color='blue', ec='darkblue', linewidth=1.5,
-                               zorder=4, alpha=0.8)
+                               color='cornflowerblue', ec='darkblue', linewidth=1.5,
+                               zorder=4, alpha=0.7)
                 self.ax.add_patch(rect)
                 
                 # Draw passengers inside the vehicle
@@ -739,12 +740,50 @@ class parallel_env(ParallelEnv):
                                                  linewidth=1, zorder=6)
                         self.ax.add_patch(passenger_circle)
                 
-                # Show destination if set
+                # Show destination if set as curved dotted arc (blue, like vehicle)
                 dest = self.vehicle_destinations.get(agent)
                 if dest is not None:
                     dest_x, dest_y = pos[dest]
-                    self.ax.plot([x, dest_x], [y, dest_y], 
-                               'b--', alpha=0.3, linewidth=1, zorder=1)
+                    # Draw curved arc instead of straight line to distinguish from roads
+                    from matplotlib.patches import FancyBboxPatch, ConnectionPatch, Arc
+                    import matplotlib.patches as mpatches
+                    
+                    # Calculate arc parameters
+                    dx = dest_x - x
+                    dy = dest_y - y
+                    distance = np.sqrt(dx**2 + dy**2)
+                    
+                    if distance > 0:
+                        # Arc goes through a control point offset perpendicular to the line
+                        # Offset to the side for visibility (arc "bulges" to one side)
+                        mid_x = (x + dest_x) / 2
+                        mid_y = (y + dest_y) / 2
+                        
+                        # Perpendicular direction (normalized)
+                        perp_x = -dy / distance
+                        perp_y = dx / distance
+                        
+                        # Control point offset (creates curvature)
+                        arc_height = min(distance * 0.2, 2.0)  # Limit arc height
+                        ctrl_x = mid_x + perp_x * arc_height
+                        ctrl_y = mid_y + perp_y * arc_height
+                        
+                        # Draw curved path using bezier-like curve
+                        # Create many points along the curve for smooth appearance
+                        t_values = np.linspace(0, 1, 30)
+                        curve_x = []
+                        curve_y = []
+                        for t in t_values:
+                            # Quadratic Bezier curve: P = (1-t)²*P0 + 2(1-t)t*P1 + t²*P2
+                            bx = (1-t)**2 * x + 2*(1-t)*t * ctrl_x + t**2 * dest_x
+                            by = (1-t)**2 * y + 2*(1-t)*t * ctrl_y + t**2 * dest_y
+                            curve_x.append(bx)
+                            curve_y.append(by)
+                        
+                        # Draw dotted curved arc in blue (similar to vehicle color)
+                        self.ax.plot(curve_x, curve_y, 
+                                   color='cornflowerblue', linestyle=':', 
+                                   linewidth=2, alpha=0.6, zorder=2)
             
             elif agent in self.human_agents:
                 # Check if human is aboard a vehicle
