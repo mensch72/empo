@@ -15,6 +15,18 @@ from .window import Window
 import numpy as np
 from itertools import product
 
+# Optional imports for ControlButton text rendering
+try:
+    import matplotlib
+    matplotlib.use('Agg')  # Use non-interactive backend
+    import matplotlib.pyplot as plt
+    import matplotlib.image as mpimg
+    from io import BytesIO
+    from scipy.ndimage import zoom
+    MATPLOTLIB_AVAILABLE = True
+except ImportError:
+    MATPLOTLIB_AVAILABLE = False
+
 """
 MAINTAINER NOTE - Encoder Synchronization
 =========================================
@@ -667,13 +679,17 @@ class ControlButton(WorldObj):
     
     def _draw_text_label(self, img, text):
         """Draw a text label on the button using matplotlib rendering."""
+        if not MATPLOTLIB_AVAILABLE:
+            # Fallback: if matplotlib is not available, draw simple centered line
+            h, w = img.shape[:2]
+            white = np.array([255, 255, 255])
+            center_y = h // 2
+            for y in range(max(0, center_y - 1), min(h, center_y + 2)):
+                for x in range(w // 4, 3 * w // 4):
+                    img[y, x] = white
+            return
+        
         try:
-            import matplotlib
-            matplotlib.use('Agg')  # Use non-interactive backend
-            import matplotlib.pyplot as plt
-            import matplotlib.image as mpimg
-            from io import BytesIO
-            
             h, w = img.shape[:2]
             
             # Create a figure matching the button dimensions
@@ -722,7 +738,6 @@ class ControlButton(WorldObj):
                 
                 # Resize if needed to match button dimensions
                 if text_img.shape[0] != h or text_img.shape[1] != w:
-                    from scipy.ndimage import zoom
                     zoom_h = h / text_img.shape[0]
                     zoom_w = w / text_img.shape[1]
                     text_rgb = zoom(text_rgb, (zoom_h, zoom_w, 1), order=1).astype(np.uint8)
@@ -734,18 +749,20 @@ class ControlButton(WorldObj):
                 
                 # Ensure dimensions match
                 if text_rgb.shape[0] == h and text_rgb.shape[1] == w:
-                    for c in range(3):
-                        img[:, :, c] = np.where(mask, 
-                                               (alpha * text_rgb[:, :, c] + (1 - alpha) * img[:, :, c]).astype(np.uint8),
-                                               img[:, :, c])
+                    # Vectorized alpha blending for all channels
+                    alpha_expanded = alpha[..., np.newaxis]
+                    img[:] = np.where(mask[..., np.newaxis], 
+                                     (alpha_expanded * text_rgb + (1 - alpha_expanded) * img).astype(np.uint8),
+                                     img)
             
         except Exception as e:
-            # Fallback: if matplotlib rendering fails, draw simple centered line
-            # This ensures the button still shows something even if rendering fails
+            # Fallback: if rendering fails, draw simple centered line
+            # Log the error for debugging if needed
+            import sys
+            print(f"Warning: ControlButton text rendering failed: {e}", file=sys.stderr)
+            
             h, w = img.shape[:2]
             white = np.array([255, 255, 255])
-            
-            # Draw a simple horizontal line as a fallback indicator
             center_y = h // 2
             for y in range(max(0, center_y - 1), min(h, center_y + 2)):
                 for x in range(w // 4, 3 * w // 4):
