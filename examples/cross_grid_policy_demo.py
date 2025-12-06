@@ -148,13 +148,15 @@ def main():
     large_world = SimpleMockWorld(width=15, height=15)
     goal_sampler_large = SimpleGoalSampler(large_world)
     
-    # Train a simple policy (very few episodes for demo)
+    # Train a simple policy (minimal training for demo speed)
+    # Note: Using very few episodes/steps for demonstration purposes only.
+    # In practice, you would use much larger values (e.g., 1000 episodes, 100 steps each).
     prior_large = train_multigrid_neural_policy_prior(
         env=large_world,
         human_agent_indices=[0],
         goal_sampler=goal_sampler_large,
-        num_episodes=10,  # Just a few for demo
-        steps_per_episode=20,
+        num_episodes=10,  # Minimal for demo speed
+        steps_per_episode=20,  # Minimal for demo speed
         batch_size=16,
         learning_rate=0.001,
         device='cpu',

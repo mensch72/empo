@@ -255,10 +255,13 @@ class MultiGridStateEncoder(BaseStateEncoder):
         # This allows policies trained on larger grids to work on smaller grids
         if actual_height < H or actual_width < W:
             wall_channel = OBJECT_TYPE_TO_CHANNEL['wall']
-            # Fill entire grid with walls first
-            grid_tensor[0, wall_channel, :, :] = 1.0
-            # Clear the actual world area (will be filled below)
-            grid_tensor[0, wall_channel, :actual_height, :actual_width] = 0.0
+            # Set walls only in the padding areas (more efficient than fill+clear)
+            if actual_width < W:
+                # Right padding: from actual_width to W
+                grid_tensor[0, wall_channel, :, actual_width:] = 1.0
+            if actual_height < H:
+                # Bottom padding: from actual_height to H
+                grid_tensor[0, wall_channel, actual_height:, :] = 1.0
         
         # Encode grid objects from actual world only
         if world_model is not None and hasattr(world_model, 'grid') and world_model.grid is not None:
