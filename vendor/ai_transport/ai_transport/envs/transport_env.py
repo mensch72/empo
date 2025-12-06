@@ -743,40 +743,73 @@ class parallel_env(ParallelEnv):
                 # Show destination if set as curved dotted arc (blue, like vehicle)
                 dest = self.vehicle_destinations.get(agent)
                 if dest is not None:
+                    # Get actual destination node position
                     dest_x, dest_y = pos[dest]
-                    # Draw curved arc instead of straight line to distinguish from roads
-                    from matplotlib.patches import FancyBboxPatch, ConnectionPatch, Arc
-                    import matplotlib.patches as mpatches
                     
+                    # Draw curved arc instead of straight line to distinguish from roads
                     # Calculate arc parameters
                     dx = dest_x - x
                     dy = dest_y - y
                     distance = np.sqrt(dx**2 + dy**2)
                     
-                    if distance > 0:
-                        # Arc goes through a control point offset perpendicular to the line
-                        # Offset to the side for visibility (arc "bulges" to one side)
-                        mid_x = (x + dest_x) / 2
-                        mid_y = (y + dest_y) / 2
+                    if distance > 0.5:  # Only draw if destination is far enough
+                        # Collect angles of roads at destination to avoid them
+                        dest_road_angles = []
+                        for neighbor in self.network.neighbors(dest):
+                            nx, ny = pos[neighbor]
+                            angle = np.arctan2(ny - dest_y, nx - dest_x)
+                            dest_road_angles.append(angle)
                         
-                        # Perpendicular direction (normalized)
-                        perp_x = -dy / distance
-                        perp_y = dx / distance
+                        # Collect angles of roads at vehicle's current node (if at node)
+                        vehicle_road_angles = []
+                        vehicle_node = self.agent_positions.get(agent)
+                        if not isinstance(vehicle_node, tuple):  # Vehicle at node, not on edge
+                            for neighbor in self.network.neighbors(vehicle_node):
+                                nx, ny = pos[neighbor]
+                                angle = np.arctan2(ny - pos[vehicle_node][1], 
+                                                 nx - pos[vehicle_node][0])
+                                vehicle_road_angles.append(angle)
                         
-                        # Control point offset (creates curvature)
-                        arc_height = min(distance * 0.2, 2.0)  # Limit arc height
-                        ctrl_x = mid_x + perp_x * arc_height
-                        ctrl_y = mid_y + perp_y * arc_height
+                        # Calculate control point to create arc with approach angles
+                        # that avoid being parallel to any roads
+                        # Use cubic Bezier with two control points for better angle control
                         
-                        # Draw curved path using bezier-like curve
+                        # Base direction from vehicle to destination
+                        base_angle = np.arctan2(dy, dx)
+                        
+                        # Choose offset angles that avoid all road angles
+                        # Start with 45 degrees offset from base direction
+                        start_offset = np.pi / 3  # 60 degrees
+                        end_offset = np.pi / 3
+                        
+                        # Adjust if too close to any road angle
+                        for road_angle in vehicle_road_angles:
+                            angle_diff = abs(((base_angle + start_offset - road_angle + np.pi) % (2*np.pi)) - np.pi)
+                            if angle_diff < np.pi / 6:  # Within 30 degrees
+                                start_offset += np.pi / 4  # Add more offset
+                        
+                        for road_angle in dest_road_angles:
+                            angle_diff = abs(((base_angle + np.pi - end_offset - road_angle + np.pi) % (2*np.pi)) - np.pi)
+                            if angle_diff < np.pi / 6:  # Within 30 degrees
+                                end_offset += np.pi / 4  # Add more offset
+                        
+                        # Calculate control points for cubic Bezier
+                        ctrl_distance = distance * 0.3
+                        ctrl1_x = x + ctrl_distance * np.cos(base_angle + start_offset)
+                        ctrl1_y = y + ctrl_distance * np.sin(base_angle + start_offset)
+                        ctrl2_x = dest_x + ctrl_distance * np.cos(base_angle + np.pi - end_offset)
+                        ctrl2_y = dest_y + ctrl_distance * np.sin(base_angle + np.pi - end_offset)
+                        
+                        # Draw curved path using cubic Bezier curve
                         # Create many points along the curve for smooth appearance
-                        t_values = np.linspace(0, 1, 30)
+                        t_values = np.linspace(0, 1, 40)
                         curve_x = []
                         curve_y = []
                         for t in t_values:
-                            # Quadratic Bezier curve: P = (1-t)²*P0 + 2(1-t)t*P1 + t²*P2
-                            bx = (1-t)**2 * x + 2*(1-t)*t * ctrl_x + t**2 * dest_x
-                            by = (1-t)**2 * y + 2*(1-t)*t * ctrl_y + t**2 * dest_y
+                            # Cubic Bezier curve: P = (1-t)³*P0 + 3(1-t)²t*P1 + 3(1-t)t²*P2 + t³*P3
+                            s = 1 - t
+                            bx = s**3 * x + 3*s**2*t * ctrl1_x + 3*s*t**2 * ctrl2_x + t**3 * dest_x
+                            by = s**3 * y + 3*s**2*t * ctrl1_y + 3*s*t**2 * ctrl2_y + t**3 * dest_y
                             curve_x.append(bx)
                             curve_y.append(by)
                         
