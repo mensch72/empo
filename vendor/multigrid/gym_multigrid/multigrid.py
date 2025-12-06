@@ -558,7 +558,8 @@ class ControlButton(WorldObj):
             trigger_color: Color of agents that trigger the programmed action
             controlled_color: Color of agents that can program the button
             enabled: Whether the button is active
-            actions_set: Actions class to use for action labels (optional, defaults to Actions)
+            actions_set: Actions class to use for action labels (optional, defaults to Actions).
+                        Must have an 'available' attribute that is a list of action names.
         """
         assert trigger_color != controlled_color, "trigger_color and controlled_color must be different"
         # Use green color to distinguish control button visually
@@ -572,6 +573,9 @@ class ControlButton(WorldObj):
         self._just_activated = False   # Internal: True on the step when programming mode was just activated
         # Store actions_set for getting action labels, default to Actions if not provided
         self.actions_set = actions_set if actions_set is not None else Actions
+        # Validate that actions_set has the required 'available' attribute
+        if not hasattr(self.actions_set, 'available'):
+            raise ValueError(f"actions_set must have an 'available' attribute with action names")
     
     def can_overlap(self):
         return False
