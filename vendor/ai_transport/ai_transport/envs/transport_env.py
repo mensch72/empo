@@ -701,19 +701,40 @@ class parallel_env(ParallelEnv):
             
             # Draw agent based on type
             if agent in self.vehicle_agents:
-                # Vehicle as blue rectangle
-                rect = Rectangle((x - 0.25, y - 0.15), 0.5, 0.3,
+                # Get vehicle capacity to determine size
+                vehicle_capacity = self.agent_attributes.get(agent, {}).get('capacity', 4)
+                
+                # Count passengers
+                passengers = [h for h in self.human_agents if self.human_aboard.get(h) == agent]
+                num_passengers = len(passengers)
+                
+                # Size vehicle based on capacity to ensure all passengers fit
+                # Base width accommodates capacity, with minimum for visibility
+                vehicle_width = max(0.8, 0.4 + vehicle_capacity * 0.25)
+                vehicle_height = 0.3
+                
+                # Vehicle as blue rectangle (sized by capacity)
+                rect = Rectangle((x - vehicle_width/2, y - vehicle_height/2), 
+                               vehicle_width, vehicle_height,
                                color='blue', ec='darkblue', linewidth=1.5,
                                zorder=4, alpha=0.8)
                 self.ax.add_patch(rect)
                 
-                # Count and show passengers aboard this vehicle
-                passengers = [h for h in self.human_agents if self.human_aboard.get(h) == agent]
+                # Draw passengers inside the vehicle
                 if passengers:
-                    # Draw small red dot(s) on top of vehicle to show passengers
+                    # Distribute passengers evenly within the vehicle rectangle
                     for i, passenger in enumerate(passengers):
-                        offset_x = -0.15 + (i * 0.15)  # Spread passengers horizontally
-                        passenger_circle = Circle((x + offset_x, y), radius=0.08, 
+                        # Calculate position within vehicle
+                        if num_passengers == 1:
+                            offset_x = 0  # Center if only one passenger
+                        else:
+                            # Spread evenly from left to right within vehicle bounds
+                            # Use 80% of vehicle width to leave margins
+                            spacing = vehicle_width * 0.8
+                            offset_x = -spacing/2 + (i * spacing / (num_passengers - 1))
+                        
+                        # Draw smaller red dot inside vehicle (smaller than walking human)
+                        passenger_circle = Circle((x + offset_x, y), radius=0.10, 
                                                  color='red', ec='darkred', 
                                                  linewidth=1, zorder=6)
                         self.ax.add_patch(passenger_circle)
@@ -733,7 +754,7 @@ class parallel_env(ParallelEnv):
                     circle = Circle((x, y), radius=0.15, color='red',
                                   ec='darkred', linewidth=1.5, zorder=5)
                     self.ax.add_patch(circle)
-                # If aboard, they will be drawn on the vehicle (see vehicle rendering above)
+                # If aboard, they are drawn inside the vehicle (see vehicle rendering above)
         
         # Draw dashed line from agent to their goal (like multigrid)
         if goal_info and 'agent' in goal_info and 'node' in goal_info:
