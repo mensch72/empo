@@ -157,7 +157,7 @@ def run_handcrafted_demo():
         ({'human_0': 0, 'vehicle_0': 0}, 'departing', "Wait for boarding to complete"),
         
         # Cycle 3: routing(vehicle announces node 2) -> unboarding -> boarding -> departing(vehicle to node 2 via edge (1,2))
-        ({'human_0': 0, 'vehicle_0': 2}, 'routing', "Vehicle: announce destination node 2"),
+        ({'human_0': 0, 'vehicle_0': 3}, 'routing', "Vehicle: announce destination node 2 (action 3 = nodes[2])"),
         ({'human_0': 0, 'vehicle_0': 0}, 'unboarding', "Human: aboard vehicle"),
         ({'human_0': 0, 'vehicle_0': 0}, 'boarding', "Human: already aboard"),
         ({'human_0': 0, 'vehicle_0': 2}, 'departing', "Vehicle: depart via edge (1,2) with passenger"),

@@ -663,10 +663,12 @@ class parallel_env(ParallelEnv):
                         dy = y2 - y1
                         length = np.sqrt(dx**2 + dy**2)
                         if length > 0:
-                            # Perpendicular unit vector
-                            px = -dy / length * 0.25  # Lane offset
-                            py = dx / length * 0.25
-                            # Offset to the right side of the direction of travel
+                            # Perpendicular unit vector (matches lane rendering offset)
+                            px = -dy / length * 0.15  # Lane offset (same as rendering)
+                            py = dx / length * 0.15
+                            # Offset direction depends on travel direction to match lane rendering
+                            # Lanes are rendered: u→v with offset +px,+py and v→u with offset -px,-py
+                            # Agent traveling u→v should use +px,+py
                             x += px
                             y += py
                 else:
@@ -713,12 +715,29 @@ class parallel_env(ParallelEnv):
                 vehicle_width = max(0.8, 0.4 + vehicle_capacity * 0.25)
                 vehicle_height = 0.3
                 
-                # Vehicle as light blue rectangle (sized by capacity)
+                # Determine rotation if vehicle is on an edge
+                agent_pos = self.agent_positions[agent]
+                rotation_angle = 0
+                if isinstance(agent_pos, tuple):
+                    # Vehicle on edge - rotate to align with road
+                    edge, coord = agent_pos
+                    x1, y1 = pos[edge[0]]
+                    x2, y2 = pos[edge[1]]
+                    dx = x2 - x1
+                    dy = y2 - y1
+                    # Calculate angle in degrees for rotation
+                    rotation_angle = np.degrees(np.arctan2(dy, dx))
+                
+                # Vehicle as light blue rectangle (sized by capacity, rotated to align with road)
                 # Using lighter color so passengers are more visible
+                from matplotlib.transforms import Affine2D
                 rect = Rectangle((x - vehicle_width/2, y - vehicle_height/2), 
                                vehicle_width, vehicle_height,
                                color='cornflowerblue', ec='darkblue', linewidth=1.5,
                                zorder=4, alpha=0.7)
+                # Apply rotation around vehicle center
+                t = Affine2D().rotate_deg_around(x, y, rotation_angle) + self.ax.transData
+                rect.set_transform(t)
                 self.ax.add_patch(rect)
                 
                 # Draw passengers inside the vehicle
