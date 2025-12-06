@@ -9,31 +9,50 @@ This script creates a large-scale transport scenario with:
 - Random actions with high boarding/unboarding probability
 - Long rollout to showcase many interactions
 
-The visualization demonstrates the rendering system's ability to handle
-complex scenarios with many agents, vehicles, passengers, and destination
-announcements all happening simultaneously.
+Rewritten from scratch using transport_two_cluster_demo.py as a template
+to ensure correct video rendering.
 
 Usage:
     python transport_stress_test_demo.py
-
-Requirements:
-    - ai_transport (vendored in vendor/ai_transport)
-    - networkx
-    - numpy
-    - matplotlib
-    - PIL (for GIF generation)
 """
 
 import sys
 import os
 
 # Add paths for imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'ai_transport'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 import numpy as np
 import networkx as nx
-from ai_transport import parallel_env
 
+from empo.transport import (
+    TransportEnvWrapper,
+    TransportGoal,
+    TransportGoalSampler,
+    TransportActions,
+)
+
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+NUM_NODES = 50  # Reasonable size for demonstration
+NUM_VEHICLES = 25  # Half the nodes
+NUM_HUMANS = 25  # Half the nodes
+VEHICLE_CAPACITY = 3
+VEHICLE_SPEED = 5.0
+HUMAN_SPEED = 1.0
+MAX_STEPS = 50  # Reasonable rollout length
+BOARDING_PROB = 0.8  # High probability to board when vehicles available
+UNBOARDING_PROB = 0.2  # Low probability to unboard (passengers stay on longer)
+
+
+# ============================================================================
+# Network Generation
+# ============================================================================
 
 def create_random_network(num_nodes=100, seed=42):
     """
@@ -58,9 +77,7 @@ def create_random_network(num_nodes=100, seed=42):
         G.add_node(i, x=x, y=y, name=f"N{i}")
     
     # Create edges between nearby nodes (within distance threshold)
-    # This creates a connected network without too many edges
     distance_threshold = 20.0
-    min_degree = 2  # Ensure each node has at least this many connections
     
     # First pass: connect nearby nodes
     for i in range(num_nodes):
@@ -83,8 +100,7 @@ def create_random_network(num_nodes=100, seed=42):
             if not G.has_edge(j, i):
                 G.add_edge(j, i, length=dist, speed=1.0, capacity=10.0)
     
-    # Second pass: ensure connectivity by connecting isolated components
-    # Find connected components (treating as undirected for this check)
+    # Second pass: ensure connectivity
     G_undirected = G.to_undirected()
     components = list(nx.connected_components(G_undirected))
     
@@ -112,185 +128,229 @@ def create_random_network(num_nodes=100, seed=42):
                 G.add_edge(n1, n2, length=min_dist, speed=1.0, capacity=10.0)
                 G.add_edge(n2, n1, length=min_dist, speed=1.0, capacity=10.0)
     
-    print(f"Created network with {num_nodes} nodes and {len(G.edges())} directed edges")
     return G
 
 
-def run_stress_test_demo():
+# ============================================================================
+# Random Policy for Stress Test
+# ============================================================================
+
+class RandomStressTestPolicy:
     """
-    Run a stress test demo with many agents taking random actions.
+    Random policy with biased boarding/unboarding for stress testing.
     """
-    print("=" * 70)
-    print("Transport Stress Test Demo - 100 Nodes, 100 Vehicles, 100 Passengers")
-    print("=" * 70)
     
-    # Create the random network
-    num_nodes = 100
-    network = create_random_network(num_nodes=num_nodes, seed=42)
-    print(f"Network: {num_nodes} nodes, {len(network.edges())} directed edges")
+    def __init__(self, env, agent_idx, is_vehicle=False, seed=42):
+        self.env = env
+        self.agent_idx = agent_idx
+        self.is_vehicle = is_vehicle
+        self.rng = np.random.RandomState(seed + agent_idx)
     
-    # Create environment with 100 humans and 100 vehicles
-    num_humans = 100
-    num_vehicles = 100
-    vehicle_capacity = 3
-    
-    print(f"\nCreating environment:")
-    print(f"  - {num_humans} human passengers")
-    print(f"  - {num_vehicles} vehicles (capacity {vehicle_capacity} each)")
-    
-    # Create environment with random initial positions
-    env = parallel_env(
-        network=network,
-        num_humans=num_humans,
-        num_vehicles=num_vehicles,
-        vehicle_capacities=[vehicle_capacity] * num_vehicles,
-        vehicle_speeds=[5.0] * num_vehicles,  # Vehicles are 5x faster than humans
-        observation_scenario='full',
-        render_mode='human',  # Enable rendering
-    )
-    
-    observations, infos = env.reset(seed=123)
-    agents = env.agents
-    
-    # Note: reset() automatically places agents at random nodes
-    # We don't need to manually place them - the environment handles initial placement
-    
-    # Assign random goal nodes to humans
-    np.random.seed(456)
-    human_goals = {}
-    for agent in agents:
-        if agent.startswith("human_"):
-            goal_node = np.random.choice(list(network.nodes()))
-            human_goals[agent] = goal_node
-            idx = int(agent.split("_")[1])
-            human_goals[idx] = goal_node
-    
-    print(f"Assigned random goal nodes to {len([a for a in agents if a.startswith('human_')])} humans")
-    
-    # Count initial co-locations
-    human_nodes = {}
-    vehicle_nodes = {}
-    for agent in agents:
-        pos = env.agent_positions.get(agent)
-        if agent.startswith("human_"):
-            human_nodes.setdefault(pos, []).append(agent)
-        elif agent.startswith("vehicle_"):
-            vehicle_nodes.setdefault(pos, []).append(agent)
-    
-    colocated_nodes = set(human_nodes.keys()) & set(vehicle_nodes.keys())
-    num_colocated_humans = sum(len(human_nodes[n]) for n in colocated_nodes)
-    print(f"Initial co-locations: {num_colocated_humans} humans at same nodes as vehicles")
-    
-    # Start video recording
-    print("\nStarting video recording...")
-    env.unwrapped.start_video_recording()
-    
-    # Render initial state (Step 0)
-    env.unwrapped.render(goal_info=human_goals, title="Stress Test Demo | Step 0")
-    
-    # Run rollout with biased random actions
-    print("Running rollout with random actions...")
-    print("(Boarding is prioritized when vehicles are available at same node)\n")
-    print("Transport environment cycles through phases: routing → boarding → departing → unboarding")
-    print("Each cycle requires 4 step() calls\n")
-    
-    cycle = 0
-    max_cycles = 25  # 25 cycles = 100 phase steps
-    done = False
-    boarding_events = 0
-    unboarding_events = 0
-    
-    while not done and cycle < max_cycles:
-        # Each cycle has 4 phases: routing, boarding, departing, unboarding
-        for phase_idx in range(4):
-            # Determine expected phase
-            expected_phases = ['routing', 'boarding', 'departing', 'unboarding']
-            expected_phase = expected_phases[phase_idx]
-            
-            # Generate actions for each agent
-            actions = {}
-            
-            for agent in agents:
-                action_mask = observations[agent].get('action_mask', [])
-                if len(action_mask) == 0:
-                    actions[agent] = 0
-                    continue
-                
-                # Get valid actions
-                valid_actions = np.where(action_mask)[0]
-                if len(valid_actions) == 0:
-                    actions[agent] = 0
-                    continue
-                
-                # Bias towards boarding when in boarding phase and vehicles available
-                if expected_phase == 'boarding' and agent.startswith("human_") and len(valid_actions) > 1:
-                    # valid_actions[0] = pass, valid_actions[1:] = board vehicles
-                    # 80% chance to board if vehicles available
-                    if np.random.random() < 0.8:
-                        # Choose a random vehicle to board (not pass)
-                        action = np.random.choice(valid_actions[1:])
-                        boarding_events += 1
-                    else:
-                        action = valid_actions[0]  # pass
-                elif expected_phase == 'unboarding' and agent.startswith("human_") and len(valid_actions) > 1:
-                    # 20% chance to unboard (so passengers stay on for a while)
-                    if np.random.random() < 0.2:
-                        action = 1  # unboard
-                        unboarding_events += 1
-                    else:
-                        action = 0  # pass (stay aboard)
-                else:
-                    # Random action for all other cases
-                    action = np.random.choice(valid_actions)
-                
-                actions[agent] = action
-            
-            # Step environment
-            observations, rewards, terminations, truncations, infos = env.step(actions)
-            
-            # Only render during 'departing' phase when actual movement occurs
-            # This is when agents change positions and the state visually changes
-            if expected_phase == 'departing':
-                env.unwrapped.render(
-                    goal_info=human_goals,
-                    title=f"Stress Test Demo | Cycle {cycle+1}"
-                )
-            
-            # Check if done
-            done = all(terminations.values()) or all(truncations.values())
-            if done:
-                break
+    def get_action(self):
+        """Get a random action based on current phase."""
+        step_type = self.env.step_type
+        agent_name = self.env.agents[self.agent_idx]
         
-        cycle += 1
+        if step_type == 'routing':
+            if self.is_vehicle:
+                # Vehicle announces random destination
+                num_nodes = len(self.env.network.nodes())
+                dest_node = self.rng.randint(0, num_nodes)
+                return TransportActions.DEST_START + dest_node
+            else:
+                # Human doesn't announce
+                return TransportActions.PASS
         
-        # Print progress every 5 cycles
-        if cycle % 5 == 0:
-            num_aboard = sum(1 for agent in agents 
-                           if agent.startswith("human_") and 
-                           env.human_aboard.get(agent) is not None)
-            print(f"Cycle {cycle}: {num_aboard}/{num_humans} humans aboard | "
-                  f"Boardings: {boarding_events} | Unboardings: {unboarding_events}")
+        elif step_type == 'boarding':
+            if not self.is_vehicle:
+                # Human: high probability to board if vehicles available
+                # Check if there are vehicles at current location
+                agent_pos = self.env.env.agent_positions.get(agent_name)
+                if agent_pos and not isinstance(agent_pos, tuple):
+                    # Get vehicles at same node
+                    vehicles_here = []
+                    for i, other_agent in enumerate(self.env.agents):
+                        if i != self.agent_idx:
+                            other_pos = self.env.env.agent_positions.get(other_agent)
+                            # Check if it's a vehicle agent (vehicles come after humans)
+                            is_vehicle_agent = 'vehicle' in other_agent
+                            if other_pos == agent_pos and is_vehicle_agent:
+                                vehicles_here.append(i)
+                    
+                    if vehicles_here and self.rng.random() < BOARDING_PROB:
+                        # Try to board a random vehicle
+                        vehicle_idx = self.rng.choice(vehicles_here)
+                        return TransportActions.BOARD_START + vehicle_idx
+            
+            return TransportActions.PASS
+        
+        elif step_type == 'departing':
+            # All agents: random movement
+            agent_pos = self.env.env.agent_positions.get(agent_name)
+            
+            if agent_pos is None or isinstance(agent_pos, tuple):
+                # On edge or invalid position
+                return TransportActions.PASS
+            
+            # Get available neighbors
+            neighbors = list(self.env.network.successors(agent_pos))
+            if not neighbors:
+                return TransportActions.PASS
+            
+            # Random movement
+            next_node = self.rng.choice(neighbors)
+            edge_idx = list(self.env.network.out_edges(agent_pos)).index((agent_pos, next_node))
+            return TransportActions.DEPART_START + edge_idx
+        
+        elif step_type == 'unboarding':
+            if not self.is_vehicle:
+                # Human: low probability to unboard (stay on longer)
+                # Check if aboard a vehicle
+                agent_pos = self.env.env.agent_positions.get(agent_name)
+                if agent_pos is None:
+                    # May be aboard - check vehicle passengers
+                    for vehicle_name in self.env.env.vehicle_agents:
+                        if agent_name in self.env.env.vehicle_passengers.get(vehicle_name, set()):
+                            if self.rng.random() < UNBOARDING_PROB:
+                                return TransportActions.UNBOARD
+                            break
+            
+            return TransportActions.PASS
+        
+        return TransportActions.PASS
+
+
+# ============================================================================
+# Rollout Function
+# ============================================================================
+
+def run_stress_test_rollout(env, policies, max_steps=100):
+    """
+    Run a single stress test rollout with random actions.
     
-    print(f"\nRollout completed after {cycle} cycles ({cycle * 4} phase steps)")
-    print(f"Total boarding events: {boarding_events}")
-    print(f"Total unboarding events: {unboarding_events}")
+    This follows the same pattern as transport_two_cluster_demo.py
+    to ensure proper video rendering.
+    """
+    env.reset()
     
-    # Save video to outputs folder
+    # Render initial state
+    title = f"Stress Test | Step 0 (Initial) | {NUM_HUMANS} humans, {NUM_VEHICLES} vehicles"
+    env.env.render(goal_info=None, value_dict=None, title=title)
+    
+    boarding_count = 0
+    unboarding_count = 0
+    
+    for step in range(max_steps):
+        # Get actions for all agents
+        actions = []
+        for agent_idx in range(env.num_agents):
+            action = policies[agent_idx].get_action()
+            actions.append(action)
+            
+            # Track boarding/unboarding
+            step_type = env.step_type
+            if step_type == 'boarding' and action >= TransportActions.BOARD_START:
+                boarding_count += 1
+            elif step_type == 'unboarding' and action == TransportActions.UNBOARD:
+                unboarding_count += 1
+        
+        # Execute actions
+        obs, rewards, done, info = env.step(actions)
+        
+        # Render after step (THIS IS CRITICAL FOR VIDEO CAPTURE)
+        step_type = env.step_type
+        title = f"Stress Test | Step {step + 1} | Phase: {step_type} | Boardings: {boarding_count} | Unboardings: {unboarding_count}"
+        env.env.render(goal_info=None, value_dict=None, title=title)
+        
+        if done:
+            break
+    
+    print(f"Rollout complete: {step + 1} steps")
+    print(f"  Total boardings: {boarding_count}")
+    print(f"  Total unboardings: {unboarding_count}")
+
+
+# ============================================================================
+# Main
+# ============================================================================
+
+def main():
+    print("=" * 70)
+    print("Transport Stress Test Demo")
+    print(f"Network: {NUM_NODES} randomly placed nodes")
+    print(f"Agents: {NUM_HUMANS} humans + {NUM_VEHICLES} vehicles")
+    print(f"Actions: Random with high boarding probability ({BOARDING_PROB})")
+    print("=" * 70)
+    print()
+    
+    # Create output directory
     output_dir = os.path.join(os.path.dirname(__file__), '..', 'outputs')
     os.makedirs(output_dir, exist_ok=True)
-    output_file = os.path.join(output_dir, 'transport_stress_test_demo.mp4')
     
-    print(f"\nSaving video to {output_file}...")
-    env.unwrapped.save_video(output_file, fps=2)
+    # Create random network
+    print(f"Creating random network with {NUM_NODES} nodes...")
+    network = create_random_network(num_nodes=NUM_NODES, seed=42)
+    print(f"  Nodes: {network.number_of_nodes()}")
+    print(f"  Edges: {network.number_of_edges()}")
+    
+    # Create environment
+    print(f"\nCreating transport environment with {NUM_HUMANS} humans and {NUM_VEHICLES} vehicles...")
+    
+    human_speeds = [HUMAN_SPEED] * NUM_HUMANS
+    vehicle_speeds = [VEHICLE_SPEED] * NUM_VEHICLES
+    vehicle_capacities = [VEHICLE_CAPACITY] * NUM_VEHICLES
+    
+    env = TransportEnvWrapper(
+        num_humans=NUM_HUMANS,
+        num_vehicles=NUM_VEHICLES,
+        network=network,
+        human_speeds=human_speeds,
+        vehicle_speeds=vehicle_speeds,
+        vehicle_capacities=vehicle_capacities,
+        render_mode='human',  # Enable rendering for video recording
+        max_steps=MAX_STEPS,
+    )
+    env.reset(seed=42)
+    
+    print(f"  Total agents: {env.num_agents}")
+    print(f"    Humans: {NUM_HUMANS}")
+    print(f"    Vehicles: {NUM_VEHICLES}")
+    
+    # Create random policies for all agents
+    print("\nInitializing random policies...")
+    policies = []
+    for agent_idx in range(env.num_agents):
+        is_vehicle = agent_idx >= NUM_HUMANS  # Vehicles come after humans
+        policy = RandomStressTestPolicy(env, agent_idx, is_vehicle=is_vehicle, seed=42)
+        policies.append(policy)
+    
+    # Start video recording
+    video_path = os.path.join(output_dir, 'transport_stress_test_demo.mp4')
+    print(f"\nStarting video recording to: {video_path}")
+    env.env.start_video_recording()
+    
+    # Run rollout
+    print(f"\nRunning stress test rollout ({MAX_STEPS} max steps)...")
+    print("-" * 70)
+    run_stress_test_rollout(env, policies, max_steps=MAX_STEPS)
+    print("-" * 70)
+    
+    # Save video
+    print(f"\nSaving video to: {video_path}")
+    env.env.save_video(video_path, fps=10)
     print(f"Video saved successfully!")
-    print(f"The video shows {step} steps with many simultaneous interactions:")
-    print(f"  - Vehicles moving and announcing destinations (blue arcs)")
-    print(f"  - Humans boarding and unboarding vehicles")
-    print(f"  - Passengers visible inside vehicles (small red dots)")
-    print(f"  - Continuous movement along roads")
     
-    env.close()
+    # Verify video has frames by checking file size
+    if os.path.exists(video_path):
+        file_size = os.path.getsize(video_path) / 1024 / 1024  # MB
+        print(f"Video file size: {file_size:.2f} MB")
+        if file_size < 0.1:
+            print("WARNING: Video file is very small, may not contain frames!")
+    
+    print("\n" + "=" * 70)
+    print("Stress test complete!")
+    print("=" * 70)
 
 
-if __name__ == "__main__":
-    run_stress_test_demo()
+if __name__ == '__main__':
+    main()
