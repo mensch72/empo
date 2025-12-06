@@ -116,3 +116,48 @@ def highlight_img(img, color=(255, 255, 255), alpha=0.30):
     blend_img = img + alpha * (np.array(color, dtype=np.uint8) - img)
     blend_img = blend_img.clip(0, 255).astype(np.uint8)
     img[:, :, :] = blend_img
+
+def point_in_rounded_rect(xmin, xmax, ymin, ymax, radius):
+    """
+    Create a function that returns True for points inside a rounded rectangle.
+    
+    Args:
+        xmin, xmax, ymin, ymax: Rectangle bounds (normalized 0-1)
+        radius: Corner radius (normalized 0-1)
+    """
+    def fn(x, y):
+        # Check if point is in the main rectangle (excluding corners)
+        in_horizontal = xmin + radius <= x <= xmax - radius and ymin <= y <= ymax
+        in_vertical = xmin <= x <= xmax and ymin + radius <= y <= ymax - radius
+        
+        if in_horizontal or in_vertical:
+            return True
+        
+        # Check rounded corners
+        # Top-left corner
+        if x < xmin + radius and y < ymin + radius:
+            dx = x - (xmin + radius)
+            dy = y - (ymin + radius)
+            return dx*dx + dy*dy <= radius*radius
+        
+        # Top-right corner
+        if x > xmax - radius and y < ymin + radius:
+            dx = x - (xmax - radius)
+            dy = y - (ymin + radius)
+            return dx*dx + dy*dy <= radius*radius
+        
+        # Bottom-left corner
+        if x < xmin + radius and y > ymax - radius:
+            dx = x - (xmin + radius)
+            dy = y - (ymax - radius)
+            return dx*dx + dy*dy <= radius*radius
+        
+        # Bottom-right corner
+        if x > xmax - radius and y > ymax - radius:
+            dx = x - (xmax - radius)
+            dy = y - (ymax - radius)
+            return dx*dx + dy*dy <= radius*radius
+        
+        return False
+    
+    return fn

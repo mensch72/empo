@@ -316,10 +316,12 @@ class KillButton(WorldObj):
     
     def render(self, img):
         """Render the kill button as a red floor tile with a skull/X pattern."""
+        corner_radius = 0.1  # Keyboard-like button
+        
         if self.enabled:
             # Red background for enabled kill button
             c = COLORS['red']
-            fill_coords(img, point_in_rect(0.031, 1, 0.031, 1), c / 2)
+            fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, corner_radius), c / 2)
             # Draw an X pattern in darker red
             darker_red = np.array([150, 0, 0])
             fill_coords(img, point_in_line(0.15, 0.15, 0.85, 0.85, r=0.05), darker_red)
@@ -327,7 +329,7 @@ class KillButton(WorldObj):
         else:
             # Grey background for disabled kill button
             c = COLORS['grey']
-            fill_coords(img, point_in_rect(0.031, 1, 0.031, 1), c / 3)
+            fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, corner_radius), c / 3)
 
 
 class PauseSwitch(WorldObj):
@@ -410,25 +412,27 @@ class PauseSwitch(WorldObj):
     
     def render(self, img):
         """Render the pause switch with state indication."""
+        corner_radius = 0.1  # Keyboard-like button
+        
         if self.enabled:
             if self.is_on:
                 # Bright blue when on
                 c = COLORS['blue']
-                fill_coords(img, point_in_rect(0, 1, 0, 1), c)
+                fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, corner_radius), c)
                 # Draw pause symbol (two vertical bars)
                 fill_coords(img, point_in_rect(0.3, 0.4, 0.25, 0.75), np.array([255, 255, 255]))
                 fill_coords(img, point_in_rect(0.6, 0.7, 0.25, 0.75), np.array([255, 255, 255]))
             else:
                 # Darker blue when off
                 c = COLORS['blue'] / 2
-                fill_coords(img, point_in_rect(0, 1, 0, 1), c)
+                fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, corner_radius), c)
                 # Draw play symbol (triangle pointing right)
                 fill_coords(img, point_in_triangle((0.3, 0.25), (0.3, 0.75), (0.7, 0.5)), 
                            np.array([200, 200, 200]))
         else:
             # Grey when disabled
             c = COLORS['grey']
-            fill_coords(img, point_in_rect(0, 1, 0, 1), c / 2)
+            fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, corner_radius), c / 2)
 
 
 class DisablingSwitch(WorldObj):
@@ -523,8 +527,10 @@ class DisablingSwitch(WorldObj):
     
     def render(self, img):
         """Render the disabling switch with indication of target type."""
+        corner_radius = 0.1  # Keyboard-like button
+        
         c = COLORS['purple']
-        fill_coords(img, point_in_rect(0, 1, 0, 1), c)
+        fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, corner_radius), c)
         
         # Draw a circle with a slash through it (disabled symbol)
         white = np.array([255, 255, 255])
@@ -657,11 +663,14 @@ class ControlButton(WorldObj):
     
     def render(self, img):
         """Render the control button with state indication and action text label."""
+        # Define rounded corner radius for keyboard-like button
+        corner_radius = 0.1
+        
         if self.enabled:
             if self.triggered_action is not None:
                 # Muted green when programmed (less bright for readable labels)
                 c = np.array([50, 120, 50])  # Darker green for better label contrast
-                fill_coords(img, point_in_rect(0, 1, 0, 1), c)
+                fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, corner_radius), c)
                 
                 # Get the action label text from the action space
                 action = self.triggered_action
@@ -675,7 +684,7 @@ class ControlButton(WorldObj):
             else:
                 # Darker green when not programmed
                 c = COLORS['green'] / 2
-                fill_coords(img, point_in_rect(0, 1, 0, 1), c)
+                fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, corner_radius), c)
                 # Draw empty circle
                 white = np.array([200, 200, 200])
                 fill_coords(img, point_in_circle(0.5, 0.5, 0.25), white)
@@ -683,7 +692,7 @@ class ControlButton(WorldObj):
         else:
             # Grey when disabled
             c = COLORS['grey']
-            fill_coords(img, point_in_rect(0, 1, 0, 1), c / 2)
+            fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, corner_radius), c / 2)
     
     def _draw_text_label(self, img, text):
         """Draw a text label on the button using matplotlib rendering."""
@@ -700,8 +709,8 @@ class ControlButton(WorldObj):
         try:
             h, w = img.shape[:2]
             
-            # Create a figure matching the button dimensions
-            dpi = 100
+            # Create a figure for text rendering with higher DPI for better quality
+            dpi = 150  # Increased from 100 for better resolution
             fig_width = w / dpi
             fig_height = h / dpi
             fig = plt.figure(figsize=(fig_width, fig_height), dpi=dpi, facecolor='none')
@@ -711,18 +720,18 @@ class ControlButton(WorldObj):
             ax.axis('off')
             ax.patch.set_alpha(0)
             
-            # Determine font size based on text length
-            # Scale appropriately for button size
+            # Much larger font sizes to make labels legible
+            # Scale based on button size and text length
             if len(text) <= 4:
-                fontsize = max(7, min(10, h // 3.5))
+                fontsize = max(12, min(18, h // 2.5))  # Increased from h//3.5
             else:
-                fontsize = max(6, min(8, h // 4.5))
+                fontsize = max(10, min(14, h // 3))    # Increased from h//4.5
             
-            # Draw text centered in white, similar to "H1" label style
+            # Draw text with minimal padding to use full button width
             ax.text(0.5, 0.5, text, ha='center', va='center',
                    fontsize=fontsize, fontweight='bold', color='white',
-                   bbox=dict(boxstyle='round,pad=0.15', facecolor='black', 
-                            alpha=0.5, edgecolor='none'))
+                   bbox=dict(boxstyle='round,pad=0.1', facecolor='black', 
+                            alpha=0.4, edgecolor='none'))
             
             # Render to buffer
             buf = BytesIO()
@@ -1156,9 +1165,10 @@ class Block(WorldObj):
         return False
 
     def render(self, img):
-        # Light brown square
+        # Render as a smaller square to show floor underneath
+        # Block takes up about 70% of the cell, centered
         c = COLORS[self.color]
-        fill_coords(img, point_in_rect(0, 1, 0, 1), c)
+        fill_coords(img, point_in_rect(0.15, 0.85, 0.15, 0.85), c)
 
 
 class Rock(WorldObj):
