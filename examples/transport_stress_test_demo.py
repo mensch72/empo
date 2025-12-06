@@ -152,22 +152,8 @@ def run_stress_test_demo():
     observations, infos = env.reset(seed=123)
     agents = env.agents
     
-    # Place agents at random nodes to ensure co-location for boarding opportunities
-    np.random.seed(789)
-    node_list = list(network.nodes())
-    
-    # Place vehicles at random nodes
-    for i, vehicle_agent in enumerate([a for a in agents if a.startswith("vehicle_")]):
-        random_node = np.random.choice(node_list)
-        env.agent_positions[vehicle_agent] = random_node
-    
-    # Place humans at random nodes (some will be co-located with vehicles)
-    for i, human_agent in enumerate([a for a in agents if a.startswith("human_")]):
-        random_node = np.random.choice(node_list)
-        env.agent_positions[human_agent] = random_node
-        env.human_aboard[human_agent] = None  # Ensure not aboard initially
-    
-    print(f"Placed agents at random nodes")
+    # Note: reset() automatically places agents at random nodes
+    # We don't need to manually place them - the environment handles initial placement
     
     # Assign random goal nodes to humans
     np.random.seed(456)
@@ -202,9 +188,9 @@ def run_stress_test_demo():
     # Render initial state (Step 0)
     env.render(goal_info=human_goals, title="Stress Test Demo | Step 0")
     
-    # Run rollout with random actions
+    # Run rollout with biased random actions
     print("Running rollout with random actions...")
-    print("(Completely random - boarding happens naturally when humans and vehicles co-locate)\n")
+    print("(Boarding is prioritized when vehicles are available at same node)\n")
     
     step = 0
     max_steps = 100  # Long rollout to see lots of activity
@@ -216,7 +202,7 @@ def run_stress_test_demo():
         # Track step type
         step_type = env.step_type if hasattr(env, 'step_type') else 'unknown'
         
-        # Generate random actions for each agent
+        # Generate actions for each agent
         actions = {}
         
         for agent in agents:
@@ -225,19 +211,34 @@ def run_stress_test_demo():
                 actions[agent] = 0
                 continue
             
-            # Choose random valid action
+            # Get valid actions
             valid_actions = np.where(action_mask)[0]
-            if len(valid_actions) > 0:
-                action = np.random.choice(valid_actions)
-                actions[agent] = action
-                
-                # Track boarding/unboarding
-                if step_type == 'boarding' and agent.startswith("human_") and action > 0:
+            if len(valid_actions) == 0:
+                actions[agent] = 0
+                continue
+            
+            # Bias towards boarding when in boarding phase and vehicles available
+            if step_type == 'boarding' and agent.startswith("human_") and len(valid_actions) > 1:
+                # valid_actions[0] = pass, valid_actions[1:] = board vehicles
+                # 80% chance to board if vehicles available
+                if np.random.random() < 0.8:
+                    # Choose a random vehicle to board (not pass)
+                    action = np.random.choice(valid_actions[1:])
                     boarding_events += 1
-                elif step_type == 'unboarding' and agent.startswith("human_") and action > 0:
+                else:
+                    action = valid_actions[0]  # pass
+            elif step_type == 'unboarding' and agent.startswith("human_") and len(valid_actions) > 1:
+                # 20% chance to unboard (so passengers stay on for a while)
+                if np.random.random() < 0.2:
+                    action = 1  # unboard
                     unboarding_events += 1
+                else:
+                    action = 0  # pass (stay aboard)
             else:
-                actions[agent] = 0  # idle if no valid actions
+                # Random action for all other cases
+                action = np.random.choice(valid_actions)
+            
+            actions[agent] = action
         
         # Step environment
         observations, rewards, terminations, truncations, infos = env.step(actions)
