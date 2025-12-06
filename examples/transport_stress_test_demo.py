@@ -191,82 +191,87 @@ def run_stress_test_demo():
     # Run rollout with biased random actions
     print("Running rollout with random actions...")
     print("(Boarding is prioritized when vehicles are available at same node)\n")
+    print("Transport environment cycles through phases: routing → boarding → departing → unboarding")
+    print("Each cycle requires 4 step() calls\n")
     
-    step = 0
-    max_steps = 100  # Long rollout to see lots of activity
+    cycle = 0
+    max_cycles = 25  # 25 cycles = 100 phase steps
     done = False
     boarding_events = 0
     unboarding_events = 0
     
-    while not done and step < max_steps:
-        # Track step type
-        step_type = env.step_type if hasattr(env, 'step_type') else 'unknown'
-        
-        # Generate actions for each agent
-        actions = {}
-        
-        for agent in agents:
-            action_mask = observations[agent].get('action_mask', [])
-            if len(action_mask) == 0:
-                actions[agent] = 0
-                continue
+    while not done and cycle < max_cycles:
+        # Each cycle has 4 phases: routing, boarding, departing, unboarding
+        for phase_idx in range(4):
+            # Determine expected phase
+            expected_phases = ['routing', 'boarding', 'departing', 'unboarding']
+            expected_phase = expected_phases[phase_idx]
             
-            # Get valid actions
-            valid_actions = np.where(action_mask)[0]
-            if len(valid_actions) == 0:
-                actions[agent] = 0
-                continue
+            # Generate actions for each agent
+            actions = {}
             
-            # Bias towards boarding when in boarding phase and vehicles available
-            if step_type == 'boarding' and agent.startswith("human_") and len(valid_actions) > 1:
-                # valid_actions[0] = pass, valid_actions[1:] = board vehicles
-                # 80% chance to board if vehicles available
-                if np.random.random() < 0.8:
-                    # Choose a random vehicle to board (not pass)
-                    action = np.random.choice(valid_actions[1:])
-                    boarding_events += 1
+            for agent in agents:
+                action_mask = observations[agent].get('action_mask', [])
+                if len(action_mask) == 0:
+                    actions[agent] = 0
+                    continue
+                
+                # Get valid actions
+                valid_actions = np.where(action_mask)[0]
+                if len(valid_actions) == 0:
+                    actions[agent] = 0
+                    continue
+                
+                # Bias towards boarding when in boarding phase and vehicles available
+                if expected_phase == 'boarding' and agent.startswith("human_") and len(valid_actions) > 1:
+                    # valid_actions[0] = pass, valid_actions[1:] = board vehicles
+                    # 80% chance to board if vehicles available
+                    if np.random.random() < 0.8:
+                        # Choose a random vehicle to board (not pass)
+                        action = np.random.choice(valid_actions[1:])
+                        boarding_events += 1
+                    else:
+                        action = valid_actions[0]  # pass
+                elif expected_phase == 'unboarding' and agent.startswith("human_") and len(valid_actions) > 1:
+                    # 20% chance to unboard (so passengers stay on for a while)
+                    if np.random.random() < 0.2:
+                        action = 1  # unboard
+                        unboarding_events += 1
+                    else:
+                        action = 0  # pass (stay aboard)
                 else:
-                    action = valid_actions[0]  # pass
-            elif step_type == 'unboarding' and agent.startswith("human_") and len(valid_actions) > 1:
-                # 20% chance to unboard (so passengers stay on for a while)
-                if np.random.random() < 0.2:
-                    action = 1  # unboard
-                    unboarding_events += 1
-                else:
-                    action = 0  # pass (stay aboard)
-            else:
-                # Random action for all other cases
-                action = np.random.choice(valid_actions)
+                    # Random action for all other cases
+                    action = np.random.choice(valid_actions)
+                
+                actions[agent] = action
             
-            actions[agent] = action
+            # Step environment
+            observations, rewards, terminations, truncations, infos = env.step(actions)
+            
+            # Only render during 'departing' phase when actual movement occurs
+            # This is when agents change positions and the state visually changes
+            if expected_phase == 'departing':
+                env.unwrapped.render(
+                    goal_info=human_goals,
+                    title=f"Stress Test Demo | Cycle {cycle+1}"
+                )
+            
+            # Check if done
+            done = all(terminations.values()) or all(truncations.values())
+            if done:
+                break
         
-        # Step environment
-        observations, rewards, terminations, truncations, infos = env.step(actions)
+        cycle += 1
         
-        # Render the new state (this captures the frame if video recording is active)
-        env.unwrapped.render(goal_info=human_goals, title=f"Stress Test Demo | Step {step+1} ({step_type})")
-        
-        step += 1
-        
-        # Render current state after each step
-        env.unwrapped.render(
-            goal_info=human_goals,
-            title=f"Stress Test Demo | Step {step}"
-        )
-        
-        # Check if done
-        done = all(terminations.values()) or all(truncations.values())
-        
-        # Print progress every 10 steps
-        if step % 10 == 0:
+        # Print progress every 5 cycles
+        if cycle % 5 == 0:
             num_aboard = sum(1 for agent in agents 
                            if agent.startswith("human_") and 
                            env.human_aboard.get(agent) is not None)
-            print(f"Step {step}: {num_aboard}/{num_humans} humans aboard | "
-                  f"Boardings: {boarding_events} | Unboardings: {unboarding_events} | "
-                  f"Phase: {step_type}")
+            print(f"Cycle {cycle}: {num_aboard}/{num_humans} humans aboard | "
+                  f"Boardings: {boarding_events} | Unboardings: {unboarding_events}")
     
-    print(f"\nRollout completed after {step} steps")
+    print(f"\nRollout completed after {cycle} cycles ({cycle * 4} phase steps)")
     print(f"Total boarding events: {boarding_events}")
     print(f"Total unboarding events: {unboarding_events}")
     
