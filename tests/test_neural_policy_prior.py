@@ -417,7 +417,7 @@ def test_save_load():
 
 
 def test_load_dimension_mismatch():
-    """Test that load fails with mismatched dimensions."""
+    """Test that load fails when trying to load from smaller grid to larger grid."""
     print("Testing load with dimension mismatch...")
     
     world_model = MockWorldModel(width=10, height=10)
@@ -442,7 +442,7 @@ def test_load_dimension_mismatch():
     
     prior.save(filepath)
     
-    # Try to load with different grid dimensions
+    # Try to load on larger grid - should fail
     different_world = MockWorldModel(width=15, height=15)
     
     try:
@@ -454,7 +454,7 @@ def test_load_dimension_mismatch():
         )
         assert False, "Should have raised ValueError"
     except ValueError as e:
-        assert "Grid dimensions mismatch" in str(e)
+        assert "Cannot load policy trained on smaller grid" in str(e)
         print(f"  ✓ Correctly raised: {e}")
     
     os.unlink(filepath)

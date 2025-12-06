@@ -100,19 +100,29 @@ class MultiGridNeuralHumanPolicyPrior(BaseNeuralHumanPolicyPrior):
         config: Dict[str, Any],
         world_model: Any
     ) -> None:
-        """Validate that grid dimensions match (multigrid-specific)."""
+        """Validate grid dimensions for policy loading.
+        
+        Allows loading policies trained on larger grids for use on smaller grids
+        (by padding with walls). Rejects loading policies from smaller grids for
+        larger grids (coordinates would be out of bounds).
+        """
         env_height = getattr(world_model, 'height', None)
         env_width = getattr(world_model, 'width', None)
+        saved_height = config.get('grid_height')
+        saved_width = config.get('grid_width')
         
-        if env_height is not None and env_height != config.get('grid_height'):
+        # Only reject if environment grid is LARGER than saved grid
+        if env_height is not None and env_height > saved_height:
             raise ValueError(
-                f"Grid dimensions mismatch: saved height={config.get('grid_height')}, "
-                f"environment height={env_height}"
+                f"Cannot load policy trained on smaller grid: "
+                f"saved height={saved_height}, environment height={env_height}. "
+                f"Policies can only be transferred from larger to smaller grids."
             )
-        if env_width is not None and env_width != config.get('grid_width'):
+        if env_width is not None and env_width > saved_width:
             raise ValueError(
-                f"Grid dimensions mismatch: saved width={config.get('grid_width')}, "
-                f"environment width={env_width}"
+                f"Cannot load policy trained on smaller grid: "
+                f"saved width={saved_width}, environment width={env_width}. "
+                f"Policies can only be transferred from larger to smaller grids."
             )
     
     @classmethod
@@ -128,9 +138,15 @@ class MultiGridNeuralHumanPolicyPrior(BaseNeuralHumanPolicyPrior):
         """
         Load a model from file.
         
+        Supports cross-grid loading: policies trained on larger grids can be loaded
+        for use on smaller grids. The encoder will pad the smaller grid with walls
+        to match the trained policy's expected dimensions. This enables transfer
+        learning and efficient policy reuse across different grid sizes.
+        
         Args:
             filepath: Path to saved model.
-            world_model: New environment.
+            world_model: New environment. Can have smaller dimensions than the saved
+                policy (will be padded with walls), but not larger dimensions.
             human_agent_indices: Human agent indices.
             goal_sampler: Goal sampler.
             infeasible_actions_become: Action to remap unsupported actions to.
@@ -140,7 +156,8 @@ class MultiGridNeuralHumanPolicyPrior(BaseNeuralHumanPolicyPrior):
             Loaded MultiGridNeuralHumanPolicyPrior instance.
         
         Raises:
-            ValueError: If grid dimensions don't match or actions conflict.
+            ValueError: If environment grid is larger than saved grid, or if
+                action encodings conflict.
         """
         checkpoint = torch.load(filepath, map_location=device, weights_only=False)
         config = checkpoint['config']
