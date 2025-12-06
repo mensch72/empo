@@ -656,21 +656,23 @@ class parallel_env(ParallelEnv):
                     y = y1 + t * (y2 - y1)
                     
                     # For bidirectional edges, offset to correct lane
-                    u, v = edge[0], edge[1]
-                    if self.network.has_edge(u, v) and self.network.has_edge(v, u):
-                        # Calculate perpendicular offset for lane separation
-                        dx = x2 - x1
-                        dy = y2 - y1
-                        length = np.sqrt(dx**2 + dy**2)
-                        if length > 0:
-                            # Perpendicular unit vector (matches lane rendering offset)
-                            px = -dy / length * 0.15  # Lane offset (same as rendering)
-                            py = dx / length * 0.15
-                            # Offset direction depends on travel direction to match lane rendering
-                            # Lanes are rendered: u→v with offset +px,+py and v→u with offset -px,-py
-                            # Agent traveling u→v should use +px,+py
-                            x += px
-                            y += py
+                    # Only apply to humans (vehicles are rotated rectangles that don't need offset)
+                    if agent in self.human_agents:
+                        u, v = edge[0], edge[1]
+                        if self.network.has_edge(u, v) and self.network.has_edge(v, u):
+                            # Calculate perpendicular offset for lane separation
+                            dx = x2 - x1
+                            dy = y2 - y1
+                            length = np.sqrt(dx**2 + dy**2)
+                            if length > 0:
+                                # Perpendicular unit vector (matches lane rendering offset)
+                                px = -dy / length * 0.15  # Lane offset (same as rendering)
+                                py = dx / length * 0.15
+                                # Offset direction depends on travel direction to match lane rendering
+                                # Lanes are rendered: u→v with offset +px,+py and v→u with offset -px,-py
+                                # Agent traveling u→v should use +px,+py
+                                x += px
+                                y += py
                 else:
                     x, y = x1, y1
             else:
