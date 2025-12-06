@@ -35,7 +35,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'ai_t
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 import numpy as np
-import torch
 import matplotlib
 matplotlib.use('Agg')  # Use non-interactive backend
 import matplotlib.pyplot as plt
@@ -348,8 +347,8 @@ class CentroidShuttlePolicy:
 # Visualization
 # ============================================================================
 
-def render_network_state(env, human_agent_indices, vehicle_agent_idx, goal_nodes, 
-                         centroids, value_dict=None, title=""):
+def render_network_state(env, human_agent_indices, goal_nodes, 
+                         value_dict=None, title=""):
     """
     Render the network state using ai_transport's built-in rendering.
     
@@ -363,10 +362,8 @@ def render_network_state(env, human_agent_indices, vehicle_agent_idx, goal_nodes
     Args:
         env: TransportEnvWrapper
         human_agent_indices: List of human agent indices
-        vehicle_agent_idx: Vehicle agent index
         goal_nodes: Dict mapping human agent index to goal node
-        centroids: Dict mapping cluster_idx to centroid node_id
-        value_dict: Optional dict mapping (agent_idx, node) to V-value
+        value_dict: Optional dict mapping nodes to V-values for coloring
         title: Plot title
     
     Returns:
@@ -403,7 +400,7 @@ def render_network_state(env, human_agent_indices, vehicle_agent_idx, goal_nodes
 # ============================================================================
 
 def run_rollout(env, neural_prior, vehicle_policy, goal_nodes, 
-                human_agent_indices, vehicle_agent_idx, centroids, 
+                human_agent_indices, vehicle_agent_idx, 
                 max_steps=100, beta=5.0, device='cpu'):
     """
     Run a single rollout with learned human policy and fixed vehicle policy.
@@ -436,8 +433,8 @@ def run_rollout(env, neural_prior, vehicle_policy, goal_nodes,
             title += " | ALL GOALS REACHED!"
         
         frame = render_network_state(
-            env, human_agent_indices, vehicle_agent_idx, 
-            goal_nodes, centroids, value_dict=None, title=title
+            env, human_agent_indices, 
+            goal_nodes, value_dict=None, title=title
         )
         frames.append(frame)
         
@@ -474,8 +471,8 @@ def run_rollout(env, neural_prior, vehicle_policy, goal_nodes,
     if all_reached:
         title += " | ALL GOALS REACHED!"
     frame = render_network_state(
-        env, human_agent_indices, vehicle_agent_idx,
-        goal_nodes, centroids, value_dict=None, title=title
+        env, human_agent_indices,
+        goal_nodes, value_dict=None, title=title
     )
     frames.append(frame)
     
@@ -697,7 +694,6 @@ def main(quick_mode=False):
             goal_nodes=goal_nodes,
             human_agent_indices=human_agent_indices,
             vehicle_agent_idx=vehicle_agent_idx,
-            centroids=centroids,
             max_steps=max_steps,
             beta=beta,
             device=device
