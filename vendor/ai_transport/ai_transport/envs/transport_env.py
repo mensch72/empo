@@ -447,10 +447,6 @@ class parallel_env(ParallelEnv):
         """
         Renders the environment using the node coordinates.
         
-        When recording video, automatically generates multiple frames proportional
-        to the real time that passed since the last render call, creating smooth
-        continuous movement visualization.
-        
         - Vehicles shown as blue rectangles with human passengers inside
         - Humans shown as red dots
         - Bidirectional roads shown with two separate lanes
@@ -474,7 +470,7 @@ class parallel_env(ParallelEnv):
             )
             return
         
-        # Store render parameters for potential multi-frame rendering
+        # Store render parameters for use in intermediate frames during movement
         self._last_goal_info = goal_info
         self._last_value_dict = value_dict
         self._last_title = title
@@ -487,28 +483,8 @@ class parallel_env(ParallelEnv):
             self._render_text()
             return
         
-        # Graphical rendering
-        # If recording and time has passed, generate multiple frames for smooth animation
-        if getattr(self, '_recording', False):
-            time_elapsed = self.real_time - self._last_real_time
-            
-            # Generate frames proportional to time elapsed (1 frame per 0.5 time units, minimum 1)
-            # This creates smooth continuous movement without too many frames
-            frames_per_time_unit = 2.0  # 2 frames per second of simulation time
-            num_frames = max(1, int(time_elapsed * frames_per_time_unit + 0.5))
-            
-            # Limit to reasonable number to avoid slowdown
-            num_frames = min(num_frames, 10)
-            
-            # Generate frames by calling _render_graphical
-            for i in range(num_frames):
-                self._render_graphical(goal_info=goal_info, value_dict=value_dict, title=title)
-            
-            # Update last render time
-            self._last_real_time = self.real_time
-        else:
-            # Single frame render when not recording
-            return self._render_graphical(goal_info=goal_info, value_dict=value_dict, title=title)
+        # Graphical rendering - single frame per call
+        return self._render_graphical(goal_info=goal_info, value_dict=value_dict, title=title)
     
     def _render_text(self):
         """Original text-based rendering"""
@@ -797,6 +773,11 @@ class parallel_env(ParallelEnv):
         
         plt.tight_layout()
         
+        # Force canvas draw before capturing frame
+        if self.fig is not None:
+            self.fig.canvas.draw()
+            self.fig.canvas.flush_events()
+        
         # Store frame for video (only if recording and there's something interesting to show)
         if hasattr(self, '_recording') and self._recording:
             # Always record frames to show progression
@@ -806,7 +787,7 @@ class parallel_env(ParallelEnv):
             buf = self.fig.canvas.buffer_rgba()
             frame = np.asarray(buf)
             # Convert RGBA to RGB
-            frame = frame[:, :, :3]
+            frame = frame[:, :, :3].copy()  # Make a copy to avoid reference issues
             self.frames.append(frame)
         
         return self.fig
@@ -872,7 +853,7 @@ class parallel_env(ParallelEnv):
         Save recorded frames as video or GIF.
         
         Tries MP4 using matplotlib's FFMpegWriter first (like other examples),
-        falls back to GIF if ffmpeg not available.
+        falls back to GIF using PIL if ffmpeg not available.
         
         Args:
             filename: Output filename (can be .mp4 or .gif)
@@ -883,41 +864,55 @@ class parallel_env(ParallelEnv):
             return
         
         print(f"Saving {len(self.frames)} frames...")
-        print(f"Frame 0 shape: {self.frames[0].shape if len(self.frames) > 0 else 'N/A'}")
         
         try:
-            import matplotlib
-            matplotlib.use('Agg')
-            import matplotlib.pyplot as plt
-            import matplotlib.animation as animation
-            
-            fig, ax = plt.subplots(figsize=(12, 10))
-            ax.axis('off')
-            
-            im = ax.imshow(self.frames[0])
-            
-            def update(frame_idx):
-                im.set_array(self.frames[frame_idx])
-                return [im]
-            
-            anim = animation.FuncAnimation(
-                fig, update, frames=len(self.frames),
-                interval=200, blit=True, repeat=True
-            )
-            
-            # Try MP4 with FFMpegWriter first (like other example scripts)
+            # Try MP4 with matplotlib's FFMpegWriter first
             try:
+                import matplotlib
+                matplotlib.use('Agg')
+                import matplotlib.pyplot as plt
+                import matplotlib.animation as animation
+                
+                fig, ax = plt.subplots(figsize=(12, 10))
+                ax.axis('off')
+                
+                im = ax.imshow(self.frames[0])
+                
+                def update(frame_idx):
+                    im.set_array(self.frames[frame_idx])
+                    return [im]
+                
+                anim = animation.FuncAnimation(
+                    fig, update, frames=len(self.frames),
+                    interval=200, blit=True, repeat=True
+                )
+                
                 writer = animation.FFMpegWriter(fps=fps, bitrate=2000)
                 anim.save(filename, writer=writer)
                 print(f"✓ Video saved to {filename} ({len(self.frames)} frames)")
+                plt.close(fig)
+                return
             except Exception as e:
-                # Fall back to GIF with pillow writer
-                print(f"Could not save MP4 ({e}), trying GIF...")
-                gif_filename = filename.replace('.mp4', '.gif')
-                anim.save(gif_filename, writer='pillow', fps=fps)
-                print(f"✓ Video saved as GIF to {gif_filename} ({len(self.frames)} frames)")
+                print(f"Could not save MP4 ({e}), trying GIF with PIL...")
             
-            plt.close(fig)
+            # Fall back to GIF using PIL directly (more reliable than matplotlib)
+            from PIL import Image
+            gif_filename = filename.replace('.mp4', '.gif')
+            
+            # Convert frames to PIL Images
+            pil_frames = [Image.fromarray(frame) for frame in self.frames]
+            
+            # Save as animated GIF
+            duration_ms = int(1000 / fps)
+            pil_frames[0].save(
+                gif_filename,
+                save_all=True,
+                append_images=pil_frames[1:],
+                duration=duration_ms,
+                loop=0
+            )
+            print(f"✓ Video saved as GIF to {gif_filename} ({len(self.frames)} frames)")
+            
         except Exception as e:
             print(f"Error saving video: {e}")
         finally:
@@ -1400,32 +1395,89 @@ class parallel_env(ParallelEnv):
         # If there are agents on edges, advance time and move them
         if remaining_durations:
             delta_t = min(remaining_durations)
-            self.real_time += delta_t
             
-            # Move all agents on edges
+            # For smooth video, subdivide movement into multiple substeps when recording
+            num_substeps = 5 if getattr(self, '_recording', False) else 1
+            substep_dt = delta_t / num_substeps
+            
+            # Store starting positions and compute target positions
+            start_positions = {}
+            target_positions = {}
+            
             for agent in self.agents:
                 pos = self.agent_positions.get(agent)
+                start_positions[agent] = pos
+                
                 if pos is not None and isinstance(pos, tuple):
                     edge, coord = pos
                     edge_data = self.network[edge[0]][edge[1]]
-                    
                     speed = self._get_agent_speed(agent, edge_data)
-                    
-                    # Update coordinate
                     new_coord = coord + speed * delta_t
                     edge_length = edge_data['length']
                     
-                    # Check if agent has reached the end of the edge
                     if abs(new_coord - edge_length) < self.FLOAT_EPSILON:
-                        # Agent arrives at target node
-                        target_node = edge[1]
-                        self.agent_positions[agent] = target_node
+                        target_positions[agent] = edge[1]  # Reached target node
                     else:
-                        # Agent still on edge
-                        self.agent_positions[agent] = (edge, new_coord)
-        
-        # Update positions of humans aboard vehicles to match vehicle positions
-        for human in self.human_agents:
-            aboard = self.human_aboard.get(human)
-            if aboard is not None:
-                self.agent_positions[human] = self.agent_positions[aboard]
+                        target_positions[agent] = (edge, new_coord)
+                else:
+                    target_positions[agent] = pos
+            
+            # Render intermediate frames with interpolated positions
+            for substep in range(num_substeps):
+                fraction = (substep + 1) / num_substeps
+                
+                # Interpolate each agent's position
+                for agent in self.agents:
+                    start_pos = start_positions[agent]
+                    target_pos = target_positions[agent]
+                    
+                    # Only interpolate if starting on an edge
+                    if start_pos is not None and isinstance(start_pos, tuple):
+                        edge, start_coord = start_pos
+                        edge_data = self.network[edge[0]][edge[1]]
+                        edge_length = edge_data['length']
+                        
+                        if isinstance(target_pos, tuple):
+                            # Still on edge at end
+                            _, target_coord = target_pos
+                            interp_coord = start_coord + (target_coord - start_coord) * fraction
+                            self.agent_positions[agent] = (edge, interp_coord)
+                        else:
+                            # Reached node at end
+                            interp_coord = start_coord + (edge_length - start_coord) * fraction
+                            if fraction >= 1.0:
+                                self.agent_positions[agent] = target_pos  # Final node
+                            else:
+                                self.agent_positions[agent] = (edge, interp_coord)
+                
+                # Update humans aboard vehicles
+                for human in self.human_agents:
+                    aboard = self.human_aboard.get(human)
+                    if aboard is not None:
+                        self.agent_positions[human] = self.agent_positions[aboard]
+                
+                # Render this intermediate state if recording
+                if getattr(self, '_recording', False):
+                    goal_info = getattr(self, '_last_goal_info', None)
+                    value_dict = getattr(self, '_last_value_dict', None)
+                    title = getattr(self, '_last_title', None)
+                    self._render_graphical(goal_info=goal_info, value_dict=value_dict, title=title)
+            
+            # Set final positions
+            for agent in self.agents:
+                self.agent_positions[agent] = target_positions[agent]
+            
+            # Update humans aboard to final positions
+            for human in self.human_agents:
+                aboard = self.human_aboard.get(human)
+                if aboard is not None:
+                    self.agent_positions[human] = self.agent_positions[aboard]
+            
+            # Advance real time (once, not incrementally)
+            self.real_time += delta_t
+        else:
+            # No movement - just update humans aboard
+            for human in self.human_agents:
+                aboard = self.human_aboard.get(human)
+                if aboard is not None:
+                    self.agent_positions[human] = self.agent_positions[aboard]
