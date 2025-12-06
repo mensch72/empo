@@ -35,10 +35,6 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'ai_t
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 import numpy as np
-import matplotlib
-matplotlib.use('Agg')  # Use non-interactive backend
-import matplotlib.pyplot as plt
-import matplotlib.animation as animation
 import networkx as nx
 
 from empo.transport import (
@@ -344,37 +340,29 @@ class CentroidShuttlePolicy:
 
 
 # ============================================================================
-# Visualization
+# Rollout
 # ============================================================================
 
-def render_network_state(env, human_agent_indices, goal_nodes, 
-                         value_dict=None, title=""):
+def run_rollout(env, neural_prior, vehicle_policy, goal_nodes, 
+                human_agent_indices, vehicle_agent_idx, 
+                max_steps=100, beta=5.0, device='cpu'):
     """
-    Render the network state using ai_transport's built-in rendering.
+    Run a single rollout with learned human policy and fixed vehicle policy.
     
-    The ai_transport package provides proper rendering that shows:
-    - Bidirectional roads as separate lanes with arrows
-    - Vehicles as blue rectangles  
-    - Humans as red dots with coordinate perturbation for overlapping agents
-    - Goals with dashed outlines and star markers
-    - Dashed line from agent to goal
+    Uses the ai_transport package's built-in rendering which automatically
+    captures frames when render() is called during a rollout.
     
-    Args:
-        env: TransportEnvWrapper
-        human_agent_indices: List of human agent indices
-        goal_nodes: Dict mapping human agent index to goal node
-        value_dict: Optional dict mapping nodes to V-values for coloring
-        title: Plot title
-    
-    Returns:
-        RGB array of the rendered image
+    Returns success status.
     """
-    # Use the vendored ai_transport package's render_frame method
-    # which provides proper visualization with bidirectional lanes, 
-    # vehicle rectangles, and passenger handling
+    env.reset()
     
-    # For this demo, we'll show the goal for the first human agent
-    # (ai_transport's rendering supports one goal visualization at a time)
+    # Create goals for humans
+    human_goals = {}
+    for agent_idx in human_agent_indices:
+        goal_node = goal_nodes[agent_idx]
+        human_goals[agent_idx] = TransportGoal(env, agent_idx, goal_node)
+    
+    # Set up goal_info for rendering (show first human's goal)
     goal_info = None
     if human_agent_indices and goal_nodes:
         agent_idx = human_agent_indices[0]
@@ -385,62 +373,7 @@ def render_network_state(env, human_agent_indices, goal_nodes,
                 'type': 'node'
             }
     
-    # Use the underlying environment's render_frame method
-    frame = env.env.render_frame(
-        goal_info=goal_info,
-        value_dict=value_dict,
-        title=title
-    )
-    
-    return frame
-
-
-# ============================================================================
-# Rollout
-# ============================================================================
-
-def run_rollout(env, neural_prior, vehicle_policy, goal_nodes, 
-                human_agent_indices, vehicle_agent_idx, 
-                max_steps=100, beta=5.0, device='cpu'):
-    """
-    Run a single rollout with learned human policy and fixed vehicle policy.
-    
-    Returns list of frames and success status.
-    """
-    env.reset()
-    frames = []
-    
-    # Create goals for humans
-    human_goals = {}
-    for agent_idx in human_agent_indices:
-        goal_node = goal_nodes[agent_idx]
-        human_goals[agent_idx] = TransportGoal(env, agent_idx, goal_node)
-    
     for step in range(max_steps):
-        # Check if all humans reached goals
-        all_reached = True
-        for agent_idx in human_agent_indices:
-            agent_name = env.agents[agent_idx]
-            agent_pos = env.env.agent_positions.get(agent_name)
-            goal_node = goal_nodes[agent_idx]
-            if agent_pos != goal_node:
-                all_reached = False
-                break
-        
-        # Render frame
-        title = f"Step {step} | Vehicle shuttles between centroids"
-        if all_reached:
-            title += " | ALL GOALS REACHED!"
-        
-        frame = render_network_state(
-            env, human_agent_indices, 
-            goal_nodes, value_dict=None, title=title
-        )
-        frames.append(frame)
-        
-        if all_reached:
-            break
-        
         # Get actions for all agents
         actions = []
         for agent_idx in range(env.num_agents):
@@ -461,75 +394,27 @@ def run_rollout(env, neural_prior, vehicle_policy, goal_nodes,
         # Execute actions
         obs, rewards, done, info = env.step(actions)
         
-        if done:
+        # Check if all humans reached goals after step
+        all_reached = True
+        for agent_idx in human_agent_indices:
+            agent_name = env.agents[agent_idx]
+            agent_pos = env.env.agent_positions.get(agent_name)
+            goal_node = goal_nodes[agent_idx]
+            if agent_pos != goal_node:
+                all_reached = False
+                break
+        
+        # Render using package's built-in rendering (captures frame if recording)
+        title = f"Step {step + 1} | Vehicle shuttles between centroids"
+        if all_reached:
+            title += " | ALL GOALS REACHED!"
+        
+        env.env.render(goal_info=goal_info, value_dict=None, title=title)
+        
+        if done or all_reached:
             break
     
-    # Final frame
-    all_reached = all([env.env.agent_positions.get(env.agents[i]) == goal_nodes[i]
-                       for i in human_agent_indices])
-    title = f"Step {step} | Vehicle shuttles between centroids"
-    if all_reached:
-        title += " | ALL GOALS REACHED!"
-    frame = render_network_state(
-        env, human_agent_indices,
-        goal_nodes, value_dict=None, title=title
-    )
-    frames.append(frame)
-    
-    return frames, all_reached
-
-
-# ============================================================================
-# Movie Creation
-# ============================================================================
-
-def create_movie(all_frames, output_path, n_rollouts):
-    """Create animation from rollout frames."""
-    print(f"Creating movie with {len(all_frames)} rollouts...")
-    
-    frames = []
-    frame_info = []
-    
-    for rollout_idx, rollout_frames in enumerate(all_frames):
-        for frame_idx, frame in enumerate(rollout_frames):
-            frames.append(frame)
-            frame_info.append((rollout_idx, frame_idx))
-    
-    if len(frames) == 0:
-        print("No frames to create movie!")
-        return
-    
-    fig, ax = plt.subplots(figsize=(14, 8))
-    ax.axis('off')
-    
-    im = ax.imshow(frames[0])
-    title = ax.set_title('', fontsize=14, fontweight='bold')
-    
-    def update(frame_idx):
-        rollout_idx, step_idx = frame_info[frame_idx]
-        im.set_array(frames[frame_idx])
-        title.set_text(f'Rollout {rollout_idx + 1}/{n_rollouts} | Step {step_idx}')
-        return [im, title]
-    
-    anim = animation.FuncAnimation(
-        fig, update, frames=len(frames),
-        interval=200, blit=True, repeat=True
-    )
-    
-    try:
-        writer = animation.FFMpegWriter(fps=5, bitrate=2000)
-        anim.save(output_path, writer=writer)
-        print(f"✓ Movie saved to {output_path}")
-    except Exception as e:
-        print(f"Could not save MP4 ({e}), trying GIF...")
-        gif_path = output_path.replace('.mp4', '.gif')
-        try:
-            anim.save(gif_path, writer='pillow', fps=5)
-            print(f"✓ Movie saved as GIF to {gif_path}")
-        except Exception as e2:
-            print(f"Error saving movie: {e2}")
-    
-    plt.close()
+    return all_reached
 
 
 # ============================================================================
@@ -585,7 +470,7 @@ def main(quick_mode=False):
         vehicle_capacities=[10],  # Large capacity
         num_clusters=NUM_CLUSTERS,  # Enable cluster-based routing
         clustering_method='kmeans',
-        render_mode=None,
+        render_mode='human',  # Enable rendering for video recording
         max_steps=max_steps,
     )
     env.reset(seed=42)
@@ -660,11 +545,15 @@ def main(quick_mode=False):
     print(f"  Training completed in {elapsed:.2f} seconds")
     print()
     
-    # Run rollouts
+    # Run rollouts and record video using package's built-in recording
     print(f"Running {n_rollouts} rollouts with learned policies...")
+    print("  Recording video using ai_transport's built-in video capture...")
     random.seed(42)
     
-    all_frames = []
+    # Start video recording on the underlying environment
+    # This enables graphical rendering and starts capturing frames
+    env.env.start_video_recording()
+    
     successes = 0
     
     for i in range(n_rollouts):
@@ -687,7 +576,7 @@ def main(quick_mode=False):
         
         print(f"  Rollout {i + 1}/{n_rollouts}: Goals = {goal_nodes}")
         
-        frames, reached = run_rollout(
+        reached = run_rollout(
             env=env,
             neural_prior=neural_prior,
             vehicle_policy=vehicle_policy,
@@ -698,11 +587,10 @@ def main(quick_mode=False):
             beta=beta,
             device=device
         )
-        all_frames.append(frames)
         
         if reached:
             successes += 1
-            print(f"    ✓ All goals reached in {len(frames) - 1} steps")
+            print(f"    ✓ All goals reached")
         else:
             print(f"    ✗ Goals not reached")
     
@@ -710,14 +598,15 @@ def main(quick_mode=False):
     print(f"Success rate: {successes}/{n_rollouts} ({100*successes/n_rollouts:.1f}%)")
     print()
     
-    # Create movie
-    movie_path = os.path.join(output_dir, 'transport_two_cluster_demo.mp4')
-    create_movie(all_frames, movie_path, n_rollouts=n_rollouts)
+    # Save video using package's built-in save method
+    video_path = os.path.join(output_dir, 'transport_two_cluster_demo.mp4')
+    print(f"Saving video to {video_path}...")
+    env.env.save_video(filename=video_path, fps=5)
     
     print()
     print("=" * 70)
     print("Demo completed!")
-    print(f"Output: {os.path.abspath(movie_path)}")
+    print(f"Output: {os.path.abspath(video_path)}")
     print()
     print("Analysis:")
     print("  - Did humans learn to walk to centroids and board the vehicle?")
