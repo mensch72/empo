@@ -929,6 +929,9 @@ class parallel_env(ParallelEnv):
         if self.fig is None or self.ax is None:
             self.fig, self.ax = plt.subplots(figsize=(12, 10))
         
+        # Remove all margins and padding - maximize network visibility
+        self.fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
+        
         self.ax.clear()
         self.ax.set_aspect('equal')
         self.ax.axis('off')
@@ -946,12 +949,13 @@ class parallel_env(ParallelEnv):
                 self._network_pos = nx.spring_layout(self.network, seed=42)
                 break
         
-        # Set axis limits once
+        # Set axis limits with minimal margins (just enough to see edge nodes)
         if self._network_pos:
             x_vals = [p[0] for p in self._network_pos.values()]
             y_vals = [p[1] for p in self._network_pos.values()]
-            x_margin = (max(x_vals) - min(x_vals)) * 0.1 + 1
-            y_margin = (max(y_vals) - min(y_vals)) * 0.1 + 1
+            # Much smaller margins - just 3% of range plus tiny buffer for edge visibility
+            x_margin = (max(x_vals) - min(x_vals)) * 0.03 + 0.5
+            y_margin = (max(y_vals) - min(y_vals)) * 0.03 + 0.5
             self.ax.set_xlim(min(x_vals) - x_margin, max(x_vals) + x_margin)
             self.ax.set_ylim(min(y_vals) - y_margin, max(y_vals) + y_margin)
         
