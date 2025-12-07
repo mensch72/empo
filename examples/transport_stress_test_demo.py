@@ -468,25 +468,28 @@ if __name__ == '__main__':
         # Create line profiler and add functions to profile
         lp = LineProfiler()
         
-        # Add key rendering functions from transport_env
-        if hasattr(transport_env.TransportEnv, '_render_single_frame'):
-            lp.add_function(transport_env.TransportEnv._render_single_frame)
+        # The actual environment class is parallel_env, not TransportEnv
+        env_class = transport_env.parallel_env
+        
+        # Add key rendering functions from parallel_env
+        if hasattr(env_class, '_render_single_frame'):
+            lp.add_function(env_class._render_single_frame)
             print("  ✓ Added _render_single_frame")
         
-        if hasattr(transport_env.TransportEnv, '_get_or_cache_network_image'):
-            lp.add_function(transport_env.TransportEnv._get_or_cache_network_image)
+        if hasattr(env_class, '_get_or_cache_network_image'):
+            lp.add_function(env_class._get_or_cache_network_image)
             print("  ✓ Added _get_or_cache_network_image")
         
-        if hasattr(transport_env.TransportEnv, '_render_uniform_frames'):
-            lp.add_function(transport_env.TransportEnv._render_uniform_frames)
+        if hasattr(env_class, '_render_uniform_frames'):
+            lp.add_function(env_class._render_uniform_frames)
             print("  ✓ Added _render_uniform_frames")
         
-        if hasattr(transport_env.TransportEnv, '_compute_positions_at_time'):
-            lp.add_function(transport_env.TransportEnv._compute_positions_at_time)
+        if hasattr(env_class, '_compute_positions_at_time'):
+            lp.add_function(env_class._compute_positions_at_time)
             print("  ✓ Added _compute_positions_at_time")
         
-        if hasattr(transport_env.TransportEnv, 'render'):
-            lp.add_function(transport_env.TransportEnv.render)
+        if hasattr(env_class, 'render'):
+            lp.add_function(env_class.render)
             print("  ✓ Added render")
         
         print("\nRunning profiled execution...")
