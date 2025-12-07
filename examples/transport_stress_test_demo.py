@@ -425,7 +425,7 @@ if __name__ == '__main__':
     
     # Print profiling results
     print("\n" + "=" * 70)
-    print("DETAILED PROFILING RESULTS")
+    print("DETAILED PROFILING RESULTS (cProfile)")
     print("=" * 70)
     print("\nTop 30 functions by cumulative time:")
     print("-" * 70)
@@ -445,3 +445,65 @@ if __name__ == '__main__':
     stats.sort_stats('tottime')
     stats.print_stats(30)
     print(s.getvalue())
+    
+    # Add line profiling for transport_env.py
+    print("\n" + "=" * 70)
+    print("LINE-BY-LINE PROFILING (transport_env.py)")
+    print("=" * 70)
+    print("\nAttempting to run line_profiler on key rendering functions...")
+    print("(If line_profiler is not installed, this section will be skipped)")
+    print()
+    
+    try:
+        # Try to import line_profiler
+        from line_profiler import LineProfiler
+        
+        # Import the transport environment module
+        from ai_transport.envs import transport_env
+        
+        print("line_profiler is available! Running detailed line profiling...")
+        print("Re-running main() with line profiling enabled...")
+        print()
+        
+        # Create line profiler and add functions to profile
+        lp = LineProfiler()
+        
+        # Add key rendering functions from transport_env
+        if hasattr(transport_env.TransportEnv, '_render_single_frame'):
+            lp.add_function(transport_env.TransportEnv._render_single_frame)
+            print("  ✓ Added _render_single_frame")
+        
+        if hasattr(transport_env.TransportEnv, '_get_or_cache_network_image'):
+            lp.add_function(transport_env.TransportEnv._get_or_cache_network_image)
+            print("  ✓ Added _get_or_cache_network_image")
+        
+        if hasattr(transport_env.TransportEnv, '_render_uniform_frames'):
+            lp.add_function(transport_env.TransportEnv._render_uniform_frames)
+            print("  ✓ Added _render_uniform_frames")
+        
+        if hasattr(transport_env.TransportEnv, '_compute_positions_at_time'):
+            lp.add_function(transport_env.TransportEnv._compute_positions_at_time)
+            print("  ✓ Added _compute_positions_at_time")
+        
+        if hasattr(transport_env.TransportEnv, 'render'):
+            lp.add_function(transport_env.TransportEnv.render)
+            print("  ✓ Added render")
+        
+        print("\nRunning profiled execution...")
+        lp.enable()
+        main()
+        lp.disable()
+        
+        print("\n" + "=" * 70)
+        print("LINE PROFILER RESULTS")
+        print("=" * 70)
+        lp.print_stats()
+        
+    except ImportError:
+        print("line_profiler is not installed.")
+        print("To enable line-by-line profiling, install it with:")
+        print("  pip install line_profiler")
+        print("\nSkipping line profiling section.")
+    except Exception as e:
+        print(f"Error during line profiling: {e}")
+        print("Skipping line profiling section.")

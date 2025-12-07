@@ -823,23 +823,27 @@ class parallel_env(ParallelEnv):
         if pos is None or network_image is None:
             return None
         
-        # Display the cached network image as background
-        # Use imshow to composite the pre-rendered network
-        self.ax.imshow(network_image, aspect='auto', extent=[
-            self.ax.get_xlim()[0] if self.ax.get_xlim()[0] != 0 else -10,
-            self.ax.get_xlim()[1] if self.ax.get_xlim()[1] != 1 else 10,
-            self.ax.get_ylim()[0] if self.ax.get_ylim()[0] != 0 else -10,
-            self.ax.get_ylim()[1] if self.ax.get_ylim()[1] != 1 else 10
-        ], zorder=0, origin='upper')
-        
-        # Set proper axis limits based on node positions (must match cached image)
+        # First, set proper axis limits based on node positions (BEFORE displaying image)
         if pos:
             x_vals = [p[0] for p in pos.values()]
             y_vals = [p[1] for p in pos.values()]
             x_margin = (max(x_vals) - min(x_vals)) * 0.1 + 1
             y_margin = (max(y_vals) - min(y_vals)) * 0.1 + 1
-            self.ax.set_xlim(min(x_vals) - x_margin, max(x_vals) + x_margin)
-            self.ax.set_ylim(min(y_vals) - y_margin, max(y_vals) + y_margin)
+            xlim = (min(x_vals) - x_margin, max(x_vals) + x_margin)
+            ylim = (min(y_vals) - y_margin, max(y_vals) + y_margin)
+            self.ax.set_xlim(xlim)
+            self.ax.set_ylim(ylim)
+        else:
+            xlim = (-10, 10)
+            ylim = (-10, 10)
+            self.ax.set_xlim(xlim)
+            self.ax.set_ylim(ylim)
+        
+        # Display the cached network image as background with correct extent
+        # The extent must match the axis limits exactly for proper alignment
+        self.ax.imshow(network_image, aspect='auto', 
+                      extent=[xlim[0], xlim[1], ylim[0], ylim[1]], 
+                      zorder=0, origin='upper')
         
         # Now we only draw the DYNAMIC elements (agents, vehicles, goals)
         # on top of the cached static network image
