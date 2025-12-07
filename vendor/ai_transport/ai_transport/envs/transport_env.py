@@ -177,6 +177,19 @@ class parallel_env(ParallelEnv):
         self.fig = None
         self.ax = None
         self.frames = []  # For video recording
+        self._last_render_time = 0.0  # Track last "click" time for uniform frame generation
+        self._time_per_frame = 0.02  # Capture frame every 0.02 time units ("clicks")
+        self._recording = False
+        
+        # Artist-based rendering: persistent matplotlib objects
+        self._artists_initialized = False
+        self._node_artists = {}  # node -> Circle artist
+        self._edge_artists = []  # List of Line2D artists for edges
+        self._vehicle_artists = {}  # vehicle -> Rectangle artist
+        self._human_artists = {}  # human -> Circle artist  
+        self._passenger_artists = {}  # (vehicle, human) -> Circle artist
+        self._destination_artists = {}  # vehicle -> Line2D artist for destination arc
+        self._network_pos = None  # Cached node positions
         
         # State components (will be initialized in reset)
         self.real_time = None
@@ -445,6 +458,10 @@ class parallel_env(ParallelEnv):
     def render(self, goal_info=None, value_dict=None, title=None):
         """
         Renders the environment using the node coordinates.
+        
+        When recording video, automatically generates frames at uniform time intervals
+        (every _time_per_frame "clicks" of continuous time) to ensure smooth playback.
+        
         - Vehicles shown as blue rectangles with human passengers inside
         - Humans shown as red dots
         - Bidirectional roads shown with two separate lanes
@@ -468,6 +485,11 @@ class parallel_env(ParallelEnv):
             )
             return
         
+        # Store render parameters for later use
+        self._last_goal_info = goal_info
+        self._last_value_dict = value_dict
+        self._last_title = title
+        
         # Check if graphical rendering is enabled
         use_graphical = getattr(self, '_use_graphical', False)
         
@@ -476,8 +498,13 @@ class parallel_env(ParallelEnv):
             self._render_text()
             return
         
-        # Graphical rendering
-        return self._render_graphical(goal_info=goal_info, value_dict=value_dict, title=title)
+        # Graphical rendering with uniform time intervals for video recording
+        if hasattr(self, '_recording') and self._recording:
+            # Generate multiple frames at uniform time intervals
+            self._render_uniform_frames(goal_info=goal_info, value_dict=value_dict, title=title)
+        else:
+            # Single frame for non-recording
+            return self._render_graphical(goal_info=goal_info, value_dict=value_dict, title=title)
     
     def _render_text(self):
         """Original text-based rendering"""
@@ -499,6 +526,100 @@ class parallel_env(ParallelEnv):
         else:
             print("Environment terminated")
     
+    def _render_uniform_frames(self, goal_info=None, value_dict=None, title=None):
+        """
+        Render frames at uniform time intervals for smooth video playback.
+        
+        Generates frames at regular "clicks" (time intervals) between _last_render_time
+        and current real_time, ensuring seamless motion regardless of decision step timing.
+        
+        Args:
+            goal_info: Optional dict with goal visualization info
+            value_dict: Optional dict mapping nodes to V-values for coloring
+            title: Optional custom title (overrides default)
+        """
+        t_now = self.real_time
+        t_last = self._last_render_time
+        
+        # Calculate how many frames to render
+        # Render at t_last + X, t_last + 2X, ..., t_last + kX
+        # where t_last + (k+1)*X > t_now
+        
+        click = self._time_per_frame
+        num_frames = int((t_now - t_last) / click)
+        
+        if num_frames > 0:
+            # Save current agent positions (at t_now)
+            saved_positions = self.agent_positions.copy()
+            
+            for i in range(1, num_frames + 1):
+                frame_time = t_last + i * click
+                
+                # Compute agent positions at this intermediate frame_time
+                self._compute_positions_at_time(frame_time)
+                
+                # Count humans aboard vehicles at this frame time
+                humans_aboard = sum(1 for h in self.human_agents if self.human_aboard.get(h) is not None)
+                
+                # Create title showing continuous time and humans aboard
+                frame_title = f"Time: {frame_time:.1f}s | Humans aboard: {humans_aboard}"
+                
+                # Render this frame with interpolated positions
+                self._render_single_frame(
+                    goal_info=goal_info,
+                    value_dict=value_dict,
+                    title=frame_title,
+                    capture_frame=True
+                )
+            
+            # Restore current agent positions (at t_now)
+            self.agent_positions = saved_positions
+            
+            # Update last render time to the last click before t_now
+            self._last_render_time = t_last + num_frames * click
+        else:
+            # If not enough time has passed for a new frame, still update state
+            # but don't capture a frame
+            pass
+    
+    def _compute_positions_at_time(self, target_time):
+        """
+        Compute where each agent would be at a specific time point by interpolating
+        their movement along edges.
+        
+        This allows rendering frames at arbitrary intermediate times between decision steps.
+        
+        Args:
+            target_time: The time point to compute positions for
+        """
+        # For each agent that is on an edge, compute their position at target_time
+        for agent in self.agents:
+            pos = self.agent_positions.get(agent)
+            
+            if isinstance(pos, tuple):
+                # Agent is on an edge
+                edge, current_coord = pos
+                
+                # Check if agent has movement state information
+                if hasattr(self, '_agent_movement_start_time') and agent in self._agent_movement_start_time:
+                    start_time = self._agent_movement_start_time[agent]
+                    start_coord = self._agent_movement_start_coord.get(agent, 0.0)
+                    speed = self.agent_attributes.get(agent, {}).get('speed', 1.0)
+                    
+                    # Compute how far agent has traveled from start_coord at target_time
+                    elapsed = target_time - start_time
+                    distance_traveled = speed * elapsed
+                    
+                    # Interpolate position along edge
+                    interpolated_coord = start_coord + distance_traveled
+                    
+                    # Clamp to edge bounds
+                    edge_length = self.network[edge[0]][edge[1]]['length']
+                    interpolated_coord = max(0.0, min(edge_length, interpolated_coord))
+                    
+                    # Update position to interpolated value
+                    self.agent_positions[agent] = (edge, interpolated_coord)
+    
     def _render_graphical(self, goal_info=None, value_dict=None, title=None):
         """
         Graphical rendering using matplotlib.
@@ -511,134 +632,47 @@ class parallel_env(ParallelEnv):
             value_dict: Optional dict mapping nodes to V-values for coloring
             title: Optional custom title (overrides default)
         """
-        # Import matplotlib only when needed
-        try:
-            import matplotlib
-            matplotlib.use('Agg')  # Use non-interactive backend
-            import matplotlib.pyplot as plt
-            from matplotlib.patches import FancyArrowPatch, Rectangle, Circle, Patch
-        except ImportError:
-            print("matplotlib is required for graphical rendering. Install with: pip install matplotlib")
-            return None
+        return self._render_single_frame(
+            goal_info=goal_info,
+            value_dict=value_dict,
+            title=title,
+            capture_frame=False
+        )
+    
+    def _render_single_frame(self, goal_info=None, value_dict=None, title=None, capture_frame=False):
+        """
+        Internal method to render a single frame using persistent artists.
+        Instead of clearing and redrawing, updates existing artist properties.
         
-        # Create figure if it doesn't exist
-        if self.fig is None or self.ax is None:
-            self.fig, self.ax = plt.subplots(figsize=(12, 10))
+        Args:
+            goal_info: Optional dict with goal visualization info
+            value_dict: Optional dict mapping nodes to V-values for coloring
+            title: Optional custom title (overrides default)
+            capture_frame: If True, captures frame for video recording
+        """
+        # Initialize artists if not done yet
+        if not self._artists_initialized:
+            self._initialize_artists()
         
-        self.ax.clear()
+        # Import needed modules
+        from matplotlib.transforms import Affine2D
+        import matplotlib.pyplot as plt
         
-        # Get node positions
-        pos = {}
-        for node in self.network.nodes():
-            if 'x' in self.network.nodes[node] and 'y' in self.network.nodes[node]:
-                pos[node] = (self.network.nodes[node]['x'], self.network.nodes[node]['y'])
-            else:
-                # Use spring layout if coordinates not available
-                pos = nx.spring_layout(self.network, seed=42)
-                break
+        pos = self._network_pos
         
-        # Draw edges with separate arrows for bidirectional roads
-        for u, v in self.network.edges():
-            x1, y1 = pos[u]
-            x2, y2 = pos[v]
+        # Update vehicle artists
+        for vehicle in self.vehicle_agents:
+            vehicle_pos = self.agent_positions.get(vehicle)
+            artist = self._vehicle_artists[vehicle]
             
-            # Check if edge is bidirectional
-            is_bidirectional = self.network.has_edge(v, u)
+            if vehicle_pos is None:
+                artist.set_visible(False)
+                continue
             
-            if is_bidirectional and u < v:
-                # Draw two parallel arrows for bidirectional edges (only once)
-                # Calculate offset perpendicular to edge
-                dx = x2 - x1
-                dy = y2 - y1
-                length = np.sqrt(dx**2 + dy**2)
-                if length > 0:
-                    # Perpendicular unit vector
-                    px = -dy / length * 0.15
-                    py = dx / length * 0.15
-                    
-                    # First arrow (offset to one side)
-                    arrow1 = FancyArrowPatch(
-                        (x1 + px, y1 + py), (x2 + px, y2 + py),
-                        arrowstyle='->', mutation_scale=15, 
-                        linewidth=1.5, color='gray', alpha=0.6
-                    )
-                    self.ax.add_patch(arrow1)
-                    
-                    # Second arrow (offset to other side)
-                    arrow2 = FancyArrowPatch(
-                        (x2 - px, y2 - py), (x1 - px, y1 - py),
-                        arrowstyle='->', mutation_scale=15,
-                        linewidth=1.5, color='gray', alpha=0.6
-                    )
-                    self.ax.add_patch(arrow2)
-            elif not is_bidirectional:
-                # Draw single arrow for unidirectional edge
-                arrow = FancyArrowPatch(
-                    (x1, y1), (x2, y2),
-                    arrowstyle='->', mutation_scale=15,
-                    linewidth=1.5, color='gray', alpha=0.6
-                )
-                self.ax.add_patch(arrow)
-        
-        # Determine node colors (from value_dict if provided)
-        if value_dict:
-            values = list(value_dict.values())
-            vmin, vmax = min(values), max(values)
-            if vmax > vmin:
-                norm = plt.Normalize(vmin=vmin, vmax=vmax)
-            else:
-                norm = plt.Normalize(vmin=0, vmax=1)
-            cmap = plt.cm.RdYlGn
-        
-        # Draw nodes (larger, without labels)
-        for node in self.network.nodes():
-            x, y = pos[node]
-            
-            # Use value-based color if available
-            if value_dict and node in value_dict:
-                node_color = cmap(norm(value_dict[node]))
-            else:
-                node_color = 'lightblue'
-            
-            circle = Circle((x, y), radius=1.0, color=node_color, 
-                          ec='black', linewidth=2, zorder=2)
-            self.ax.add_patch(circle)
-            
-            # Draw node label
-            self.ax.text(x, y, str(node), ha='center', va='center',
-                        fontsize=10, fontweight='bold', zorder=3)
-            
-            # Show value below node if value_dict provided
-            if value_dict and node in value_dict:
-                self.ax.text(x, y - 1.2, f'{value_dict[node]:.2f}',
-                            ha='center', va='top', fontsize=8, color='darkblue')
-        
-        # Highlight goal node with dashed outline (like multigrid)
-        if goal_info and 'node' in goal_info:
-            goal_node = goal_info['node']
-            if goal_node in pos:
-                gx, gy = pos[goal_node]
-                # Dashed outline circle around goal
-                goal_outline = Circle((gx, gy), radius=1.3, 
-                                      color='none', ec='gold', 
-                                      linewidth=4, linestyle='--', zorder=3)
-                self.ax.add_patch(goal_outline)
-                # Star marker at goal
-                self.ax.plot(gx, gy, '*', markersize=25, color='gold', 
-                           markeredgecolor='darkorange', markeredgewidth=1, zorder=4)
-        
-        # Collect agent positions and add perturbation for overlapping agents
-        agent_display_positions = {}
-        position_counts = {}  # Track how many agents at each position
-        position_indices = {}  # Track which index each agent gets at a position
-        
-        for agent in self.agents:
-            agent_pos = self.agent_positions[agent]
-            
-            # Calculate agent's x, y coordinates
-            if isinstance(agent_pos, tuple):
-                # Agent on edge
-                edge, coord = agent_pos
+            # Get vehicle position
+            if isinstance(vehicle_pos, tuple):
+                # On edge
+                edge, coord = vehicle_pos
                 x1, y1 = pos[edge[0]]
                 x2, y2 = pos[edge[1]]
                 edge_length = self.network[edge[0]][edge[1]]['length']
@@ -648,134 +682,170 @@ class parallel_env(ParallelEnv):
                     x = x1 + t * (x2 - x1)
                     y = y1 + t * (y2 - y1)
                     
-                    # For bidirectional edges, offset to correct lane
+                    # Calculate rotation angle to align with road
+                    dx = x2 - x1
+                    dy = y2 - y1
+                    rotation_angle = np.degrees(np.arctan2(dy, dx))
+                    
+                    # FIX: Vehicle lane positioning
+                    # Vehicles should stay on one lane (offset perpendicular to direction)
+                    # Check if bidirectional and apply consistent lane offset
+                    if self.network.has_edge(edge[1], edge[0]):  # Bidirectional
+                        # Calculate perpendicular offset (same as edge rendering)
+                        length = np.sqrt(dx**2 + dy**2)
+                        if length > 0:
+                            px = -dy / length * 0.15
+                            py = dx / length * 0.15
+                            # Always use same lane direction (vehicle traveling u→v uses +px,+py lane)
+                            x += px
+                            y += py
+                else:
+                    x, y = x1, y1
+                    rotation_angle = 0
+            else:
+                # At node
+                x, y = pos[vehicle_pos]
+                rotation_angle = 0
+            
+            # Update vehicle rectangle position and rotation
+            capacity = self.agent_attributes.get(vehicle, {}).get('capacity', 4)
+            vehicle_width = max(0.8, 0.4 + capacity * 0.25)
+            vehicle_height = 0.3
+            
+            artist.set_xy((x - vehicle_width/2, y - vehicle_height/2))
+            artist.set_width(vehicle_width)
+            artist.set_height(vehicle_height)
+            
+            # Apply rotation
+            t = Affine2D().rotate_deg_around(x, y, rotation_angle) + self.ax.transData
+            artist.set_transform(t)
+            artist.set_visible(True)
+            
+            # Update passengers inside vehicle
+            passengers = [h for h in self.human_agents if self.human_aboard.get(h) == vehicle]
+            num_passengers = len(passengers)
+            
+            for i in range(capacity):
+                passenger_artist = self._passenger_artists.get((vehicle, i))
+                if passenger_artist:
+                    if i < num_passengers:
+                        # Position passenger inside vehicle
+                        if num_passengers == 1:
+                            offset_x = 0
+                        else:
+                            spacing = vehicle_width * 0.8
+                            offset_x = -spacing/2 + (i * spacing / (num_passengers - 1))
+                        
+                        passenger_artist.set_center((x + offset_x, y))
+                        passenger_artist.set_visible(True)
+                    else:
+                        passenger_artist.set_visible(False)
+            
+            # Update destination arc for vehicle
+            dest = self.vehicle_destinations.get(vehicle)
+            dest_artist = self._destination_artists[vehicle]
+            
+            if dest is not None and dest in pos:
+                dest_x, dest_y = pos[dest]
+                dx = dest_x - x
+                dy = dest_y - y
+                distance = np.sqrt(dx**2 + dy**2)
+                
+                if distance > 0.5:
+                    # Generate curved arc points
+                    base_angle = np.arctan2(dy, dx)
+                    ctrl_distance = distance * 0.3
+                    start_offset = np.pi / 3
+                    end_offset = np.pi / 3
+                    
+                    ctrl1_x = x + ctrl_distance * np.cos(base_angle + start_offset)
+                    ctrl1_y = y + ctrl_distance * np.sin(base_angle + start_offset)
+                    ctrl2_x = dest_x + ctrl_distance * np.cos(base_angle + np.pi - end_offset)
+                    ctrl2_y = dest_y + ctrl_distance * np.sin(base_angle + np.pi - end_offset)
+                    
+                    # Cubic Bezier curve
+                    t_values = np.linspace(0, 1, 40)
+                    curve_x, curve_y = [], []
+                    for t in t_values:
+                        s = 1 - t
+                        bx = s**3 * x + 3*s**2*t * ctrl1_x + 3*s*t**2 * ctrl2_x + t**3 * dest_x
+                        by = s**3 * y + 3*s**2*t * ctrl1_y + 3*s*t**2 * ctrl2_y + t**3 * dest_y
+                        curve_x.append(bx)
+                        curve_y.append(by)
+                    
+                    dest_artist.set_data(curve_x, curve_y)
+                    dest_artist.set_visible(True)
+                else:
+                    dest_artist.set_visible(False)
+            else:
+                dest_artist.set_visible(False)
+        
+        # Update human artists (only those not aboard vehicles)
+        for human in self.human_agents:
+            aboard = self.human_aboard.get(human)
+            artist = self._human_artists[human]
+            
+            if aboard is not None:
+                # Human is aboard a vehicle - hide walking artist (shown as passenger)
+                artist.set_visible(False)
+                continue
+            
+            # Human walking - update position
+            human_pos = self.agent_positions.get(human)
+            if human_pos is None:
+                artist.set_visible(False)
+                continue
+            
+            if isinstance(human_pos, tuple):
+                # On edge
+                edge, coord = human_pos
+                x1, y1 = pos[edge[0]]
+                x2, y2 = pos[edge[1]]
+                edge_length = self.network[edge[0]][edge[1]]['length']
+                
+                if edge_length > 0:
+                    t = coord / edge_length
+                    x = x1 + t * (x2 - x1)
+                    y = y1 + t * (y2 - y1)
+                    
+                    # Apply lane offset for bidirectional roads
                     u, v = edge[0], edge[1]
                     if self.network.has_edge(u, v) and self.network.has_edge(v, u):
-                        # Calculate perpendicular offset for lane separation
                         dx = x2 - x1
                         dy = y2 - y1
                         length = np.sqrt(dx**2 + dy**2)
                         if length > 0:
-                            # Perpendicular unit vector
-                            px = -dy / length * 0.25  # Lane offset
-                            py = dx / length * 0.25
-                            # Offset to the right side of the direction of travel
+                            px = -dy / length * 0.15
+                            py = dx / length * 0.15
                             x += px
                             y += py
                 else:
                     x, y = x1, y1
             else:
-                # Agent at node
-                x, y = pos[agent_pos]
+                # At node
+                x, y = pos[human_pos]
             
-            # Track position for perturbation
-            pos_key = (round(x, 2), round(y, 2))  # Use rounded position as key
-            if pos_key not in position_counts:
-                position_counts[pos_key] = 0
-                position_indices[pos_key] = []
-            position_indices[pos_key].append(agent)
-            agent_idx = position_counts[pos_key]
-            position_counts[pos_key] += 1
-            
-            # Add perturbation if multiple agents at same location
-            # Arrange in a circle to make overlapping agents distinguishable
-            if agent_idx > 0:
-                # Use max count of 4 to ensure reasonable spacing even with many agents
-                angle = 2 * np.pi * agent_idx / max(4, position_counts[pos_key])
-                perturb_radius = 1.2  # Radius of perturbation circle (larger for visibility)
-                x += perturb_radius * np.cos(angle)
-                y += perturb_radius * np.sin(angle)
-            
-            agent_display_positions[agent] = (x, y)
+            artist.set_center((x, y))
+            artist.set_visible(True)
         
-        # Draw agents
-        for agent in self.agents:
-            x, y = agent_display_positions[agent]
-            
-            # Draw agent based on type
-            if agent in self.vehicle_agents:
-                # Vehicle as blue rectangle
-                rect = Rectangle((x - 0.25, y - 0.15), 0.5, 0.3,
-                               color='blue', ec='darkblue', linewidth=1.5,
-                               zorder=4, alpha=0.8)
-                self.ax.add_patch(rect)
-                
-                # Show destination if set
-                dest = self.vehicle_destinations.get(agent)
-                if dest is not None:
-                    dest_x, dest_y = pos[dest]
-                    self.ax.plot([x, dest_x], [y, dest_y], 
-                               'b--', alpha=0.3, linewidth=1, zorder=1)
-            
-            elif agent in self.human_agents:
-                # Check if human is aboard a vehicle
-                aboard = self.human_aboard.get(agent)
-                if aboard is None:
-                    # Human not aboard - show as red dot
-                    circle = Circle((x, y), radius=0.15, color='red',
-                                  ec='darkred', linewidth=1.5, zorder=5)
-                    self.ax.add_patch(circle)
-                # If aboard, don't draw separately (they're with the vehicle)
-        
-        # Draw dashed line from agent to their goal (like multigrid)
-        if goal_info and 'agent' in goal_info and 'node' in goal_info:
-            goal_agent = goal_info['agent']
-            goal_node = goal_info['node']
-            if goal_agent in agent_display_positions and goal_node in pos:
-                ax, ay = agent_display_positions[goal_agent]
-                gx, gy = pos[goal_node]
-                # Dashed line connecting agent to goal
-                self.ax.plot([ax, gx], [ay, gy], 
-                           color='gold', linestyle='--', linewidth=2, 
-                           alpha=0.7, zorder=2)
-        
-        # Add title with time and step type (or custom title)
+        # Update title
         if title is not None:
             self.ax.set_title(title, fontsize=14, fontweight='bold')
         else:
             self.ax.set_title(f'Transport Network - Time: {self.real_time:.2f}, Step: {self.step_type}',
                              fontsize=14, fontweight='bold')
         
-        self.ax.set_aspect('equal')
-        self.ax.axis('off')
-        
-        # Set axis limits with padding
-        if pos:
-            x_vals = [p[0] for p in pos.values()]
-            y_vals = [p[1] for p in pos.values()]
-            x_margin = (max(x_vals) - min(x_vals)) * 0.1 + 1
-            y_margin = (max(y_vals) - min(y_vals)) * 0.1 + 1
-            self.ax.set_xlim(min(x_vals) - x_margin, max(x_vals) + x_margin)
-            self.ax.set_ylim(min(y_vals) - y_margin, max(y_vals) + y_margin)
-        
-        # Add legend
-        legend_elements = [
-            Patch(facecolor='blue', edgecolor='darkblue', label='Vehicle'),
-            Patch(facecolor='red', edgecolor='darkred', label='Human'),
-            Patch(facecolor='lightblue', edgecolor='black', label='Node')
-        ]
-        # Add goal to legend if goal_info provided
-        if goal_info:
-            from matplotlib.lines import Line2D
-            legend_elements.append(
-                Line2D([0], [0], marker='*', color='w', label='Goal',
-                      markerfacecolor='gold', markersize=15,
-                      markeredgecolor='darkorange', markeredgewidth=1)
-            )
-        self.ax.legend(handles=legend_elements, loc='upper right')
-        
-        plt.tight_layout()
-        
-        # Store frame for video (only if recording and there's something interesting to show)
-        if hasattr(self, '_recording') and self._recording:
-            # Always record frames to show progression
-            # Convert plot to image
+        # Draw canvas
+        if self.fig is not None:
             self.fig.canvas.draw()
-            # Get the RGBA buffer from the figure
+            self.fig.canvas.flush_events()
+        
+        # Capture frame if requested
+        if capture_frame and hasattr(self, '_recording') and self._recording:
+            self.fig.canvas.draw()
             buf = self.fig.canvas.buffer_rgba()
             frame = np.asarray(buf)
-            # Convert RGBA to RGB
-            frame = frame[:, :, :3]
+            frame = frame[:, :, :3].copy()
             self.frames.append(frame)
         
         return self.fig
@@ -831,48 +901,246 @@ class parallel_env(ParallelEnv):
             self._use_graphical = False
     
     def start_video_recording(self):
-        """Start recording frames for video"""
+        """Start recording frames for video - initialize persistent artists"""
         self._recording = True
         self.frames = []
         self.enable_rendering('graphical')
+        
+        # Initialize matplotlib figure and persistent artists
+        self._initialize_artists()
     
-    def save_video(self, filename='transport_video.mp4', fps=5):
+    def _initialize_artists(self):
         """
-        Save recorded frames as MP4 video.
+        Initialize persistent matplotlib artist objects for efficient rendering.
+        Called once at start of video recording.
+        """
+        # Import matplotlib
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            from matplotlib.patches import Rectangle, Circle
+            from matplotlib.lines import Line2D
+        except ImportError:
+            print("matplotlib is required for graphical rendering")
+            return
+        
+        # Create figure if needed
+        if self.fig is None or self.ax is None:
+            self.fig, self.ax = plt.subplots(figsize=(12, 10))
+        
+        # Remove all margins and padding - maximize network visibility
+        self.fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
+        
+        self.ax.clear()
+        self.ax.set_aspect('equal')
+        self.ax.axis('off')
+        
+        # Get node positions
+        self._network_pos = {}
+        for node in self.network.nodes():
+            if 'x' in self.network.nodes[node] and 'y' in self.network.nodes[node]:
+                self._network_pos[node] = (
+                    self.network.nodes[node]['x'],
+                    self.network.nodes[node]['y']
+                )
+            else:
+                # Use spring layout if coordinates not available
+                self._network_pos = nx.spring_layout(self.network, seed=42)
+                break
+        
+        # Set axis limits with minimal margins (just enough to see edge nodes)
+        if self._network_pos:
+            x_vals = [p[0] for p in self._network_pos.values()]
+            y_vals = [p[1] for p in self._network_pos.values()]
+            # Much smaller margins - just 3% of range plus tiny buffer for edge visibility
+            x_margin = (max(x_vals) - min(x_vals)) * 0.03 + 0.5
+            y_margin = (max(y_vals) - min(y_vals)) * 0.03 + 0.5
+            self.ax.set_xlim(min(x_vals) - x_margin, max(x_vals) + x_margin)
+            self.ax.set_ylim(min(y_vals) - y_margin, max(y_vals) + y_margin)
+        
+        # Draw static network (nodes and edges)
+        self._draw_static_network()
+        
+        # Initialize artists for agents (vehicles and humans)
+        self._initialize_agent_artists()
+        
+        self._artists_initialized = True
+    
+    def _draw_static_network(self):
+        """Draw the static road network (nodes and edges) once."""
+        from matplotlib.patches import Circle
+        from matplotlib.lines import Line2D
+        
+        pos = self._network_pos
+        
+        # Draw edges as simple lines (bidirectional = two parallel lines)
+        self._edge_artists = []
+        for u, v in self.network.edges():
+            x1, y1 = pos[u]
+            x2, y2 = pos[v]
+            
+            # Check if bidirectional
+            is_bidirectional = self.network.has_edge(v, u)
+            
+            if is_bidirectional and u < v:
+                # Two parallel lines for bidirectional
+                dx = x2 - x1
+                dy = y2 - y1
+                length = np.sqrt(dx**2 + dy**2)
+                if length > 0:
+                    # Perpendicular unit vector
+                    px = -dy / length * 0.15
+                    py = dx / length * 0.15
+                    
+                    # First line (offset to one side)
+                    line1 = Line2D([x1 + px, x2 + px], [y1 + py, y2 + py],
+                                   color='gray', linewidth=1.5, alpha=0.6, zorder=1)
+                    self.ax.add_line(line1)
+                    self._edge_artists.append(line1)
+                    
+                    # Second line (offset to other side)
+                    line2 = Line2D([x2 - px, x1 - px], [y2 - py, y1 - py],
+                                   color='gray', linewidth=1.5, alpha=0.6, zorder=1)
+                    self.ax.add_line(line2)
+                    self._edge_artists.append(line2)
+            elif not is_bidirectional:
+                # Single line for unidirectional
+                line = Line2D([x1, x2], [y1, y2],
+                              color='gray', linewidth=1.5, alpha=0.6, zorder=1)
+                self.ax.add_line(line)
+                self._edge_artists.append(line)
+        
+        # Draw nodes
+        self._node_artists = {}
+        for node in self.network.nodes():
+            x, y = pos[node]
+            circle = Circle((x, y), radius=1.0, color='lightblue',
+                           ec='black', linewidth=2, zorder=2)
+            self.ax.add_patch(circle)
+            self._node_artists[node] = circle
+            
+            # Draw node label
+            self.ax.text(x, y, str(node), ha='center', va='center',
+                        fontsize=10, fontweight='bold', zorder=3)
+    
+    def _initialize_agent_artists(self):
+        """Initialize persistent artists for all agents."""
+        from matplotlib.patches import Rectangle, Circle
+        from matplotlib.lines import Line2D
+        
+        # Initialize vehicle artists
+        self._vehicle_artists = {}
+        for vehicle in self.vehicle_agents:
+            capacity = self.agent_attributes.get(vehicle, {}).get('capacity', 4)
+            vehicle_width = max(0.8, 0.4 + capacity * 0.25)
+            vehicle_height = 0.3
+            
+            rect = Rectangle((0, 0), vehicle_width, vehicle_height,
+                           color='cornflowerblue', ec='darkblue',
+                           linewidth=1.5, zorder=4, alpha=0.7)
+            rect.set_visible(False)  # Hidden until positioned
+            self.ax.add_patch(rect)
+            self._vehicle_artists[vehicle] = rect
+        
+        # Initialize human artists (walking)
+        self._human_artists = {}
+        for human in self.human_agents:
+            circle = Circle((0, 0), radius=0.15, color='red',
+                           ec='darkred', linewidth=1.5, zorder=5)
+            circle.set_visible(False)  # Hidden until positioned
+            self.ax.add_patch(circle)
+            self._human_artists[human] = circle
+        
+        # Initialize passenger artists (humans aboard vehicles)
+        self._passenger_artists = {}
+        for vehicle in self.vehicle_agents:
+            capacity = self.agent_attributes.get(vehicle, {}).get('capacity', 4)
+            for i in range(capacity):
+                # Create passenger circle (will be positioned inside vehicle)
+                circle = Circle((0, 0), radius=0.10, color='red',
+                               ec='darkred', linewidth=1, zorder=6)
+                circle.set_visible(False)
+                self.ax.add_patch(circle)
+                self._passenger_artists[(vehicle, i)] = circle
+        
+        # Initialize destination arc artists for vehicles
+        self._destination_artists = {}
+        for vehicle in self.vehicle_agents:
+            # Create empty line for destination arc
+            line = Line2D([], [], color='cornflowerblue',
+                         linestyle=':', linewidth=2, alpha=0.6, zorder=2)
+            line.set_visible(False)
+            self.ax.add_line(line)
+            self._destination_artists[vehicle] = line
+    
+    def save_video(self, filename='transport_video.mp4', fps=20):
+        """
+        Save recorded frames as video or GIF.
+        
+        Tries MP4 using matplotlib's FFMpegWriter first (like other examples),
+        falls back to GIF using PIL if ffmpeg not available.
         
         Args:
-            filename: Output filename
+            filename: Output filename (can be .mp4 or .gif)
             fps: Frames per second
         """
         if not self.frames:
             print("No frames recorded. Call start_video_recording() first.")
             return
         
+        print(f"Saving {len(self.frames)} frames...")
+        
         try:
-            import imageio
-            # Use imageio.mimsave with plugin='pillow' to avoid ffmpeg interpolation
-            # Or use ffmpeg with specific codec options
-            imageio.mimsave(
-                filename, 
-                self.frames, 
-                fps=fps,
-                codec='libx264',
-                quality=8,
-                pixelformat='yuv420p',
-                macro_block_size=1  # Disable automatic resizing
+            # Try MP4 with matplotlib's FFMpegWriter first
+            try:
+                import matplotlib
+                matplotlib.use('Agg')
+                import matplotlib.pyplot as plt
+                import matplotlib.animation as animation
+                
+                fig, ax = plt.subplots(figsize=(12, 10))
+                ax.axis('off')
+                
+                im = ax.imshow(self.frames[0])
+                
+                def update(frame_idx):
+                    im.set_array(self.frames[frame_idx])
+                    return [im]
+                
+                anim = animation.FuncAnimation(
+                    fig, update, frames=len(self.frames),
+                    interval=200, blit=True, repeat=True
+                )
+                
+                writer = animation.FFMpegWriter(fps=fps, bitrate=2000)
+                anim.save(filename, writer=writer)
+                print(f"✓ Video saved to {filename} ({len(self.frames)} frames)")
+                plt.close(fig)
+                return
+            except Exception as e:
+                print(f"Could not save MP4 ({e}), trying GIF with PIL...")
+            
+            # Fall back to GIF using PIL directly (more reliable than matplotlib)
+            from PIL import Image
+            gif_filename = filename.replace('.mp4', '.gif')
+            
+            # Convert frames to PIL Images
+            pil_frames = [Image.fromarray(frame) for frame in self.frames]
+            
+            # Save as animated GIF
+            duration_ms = int(1000 / fps)
+            pil_frames[0].save(
+                gif_filename,
+                save_all=True,
+                append_images=pil_frames[1:],
+                duration=duration_ms,
+                loop=0
             )
-            print(f"Video saved to {filename} ({len(self.frames)} frames)")
-        except ImportError:
-            print("imageio package required for video recording. Install with: pip install imageio[ffmpeg]")
+            print(f"✓ Video saved as GIF to {gif_filename} ({len(self.frames)} frames)")
+            
         except Exception as e:
             print(f"Error saving video: {e}")
-            print(f"Trying alternative method...")
-            try:
-                import imageio
-                imageio.mimsave(filename, self.frames, fps=fps)
-                print(f"Video saved to {filename} ({len(self.frames)} frames)")
-            except Exception as e2:
-                print(f"Failed to save video: {e2}")
         finally:
             # Always reset state
             self._recording = False
@@ -913,6 +1181,7 @@ class parallel_env(ParallelEnv):
         
         # Initialize state components
         self.real_time = 0.0
+        self._last_render_time = 0.0  # For uniform frame generation in render()
         
         # Initialize empty dictionaries first (needed by initialize_random_positions)
         self.agent_positions = {}
@@ -1315,11 +1584,23 @@ class parallel_env(ParallelEnv):
                         # Vehicles can always depart
                         if agent in self.vehicle_agents:
                             self.agent_positions[agent] = (chosen_edge, 0.0)
+                            # Track movement start for interpolation
+                            if not hasattr(self, '_agent_movement_start_time'):
+                                self._agent_movement_start_time = {}
+                                self._agent_movement_start_coord = {}
+                            self._agent_movement_start_time[agent] = self.real_time
+                            self._agent_movement_start_coord[agent] = 0.0
                         # Humans can only depart if not aboard
                         elif agent in self.human_agents:
                             aboard = self.human_aboard.get(agent)
                             if aboard is None:
                                 self.agent_positions[agent] = (chosen_edge, 0.0)
+                                # Track movement start for interpolation
+                                if not hasattr(self, '_agent_movement_start_time'):
+                                    self._agent_movement_start_time = {}
+                                    self._agent_movement_start_coord = {}
+                                self._agent_movement_start_time[agent] = self.real_time
+                                self._agent_movement_start_coord[agent] = 0.0
         
         # Now compute movement for all agents on edges
         # Find minimum remaining duration on edges
@@ -1352,32 +1633,95 @@ class parallel_env(ParallelEnv):
         # If there are agents on edges, advance time and move them
         if remaining_durations:
             delta_t = min(remaining_durations)
-            self.real_time += delta_t
             
-            # Move all agents on edges
+            # For smooth video, subdivide movement into multiple substeps when recording
+            num_substeps = 5 if getattr(self, '_recording', False) else 1
+            substep_dt = delta_t / num_substeps
+            
+            # Store starting positions and compute target positions
+            start_positions = {}
+            target_positions = {}
+            
             for agent in self.agents:
                 pos = self.agent_positions.get(agent)
+                start_positions[agent] = pos
+                
                 if pos is not None and isinstance(pos, tuple):
                     edge, coord = pos
                     edge_data = self.network[edge[0]][edge[1]]
-                    
                     speed = self._get_agent_speed(agent, edge_data)
-                    
-                    # Update coordinate
                     new_coord = coord + speed * delta_t
                     edge_length = edge_data['length']
                     
-                    # Check if agent has reached the end of the edge
                     if abs(new_coord - edge_length) < self.FLOAT_EPSILON:
-                        # Agent arrives at target node
-                        target_node = edge[1]
-                        self.agent_positions[agent] = target_node
+                        target_positions[agent] = edge[1]  # Reached target node
                     else:
-                        # Agent still on edge
-                        self.agent_positions[agent] = (edge, new_coord)
-        
-        # Update positions of humans aboard vehicles to match vehicle positions
-        for human in self.human_agents:
-            aboard = self.human_aboard.get(human)
-            if aboard is not None:
-                self.agent_positions[human] = self.agent_positions[aboard]
+                        target_positions[agent] = (edge, new_coord)
+                else:
+                    target_positions[agent] = pos
+            
+            # Render intermediate frames with interpolated positions
+            for substep in range(num_substeps):
+                fraction = (substep + 1) / num_substeps
+                
+                # Interpolate each agent's position
+                for agent in self.agents:
+                    start_pos = start_positions[agent]
+                    target_pos = target_positions[agent]
+                    
+                    # Only interpolate if starting on an edge
+                    if start_pos is not None and isinstance(start_pos, tuple):
+                        edge, start_coord = start_pos
+                        edge_data = self.network[edge[0]][edge[1]]
+                        edge_length = edge_data['length']
+                        
+                        if isinstance(target_pos, tuple):
+                            # Still on edge at end
+                            _, target_coord = target_pos
+                            interp_coord = start_coord + (target_coord - start_coord) * fraction
+                            self.agent_positions[agent] = (edge, interp_coord)
+                        else:
+                            # Reached node at end
+                            interp_coord = start_coord + (edge_length - start_coord) * fraction
+                            if fraction >= 1.0:
+                                self.agent_positions[agent] = target_pos  # Final node
+                            else:
+                                self.agent_positions[agent] = (edge, interp_coord)
+                
+                # Update humans aboard vehicles
+                for human in self.human_agents:
+                    aboard = self.human_aboard.get(human)
+                    if aboard is not None:
+                        self.agent_positions[human] = self.agent_positions[aboard]
+                
+                # Render this intermediate state if recording
+                if getattr(self, '_recording', False):
+                    goal_info = getattr(self, '_last_goal_info', None)
+                    value_dict = getattr(self, '_last_value_dict', None)
+                    title = getattr(self, '_last_title', None)
+                    self._render_graphical(goal_info=goal_info, value_dict=value_dict, title=title)
+            
+            # Set final positions
+            for agent in self.agents:
+                self.agent_positions[agent] = target_positions[agent]
+                # Clear movement tracking if agent reached a node
+                if not isinstance(target_positions[agent], tuple):
+                    if hasattr(self, '_agent_movement_start_time') and agent in self._agent_movement_start_time:
+                        del self._agent_movement_start_time[agent]
+                    if hasattr(self, '_agent_movement_start_coord') and agent in self._agent_movement_start_coord:
+                        del self._agent_movement_start_coord[agent]
+            
+            # Update humans aboard to final positions
+            for human in self.human_agents:
+                aboard = self.human_aboard.get(human)
+                if aboard is not None:
+                    self.agent_positions[human] = self.agent_positions[aboard]
+            
+            # Advance real time (once, not incrementally)
+            self.real_time += delta_t
+        else:
+            # No movement - just update humans aboard
+            for human in self.human_agents:
+                aboard = self.human_aboard.get(human)
+                if aboard is not None:
+                    self.agent_positions[human] = self.agent_positions[aboard]
