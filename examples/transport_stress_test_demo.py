@@ -53,8 +53,6 @@ timing_stats = {}
 
 from empo.transport import (
     TransportEnvWrapper,
-    TransportGoal,
-    TransportGoalSampler,
     TransportActions,
 )
 
@@ -63,14 +61,14 @@ from empo.transport import (
 # Configuration
 # ============================================================================
 
-NUM_NODES = 50  # Reasonable size for demonstration
-NUM_VEHICLES = 25  # Half the nodes
-NUM_HUMANS = 25  # Half the nodes
-VEHICLE_CAPACITY = 3
+NUM_NODES = 200  # Reasonable size for demonstration
+NUM_VEHICLES = 100  # Half the nodes
+NUM_HUMANS = 100  # Half the nodes
+VEHICLE_CAPACITY = 5
 VEHICLE_SPEED = 5.0
 HUMAN_SPEED = 1.0
-MAX_STEPS = 50  # Reasonable rollout length
-BOARDING_PROB = 0.8  # High probability to board when vehicles available
+MAX_STEPS = 500  # Reasonable rollout length
+BOARDING_PROB = 0.9  # High probability to board when vehicles available
 UNBOARDING_PROB = 0.2  # Low probability to unboard (passengers stay on longer)
 
 
@@ -95,13 +93,13 @@ def create_random_network(num_nodes=100, seed=42):
     # Generate random node positions in a 100x100 square
     node_positions = {}
     for i in range(num_nodes):
-        x = np.random.uniform(0, 50)
-        y = np.random.uniform(0, 50)
+        x = np.random.uniform(0, 100)
+        y = np.random.uniform(0, 100)
         node_positions[i] = (x, y)
         G.add_node(i, x=x, y=y, name=f"N{i}")
     
     # Create edges between nearby nodes (within distance threshold)
-    distance_threshold = 10.0
+    distance_threshold = 20.0
     
     # First pass: connect nearby nodes
     for i in range(num_nodes):
@@ -456,7 +454,7 @@ if __name__ == '__main__':
     
     try:
         # Try to import line_profiler
-        from line_profiler import LineProfiler
+#        from line_profiler import LineProfiler
         
         # Import the transport environment module
         from ai_transport.envs import transport_env
