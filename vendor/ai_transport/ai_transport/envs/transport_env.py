@@ -176,6 +176,11 @@ class parallel_env(ParallelEnv):
         # Rendering state
         self.fig = None
         self.ax = None
+        
+        # Rendering performance optimization: cache static network rendering
+        self._cached_network_canvas = None  # Cached rendered network as numpy array
+        self._cached_network_pos = None     # Cached node positions dictionary
+        self._network_cache_valid = False   # Whether cache is valid
         self.frames = []  # For video recording
         self._last_render_time = 0.0  # Track last "click" time for uniform frame generation
         self._time_per_frame = 0.02 #5  # Capture frame every 0.5 time units ("clicks")
@@ -628,6 +633,41 @@ class parallel_env(ParallelEnv):
             capture_frame=False
         )
     
+    def _get_or_cache_network_rendering(self):
+        """
+        Get cached network rendering or create it if not cached.
+        Returns node positions dictionary.
+        
+        This significantly speeds up rendering by avoiding re-drawing
+        the static network (nodes and edges) on every frame.
+        """
+        if self._network_cache_valid and self._cached_network_pos is not None:
+            return self._cached_network_pos
+        
+        # Import matplotlib
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            from matplotlib.patches import FancyArrowPatch, Circle
+        except ImportError:
+            return None
+        
+        # Get node positions
+        pos = {}
+        for node in self.network.nodes():
+            if 'x' in self.network.nodes[node] and 'y' in self.network.nodes[node]:
+                pos[node] = (self.network.nodes[node]['x'], self.network.nodes[node]['y'])
+            else:
+                import networkx as nx
+                pos = nx.spring_layout(self.network, seed=42)
+                break
+        
+        self._cached_network_pos = pos
+        self._network_cache_valid = True
+        
+        return pos
+    
     def _render_single_frame(self, goal_info=None, value_dict=None, title=None, capture_frame=False):
         """
         Internal method to render a single frame.
@@ -654,15 +694,10 @@ class parallel_env(ParallelEnv):
         
         self.ax.clear()
         
-        # Get node positions
-        pos = {}
-        for node in self.network.nodes():
-            if 'x' in self.network.nodes[node] and 'y' in self.network.nodes[node]:
-                pos[node] = (self.network.nodes[node]['x'], self.network.nodes[node]['y'])
-            else:
-                # Use spring layout if coordinates not available
-                pos = nx.spring_layout(self.network, seed=42)
-                break
+        # Get cached node positions (avoids recomputing on every frame)
+        pos = self._get_or_cache_network_rendering()
+        if pos is None:
+            return None
         
         # Draw edges with separate arrows for bidirectional roads
         for u, v in self.network.edges():
@@ -1200,6 +1235,9 @@ class parallel_env(ParallelEnv):
         # Initialize state components
         self.real_time = 0.0
         self._last_render_time = 0.0  # For uniform frame generation in render()
+        
+        # Invalidate network rendering cache (in case network changed)
+        self._network_cache_valid = False
         
         # Initialize empty dictionaries first (needed by initialize_random_positions)
         self.agent_positions = {}
