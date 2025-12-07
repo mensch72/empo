@@ -168,9 +168,6 @@ class parallel_env(ParallelEnv):
         # Validate network has required attributes
         self._validate_network()
         
-        # Performance optimization: precompute edge lengths dictionary for O(1) lookup
-        self._populate_edge_lengths_cache()
-        
         self.render_mode = render_mode
         
         # Initialize np_random_seed for action space
@@ -179,18 +176,9 @@ class parallel_env(ParallelEnv):
         # Rendering state
         self.fig = None
         self.ax = None
-        
-        # Rendering performance optimization: cache static network rendering IMAGE
-        self._cached_network_image = None   # Cached rendered network as numpy array (RGB image)
-        self._cached_network_pos = None     # Cached node positions dictionary
-        self._cached_fig_size = None        # Track figure size for cache validity
-        self._network_cache_valid = False   # Whether cache is valid
         self.frames = []  # For video recording
         self._last_render_time = 0.0  # Track last "click" time for uniform frame generation
-        self._time_per_frame = 0.02  # Capture frame every 0.02 time units ("clicks") for fluid motion
-        
-        # Performance optimization: precompute edge lengths dictionary for O(1) lookup
-        self._edge_lengths = {}  # Will be populated after network is set
+        self._time_per_frame = 0.02 #5  # Capture frame every 0.5 time units ("clicks")
         
         # State components (will be initialized in reset)
         self.real_time = None
@@ -329,7 +317,7 @@ class parallel_env(ParallelEnv):
                 # Place on random edge at random coordinate
                 edge_idx = rng.randint(len(edges))
                 edge = edges[edge_idx]
-                edge_length = self._get_edge_length(edge)
+                edge_length = self.network[edge[0]][edge[1]]['length']
                 coord = float(rng.uniform(0, edge_length))
                 self.agent_positions[agent] = (edge, coord)
         
@@ -361,30 +349,6 @@ class parallel_env(ParallelEnv):
             for attr in required_attrs:
                 if attr not in edge_data:
                     raise ValueError(f"Edge ({u}, {v}) missing required '{attr}' attribute")
-    
-    def _populate_edge_lengths_cache(self):
-        """
-        Precompute edge lengths dictionary for O(1) lookup.
-        
-        Line profiling showed that accessing self.network[u][v]['length'] 
-        repeatedly was a major bottleneck. This precomputes all edge lengths
-        into a dictionary for fast lookups.
-        """
-        self._edge_lengths = {}
-        for u, v in self.network.edges():
-            self._edge_lengths[(u, v)] = self.network[u][v]['length']
-    
-    def _get_edge_length(self, edge):
-        """
-        Get edge length from precomputed cache (O(1) lookup).
-        
-        Args:
-            edge: Tuple (u, v) representing an edge
-            
-        Returns:
-            float: Length of the edge
-        """
-        return self._edge_lengths.get(edge, 0.0)
 
     # Observation space should be defined here.
     # Observation spaces change based on observation_scenario, so caching is disabled
@@ -639,7 +603,7 @@ class parallel_env(ParallelEnv):
                     interpolated_coord = start_coord + distance_traveled
                     
                     # Clamp to edge bounds
-                    edge_length = self._get_edge_length(edge)
+                    edge_length = self.network[edge[0]][edge[1]]['length']
                     interpolated_coord = max(0.0, min(edge_length, interpolated_coord))
                     
                     # Update position to interpolated value
@@ -663,156 +627,6 @@ class parallel_env(ParallelEnv):
             title=title,
             capture_frame=False
         )
-    
-    def _get_or_cache_network_image(self, value_dict=None):
-        """
-        Get cached rendered network IMAGE or render and cache it if cache is invalid.
-        Caches the complete static network rendering (nodes + edges) as an RGB image.
-        Dynamic elements (agents, vehicles, goals) are drawn separately each frame.
-        
-        This provides 10-100x rendering speedup since the static network never changes.
-        
-        Args:
-            value_dict: Optional dict mapping nodes to V-values for coloring
-            
-        Returns:
-            tuple: (pos_dict, network_image_rgb) where:
-                - pos_dict: Mapping from node ID to (x, y) position tuple
-                - network_image_rgb: RGB numpy array of rendered network
-        """
-        # Check if cache is valid and figure size hasn't changed
-        current_fig_size = (12, 10)  # Match the size in _render_single_frame
-        cache_valid = (self._network_cache_valid and 
-                      self._cached_network_image is not None and
-                      self._cached_network_pos is not None and
-                      self._cached_fig_size == current_fig_size)
-        
-        if cache_valid:
-            return self._cached_network_pos, self._cached_network_image
-        
-        # Need to render the network
-        try:
-            import matplotlib
-            matplotlib.use('Agg')
-            import matplotlib.pyplot as plt
-            from matplotlib.patches import Circle
-        except ImportError:
-            return None, None
-        
-        # Get node positions
-        pos = {}
-        for node in self.network.nodes():
-            if 'x' in self.network.nodes[node] and 'y' in self.network.nodes[node]:
-                pos[node] = (self.network.nodes[node]['x'], self.network.nodes[node]['y'])
-            else:
-                import networkx as nx
-                pos = nx.spring_layout(self.network, seed=42)
-                break
-        
-        # Create a temporary figure just for rendering the static network
-        fig_temp, ax_temp = plt.subplots(figsize=current_fig_size)
-        ax_temp.clear()
-        
-        # Performance optimization: Use simple lines instead of expensive FancyArrowPatch
-        # Travel direction is clear from agent movement, so arrows are not strictly necessary
-        # This provides a major speedup (line profiling showed arrows took ~45% of rendering time)
-        
-        # Draw edges with simple lines for bidirectional roads
-        for u, v in self.network.edges():
-            x1, y1 = pos[u]
-            x2, y2 = pos[v]
-            
-            # Check if edge is bidirectional
-            is_bidirectional = self.network.has_edge(v, u)
-            
-            if is_bidirectional and u < v:
-                # Draw two parallel lines for bidirectional edges (only once)
-                dx = x2 - x1
-                dy = y2 - y1
-                length = np.sqrt(dx**2 + dy**2)
-                if length > 0:
-                    # Perpendicular unit vector
-                    px = -dy / length * 0.15
-                    py = dx / length * 0.15
-                    
-                    # First line (offset to one side)
-                    ax_temp.plot([x1 + px, x2 + px], [y1 + py, y2 + py],
-                               color='gray', linewidth=1.5, alpha=0.6, zorder=1)
-                    
-                    # Second line (offset to other side)
-                    ax_temp.plot([x2 - px, x1 - px], [y2 - py, y1 - py],
-                               color='gray', linewidth=1.5, alpha=0.6, zorder=1)
-            elif not is_bidirectional:
-                # Draw single line for unidirectional edge
-                ax_temp.plot([x1, x2], [y1, y2],
-                           color='gray', linewidth=1.5, alpha=0.6, zorder=1)
-        
-        # Determine node colors (from value_dict if provided)
-        if value_dict:
-            values = list(value_dict.values())
-            vmin, vmax = min(values), max(values)
-            if vmax > vmin:
-                norm = plt.Normalize(vmin=vmin, vmax=vmax)
-            else:
-                norm = plt.Normalize(vmin=0, vmax=1)
-            cmap = plt.cm.RdYlGn
-        
-        # Draw nodes
-        for node in self.network.nodes():
-            x, y = pos[node]
-            
-            # Use value-based color if available
-            if value_dict and node in value_dict:
-                node_color = cmap(norm(value_dict[node]))
-            else:
-                node_color = 'lightblue'
-            
-            circle = Circle((x, y), radius=1.0, color=node_color, 
-                          ec='black', linewidth=2, zorder=2)
-            ax_temp.add_patch(circle)
-            
-            # Draw node label
-            ax_temp.text(x, y, str(node), ha='center', va='center',
-                        fontsize=10, fontweight='bold', zorder=3)
-            
-            # Show value below node if value_dict provided
-            if value_dict and node in value_dict:
-                ax_temp.text(x, y - 1.2, f'{value_dict[node]:.2f}',
-                            ha='center', va='top', fontsize=8, color='darkblue')
-        
-        ax_temp.set_aspect('equal')
-        ax_temp.axis('off')
-        
-        # Set axis limits with padding (same as in _render_single_frame)
-        if pos:
-            x_vals = [p[0] for p in pos.values()]
-            y_vals = [p[1] for p in pos.values()]
-            x_margin = (max(x_vals) - min(x_vals)) * 0.1 + 1
-            y_margin = (max(y_vals) - min(y_vals)) * 0.1 + 1
-            ax_temp.set_xlim(min(x_vals) - x_margin, max(x_vals) + x_margin)
-            ax_temp.set_ylim(min(y_vals) - y_margin, max(y_vals) + y_margin)
-        
-        # Remove tight_layout to ensure exact pixel alignment with main figure
-        # plt.tight_layout()  # REMOVED - causes size mismatch
-        fig_temp.subplots_adjust(left=0, right=1, top=1, bottom=0)  # Use exact bounds
-        
-        # Render to image
-        fig_temp.canvas.draw()
-        buf = fig_temp.canvas.buffer_rgba()
-        network_image = np.asarray(buf)
-        # Convert RGBA to RGB
-        network_image_rgb = network_image[:, :, :3].copy()
-        
-        # Close temporary figure
-        plt.close(fig_temp)
-        
-        # Cache the results
-        self._cached_network_pos = pos
-        self._cached_network_image = network_image_rgb
-        self._cached_fig_size = current_fig_size
-        self._network_cache_valid = True
-        
-        return pos, network_image_rgb
     
     def _render_single_frame(self, goal_info=None, value_dict=None, title=None, capture_frame=False):
         """
@@ -840,45 +654,98 @@ class parallel_env(ParallelEnv):
         
         self.ax.clear()
         
-        # Get cached network image (static: nodes + edges) and positions
-        # This is a MAJOR performance optimization - the network never changes,
-        # so we render it once and reuse the image for all subsequent frames
-        pos, network_image = self._get_or_cache_network_image(value_dict=value_dict)
-        if pos is None or network_image is None:
-            return None
+        # Get node positions
+        pos = {}
+        for node in self.network.nodes():
+            if 'x' in self.network.nodes[node] and 'y' in self.network.nodes[node]:
+                pos[node] = (self.network.nodes[node]['x'], self.network.nodes[node]['y'])
+            else:
+                # Use spring layout if coordinates not available
+                pos = nx.spring_layout(self.network, seed=42)
+                break
         
-        # First, set proper axis limits based on node positions (BEFORE displaying image)
-        if pos:
-            x_vals = [p[0] for p in pos.values()]
-            y_vals = [p[1] for p in pos.values()]
-            x_margin = (max(x_vals) - min(x_vals)) * 0.1 + 1
-            y_margin = (max(y_vals) - min(y_vals)) * 0.1 + 1
-            xlim = (min(x_vals) - x_margin, max(x_vals) + x_margin)
-            ylim = (min(y_vals) - y_margin, max(y_vals) + y_margin)
-            self.ax.set_xlim(xlim)
-            self.ax.set_ylim(ylim)
-        else:
-            xlim = (-10, 10)
-            ylim = (-10, 10)
-            self.ax.set_xlim(xlim)
-            self.ax.set_ylim(ylim)
+        # Draw edges with separate arrows for bidirectional roads
+        for u, v in self.network.edges():
+            x1, y1 = pos[u]
+            x2, y2 = pos[v]
+            
+            # Check if edge is bidirectional
+            is_bidirectional = self.network.has_edge(v, u)
+            
+            if is_bidirectional and u < v:
+                # Draw two parallel arrows for bidirectional edges (only once)
+                # Calculate offset perpendicular to edge
+                dx = x2 - x1
+                dy = y2 - y1
+                length = np.sqrt(dx**2 + dy**2)
+                if length > 0:
+                    # Perpendicular unit vector
+                    px = -dy / length * 0.15
+                    py = dx / length * 0.15
+                    
+                    # First arrow (offset to one side)
+                    arrow1 = FancyArrowPatch(
+                        (x1 + px, y1 + py), (x2 + px, y2 + py),
+                        arrowstyle='->', mutation_scale=15, 
+                        linewidth=1.5, color='gray', alpha=0.6
+                    )
+                    self.ax.add_patch(arrow1)
+                    
+                    # Second arrow (offset to other side)
+                    arrow2 = FancyArrowPatch(
+                        (x2 - px, y2 - py), (x1 - px, y1 - py),
+                        arrowstyle='->', mutation_scale=15,
+                        linewidth=1.5, color='gray', alpha=0.6
+                    )
+                    self.ax.add_patch(arrow2)
+            elif not is_bidirectional:
+                # Draw single arrow for unidirectional edge
+                arrow = FancyArrowPatch(
+                    (x1, y1), (x2, y2),
+                    arrowstyle='->', mutation_scale=15,
+                    linewidth=1.5, color='gray', alpha=0.6
+                )
+                self.ax.add_patch(arrow)
         
-        # Display the cached network image as background with correct extent
-        # The extent must match the axis limits exactly for proper alignment
-        self.ax.imshow(network_image, aspect='auto', 
-                      extent=[xlim[0], xlim[1], ylim[0], ylim[1]], 
-                      zorder=0, origin='upper')
+        # Determine node colors (from value_dict if provided)
+        if value_dict:
+            values = list(value_dict.values())
+            vmin, vmax = min(values), max(values)
+            if vmax > vmin:
+                norm = plt.Normalize(vmin=vmin, vmax=vmax)
+            else:
+                norm = plt.Normalize(vmin=0, vmax=1)
+            cmap = plt.cm.RdYlGn
         
-        # Now we only draw the DYNAMIC elements (agents, vehicles, goals)
-        # on top of the cached static network image
+        # Draw nodes (larger, without labels)
+        for node in self.network.nodes():
+            x, y = pos[node]
+            
+            # Use value-based color if available
+            if value_dict and node in value_dict:
+                node_color = cmap(norm(value_dict[node]))
+            else:
+                node_color = 'lightblue'
+            
+            circle = Circle((x, y), radius=1.0, color=node_color, 
+                          ec='black', linewidth=2, zorder=2)
+            self.ax.add_patch(circle)
+            
+            # Draw node label
+            self.ax.text(x, y, str(node), ha='center', va='center',
+                        fontsize=10, fontweight='bold', zorder=3)
+            
+            # Show value below node if value_dict provided
+            if value_dict and node in value_dict:
+                self.ax.text(x, y - 1.2, f'{value_dict[node]:.2f}',
+                            ha='center', va='top', fontsize=8, color='darkblue')
         
-        # Highlight goal node with dashed outline (dynamic - depends on goal_info)
+        # Highlight goal node with dashed outline (like multigrid)
         if goal_info and 'node' in goal_info:
             goal_node = goal_info['node']
             if goal_node in pos:
                 gx, gy = pos[goal_node]
                 # Dashed outline circle around goal
-                from matplotlib.patches import Circle
                 goal_outline = Circle((gx, gy), radius=1.3, 
                                       color='none', ec='gold', 
                                       linewidth=4, linestyle='--', zorder=3)
@@ -901,7 +768,7 @@ class parallel_env(ParallelEnv):
                 edge, coord = agent_pos
                 x1, y1 = pos[edge[0]]
                 x2, y2 = pos[edge[1]]
-                edge_length = self._get_edge_length(edge)
+                edge_length = self.network[edge[0]][edge[1]]['length']
                 
                 if edge_length > 0:
                     t = coord / edge_length
@@ -1008,9 +875,11 @@ class parallel_env(ParallelEnv):
                             spacing = vehicle_width * 0.8
                             offset_x = -spacing/2 + (i * spacing / (num_passengers - 1))
                         
-                        # Draw smaller red dot inside vehicle using plot (faster than Circle)
-                        self.ax.plot(x + offset_x, y, 'o', color='red', markeredgecolor='darkred',
-                                   markeredgewidth=1, markersize=5, zorder=6)
+                        # Draw smaller red dot inside vehicle (smaller than walking human)
+                        passenger_circle = Circle((x + offset_x, y), radius=0.10, 
+                                                 color='red', ec='darkred', 
+                                                 linewidth=1, zorder=6)
+                        self.ax.add_patch(passenger_circle)
                 
                 # Show destination if set as curved dotted arc (blue, like vehicle)
                 dest = self.vehicle_destinations.get(agent)
@@ -1094,9 +963,10 @@ class parallel_env(ParallelEnv):
                 # Check if human is aboard a vehicle
                 aboard = self.human_aboard.get(agent)
                 if aboard is None:
-                    # Human not aboard - show as red dot using plot (much faster than Circle)
-                    self.ax.plot(x, y, 'o', color='red', markeredgecolor='darkred',
-                               markeredgewidth=1.5, markersize=8, zorder=5)
+                    # Human not aboard - show as red dot
+                    circle = Circle((x, y), radius=0.15, color='red',
+                                  ec='darkred', linewidth=1.5, zorder=5)
+                    self.ax.add_patch(circle)
                 # If aboard, they are drawn inside the vehicle (see vehicle rendering above)
         
         # Draw dashed line from agent to their goal (like multigrid)
@@ -1217,10 +1087,132 @@ class parallel_env(ParallelEnv):
             self._use_graphical = False
     
     def start_video_recording(self):
-        """Start recording frames for video"""
+        """Start recording frames for video and initialize persistent artists"""
         self._recording = True
         self.frames = []
         self.enable_rendering('graphical')
+        
+        # Initialize persistent artists for efficient rendering
+        self._initialize_artists()
+    
+    def _initialize_artists(self):
+        """
+        Create all persistent artist objects once for efficient rendering.
+        Artists are updated each frame instead of being recreated.
+        """
+        # Import matplotlib
+        try:
+            import matplotlib
+            matplotlib.use('Agg')
+            import matplotlib.pyplot as plt
+            from matplotlib.patches import Rectangle, Circle
+            from matplotlib.lines import Line2D
+        except ImportError:
+            print("matplotlib is required. Install with: pip install matplotlib")
+            return
+        
+        # Create figure if it doesn't exist
+        if self.fig is None or self.ax is None:
+            self.fig, self.ax = plt.subplots(figsize=(12, 10))
+        
+        self.ax.clear()
+        
+        # Get node positions
+        pos = {}
+        for node in self.network.nodes():
+            if 'x' in self.network.nodes[node] and 'y' in self.network.nodes[node]:
+                pos[node] = (self.network.nodes[node]['x'], self.network.nodes[node]['y'])
+            else:
+                pos = nx.spring_layout(self.network, seed=42)
+                break
+        self._node_positions = pos
+        
+        # Draw static network (nodes and edges)
+        # This is done once and not updated
+        
+        # Draw edges as simple lines (not arrows - direction clear from movement)
+        for u, v in self.network.edges():
+            x1, y1 = pos[u]
+            x2, y2 = pos[v]
+            
+            # Check if edge is bidirectional
+            is_bidirectional = self.network.has_edge(v, u)
+            
+            if is_bidirectional and u < v:
+                # Draw two parallel lines for bidirectional edges
+                dx = x2 - x1
+                dy = y2 - y1
+                length = np.sqrt(dx**2 + dy**2)
+                if length > 0:
+                    # Perpendicular unit vector for offset
+                    px = -dy / length * 0.15
+                    py = dx / length * 0.15
+                    
+                    # First line (offset to one side)
+                    self.ax.plot([x1 + px, x2 + px], [y1 + py, y2 + py],
+                               'gray', linewidth=1.5, alpha=0.6, zorder=1)
+                    
+                    # Second line (offset to other side)
+                    self.ax.plot([x2 - px, x1 - px], [y2 - py, y1 - py],
+                               'gray', linewidth=1.5, alpha=0.6, zorder=1)
+            elif not is_bidirectional:
+                # Draw single line for unidirectional edge
+                self.ax.plot([x1, x2], [y1, y2],
+                           'gray', linewidth=1.5, alpha=0.6, zorder=1)
+        
+        # Draw nodes
+        for node in self.network.nodes():
+            x, y = pos[node]
+            circle = Circle((x, y), radius=1.0, color='lightblue',
+                          ec='black', linewidth=2, zorder=2)
+            self.ax.add_patch(circle)
+            self.ax.text(x, y, str(node), ha='center', va='center',
+                        fontsize=10, fontweight='bold', zorder=3)
+        
+        # Set axis limits based on node positions
+        x_coords = [p[0] for p in pos.values()]
+        y_coords = [p[1] for p in pos.values()]
+        margin = 2.0
+        self.ax.set_xlim(min(x_coords) - margin, max(x_coords) + margin)
+        self.ax.set_ylim(min(y_coords) - margin, max(y_coords) + margin)
+        self.ax.set_aspect('equal')
+        self.ax.axis('off')
+        
+        # Create persistent artists for each agent (vehicles and humans)
+        self._vehicle_artists = {}
+        self._human_artists = {}
+        self._passenger_artists = {}  # Dict of dict: {vehicle: {human: artist}}
+        self._destination_artists = {}
+        
+        # Create vehicle artists
+        for agent in self.vehicle_agents:
+            vehicle_capacity = self.agent_attributes.get(agent, {}).get('capacity', 4)
+            vehicle_width = max(0.8, 0.4 + vehicle_capacity * 0.25)
+            vehicle_height = 0.3
+            
+            rect = Rectangle((0, 0), vehicle_width, vehicle_height,
+                           color='cornflowerblue', ec='darkblue', linewidth=1.5,
+                           zorder=4, alpha=0.7, visible=False)
+            self.ax.add_patch(rect)
+            self._vehicle_artists[agent] = rect
+            
+            # Create destination arc artist (initially invisible)
+            dest_line = Line2D([], [], linestyle='--', color='dodgerblue',
+                             linewidth=2, alpha=0.7, zorder=3, visible=False)
+            self.ax.add_line(dest_line)
+            self._destination_artists[agent] = dest_line
+        
+        # Create human artists (walking)
+        for agent in self.human_agents:
+            # Create artist (initially invisible)
+            circle = Circle((0, 0), radius=0.15, color='red', ec='darkred',
+                          linewidth=1.5, zorder=5, visible=False)
+            self.ax.add_patch(circle)
+            self._human_artists[agent] = circle
+        
+        # Create passenger artists (smaller circles for humans aboard vehicles)
+        # We'll create them dynamically as needed since passenger count varies
+        self._passenger_artists = {}
     
     def save_video(self, filename='transport_video.mp4', fps=20):
         """
@@ -1330,9 +1322,6 @@ class parallel_env(ParallelEnv):
         # Initialize state components
         self.real_time = 0.0
         self._last_render_time = 0.0  # For uniform frame generation in render()
-        
-        # Invalidate network rendering cache (in case network changed)
-        self._network_cache_valid = False
         
         # Initialize empty dictionaries first (needed by initialize_random_positions)
         self.agent_positions = {}
