@@ -187,7 +187,7 @@ class parallel_env(ParallelEnv):
         self._network_cache_valid = False   # Whether cache is valid
         self.frames = []  # For video recording
         self._last_render_time = 0.0  # Track last "click" time for uniform frame generation
-        self._time_per_frame = 0.02 #5  # Capture frame every 0.5 time units ("clicks")
+        self._time_per_frame = 0.02  # Capture frame every 0.02 time units ("clicks") for fluid motion
         
         # Performance optimization: precompute edge lengths dictionary for O(1) lookup
         self._edge_lengths = {}  # Will be populated after network is set
@@ -792,7 +792,9 @@ class parallel_env(ParallelEnv):
             ax_temp.set_xlim(min(x_vals) - x_margin, max(x_vals) + x_margin)
             ax_temp.set_ylim(min(y_vals) - y_margin, max(y_vals) + y_margin)
         
-        plt.tight_layout()
+        # Remove tight_layout to ensure exact pixel alignment with main figure
+        # plt.tight_layout()  # REMOVED - causes size mismatch
+        fig_temp.subplots_adjust(left=0, right=1, top=1, bottom=0)  # Use exact bounds
         
         # Render to image
         fig_temp.canvas.draw()
@@ -1006,11 +1008,9 @@ class parallel_env(ParallelEnv):
                             spacing = vehicle_width * 0.8
                             offset_x = -spacing/2 + (i * spacing / (num_passengers - 1))
                         
-                        # Draw smaller red dot inside vehicle (smaller than walking human)
-                        passenger_circle = Circle((x + offset_x, y), radius=0.10, 
-                                                 color='red', ec='darkred', 
-                                                 linewidth=1, zorder=6)
-                        self.ax.add_patch(passenger_circle)
+                        # Draw smaller red dot inside vehicle using plot (faster than Circle)
+                        self.ax.plot(x + offset_x, y, 'o', color='red', markeredgecolor='darkred',
+                                   markeredgewidth=1, markersize=5, zorder=6)
                 
                 # Show destination if set as curved dotted arc (blue, like vehicle)
                 dest = self.vehicle_destinations.get(agent)
@@ -1094,10 +1094,9 @@ class parallel_env(ParallelEnv):
                 # Check if human is aboard a vehicle
                 aboard = self.human_aboard.get(agent)
                 if aboard is None:
-                    # Human not aboard - show as red dot
-                    circle = Circle((x, y), radius=0.15, color='red',
-                                  ec='darkred', linewidth=1.5, zorder=5)
-                    self.ax.add_patch(circle)
+                    # Human not aboard - show as red dot using plot (much faster than Circle)
+                    self.ax.plot(x, y, 'o', color='red', markeredgecolor='darkred',
+                               markeredgewidth=1.5, markersize=8, zorder=5)
                 # If aboard, they are drawn inside the vehicle (see vehicle rendering above)
         
         # Draw dashed line from agent to their goal (like multigrid)
