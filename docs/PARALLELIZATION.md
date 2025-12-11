@@ -4,7 +4,7 @@ This document describes the different forms of pickling and data passing used in
 
 ## Overview
 
-EMPO uses Python's `multiprocessing` module with `ProcessPoolExecutor` for parallel computation. There are two main parallelization sites:
+EMPO uses Python's `multiprocessing` module with `ProcessPoolExecutor` for parallel computation, in addition to the parallelization that pytorch does internally. There are currently two such non-pytorch parallelization sites:
 
 1. **DAG Construction** (`src/empo/world_model.py`) - Parallelizes BFS exploration of the state space
 2. **Backward Induction** (`src/empo/backward_induction.py`) - Parallelizes policy computation across states
@@ -97,7 +97,7 @@ ctx = mp.get_context('fork')
 - The `fork` context creates child processes that inherit the parent's memory (copy-on-write)
 - Large data structures (states, transitions, V-values) are shared without explicit copying
 - Significantly faster for large state spaces
-- Only works on Unix-like systems (Linux, macOS - not Windows)
+- Only works inside a Docker container (standard approach in this project) or on Unix-like systems (Linux, macOS - not Windows)
 
 ### Data Passing Strategy: Shared Memory via Module Globals
 
@@ -186,7 +186,7 @@ Main Process                         Worker Processes (forked)
 
 ### Level-by-Level Execution
 
-Because backward induction requires V-values from successor states, computation must proceed level-by-level:
+Because backward induction requires V-values from successor states, computation must proceed level-by-level (a level is a set of states neither of which is a possible ancestor state of another):
 
 ```python
 for level_idx, level in enumerate(dependency_levels):
@@ -216,7 +216,7 @@ for level_idx, level in enumerate(dependency_levels):
 | Aspect | DAG Construction | Backward Induction |
 |--------|------------------|-------------------|
 | **Context** | `spawn` | `fork` |
-| **Platform** | Cross-platform | Unix-only |
+| **Platform** | Cross-platform | Docker/Unix-only |
 | **Data Passing** | Pickle + initializer | Module globals (fork inheritance) |
 | **Large Data** | Copied per worker | Shared (copy-on-write) |
 | **Custom Functions** | N/A | cloudpickle |
@@ -235,7 +235,7 @@ for level_idx, level in enumerate(dependency_levels):
 - Environment may use threads or CUDA
 
 ### When to use `fork` with shared globals:
-- Unix-only deployment is acceptable
+- Docker/Unix-only deployment is acceptable
 - Large read-only data structures
 - Minimal per-task data transfer
 - Need custom functions (use cloudpickle)

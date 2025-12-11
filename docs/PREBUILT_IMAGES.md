@@ -1,6 +1,24 @@
 # Pre-built Container Images
 
-This document explains how EMPO uses pre-built Docker container images to speed up development setup, especially for automated development environments like GitHub Codespaces or AI coding assistants.
+This document explains how EMPO uses pre-built Docker container images for **automated environments** like GitHub Codespaces, CI/CD pipelines, and AI coding assistants.
+
+> **⚠️ For Active Development**: If you're doing active development on EMPO, use the standard workflow instead:
+> ```bash
+> make up    # Builds locally and mounts your code
+> make test  # Runs tests with your local changes
+> make shell # Opens a shell in the container
+> ```
+> This ensures your local code changes and branch are always reflected. Pre-built images are primarily for **ephemeral environments** where fast startup matters more than local modifications.
+
+## When to Use Pre-built Images vs Local Build
+
+| Scenario | Recommended Approach |
+|----------|---------------------|
+| Active development on a feature branch | `make up` (local build) |
+| GitHub Codespaces | Pre-built image (auto-configured) |
+| CI/CD pipelines | Pre-built image |
+| Quick testing without Docker build time | Pre-built image |
+| Working on Dockerfile or requirements changes | `make up` (local build) |
 
 ## Overview
 

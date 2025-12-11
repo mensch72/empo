@@ -145,8 +145,9 @@ This architecture enables:
 
 ## Known Limitations
 
-### Box.contains
-Boxes are encoded only by grid presence. Contents of boxes are not encoded. If needed, add a list-based encoder for Box objects.
-
 ### Extensibility
 When adding new object types or agent features to the multigrid environment, update the encoders accordingly. See the maintenance note in `multigrid.py`.
+
+### (unused) Box.contains
+Boxes are encoded only by grid presence. Contents of boxes are not encoded. If needed, add a list-based encoder for Box objects.
+But this project is not using boxes anyway.

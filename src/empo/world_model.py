@@ -405,7 +405,7 @@ class WorldModel(gym.Env):
         # Set up progress bar
         pbar: Optional[tqdm[int]] = None
         if not quiet:
-            pbar = tqdm(desc="Building DAG", unit="states")
+            pbar = tqdm(desc="Building DAG", unit=" states")
         
         states_processed = 0
         while queue:

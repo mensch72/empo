@@ -5,7 +5,7 @@ Bellman Backward Induction Example
 This script demonstrates backward induction on the SmallOneOrTwoChambersMapEnv:
 1. Computes the DAG of all reachable states
 2. Performs backward induction from terminal states to the initial state
-3. Uses the Bellman equation to compute value functions and optimal policies
+3. Uses the Bellman equation to compute standard value functions and an optimal policy for the robot based on a custom reward function (this is not what we will later do in this project, it is just to show that also standard value functions can be computed this way!)
 4. Assumes humans move randomly and the robot follows an optimal policy
 5. Produces a movie of an episode showing optimal robot play vs random humans
 
