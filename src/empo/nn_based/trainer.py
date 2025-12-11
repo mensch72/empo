@@ -91,7 +91,12 @@ class Trainer:
         """
         if random.random() < epsilon:
             if self.exploration_policy is not None:
-                return random.choices(range(self.q_network.num_actions), weights=self.exploration_policy)[0]
+                # Support both callable (state-dependent) and list (static) policies
+                if callable(self.exploration_policy):
+                    weights = self.exploration_policy(state, world_model, agent_idx)
+                else:
+                    weights = self.exploration_policy
+                return random.choices(range(self.q_network.num_actions), weights=weights)[0]
             else:
                 return random.randint(0, self.q_network.num_actions - 1)
         

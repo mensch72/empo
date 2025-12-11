@@ -39,7 +39,7 @@ The fact that some of the code uses reinforcement learning (RL) algorithms can l
 
 ## Core Framework
 
-The EMPO framework provides:
+The EMPO framework so far provides:
 
 ### World Model Abstraction (`src/empo/`)
 - **WorldModel**: Abstract base class for environments with explicit state management
@@ -57,14 +57,19 @@ The EMPO framework provides:
   - Supports parallel computation for large state spaces
   - Configurable temperature (β) for policy stochasticity
 
-### Vendored MultiGrid (`vendor/multigrid/`)
+### Vendored Test Environments
+
+#### MultiGrid (`vendor/multigrid/`)
 Extended multi-agent gridworld environment with:
 - State management and transition probability computation
 - New object types: Rock, Block, UnsteadyGround, MagicWall
 - Map-based environment specification
 - Agent-specific capabilities (can_push_rocks, can_enter_magic_walls)
 
-See [docs/API.md](docs/API.md) for complete API reference.
+#### Transport (`vendor/ai_transport/`)
+An environment in which a fleet of autonomous passenger vehicles (robots) can transport humans between nodes in a road network.
+
+See [docs/API.md](docs/API.md) for API reference.
 
 ## Features
 

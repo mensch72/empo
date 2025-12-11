@@ -246,6 +246,8 @@ def train_multigrid_neural_policy_prior(
     verbose: bool = True,
     reward_shaping: bool = True,
     use_path_based_shaping: bool = None,  # Alias for reward_shaping
+    robot_shaping_exponent: float = 0.0,
+    button_toggle_bias: float = 0.0,
     epsilon: float = 0.3,
     exploration_policy: Optional[List[float]] = None,
     updates_per_episode: int = 1,
@@ -270,6 +272,25 @@ def train_multigrid_neural_policy_prior(
     2. The phi network learns from fresh Q-network policies at each step
     3. No lag between Q-network improvement and phi network learning
     
+    Robot Shaping (for control button scenarios):
+        When robot_shaping_exponent > 0, uses multiplicative potential shaping:
+        Φ(s) = Φ_human(s) * (0.5 * |Φ_robot(s)|^a)
+        
+        The robot factor is normalized to [0, 0.5] so that:
+        - When robot is at goal: factor=0, Φ=0 (best possible)
+        - When robot is far: factor=0.5, Φ=0.5*Φ_human
+        
+        This creates an intentional discontinuity when a robot becomes button-controlled:
+        Before: Φ=Φ_human, After: Φ≤0.5*Φ_human (less negative = better)
+        This gives a positive shaping reward, incentivizing the human to let the
+        robot program buttons. Only considers robots that are controlled_agent
+        of some ControlButton in the environment.
+    
+    Button-Aware Exploration:
+        When button_toggle_bias > 0, the exploration policy is biased toward
+        toggling when the human agent faces a programmed control button.
+        This helps discover the button-control mechanism faster.
+    
     Args:
         world_model: Multigrid environment (alias for env).
         env: Multigrid environment.
@@ -291,8 +312,14 @@ def train_multigrid_neural_policy_prior(
         verbose: Print progress.
         reward_shaping: Use distance-based reward shaping.
         use_path_based_shaping: Alias for reward_shaping.
+        robot_shaping_exponent: Exponent 'a' for multiplicative robot shaping.
+            When > 0, combines human and robot potentials as Φ_h * |Φ_r|^a.
+            Only uses robots controlled by ControlButtons. Default 0.0 (disabled).
+        button_toggle_bias: Probability of toggling when facing a programmed button
+            during exploration. Default 0.0 (disabled, uniform exploration).
         epsilon: Exploration rate for epsilon-greedy.
         exploration_policy: Optional action probability weights for exploration.
+            Can be a list (static) or callable(state, world_model, agent_idx) -> weights.
         updates_per_episode: Number of training updates per episode.
         train_phi_network: Whether to train a direct phi network for fast marginal queries.
             When True, trains h_phi(s, agent) -> P(action) to approximate E_g[π(a|s,g)].
@@ -416,6 +443,74 @@ def train_multigrid_neural_policy_prior(
     # Track current world_model for reward shaping (updated in ensemble training)
     current_world_model = [env]  # Use list to allow modification in closure
     
+    # Detect button-controlled robots for robot shaping
+    # Scan grid for ControlButton cells and collect their controlled_agent indices
+    button_controlled_robots = set()
+    button_positions = {}  # Maps (x, y) -> controlled_agent index
+    if hasattr(env, 'grid'):
+        for j in range(grid_height):
+            for i in range(grid_width):
+                cell = env.grid.get(i, j)
+                if cell is not None and cell.type == 'controlbutton':
+                    if hasattr(cell, 'controlled_agent') and cell.controlled_agent is not None:
+                        button_controlled_robots.add(cell.controlled_agent)
+                        if hasattr(cell, 'triggered_action') and cell.triggered_action is not None:
+                            button_positions[(i, j)] = cell.controlled_agent
+    
+    # Create button-aware exploration policy if button_toggle_bias > 0
+    # Direction vectors: 0=east(+x), 1=south(+y), 2=west(-x), 3=north(-y)
+    DIR_TO_DELTA = {0: (1, 0), 1: (0, 1), 2: (-1, 0), 3: (0, -1)}
+    TOGGLE_ACTION = 6  # Standard toggle action in multigrid
+    
+    def button_aware_exploration(state, world_model, agent_idx):
+        """
+        State-dependent exploration policy that biases toward toggle when facing a button.
+        """
+        # Get agent position and direction from state
+        _, agent_states, _, _ = state
+        if agent_idx >= len(agent_states):
+            return [1.0] * num_actions  # Uniform fallback
+        
+        agent_state = agent_states[agent_idx]
+        if len(agent_state) < 3:
+            return [1.0] * num_actions
+        
+        agent_x, agent_y = int(agent_state[0]), int(agent_state[1])
+        agent_dir = int(agent_state[2])
+        
+        # Check if there's a programmed button in front of the agent
+        dx, dy = DIR_TO_DELTA.get(agent_dir, (0, 0))
+        front_pos = (agent_x + dx, agent_y + dy)
+        
+        # Check current world_model's grid for button at front_pos
+        wm = current_world_model[0]
+        facing_programmed_button = False
+        if hasattr(wm, 'grid') and front_pos in button_positions:
+            cell = wm.grid.get(front_pos[0], front_pos[1])
+            if cell is not None and cell.type == 'controlbutton':
+                if hasattr(cell, 'triggered_action') and cell.triggered_action is not None:
+                    facing_programmed_button = True
+        
+        if facing_programmed_button and TOGGLE_ACTION < num_actions:
+            # Bias toward toggle action
+            weights = [1.0] * num_actions
+            # Redistribute probability: toggle gets button_toggle_bias, rest share remaining
+            remaining = 1.0 - button_toggle_bias
+            for i in range(num_actions):
+                if i == TOGGLE_ACTION:
+                    weights[i] = button_toggle_bias
+                else:
+                    weights[i] = remaining / (num_actions - 1)
+            return weights
+        else:
+            # Uniform exploration
+            return [1.0] * num_actions
+    
+    # Use button-aware exploration if enabled, otherwise use provided or None
+    effective_exploration_policy = exploration_policy
+    if button_toggle_bias > 0 and button_positions:
+        effective_exploration_policy = button_aware_exploration
+    
     # Create reward function with potential-based shaping (Ng et al. 1999)
     # F(s,a,s') = γ * Φ(s') - Φ(s) where Φ(s) = -path_cost(agent, goal) / max_cost
     # Path cost sums passing difficulty scores along the shortest path
@@ -464,9 +559,50 @@ def train_multigrid_neural_policy_prior(
         # Use world_model for path cost computation with passing difficulty scores
         wm = current_world_model[0]
         
-        # Φ(s) = -path_cost(agent, goal) / max_cost
-        phi_s = path_calc.compute_potential(curr_pos, target, wm)
-        phi_s_prime = path_calc.compute_potential(next_pos, target, wm)
+        # Compute human potential: Φ_human = -path_cost(human, goal) / max_cost
+        phi_human_s = path_calc.compute_potential(curr_pos, target, wm)
+        phi_human_s_prime = path_calc.compute_potential(next_pos, target, wm)
+        
+        # Compute robot potential if robot_shaping_exponent > 0
+        # Uses multiplicative combination: Φ = Φ_human * (0.5 * |Φ_robot|^a)
+        # The robot factor is normalized to [0, 0.5] so that:
+        # - When robot is at goal (Φ_robot=0): factor=0, Φ=0 (best)
+        # - When robot is far (Φ_robot=-1): factor=0.5, Φ=0.5*Φ_human
+        # This creates a discontinuity when a robot becomes button-controlled:
+        # Before: Φ=Φ_human, After: Φ=0.5*Φ_human (at most)
+        # Since Φ_human<0, this makes Φ less negative (better), giving positive
+        # shaping reward - an incentive to let the robot program the button.
+        if robot_shaping_exponent > 0 and button_controlled_robots:
+            # Find the best (closest to 0) robot potential
+            min_robot_phi_s = -1.0
+            min_robot_phi_s_prime = -1.0
+            
+            for robot_idx in button_controlled_robots:
+                if robot_idx < len(curr_agent_states):
+                    robot_curr_pos = (int(curr_agent_states[robot_idx][0]),
+                                     int(curr_agent_states[robot_idx][1]))
+                    robot_phi_s = path_calc.compute_potential(robot_curr_pos, target, wm)
+                    if robot_phi_s > min_robot_phi_s:
+                        min_robot_phi_s = robot_phi_s
+                
+                if robot_idx < len(next_agent_states):
+                    robot_next_pos = (int(next_agent_states[robot_idx][0]),
+                                     int(next_agent_states[robot_idx][1]))
+                    robot_phi_s_prime = path_calc.compute_potential(robot_next_pos, target, wm)
+                    if robot_phi_s_prime > min_robot_phi_s_prime:
+                        min_robot_phi_s_prime = robot_phi_s_prime
+            
+            # Multiplicative potential with robot factor normalized to [0, 0.5]:
+            # Φ = Φ_human * (0.5 * |Φ_robot|^a)
+            # Both Φ_human and Φ_robot are in [-1, 0], so |Φ_robot| in [0, 1]
+            robot_factor_s = 0.5 * (abs(min_robot_phi_s) ** robot_shaping_exponent)
+            robot_factor_s_prime = 0.5 * (abs(min_robot_phi_s_prime) ** robot_shaping_exponent)
+            phi_s = phi_human_s * robot_factor_s
+            phi_s_prime = phi_human_s_prime * robot_factor_s_prime
+        else:
+            # Standard human-only potential
+            phi_s = phi_human_s
+            phi_s_prime = phi_human_s_prime
         
         # Shaping: F(s,a,s') = γ * Φ(s') - Φ(s)
         shaping_reward = gamma * phi_s_prime - phi_s
@@ -485,7 +621,7 @@ def train_multigrid_neural_policy_prior(
         gamma=gamma,
         target_update_freq=target_update_freq,
         device=device,
-        exploration_policy=exploration_policy,
+        exploration_policy=effective_exploration_policy,
         reward_fn=reward_fn
     )
     

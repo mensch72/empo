@@ -15,6 +15,12 @@ The human learns policies for 2 goals:
 - Goal 1: Get the robot to position (4, 1) - top position
 - Goal 2: Get the robot to position (4, 5) - bottom position
 
+Training features:
+- Multiplicative robot shaping: Φ = Φ_human * |Φ_robot|^a
+  This makes robot-to-goal progress matter when human path is blocked.
+- Button-aware exploration: Higher probability of toggling when facing a button.
+  This helps discover the button-control mechanism faster.
+
 Workflow:
 1. Prequel phase: Robot programs buttons and steps aside to (4,3) facing right, human moves to (2,3)
 2. Learning phase: Train neural network for human to reach goal positions via button control
@@ -922,6 +928,7 @@ def train_and_rollout_with_learned_policy(quick_mode=False):
     print(f"  Goals: {goal_cells}")
     print(f"  Training episodes: {n_episodes}")
     print("  Human learns to guide robot to goal positions via control buttons")
+    print("  Using multiplicative robot shaping and button-aware exploration")
     print()
     
     device = 'cpu'
@@ -945,6 +952,8 @@ def train_and_rollout_with_learned_policy(quick_mode=False):
             train_phi_network=False,
             epsilon=0.3,
             reward_shaping=True,  # Use path-based reward shaping with passing costs
+            robot_shaping_exponent=0.5,  # Multiplicative potential: Φ_human * |Φ_robot|^0.5
+            button_toggle_bias=0.5,  # 50% chance to toggle when facing programmed button
             device=device,
             verbose=True
         )
