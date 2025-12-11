@@ -2279,6 +2279,10 @@ class MultiGridEnv(WorldModel):
 
         # Window to use for human rendering mode
         self.window = None
+        
+        # Video recording state
+        self._recording = False
+        self._video_frames = []
 
         # Environment configuration
         self.width = width
@@ -3405,6 +3409,10 @@ class MultiGridEnv(WorldModel):
 
         if mode == 'human':
             self.window.show_img(img)
+        
+        # Auto-capture frame if recording
+        if self._recording and mode == 'rgb_array':
+            self._video_frames.append(img.copy())
 
         return img
     
@@ -3484,6 +3492,133 @@ class MultiGridEnv(WorldModel):
                             img[py+oy, px+ox] = color
             x += x_inc
             y += y_inc
+
+    # =========================================================================
+    # Video Recording Methods
+    # =========================================================================
+    
+    def start_video_recording(self):
+        """
+        Start recording frames for video.
+        
+        After calling this, each call to render() with mode='rgb_array' will
+        automatically store the frame. Call save_video() to save the recording.
+        
+        Example:
+            env.start_video_recording()
+            for step in range(100):
+                env.step(actions)
+                env.render(mode='rgb_array')  # Frame automatically captured
+            env.save_video('output.mp4', fps=10)
+        """
+        self._recording = True
+        self._video_frames = []
+    
+    def stop_video_recording(self):
+        """
+        Stop recording frames without saving.
+        
+        Use this to cancel a recording. To save frames, use save_video() instead.
+        """
+        self._recording = False
+        self._video_frames = []
+    
+    def capture_frame(self, tile_size=TILE_PIXELS):
+        """
+        Capture the current frame and add it to the video recording.
+        
+        This is called automatically by render() when recording is active,
+        but can also be called manually to capture specific frames.
+        
+        Args:
+            tile_size: Size of each grid cell in pixels (default: TILE_PIXELS)
+            
+        Returns:
+            The captured frame as a numpy array, or None if not recording.
+        """
+        if not self._recording:
+            return None
+        
+        img = self.render(mode='rgb_array', tile_size=tile_size)
+        if img is not None:
+            self._video_frames.append(img.copy())
+        return img
+    
+    def save_video(self, filename='multigrid_video.mp4', fps=10):
+        """
+        Save recorded frames as video.
+        
+        Uses imageio for fast encoding. Supports MP4 (requires imageio-ffmpeg)
+        and GIF formats. Falls back to GIF using PIL if imageio is not available.
+        
+        Args:
+            filename: Output filename. Extension determines format:
+                     - .mp4: H.264 video (requires imageio-ffmpeg)
+                     - .gif: Animated GIF
+            fps: Frames per second (default: 10)
+            
+        Example:
+            env.start_video_recording()
+            for _ in range(50):
+                env.step(actions)
+                env.render(mode='rgb_array')
+            env.save_video('demo.mp4', fps=5)
+        """
+        if not self._video_frames:
+            print("No frames recorded. Call start_video_recording() and render() first.")
+            return
+        
+        n_frames = len(self._video_frames)
+        print(f"Saving {n_frames} frames to {filename}...")
+        
+        # Try imageio first (fastest)
+        try:
+            import imageio.v3 as iio
+            
+            if filename.endswith('.gif'):
+                # GIF format
+                duration = 1000.0 / fps  # milliseconds per frame
+                iio.imwrite(filename, self._video_frames, duration=duration, loop=0)
+            else:
+                # MP4 or other video format
+                iio.imwrite(filename, self._video_frames, fps=fps)
+            
+            print(f"✓ Video saved to {filename} ({n_frames} frames)")
+            self._recording = False
+            self._video_frames = []
+            return
+            
+        except ImportError:
+            print("imageio not available, trying PIL for GIF...")
+        except Exception as e:
+            print(f"imageio failed ({e}), trying PIL for GIF...")
+        
+        # Fall back to PIL for GIF
+        try:
+            from PIL import Image
+            
+            gif_filename = filename if filename.endswith('.gif') else filename.rsplit('.', 1)[0] + '.gif'
+            
+            # Convert frames to PIL Images
+            pil_frames = [Image.fromarray(frame) for frame in self._video_frames]
+            
+            # Save as animated GIF
+            duration_ms = int(1000 / fps)
+            pil_frames[0].save(
+                gif_filename,
+                save_all=True,
+                append_images=pil_frames[1:],
+                duration=duration_ms,
+                loop=0
+            )
+            print(f"✓ Video saved as GIF to {gif_filename} ({n_frames} frames)")
+            
+        except Exception as e:
+            print(f"Error saving video: {e}")
+        
+        # Reset state
+        self._recording = False
+        self._video_frames = []
 
     def get_state(self):
         """

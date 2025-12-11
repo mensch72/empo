@@ -11,6 +11,8 @@ git clone https://github.com/yourusername/empo.git
 cd empo
 ```
 
+(EMPO project members: you should *not* fork but should work with the main repo directly and be given write permission)
+
 ### 2. Set Up Development Environment
 
 ```bash
@@ -45,24 +47,19 @@ python tests/test_structure.py
    ```bash
    git checkout -b feature/your-feature-name
    ```
+   Then make your changes in some editor
 
-2. Make your changes in the container:
+2. Execute code in the container:
    ```bash
    make shell
-   # Edit files, test changes
+
+   # inside container:
+   python examples/whatever.py
    ```
 
-3. Test your changes:
+3. Run tests from outside the container:
    ```bash
-   # Run tests
-   pytest tests/ -v
-   
-   # Run linters
-   ruff check .
-   black .
-   
-   # Test training script
-   python train.py --num-episodes 10
+   make test
    ```
 
 4. Commit your changes:
@@ -80,46 +77,11 @@ python tests/test_structure.py
 
 ### Python
 
-- Follow PEP 8 style guide
+- Follow PEP 8 style guide, but not slavishly
 - Use type hints where appropriate
 - Write docstrings for public functions/classes
-- Format code with `black`
-- Lint with `ruff`
-
-Example:
-```python
-def train_agent(
-    env_name: str,
-    num_episodes: int,
-    learning_rate: float = 0.001
-) -> Dict[str, Any]:
-    """
-    Train a reinforcement learning agent.
-    
-    Args:
-        env_name: Name of the environment
-        num_episodes: Number of training episodes
-        learning_rate: Learning rate for optimizer
-        
-    Returns:
-        Dictionary containing training metrics
-    """
-    # Implementation
-    pass
-```
-
-### Shell Scripts
-
-- Use `#!/bin/bash` shebang
-- Add error handling with `set -e`
-- Include comments for complex logic
-- Test scripts with `bash -n script.sh`
-
-### YAML/Configuration
-
-- Use 2 spaces for indentation
-- Include comments for non-obvious settings
-- Validate with `yamllint` if available
+- maybe format code with `black`
+- maybe lint with `ruff`
 
 ## Testing
 
@@ -139,7 +101,7 @@ def test_feature_functionality():
     assert result == expected_value
 ```
 
-### Running Tests
+### Running tests inside container
 
 ```bash
 # In container
@@ -253,12 +215,6 @@ feat: Add support for PPO algorithm
 fix: Resolve GPU memory leak in training loop
 docs: Update cluster deployment instructions
 ```
-
-## Getting Help
-
-- **Issues**: Open an issue on GitHub
-- **Discussions**: Use GitHub Discussions for questions
-- **Pull Requests**: Tag maintainers for review
 
 ## Code Review Process
 

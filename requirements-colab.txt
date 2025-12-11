@@ -22,6 +22,7 @@ pettingzoo>=1.24.0
 cloudpickle>=3.0.0
 PyYAML>=6.0
 matplotlib>=3.7.0
+imageio>=2.31.0
 tqdm>=4.65.0
 
 # Optional: graphviz for DAG visualization (also needs apt-get install graphviz)

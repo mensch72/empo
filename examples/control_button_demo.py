@@ -220,64 +220,11 @@ class RockPositionGoalSampler(PossibleGoalSampler):
         return goal, 1.0
 
 
-def create_movie(frames, output_path, fps=2):
-    """
-    Create a movie (GIF) from a list of frames.
-    
-    Args:
-        frames: List of (title, image) tuples or just images
-        output_path: Path to save the movie
-        fps: Frames per second
-    """
-    try:
-        from PIL import Image
-        import matplotlib.pyplot as plt
-        from io import BytesIO
-        
-        # Convert frames to PIL images with titles
-        pil_frames = []
-        for frame in frames:
-            if isinstance(frame, tuple):
-                title, img = frame
-            else:
-                title, img = None, frame
-            
-            # Create figure with title
-            fig, ax = plt.subplots(figsize=(8, 8))
-            ax.imshow(img)
-            if title:
-                ax.set_title(title, fontsize=14)
-            ax.axis('off')
-            
-            # Convert to image using buffer
-            buf = BytesIO()
-            fig.savefig(buf, format='png', bbox_inches='tight', dpi=100)
-            buf.seek(0)
-            pil_frames.append(Image.open(buf).copy())
-            buf.close()
-            plt.close(fig)
-        
-        # Save as GIF
-        if pil_frames:
-            duration = int(1000 / fps)  # milliseconds per frame
-            pil_frames[0].save(
-                output_path,
-                save_all=True,
-                append_images=pil_frames[1:],
-                duration=duration,
-                loop=0
-            )
-            print(f"Saved movie to {output_path}")
-            return True
-    except ImportError as e:
-        print(f"Could not create movie: {e}")
-        return False
-    return False
-
-
 def demonstrate_prequel_with_movie():
     """
     Demonstrate the prequel phase where robot programs buttons, saving as a movie.
+    
+    Uses the new start_video_recording() and save_video() methods from MultiGridEnv.
     """
     print("=" * 70)
     print("Prequel Demonstration: Robot Programs Buttons")
@@ -305,133 +252,106 @@ def demonstrate_prequel_with_movie():
     print(f"  Human at: {tuple(env.agents[human_idx].pos)}")
     print()
     
-    frames = []
+    # Start video recording
+    env.start_video_recording()
     
-    try:
-        import matplotlib.pyplot as plt
-        
-        # Capture initial frame
-        img = env.render(mode='rgb_array')
-        frames.append(('Initial: Robot ready to program', img))
-        
-        actions = [Actions.still] * len(env.agents)
-        
-        # === Program upper button (2, 2) with 'left' ===
-        print("Programming upper button (2,2) with 'left'...")
-        
-        # Turn to face north
-        actions[robot_idx] = Actions.left
-        env.step(actions)
-        actions[robot_idx] = Actions.left
-        env.step(actions)
-        print(f"  Robot turned to face north, dir={env.agents[robot_idx].dir}")
-        
-        img = env.render(mode='rgb_array')
-        frames.append(('Robot faces upper button', img))
-        
-        # Toggle to enter programming mode
-        actions[robot_idx] = Actions.toggle
-        env.step(actions)
-        print(f"  Robot toggled button to enter programming mode")
-        
-        # Program 'left' action
-        actions[robot_idx] = Actions.left
-        env.step(actions)
-        print(f"  Robot performed 'left' - button now programmed")
-        
-        img = env.render(mode='rgb_array')
-        frames.append(('Upper button: "left" programmed', img))
-        
-        # === Program lower button (2, 4) with 'right' ===
-        print("\nProgramming lower button (2,4) with 'right'...")
-        
-        # Turn to face south
-        actions[robot_idx] = Actions.left
-        env.step(actions)
-        print(f"  Robot turned to face south, dir={env.agents[robot_idx].dir}")
-        
-        img = env.render(mode='rgb_array')
-        frames.append(('Robot faces lower button', img))
-        
-        # Toggle to enter programming mode
-        actions[robot_idx] = Actions.toggle
-        env.step(actions)
-        print(f"  Robot toggled button to enter programming mode")
-        
-        # Program 'right' action
-        actions[robot_idx] = Actions.right
-        env.step(actions)
-        print(f"  Robot performed 'right' - button now programmed")
-        
-        img = env.render(mode='rgb_array')
-        frames.append(('Lower button: "right" programmed', img))
-        
-        # === Program right button (3, 3) with 'forward' ===
-        print("\nProgramming right button (3,3) with 'forward'...")
-        
-        # Turn to face east
-        actions[robot_idx] = Actions.left
-        env.step(actions)
-        actions[robot_idx] = Actions.left
-        env.step(actions)
-        print(f"  Robot turned to face east, dir={env.agents[robot_idx].dir}")
-        
-        img = env.render(mode='rgb_array')
-        frames.append(('Robot faces right button', img))
-        
-        # Toggle to enter programming mode
-        actions[robot_idx] = Actions.toggle
-        env.step(actions)
-        print(f"  Robot toggled button to enter programming mode")
-        
-        # Program 'forward' action
-        actions[robot_idx] = Actions.forward
-        env.step(actions)
-        print(f"  Robot performed 'forward' - button now programmed")
-        
-        img = env.render(mode='rgb_array')
-        frames.append(('All buttons programmed!', img))
-        
-        # Check final button states
-        print("\nFinal button states (programmed):")
-        action_names = {1: 'left', 2: 'right', 3: 'forward', 6: 'toggle'}
-        for j in range(env.grid.height):
-            for i in range(env.grid.width):
-                cell = env.grid.get(i, j)
-                if cell is not None and cell.type == 'controlbutton':
-                    action_name = action_names.get(cell.triggered_action, str(cell.triggered_action)) if cell.triggered_action else "None"
-                    print(f"  Button at ({i}, {j}): action={action_name}, controlled_agent={cell.controlled_agent}")
-        
-        # Save frames as individual images
-        fig, axes = plt.subplots(2, 4, figsize=(20, 10))
-        for idx, (title, img) in enumerate(frames):
-            ax = axes[idx // 4, idx % 4]
-            ax.imshow(img)
-            ax.set_title(title, fontsize=10)
-            ax.axis('off')
-        # Hide unused axes
-        for idx in range(len(frames), 8):
-            axes[idx // 4, idx % 4].axis('off')
-        plt.tight_layout()
-        prequel_img_path = os.path.join(OUTPUT_DIR, 'control_button_prequel.png')
-        plt.savefig(prequel_img_path, dpi=150, bbox_inches='tight')
-        print(f"\nSaved prequel frames to {prequel_img_path}")
-        plt.close()
-        
-        # Save as movie/GIF
-        movie_path = os.path.join(OUTPUT_DIR, 'control_button_prequel.gif')
-        create_movie(frames, movie_path, fps=1)
-        
-    except ImportError as e:
-        print(f"(matplotlib not available for rendering: {e})")
+    # Capture initial frame
+    env.render(mode='rgb_array')
+    
+    actions = [Actions.still] * len(env.agents)
+    
+    # === Program upper button (2, 2) with 'left' ===
+    print("Programming upper button (2,2) with 'left'...")
+    
+    # Turn to face north
+    actions[robot_idx] = Actions.left
+    env.step(actions)
+    env.render(mode='rgb_array')
+    actions[robot_idx] = Actions.left
+    env.step(actions)
+    env.render(mode='rgb_array')
+    print(f"  Robot turned to face north, dir={env.agents[robot_idx].dir}")
+    
+    # Toggle to enter programming mode
+    actions[robot_idx] = Actions.toggle
+    env.step(actions)
+    env.render(mode='rgb_array')
+    print(f"  Robot toggled button to enter programming mode")
+    
+    # Program 'left' action
+    actions[robot_idx] = Actions.left
+    env.step(actions)
+    env.render(mode='rgb_array')
+    print(f"  Robot performed 'left' - button now programmed")
+    
+    # === Program lower button (2, 4) with 'right' ===
+    print("\nProgramming lower button (2,4) with 'right'...")
+    
+    # Turn to face south
+    actions[robot_idx] = Actions.left
+    env.step(actions)
+    env.render(mode='rgb_array')
+    print(f"  Robot turned to face south, dir={env.agents[robot_idx].dir}")
+    
+    # Toggle to enter programming mode
+    actions[robot_idx] = Actions.toggle
+    env.step(actions)
+    env.render(mode='rgb_array')
+    print(f"  Robot toggled button to enter programming mode")
+    
+    # Program 'right' action
+    actions[robot_idx] = Actions.right
+    env.step(actions)
+    env.render(mode='rgb_array')
+    print(f"  Robot performed 'right' - button now programmed")
+    
+    # === Program right button (3, 3) with 'forward' ===
+    print("\nProgramming right button (3,3) with 'forward'...")
+    
+    # Turn to face east
+    actions[robot_idx] = Actions.left
+    env.step(actions)
+    env.render(mode='rgb_array')
+    actions[robot_idx] = Actions.left
+    env.step(actions)
+    env.render(mode='rgb_array')
+    print(f"  Robot turned to face east, dir={env.agents[robot_idx].dir}")
+    
+    # Toggle to enter programming mode
+    actions[robot_idx] = Actions.toggle
+    env.step(actions)
+    env.render(mode='rgb_array')
+    print(f"  Robot toggled button to enter programming mode")
+    
+    # Program 'forward' action
+    actions[robot_idx] = Actions.forward
+    env.step(actions)
+    env.render(mode='rgb_array')
+    print(f"  Robot performed 'forward' - button now programmed")
+    
+    # Check final button states
+    print("\nFinal button states (programmed):")
+    action_names = {1: 'left', 2: 'right', 3: 'forward', 6: 'toggle'}
+    for j in range(env.grid.height):
+        for i in range(env.grid.width):
+            cell = env.grid.get(i, j)
+            if cell is not None and cell.type == 'controlbutton':
+                action_name = action_names.get(cell.triggered_action, str(cell.triggered_action)) if cell.triggered_action else "None"
+                print(f"  Button at ({i}, {j}): action={action_name}, controlled_agent={cell.controlled_agent}")
+    
+    # Save video using the new package method
+    movie_path = os.path.join(OUTPUT_DIR, 'control_button_prequel.mp4')
+    env.save_video(movie_path, fps=1)
     
     print()
-    return env, frames
+    return env
 
 
 def demonstrate_human_control_with_movie():
     """
     Demonstrate human using control buttons to control robot, saving as a movie.
+    
+    Uses the new start_video_recording() and save_video() methods from MultiGridEnv.
     """
     print("=" * 70)
     print("Human Control Demonstration: Using Programmed Buttons")
@@ -459,119 +379,66 @@ def demonstrate_human_control_with_movie():
     print(f"  Robot at: {tuple(env.agents[robot_idx].pos)}, dir={env.agents[robot_idx].dir}")
     print()
     
-    frames = []
+    # Start video recording
+    env.start_video_recording()
     
-    try:
-        import matplotlib.pyplot as plt
-        
-        actions = [Actions.still] * len(env.agents)
-        
-        # Capture initial frame
-        img = env.render(mode='rgb_array')
-        frames.append(('Initial: Buttons programmed', img))
-        
-        # Human needs to move to face a button
-        # Human at (1,1), needs to get to position to toggle buttons
-        
-        # Move human to (2,2) area - but can't go through button
-        # Let's have human turn and move
-        print("Human moving into position...")
-        
-        # Turn right to face south
-        actions[human_idx] = Actions.right
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        frames.append(('Human turns south', img))
-        
-        # Move forward
-        actions[human_idx] = Actions.forward
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        frames.append(('Human moves to (1,2)', img))
-        
-        # Move forward again
-        actions[human_idx] = Actions.forward
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        frames.append(('Human at (1,3)', img))
-        
-        # Turn right to face west... no, east to face buttons
-        actions[human_idx] = Actions.left
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        frames.append(('Human faces east', img))
-        
-        # Move forward to get closer
-        actions[human_idx] = Actions.forward
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        frames.append(('Human at (2,3)', img))
-        
-        # Now human can toggle the right button at (3,3)
-        print("\nHuman toggles right button (programmed for 'forward')...")
-        actions[human_idx] = Actions.toggle
-        actions[robot_idx] = Actions.still
-        env.step(actions)
-        print(f"  Robot forced_next_action: {env.agents[robot_idx].forced_next_action}")
-        img = env.render(mode='rgb_array')
-        frames.append(('Human triggers "forward" button', img))
-        
-        # Robot's next action is forced
-        print("Robot executes forced 'forward' action...")
-        robot_pos_before = tuple(env.agents[robot_idx].pos)
-        actions[human_idx] = Actions.still
-        actions[robot_idx] = Actions.still  # Robot "chooses" still, but forced to forward
-        env.step(actions)
-        robot_pos_after = tuple(env.agents[robot_idx].pos)
-        print(f"  Robot moved: {robot_pos_before} -> {robot_pos_after}")
-        img = env.render(mode='rgb_array')
-        frames.append(('Robot moves forward!', img))
-        
-        # Human turns to face upper button
-        print("\nHuman toggles upper button (programmed for 'left')...")
-        actions[human_idx] = Actions.left  # Turn north
-        env.step(actions)
-        actions[human_idx] = Actions.toggle
-        env.step(actions)
-        print(f"  Robot forced_next_action: {env.agents[robot_idx].forced_next_action}")
-        img = env.render(mode='rgb_array')
-        frames.append(('Human triggers "left" button', img))
-        
-        # Robot turns left
-        robot_dir_before = env.agents[robot_idx].dir
-        actions[human_idx] = Actions.still
-        actions[robot_idx] = Actions.still
-        env.step(actions)
-        robot_dir_after = env.agents[robot_idx].dir
-        print(f"  Robot turned: dir {robot_dir_before} -> {robot_dir_after}")
-        img = env.render(mode='rgb_array')
-        frames.append(('Robot turns left!', img))
-        
-        # Save frames as individual images
-        fig, axes = plt.subplots(2, 5, figsize=(25, 10))
-        for idx, (title, img) in enumerate(frames):
-            ax = axes[idx // 5, idx % 5]
-            ax.imshow(img)
-            ax.set_title(title, fontsize=10)
-            ax.axis('off')
-        # Hide unused axes
-        for idx in range(len(frames), 10):
-            axes[idx // 5, idx % 5].axis('off')
-        plt.tight_layout()
-        control_img_path = os.path.join(OUTPUT_DIR, 'control_button_human_control.png')
-        plt.savefig(control_img_path, dpi=150, bbox_inches='tight')
-        print(f"\nSaved control frames to {control_img_path}")
-        plt.close()
-        
-        # Save as movie/GIF
-        movie_path = os.path.join(OUTPUT_DIR, 'control_button_human_control.gif')
-        create_movie(frames, movie_path, fps=1)
-        
-    except ImportError as e:
-        print(f"(matplotlib not available for rendering: {e})")
+    actions = [Actions.still] * len(env.agents)
+    
+    # Capture initial frame
+    env.render(mode='rgb_array')
+    
+    # Human needs to move to face a button
+    # Human at (2,3), can toggle the right button at (3,3)
+    print("Human moving into position...")
+    
+    # Turn right to face east (toward button at (3,3))
+    actions[human_idx] = Actions.right
+    env.step(actions)
+    env.render(mode='rgb_array')
+    
+    # Now human can toggle the right button at (3,3)
+    print("\nHuman toggles right button (programmed for 'forward')...")
+    actions[human_idx] = Actions.toggle
+    actions[robot_idx] = Actions.still
+    env.step(actions)
+    print(f"  Robot forced_next_action: {env.agents[robot_idx].forced_next_action}")
+    env.render(mode='rgb_array')
+    
+    # Robot's next action is forced
+    print("Robot executes forced 'forward' action...")
+    robot_pos_before = tuple(env.agents[robot_idx].pos)
+    actions[human_idx] = Actions.still
+    actions[robot_idx] = Actions.still  # Robot "chooses" still, but forced to forward
+    env.step(actions)
+    robot_pos_after = tuple(env.agents[robot_idx].pos)
+    print(f"  Robot moved: {robot_pos_before} -> {robot_pos_after}")
+    env.render(mode='rgb_array')
+    
+    # Human turns to face upper button
+    print("\nHuman toggles upper button (programmed for 'left')...")
+    actions[human_idx] = Actions.left  # Turn north
+    env.step(actions)
+    env.render(mode='rgb_array')
+    actions[human_idx] = Actions.toggle
+    env.step(actions)
+    print(f"  Robot forced_next_action: {env.agents[robot_idx].forced_next_action}")
+    env.render(mode='rgb_array')
+    
+    # Robot turns left
+    robot_dir_before = env.agents[robot_idx].dir
+    actions[human_idx] = Actions.still
+    actions[robot_idx] = Actions.still
+    env.step(actions)
+    robot_dir_after = env.agents[robot_idx].dir
+    print(f"  Robot turned: dir {robot_dir_before} -> {robot_dir_after}")
+    env.render(mode='rgb_array')
+    
+    # Save video using the new package method
+    movie_path = os.path.join(OUTPUT_DIR, 'control_button_human_control.mp4')
+    env.save_video(movie_path, fps=1)
     
     print()
-    return env, frames
+    return env
 
 
 def create_full_rollout_movie():
@@ -580,6 +447,8 @@ def create_full_rollout_movie():
     1. Prequel: Robot programs all buttons, steps aside to (1,5)
     2. Prequel: Human moves to position (2,3) between buttons
     3. Human control phase: Human uses buttons to control robot (following learned/demo policy)
+    
+    Uses the new start_video_recording() and save_video() methods from MultiGridEnv.
     """
     print("=" * 70)
     print("Full Rollout Movie: Prequel + Human Control")
@@ -588,8 +457,6 @@ def create_full_rollout_movie():
     
     # Ensure output directory exists
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    
-    all_frames = []
     
     # Create environment WITHOUT pre-programming for full demo
     env = ControlButtonEnv(max_steps=100, pre_programmed=False)
@@ -608,272 +475,215 @@ def create_full_rollout_movie():
     print(f"  Human (yellow): {tuple(env.agents[human_idx].pos)}, dir={env.agents[human_idx].dir}")
     print(f"  Robot (grey): {tuple(env.agents[robot_idx].pos)}, dir={env.agents[robot_idx].dir}")
     
-    try:
-        import matplotlib.pyplot as plt
-        
-        actions = [Actions.still] * len(env.agents)
-        
-        # ========== PREQUEL PHASE 1: ROBOT PROGRAMS BUTTONS ==========
-        print("\n=== PREQUEL: Robot programs buttons ===")
-        
-        img = env.render(mode='rgb_array')
-        all_frames.append(('PREQUEL: Initial state', img))
-        
-        # Robot at (2, 3) facing south (dir=1)
-        # Upper button at (2, 2) is north of robot
-        
-        # Turn left twice to face north (dir=3)
-        actions[robot_idx] = Actions.left
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        all_frames.append(('', img))
-        actions[robot_idx] = Actions.left
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        all_frames.append(('', img))
-        # Toggle upper button (2, 2)
-        actions[robot_idx] = Actions.toggle
-        env.step(actions)
-        # Program 'left' action (robot now faces west)
-        actions[robot_idx] = Actions.left
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        all_frames.append(('PREQUEL: Upper = "L"', img))
-        print(f"  Upper button (2,2) programmed with 'left'")
-        
-        # Now facing west (dir=2). Turn left to face south (dir=1)
-        actions[robot_idx] = Actions.left
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        all_frames.append(('', img))
-        # Toggle lower button (2, 4)
-        actions[robot_idx] = Actions.toggle
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        all_frames.append(('', img))
-        # Program 'right' action (robot now faces west again)
-        actions[robot_idx] = Actions.right
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        all_frames.append(('PREQUEL: Lower = "R"', img))
-        print(f"  Lower button (2,4) programmed with 'right'")
-        
-        # Now facing west (dir=2). Need to face east to toggle right button (3,3)
-        # Turn left twice: west -> south -> east
-        actions[robot_idx] = Actions.left
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        all_frames.append(('', img))
-        actions[robot_idx] = Actions.left
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        all_frames.append(('', img))
-        # Toggle right button (3, 3)
-        actions[robot_idx] = Actions.toggle
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        all_frames.append(('', img))
-        # Program 'forward' action - robot stays in place (button blocks movement)
-        actions[robot_idx] = Actions.forward
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        all_frames.append(('PREQUEL: Right = "F"', img))
-        print(f"  Right button (3,3) programmed with 'forward'")
-        print(f"  Robot at: {tuple(env.agents[robot_idx].pos)}, dir={env.agents[robot_idx].dir}")
-        
-        print("  All buttons programmed!")
-        
-        # ========== PREQUEL PHASE 2: ROBOT STEPS ASIDE TO (4, 3) FACING EAST ==========
-        print("\n=== PREQUEL: Robot steps aside to (4,3) facing right ===")
-        
-        # Robot now at (2, 3) facing east (dir=0). Need to go to (4, 3) facing east.
-        # Move forward twice to (4, 3), keep facing east
-        actions[robot_idx] = Actions.forward  # (2,3) -> blocked by button at (3,3)
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        all_frames.append(('', img))
-        # Need to go around: turn right (face south), go to (2,4), turn left (face east), go to (4,4), turn left (face north), go to (4,3), turn right (face east)
-        # Or simpler: stay at (2,3), turn to face east, let human control phase proceed
-        # Actually the robot needs to move. Let's do: go around the button
-        
-        # Turn right to face south
-        actions[robot_idx] = Actions.right  # east -> south
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        all_frames.append(('', img))
-        # Move forward to (2, 4)
-        actions[robot_idx] = Actions.forward
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        all_frames.append(('', img))
-        # Turn left to face east
-        actions[robot_idx] = Actions.left  # south -> east
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        all_frames.append(('', img))
-        # Move forward to (3, 4)
-        actions[robot_idx] = Actions.forward
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        all_frames.append(('', img))
-        # Move forward to (4, 4)
-        actions[robot_idx] = Actions.forward
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        all_frames.append(('', img))
-        # Turn left to face north
-        actions[robot_idx] = Actions.left  # east -> north
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        all_frames.append(('', img))
-        # Move forward to (4, 3)
-        actions[robot_idx] = Actions.forward
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        all_frames.append(('', img))
-        # Turn right to face east
-        actions[robot_idx] = Actions.right  # north -> east
-        env.step(actions)
-        
-        img = env.render(mode='rgb_array')
-        all_frames.append(('PREQUEL: Robot at (4,3) facing right', img))
-        print(f"  Robot now at: {tuple(env.agents[robot_idx].pos)}, dir={env.agents[robot_idx].dir}")
-        
-        # ========== PREQUEL PHASE 3: HUMAN MOVES TO (2, 3) ==========
-        print("\n=== PREQUEL: Human moves to (2,3) ===")
-        
-        # Human is at (1, 1) facing up (dir=3). Need to get to (2, 3).
-        # Path: (1,1) -> (1,2) -> (1,3) -> (2,3)
-        
-        actions[robot_idx] = Actions.still  # Robot stays still now
-        
-        # Turn right to face east (dir=0)
-        actions[human_idx] = Actions.right
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        all_frames.append(('', img))
-        # Turn right to face south (dir=1)
-        actions[human_idx] = Actions.right
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        all_frames.append(('', img))
-        # Move forward to (1, 2)
-        actions[human_idx] = Actions.forward
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        all_frames.append(('', img))
-        # Move forward to (1, 3)
-        actions[human_idx] = Actions.forward
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        all_frames.append(('', img))
-        # Turn left to face east (dir=0)
-        actions[human_idx] = Actions.left
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        all_frames.append(('', img))
-        # Move forward to (2, 3)
-        actions[human_idx] = Actions.forward
-        env.step(actions)
-        
-        img = env.render(mode='rgb_array')
-        all_frames.append(('PREQUEL: Human at (2,3) - READY!', img))
-        print(f"  Human now at: {tuple(env.agents[human_idx].pos)}")
-        print(f"  Robot at: {tuple(env.agents[robot_idx].pos)}, dir={env.agents[robot_idx].dir}")
-        print(f"\n  === READY STATE ACHIEVED ===")
-        print(f"  Human at (2,3) between buttons, Robot at (4,3) facing right")
-        
-        # ========== HUMAN CONTROL PHASE ==========
-        print("\n=== CONTROL: Human uses buttons ===")
-        
-        # Human at (2, 3) facing east (dir=0) can toggle:
-        # - Right button (3, 3) -> forward (face east and toggle)
-        # - Upper button (2, 2) -> left (face north and toggle)
-        # - Lower button (2, 4) -> right (face south and toggle)
-        
-        # Demo: trigger forward button to move robot forward
-        # Human facing east, toggle right button
-        actions[human_idx] = Actions.toggle
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        all_frames.append(('CONTROL: Human triggers "F"', img))
-        print(f"  Human triggers forward button")
-        
-        # Robot executes forced forward
-        actions[human_idx] = Actions.still
-        env.step(actions)  # Robot forced forward
-        img = env.render(mode='rgb_array')
-        all_frames.append(('CONTROL: Robot moves forward!', img))
-        print(f"  Robot moved to: {tuple(env.agents[robot_idx].pos)}")
-        
-        # Human triggers upper button (left)
-        actions[human_idx] = Actions.left  # Face north
-        env.step(actions)
-        actions[human_idx] = Actions.toggle  # Toggle upper button
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        all_frames.append(('CONTROL: Human triggers "L"', img))
-        print(f"  Human triggers left button")
-        
-        # Robot turns left
-        actions[human_idx] = Actions.still
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        all_frames.append(('CONTROL: Robot turns left!', img))
-        print(f"  Robot turned left, dir={env.agents[robot_idx].dir}")
-        
-        # Human triggers lower button (right)
-        # Human facing north, turn to face south
-        actions[human_idx] = Actions.left  # Face west
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        all_frames.append(('', img))
-        actions[human_idx] = Actions.left  # Face south
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        all_frames.append(('', img))
-        actions[human_idx] = Actions.toggle  # Toggle lower button
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        all_frames.append(('CONTROL: Human triggers "R"', img))
-        print(f"  Human triggers right button")
-        
-        # Robot turns right
-        actions[human_idx] = Actions.still
-        env.step(actions)
-        img = env.render(mode='rgb_array')
-        all_frames.append(('CONTROL: Robot turns right!', img))
-        print(f"  Robot turned right, dir={env.agents[robot_idx].dir}")
-        
-        print("\n  Control demonstration complete!")
-        
-        # Save as movie
-        movie_path = os.path.join(OUTPUT_DIR, 'control_button_full_rollout.gif')
-        create_movie(all_frames, movie_path, fps=1)
-        
-        # Save summary image
-        n_frames = len(all_frames)
-        cols = min(5, n_frames)
-        rows = (n_frames + cols - 1) // cols
-        fig, axes = plt.subplots(rows, cols, figsize=(5*cols, 5*rows))
-        axes = axes.flatten() if n_frames > 1 else [axes]
-        for idx, (title, img) in enumerate(all_frames):
-            axes[idx].imshow(img)
-            axes[idx].set_title(title, fontsize=9)
-            axes[idx].axis('off')
-        for idx in range(len(all_frames), len(axes)):
-            axes[idx].axis('off')
-        plt.tight_layout()
-        summary_path = os.path.join(OUTPUT_DIR, 'control_button_full_rollout.png')
-        plt.savefig(summary_path, dpi=150, bbox_inches='tight')
-        print(f"\nSaved rollout summary to {summary_path}")
-        plt.close()
-        
-    except ImportError as e:
-        print(f"(matplotlib not available: {e})")
+    # Start video recording
+    env.start_video_recording()
+    
+    actions = [Actions.still] * len(env.agents)
+    
+    # ========== PREQUEL PHASE 1: ROBOT PROGRAMS BUTTONS ==========
+    print("\n=== PREQUEL: Robot programs buttons ===")
+    
+    env.render(mode='rgb_array')
+    
+    # Robot at (2, 3) facing south (dir=1)
+    # Upper button at (2, 2) is north of robot
+    
+    # Turn left twice to face north (dir=3)
+    actions[robot_idx] = Actions.left
+    env.step(actions)
+    env.render(mode='rgb_array')
+    actions[robot_idx] = Actions.left
+    env.step(actions)
+    env.render(mode='rgb_array')
+    # Toggle upper button (2, 2)
+    actions[robot_idx] = Actions.toggle
+    env.step(actions)
+    # Program 'left' action (robot now faces west)
+    actions[robot_idx] = Actions.left
+    env.step(actions)
+    env.render(mode='rgb_array')
+    print(f"  Upper button (2,2) programmed with 'left'")
+    
+    # Now facing west (dir=2). Turn left to face south (dir=1)
+    actions[robot_idx] = Actions.left
+    env.step(actions)
+    env.render(mode='rgb_array')
+    # Toggle lower button (2, 4)
+    actions[robot_idx] = Actions.toggle
+    env.step(actions)
+    env.render(mode='rgb_array')
+    # Program 'right' action (robot now faces west again)
+    actions[robot_idx] = Actions.right
+    env.step(actions)
+    env.render(mode='rgb_array')
+    print(f"  Lower button (2,4) programmed with 'right'")
+    
+    # Now facing west (dir=2). Need to face east to toggle right button (3,3)
+    # Turn left twice: west -> south -> east
+    actions[robot_idx] = Actions.left
+    env.step(actions)
+    env.render(mode='rgb_array')
+    actions[robot_idx] = Actions.left
+    env.step(actions)
+    env.render(mode='rgb_array')
+    # Toggle right button (3, 3)
+    actions[robot_idx] = Actions.toggle
+    env.step(actions)
+    env.render(mode='rgb_array')
+    # Program 'forward' action - robot stays in place (button blocks movement)
+    actions[robot_idx] = Actions.forward
+    env.step(actions)
+    env.render(mode='rgb_array')
+    print(f"  Right button (3,3) programmed with 'forward'")
+    print(f"  Robot at: {tuple(env.agents[robot_idx].pos)}, dir={env.agents[robot_idx].dir}")
+    
+    print("  All buttons programmed!")
+    
+    # ========== PREQUEL PHASE 2: ROBOT STEPS ASIDE TO (4, 3) FACING EAST ==========
+    print("\n=== PREQUEL: Robot steps aside to (4,3) facing right ===")
+    
+    # Robot now at (2, 3) facing east (dir=0). Need to go to (4, 3) facing east.
+    # Move forward twice to (4, 3), keep facing east
+    actions[robot_idx] = Actions.forward  # (2,3) -> blocked by button at (3,3)
+    env.step(actions)
+    env.render(mode='rgb_array')
+    # Need to go around: turn right (face south), go to (2,4), turn left (face east), go to (4,4), turn left (face north), go to (4,3), turn right (face east)
+    
+    # Turn right to face south
+    actions[robot_idx] = Actions.right  # east -> south
+    env.step(actions)
+    env.render(mode='rgb_array')
+    # Move forward to (2, 4)
+    actions[robot_idx] = Actions.forward
+    env.step(actions)
+    env.render(mode='rgb_array')
+    # Turn left to face east
+    actions[robot_idx] = Actions.left  # south -> east
+    env.step(actions)
+    env.render(mode='rgb_array')
+    # Move forward to (3, 4)
+    actions[robot_idx] = Actions.forward
+    env.step(actions)
+    env.render(mode='rgb_array')
+    # Move forward to (4, 4)
+    actions[robot_idx] = Actions.forward
+    env.step(actions)
+    env.render(mode='rgb_array')
+    # Turn left to face north
+    actions[robot_idx] = Actions.left  # east -> north
+    env.step(actions)
+    env.render(mode='rgb_array')
+    # Move forward to (4, 3)
+    actions[robot_idx] = Actions.forward
+    env.step(actions)
+    env.render(mode='rgb_array')
+    # Turn right to face east
+    actions[robot_idx] = Actions.right  # north -> east
+    env.step(actions)
+    
+    env.render(mode='rgb_array')
+    print(f"  Robot now at: {tuple(env.agents[robot_idx].pos)}, dir={env.agents[robot_idx].dir}")
+    
+    # ========== PREQUEL PHASE 3: HUMAN MOVES TO (2, 3) ==========
+    print("\n=== PREQUEL: Human moves to (2,3) ===")
+    
+    # Human is at (1, 1) facing up (dir=3). Need to get to (2, 3).
+    # Path: (1,1) -> (1,2) -> (1,3) -> (2,3)
+    
+    actions[robot_idx] = Actions.still  # Robot stays still now
+    
+    # Turn right to face east (dir=0)
+    actions[human_idx] = Actions.right
+    env.step(actions)
+    env.render(mode='rgb_array')
+    # Turn right to face south (dir=1)
+    actions[human_idx] = Actions.right
+    env.step(actions)
+    env.render(mode='rgb_array')
+    # Move forward to (1, 2)
+    actions[human_idx] = Actions.forward
+    env.step(actions)
+    env.render(mode='rgb_array')
+    # Move forward to (1, 3)
+    actions[human_idx] = Actions.forward
+    env.step(actions)
+    env.render(mode='rgb_array')
+    # Turn left to face east (dir=0)
+    actions[human_idx] = Actions.left
+    env.step(actions)
+    env.render(mode='rgb_array')
+    # Move forward to (2, 3)
+    actions[human_idx] = Actions.forward
+    env.step(actions)
+    
+    env.render(mode='rgb_array')
+    print(f"  Human now at: {tuple(env.agents[human_idx].pos)}")
+    print(f"  Robot at: {tuple(env.agents[robot_idx].pos)}, dir={env.agents[robot_idx].dir}")
+    print(f"\n  === READY STATE ACHIEVED ===")
+    print(f"  Human at (2,3) between buttons, Robot at (4,3) facing right")
+    
+    # ========== HUMAN CONTROL PHASE ==========
+    print("\n=== CONTROL: Human uses buttons ===")
+    
+    # Human at (2, 3) facing east (dir=0) can toggle:
+    # - Right button (3, 3) -> forward (face east and toggle)
+    # - Upper button (2, 2) -> left (face north and toggle)
+    # - Lower button (2, 4) -> right (face south and toggle)
+    
+    # Demo: trigger forward button to move robot forward
+    # Human facing east, toggle right button
+    actions[human_idx] = Actions.toggle
+    env.step(actions)
+    env.render(mode='rgb_array')
+    print(f"  Human triggers forward button")
+    
+    # Robot executes forced forward
+    actions[human_idx] = Actions.still
+    env.step(actions)  # Robot forced forward
+    env.render(mode='rgb_array')
+    print(f"  Robot moved to: {tuple(env.agents[robot_idx].pos)}")
+    
+    # Human triggers upper button (left)
+    actions[human_idx] = Actions.left  # Face north
+    env.step(actions)
+    actions[human_idx] = Actions.toggle  # Toggle upper button
+    env.step(actions)
+    env.render(mode='rgb_array')
+    print(f"  Human triggers left button")
+    
+    # Robot turns left
+    actions[human_idx] = Actions.still
+    env.step(actions)
+    env.render(mode='rgb_array')
+    print(f"  Robot turned left, dir={env.agents[robot_idx].dir}")
+    
+    # Human triggers lower button (right)
+    # Human facing north, turn to face south
+    actions[human_idx] = Actions.left  # Face west
+    env.step(actions)
+    env.render(mode='rgb_array')
+    actions[human_idx] = Actions.left  # Face south
+    env.step(actions)
+    env.render(mode='rgb_array')
+    actions[human_idx] = Actions.toggle  # Toggle lower button
+    env.step(actions)
+    env.render(mode='rgb_array')
+    print(f"  Human triggers right button")
+    
+    # Robot turns right
+    actions[human_idx] = Actions.still
+    env.step(actions)
+    env.render(mode='rgb_array')
+    print(f"  Robot turned right, dir={env.agents[robot_idx].dir}")
+    
+    print("\n  Control demonstration complete!")
+    
+    # Save video using the new package method
+    movie_path = os.path.join(OUTPUT_DIR, 'control_button_full_rollout.mp4')
+    env.save_video(movie_path, fps=2)
     
     print()
-    return all_frames
+    return env
 
 
 # Configuration for quick mode vs full mode
@@ -963,23 +773,20 @@ def train_and_rollout_with_learned_policy(quick_mode=False):
         # Run rollouts with learned policy using neural_prior.sample()
         print("\nRunning rollouts with learned policy...")
         
-        import matplotlib.pyplot as plt
-        
-        all_rollout_frames = []
-        
         for goal_idx, goal_pos in enumerate(goal_cells):
             print(f"\n  Rollout for goal: robot at {goal_pos}")
             
             env.reset()
-            rollout_frames = []
+            
+            # Start recording for this rollout
+            env.start_video_recording()
             
             # Create goal object for this rollout
             goal = RobotAtRockGoal(env, robot_idx, goal_pos)
             
             for step in range(min(30, env.max_steps)):  # Limit steps for demo
                 state = env.get_state()
-                img = env.render(mode='rgb_array')
-                rollout_frames.append((f'Goal: Robot at {goal_pos} | Step {step}', img))
+                env.render(mode='rgb_array')
                 
                 # Get human action from learned policy using sample()
                 human_action = neural_prior.sample(state, human_idx, goal)
@@ -999,11 +806,9 @@ def train_and_rollout_with_learned_policy(quick_mode=False):
                 if done:
                     break
             
-            all_rollout_frames.extend(rollout_frames)
-        
-        # Save rollouts movie
-        movie_path = os.path.join(OUTPUT_DIR, 'control_button_learned_rollouts.gif')
-        create_movie(all_rollout_frames, movie_path, fps=2)
+            # Save this rollout's video
+            movie_path = os.path.join(OUTPUT_DIR, f'control_button_rollout_goal{goal_idx}.mp4')
+            env.save_video(movie_path, fps=2)
         
         return neural_prior
         

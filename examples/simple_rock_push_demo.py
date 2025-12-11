@@ -33,7 +33,11 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(SCRIPT_DIR)
 OUTPUT_DIR = os.path.join(PROJECT_DIR, 'outputs')
 
-# Map: Button at (2,0), Human at (2,1), Robot at (3,1) facing east, Rock at (4,1)
+# Map layout (3 rows x 8 cols):
+# - Button at (2, 0) - in top wall, accessible from (2,1) facing north
+# - Human at (2, 1)
+# - Robot at (3, 1) facing east
+# - Rock at (4, 1)
 INITIAL_MAP = """
 We We CB We We We We We
 We .. Ay Ae Ro .. .. We
@@ -45,7 +49,7 @@ class SimpleRockPushEnv(MultiGridEnv):
     """
     Minimal environment for demonstrating button-controlled rock pushing.
     
-    Button at (2, 0) starts unprogrammed.
+    Button at (2, 0) starts unprogrammed (embedded in top wall).
     Robot can push rocks. Human must use button to steer robot after robot programs it.
     
     Robot's fixed policy (executed via step_robot()):
@@ -55,16 +59,16 @@ class SimpleRockPushEnv(MultiGridEnv):
     4. Wait for button presses (stay still)
     """
     
-    def __init__(self, max_steps: int = 50):
+    def __init__(self, max_steps: int = 1000):
         super().__init__(
             map=INITIAL_MAP,
             max_steps=max_steps,
             partial_obs=False,
             objects_set=World,
-            actions_set=Actions
+            actions_set=Actions,
+            orientations=['e', 'e']  # Human faces east, Robot faces east
         )
-        self.robot_phase = 'wait_for_human'  # Phases: wait_for_human, go_to_button, program, return, done
-        self.robot_step_count = 0
+        self.robot_phase = 'wait_for_human'  # Phases: wait_for_human, turn_west, move_to_button_cell, turn_north, program, turn_east, return_to_start, done
     
     def _gen_grid(self, width, height):
         """Generate grid - button starts unprogrammed."""
@@ -80,76 +84,92 @@ class SimpleRockPushEnv(MultiGridEnv):
         """
         Get the robot's next action based on its fixed policy.
         
-        Robot policy:
+        Robot policy (direction-aware):
         1. Wait until human is not blocking (not at 2,1)
-        2. Turn left (to face north), move forward to (3,0), turn left (face west),
-           move forward to (2,0), toggle button, do 'forward' to program it
-        3. Turn around and return to (3,1) facing east
-        4. Stay still forever (wait for button triggers)
+        2. Navigate to (2,1) facing north toward button at (2,0)
+        3. Toggle button, do 'forward' to program it
+        4. Return to (3,1) facing east
+        5. Stay still forever (wait for button triggers)
+        
+        Map layout:
+          We We CB We We We We We   <- Button at (2,0)
+          We .. Ay Ae Ro .. .. We   <- Human(2,1), Robot(3,1), Rock(4,1)
+          We We We We We We We We
+        
+        Directions: 0=east, 1=south, 2=west, 3=north
         """
         robot = None
-        robot_idx = None
         for i, agent in enumerate(self.agents):
             if agent.color == 'grey':
                 robot = agent
-                robot_idx = i
                 break
         
         if robot is None:
             return Actions.still
         
         robot_pos = tuple(robot.pos)
-        robot_dir = robot.dir  # 0=right, 1=down, 2=left, 3=up
+        robot_dir = robot.dir  # 0=east, 1=south, 2=west, 3=north
+        
+        # Helper to turn toward a target direction
+        def turn_toward(current_dir, target_dir):
+            """Return action to turn from current_dir toward target_dir, or None if aligned."""
+            if current_dir == target_dir:
+                return None
+            # Calculate shortest turn
+            diff = (target_dir - current_dir) % 4
+            if diff == 1 or diff == -3:
+                return Actions.right
+            else:
+                return Actions.left
         
         if self.robot_phase == 'wait_for_human':
             # Wait until human moves away from (2,1)
             if human_pos != (2, 1):
-                self.robot_phase = 'go_to_button'
-                self.robot_step_count = 0
+                self.robot_phase = 'turn_west'
             return Actions.still
         
-        elif self.robot_phase == 'go_to_button':
-            # Sequence: turn left (face north), forward, turn left (face west), forward
-            # Robot starts at (3,1) facing east (dir=0)
-            self.robot_step_count += 1
-            if self.robot_step_count == 1:
-                return Actions.left  # Now facing north (dir=3)
-            elif self.robot_step_count == 2:
-                return Actions.forward  # Move to (3,0)
-            elif self.robot_step_count == 3:
-                return Actions.left  # Now facing west (dir=2)
-            elif self.robot_step_count == 4:
-                return Actions.forward  # Move to (2,0)
-            elif self.robot_step_count == 5:
+        elif self.robot_phase == 'turn_west':
+            # Turn to face west (dir=2) to move toward button position
+            action = turn_toward(robot_dir, 2)  # 2 = west
+            if action is None:
+                self.robot_phase = 'move_to_button_cell'
+            return action if action else Actions.still
+        
+        elif self.robot_phase == 'move_to_button_cell':
+            # Move west from (3,1) to (2,1)
+            if robot_pos == (2, 1):
+                self.robot_phase = 'turn_north'
+            else:
+                return Actions.forward
+            return Actions.still
+        
+        elif self.robot_phase == 'turn_north':
+            # Turn to face north (dir=3) toward button at (2,0)
+            action = turn_toward(robot_dir, 3)  # 3 = north
+            if action is None:
                 self.robot_phase = 'program'
-                self.robot_step_count = 0
                 return Actions.toggle  # Enter programming mode
+            return action
         
         elif self.robot_phase == 'program':
             # Program button with 'forward' action
-            self.robot_phase = 'return'
-            self.robot_step_count = 0
-            return Actions.forward  # Button is now programmed with 'forward'
+            self.robot_phase = 'turn_east'
+            return Actions.forward  # Button now programmed with 'forward'
         
-        elif self.robot_phase == 'return':
-            # Return to (3,1) facing east
-            # From (2,0) facing west: turn around, forward, turn right, forward
-            self.robot_step_count += 1
-            if self.robot_step_count == 1:
-                return Actions.left  # Face south
-            elif self.robot_step_count == 2:
-                return Actions.left  # Face east
-            elif self.robot_step_count == 3:
-                return Actions.forward  # Move to (3,0)
-            elif self.robot_step_count == 4:
-                return Actions.right  # Face south
-            elif self.robot_step_count == 5:
-                return Actions.forward  # Move to (3,1)
-            elif self.robot_step_count == 6:
-                return Actions.left  # Face east
-            else:
+        elif self.robot_phase == 'turn_east':
+            # Turn to face east (dir=0) to return
+            action = turn_toward(robot_dir, 0)  # 0 = east
+            if action is None:
+                self.robot_phase = 'return_to_start'
+            return action if action else Actions.still
+        
+        elif self.robot_phase == 'return_to_start':
+            # Move east from (2,1) to (3,1)
+            if robot_pos == (3, 1):
                 self.robot_phase = 'done'
-                return Actions.still
+            else:
+                return Actions.forward
+            return Actions.still
         
         else:  # done
             return Actions.still
@@ -204,48 +224,148 @@ class SingleGoalSampler(PossibleGoalSampler):
         return goal, 1.0
 
 
-def create_movie(frames, output_path, fps=2):
-    """Create a GIF from frames."""
-    try:
-        from PIL import Image
-        import matplotlib.pyplot as plt
-        from io import BytesIO
+def demonstrate_handcrafted_policies(env, human_idx, robot_idx, target_pos):
+    """
+    Show the robot policy working with a handcrafted human policy.
+    
+    Human policy: Step to the side (east) to let robot pass, wait, then proceed to button.
+    
+    Initial state (with orientations=['e', 'e']):
+    - Human at (2,1) facing east (dir=0)
+    - Robot at (3,1) facing east (dir=0)
+    """
+    print()
+    print("=" * 60)
+    print("Demonstrating Handcrafted Policies")
+    print("=" * 60)
+    print("Human: Steps aside, waits for robot, then uses button")
+    print("Robot: Goes to button, programs it, returns")
+    print()
+    
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    
+    env.reset()
+    env.robot_phase = 'wait_for_human'
+    
+    # Start video recording
+    env.start_video_recording()
+    
+    action_names = {
+        Actions.still: 'still',
+        Actions.left: 'left', 
+        Actions.right: 'right',
+        Actions.forward: 'forward',
+        Actions.toggle: 'toggle'
+    }
+    
+    # Helper to turn toward a target direction
+    # Directions: 0=east, 1=south, 2=west, 3=north
+    def turn_toward(current_dir, target_dir):
+        """Return action to turn from current_dir toward target_dir, or None if aligned."""
+        if current_dir == target_dir:
+            return None
+        diff = (target_dir - current_dir) % 4
+        if diff == 1 or diff == -3:
+            return Actions.right
+        else:
+            return Actions.left
+    
+    # Capture initial frame
+    env.render(mode='rgb_array')
+    
+    # Human policy phases (direction-aware)
+    # Human starts at (2,1) facing east (dir=0)
+    # Robot is at (3,1) - human must step WEST to (1,1) to get out of robot's way
+    human_phase = 'step_aside'
+    
+    max_steps = 50
+    for step in range(max_steps):
+        human_pos = tuple(env.agents[human_idx].pos)
+        human_dir = env.agents[human_idx].dir
+        robot_pos = tuple(env.agents[robot_idx].pos)
+        robot_phase = env.robot_phase
         
-        pil_frames = []
-        for frame in frames:
-            if isinstance(frame, tuple):
-                title, img = frame
+        # Handcrafted human policy (direction-aware)
+        if human_phase == 'step_aside':
+            # Move west to (1,1) to let robot pass to button
+            if human_pos == (1, 1):
+                human_phase = 'wait_for_robot'
+                human_action = Actions.still
+            elif human_dir != 2:  # Not facing west
+                human_action = turn_toward(human_dir, 2)  # Turn to face west
             else:
-                title, img = None, frame
-            
-            fig, ax = plt.subplots(figsize=(8, 4))
-            ax.imshow(img)
-            if title:
-                ax.set_title(title, fontsize=14)
-            ax.axis('off')
-            
-            buf = BytesIO()
-            fig.savefig(buf, format='png', bbox_inches='tight', dpi=100)
-            buf.seek(0)
-            pil_frames.append(Image.open(buf).copy())
-            buf.close()
-            plt.close(fig)
+                human_action = Actions.forward  # Move west
+        elif human_phase == 'wait_for_robot':
+            # Wait until robot has programmed button and returned
+            if robot_phase == 'done':
+                human_phase = 'go_to_button'
+            human_action = Actions.still
+        elif human_phase == 'go_to_button':
+            # Go east to button position (2,1)
+            if human_pos == (2, 1):
+                human_phase = 'face_button'
+                human_action = Actions.still
+            elif human_dir != 0:  # Not facing east
+                human_action = turn_toward(human_dir, 0)  # Turn to face east
+            else:
+                human_action = Actions.forward  # Move east to (2,1)
+        elif human_phase == 'face_button':
+            # Turn north to face button at (2,0)
+            if human_dir == 3:  # Facing north
+                human_phase = 'toggle_button_1'
+                human_action = Actions.toggle  # First toggle
+            else:
+                human_action = turn_toward(human_dir, 3)  # Turn to face north
+        elif human_phase == 'toggle_button_1':
+            human_phase = 'toggle_button_2'
+            human_action = Actions.toggle  # Second toggle
+        elif human_phase == 'toggle_button_2':
+            human_phase = 'go_to_goal'
+            human_action = Actions.still
+        elif human_phase == 'go_to_goal':
+            # Go east to goal at (4,1)
+            if human_pos == target_pos:
+                human_phase = 'done'
+                human_action = Actions.still
+            elif human_dir != 0:  # Not facing east
+                human_action = turn_toward(human_dir, 0)  # Turn to face east
+            else:
+                human_action = Actions.forward  # Move east
+        else:
+            human_action = Actions.still
         
-        if pil_frames:
-            duration = int(1000 / fps)
-            pil_frames[0].save(
-                output_path,
-                save_all=True,
-                append_images=pil_frames[1:],
-                duration=duration,
-                loop=0
-            )
-            print(f"Saved movie to {output_path}")
-            return True
-    except ImportError as e:
-        print(f"Could not create movie: {e}")
-        return False
-    return False
+        # Get robot action from its fixed policy
+        robot_action = env.get_robot_action(human_pos)
+        
+        actions = [Actions.still] * len(env.agents)
+        actions[human_idx] = human_action
+        actions[robot_idx] = robot_action
+        
+        obs, rewards, done, info = env.step(actions)
+        
+        human_pos = tuple(env.agents[human_idx].pos)
+        robot_pos = tuple(env.agents[robot_idx].pos)
+        
+        # Capture frame
+        env.render(mode='rgb_array')
+        
+        print(f"Step {step+1}: Human={action_names.get(human_action, '?')}@{human_pos}, "
+              f"Robot={action_names.get(robot_action, '?')}@{robot_pos}, "
+              f"RobotPhase={env.robot_phase}")
+        
+        # Check if goal achieved
+        if human_pos == target_pos:
+            print(f"\n*** Goal achieved at step {step+1}! ***")
+            break
+        
+        if done:
+            print("Episode ended")
+            break
+    
+    # Save video
+    movie_path = os.path.join(OUTPUT_DIR, 'simple_rock_push_handcrafted.mp4')
+    env.save_video(movie_path, fps=2)
+    print(f"\nSaved handcrafted demo video to: {movie_path}")
 
 
 def train_human_policy():
@@ -254,7 +374,7 @@ def train_human_policy():
     print("Training Human Policy")
     print("=" * 60)
     
-    env = SimpleRockPushEnv(max_steps=50)
+    env = SimpleRockPushEnv(max_steps=1000)
     env.reset()
     
     # Find agent indices
@@ -287,7 +407,7 @@ def train_human_policy():
         env=env,
         goal_sampler=goal_sampler,
         human_agent_indices=[human_idx],
-        steps_per_episode=30,
+        steps_per_episode=100,
         num_episodes=1000,
         beta=100.0,
         gamma=0.95,
@@ -301,7 +421,7 @@ def train_human_policy():
 
 
 def demonstrate_learned_policy(human_policy, env, human_idx, robot_idx, target_pos):
-    """Show the learned policy in action."""
+    """Show the learned policy in action using video recording."""
     print()
     print("=" * 60)
     print("Demonstrating Learned Policy")
@@ -311,12 +431,11 @@ def demonstrate_learned_policy(human_policy, env, human_idx, robot_idx, target_p
     
     env.reset()
     
+    # Start video recording
+    env.start_video_recording()
+    
     # Set goal
     goal = HumanAtPositionGoal(env, human_idx, target_pos)
-    
-    frames = []
-    img = env.render(mode='rgb_array')
-    frames.append((f"Step 0: Start | Goal: reach (4,1)", img))
     
     action_names = {
         Actions.still: 'still',
@@ -326,7 +445,10 @@ def demonstrate_learned_policy(human_policy, env, human_idx, robot_idx, target_p
         Actions.toggle: 'toggle'
     }
     
-    max_steps = 30
+    # Capture initial frame
+    env.render(mode='rgb_array')
+    
+    max_steps = 1000
     for step in range(max_steps):
         # Get action from learned policy for human
         state = env.get_state()
@@ -345,9 +467,8 @@ def demonstrate_learned_policy(human_policy, env, human_idx, robot_idx, target_p
         human_pos = tuple(env.agents[human_idx].pos)
         robot_pos = tuple(env.agents[robot_idx].pos)
         
-        img = env.render(mode='rgb_array')
-        title = f"Step {step+1}: Human {action_names.get(human_action, '?')} | H:{human_pos} R:{robot_pos}"
-        frames.append((title, img))
+        # Capture frame
+        env.render(mode='rgb_array')
         
         print(f"Step {step+1}: Human={action_names.get(human_action, '?')}, "
               f"Human@{human_pos}, Robot@{robot_pos}")
@@ -356,7 +477,6 @@ def demonstrate_learned_policy(human_policy, env, human_idx, robot_idx, target_p
         state = env.get_state()
         if goal.is_achieved(state):
             print(f"\n*** Goal achieved at step {step+1}! ***")
-            frames.append((f"Step {step+1}: GOAL ACHIEVED!", img))
             break
         
         if done:
@@ -365,11 +485,9 @@ def demonstrate_learned_policy(human_policy, env, human_idx, robot_idx, target_p
     else:
         print("\nMax steps reached without achieving goal")
     
-    # Save movie
-    movie_path = os.path.join(OUTPUT_DIR, 'simple_rock_push_demo.gif')
-    create_movie(frames, movie_path, fps=2)
-    
-    return frames
+    # Save video using the new package method
+    movie_path = os.path.join(OUTPUT_DIR, 'simple_rock_push_demo.mp4')
+    env.save_video(movie_path, fps=2)
 
 
 def main():
@@ -382,10 +500,27 @@ def main():
     print("Strategy: Use button to make robot push rock forward")
     print()
     
+    # First create environment and find agent indices
+    env = SimpleRockPushEnv(max_steps=1000)
+    env.reset()
+    
+    human_idx = None
+    robot_idx = None
+    for i, agent in enumerate(env.agents):
+        if agent.color == 'yellow':
+            human_idx = i
+        elif agent.color == 'grey':
+            robot_idx = i
+    
+    target_pos = (4, 1)
+    
+    # Demonstrate handcrafted policies first (before training)
+    demonstrate_handcrafted_policies(env, human_idx, robot_idx, target_pos)
+    
     # Train
     human_policy, env, human_idx, robot_idx, target_pos = train_human_policy()
     
-    # Demonstrate
+    # Demonstrate learned policy
     demonstrate_learned_policy(human_policy, env, human_idx, robot_idx, target_pos)
     
     print()
