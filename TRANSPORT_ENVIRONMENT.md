@@ -13,8 +13,6 @@ empo/
 ├── vendor/
 │   ├── multigrid/          # existing
 │   └── ai_transport/       # NEW: vendored transport env
-├── src/empo/
-│   └── env_utils.py        # add transport clustering utilities
 └── nn_based/
     ├── minigrid/           # existing
     └── transport/          # NEW: parallel structure

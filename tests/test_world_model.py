@@ -6,7 +6,6 @@ Tests that:
 1. WorldModel properly extends gymnasium.Env
 2. MultiGridEnv inherits from WorldModel
 3. WorldModel methods are accessible and work correctly
-4. Backward compatibility with env_utils functions is maintained
 """
 
 import sys
@@ -18,7 +17,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "vendor" / "multigrid"))
 
 import gymnasium as gym
 from empo.world_model import WorldModel
-from empo import env_utils
 from gym_multigrid.multigrid import MultiGridEnv
 from gym_multigrid.envs import CollectGame4HEnv10x10N2
 
@@ -64,20 +62,6 @@ def test_multigrid_env_get_dag_method():
     
     # Get DAG using the method
     states, state_to_idx, successors = env.get_dag()
-    
-    # Basic sanity checks
-    assert len(states) > 0, "Should find at least one state"
-    assert len(state_to_idx) == len(states), "state_to_idx should have same length as states"
-    assert len(successors) == len(states), "successors should have same length as states"
-
-
-def test_backward_compatible_get_dag_function():
-    """Test that the env_utils.get_dag function still works."""
-    env = CollectGame4HEnv10x10N2()
-    env.max_steps = 1  # Limit for tractable DAG
-    
-    # Get DAG using the function
-    states, state_to_idx, successors = env_utils.get_dag(env)
     
     # Basic sanity checks
     assert len(states) > 0, "Should find at least one state"
@@ -265,9 +249,6 @@ class CyclicMockEnv:
     
     Creates a cyclic state space:
         State 0 (root) -> State 1 -> State 2 -> State 0 (cycle!)
-    
-    Note: This mock does NOT have a get_dag method, so it cannot be used
-    with env_utils.get_dag(). This is intentional for testing the TypeError.
     """
     
     def __init__(self):
@@ -302,17 +283,6 @@ class CyclicMockEnv:
             return None
 
 
-def test_get_dag_requires_get_dag_method():
-    """Test that env_utils.get_dag raises TypeError for envs without get_dag method."""
-    import pytest
-    
-    cyclic_env = CyclicMockEnv()
-    
-    # The get_dag function should raise TypeError when env doesn't have get_dag method
-    with pytest.raises(TypeError, match="must have a get_dag"):
-        env_utils.get_dag(cyclic_env)
-
-
 def run_all_tests():
     """Run all tests and report results."""
     tests = [
@@ -322,13 +292,11 @@ def run_all_tests():
         test_world_model_has_abstract_methods,
         test_world_model_has_dag_methods,
         test_multigrid_env_get_dag_method,
-        test_backward_compatible_get_dag_function,
         test_world_model_exported_from_empo,
         test_initial_state_method,
         test_is_terminal_method,
         test_default_step_method,
         test_default_step_with_probabilistic_transitions,
-        test_get_dag_requires_get_dag_method,
     ]
     
     print("=" * 60)

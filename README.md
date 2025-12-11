@@ -439,7 +439,6 @@ empo/
 │   │   ├── possible_goal.py   # Goal abstractions
 │   │   ├── human_policy_prior.py  # Human behavior modeling
 │   │   ├── backward_induction.py  # Policy computation
-│   │   ├── env_utils.py       # Environment utilities
 │   │   └── hierarchical/      # Hierarchical planning (WIP)
 │   ├── envs/                  # Custom environments
 │   │   └── one_or_three_chambers.py  # Multi-chamber gridworld

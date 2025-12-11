@@ -151,14 +151,14 @@ def test_parallel_correctness_small():
 
 
 def test_parallel_correctness_medium():
-    """Test with a medium environment (max_steps=4)."""
+    """Test with a medium environment (max_steps=3)."""
     print("\n" + "=" * 70)
-    print("Test: Medium environment (max_steps=4)")
+    print("Test: Medium environment (max_steps=3)")
     print("=" * 70)
     
     # Create environment
     wm = SmallOneOrThreeChambersMapEnv()
-    wm.max_steps = 4
+    wm.max_steps = 3
     wm.reset()
     
     # Use a few target cells

@@ -137,31 +137,6 @@ The `examples/` directory now contains comprehensive examples covering all menti
 
 ## Redundant Code
 
-### RED-001: `env_utils.py` duplicates `WorldModel` methods
-**Priority:** Low  
-**Location:** `src/empo/env_utils.py`  
-**Description:**  
-The `env_utils.py` module provides standalone functions `get_dag()` and `plot_dag()` that duplicate the corresponding methods in `WorldModel`:
-- `env_utils.get_dag(env)` → delegates to `env.get_dag()` for WorldModel instances
-- `env_utils.plot_dag(...)` → identical to `WorldModel.plot_dag()`
-
-**Current usage:**
-- Examples: `dag_and_episode_example.py`, `dag_visualization_example.py` import from `env_utils`
-- Tests: `test_env_utils.py`, `test_world_model.py` test backward compatibility
-
-**Status:** Intentionally kept for backward compatibility. The docstring explicitly notes that instance methods are preferred:
-```python
-# Preferred Approach:
-# For environments inheriting from WorldModel (including MultiGridEnv), use
-# the instance methods directly:
-#     - env.get_dag() instead of get_dag(env)
-#     - env.plot_dag() instead of plot_dag(...)
-```
-
-**Recommendation:** Can be deprecated in a future version once all examples/tests are migrated.
-
----
-
 ### RED-002: Commented-out `Grid.decode()` method
 **Priority:** Low  
 **Location:** `vendor/multigrid/gym_multigrid/multigrid.py:1072-1091`  
