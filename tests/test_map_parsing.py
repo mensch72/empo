@@ -102,7 +102,7 @@ def test_all_object_types():
     We Bl Ro La Sw Un .. .. .. We
     We Gr Kr Br Xr .. .. .. .. We
     We Lr Cr Or .. .. .. .. .. We
-    We Mn Ms Mw Me .. .. .. .. We
+    We Mn Ms Mw Me Ma .. .. .. We
     We .. Ar .. .. .. .. .. .. We
     We We We We We We We We We We
     """
@@ -150,6 +150,7 @@ def test_all_object_types():
     assert cells[4][2] == ('magicwall', {'magic_side': 1})  # south
     assert cells[4][3] == ('magicwall', {'magic_side': 2})  # west
     assert cells[4][4] == ('magicwall', {'magic_side': 0})  # east
+    assert cells[4][5] == ('magicwall', {'magic_side': 4})  # all
 
 
 def test_create_environment_with_map():

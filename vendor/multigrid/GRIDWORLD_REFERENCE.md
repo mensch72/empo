@@ -217,17 +217,17 @@ Each cell in the grid can contain:
 - **Properties**:
   - Cannot be passed through by agents under normal circumstances
   - Cannot be seen through (blocks vision)
-  - Can be entered by specific agents with a certain probability from one specific direction
+  - Can be entered by specific agents with a certain probability from one specific direction (or all directions)
   - Once entered, agents can step off as if it was an empty cell (can overlap)
   - Cannot be picked up or moved
   - May turn into a normal wall after a failed entry attempt
 - **Attributes**:
-  - `magic_side`: Direction from which the wall can be entered (0=right, 1=down, 2=left, 3=up)
+  - `magic_side`: Direction from which the wall can be entered (0=right, 1=down, 2=left, 3=up, 4=all)
   - `entry_probability`: Probability (0.0 to 1.0) that an authorized agent successfully enters from the magic side
   - `solidify_probability`: Probability (0.0 to 1.0) that a failed entry attempt turns the magic wall into a normal wall (default 0.0)
 - **Agent Requirements**:
   - Agent must have `can_enter_magic_walls` attribute set to `True` to attempt entry
-  - Agent must approach from the magic side (opposite direction to their facing direction)
+  - Agent must approach from the magic side (opposite direction to their facing direction), or magic_side=4 allows any direction
   - Entry attempt is probabilistic based on `entry_probability`
 - **Entry Mechanics**:
   - Agent uses **forward action** when facing the magic wall from the magic side
@@ -239,12 +239,13 @@ Each cell in the grid can contain:
   - **No conflicts possible**: At most one agent can be next to the magic side of each magic wall
 - **Rendering**:
   - Base wall rendered in configured color (default grey)
-  - Dashed blue line drawn parallel to and near the magic side
+  - Dashed blue line drawn parallel to and near the magic side(s)
   - Line position indicates which side can be entered from:
     - magic_side=0 (right): Line on right edge
     - magic_side=1 (down): Line on bottom edge
     - magic_side=2 (left): Line on left edge
     - magic_side=3 (up): Line on top edge
+    - magic_side=4 (all): Lines on all four edges
   - Magenta flash and brighter wall color when entry succeeds
 - **Use Cases**:
   - Adding controlled stochasticity to navigation

@@ -303,7 +303,28 @@ class MyEnv(MultiGridEnv):
 | `Ro` | Rock |
 | `Bl` | Block |
 | `Un` | Unsteady ground |
-| `Mn/Ms/Me/Mw` | Magic wall (north/south/east/west side) |
+| `Mn/Ms/Me/Mw/Ma` | Magic wall (north/south/east/west/all sides) |
+
+### Agent Color Conventions (MultiGrid)
+
+In MultiGrid environments used by the EMPO framework, agent colors distinguish agent types in human-robot collaboration scenarios:
+
+| Color | Agent Type | Description |
+|-------|------------|-------------|
+| `yellow` | Human | Human agents whose empowerment is to be maximized |
+| `grey` | Robot | AI agents that act to maximize human empowerment |
+
+This convention is used throughout the MultiGrid-based environments to identify agent roles:
+
+```python
+# Identify human agents
+human_indices = [i for i, agent in enumerate(env.agents) if agent.color == 'yellow']
+
+# Identify robot agents  
+robot_indices = [i for i, agent in enumerate(env.agents) if agent.color == 'grey']
+```
+
+**Note:** This semantic meaning is specific to the EMPO project's MultiGrid environments. Other environment types (Transport, Minecraft, etc.) may use different conventions for distinguishing agent roles. The underlying MultiGrid library itself supports arbitrary agent colors—we use this subset with defined semantics for human empowerment research.
 
 ---
 

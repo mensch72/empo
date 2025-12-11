@@ -29,7 +29,8 @@ class UnsteadyGroundDemoEnv(MultiGridEnv):
             max_steps=200,
             agents=self.agents,
             partial_obs=False,
-            objects_set=World
+            objects_set=World,
+            stumble_probability=0.7
         )
     
     def _gen_grid(self, width, height):
@@ -92,7 +93,7 @@ def create_animation(output_path='unsteady_ground_animation.mp4', num_steps=50):
     print(f"  Grid size: 10x10")
     print(f"  Number of agents: 10")
     print(f"  Number of unsteady cells: 10")
-    print(f"  Stumble probability: 50%")
+    print(f"  Stumble probability: 70%")
     print()
     
     # Create environment

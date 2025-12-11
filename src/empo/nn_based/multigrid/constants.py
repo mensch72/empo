@@ -53,11 +53,11 @@ DOOR_STATE_LOCKED = 3
 # Per-color key channels: value = 1 if present
 KEY_CHANNEL_START = DOOR_CHANNEL_START + NUM_STANDARD_COLORS  # 21
 
-# Magic wall channel: value encodes magic_side (1-4) or inactive (5)
+# Magic wall channel: value encodes magic_side (1-5) or inactive (6)
 MAGICWALL_CHANNEL = KEY_CHANNEL_START + NUM_STANDARD_COLORS  # 28
 MAGICWALL_STATE_NONE = 0
-MAGICWALL_STATE_ACTIVE_BASE = 1  # Add magic_side (0-3) to get 1-4
-MAGICWALL_STATE_INACTIVE = 5
+MAGICWALL_STATE_ACTIVE_BASE = 1  # Add magic_side (0-4) to get 1-5
+MAGICWALL_STATE_INACTIVE = 6
 
 NUM_OBJECT_TYPE_CHANNELS = MAGICWALL_CHANNEL + 1  # 29
 

@@ -896,10 +896,10 @@ class Wall(WorldObj):
 class MagicWall(WorldObj):
     """
     Magic wall that can be entered by certain agents with a certain probability 
-    from one specific direction.
+    from one specific direction (or all directions).
     
     Attributes:
-        magic_side: Direction from which the wall can be entered (0=right, 1=down, 2=left, 3=up) [immutable]
+        magic_side: Direction from which the wall can be entered (0=right, 1=down, 2=left, 3=up, 4=all) [immutable]
         entry_probability: Probability (0.0 to 1.0) that an authorized agent successfully enters [immutable]
         solidify_probability: Probability (0.0 to 1.0) that a failed entry attempt deactivates this wall [immutable]
         active: Whether this wall still functions as a magic wall (True) or has solidified into a regular wall (False) [mutable]
@@ -909,13 +909,13 @@ class MagicWall(WorldObj):
         """
         Args:
             world: World object defining the environment
-            magic_side: Direction from which agents can attempt to enter (0-3)
+            magic_side: Direction from which agents can attempt to enter (0-4: 0=right, 1=down, 2=left, 3=up, 4=all)
             entry_probability: Probability of successful entry (0.0 to 1.0)
             solidify_probability: Probability that a failed entry turns this into a normal wall (0.0 to 1.0)
             color: Color of the wall for rendering
         """
         super().__init__(world, 'magicwall', color)
-        assert 0 <= magic_side <= 3, "magic_side must be 0 (right), 1 (down), 2 (left), or 3 (up)"
+        assert 0 <= magic_side <= 4, "magic_side must be 0 (right), 1 (down), 2 (left), 3 (up), or 4 (all)"
         assert 0.0 <= entry_probability <= 1.0, "entry_probability must be between 0.0 and 1.0"
         assert 0.0 <= solidify_probability <= 1.0, "solidify_probability must be between 0.0 and 1.0"
         self.magic_side = magic_side
@@ -964,7 +964,28 @@ class MagicWall(WorldObj):
         offset = 0.15  # Distance from the edge
         
         # Create dashed line based on magic_side direction
-        if self.magic_side == 0:  # Right - vertical dashed line near right edge
+        if self.magic_side == 4:  # All sides - draw lines on all four edges
+            # Right edge
+            x_pos = 1 - offset
+            for y in np.arange(0.05, 0.95, dash_length + gap_length):
+                dash_end = min(y + dash_length, 0.95)
+                fill_coords(img, point_in_rect(x_pos - line_width/2, x_pos + line_width/2, y, dash_end), blue_color)
+            # Bottom edge
+            y_pos = 1 - offset
+            for x in np.arange(0.05, 0.95, dash_length + gap_length):
+                dash_end = min(x + dash_length, 0.95)
+                fill_coords(img, point_in_rect(x, dash_end, y_pos - line_width/2, y_pos + line_width/2), blue_color)
+            # Left edge
+            x_pos = offset
+            for y in np.arange(0.05, 0.95, dash_length + gap_length):
+                dash_end = min(y + dash_length, 0.95)
+                fill_coords(img, point_in_rect(x_pos - line_width/2, x_pos + line_width/2, y, dash_end), blue_color)
+            # Top edge
+            y_pos = offset
+            for x in np.arange(0.05, 0.95, dash_length + gap_length):
+                dash_end = min(x + dash_length, 0.95)
+                fill_coords(img, point_in_rect(x, dash_end, y_pos - line_width/2, y_pos + line_width/2), blue_color)
+        elif self.magic_side == 0:  # Right - vertical dashed line near right edge
             x_pos = 1 - offset
             y_start = 0.05
             y_end = 0.95
@@ -1007,7 +1028,28 @@ class MagicWall(WorldObj):
         offset = 0.15
         
         # Create dashed line based on magic_side direction (same positions, different color)
-        if self.magic_side == 0:  # Right
+        if self.magic_side == 4:  # All sides - draw lines on all four edges
+            # Right edge
+            x_pos = 1 - offset
+            for y in np.arange(0.05, 0.95, dash_length + gap_length):
+                dash_end = min(y + dash_length, 0.95)
+                fill_coords(img, point_in_rect(x_pos - line_width/2, x_pos + line_width/2, y, dash_end), magic_color)
+            # Bottom edge
+            y_pos = 1 - offset
+            for x in np.arange(0.05, 0.95, dash_length + gap_length):
+                dash_end = min(x + dash_length, 0.95)
+                fill_coords(img, point_in_rect(x, dash_end, y_pos - line_width/2, y_pos + line_width/2), magic_color)
+            # Left edge
+            x_pos = offset
+            for y in np.arange(0.05, 0.95, dash_length + gap_length):
+                dash_end = min(y + dash_length, 0.95)
+                fill_coords(img, point_in_rect(x_pos - line_width/2, x_pos + line_width/2, y, dash_end), magic_color)
+            # Top edge
+            y_pos = offset
+            for x in np.arange(0.05, 0.95, dash_length + gap_length):
+                dash_end = min(x + dash_length, 0.95)
+                fill_coords(img, point_in_rect(x, dash_end, y_pos - line_width/2, y_pos + line_width/2), magic_color)
+        elif self.magic_side == 0:  # Right
             x_pos = 1 - offset
             for y in np.arange(0.05, 0.95, dash_length + gap_length):
                 dash_end = min(y + dash_length, 0.95)
@@ -1638,27 +1680,6 @@ class Grid:
 
         return array
 
-    # @staticmethod
-    # def decode(array):
-    #     """
-    #     Decode an array grid encoding back into a grid
-    #     """
-    #
-    #     width, height, channels = array.shape
-    #     assert channels == 3
-    #
-    #     vis_mask = np.ones(shape=(width, height), dtype=np.bool)
-    #
-    #     grid = Grid(width, height)
-    #     for i in range(width):
-    #         for j in range(height):
-    #             type_idx, color_idx, state = array[i, j]
-    #             v = WorldObj.decode(type_idx, color_idx, state)
-    #             grid.set(i, j, v)
-    #             vis_mask[i, j] = (type_idx != OBJECT_TO_IDX['unseen'])
-    #
-    #     return grid, vis_mask
-
     def process_vis(grid, agent_pos):
         mask = np.zeros(shape=(grid.width, grid.height), dtype=np.bool)
 
@@ -1751,6 +1772,7 @@ MAGIC_SIDE_EAST = 0   # Entry from east (approaching from west)
 MAGIC_SIDE_SOUTH = 1  # Entry from south (approaching from north)
 MAGIC_SIDE_WEST = 2   # Entry from west (approaching from east)
 MAGIC_SIDE_NORTH = 3  # Entry from north (approaching from south)
+MAGIC_SIDE_ALL = 4    # Entry from all sides
 
 
 def parse_map_string(map_spec, objects_set=World):
@@ -1912,7 +1934,8 @@ def _parse_cell(cell_str, objects_set):
             'n': MAGIC_SIDE_NORTH,
             's': MAGIC_SIDE_SOUTH,
             'w': MAGIC_SIDE_WEST,
-            'e': MAGIC_SIDE_EAST
+            'e': MAGIC_SIDE_EAST,
+            'a': MAGIC_SIDE_ALL
         }
         if direction not in magic_side_map:
             raise ValueError(f"Invalid magic wall direction: {direction}")
@@ -1949,7 +1972,7 @@ def _parse_cell(cell_str, objects_set):
         raise ValueError(f"Unknown cell type: {cell_str}")
 
 
-def create_object_from_spec(cell_spec, objects_set, actions_set=None):
+def create_object_from_spec(cell_spec, objects_set, actions_set=None, stumble_probability=0.5, solidify_probability=0.1):
     """
     Create a WorldObj from a cell specification.
     
@@ -1957,6 +1980,8 @@ def create_object_from_spec(cell_spec, objects_set, actions_set=None):
         cell_spec: Tuple (type, params_dict) from _parse_cell
         objects_set: The World class to use
         actions_set: The Actions class to use (optional, needed for ControlButton)
+        stumble_probability: Default stumble probability for UnsteadyGround (0.0 to 1.0)
+        solidify_probability: Default solidify probability for MagicWall (0.0 to 1.0)
         
     Returns:
         WorldObj or None for empty cells
@@ -1977,11 +2002,12 @@ def create_object_from_spec(cell_spec, objects_set, actions_set=None):
     elif obj_type == 'switch':
         return Switch(objects_set)
     elif obj_type == 'unsteady':
-        return UnsteadyGround(objects_set)
+        return UnsteadyGround(objects_set, stumble_probability=stumble_probability)
     elif obj_type == 'magicwall':
         return MagicWall(objects_set, 
                         magic_side=params.get('magic_side', 0),
-                        entry_probability=params.get('entry_probability', 0.5))
+                        entry_probability=params.get('entry_probability', 0.5),
+                        solidify_probability=solidify_probability)
     elif obj_type == 'killbutton':
         return KillButton(objects_set,
                          trigger_color=params.get('trigger_color', 'yellow'),
@@ -2070,7 +2096,9 @@ class MultiGridEnv(WorldModel):
             map=None,
             orientations=None,
             can_push_rocks='e',
-            config_file=None
+            config_file=None,
+            stumble_probability=0.5,
+            solidify_probability=0.1
     ):
         """
         Initialize a MultiGridEnv.
@@ -2094,6 +2122,8 @@ class MultiGridEnv(WorldModel):
                         If provided, loads map and other parameters from the file.
                         YAML files (.yaml, .yml) use PyYAML; JSON files use standard json.
                         Parameters passed explicitly to __init__ override config file values.
+            stumble_probability: Default probability of stumbling on UnsteadyGround (0.0 to 1.0)
+            solidify_probability: Default probability of MagicWall solidifying on failed entry (0.0 to 1.0)
         """
         # Load config from config file if provided
         if config_file is not None:
@@ -2126,6 +2156,10 @@ class MultiGridEnv(WorldModel):
                 width = config['width']
             if height is None and 'height' in config:
                 height = config['height']
+            if stumble_probability == 0.5 and 'stumble_probability' in config:  # default: 0.5
+                stumble_probability = config['stumble_probability']
+            if solidify_probability == 0.1 and 'solidify_probability' in config:  # default: 0.1
+                solidify_probability = config['solidify_probability']
             
             # Store config file path for reference
             self._config_file = config_file
@@ -2143,6 +2177,14 @@ class MultiGridEnv(WorldModel):
         self._init_seed = seed
         self._init_orientations = orientations
         self._init_can_push_rocks = can_push_rocks
+        self._init_stumble_probability = stumble_probability
+        self._init_solidify_probability = solidify_probability
+        
+        # Store stumble_probability for use by UnsteadyGround objects
+        self.stumble_probability = stumble_probability
+        
+        # Store solidify_probability for use by MagicWall objects
+        self.solidify_probability = solidify_probability
         
         # Initialize RNG early so we can use it for random orientations
         # This is done before reset() to allow random orientations to be drawn in __init__
@@ -2271,7 +2313,9 @@ class MultiGridEnv(WorldModel):
             'map': self._map_spec,
             'orientations': getattr(self, '_init_orientations', None),
             'can_push_rocks': getattr(self, '_init_can_push_rocks', 'e'),
-            'config_file': getattr(self, '_config_file', None)
+            'config_file': getattr(self, '_config_file', None),
+            'stumble_probability': getattr(self, '_init_stumble_probability', 0.5),
+            'solidify_probability': getattr(self, '_init_solidify_probability', 0.1)
         }
     
     @staticmethod
@@ -2493,7 +2537,9 @@ class MultiGridEnv(WorldModel):
             for x in range(map_width):
                 cell_spec = cells[y][x]
                 if cell_spec is not None and cell_spec[0] != 'agent':
-                    obj = create_object_from_spec(cell_spec, self.objects, self.actions)
+                    obj = create_object_from_spec(cell_spec, self.objects, self.actions, 
+                                                  stumble_probability=self.stumble_probability,
+                                                  solidify_probability=self.solidify_probability)
                     if obj is not None:
                         self.grid.set(x, y, obj)
         
@@ -2628,11 +2674,16 @@ class MultiGridEnv(WorldModel):
         self.agents[agent_idx].pos = np.array(target_pos) if not isinstance(target_pos, np.ndarray) else target_pos
         
         # Save overlappable terrain at new position so it persists under the agent
-        # and can be restored when the agent leaves
-        if target_cell is not None and target_cell.can_overlap():
-            self.terrain_grid.set(*self.agents[agent_idx].pos, target_cell)
-        else:
-            self.terrain_grid.set(*self.agents[agent_idx].pos, None)
+        # and can be restored when the agent leaves.
+        # Note: If terrain is already set at the target position (e.g., magic wall entry
+        # pre-saves the magic wall), we preserve it rather than overwriting.
+        existing_terrain = self.terrain_grid.get(*self.agents[agent_idx].pos)
+        if existing_terrain is None:
+            if target_cell is not None and target_cell.can_overlap():
+                self.terrain_grid.set(*self.agents[agent_idx].pos, target_cell)
+            else:
+                self.terrain_grid.set(*self.agents[agent_idx].pos, None)
+        # else: terrain already set (e.g., by magic wall entry), keep it
         
         # Set new position
         self.grid.set(*self.agents[agent_idx].pos, self.agents[agent_idx])
@@ -3110,11 +3161,11 @@ class MultiGridEnv(WorldModel):
                 fwd_cell = self.grid.get(*fwd_pos)
                 # Check if it's an active magic wall (not solidified)
                 if fwd_cell is not None and fwd_cell.type == 'magicwall' and fwd_cell.active:
-                    # Check if agent is approaching from the magic side
+                    # Check if agent is approaching from the magic side (or magic_side=4 means all sides)
                     # Agent's direction is where they're facing, magic_side is where wall can be entered from
                     # If agent faces right (dir=0), they approach from left (opposite of right=0 is left=2)
                     approach_dir = (self.agents[i].dir + 2) % 4
-                    if approach_dir == fwd_cell.magic_side:
+                    if fwd_cell.magic_side == 4 or approach_dir == fwd_cell.magic_side:
                         magic_wall_agents.append(i)
                         continue
                 

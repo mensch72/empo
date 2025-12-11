@@ -63,7 +63,7 @@ class MagicWallDemoEnv(MultiGridEnv):
                     break
             
             # Create magic wall with random magic side, entry probability, and solidify probability
-            magic_side = self._rand_int(0, 4)  # 0=right, 1=down, 2=left, 3=up
+            magic_side = self._rand_int(0, 5)  # 0=right, 1=down, 2=left, 3=up, 4=all
             entry_prob = 0.5 + 0.5 * np.random.random()  # 50% to 100% for better visibility
             solidify_prob = 0.1 + 0.2 * np.random.random()  # 10% to 30% chance to solidify on failed entry
             magic_wall = MagicWall(World, magic_side=magic_side, 
@@ -204,10 +204,12 @@ def main():
     print("This example demonstrates:")
     print("  - Creating a 16x16 multigrid environment with 30 magic walls")
     print("  - 10 agents navigating (9 can enter magic walls, 1 cannot)")
-    print("  - Magic walls that can only be entered from specific directions")
+    print("  - Magic walls that can be entered from specific directions or all directions")
+    print("  - Five magic_side options: right(0), down(1), left(2), up(3), all(4)")
     print("  - Probabilistic entry success (50% to 100%)")
     print("  - Magic walls that may solidify into normal walls on failed entry")
-    print("  - Blue dashed lines indicate which side can be entered")
+    print("  - Blue dashed lines indicate which side(s) can be entered")
+    print("  - All-sides walls have blue lines on all four edges")
     print("  - Magenta flash indicates successful entry")
     print()
     
