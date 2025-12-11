@@ -280,25 +280,44 @@ class HeuristicPotentialPolicy(HumanPolicyPrior):
     - Otherwise, uses the forward action (which won't actually open the door
       in SmallActions environments, but represents the agent's intent)
     
+    Key Pickup:
+    If the agent is adjacent to a key that can open at least one locked door,
+    and the agent is not already carrying a key, the policy overrides the
+    potential-based action and instead turns toward the key and picks it up.
+    - If num_actions > 4 (full Actions set), uses the pickup action
+    - Otherwise, uses the forward action
+    
+    Key Drop:
+    If the agent is carrying a key that can no longer open any locked door
+    (all matching doors have been unlocked), the policy overrides the potential-based
+    action and instead drops the key on the neighboring cell with the worst potential
+    (furthest from goal), freeing the agent to carry other objects if needed.
+    - If num_actions > 5 (full Actions set), uses the drop action
+    - Otherwise, uses the forward action
+    
     The policy is parameterized by:
     - softness (beta): Controls how deterministic the policy is.
       - beta -> 0: Uniform random over all actions
       - beta -> inf: Deterministic (always pick best action)
       - Typical values: 1-10 for exploration, 10-100 for exploitation
     
-    Action selection logic:
+    Action selection logic (in priority order):
     1. Check for adjacent actionable doors (locked with matching key, or closed)
        - If found and not facing: return turn action to face the door
        - If found and facing: return toggle (or forward) action
-    2. Compute potential Φ(current_pos) for current position
-    3. For each of 4 cardinal directions, compute potential Φ(neighbor_pos)
+    2. Check for adjacent useful keys (can open at least one locked door)
+       - If found and not carrying a key: turn toward key and pick it up
+    3. Check for useless key being carried (can't open any locked door)
+       - If carrying useless key: turn toward worst-potential cell and drop it
+    4. Compute potential Φ(current_pos) for current position
+    5. For each of 4 cardinal directions, compute potential Φ(neighbor_pos)
        for the neighboring cell (if walkable)
-    4. Compute advantage for each direction: A_dir = Φ(neighbor) - Φ(current)
-    5. Convert to action probabilities using softmax:
+    6. Compute advantage for each direction: A_dir = Φ(neighbor) - Φ(current)
+    7. Convert to action probabilities using softmax:
        - If facing direction d: forward action gets advantage A_d
        - Turn actions get advantage of the direction they would face
        - Still action gets advantage 0 (no improvement)
-    6. Apply softmax: P(action) ∝ exp(beta * advantage)
+    8. Apply softmax: P(action) ∝ exp(beta * advantage)
     
     Attributes:
         path_calculator: PathDistanceCalculator for potential computation.
@@ -326,7 +345,9 @@ class HeuristicPotentialPolicy(HumanPolicyPrior):
     ACTION_RIGHT = 2
     ACTION_FORWARD = 3
     
-    # Action index for toggle in full Actions set
+    # Action indices for full Actions set
+    ACTION_PICKUP = 4
+    ACTION_DROP = 5
     ACTION_TOGGLE = 6
     
     def __init__(
@@ -488,6 +509,159 @@ class HeuristicPotentialPolicy(HumanPolicyPrior):
         
         return None
     
+    def _get_locked_doors_by_color(self) -> dict:
+        """
+        Get a dictionary mapping door colors to lists of locked door positions.
+        
+        Returns:
+            Dict mapping color -> list of (x, y) positions of locked doors.
+        """
+        locked_doors = {}
+        
+        for y in range(self.world_model.height):
+            for x in range(self.world_model.width):
+                cell = self.world_model.grid.get(x, y)
+                if cell is None:
+                    continue
+                
+                cell_type = getattr(cell, 'type', None)
+                if cell_type != 'door':
+                    continue
+                
+                is_locked = getattr(cell, 'is_locked', False)
+                if not is_locked:
+                    continue
+                
+                door_color = getattr(cell, 'color', None)
+                if door_color is not None:
+                    if door_color not in locked_doors:
+                        locked_doors[door_color] = []
+                    locked_doors[door_color].append((x, y))
+        
+        return locked_doors
+    
+    def _find_useful_key(
+        self,
+        agent_x: int,
+        agent_y: int,
+        carrying_type: Optional[str],
+        locked_doors_by_color: dict
+    ) -> Optional[int]:
+        """
+        Find an adjacent key that can open at least one locked door.
+        
+        Only considers picking up a key if:
+        - Agent is not already carrying a key
+        - The key's color matches at least one locked door
+        
+        Args:
+            agent_x, agent_y: Agent's current position.
+            carrying_type: Type of object the agent is carrying, or None.
+            locked_doors_by_color: Dict mapping color -> list of locked door positions.
+        
+        Returns:
+            Direction (0-3) of the useful key, or None if no useful key found.
+        """
+        # Don't pick up a key if already carrying one
+        if carrying_type == 'key':
+            return None
+        
+        for direction in range(4):
+            dx, dy = self.DIR_TO_VEC[direction]
+            neighbor_x, neighbor_y = agent_x + dx, agent_y + dy
+            
+            # Check bounds
+            if not (0 <= neighbor_x < self.world_model.width and 
+                    0 <= neighbor_y < self.world_model.height):
+                continue
+            
+            cell = self.world_model.grid.get(neighbor_x, neighbor_y)
+            if cell is None:
+                continue
+            
+            cell_type = getattr(cell, 'type', None)
+            if cell_type != 'key':
+                continue
+            
+            key_color = getattr(cell, 'color', None)
+            
+            # Check if this key can open at least one locked door
+            if key_color in locked_doors_by_color and len(locked_doors_by_color[key_color]) > 0:
+                return direction
+        
+        return None
+    
+    def _find_drop_cell_for_useless_key(
+        self,
+        agent_x: int,
+        agent_y: int,
+        carrying_type: Optional[str],
+        carrying_color: Optional[str],
+        locked_doors_by_color: dict,
+        goal_tuple: tuple,
+        blocked_positions: set
+    ) -> Optional[int]:
+        """
+        Find an adjacent cell to drop a useless key (one that can't open any locked door).
+        
+        The key is dropped on the neighboring cell with the worst potential (furthest from goal).
+        
+        Args:
+            agent_x, agent_y: Agent's current position.
+            carrying_type: Type of object the agent is carrying.
+            carrying_color: Color of the carried object.
+            locked_doors_by_color: Dict mapping color -> list of locked door positions.
+            goal_tuple: Goal coordinates for potential calculation.
+            blocked_positions: Set of positions blocked by agents/rocks.
+        
+        Returns:
+            Direction (0-3) of the best cell to drop the key, or None if can't/shouldn't drop.
+        """
+        # Only consider dropping if carrying a key
+        if carrying_type != 'key':
+            return None
+        
+        # Check if the key can still open at least one locked door
+        if carrying_color in locked_doors_by_color and len(locked_doors_by_color[carrying_color]) > 0:
+            return None  # Key is still useful, don't drop it
+        
+        # Find the neighboring cell with the worst potential (most negative = furthest from goal)
+        worst_potential = float('inf')
+        worst_direction = None
+        
+        for direction in range(4):
+            dx, dy = self.DIR_TO_VEC[direction]
+            neighbor_x, neighbor_y = agent_x + dx, agent_y + dy
+            
+            # Check bounds
+            if not (0 <= neighbor_x < self.world_model.width and 
+                    0 <= neighbor_y < self.world_model.height):
+                continue
+            
+            # Check if the cell is empty and not blocked
+            if (neighbor_x, neighbor_y) in blocked_positions:
+                continue
+            
+            cell = self.world_model.grid.get(neighbor_x, neighbor_y)
+            
+            # Can only drop on empty cells or cells that can be overlapped
+            if cell is not None:
+                cell_type = getattr(cell, 'type', None)
+                # Can't drop on walls, doors, keys, balls, boxes, etc.
+                if cell_type in ('wall', 'door', 'key', 'ball', 'box', 'block', 'rock', 'lava', 'magicwall'):
+                    continue
+            
+            # Calculate potential for this cell
+            neighbor_potential = self.path_calculator.compute_potential(
+                (neighbor_x, neighbor_y), goal_tuple, self.world_model
+            )
+            
+            if neighbor_potential < worst_potential:
+                worst_potential = neighbor_potential
+                worst_direction = direction
+        
+        return worst_direction
+    
     def _get_turn_action_to_face(self, current_dir: int, target_dir: int) -> int:
         """
         Get the turn action to face from current_dir toward target_dir.
@@ -596,6 +770,63 @@ class HeuristicPotentialPolicy(HumanPolicyPrior):
         for obj_type, obj_x, obj_y in mobile_objects:
             if obj_type == 'rock':
                 blocked_positions.add((obj_x, obj_y))
+        
+        # Get locked doors by color for key handling logic
+        locked_doors_by_color = self._get_locked_doors_by_color()
+        
+        # Check for useful keys to pick up (override potential-based action)
+        # This handles: keys that can open at least one locked door, when not carrying a key
+        key_direction = self._find_useful_key(
+            agent_x, agent_y, carrying_type, locked_doors_by_color
+        )
+        
+        if key_direction is not None:
+            # Found a useful key - turn toward it and pick it up
+            probs = np.zeros(self.num_actions)
+            
+            if agent_dir == key_direction:
+                # Already facing the key - use pickup action if available, otherwise forward
+                # ACTION_PICKUP is at index 4, so we need num_actions > 4 (i.e., at least 5 actions)
+                if self.num_actions > self.ACTION_PICKUP:
+                    # Full Actions set with pickup available
+                    probs[self.ACTION_PICKUP] = 1.0
+                else:
+                    # SmallActions - use forward to bump into key (won't pick it up, but
+                    # this policy does its best with available actions)
+                    probs[self.ACTION_FORWARD] = 1.0
+            else:
+                # Turn to face the key
+                turn_action = self._get_turn_action_to_face(agent_dir, key_direction)
+                probs[turn_action] = 1.0
+            
+            return probs
+        
+        # Check for useless keys to drop (override potential-based action)
+        # This handles: keys that cannot open any locked door anymore
+        drop_direction = self._find_drop_cell_for_useless_key(
+            agent_x, agent_y, carrying_type, carrying_color,
+            locked_doors_by_color, goal_tuple, blocked_positions
+        )
+        
+        if drop_direction is not None:
+            # Found a cell to drop the useless key - turn toward it and drop
+            probs = np.zeros(self.num_actions)
+            
+            if agent_dir == drop_direction:
+                # Already facing the drop cell - use drop action if available, otherwise forward
+                # ACTION_DROP is at index 5, so we need num_actions > 5 (i.e., at least 6 actions)
+                if self.num_actions > self.ACTION_DROP:
+                    # Full Actions set with drop available
+                    probs[self.ACTION_DROP] = 1.0
+                else:
+                    # SmallActions - use forward (won't drop, but this policy does its best)
+                    probs[self.ACTION_FORWARD] = 1.0
+            else:
+                # Turn to face the drop cell
+                turn_action = self._get_turn_action_to_face(agent_dir, drop_direction)
+                probs[turn_action] = 1.0
+            
+            return probs
         
         # Compute potential at current position
         current_potential = self.path_calculator.compute_potential(

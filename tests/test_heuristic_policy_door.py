@@ -450,9 +450,222 @@ def run_all_tests():
     test_policy_locked_door_with_key()
     print()
     
+    # Key handling tests
+    test_find_useful_key()
+    print()
+    
+    test_find_useful_key_not_carrying()
+    print()
+    
+    test_find_useful_key_already_carrying()
+    print()
+    
+    test_find_useless_key_drop()
+    print()
+    
+    test_policy_override_pickup_key()
+    print()
+    
+    test_policy_override_drop_useless_key()
+    print()
+    
     print("=" * 60)
-    print("All HeuristicPotentialPolicy door handling tests passed!")
+    print("All HeuristicPotentialPolicy door and key handling tests passed!")
     print("=" * 60)
+
+
+def test_find_useful_key():
+    """Test that useful key adjacent to agent is detected."""
+    print("Testing: useful key detection...")
+    
+    # Create a world with a red key to the east and a locked red door
+    cells = {
+        (3, 2): MockCell('key', color='red'),
+        (5, 5): MockCell('door', is_open=False, is_locked=True, color='red'),
+    }
+    world_model = MockWorldModel(width=10, height=10, cells=cells)
+    path_calc = MockPathCalculator()
+    
+    policy = HeuristicPotentialPolicy(
+        world_model=world_model,
+        human_agent_indices=[0],
+        path_calculator=path_calc,
+        num_actions=8
+    )
+    
+    # Get locked doors by color
+    locked_doors = policy._get_locked_doors_by_color()
+    
+    # Agent at (2, 2) not carrying anything
+    key_dir = policy._find_useful_key(2, 2, None, locked_doors)
+    
+    # Should find key to the east (direction 0)
+    assert key_dir == 0, f"Expected direction 0 (east), got {key_dir}"
+    print("  ✓ Useful key detected correctly")
+
+
+def test_find_useful_key_not_carrying():
+    """Test that useless key (no matching locked door) is not detected."""
+    print("Testing: useless key not detected (no matching locked door)...")
+    
+    # Create a world with a blue key but only red locked doors
+    cells = {
+        (3, 2): MockCell('key', color='blue'),
+        (5, 5): MockCell('door', is_open=False, is_locked=True, color='red'),
+    }
+    world_model = MockWorldModel(width=10, height=10, cells=cells)
+    path_calc = MockPathCalculator()
+    
+    policy = HeuristicPotentialPolicy(
+        world_model=world_model,
+        human_agent_indices=[0],
+        path_calculator=path_calc,
+        num_actions=8
+    )
+    
+    # Get locked doors by color
+    locked_doors = policy._get_locked_doors_by_color()
+    
+    # Agent at (2, 2) not carrying anything
+    key_dir = policy._find_useful_key(2, 2, None, locked_doors)
+    
+    # Should NOT find the blue key (no matching locked door)
+    assert key_dir is None, f"Expected None (no matching door), got {key_dir}"
+    print("  ✓ Useless key correctly ignored")
+
+
+def test_find_useful_key_already_carrying():
+    """Test that key is not picked up if already carrying a key."""
+    print("Testing: don't pick up key when already carrying one...")
+    
+    # Create a world with a red key and locked door
+    cells = {
+        (3, 2): MockCell('key', color='red'),
+        (5, 5): MockCell('door', is_open=False, is_locked=True, color='red'),
+    }
+    world_model = MockWorldModel(width=10, height=10, cells=cells)
+    path_calc = MockPathCalculator()
+    
+    policy = HeuristicPotentialPolicy(
+        world_model=world_model,
+        human_agent_indices=[0],
+        path_calculator=path_calc,
+        num_actions=8
+    )
+    
+    # Get locked doors by color
+    locked_doors = policy._get_locked_doors_by_color()
+    
+    # Agent at (2, 2) already carrying a key
+    key_dir = policy._find_useful_key(2, 2, 'key', locked_doors)
+    
+    # Should NOT pick up (already carrying)
+    assert key_dir is None, f"Expected None (already carrying), got {key_dir}"
+    print("  ✓ Key correctly ignored when already carrying")
+
+
+def test_find_useless_key_drop():
+    """Test that useless key drop cell is found correctly."""
+    print("Testing: find drop cell for useless key...")
+    
+    # Create a world with no locked doors (key is useless)
+    cells = {}
+    world_model = MockWorldModel(width=10, height=10, cells=cells)
+    path_calc = MockPathCalculator()
+    
+    policy = HeuristicPotentialPolicy(
+        world_model=world_model,
+        human_agent_indices=[0],
+        path_calculator=path_calc,
+        num_actions=8
+    )
+    
+    # No locked doors
+    locked_doors = {}
+    goal_tuple = (8, 8)  # Goal to the southeast
+    blocked_positions = set()
+    
+    # Agent at (5, 5) carrying a red key
+    drop_dir = policy._find_drop_cell_for_useless_key(
+        5, 5, 'key', 'red', locked_doors, goal_tuple, blocked_positions
+    )
+    
+    # Should find a drop direction (worst potential = furthest from goal)
+    # From (5,5) to (8,8), worst potential cells are to west (2) or north (3)
+    assert drop_dir is not None, f"Expected a drop direction, got None"
+    # The worst potential should be either west (2) or north (3)
+    assert drop_dir in [2, 3], f"Expected direction 2 or 3 (away from goal), got {drop_dir}"
+    print("  ✓ Drop cell for useless key found correctly")
+
+
+def test_policy_override_pickup_key():
+    """Test that policy returns pickup action when facing useful key."""
+    print("Testing: policy override - pickup key...")
+    
+    # Create a world with a red key to the east and a locked red door
+    cells = {
+        (3, 2): MockCell('key', color='red'),
+        (5, 5): MockCell('door', is_open=False, is_locked=True, color='red'),
+    }
+    world_model = MockWorldModel(width=10, height=10, cells=cells)
+    path_calc = MockPathCalculator()
+    
+    policy = HeuristicPotentialPolicy(
+        world_model=world_model,
+        human_agent_indices=[0],
+        path_calculator=path_calc,
+        num_actions=8,  # Full Actions set
+        softness=10.0
+    )
+    
+    # Agent at (2, 2), facing east (direction 0) toward the key
+    agent_state = (2, 2, 0, False, True, False, None, None, None)
+    state = (0, [agent_state], [], [])
+    
+    goal = MockGoal((5, 5))
+    
+    probs = policy(state, human_agent_index=0, possible_goal=goal)
+    
+    # Should use pickup action (index 4) since facing the key
+    assert probs[policy.ACTION_PICKUP] == 1.0, \
+        f"Expected ACTION_PICKUP (prob=1.0), got probs={probs}"
+    print("  ✓ Policy correctly returns pickup when facing useful key")
+
+
+def test_policy_override_drop_useless_key():
+    """Test that policy returns drop action when carrying useless key."""
+    print("Testing: policy override - drop useless key...")
+    
+    # Create a world with no locked doors (key is useless)
+    cells = {}
+    world_model = MockWorldModel(width=10, height=10, cells=cells)
+    path_calc = MockPathCalculator()
+    
+    policy = HeuristicPotentialPolicy(
+        world_model=world_model,
+        human_agent_indices=[0],
+        path_calculator=path_calc,
+        num_actions=8,  # Full Actions set
+        softness=10.0
+    )
+    
+    # Agent at (5, 5), carrying red key (useless), goal to southeast
+    # Worst potential is to the northwest, so agent should turn that way
+    agent_state = (5, 5, 0, False, True, False, 'key', 'red', None)  # Facing east
+    state = (0, [agent_state], [], [])
+    
+    goal = MockGoal((8, 8))  # Goal to southeast
+    
+    probs = policy(state, human_agent_index=0, possible_goal=goal)
+    
+    # Should try to drop (turn or drop action)
+    # Since key is useless, policy should either turn toward worst potential or drop
+    # The exact action depends on which direction is worst potential
+    # Either ACTION_DROP if already facing, or a turn action
+    action_sum = probs[policy.ACTION_DROP] + probs[policy.ACTION_LEFT] + probs[policy.ACTION_RIGHT]
+    assert action_sum == 1.0, \
+        f"Expected drop or turn action, got probs={probs}"
+    print("  ✓ Policy correctly handles useless key drop")
 
 
 if __name__ == "__main__":
