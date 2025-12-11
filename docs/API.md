@@ -23,7 +23,7 @@ from empo import WorldModel
 | `transition_probabilities(state, actions)` | Compute exact transition probabilities |
 | `initial_state()` | Get initial state without permanently resetting |
 | `is_terminal(state=None)` | Check if a state is terminal |
-| `get_dag(return_probabilities=False)` | Compute DAG of reachable states |
+| `get_dag(return_probabilities=False)` | Compute directed acyclic graph (DAG) of reachable states |
 | `get_dag_parallel(return_probabilities=False, num_workers=None)` | Parallel DAG computation |
 | `plot_dag(...)` | Visualize DAG with Graphviz |
 
@@ -61,7 +61,7 @@ from empo import PossibleGoal
 
 | Method | Description |
 |--------|-------------|
-| `is_achieved(state) -> int` | Returns 1 if goal achieved, 0 otherwise |
+| `is_achieved(state) -> int` | Returns 1 if goal achieved, 0 otherwise, to be used as "reward" and episode termination signal in reinforcement learning |
 | `__hash__() -> int` | Hash for use as dictionary key |
 | `__eq__(other) -> bool` | Equality comparison |
 
@@ -90,7 +90,7 @@ class ReachCell(PossibleGoal):
 
 ### PossibleGoalGenerator (empo.possible_goal)
 
-Abstract base class for enumerating possible goals.
+Abstract base class for enumerating all (!) possible goals and assign aggregation weights to them.
 
 ```python
 from empo import PossibleGoalGenerator
@@ -120,7 +120,7 @@ class AllCellsGenerator(PossibleGoalGenerator):
 
 ### HumanPolicyPrior (empo.human_policy_prior)
 
-Abstract base class for human policy priors.
+Abstract base class for human policy priors, optionally conditioned on a particular goal.
 
 ```python
 from empo import HumanPolicyPrior
@@ -149,7 +149,7 @@ Created by `compute_human_policy_prior()` function.
 
 ### compute_human_policy_prior (empo.backward_induction)
 
-Compute human policy prior via backward induction.
+Compute human policy prior via backward induction (only tractable in very small world models).
 
 ```python
 from empo import compute_human_policy_prior
@@ -209,12 +209,11 @@ sampled_action = policy_prior.sample(state, agent_idx=0, goal=my_goal)
 
 ## Environment Module: `src.envs`
 
-Custom MultiGrid environments for human-robot collaboration.
+Concrete example world models or environments.
 
-### SmallOneOrTwoChambersMapEnv
+### OneOrTwoChambersMapEnv and SmallOneOrTwoChambersMapEnv
 
-Simplified environment for tractable computation.
-
+An example where two humans can be given access to different chambers
 ```python
 from src.envs import SmallOneOrTwoChambersMapEnv
 ```

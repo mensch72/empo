@@ -108,12 +108,8 @@ def test_unsteady_agent_can_push_blocks():
         print(f"    Pos {pos}, Dir {dir_val}: {count} times")
     
     # Should see at least 2 different outcomes (stumble vs no stumble)
-    if len(outcomes) >= 2:
-        print(f"  ✓ Found {len(outcomes)} different outcomes (stochastic)")
-        return True
-    else:
-        print(f"  ✗ Only found {len(outcomes)} outcome (should be stochastic)")
-        return False
+    assert len(outcomes) >= 2, f"Only found {len(outcomes)} outcome (should be stochastic with at least 2)"
+    print(f"  ✓ Found {len(outcomes)} different outcomes (stochastic)")
 
 
 def test_transition_probabilities_with_push():
@@ -130,19 +126,14 @@ def test_transition_probabilities_with_push():
     
     result = env.transition_probabilities(state, actions)
     
-    if result is None:
-        print("  ✗ Got None result")
-        return False
+    assert result is not None, "Got None result from transition_probabilities"
     
     print(f"  Number of possible outcomes: {len(result)}")
     
     # Check probabilities sum to 1.0
     total_prob = sum(prob for prob, _ in result)
-    if abs(total_prob - 1.0) < 1e-10:
-        print(f"  ✓ Probabilities sum to 1.0")
-    else:
-        print(f"  ✗ Probabilities sum to {total_prob}")
-        return False
+    assert abs(total_prob - 1.0) < 1e-10, f"Probabilities sum to {total_prob}, not 1.0"
+    print(f"  ✓ Probabilities sum to 1.0")
     
     # Print outcomes
     print("\n  Outcomes:")
@@ -157,12 +148,8 @@ def test_transition_probabilities_with_push():
         print(f"    {i+1}. Prob={prob:.4f}: Agent@{agent_pos} dir={agent_dir}")
     
     # Should have 3 outcomes (forward, left-forward, right-forward)
-    if len(result) == 3:
-        print(f"\n  ✓ Found expected 3 outcomes")
-        return True
-    else:
-        print(f"\n  ✗ Found {len(result)} outcomes (expected 3)")
-        return False
+    assert len(result) == 3, f"Found {len(result)} outcomes (expected 3)"
+    print(f"\n  ✓ Found expected 3 outcomes")
 
 
 def run_all_tests():
@@ -177,25 +164,14 @@ def run_all_tests():
         test_transition_probabilities_with_push,
     ]
     
-    results = []
     for test_func in tests:
-        try:
-            result = test_func()
-            results.append(result)
-        except Exception as e:
-            print(f"  ✗ Test failed with exception: {e}")
-            import traceback
-            traceback.print_exc()
-            results.append(False)
+        test_func()
         print()
     
     print("=" * 70)
-    print(f"Results: {sum(results)}/{len(results)} tests passed")
+    print(f"All {len(tests)} tests passed")
     print("=" * 70)
-    
-    return all(results)
 
 
 if __name__ == "__main__":
-    success = run_all_tests()
-    sys.exit(0 if success else 1)
+    run_all_tests()

@@ -130,19 +130,14 @@ def test_cross_push_conflict():
     state = env.get_state()
     result = env.transition_probabilities(state, actions)
     
-    if result is None:
-        print("  ✗ Got None result")
-        return False
+    assert result is not None, "Got None result from transition_probabilities"
     
     print(f"  Number of possible outcomes: {len(result)}")
     
     # Check probabilities sum to 1.0
     total_prob = sum(prob for prob, _ in result)
-    if abs(total_prob - 1.0) < 1e-10:
-        print(f"  ✓ Probabilities sum to 1.0")
-    else:
-        print(f"  ✗ Probabilities sum to {total_prob}")
-        return False
+    assert abs(total_prob - 1.0) < 1e-10, f"Probabilities sum to {total_prob}, not 1.0"
+    print(f"  ✓ Probabilities sum to 1.0")
     
     # Print outcomes
     print("\n  Outcomes:")
@@ -175,12 +170,8 @@ def test_cross_push_conflict():
             print(f"       ⚠ Block is at (4,2) which is Agent 1's original position!")
     
     # We expect 3x3=9 outcomes total from stumbling combinations
-    if len(result) >= 6:  # At least several distinct outcomes
-        print(f"\n  ✓ Found {len(result)} outcomes (reasonable for 2 stumbling agents)")
-        return True
-    else:
-        print(f"\n  ✗ Found only {len(result)} outcomes (expected more)")
-        return False
+    assert len(result) >= 6, f"Found only {len(result)} outcomes (expected at least 6 for 2 stumbling agents)"
+    print(f"\n  ✓ Found {len(result)} outcomes (reasonable for 2 stumbling agents)")
 
 
 if __name__ == "__main__":
@@ -189,15 +180,8 @@ if __name__ == "__main__":
     print("=" * 70)
     print()
     
-    try:
-        success = test_cross_push_conflict()
-        print()
-        print("=" * 70)
-        print(f"Result: {'PASS' if success else 'FAIL'}")
-        print("=" * 70)
-        sys.exit(0 if success else 1)
-    except Exception as e:
-        print(f"✗ Test failed with exception: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+    test_cross_push_conflict()
+    print()
+    print("=" * 70)
+    print("Result: PASS")
+    print("=" * 70)

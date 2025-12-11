@@ -138,16 +138,8 @@ def test_parallel_correctness_small():
     print("\nComparing results...")
     differences = compare_policies(result_seq.values, result_par.values)
     
-    if not differences:
-        print("✓ PASS: Sequential and parallel results are identical!")
-        return True
-    else:
-        print(f"✗ FAIL: Found {len(differences)} differences:")
-        for diff in differences[:10]:  # Show first 10
-            print(f"  - {diff}")
-        if len(differences) > 10:
-            print(f"  ... and {len(differences) - 10} more")
-        return False
+    assert not differences, f"Found {len(differences)} differences between sequential and parallel:\n" + "\n".join(differences[:10])
+    print("✓ PASS: Sequential and parallel results are identical!")
 
 
 def test_parallel_correctness_medium():
@@ -192,16 +184,8 @@ def test_parallel_correctness_medium():
     print("\nComparing results...")
     differences = compare_policies(result_seq.values, result_par.values)
     
-    if not differences:
-        print("✓ PASS: Sequential and parallel results are identical!")
-        return True
-    else:
-        print(f"✗ FAIL: Found {len(differences)} differences:")
-        for diff in differences[:10]:
-            print(f"  - {diff}")
-        if len(differences) > 10:
-            print(f"  ... and {len(differences) - 10} more")
-        return False
+    assert not differences, f"Found {len(differences)} differences between sequential and parallel:\n" + "\n".join(differences[:10])
+    print("✓ PASS: Sequential and parallel results are identical!")
 
 
 def test_v_values_visibility():
@@ -239,7 +223,6 @@ def test_v_values_visibility():
                 print(f"WARNING: State at level {level} has successors at levels {succ_levels}")
     
     print("\nLevel structure looks correct for backward induction.")
-    return True
 
 
 def main():
@@ -248,33 +231,31 @@ def main():
     print("=" * 70)
     print()
     
-    results = []
+    test_names = []
     
     # Test V_values visibility
-    results.append(("V_values visibility", test_v_values_visibility()))
+    test_v_values_visibility()
+    test_names.append("V_values visibility")
     
     # Test small environment
-    results.append(("Small environment", test_parallel_correctness_small()))
+    test_parallel_correctness_small()
+    test_names.append("Small environment")
     
     # Test medium environment
-    results.append(("Medium environment", test_parallel_correctness_medium()))
+    test_parallel_correctness_medium()
+    test_names.append("Medium environment")
     
     # Summary
     print("\n" + "=" * 70)
     print("SUMMARY")
     print("=" * 70)
-    for name, passed in results:
-        status = "✓ PASS" if passed else "✗ FAIL"
-        print(f"  {status}: {name}")
+    for name in test_names:
+        print(f"  ✓ PASS: {name}")
     
-    all_passed = all(passed for _, passed in results)
     print()
-    if all_passed:
-        print("All tests passed!")
-    else:
-        print("Some tests failed!")
+    print("All tests passed!")
     
-    return 0 if all_passed else 1
+    return 0
 
 
 if __name__ == "__main__":
