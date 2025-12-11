@@ -566,6 +566,7 @@ class HeuristicPotentialPolicy(HumanPolicyPrior):
             
             if agent_dir == door_direction:
                 # Already facing the door - use toggle action if available, otherwise forward
+                # ACTION_TOGGLE is at index 6, so we need num_actions > 6 (i.e., at least 7 actions)
                 if self.num_actions > self.ACTION_TOGGLE:
                     # Full Actions set with toggle available
                     probs[self.ACTION_TOGGLE] = 1.0
