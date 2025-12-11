@@ -84,7 +84,7 @@ UNSTEADY_GROUND_PROBABILITY = 0.10
 DOOR_KEY_COLOR = 'r'
 
 # Heuristic policy parameters
-DEFAULT_SOFTNESS = 10.0  # Softmax temperature (higher = more deterministic)
+DEFAULT_SOFTNESS = 1000.0  # Softmax temperature (higher = more deterministic)
 
 # Maximum attempts for rejection sampling
 MAX_REJECTION_SAMPLING_ATTEMPTS = 1000
@@ -607,6 +607,9 @@ def main():
     
     # Save movie using environment's save_video method
     movie_path = os.path.join(output_dir, 'heuristic_multigrid_ensemble_demo.mp4')
+    # Remove existing file to ensure clean overwrite
+    if os.path.exists(movie_path):
+        os.remove(movie_path)
     recording_env.save_video(movie_path, fps=10)
     
     print()

@@ -451,16 +451,15 @@ class HeuristicPotentialPolicy(HumanPolicyPrior):
         goal_tuple = self._get_goal_tuple(possible_goal)
         
         # Build set of agent positions (excluding current agent)
-        agent_positions = set()
+        # These are positions that are truly blocked (can't be pushed through)
+        blocked_positions = set()
         for i, a_state in enumerate(agent_states):
             if i != human_agent_index:
-                agent_positions.add((int(a_state[0]), int(a_state[1])))
+                blocked_positions.add((int(a_state[0]), int(a_state[1])))
         
-        # Add mobile objects as obstacles
-        if mobile_objects:
-            for obj_data in mobile_objects:
-                if len(obj_data) >= 3:
-                    agent_positions.add((int(obj_data[1]), int(obj_data[2])))
+        # Note: We do NOT add mobile objects (blocks, rocks) to blocked_positions
+        # because they can be pushed. The potential function already accounts for
+        # the cost of pushing them via higher passing costs.
         
         # Compute potential at current position
         current_potential = self.path_calculator.compute_potential(
