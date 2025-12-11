@@ -3954,11 +3954,15 @@ class MultiGridEnv(WorldModel):
                     stumble_prob = 0.5  # Default fallback
             # Block elements are (probability, outcome) pairs
             # If stumbles, 50% chance of left-forward, 50% chance of right-forward
-            outcomes = [
-                (1.0 - stumble_prob, 'forward'),
-                (stumble_prob * 0.5, 'left-forward'),
-                (stumble_prob * 0.5, 'right-forward')
-            ]
+            # Optimization: if stumble_prob is 0, only forward is possible
+            if stumble_prob == 0:
+                outcomes = [(1.0, 'forward')]
+            else:
+                outcomes = [
+                    (1.0 - stumble_prob, 'forward'),
+                    (stumble_prob * 0.5, 'left-forward'),
+                    (stumble_prob * 0.5, 'right-forward')
+                ]
             all_blocks.append(('unsteady', agent_idx, outcomes))
         
         # Add magic wall agent blocks (one per magic-wall-entry agent)

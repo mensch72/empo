@@ -71,6 +71,9 @@ class UnsteadyGroundTestEnv(MultiGridEnv):
         unsteady2 = UnsteadyGround(World, stumble_probability=0.5, color='brown')
         self.grid.set(1, 2, unsteady1)
         self.grid.set(2, 2, unsteady2)
+        # Save terrain to terrain_grid so it persists under agents
+        self.terrain_grid.set(1, 2, unsteady1)
+        self.terrain_grid.set(2, 2, unsteady2)
         
         # Place agent 0 at (1, 1) facing down (dir=1)
         self.agents[0].pos = np.array([1, 1])
@@ -203,6 +206,9 @@ def test_two_stumbling_agents_same_target():
             unsteady2 = UnsteadyGround(World, stumble_probability=0.5, color='brown')
             self.grid.set(1, 1, unsteady1)
             self.grid.set(3, 1, unsteady2)
+            # Save terrain to terrain_grid so it persists under agents
+            self.terrain_grid.set(1, 1, unsteady1)
+            self.terrain_grid.set(3, 1, unsteady2)
             
             # Place agent 0 at (1, 1) facing right (dir=0)
             self.agents[0].pos = np.array([1, 1])

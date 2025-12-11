@@ -62,6 +62,8 @@ class UnsteadyPushTestEnv(MultiGridEnv):
         # Place unsteady ground
         unsteady = UnsteadyGround(World, stumble_probability=0.5, color='brown')
         self.grid.set(1, 1, unsteady)
+        # Save terrain to terrain_grid so it persists under agents
+        self.terrain_grid.set(1, 1, unsteady)
         
         # Place block
         block = Block(World)
