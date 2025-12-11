@@ -450,16 +450,18 @@ class HeuristicPotentialPolicy(HumanPolicyPrior):
         # Get goal coordinates
         goal_tuple = self._get_goal_tuple(possible_goal)
         
-        # Build set of agent positions (excluding current agent)
+        # Build set of blocked positions (excluding current agent)
         # These are positions that are truly blocked (can't be pushed through)
         blocked_positions = set()
         for i, a_state in enumerate(agent_states):
             if i != human_agent_index:
                 blocked_positions.add((int(a_state[0]), int(a_state[1])))
         
-        # Note: We do NOT add mobile objects (blocks, rocks) to blocked_positions
-        # because they can be pushed. The potential function already accounts for
-        # the cost of pushing them via higher passing costs.
+        # Add rocks to blocked positions - humans typically cannot push rocks
+        # Blocks are NOT added - they are pushable by humans
+        for obj_type, obj_x, obj_y in mobile_objects:
+            if obj_type == 'rock':
+                blocked_positions.add((obj_x, obj_y))
         
         # Compute potential at current position
         current_potential = self.path_calculator.compute_potential(
@@ -481,7 +483,7 @@ class HeuristicPotentialPolicy(HumanPolicyPrior):
             neighbor_x, neighbor_y = agent_x + dx, agent_y + dy
             neighbor_pos = (neighbor_x, neighbor_y)
             
-            if self._is_cell_walkable(neighbor_x, neighbor_y, agent_positions):
+            if self._is_cell_walkable(neighbor_x, neighbor_y, blocked_positions):
                 neighbor_potential = self.path_calculator.compute_potential(
                     neighbor_pos, goal_tuple, self.world_model
                 )
