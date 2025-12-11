@@ -277,7 +277,8 @@ def compute_human_policy_prior(
     num_workers: Optional[int] = None, 
     level_fct: Optional[Callable[[State], int]] = None, 
     return_V_values: Literal[False] = False,
-    progress_callback: Optional[Callable[[int, int], None]] = None
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+    quiet: bool = False
 ) -> TabularHumanPolicyPrior: ...
 
 
@@ -294,7 +295,8 @@ def compute_human_policy_prior(
     level_fct: Optional[Callable[[State], int]] = None, 
     *, 
     return_V_values: Literal[True],
-    progress_callback: Optional[Callable[[int, int], None]] = None
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+    quiet: bool = False
 ) -> Tuple[TabularHumanPolicyPrior, Dict[State, Dict[int, Dict[PossibleGoal, float]]]]: ...
 
 
@@ -309,7 +311,8 @@ def compute_human_policy_prior(
     num_workers: Optional[int] = None, 
     level_fct: Optional[Callable[[State], int]] = None, 
     return_V_values: bool = False,
-    progress_callback: Optional[Callable[[int, int], None]] = None
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+    quiet: bool = False
 ) -> Union[TabularHumanPolicyPrior, Tuple[TabularHumanPolicyPrior, Dict[State, Dict[int, Dict[PossibleGoal, float]]]]]:
     """
     Compute human policy prior via backward induction on the state DAG.
@@ -406,12 +409,11 @@ def compute_human_policy_prior(
     action_powers: npt.NDArray[np.int64] = num_actions ** np.arange(num_agents)
 
     # first get the dag of the world model:
-    states, state_to_idx, successors, transitions = world_model.get_dag(return_probabilities=True)
-    print(f"No. of states: {len(states)}")
+    states, state_to_idx, successors, transitions = world_model.get_dag(return_probabilities=True, quiet=quiet)
     
     # Set up default tqdm progress bar if no callback provided
     _pbar: Optional[tqdm[int]] = None
-    if progress_callback is None:
+    if progress_callback is None and not quiet:
         _pbar = tqdm(total=len(states), desc="Backward induction", unit="states")
         def progress_callback(done: int, total: int) -> None:
             if _pbar is not None:
@@ -426,18 +428,22 @@ def compute_human_policy_prior(
         if num_workers is None:
             num_workers = mp.cpu_count()
         
-        print(f"Using parallel execution with {num_workers} workers")
+        if not quiet:
+            print(f"Using parallel execution with {num_workers} workers")
         
         # Compute dependency levels
         dependency_levels: List[List[int]]
         if level_fct is not None:
-            print("Using fast level computation with provided level function")
+            if not quiet:
+                print("Using fast level computation with provided level function")
             dependency_levels = compute_dependency_levels_fast(states, level_fct)
         else:
-            print("Using general level computation")
+            if not quiet:
+                print("Using general level computation")
             dependency_levels = compute_dependency_levels_general(successors)
         
-        print(f"Computed {len(dependency_levels)} dependency levels")
+        if not quiet:
+            print(f"Computed {len(dependency_levels)} dependency levels")
         
         # Initialize shared data for worker processes
         # On Linux (fork), workers inherit these as copy-on-write

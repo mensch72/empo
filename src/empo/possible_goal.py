@@ -210,6 +210,7 @@ class PossibleGoalGenerator(ABC):
     """
 
     env: Any  # gymnasium.Env or compatible
+    world_model: Any  # Alias for env for compatibility
     
     def __init__(self, env: Any):
         """
@@ -219,6 +220,7 @@ class PossibleGoalGenerator(ABC):
             env: The gymnasium environment (or compatible) this generator applies to.
         """
         self.env = env
+        self.world_model = env  # Alias for compatibility
 
     @abstractmethod
     def generate(self, state, human_agent_index: int) -> Iterator[Tuple['PossibleGoal', float]]:

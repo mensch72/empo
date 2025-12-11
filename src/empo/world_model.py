@@ -18,6 +18,7 @@ import heapq
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
+from tqdm import tqdm
 
 # Type aliases for complex types
 State = Any  # State is typically a hashable tuple
@@ -316,16 +317,16 @@ class WorldModel(gym.Env):
     
     @overload
     def get_dag(
-        self, return_probabilities: Literal[False] = False
+        self, return_probabilities: Literal[False] = False, quiet: bool = False
     ) -> Tuple[List[State], Dict[State, int], List[List[int]]]: ...
     
     @overload
     def get_dag(
-        self, return_probabilities: Literal[True]
+        self, return_probabilities: Literal[True], quiet: bool = False
     ) -> Tuple[List[State], Dict[State, int], List[List[int]], List[List[Tuple[ActionProfile, List[float], List[int]]]]]: ...
     
     def get_dag(
-        self, return_probabilities: bool = False
+        self, return_probabilities: bool = False, quiet: bool = False
     ) -> Union[
         Tuple[List[State], Dict[State, int], List[List[int]]],
         Tuple[List[State], Dict[State, int], List[List[int]], List[List[Tuple[ActionProfile, List[float], List[int]]]]]
@@ -352,6 +353,7 @@ class WorldModel(gym.Env):
                 tuples for that state, where action is the action tuple, probs is a
                 list of transition probabilities, and succ_indices is a list of
                 successor state indices (parallel lists).
+            quiet: If True, suppress the progress bar. Default is False (show progress).
         
         Returns:
             A tuple containing:
@@ -400,6 +402,12 @@ class WorldModel(gym.Env):
         num_actions: int = self.action_space.n  # type: ignore[attr-defined]
         total_combinations = num_actions ** num_agents
         
+        # Set up progress bar
+        pbar: Optional[tqdm[int]] = None
+        if not quiet:
+            pbar = tqdm(desc="Building DAG", unit="states")
+        
+        states_processed = 0
         while queue:
             current_state = queue.popleft()
             current_idx = temp_state_to_idx[current_state]
@@ -452,6 +460,16 @@ class WorldModel(gym.Env):
                     # Add edge from current to successor
                     successor_idx = temp_state_to_idx[successor_state]
                     edges[current_idx].add(successor_idx)
+            
+            # Update progress bar
+            states_processed += 1
+            if pbar is not None:
+                pbar.n = states_processed
+                pbar.refresh()
+        
+        # Close progress bar
+        if pbar is not None:
+            pbar.close()
         
         # PHASE 2: Topological sort using Kahn's algorithm with deterministic ordering
         # We use a heap sorted by state tuples to ensure identical ordering regardless

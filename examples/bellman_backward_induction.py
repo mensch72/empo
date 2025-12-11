@@ -32,6 +32,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from itertools import product
+from tqdm import tqdm
 
 from envs.one_or_three_chambers import SmallOneOrTwoChambersMapEnv
 
@@ -278,13 +279,10 @@ def compute_value_functions_and_policy(env, states, state_to_idx, successors, tr
     
     # Backward induction: process states from last to first
     print("\nPerforming backward induction...")
-    processed_count = 0
-    start_time = time.time()
     
-    for state_idx in reversed(range(num_states)):
+    for state_idx in tqdm(reversed(range(num_states)), total=num_states, desc="Backward induction", unit="states"):
         if state_idx in value_function:
             # Already processed (terminal state)
-            processed_count += 1
             continue
         
         state = states[state_idx]
@@ -367,14 +365,6 @@ def compute_value_functions_and_policy(env, states, state_to_idx, successors, tr
         else:
             value_function[state_idx] = immediate_reward + best_value
             optimal_policy[state_idx] = best_action
-        
-        processed_count += 1
-        if processed_count % 1000 == 0:
-            elapsed = time.time() - start_time
-            print(f"  Processed {processed_count}/{num_states} states... ({elapsed:.1f}s)")
-    
-    elapsed = time.time() - start_time
-    print(f"  Processed {processed_count}/{num_states} states - Done! ({elapsed:.1f}s)")
     
     return value_function, optimal_policy
 
