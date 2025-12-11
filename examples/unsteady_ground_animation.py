@@ -10,8 +10,6 @@ import sys
 import os
 
 import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.animation as animation
 from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, Wall, World, UnsteadyGround
 
 
@@ -79,13 +77,7 @@ class UnsteadyGroundDemoEnv(MultiGridEnv):
                     break
 
 
-def render_grid_to_array(env):
-    """Render the environment grid to a numpy array for animation."""
-    img = env.render(mode='rgb_array', highlight=False)
-    return img
-
-
-def create_animation(output_path='unsteady_ground_animation.mp4', num_steps=50):
+def create_animation(output_path='unsteady_ground_animation.mp4', num_steps=50, fps=5):
     """Create and save an animation showing agents navigating unsteady ground."""
     
     print("Creating unsteady ground animation...")
@@ -99,11 +91,11 @@ def create_animation(output_path='unsteady_ground_animation.mp4', num_steps=50):
     env = UnsteadyGroundDemoEnv(num_agents=10, num_unsteady_cells=10)
     env.reset()
     
-    # Collect frames
-    frames = []
+    # Start video recording using MultiGridEnv's built-in method
+    env.start_video_recording()
     
     # Initial state
-    frames.append(render_grid_to_array(env))
+    env.render(mode='rgb_array')
     
     # Simulate steps with agents moving forward randomly
     print(f"Simulating {num_steps} steps...")
@@ -121,61 +113,13 @@ def create_animation(output_path='unsteady_ground_animation.mp4', num_steps=50):
                 actions.append(1)  # right
         
         obs, rewards, done, info = env.step(actions)
-        frames.append(render_grid_to_array(env))
+        env.render(mode='rgb_array')  # Frame automatically captured
         
         if (step + 1) % 10 == 0:
             print(f"  Step {step + 1}/{num_steps} complete")
     
-    print(f"\nCollected {len(frames)} frames")
-    
-    # Create animation
-    print(f"Saving animation to {output_path}...")
-    fig, ax = plt.subplots(figsize=(8, 8))
-    ax.set_aspect('equal')
-    ax.axis('off')
-    
-    # Initialize the image
-    im = ax.imshow(frames[0])
-    
-    def update(frame_idx):
-        im.set_array(frames[frame_idx])
-        ax.set_title(f'Unsteady Ground Demo - Step {frame_idx}/{len(frames)-1}', 
-                     fontsize=14, fontweight='bold')
-        return [im]
-    
-    # Create animation
-    anim = animation.FuncAnimation(
-        fig, 
-        update, 
-        frames=len(frames),
-        interval=200,  # 200ms between frames (5 fps)
-        blit=True,
-        repeat=True
-    )
-    
-    # Save as MP4
-    try:
-        writer = animation.FFMpegWriter(fps=5, bitrate=1800)
-        anim.save(output_path, writer=writer)
-        print(f"✓ Animation saved successfully to {output_path}")
-        print(f"  Total frames: {len(frames)}")
-        print(f"  Duration: ~{len(frames)/5:.1f} seconds")
-    except Exception as e:
-        print(f"✗ Error saving animation: {e}")
-        print("  Note: FFmpeg is required to save MP4 files.")
-        print("  Install with: apt-get install ffmpeg  (on Ubuntu)")
-        print("               brew install ffmpeg     (on macOS)")
-        
-        # Try saving as GIF as fallback
-        print("\nTrying to save as GIF instead...")
-        gif_path = output_path.replace('.mp4', '.gif')
-        try:
-            anim.save(gif_path, writer='pillow', fps=5)
-            print(f"✓ Animation saved as GIF to {gif_path}")
-        except Exception as e2:
-            print(f"✗ Error saving GIF: {e2}")
-    
-    plt.close()
+    # Save video using MultiGridEnv's built-in method
+    env.save_video(output_path, fps=fps)
 
 
 def main():

@@ -10,8 +10,6 @@ import sys
 import os
 
 import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.animation as animation
 from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, Block, Rock, Wall, World
 
 
@@ -58,14 +56,7 @@ class BlockRockDemoEnv(MultiGridEnv):
             self.grid.set(3 + i, 5, rock)
 
 
-def render_grid_to_array(env):
-    """Render the environment grid to a numpy array for animation."""
-    # Get the full grid rendering
-    img = env.render(mode='rgb_array', highlight=False)
-    return img
-
-
-def create_animation(output_path='blocks_rocks_animation.mp4'):
+def create_animation(output_path='blocks_rocks_animation.mp4', fps=2):
     """Create and save an animation showing blocks and rocks being pushed."""
     
     print("Creating blocks and rocks pushing animation...")
@@ -74,18 +65,18 @@ def create_animation(output_path='blocks_rocks_animation.mp4'):
     env = BlockRockDemoEnv(num_agents=1)
     env.reset()
     
-    # Collect frames
-    frames = []
+    # Start video recording using MultiGridEnv's built-in method
+    env.start_video_recording()
     
     # Initial state
-    frames.append(render_grid_to_array(env))
+    env.render(mode='rgb_array')
     
     # Agent pushes blocks (3 consecutive blocks)
     print("Pushing blocks...")
     for i in range(4):
         actions = [3]  # forward action
         obs, rewards, done, info = env.step(actions)
-        frames.append(render_grid_to_array(env))
+        env.render(mode='rgb_array')  # Frame automatically captured
         print(f"  Step {i+1}: Agent at {env.agents[0].pos}")
     
     # Move agent to second row (turn down, move down twice, turn right)
@@ -94,79 +85,33 @@ def create_animation(output_path='blocks_rocks_animation.mp4'):
     # Turn down
     actions = [1]  # turn right (to face down)
     env.step(actions)
-    frames.append(render_grid_to_array(env))
+    env.render(mode='rgb_array')
     
     # Move down
     actions = [3]  # forward
     env.step(actions)
-    frames.append(render_grid_to_array(env))
+    env.render(mode='rgb_array')
     
     # Move down again
     actions = [3]  # forward
     env.step(actions)
-    frames.append(render_grid_to_array(env))
+    env.render(mode='rgb_array')
     
     # Turn right to face rocks
     actions = [1]  # turn right
     env.step(actions)
-    frames.append(render_grid_to_array(env))
+    env.render(mode='rgb_array')
     
     # Agent pushes rocks (3 consecutive rocks)
     print("Pushing rocks...")
     for i in range(4):
         actions = [3]  # forward action
         obs, rewards, done, info = env.step(actions)
-        frames.append(render_grid_to_array(env))
+        env.render(mode='rgb_array')  # Frame automatically captured
         print(f"  Step {i+1}: Agent at {env.agents[0].pos}")
     
-    # Create animation
-    print(f"Saving animation to {output_path}...")
-    fig, ax = plt.subplots(figsize=(8, 6))
-    ax.set_aspect('equal')
-    ax.axis('off')
-    
-    # Initialize the image
-    im = ax.imshow(frames[0])
-    
-    def update(frame_idx):
-        im.set_array(frames[frame_idx])
-        ax.set_title(f'Blocks and Rocks Pushing Demo - Frame {frame_idx+1}/{len(frames)}', 
-                     fontsize=14, fontweight='bold')
-        return [im]
-    
-    # Create animation with slower frame rate for better visualization
-    anim = animation.FuncAnimation(
-        fig, 
-        update, 
-        frames=len(frames),
-        interval=500,  # 500ms between frames (2 fps)
-        blit=True,
-        repeat=True
-    )
-    
-    # Save as MP4
-    try:
-        writer = animation.FFMpegWriter(fps=2, bitrate=1800)
-        anim.save(output_path, writer=writer)
-        print(f"✓ Animation saved successfully to {output_path}")
-        print(f"  Total frames: {len(frames)}")
-        print(f"  Duration: ~{len(frames)/2:.1f} seconds")
-    except Exception as e:
-        print(f"✗ Error saving animation: {e}")
-        print("  Note: FFmpeg is required to save MP4 files.")
-        print("  Install with: apt-get install ffmpeg  (on Ubuntu)")
-        print("               brew install ffmpeg     (on macOS)")
-        
-        # Try saving as GIF as fallback
-        print("\nTrying to save as GIF instead...")
-        gif_path = output_path.replace('.mp4', '.gif')
-        try:
-            anim.save(gif_path, writer='pillow', fps=2)
-            print(f"✓ Animation saved as GIF to {gif_path}")
-        except Exception as e2:
-            print(f"✗ Error saving GIF: {e2}")
-    
-    plt.close()
+    # Save video using MultiGridEnv's built-in method
+    env.save_video(output_path, fps=fps)
 
 
 def main():

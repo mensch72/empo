@@ -18,7 +18,6 @@ import os
 
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.animation as animation
 from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, Block, Rock, Wall, World
 
 
@@ -309,22 +308,18 @@ class SmallDAGEnv(MultiGridEnv):
 
 
 
-def render_grid_to_array(env):
-    """Render the environment grid to a numpy array for animation."""
-    img = env.render(mode='rgb_array', highlight=False)
-    return img
-
-
-def create_sample_episode_gif(env, output_path='sample_episode.gif'):
-    """Create and save a GIF of one sample episode."""
+def create_sample_episode_gif(env, output_path='sample_episode.gif', fps=2):
+    """Create and save a GIF of one sample episode using MultiGridEnv's video recording."""
     print(f"\nCreating sample episode GIF...")
     
     # Reset environment
     env.reset()
     
-    # Collect frames
-    frames = []
-    frames.append(render_grid_to_array(env))
+    # Start video recording using MultiGridEnv's built-in method
+    env.start_video_recording()
+    
+    # Initial frame
+    env.render(mode='rgb_array')
     
     # Run a sample episode with random actions
     done = False
@@ -336,44 +331,12 @@ def create_sample_episode_gif(env, output_path='sample_episode.gif'):
         # Random actions for both agents
         actions = [env.action_space.sample() for _ in env.agents]
         obs, rewards, done, info = env.step(actions)
-        frames.append(render_grid_to_array(env))
+        env.render(mode='rgb_array')  # Frame automatically captured
         step_count += 1
         print(f"  Step {step_count}: actions={actions}, done={done}")
     
-    # Create animation
-    print(f"Saving GIF to {output_path}...")
-    fig, ax = plt.subplots(figsize=(6, 6))
-    ax.set_aspect('equal')
-    ax.axis('off')
-    
-    # Initialize the image
-    im = ax.imshow(frames[0])
-    
-    def update(frame_idx):
-        im.set_array(frames[frame_idx])
-        ax.set_title(f'Sample Episode - Step {frame_idx}/{len(frames)-1}', 
-                     fontsize=12, fontweight='bold')
-        return [im]
-    
-    # Create animation
-    anim = animation.FuncAnimation(
-        fig, 
-        update, 
-        frames=len(frames),
-        interval=500,  # 500ms between frames
-        blit=True,
-        repeat=True
-    )
-    
-    # Save as GIF
-    try:
-        anim.save(output_path, writer='pillow', fps=2)
-        print(f"✓ Sample episode GIF saved to {output_path}")
-        print(f"  Total frames: {len(frames)}")
-    except Exception as e:
-        print(f"✗ Error saving GIF: {e}")
-    
-    plt.close()
+    # Save video using MultiGridEnv's built-in method
+    env.save_video(output_path, fps=fps)
 
 
 def compute_and_plot_dag(env, output_path='dag_plot.pdf'):

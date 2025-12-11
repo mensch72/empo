@@ -408,12 +408,12 @@ def train_human_policy():
         goal_sampler=goal_sampler,
         human_agent_indices=[human_idx],
         steps_per_episode=100,
-        num_episodes=1000,
+        num_episodes=10000,
         beta=100.0,
         gamma=0.95,
-        epsilon=0.3,
+        epsilon=0.7,
         robot_shaping_exponent=0.5,
-        button_toggle_bias=0.5,
+        button_toggle_bias=0.25,
         verbose=True
     )
     
