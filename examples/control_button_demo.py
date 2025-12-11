@@ -35,7 +35,7 @@ sys.modules['gym'] = gym
 
 from gym_multigrid.multigrid import MultiGridEnv, World, Actions
 from empo.possible_goal import PossibleGoal, PossibleGoalSampler
-from empo.nn_based import train_neural_policy_prior
+from empo.nn_based.multigrid import train_multigrid_neural_policy_prior
 
 # Output directory for movies and images
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -880,7 +880,7 @@ def train_and_rollout_with_learned_policy(quick_mode=False):
     Train a neural network for the human to learn to reach goal positions,
     then demonstrate rollouts with prequel + learned policy.
     
-    Uses train_neural_policy_prior() to train the policy, then neural_prior.sample()
+    Uses train_multigrid_neural_policy_prior() to train the policy, then neural_prior.sample()
     to get actions during rollouts.
     """
     n_episodes = N_EPISODES_QUICK if quick_mode else N_EPISODES_FULL
@@ -930,7 +930,7 @@ def train_and_rollout_with_learned_policy(quick_mode=False):
     t0 = time.time()
     try:
         # Train the neural policy prior
-        neural_prior = train_neural_policy_prior(
+        neural_prior = train_multigrid_neural_policy_prior(
             world_model=env,
             human_agent_indices=[human_idx],
             goal_sampler=goal_sampler,

@@ -10,6 +10,7 @@ import torch.optim as optim
 from collections import deque
 from typing import Any, Dict, List, Optional
 import random
+from tqdm import tqdm
 
 from empo.possible_goal import PossibleGoalSampler
 
@@ -495,6 +496,9 @@ def train_multigrid_neural_policy_prior(
     # State buffer for phi network training (uses deque for O(1) append/remove)
     phi_state_buffer = deque(maxlen=buffer_capacity) if train_phi_network else None
     
+    # Set up progress bar
+    pbar = tqdm(total=num_episodes, desc="Training", unit="episodes", disable=not verbose)
+    
     for episode in range(num_episodes):
         # Switch environment if using ensemble
         if world_model_generator is not None:
@@ -577,8 +581,9 @@ def train_multigrid_neural_policy_prior(
                     device=device
                 )
         
-        if verbose and (episode + 1) % 100 == 0:
-            print(f"Episode {episode + 1}/{num_episodes}")
+        pbar.update(1)
+    
+    pbar.close()
     
     # Get action encoding
     action_encoding = DEFAULT_ACTION_ENCODING
