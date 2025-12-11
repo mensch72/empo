@@ -16,10 +16,6 @@ It then:
 import sys
 import os
 
-# Add paths for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
-
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation

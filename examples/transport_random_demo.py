@@ -30,10 +30,6 @@ import os
 import argparse
 import random
 
-# Add paths for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'ai_transport'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
-
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation

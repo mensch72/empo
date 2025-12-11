@@ -24,10 +24,6 @@ import os
 import time
 import argparse
 
-# Add paths for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
-
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
@@ -146,7 +142,7 @@ def print_line_profiler_stats():
 # Target cell where the robot receives a reward of 1
 # In the map, this is position (3, 7) - column 3, row 7:
 # We We We We We .. .. .. .. ..    <- row 0
-# We .. We .. We .. .. .. .. ..    <- row 1 (removed upper human)
+# We .. We .. We .. .. .. .. ..    <- row 1
 # We .. We Ay We We We .. .. ..    <- row 2
 # We Ae Ro .. .. .. We .. .. ..    <- row 3
 # We .. We We We .. We We We ..    <- row 4

@@ -24,10 +24,6 @@ import sys
 import os
 import time
 
-# Add paths for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
-
 from envs.one_or_three_chambers import SmallOneOrTwoChambersMapEnv
 
 

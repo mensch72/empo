@@ -11,10 +11,6 @@ Tests that:
 import sys
 from pathlib import Path
 
-# Setup path to import empo
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-sys.path.insert(0, str(Path(__file__).parent.parent / "vendor" / "multigrid"))
-
 import gymnasium as gym
 from empo.world_model import WorldModel
 from gym_multigrid.multigrid import MultiGridEnv

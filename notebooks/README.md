@@ -37,14 +37,16 @@ jupyter lab
 
 When creating new notebooks for this repository:
 
-1. **Set up Python paths** at the start:
+1. **Docker container (recommended)**: When running notebooks inside the Docker container (`make shell`, then `jupyter notebook`), the `PYTHONPATH` is already set and no path setup is needed.
+
+2. **Google Colab**: When running in Colab, set up Python paths at the start:
    ```python
    import sys, os
    sys.path.insert(0, os.path.join(os.getcwd(), 'src'))
    sys.path.insert(0, os.path.join(os.getcwd(), 'vendor', 'multigrid'))
    ```
 
-2. **Import from empo package**:
+3. **Import from empo package**:
    ```python
    from empo import WorldModel, PossibleGoal, compute_human_policy_prior
    from envs.one_or_three_chambers import SmallOneOrThreeChambersMapEnv

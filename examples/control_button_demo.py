@@ -28,10 +28,6 @@ import os
 import time
 import random
 
-# Add paths for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
-
 
 # Patch gym import for compatibility
 import gymnasium as gym

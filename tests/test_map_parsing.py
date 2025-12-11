@@ -3,7 +3,6 @@ Test map parsing functionality for MultiGridEnv.
 """
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
 
 import numpy as np
 from gym_multigrid.multigrid import (
@@ -334,9 +333,6 @@ def test_environment_reset():
 
 def test_one_or_three_chambers_map_env():
     """Test that OneOrThreeChambersMapEnv produces the same layout as the original."""
-    import sys
-    import os
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
     from envs.one_or_three_chambers import OneOrThreeChambersEnv, OneOrThreeChambersMapEnv
     
     # Create both environments

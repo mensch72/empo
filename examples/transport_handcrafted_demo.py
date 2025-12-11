@@ -26,9 +26,6 @@ Requirements:
 import sys
 import os
 
-# Add paths for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'ai_transport'))
-
 import numpy as np
 import networkx as nx
 from ai_transport import parallel_env

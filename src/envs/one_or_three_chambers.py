@@ -39,9 +39,6 @@ B block
 import sys
 import os
 
-# Add vendor/multigrid to path for gym_multigrid imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'vendor', 'multigrid'))
-
 import numpy as np
 from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, Wall, Block, Rock, World, SmallActions
 

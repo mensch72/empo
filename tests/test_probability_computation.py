@@ -11,9 +11,6 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-# Setup path to import multigrid
-sys.path.insert(0, str(Path(__file__).parent.parent / "vendor" / "multigrid"))
-
 # Patch gym import for compatibility
 import gymnasium as gym
 sys.modules['gym'] = gym

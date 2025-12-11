@@ -6,9 +6,6 @@ import os
 import json
 import tempfile
 
-# Add paths for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
-
 import numpy as np
 from gym_multigrid.multigrid import MultiGridEnv, World
 

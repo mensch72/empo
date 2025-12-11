@@ -23,10 +23,6 @@ except ImportError:
 
 LINE_PROFILER_AVAILABLE = False
 
-# Add paths for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
-
 from envs.one_or_three_chambers import SmallOneOrThreeChambersMapEnv
 from empo.possible_goal import PossibleGoal, PossibleGoalGenerator
 from empo.backward_induction import compute_human_policy_prior
@@ -117,8 +113,7 @@ def setup_line_profiler():
     import empo.backward_induction as backward_induction_module
     import empo.possible_goal as possible_goal_module
     
-    # Import multigrid with the correct path
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
+    # Import multigrid
     import gym_multigrid.multigrid as multigrid_module
     
     # Add functions to profile from backward_induction.py

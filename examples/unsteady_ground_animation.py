@@ -8,7 +8,6 @@ and 10 agents, simulates their movements, and saves the result as an animation.
 
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
 
 import numpy as np
 import matplotlib.pyplot as plt

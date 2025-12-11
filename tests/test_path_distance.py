@@ -5,8 +5,6 @@ Tests for PathDistanceCalculator rectangle support and passing cost shaping.
 import sys
 import os
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
-
 from empo.nn_based.multigrid import PathDistanceCalculator
 from empo.nn_based.multigrid.path_distance import DEFAULT_PASSING_COSTS
 

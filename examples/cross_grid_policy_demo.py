@@ -15,10 +15,6 @@ learning and efficient policy reuse across different grid sizes.
 import sys
 import os
 
-# Add paths for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
-
 import tempfile
 import torch
 from empo.nn_based.multigrid import (

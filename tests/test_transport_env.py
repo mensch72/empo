@@ -15,10 +15,6 @@ import sys
 import os
 from pathlib import Path
 
-# Add paths for imports
-sys.path.insert(0, str(Path(__file__).parent.parent / "vendor" / "ai_transport"))
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
-
 
 def test_import_ai_transport():
     """Test that ai_transport package can be imported."""
