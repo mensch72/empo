@@ -43,17 +43,6 @@ def test_train_script_exists():
         return False
 
 
-def test_config_exists():
-    """Test that default config exists."""
-    config_file = Path(__file__).parent.parent / "configs" / "default.yaml"
-    if config_file.exists():
-        print("✓ configs/default.yaml exists")
-        return True
-    else:
-        print("✗ configs/default.yaml not found")
-        return False
-
-
 def test_requirements_exist():
     """Test that requirement files exist."""
     req_file = Path(__file__).parent.parent / "requirements.txt"

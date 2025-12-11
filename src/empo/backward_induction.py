@@ -61,16 +61,17 @@ from itertools import product
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing as mp
 from collections import defaultdict
-from typing import Optional, Callable, List, Tuple, Dict, Any, Union, overload, Literal
+from typing import Optional, Callable, List, Tuple, Dict, Any, Union, overload, Literal, TypeAlias
 
 import cloudpickle
+from tqdm import tqdm
 
 from empo.possible_goal import PossibleGoal, PossibleGoalGenerator
 from empo.human_policy_prior import TabularHumanPolicyPrior
 from empo.world_model import WorldModel
 
 # Type aliases for complex types used throughout
-State = Any  # State is typically a hashable tuple from WorldModel.get_state()
+State: TypeAlias = Any  # State is typically a hashable tuple from WorldModel.get_state()
 ActionProfile = List[int]
 TransitionData = Tuple[Tuple[int, ...], List[float], List[State]]  # (action_profile, probs, successor_states)
 VValues = List[List[Dict[PossibleGoal, float]]]  # Indexed as V_values[state_index][agent_index][goal]
@@ -275,7 +276,8 @@ def compute_human_policy_prior(
     parallel: bool = False, 
     num_workers: Optional[int] = None, 
     level_fct: Optional[Callable[[State], int]] = None, 
-    return_V_values: Literal[False] = False
+    return_V_values: Literal[False] = False,
+    progress_callback: Optional[Callable[[int, int], None]] = None
 ) -> TabularHumanPolicyPrior: ...
 
 
@@ -291,7 +293,8 @@ def compute_human_policy_prior(
     num_workers: Optional[int] = None, 
     level_fct: Optional[Callable[[State], int]] = None, 
     *, 
-    return_V_values: Literal[True]
+    return_V_values: Literal[True],
+    progress_callback: Optional[Callable[[int, int], None]] = None
 ) -> Tuple[TabularHumanPolicyPrior, Dict[State, Dict[int, Dict[PossibleGoal, float]]]]: ...
 
 
@@ -305,7 +308,8 @@ def compute_human_policy_prior(
     parallel: bool = False, 
     num_workers: Optional[int] = None, 
     level_fct: Optional[Callable[[State], int]] = None, 
-    return_V_values: bool = False
+    return_V_values: bool = False,
+    progress_callback: Optional[Callable[[int, int], None]] = None
 ) -> Union[TabularHumanPolicyPrior, Tuple[TabularHumanPolicyPrior, Dict[State, Dict[int, Dict[PossibleGoal, float]]]]]:
     """
     Compute human policy prior via backward induction on the state DAG.
@@ -404,6 +408,15 @@ def compute_human_policy_prior(
     # first get the dag of the world model:
     states, state_to_idx, successors, transitions = world_model.get_dag(return_probabilities=True)
     print(f"No. of states: {len(states)}")
+    
+    # Set up default tqdm progress bar if no callback provided
+    _pbar: Optional[tqdm[int]] = None
+    if progress_callback is None:
+        _pbar = tqdm(total=len(states), desc="Backward induction", unit="states")
+        def progress_callback(done: int, total: int) -> None:
+            if _pbar is not None:
+                _pbar.n = done
+                _pbar.refresh()
     
     # Initialize V_values as nested lists for faster access
     V_values: VValues = [[{} for _ in range(num_agents)] for _ in range(len(states))]
@@ -558,6 +571,11 @@ def compute_human_policy_prior(
                 
                 if PROFILE_PARALLEL:
                     prof_total_parallel_time += time.perf_counter() - _level_t0
+            
+            # Report progress after each level
+            if progress_callback:
+                states_processed = sum(len(lvl) for lvl in dependency_levels[:level_idx + 1])
+                progress_callback(states_processed, len(states))
         
         # Print profiling results
         if PROFILE_PARALLEL:
@@ -600,7 +618,8 @@ def compute_human_policy_prior(
         compute_sequential(states, V_values, system2_policies, transitions,
                          human_agent_indices, possible_goal_generator,
                          num_agents, num_actions, action_powers,
-                         believed_others_policy, beta, gamma)
+                         believed_others_policy, beta, gamma,
+                         progress_callback)
     
     human_policy_priors = system2_policies # TODO: mix with system-1 policies!
 
@@ -617,8 +636,12 @@ def compute_human_policy_prior(
                 V_values_dict[state] = {agent_idx: V_values[state_idx][agent_idx] 
                                         for agent_idx in human_agent_indices
                                         if V_values[state_idx][agent_idx]}
+        if _pbar is not None:
+            _pbar.close()
         return policy_prior, V_values_dict
     
+    if _pbar is not None:
+        _pbar.close()
     return policy_prior
 
 
@@ -626,7 +649,7 @@ def compute_sequential(
     states: List[State], 
     V_values: VValues, 
     system2_policies: PolicyDict, 
-    transitions: List[List[Tuple[Tuple[int, ...], List[float], List[int]]]],
+    transitions: List[List[Tuple[Tuple[int, ...], List[float], List[State]]]],
     human_agent_indices: List[int], 
     possible_goal_generator: PossibleGoalGenerator,
     num_agents: int, 
@@ -634,7 +657,8 @@ def compute_sequential(
     action_powers: npt.NDArray[np.int64],
     believed_others_policy: Callable[[State, int, int], List[Tuple[float, List[int]]]], 
     beta: float, 
-    gamma: float
+    gamma: float,
+    progress_callback: Optional[Callable[[int, int], None]] = None
 ) -> None:
     """Original sequential algorithm."""
     actions = range(num_actions)
@@ -706,3 +730,8 @@ def compute_sequential(
                         v_result = V_values[state_index][agent_index][possible_goal] = float(np.sum(p * q))
                         if DEBUG:
                             print(f"      Goal not achieved; V = {v_result:.4f}")
+        
+        # Report progress after each state
+        if progress_callback:
+            states_processed = len(states) - state_index
+            progress_callback(states_processed, len(states))

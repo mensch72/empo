@@ -36,7 +36,6 @@ echo ""
 echo "2. Checking directory structure..."
 required_dirs=(
     "src/empo"
-    "configs"
     "scripts"
     "examples"
 )
@@ -69,24 +68,6 @@ for file in $python_files; do
         exit 1
     fi
 done
-
-# Check YAML syntax
-echo ""
-echo "4. Checking YAML syntax..."
-if command -v python3 &> /dev/null; then
-    if python3 -c "import yaml" 2>/dev/null; then
-        if python3 -c "import yaml; yaml.safe_load(open('configs/default.yaml'))" 2>/dev/null; then
-            echo "   ✓ configs/default.yaml"
-        else
-            echo "   ✗ configs/default.yaml (syntax error)"
-            exit 1
-        fi
-    else
-        echo "   ⚠ PyYAML not installed, skipping YAML validation"
-    fi
-else
-    echo "   ⚠ Python3 not available, skipping YAML validation"
-fi
 
 # Check Docker Compose syntax
 echo ""

@@ -453,8 +453,6 @@ empo/
 │   ├── API.md                 # API reference
 │   └── ISSUES.md              # Known issues and improvements
 ├── tests/                     # Test suite
-├── configs/
-│   └── default.yaml           # Example configuration
 ├── scripts/
 │   ├── run_cluster.sh         # SLURM job script
 │   └── setup_cluster_image.sh # Cluster image setup helper
@@ -489,17 +487,6 @@ git subtree pull --prefix=vendor/multigrid https://github.com/ArnaudFickinger/gy
 
 See [VENDOR.md](VENDOR.md) for detailed documentation on managing vendored dependencies.
 
-## Configuration
-
-Training can be configured via command-line arguments or YAML configuration files:
-
-```bash
-# Using command-line arguments
-python train.py --env-name CartPole-v1 --num-episodes 1000 --lr 0.001
-
-# Using a config file (implement config loading in your code)
-python train.py --config configs/default.yaml
-```
 
 ## Environment Variables
 

@@ -3778,7 +3778,7 @@ class MultiGridEnv(WorldModel):
         # Check if all actions are valid
         for action in actions:
             if action < 0 or action >= self.action_space.n:
-                return None
+                raise ValueError(f"Invalid action {action} in transition_probabilities")
         
         # Save original state to restore at the end
         original_state = self.get_state()

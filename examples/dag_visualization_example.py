@@ -14,10 +14,10 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from empo.env_utils import get_dag, plot_dag
+from empo.world_model import WorldModel
 
 
-class DifferentPathLengthsEnv:
+class DifferentPathLengthsEnv(WorldModel):
     """
     A simple environment demonstrating paths of DIFFERENT lengths.
     
@@ -103,7 +103,7 @@ def main():
     
     # Compute DAG
     print("Computing DAG structure...")
-    states, state_to_idx, successors = get_dag(env)
+    states, state_to_idx, successors = env.get_dag()
     print(f"  ✓ Found {len(states)} states")
     print()
     
@@ -167,10 +167,10 @@ def main():
             3: "State 3"
         }
         
-        output_file = plot_dag(
-            states,
-            state_to_idx,
-            successors,
+        output_file = env.plot_dag(
+            states=states,
+            state_to_idx=state_to_idx,
+            successors=successors,
             output_file=str(outputs_dir / "different_path_lengths_dag"),
             format="png",
             state_labels=state_labels,

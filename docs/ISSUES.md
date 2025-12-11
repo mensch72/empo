@@ -4,46 +4,7 @@ This document lists known bugs, limitations, and potential improvements identifi
 
 ---
 
-## Bugs
-
-### ~~BUG-002: Custom believed_others_policy not supported in parallel mode~~ (FIXED)
-**Status:** ✅ Resolved  
-**Location:** `src/empo/backward_induction.py`  
-**Description:**  
-Custom `believed_others_policy` functions could not be used with `parallel=True` due to pickling constraints with standard pickle.
-
-**Fix:**  
-Implemented cloudpickle-based serialization for custom `believed_others_policy` functions. Cloudpickle can serialize lambdas, closures, and other function types that standard pickle cannot handle. The serialized function is passed to worker processes via module-level globals and deserialized in each worker before use.
-
-See `docs/PARALLELIZATION.md` for detailed documentation of the pickling and data passing strategies used in all parallelizations.
-
----
-
-### ~~BUG-003: TabularHumanPolicyPrior marginal computation may fail~~ (FIXED)
-**Status:** ✅ Resolved  
-**Location:** `src/empo/human_policy_prior.py`  
-**Description:**  
-When computing marginal distribution without a goal, the initial `total = None` pattern could return `None` if no goals are generated (empty generator).
-
-**Fix:**  
-Changed to initialize `total` as a zero array with proper size from `world_model.action_space.n`.
-
----
-
 ## Improvements
-
-### IMP-001: Add type hints throughout codebase
-**Priority:** Medium  
-**Scope:** All source files  
-**Description:**  
-While some modules have type hints, they are inconsistent. Adding comprehensive type hints would improve IDE support and catch bugs earlier.
-
-**Affected files:**
-- `src/empo/backward_induction.py` - partial type hints
-- `src/empo/env_utils.py` - has type hints
-- `vendor/multigrid/gym_multigrid/multigrid.py` - minimal type hints
-
----
 
 ### IMP-002: Add comprehensive test coverage for edge cases
 **Priority:** Medium  
@@ -54,14 +15,6 @@ Several edge cases are not covered by tests:
 - Single-agent environments
 - Environments with max_steps=1
 - Very large state spaces (memory limits)
-
----
-
-### IMP-003: Improve error messages in transition_probabilities
-**Priority:** Low  
-**Location:** `vendor/multigrid/gym_multigrid/multigrid.py:2877-2886`  
-**Description:**  
-When `transition_probabilities` returns `None`, there's no indication of why (terminal state vs. invalid action). Consider returning more informative error information.
 
 ---
 
@@ -85,7 +38,7 @@ def get_dag(self, use_cache=True, return_probabilities=False):
 ---
 
 ### IMP-005: Support for gymnasium's new API (terminated/truncated)
-**Priority:** Medium  
+**Priority:** Low (unclear which behavior is right)  
 **Location:** `vendor/multigrid/gym_multigrid/multigrid.py`  
 **Description:**  
 The step() method still returns the old gym API with 4 values `(obs, reward, done, info)`. The new gymnasium API uses 5 values `(obs, reward, terminated, truncated, info)`.
@@ -100,22 +53,6 @@ return obs, rewards, done, {}
 terminated = done and self.step_count < self.max_steps
 truncated = done and self.step_count >= self.max_steps
 return obs, rewards, terminated, truncated, {}
-```
-
----
-
-### IMP-008: Add progress callback for long-running computations
-**Priority:** Low  
-**Location:** `src/empo/backward_induction.py`  
-**Description:**  
-For large state spaces, backward induction can take a long time. Adding an optional progress callback would improve user experience.
-
-**Suggested API:**
-```python
-def compute_human_policy_prior(..., progress_callback=None):
-    # ...
-    if progress_callback:
-        progress_callback(states_processed, total_states)
 ```
 
 ---

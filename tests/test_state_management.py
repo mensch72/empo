@@ -312,15 +312,14 @@ def test_transition_probabilities_invalid_action():
     # Use an invalid action (out of range)
     actions = [999 for _ in range(len(env.agents))]
     
-    result = env.transition_probabilities(state, actions)
-    
-    if result is None:
-        print(f"  ✓ Invalid action correctly returns None")
+    try:
+        result = env.transition_probabilities(state, actions)
+    except ValueError:
+        print(f"  ✓ Invalid action correctly raises ValueError")
         return True
     else:
-        print(f"  ✗ Invalid action should return None, got {result}")
+        print(f"  ✗ Invalid action should raise ValueError, got {result}")
         return False
-
 
 def test_state_includes_time_left():
     """Test that state includes step count (time left)."""

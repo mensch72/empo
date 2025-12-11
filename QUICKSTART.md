@@ -251,7 +251,6 @@ apptainer exec --nv empo.sif python3 -c "import torch; print(torch.cuda.is_avail
 ## Next Steps
 
 - Read the full [README.md](README.md)
-- Explore [configs/default.yaml](configs/default.yaml)
 - Check example scripts in [examples/](examples/)
 - Customize for your research needs
 

@@ -24,7 +24,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, Block, Rock, Wall, World
-from empo.env_utils import get_dag, plot_dag
 
 
 class SmallDAGEnv(MultiGridEnv):
@@ -382,13 +381,13 @@ def create_sample_episode_gif(env, output_path='sample_episode.gif'):
 
 
 def compute_and_plot_dag(env, output_path='dag_plot.pdf'):
-    """Compute and plot the DAG structure."""
+    """Compute and plot the DAG structure using WorldModel methods."""
     print("\nComputing DAG structure...")
     print("  This may take a moment for complex environments...")
     
     try:
-        # Get DAG structure
-        states, state_to_idx, successors = get_dag(env)
+        # env already inherits from WorldModel, so we can call get_dag directly
+        states, state_to_idx, successors = env.get_dag()
         
         print(f"✓ DAG computed successfully!")
         print(f"  Total reachable states: {len(states)}")
@@ -415,11 +414,11 @@ def compute_and_plot_dag(env, output_path='dag_plot.pdf'):
             # Create simple labels showing state index
             state_labels = {state: f"S{idx}" for idx, state in enumerate(states)}
             
-            # Plot with PDF format
-            plot_dag(
-                states, 
-                state_to_idx, 
-                successors, 
+            # Plot with PDF format using env's plot_dag method
+            env.plot_dag(
+                states=states,
+                state_to_idx=state_to_idx,
+                successors=successors,
                 output_file=output_path.replace('.pdf', ''),
                 format='pdf',
                 state_labels=state_labels,

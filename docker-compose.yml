@@ -2,6 +2,7 @@ services:
   empo-dev:
     build:
       context: .
+      network: host
       dockerfile: Dockerfile
       args:
         DEV_MODE: "true"
