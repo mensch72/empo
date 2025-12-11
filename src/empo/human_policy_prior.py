@@ -268,6 +268,18 @@ class HeuristicPotentialPolicy(HumanPolicyPrior):
     neighboring empty cells, then produces a soft probability distribution over
     actions that favors moves toward higher potential (closer to goal).
     
+    Door Handling:
+    If the agent is adjacent to an actionable door, the policy overrides the
+    potential-based action and instead turns toward the door and opens/unlocks it.
+    An actionable door is either:
+    - A locked door where the agent carries a key of matching color
+    - An unlocked but closed door
+    
+    When facing an actionable door:
+    - If num_actions > 6 (full Actions set), uses the toggle action
+    - Otherwise, uses the forward action (which won't actually open the door
+      in SmallActions environments, but represents the agent's intent)
+    
     The policy is parameterized by:
     - softness (beta): Controls how deterministic the policy is.
       - beta -> 0: Uniform random over all actions
@@ -275,15 +287,18 @@ class HeuristicPotentialPolicy(HumanPolicyPrior):
       - Typical values: 1-10 for exploration, 10-100 for exploitation
     
     Action selection logic:
-    1. Compute potential Φ(current_pos) for current position
-    2. For each of 4 cardinal directions, compute potential Φ(neighbor_pos)
+    1. Check for adjacent actionable doors (locked with matching key, or closed)
+       - If found and not facing: return turn action to face the door
+       - If found and facing: return toggle (or forward) action
+    2. Compute potential Φ(current_pos) for current position
+    3. For each of 4 cardinal directions, compute potential Φ(neighbor_pos)
        for the neighboring cell (if walkable)
-    3. Compute advantage for each direction: A_dir = Φ(neighbor) - Φ(current)
-    4. Convert to action probabilities using softmax:
+    4. Compute advantage for each direction: A_dir = Φ(neighbor) - Φ(current)
+    5. Convert to action probabilities using softmax:
        - If facing direction d: forward action gets advantage A_d
        - Turn actions get advantage of the direction they would face
        - Still action gets advantage 0 (no improvement)
-    5. Apply softmax: P(action) ∝ exp(beta * advantage)
+    6. Apply softmax: P(action) ∝ exp(beta * advantage)
     
     Attributes:
         path_calculator: PathDistanceCalculator for potential computation.
@@ -310,6 +325,9 @@ class HeuristicPotentialPolicy(HumanPolicyPrior):
     ACTION_LEFT = 1
     ACTION_RIGHT = 2
     ACTION_FORWARD = 3
+    
+    # Action index for toggle in full Actions set
+    ACTION_TOGGLE = 6
     
     def __init__(
         self,
@@ -411,6 +429,90 @@ class HeuristicPotentialPolicy(HumanPolicyPrior):
         # Everything else (floor, goal, key, ball, box, switch, block, rock, etc.) is walkable
         return True
     
+    def _find_actionable_door(
+        self,
+        agent_x: int,
+        agent_y: int,
+        carrying_type: Optional[str],
+        carrying_color: Optional[str]
+    ) -> Optional[int]:
+        """
+        Find an adjacent door that can be opened/unlocked by the agent.
+        
+        An actionable door is either:
+        - A locked door where the agent carries a key of matching color
+        - An unlocked but closed door
+        
+        Args:
+            agent_x, agent_y: Agent's current position.
+            carrying_type: Type of object the agent is carrying (e.g., 'key'), or None.
+            carrying_color: Color of the carried object, or None.
+        
+        Returns:
+            Direction (0-3) of the actionable door, or None if no actionable door found.
+            Direction 0=east, 1=south, 2=west, 3=north.
+        """
+        for direction in range(4):
+            dx, dy = self.DIR_TO_VEC[direction]
+            neighbor_x, neighbor_y = agent_x + dx, agent_y + dy
+            
+            # Check bounds
+            if not (0 <= neighbor_x < self.world_model.width and 
+                    0 <= neighbor_y < self.world_model.height):
+                continue
+            
+            cell = self.world_model.grid.get(neighbor_x, neighbor_y)
+            if cell is None:
+                continue
+            
+            cell_type = getattr(cell, 'type', None)
+            if cell_type != 'door':
+                continue
+            
+            is_open = getattr(cell, 'is_open', False)
+            is_locked = getattr(cell, 'is_locked', False)
+            door_color = getattr(cell, 'color', None)
+            
+            # Skip already-open doors
+            if is_open:
+                continue
+            
+            # Check if the door can be opened
+            if is_locked:
+                # Locked door: need matching key
+                if carrying_type == 'key' and carrying_color == door_color:
+                    return direction
+            else:
+                # Unlocked but closed door: can be opened by anyone
+                return direction
+        
+        return None
+    
+    def _get_turn_action_to_face(self, current_dir: int, target_dir: int) -> int:
+        """
+        Get the turn action to face from current_dir toward target_dir.
+        
+        Args:
+            current_dir: Current facing direction (0-3).
+            target_dir: Target direction to face (0-3).
+        
+        Returns:
+            Action index (ACTION_LEFT, ACTION_RIGHT, or ACTION_FORWARD if already facing).
+        """
+        if current_dir == target_dir:
+            # Already facing the target direction
+            return self.ACTION_FORWARD
+        
+        # Calculate turn direction
+        diff = (target_dir - current_dir) % 4
+        if diff == 1:
+            return self.ACTION_RIGHT
+        elif diff == 3:
+            return self.ACTION_LEFT
+        else:
+            # diff == 2: Either direction works, prefer right
+            return self.ACTION_RIGHT
+    
     def __call__(
         self,
         state,
@@ -446,6 +548,37 @@ class HeuristicPotentialPolicy(HumanPolicyPrior):
         agent_x, agent_y = int(agent_state[0]), int(agent_state[1])
         agent_dir = int(agent_state[2]) if len(agent_state) > 2 else 0
         agent_pos = (agent_x, agent_y)
+        
+        # Extract carrying information from agent state
+        # agent_state format: (x, y, dir, terminated, started, paused, carrying_type, carrying_color, ...)
+        carrying_type = agent_state[6] if len(agent_state) > 6 else None
+        carrying_color = agent_state[7] if len(agent_state) > 7 else None
+        
+        # Check for actionable doors first (override potential-based action)
+        # This handles: locked doors with matching key, or unlocked closed doors
+        door_direction = self._find_actionable_door(
+            agent_x, agent_y, carrying_type, carrying_color
+        )
+        
+        if door_direction is not None:
+            # Found an actionable door - override potential-based action
+            probs = np.zeros(self.num_actions)
+            
+            if agent_dir == door_direction:
+                # Already facing the door - use toggle action if available, otherwise forward
+                if self.num_actions > self.ACTION_TOGGLE:
+                    # Full Actions set with toggle available
+                    probs[self.ACTION_TOGGLE] = 1.0
+                else:
+                    # SmallActions - use forward to bump into door (won't open it, but
+                    # this policy does its best with available actions)
+                    probs[self.ACTION_FORWARD] = 1.0
+            else:
+                # Turn to face the door
+                turn_action = self._get_turn_action_to_face(agent_dir, door_direction)
+                probs[turn_action] = 1.0
+            
+            return probs
         
         # Get goal coordinates
         goal_tuple = self._get_goal_tuple(possible_goal)
