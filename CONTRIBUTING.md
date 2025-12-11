@@ -2,6 +2,11 @@
 
 Thank you for your interest in contributing to EMPO! This document provides guidelines for contributing to the project.
 
+## Most Important
+
+- Before coding something new, make sure the functionality you need is not already there somewhere under `src` or `vendor`. If not, maybe some example under `examples` already has it. If that is the case, turn that functionality into a package functionality  under `src` or `vendor` so that it can be reused. If what you need is really nowhere in the codebase, consider adding it to the package functionality under `src` or `vendor` in a reusable way, rather than just putting it in your script.
+- Try adopting a similar coding and documentation style as the one you see in the existing codebase.
+
 ## Development Setup
 
 ### 1. Fork and Clone

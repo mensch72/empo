@@ -256,3 +256,292 @@ class TabularHumanPolicyPrior(HumanPolicyPrior):
             for goal, weight in self.possible_goal_generator.generate(state, human_agent_index):
                 total += vs[goal] * weight
             return total
+
+
+class HeuristicPotentialPolicy(HumanPolicyPrior):
+    """
+    Heuristic goal-directed policy based on potential function gradients.
+    
+    This policy uses the precomputed shortest paths and potential function from
+    PathDistanceCalculator to guide agents toward goals without learning. At each
+    state, it evaluates the potential at the current position and at all
+    neighboring empty cells, then produces a soft probability distribution over
+    actions that favors moves toward higher potential (closer to goal).
+    
+    The policy is parameterized by:
+    - softness (beta): Controls how deterministic the policy is.
+      - beta -> 0: Uniform random over all actions
+      - beta -> inf: Deterministic (always pick best action)
+      - Typical values: 1-10 for exploration, 10-100 for exploitation
+    
+    Action selection logic:
+    1. Compute potential Φ(current_pos) for current position
+    2. For each of 4 cardinal directions, compute potential Φ(neighbor_pos)
+       for the neighboring cell (if walkable)
+    3. Compute advantage for each direction: A_dir = Φ(neighbor) - Φ(current)
+    4. Convert to action probabilities using softmax:
+       - If facing direction d: forward action gets advantage A_d
+       - Turn actions get advantage of the direction they would face
+       - Still action gets advantage 0 (no improvement)
+    5. Apply softmax: P(action) ∝ exp(beta * advantage)
+    
+    Attributes:
+        path_calculator: PathDistanceCalculator for potential computation.
+        softness: Temperature parameter for softmax (higher = more deterministic).
+        num_actions: Number of available actions (typically 4 for SmallActions).
+    
+    Note:
+        This policy requires a MultiGridEnv-like world model with:
+        - grid attribute for checking cell contents
+        - agents attribute with pos and dir for each agent
+        - get_state() method returning (step_count, agent_states, mobile_objects, mutable_objects)
+    """
+    
+    # Direction vectors: 0=east (+x), 1=south (+y), 2=west (-x), 3=north (-y)
+    DIR_TO_VEC = [
+        (1, 0),   # 0 = east
+        (0, 1),   # 1 = south
+        (-1, 0),  # 2 = west
+        (0, -1),  # 3 = north
+    ]
+    
+    # Action indices for SmallActions: 0=still, 1=left, 2=right, 3=forward
+    ACTION_STILL = 0
+    ACTION_LEFT = 1
+    ACTION_RIGHT = 2
+    ACTION_FORWARD = 3
+    
+    def __init__(
+        self,
+        world_model: 'WorldModel',
+        human_agent_indices: List[int],
+        path_calculator,  # PathDistanceCalculator from empo.nn_based.multigrid
+        softness: float = 10.0,
+        num_actions: int = 4
+    ):
+        """
+        Initialize the heuristic potential policy.
+        
+        Args:
+            world_model: The multigrid environment.
+            human_agent_indices: Indices of agents to control with this policy.
+            path_calculator: PathDistanceCalculator with precomputed shortest paths.
+            softness: Softmax temperature (beta). Higher = more deterministic.
+                     Default 10.0 provides moderate exploitation.
+            num_actions: Number of actions (default 4 for SmallActions).
+        """
+        super().__init__(world_model, human_agent_indices)
+        self.path_calculator = path_calculator
+        self.softness = softness
+        self.num_actions = num_actions
+    
+    def _get_goal_tuple(self, possible_goal: 'PossibleGoal') -> tuple:
+        """
+        Extract goal coordinates from a PossibleGoal object.
+        
+        Handles both point goals (x, y) and rectangle goals (x1, y1, x2, y2).
+        
+        Args:
+            possible_goal: Goal object with target_pos or target_rect attribute.
+        
+        Returns:
+            Tuple of (x, y) for point goals or (x1, y1, x2, y2) for rectangles.
+        """
+        if hasattr(possible_goal, 'target_rect'):
+            return possible_goal.target_rect
+        elif hasattr(possible_goal, 'target_pos'):
+            return possible_goal.target_pos
+        elif hasattr(possible_goal, 'target'):
+            target = possible_goal.target
+            if isinstance(target, tuple):
+                return target
+        # Fallback: try to extract from string representation or raise error
+        raise ValueError(f"Cannot extract goal coordinates from {possible_goal}")
+    
+    def _is_cell_walkable(self, x: int, y: int, agent_positions: set) -> bool:
+        """
+        Check if a cell is walkable (can be moved into).
+        
+        A cell is walkable if:
+        - It's within grid bounds
+        - It's not a wall, lava, or other impassable obstacle
+        - It's not occupied by another agent
+        - It's not a closed/locked door (unless the agent can open it)
+        
+        Note: Blocks and rocks are considered walkable because they can be pushed.
+        The potential function already accounts for the difficulty of pushing them
+        via higher passing costs in PathDistanceCalculator.
+        
+        Args:
+            x, y: Cell coordinates to check.
+            agent_positions: Set of (x, y) positions occupied by agents.
+        
+        Returns:
+            True if the cell can be entered, False otherwise.
+        """
+        # Check bounds
+        if not (0 <= x < self.world_model.width and 0 <= y < self.world_model.height):
+            return False
+        
+        # Check if occupied by another agent
+        if (x, y) in agent_positions:
+            return False
+        
+        # Check cell contents
+        cell = self.world_model.grid.get(x, y)
+        if cell is None:
+            return True  # Empty cell
+        
+        cell_type = getattr(cell, 'type', None)
+        
+        # Impassable obstacles (cannot be moved through even with pushing)
+        if cell_type in ('wall', 'magicwall', 'lava'):
+            return False
+        
+        # Doors: closed/locked doors are obstacles (for simplicity)
+        if cell_type == 'door':
+            is_open = getattr(cell, 'is_open', False)
+            if not is_open:
+                return False
+        
+        # Blocks and rocks ARE walkable - they can be pushed
+        # The potential function already accounts for the pushing cost
+        # (block cost = 2, rock cost = 50 in DEFAULT_PASSING_COSTS)
+        
+        # Everything else (floor, goal, key, ball, box, switch, block, rock, etc.) is walkable
+        return True
+    
+    def __call__(
+        self,
+        state,
+        human_agent_index: int,
+        possible_goal: Optional['PossibleGoal'] = None
+    ) -> np.ndarray:
+        """
+        Compute action distribution based on potential gradients.
+        
+        Args:
+            state: Current world state tuple from get_state().
+            human_agent_index: Index of the agent to get actions for.
+            possible_goal: The goal to move toward. Required for this policy.
+        
+        Returns:
+            np.ndarray: Probability distribution over actions.
+        
+        Raises:
+            ValueError: If possible_goal is None (goal is required).
+        """
+        if possible_goal is None:
+            # Without a goal, return uniform distribution
+            return np.ones(self.num_actions) / self.num_actions
+        
+        # Extract state components
+        step_count, agent_states, mobile_objects, mutable_objects = state
+        
+        # Get agent position and direction
+        if human_agent_index >= len(agent_states):
+            return np.ones(self.num_actions) / self.num_actions
+        
+        agent_state = agent_states[human_agent_index]
+        agent_x, agent_y = int(agent_state[0]), int(agent_state[1])
+        agent_dir = int(agent_state[2]) if len(agent_state) > 2 else 0
+        agent_pos = (agent_x, agent_y)
+        
+        # Get goal coordinates
+        goal_tuple = self._get_goal_tuple(possible_goal)
+        
+        # Build set of agent positions (excluding current agent)
+        agent_positions = set()
+        for i, a_state in enumerate(agent_states):
+            if i != human_agent_index:
+                agent_positions.add((int(a_state[0]), int(a_state[1])))
+        
+        # Add mobile objects as obstacles
+        if mobile_objects:
+            for obj_data in mobile_objects:
+                if len(obj_data) >= 3:
+                    agent_positions.add((int(obj_data[1]), int(obj_data[2])))
+        
+        # Compute potential at current position
+        current_potential = self.path_calculator.compute_potential(
+            agent_pos, goal_tuple, self.world_model
+        )
+        
+        # Check if already at goal
+        if self.path_calculator.is_in_goal(agent_pos, goal_tuple):
+            # At goal: prefer staying still
+            probs = np.zeros(self.num_actions)
+            probs[self.ACTION_STILL] = 1.0
+            return probs
+        
+        # Compute potential for each neighboring direction
+        dir_advantages = {}  # direction -> advantage (potential improvement)
+        
+        for direction in range(4):
+            dx, dy = self.DIR_TO_VEC[direction]
+            neighbor_x, neighbor_y = agent_x + dx, agent_y + dy
+            neighbor_pos = (neighbor_x, neighbor_y)
+            
+            if self._is_cell_walkable(neighbor_x, neighbor_y, agent_positions):
+                neighbor_potential = self.path_calculator.compute_potential(
+                    neighbor_pos, goal_tuple, self.world_model
+                )
+                # Advantage is improvement in potential (higher is better)
+                dir_advantages[direction] = neighbor_potential - current_potential
+            else:
+                # Can't move there: large negative advantage
+                dir_advantages[direction] = -1.0
+        
+        # Convert direction advantages to action advantages
+        # Actions: 0=still, 1=left, 2=right, 3=forward
+        action_advantages = np.zeros(self.num_actions)
+        
+        # Still: no change in position, advantage = 0
+        action_advantages[self.ACTION_STILL] = 0.0
+        
+        # Forward: move in current facing direction
+        action_advantages[self.ACTION_FORWARD] = dir_advantages.get(agent_dir, -1.0)
+        
+        # Left: turn left (counter-clockwise), then would face (agent_dir - 1) % 4
+        # This doesn't move, but positions for future forward
+        left_dir = (agent_dir - 1) % 4
+        action_advantages[self.ACTION_LEFT] = dir_advantages.get(left_dir, -1.0) * 0.5
+        
+        # Right: turn right (clockwise), then would face (agent_dir + 1) % 4
+        right_dir = (agent_dir + 1) % 4
+        action_advantages[self.ACTION_RIGHT] = dir_advantages.get(right_dir, -1.0) * 0.5
+        
+        # Special case: if facing the best direction and it's walkable, strongly prefer forward
+        best_dir = max(dir_advantages, key=dir_advantages.get)
+        if agent_dir == best_dir and dir_advantages[best_dir] > 0:
+            action_advantages[self.ACTION_FORWARD] = dir_advantages[best_dir]
+        elif dir_advantages[best_dir] > 0:
+            # Need to turn toward best direction
+            # Compute which turn is shorter
+            diff = (best_dir - agent_dir) % 4
+            if diff == 1:
+                # Turn right once
+                action_advantages[self.ACTION_RIGHT] = dir_advantages[best_dir] * 0.8
+            elif diff == 3:
+                # Turn left once
+                action_advantages[self.ACTION_LEFT] = dir_advantages[best_dir] * 0.8
+            elif diff == 2:
+                # Either turn works, slight preference for right
+                action_advantages[self.ACTION_RIGHT] = dir_advantages[best_dir] * 0.6
+                action_advantages[self.ACTION_LEFT] = dir_advantages[best_dir] * 0.6
+        
+        # Apply softmax with temperature
+        scaled = action_advantages * self.softness
+        # Subtract max for numerical stability
+        scaled = scaled - np.max(scaled)
+        exp_scaled = np.exp(scaled)
+        probs = exp_scaled / np.sum(exp_scaled)
+        
+        return probs
+
+
+# Import PathDistanceCalculator for type hints (optional, avoids circular import)
+try:
+    from empo.nn_based.multigrid.path_distance import PathDistanceCalculator
+except ImportError:
+    PathDistanceCalculator = None  # type: ignore

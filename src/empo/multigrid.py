@@ -529,7 +529,8 @@ def render_goals_on_frame(
     env,
     agent_goals: Dict[int, Any],
     tile_size: int = 32,
-    goal_color: Tuple[float, float, float, float] = (0.0, 0.4, 1.0, 0.7)
+    goal_color: Tuple[float, float, float, float] = (0.0, 0.4, 1.0, 0.7),
+    dpi: int = 100
 ) -> np.ndarray:
     """
     Render the environment with goal overlays for all agents.
@@ -544,16 +545,22 @@ def render_goals_on_frame(
         agent_goals: Dict mapping agent indices to their goal objects.
         tile_size: Size of each grid cell in pixels.
         goal_color: RGBA color for goal visualization.
+        dpi: DPI for the output image (determines final size).
     
     Returns:
-        RGB image array of the rendered frame.
+        RGB image array of the rendered frame with consistent size.
     """
     import matplotlib.pyplot as plt
     
     # Render base environment
-    img = env.render(mode='rgb_array', highlight=False)
+    img = env.render(mode='rgb_array', highlight=False, tile_size=tile_size)
     
-    fig, ax = plt.subplots(figsize=(8, 8))
+    # Calculate figure size to produce consistent output dimensions
+    # Output will be img.shape[1] x img.shape[0] pixels
+    fig_width = img.shape[1] / dpi
+    fig_height = img.shape[0] / dpi
+    
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height), dpi=dpi)
     ax.imshow(img)
     
     # Get agent positions from environment state
@@ -579,10 +586,11 @@ def render_goals_on_frame(
     ax.set_xlim(0, img.shape[1])
     ax.set_ylim(img.shape[0], 0)
     
-    fig.tight_layout(pad=0)
+    # Use constrained layout for consistent sizing
+    fig.subplots_adjust(left=0, right=1, top=1, bottom=0, wspace=0, hspace=0)
     fig.canvas.draw()
     
-    # Convert to array
+    # Convert to array - use exact pixel dimensions from canvas
     buf = np.asarray(fig.canvas.buffer_rgba())
     buf = buf[:, :, :3]  # Remove alpha channel
     
