@@ -279,6 +279,14 @@ The vendored `gym_multigrid` in `vendor/multigrid/` extends the original with:
 | `DisablingSwitch` | Non-overlappable switch that toggles the `enabled` state of other objects. Configured with `toggle_color` and `target_type` ('killbutton', 'pauseswitch', or 'controlbutton'). Rendered as purple tile with disabled symbol. |
 | `ControlButton` | Non-overlappable button enabling two-step agent control: (1) Programming phase - agent of `controlled_color` toggles then performs action to memorize it; (2) Triggering phase - agent of `trigger_color` toggles to force the controlled agent's next action. Has `enabled` state, `controlled_agent`, and `triggered_action`. Rendered as green tile. |
 
+### Unused Object Types
+
+We are *not* planning to use the standard multigrid object types `Goal` (because goals are handled in a different way in our project) and `Box` (too complex and unnecessary behavior).
+
+### Unused "Reward"
+
+We are also not using the (extrinsic) "rewards" returned by the multigrid environment (or other environments) because in our project all rewards are either hypothetical (representing a possible goal the robot considers the humans might have) or intrinsic (representing the robot's internal assessment of human power).
+
 ### Agent Attributes
 
 | Attribute | Type | Description |

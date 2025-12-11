@@ -2618,6 +2618,12 @@ class MultiGridEnv(WorldModel):
         # Check if this cell is empty or can be overlapped
         end_cell = self.grid.get(*current_pos)
         if end_cell is None or end_cell.can_overlap():
+            # Also check if the end position was occupied by another agent at step start.
+            # This prevents chain conflicts where pushing depends on execution order.
+            end_pos_tuple = tuple(current_pos)
+            if hasattr(self, '_initial_agent_positions') and end_pos_tuple in self._initial_agent_positions:
+                # Cannot push onto a cell that was occupied by an agent at step start
+                return False, 0, None
             return True, num_objects, current_pos
         else:
             return False, 0, None
@@ -2893,6 +2899,17 @@ class MultiGridEnv(WorldModel):
         fwd_pos = self.agents[agent_idx].front_pos
         fwd_cell = self.grid.get(*fwd_pos)
         
+        # Check if the target cell was occupied by another agent at the start of this step.
+        # This prevents chain conflicts where outcome depends on execution order.
+        # An agent can only move into a cell the step AFTER it was vacated.
+        fwd_pos_tuple = tuple(fwd_pos)
+        own_pos_tuple = tuple(self.agents[agent_idx].pos)
+        target_was_other_agent = (
+            hasattr(self, '_initial_agent_positions') and 
+            fwd_pos_tuple in self._initial_agent_positions and
+            fwd_pos_tuple != own_pos_tuple  # Can always stay in own cell
+        )
+        
         if action == self.actions.left:
             self.agents[agent_idx].dir -= 1
             if self.agents[agent_idx].dir < 0:
@@ -2902,7 +2919,10 @@ class MultiGridEnv(WorldModel):
             self.agents[agent_idx].dir = (self.agents[agent_idx].dir + 1) % 4
         
         elif action == self.actions.forward:
-            if fwd_cell is not None and fwd_cell.type in ['block', 'rock']:
+            # Block movement if target was occupied by another agent at step start
+            if target_was_other_agent:
+                pass  # Movement blocked - agent stays in place
+            elif fwd_cell is not None and fwd_cell.type in ['block', 'rock']:
                 self._push_objects(self.agents[agent_idx], fwd_pos)
             elif fwd_cell is not None:
                 if fwd_cell.type == 'goal':
@@ -3021,6 +3041,12 @@ class MultiGridEnv(WorldModel):
             cell_obj = self.grid.get(*contested_cell)
             if cell_obj is not None and cell_obj.type == 'agent':
                 occupied_targets.add(contested_cell)
+            # Also check if the contested cell was occupied by another agent at step start
+            # This prevents chain conflicts for unsteady agents too
+            if hasattr(self, '_initial_agent_positions') and contested_cell in self._initial_agent_positions:
+                # Check it's not the agent's own position
+                if contested_cell != tuple(self.agents[i].pos):
+                    occupied_targets.add(contested_cell)
         
         for contested_cell, count in contested_counts.items():
             if count > 1:
@@ -3186,6 +3212,15 @@ class MultiGridEnv(WorldModel):
         
         # Clear magic wall entered cells from previous step (for visual feedback)
         self.magic_wall_entered_cells = set()
+        
+        # Record initial agent positions to prevent chain conflicts.
+        # An agent cannot move into (or push objects onto) a cell that was occupied
+        # by another agent at the beginning of this step. This ensures deterministic
+        # conflict resolution: one can only move onto a cell the step AFTER it was vacated.
+        self._initial_agent_positions = set()
+        for agent in self.agents:
+            if agent.pos is not None and not agent.terminated:
+                self._initial_agent_positions.add(tuple(agent.pos))
         
         # Convert to list for potential modification
         actions = list(actions)
@@ -4255,6 +4290,13 @@ class MultiGridEnv(WorldModel):
         # Increment step counter
         self.step_count += 1
         
+        # Record initial agent positions to prevent chain conflicts.
+        # This must be consistent with step() behavior.
+        self._initial_agent_positions = set()
+        for agent in self.agents:
+            if agent.pos is not None and not agent.terminated:
+                self._initial_agent_positions.add(tuple(agent.pos))
+        
         # Execute each agent's action in the specified order
         rewards = np.zeros(len(actions))
         done = False
@@ -4306,6 +4348,13 @@ class MultiGridEnv(WorldModel):
         
         # Increment step counter
         self.step_count += 1
+        
+        # Record initial agent positions to prevent chain conflicts.
+        # This must be consistent with step() behavior.
+        self._initial_agent_positions = set()
+        for agent in self.agents:
+            if agent.pos is not None and not agent.terminated:
+                self._initial_agent_positions.add(tuple(agent.pos))
         
         # Separate agents into normal, unsteady-forward, and magic-wall
         normal_agents = []
