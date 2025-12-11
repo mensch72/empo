@@ -71,6 +71,9 @@ class UnsteadyCrossPushTestEnv(MultiGridEnv):
         unsteady2 = UnsteadyGround(World, stumble_probability=0.5, color='brown')
         self.grid.set(2, 2, unsteady1)
         self.grid.set(4, 2, unsteady2)
+        # Save terrain to terrain_grid so it persists under agents
+        self.terrain_grid.set(2, 2, unsteady1)
+        self.terrain_grid.set(4, 2, unsteady2)
         
         # Place block at (3,2) - between the two agents
         block = Block(World)

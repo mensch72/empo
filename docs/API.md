@@ -255,12 +255,29 @@ The vendored `gym_multigrid` in `vendor/multigrid/` extends the original with:
 
 ### New Object Types
 
+#### Pushable Objects
+
 | Type | Description |
 |------|-------------|
 | `Block` | Pushable by any agent |
 | `Rock` | Pushable only by authorized agents (based on `can_push_rocks`) |
-| `UnsteadyGround` | Agents may stumble (stochastic movement) |
-| `MagicWall` | Probabilistic entry from one direction |
+
+#### Terrain Objects
+
+| Type | Description |
+|------|-------------|
+| `UnsteadyGround` | Overlappable ground where agents may stumble (stochastic movement). Has configurable `stumble_probability` (default 0.5). |
+| `MagicWall` | Wall that authorized agents can enter probabilistically from a specific direction. Has `magic_side` (0=right, 1=down, 2=left, 3=up, 4=all), `entry_probability`, `solidify_probability`, and mutable `active` state. |
+
+#### Switches and Buttons
+
+| Type | Description |
+|------|-------------|
+| `Switch` | Basic overlappable switch (floor tile) |
+| `KillButton` | Overlappable button that permanently "kills" agents (restricts to "still" action only). Configured with `trigger_color` (agents that activate it) and `target_color` (agents that get killed). Has `enabled` state. Rendered as red tile with X pattern. |
+| `PauseSwitch` | Non-overlappable toggle switch that pauses agents while ON. Configured with `toggle_color` (agents that can toggle), `target_color` (agents that get paused), `is_on` state, and `enabled` state. Rendered as blue tile with pause/play symbol. |
+| `DisablingSwitch` | Non-overlappable switch that toggles the `enabled` state of other objects. Configured with `toggle_color` and `target_type` ('killbutton', 'pauseswitch', or 'controlbutton'). Rendered as purple tile with disabled symbol. |
+| `ControlButton` | Non-overlappable button enabling two-step agent control: (1) Programming phase - agent of `controlled_color` toggles then performs action to memorize it; (2) Triggering phase - agent of `trigger_color` toggles to force the controlled agent's next action. Has `enabled` state, `controlled_agent`, and `triggered_action`. Rendered as green tile. |
 
 ### Agent Attributes
 
@@ -269,6 +286,8 @@ The vendored `gym_multigrid` in `vendor/multigrid/` extends the original with:
 | `can_push_rocks` | bool | Whether agent can push rocks |
 | `can_enter_magic_walls` | bool | Whether agent can attempt magic wall entry |
 | `on_unsteady_ground` | bool | (Derived) Currently on unsteady ground |
+| `paused` | bool | Whether agent is paused (can only use "still" action) |
+| `forced_next_action` | int/None | If set, overrides the agent's next action (used by ControlButton) |
 
 ### Map Specification
 
@@ -301,8 +320,16 @@ class MyEnv(MultiGridEnv):
 | `Ae` | Grey agent |
 | `Ro` | Rock |
 | `Bl` | Block |
+| `La` | Lava |
 | `Un` | Unsteady ground |
+| `Sw` | Switch |
 | `Mn/Ms/Me/Mw/Ma` | Magic wall (north/south/east/west/all sides) |
+| `Kb` or `Ki` | KillButton (yellow triggers, grey killed) |
+| `Ps` or `Pa` | PauseSwitch (yellow toggles, grey paused) |
+| `Dk` or `dK` | DisablingSwitch for KillButtons (grey toggles) |
+| `Dp` or `dP` | DisablingSwitch for PauseSwitches (grey toggles) |
+| `DC` or `dC` | DisablingSwitch for ControlButtons (grey toggles) |
+| `CB` | ControlButton (yellow triggers, grey controlled) |
 
 ### Agent Color Conventions (MultiGrid)
 
