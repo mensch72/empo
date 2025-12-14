@@ -2560,13 +2560,55 @@ class MultiGridEnv(WorldModel):
                 self.grid.set(x, y, agent)
 
     def _handle_pickup(self, i, rewards, fwd_pos, fwd_cell):
-        pass
+        """
+        Handle pickup action - agent picks up object in front of them.
+        
+        Default implementation that can be overridden by subclasses for
+        game-specific pickup behavior (e.g., rewards, restrictions).
+        
+        Args:
+            i: Agent index
+            rewards: Rewards array to potentially modify
+            fwd_pos: Position in front of the agent
+            fwd_cell: Object at the forward position (or None)
+        """
+        if fwd_cell and fwd_cell.can_pickup():
+            if self.agents[i].carrying is None:
+                # Pick up the object
+                self.agents[i].carrying = fwd_cell
+                # Update object's position tracking if it has cur_pos
+                if hasattr(fwd_cell, 'cur_pos'):
+                    fwd_cell.cur_pos = np.array([-1, -1])
+                # Remove from grid
+                self.grid.set(*fwd_pos, None)
 
     def _handle_build(self, i, rewards, fwd_pos, fwd_cell):
         pass
 
     def _handle_drop(self, i, rewards, fwd_pos, fwd_cell):
-        pass
+        """
+        Handle drop action - agent drops carried object in front of them.
+        
+        Default implementation that can be overridden by subclasses for
+        game-specific drop behavior (e.g., rewards, restrictions).
+        
+        Args:
+            i: Agent index
+            rewards: Rewards array to potentially modify
+            fwd_pos: Position in front of the agent
+            fwd_cell: Object at the forward position (or None)
+        """
+        carrying = self.agents[i].carrying
+        if carrying is not None:
+            # Can only drop on empty cells or cells that can be overlapped
+            if fwd_cell is None or fwd_cell.can_overlap():
+                # Place object on grid
+                self.grid.set(*fwd_pos, carrying)
+                # Update object's position tracking if it has cur_pos
+                if hasattr(carrying, 'cur_pos'):
+                    carrying.cur_pos = np.array(fwd_pos)
+                # Clear agent's carrying state
+                self.agents[i].carrying = None
 
     def _handle_special_moves(self, i, rewards, fwd_pos, fwd_cell):
         """
