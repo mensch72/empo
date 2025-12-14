@@ -6,31 +6,37 @@ This script demonstrates the heuristic potential-based policy's ability to:
 1. Pick up a key that can open locked doors
 2. Navigate to and unlock doors using the key
 3. Drop the key after it's no longer useful
-4. Reach the goal area
+4. Open closed (but unlocked) doors
+5. NOT pick up keys that can't open any locked door
+6. Reach the goal area
 
 The demo uses a specific map:
 ```
 We We We We We We We
 We Kr Lr .. We .. We
 We Ay .. .. Lr .. We
-We .. .. .. We .. We
+We Kg Cg .. We .. We
 We We We We We We We 
 ```
 
 Where:
 - Ay = Yellow agent (human)
 - Kr = Red key
+- Kg = Green key (should NOT be picked up - no locked green doors)
 - Lr = Locked red door
+- Cg = Closed (unlocked) green door (should be opened)
 - We = Wall
 
 The human's goal is to reach the rightmost column ((5,1) to (5,3)).
 
 Expected behavior:
-1. Pick up the red key (Kr)
+1. Pick up the red key (Kr) - needed for locked doors
 2. Open the first locked red door (Lr at (2,1))
 3. Open the second locked red door (Lr at (4,2))
 4. Drop the red key (no longer needed)
 5. Move to the goal area
+6. Do NOT pick up the green key (Kg) - no locked green doors
+7. DO open the closed green door (Cg at (2,3)) - it's closed but unlocked
 
 Note: Can't use 'Kb' for blue key because it conflicts with KillButton code.
 
@@ -70,16 +76,22 @@ from empo.nn_based.multigrid.path_distance import PathDistanceCalculator
 # Map codes:
 #   We = Wall (grey)
 #   Ay = Yellow agent
-#   Kr = Red key
+#   Kr = Red key, Kg = Green key
 #   Lr = Locked red door
+#   Cg = Closed (unlocked) green door
 #   .. = Empty floor
 #
 # Note: Can't use Kb for blue key because 'Kb' is reserved for KillButton
+#
+# Test scenario:
+# - Agent should pick up red key (Kr) to open locked red doors (Lr)
+# - Agent should NOT pick up green key (Kg) since green door (Cg) is unlocked
+# - Agent should open the closed green door (Cg) on the way to goal
 MAP_STR = """
 We We We We We We We
 We Kr Lr .. We .. We
 We Ay .. .. Lr .. We
-We .. .. .. We .. We
+We Kg Cg .. We .. We
 We We We We We We We
 """
 
@@ -163,6 +175,7 @@ def run_rollout(
     
     # Track state
     picked_up_red_key = False
+    picked_up_green_key = False  # Should NOT happen
     opened_doors = []
     dropped_key = False
     reached_goal = False
@@ -184,12 +197,19 @@ def run_rollout(
         frame = render_goals_on_frame(env, {human_agent_index: goal})
         frames.append(frame)
         
-        # Check for key pickup
+        # Check for red key pickup
         if carrying_type == 'key' and carrying_color == 'red' and not picked_up_red_key:
             picked_up_red_key = True
             events_log.append(f"Step {step}: Picked up red key")
             if verbose:
                 print(f"  Step {step}: ✓ Picked up red key")
+        
+        # Check for green key pickup (should NOT happen)
+        if carrying_type == 'key' and carrying_color == 'green' and not picked_up_green_key:
+            picked_up_green_key = True
+            events_log.append(f"Step {step}: UNEXPECTED - Picked up green key!")
+            if verbose:
+                print(f"  Step {step}: ✗ UNEXPECTED - Picked up green key!")
         
         # Check for key drop
         if picked_up_red_key and carrying_type is None and not dropped_key:
@@ -241,12 +261,25 @@ def run_rollout(
         frame = render_goals_on_frame(env, {human_agent_index: goal})
         frames.append(frame)
     
-    # Determine success
-    success = picked_up_red_key and len(opened_doors) >= 2 and reached_goal
+    # Check if green door at (2,3) was opened
+    opened_green_door = (2, 3) in opened_doors
+    
+    # Determine success:
+    # - Must pick up red key
+    # - Must NOT pick up green key (no locked green doors)
+    # - Must open at least 3 doors (2 locked red + 1 closed green)
+    # - Must reach goal
+    success = (picked_up_red_key and 
+               not picked_up_green_key and 
+               len(opened_doors) >= 3 and 
+               opened_green_door and
+               reached_goal)
     
     return frames, events_log, success, {
         'picked_up_red_key': picked_up_red_key,
+        'picked_up_green_key': picked_up_green_key,
         'opened_doors': opened_doors,
+        'opened_green_door': opened_green_door,
         'dropped_key': dropped_key,
         'reached_goal': reached_goal
     }
@@ -266,11 +299,13 @@ def main():
     print()
     print("Goal: Reach the rightmost cells (column 5, rows 1-3)")
     print("Expected behavior:")
-    print("  1. Pick up red key (Kr)")
+    print("  1. Pick up red key (Kr) - needed for locked doors")
     print("  2. Open first locked red door (Lr at column 2)")
     print("  3. Open second locked red door (Lr at column 4)")
     print("  4. Drop the red key (no longer needed)")
-    print("  5. Move to goal area")
+    print("  5. Open closed green door (Cg at (2,3)) - unlocked but closed")
+    print("  6. Do NOT pick up green key (Kg) - no locked green doors")
+    print("  7. Reach goal area")
     print()
     
     # Create environment
@@ -303,7 +338,9 @@ def main():
     # Report results
     print("Results:")
     print(f"  Picked up red key: {'✓' if details['picked_up_red_key'] else '✗'}")
+    print(f"  Did NOT pick up green key: {'✓' if not details['picked_up_green_key'] else '✗ UNEXPECTED'}")
     print(f"  Doors opened: {len(details['opened_doors'])} ({details['opened_doors']})")
+    print(f"  Opened green door (2,3): {'✓' if details['opened_green_door'] else '✗'}")
     print(f"  Dropped key: {'✓' if details['dropped_key'] else '✗'}")
     print(f"  Reached goal: {'✓' if details['reached_goal'] else '✗'}")
     print()
@@ -314,8 +351,12 @@ def main():
         print("✗ INCOMPLETE: Agent did not complete all expected behaviors")
         if not details['picked_up_red_key']:
             print("  - Did not pick up red key")
-        if len(details['opened_doors']) < 2:
-            print(f"  - Only opened {len(details['opened_doors'])} doors (expected 2)")
+        if details['picked_up_green_key']:
+            print("  - UNEXPECTED: Picked up green key (should not - no locked green doors)")
+        if len(details['opened_doors']) < 3:
+            print(f"  - Only opened {len(details['opened_doors'])} doors (expected 3: 2 red + 1 green)")
+        if not details['opened_green_door']:
+            print("  - Did not open green door at (2,3)")
         if not details['reached_goal']:
             print("  - Did not reach goal")
     print()
