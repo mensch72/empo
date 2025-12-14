@@ -351,26 +351,6 @@ class RandomMultigridEnv(MultiGridEnv):
             grid[y][x] = 'Ae'
         
         return '\n'.join(' '.join(row) for row in grid)
-    
-    def _handle_pickup(self, agent_idx, rewards, fwd_pos, fwd_cell):
-        """Handle pickup action - agent picks up object in front of them."""
-        if fwd_cell and fwd_cell.can_pickup():
-            # Check if agent is already carrying something
-            if self.agents[agent_idx].carrying is None:
-                # Pick up the object
-                self.agents[agent_idx].carrying = fwd_cell
-                # Remove from grid
-                self.grid.set(*fwd_pos, None)
-    
-    def _handle_drop(self, agent_idx, rewards, fwd_pos, fwd_cell):
-        """Handle drop action - agent drops object in front of them."""
-        carrying = self.agents[agent_idx].carrying
-        if carrying is not None:
-            # Can only drop on empty cells or cells that can be overlapped
-            if fwd_cell is None or fwd_cell.can_overlap():
-                # Drop the object
-                self.grid.set(*fwd_pos, carrying)
-                self.agents[agent_idx].carrying = None
 
 
 def create_random_env(seed: int) -> RandomMultigridEnv:
