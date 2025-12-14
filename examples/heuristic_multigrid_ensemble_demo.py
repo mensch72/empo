@@ -277,7 +277,7 @@ class RandomMultigridEnv(MultiGridEnv):
                     
                     cumulative += self.door_prob
                     if r < cumulative:
-                        row.append(f'C{self.door_key_color}')
+                        row.append(f'L{self.door_key_color}')  # 'L' = Locked door (requires key)
                         pending_keys.append(self.door_key_color)
                         available_cells.append((x, y))
                         continue
@@ -418,7 +418,7 @@ def create_heuristic_policy(
         human_agent_indices=human_agent_indices,
         path_calculator=path_calculator,
         softness=softness,
-        num_actions=4  # SmallActions: still, left, right, forward
+        num_actions=8  # Full Actions: still, left, right, forward, pickup, drop, toggle, done
     )
     
     return policy
