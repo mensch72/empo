@@ -41,7 +41,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from gym_multigrid.multigrid import (
-    MultiGridEnv, Grid, Agent, Wall, World, SmallActions,
+    MultiGridEnv, Grid, Agent, Wall, World, Actions, #SmallActions,
     Key, Ball, Box, Door, Lava, Block, Goal
 )
 from empo.possible_goal import PossibleGoal, PossibleGoalSampler
@@ -71,12 +71,12 @@ NUM_TEST_ENVS_QUICK = 5
 NUM_ROLLOUTS_QUICK = 10
 
 # Object placement probabilities
-WALL_PROBABILITY = 0.1
-DOOR_PROBABILITY = 0.00 # 0.03
+WALL_PROBABILITY = 0.05 # 0.1
+DOOR_PROBABILITY = 0.03 # 0.03
 BALL_PROBABILITY = 0.0
 BOX_PROBABILITY = 0.0
 LAVA_PROBABILITY = 0.0
-BLOCK_PROBABILITY = 0.03
+BLOCK_PROBABILITY = 0.00 #0.03
 ROCK_PROBABILITY = 0.00 # 0.02
 UNSTEADY_GROUND_PROBABILITY = 0.10
 
@@ -242,7 +242,7 @@ class RandomMultigridEnv(MultiGridEnv):
             max_steps=max_steps,
             partial_obs=False,
             objects_set=World,
-            actions_set=SmallActions
+            actions_set=Actions #SmallActions
         )
     
     def _generate_random_map(self) -> str:
