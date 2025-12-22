@@ -11,9 +11,6 @@ This script shows how to use:
 import sys
 from pathlib import Path
 
-# Setup path to import multigrid
-sys.path.insert(0, str(Path(__file__).parent.parent / "vendor" / "multigrid"))
-
 # Patch gym import for compatibility
 import gymnasium as gym
 sys.modules['gym'] = gym
@@ -147,13 +144,19 @@ def example_state_properties():
     # States are immutable tuples
     print(f"✓ State type: {type(state).__name__}")
     
-    # State includes step count
-    state_dict = dict(state)
-    print(f"✓ Step count in state: {state_dict.get('step_count', 'NOT FOUND')}")
+    # State format: (step_count, agent_states, mobile_objects, mutable_objects)
+    # - step_count: integer, current time step
+    # - agent_states: tuple of tuples, each with (pos_x, pos_y, dir, terminated, started, paused, carrying_type, carrying_color)
+    # - mobile_objects: tuple of tuples for blocks, rocks, etc.
+    # - mutable_objects: tuple of tuples for doors, switches, etc.
+    step_count, agent_states, mobile_objects, mutable_objects = state
+    print(f"✓ Step count in state: {step_count}")
     
     # State includes time left
-    time_left = env.max_steps - state_dict['step_count']
+    time_left = env.max_steps - step_count
     print(f"✓ Time left: {time_left} steps")
+    print(f"✓ Number of agents: {len(agent_states)}")
+    print(f"✓ Number of mobile objects: {len(mobile_objects)}")
     
     print()
 

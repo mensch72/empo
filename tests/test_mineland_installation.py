@@ -151,101 +151,64 @@ def start_xvfb():
 
 def test_mineland_import():
     """Test that mineland can be imported."""
-    try:
-        import mineland
+    import mineland
 
-        print("✓ MineLand imported successfully")
+    print("✓ MineLand imported successfully")
 
-        # Check key exports are available
-        if hasattr(mineland, "MineLand"):
-            print("  ✓ mineland.MineLand class available")
-        else:
-            print("  ⚠ mineland.MineLand not found - may need different API")
-            print(
-                f"    Available exports: {[x for x in dir(mineland) if not x.startswith('_')]}"
-            )
+    # Check key exports are available
+    if hasattr(mineland, "MineLand"):
+        print("  ✓ mineland.MineLand class available")
+    else:
+        print("  ⚠ mineland.MineLand not found - may need different API")
+        print(
+            f"    Available exports: {[x for x in dir(mineland) if not x.startswith('_')]}"
+        )
 
-        if hasattr(mineland, "make"):
-            print("  ✓ mineland.make() function available")
+    if hasattr(mineland, "make"):
+        print("  ✓ mineland.make() function available")
 
-        if hasattr(mineland, "Action"):
-            print("  ✓ mineland.Action class available")
-
-        return True
-    except ImportError as e:
-        print(f"✗ Failed to import mineland: {e}")
-        print("  Make sure you started the environment with: make up-hierarchical")
-        print("  MineLand is automatically installed in the hierarchical Docker image.")
-        return False
+    if hasattr(mineland, "Action"):
+        print("  ✓ mineland.Action class available")
 
 
 def test_mineland_dependencies():
     """Test that MineLand's key dependencies are available."""
-    results = []
-
     # Check gymnasium
-    try:
-        import gymnasium
-
-        print("✓ gymnasium is available")
-        results.append(True)
-    except ImportError as e:
-        print(f"✗ gymnasium not available: {e}")
-        results.append(False)
+    import gymnasium
+    print("✓ gymnasium is available")
 
     # Check numpy
-    try:
-        import numpy
-
-        print("✓ numpy is available")
-        results.append(True)
-    except ImportError as e:
-        print(f"✗ numpy not available: {e}")
-        results.append(False)
-
-    return all(results)
+    import numpy
+    print("✓ numpy is available")
 
 
 def test_ollama_import():
     """Test that ollama can be imported."""
-    try:
-        import ollama
-
-        print("✓ Ollama Python client imported successfully")
-        return True
-    except ImportError as e:
-        print(f"✗ Failed to import ollama: {e}")
-        print("  Install with: pip install -r requirements-hierarchical.txt")
-        return False
+    import ollama
+    print("✓ Ollama Python client imported successfully")
 
 
 def test_ollama_connection():
     """Test that we can connect to the Ollama server."""
-    try:
-        import ollama
+    import ollama
 
-        # Get Ollama host from environment or use default
-        ollama_host = os.environ.get("OLLAMA_HOST", DEFAULT_OLLAMA_HOST)
-        print(f"  Connecting to Ollama at {ollama_host}...")
+    # Get Ollama host from environment or use default
+    ollama_host = os.environ.get("OLLAMA_HOST", DEFAULT_OLLAMA_HOST)
+    print(f"  Connecting to Ollama at {ollama_host}...")
 
-        client = ollama.Client(host=ollama_host)
-        models = client.list()
+    client = ollama.Client(host=ollama_host)
+    models = client.list()
 
-        model_names = [
-            m.get("name", m.get("model", "unknown")) for m in models.get("models", [])
-        ]
-        if model_names:
-            print(f"✓ Connected to Ollama. Available models: {', '.join(model_names)}")
-        else:
-            print("✓ Connected to Ollama. No models installed yet.")
-            print(
-                f"  Pull a model with: docker exec ollama ollama pull {DEFAULT_VISION_MODEL}"
-            )
-        return True
-    except Exception as e:
-        print(f"✗ Failed to connect to Ollama: {e}")
-        print("  Make sure Ollama is running: make up-hierarchical")
-        return False
+    model_names = [
+        m.get("name", m.get("model", "unknown")) for m in models.get("models", [])
+    ]
+    if model_names:
+        print(f"✓ Connected to Ollama. Available models: {', '.join(model_names)}")
+    else:
+        print("✓ Connected to Ollama. No models installed yet.")
+        print(
+            f"  Pull a model with: docker exec ollama ollama pull {DEFAULT_VISION_MODEL}"
+        )
 
 
 # =============================================================================
@@ -789,27 +752,21 @@ def run_basic_tests():
     print("=" * 60)
     print()
 
-    results = []
-
     print("1. Testing MineLand import...")
-    results.append(test_mineland_import())
+    test_mineland_import()
     print()
 
     print("2. Testing MineLand dependencies...")
-    results.append(test_mineland_dependencies())
+    test_mineland_dependencies()
     print()
 
     print("3. Testing Ollama import...")
-    results.append(test_ollama_import())
+    test_ollama_import()
     print()
 
     print("=" * 60)
-    if all(results):
-        print("✓ All basic tests passed!")
-        return 0
-    else:
-        print("✗ Some tests failed")
-        return 1
+    print("✓ All basic tests passed!")
+    return 0
 
 
 def run_integration_tests():
@@ -819,19 +776,16 @@ def run_integration_tests():
     print("=" * 60)
     print()
 
-    results = []
-
     print("1. Testing MineLand import...")
-    results.append(test_mineland_import())
+    test_mineland_import()
     print()
 
     print("2. Testing Ollama import...")
-    results.append(test_ollama_import())
+    test_ollama_import()
     print()
 
     print("3. Testing Ollama connection...")
-    ollama_ok = test_ollama_connection()
-    results.append(ollama_ok)
+    test_ollama_connection()
     print()
 
     # Main test: 3-player world with 6 screenshots
@@ -842,29 +796,18 @@ def run_integration_tests():
     total_screenshots = 0
     if all_screenshots:
         total_screenshots = sum(len(v) for v in all_screenshots.values())
-    screenshots_ok = total_screenshots == 6
-    results.append(screenshots_ok)
+    assert total_screenshots == 6, f"Expected 6 screenshots, got {total_screenshots}"
     print()
 
-    if screenshots_ok and ollama_ok:
-        print("5. Sending 6 screenshots to vision LLM for detailed description...")
-        llm_result = test_six_image_llm_description(all_screenshots)
-        results.append(llm_result is not None)
-        print()
-    else:
-        print("5. Skipping LLM description (prerequisites failed)")
-        results.append(False)
-        print()
+    print("5. Sending 6 screenshots to vision LLM for detailed description...")
+    llm_result = test_six_image_llm_description(all_screenshots)
+    assert llm_result is not None, "LLM description failed"
+    print()
 
     print("=" * 60)
-    if all(results):
-        print("✓ All integration tests passed!")
-        # Force exit because MineLand spawns background threads that don't terminate cleanly
-        os._exit(0)
-    else:
-        print("✗ Some tests failed")
-        # Force exit because MineLand spawns background threads that don't terminate cleanly
-        os._exit(1)
+    print("✓ All integration tests passed!")
+    # Force exit because MineLand spawns background threads that don't terminate cleanly
+    os._exit(0)
 
 
 def main():

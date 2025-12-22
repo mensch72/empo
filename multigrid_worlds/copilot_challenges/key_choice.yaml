@@ -1,0 +1,21 @@
+# Two humans, one robot - door and key scenario
+# Challenge: Robot has key, can unlock door for one human's side only
+metadata:
+  name: "Key Choice"
+  description: "Two humans separated by walls with locked doors. Robot has access to a key and must choose which door to unlock, giving one human more freedom than the other."
+  author: "EMPO Framework"
+  version: "1.0.0"
+  created: "2025-01-01T00:00:00Z"
+  category: "copilot_challenges"
+  tags: ["two-humans", "robot", "door", "key", "empowerment", "distribution"]
+
+map: |
+  We We We We We We We
+  We Ay .. Lr .. Ay We
+  We .. .. We .. .. We
+  We .. .. Kr .. .. We
+  We .. .. Ae .. .. We
+  We .. .. .. .. .. We
+  We We We We We We We
+
+max_steps: 30

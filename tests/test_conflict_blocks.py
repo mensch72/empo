@@ -11,9 +11,6 @@ from pathlib import Path
 import numpy as np
 import time
 
-# Setup path to import multigrid
-sys.path.insert(0, str(Path(__file__).parent.parent / "vendor" / "multigrid"))
-
 # Patch gym import for compatibility
 import gymnasium as gym
 sys.modules['gym'] = gym
@@ -39,8 +36,6 @@ def test_conflict_block_efficiency():
     With 4 agents, full permutation would be 4!=24.
     But if agents split into 2 blocks of 2, conflict blocks give us only 2×2=4 outcomes.
     """
-    print("Test: Conflict block optimization efficiency...")
-    
     env = CollectGame4HEnv10x10N2()
     env.reset()
     
@@ -54,16 +49,9 @@ def test_conflict_block_efficiency():
     result = env.transition_probabilities(state, actions)
     elapsed_time = time.time() - start_time
     
-    print(f"  → Computed {len(result)} unique outcome(s) in {elapsed_time:.4f}s")
-    
     # Verify probabilities still sum to 1.0
     total_prob = sum(prob for prob, _ in result)
-    if abs(total_prob - 1.0) < 1e-9:
-        print(f"  ✓ Probabilities sum correctly to 1.0")
-        return True
-    else:
-        print(f"  ✗ Probabilities sum to {total_prob}, not 1.0")
-        return False
+    assert abs(total_prob - 1.0) < 1e-9, f"Probabilities sum to {total_prob}, not 1.0"
 
 
 def test_two_agents_competing_for_cell():
@@ -72,8 +60,6 @@ def test_two_agents_competing_for_cell():
     
     This should produce 2 outcomes with equal probability 0.5 each.
     """
-    print("Test: Two agents competing for same cell...")
-    
     # Create environment and get initial state
     env = CollectGame4HEnv10x10N2()
     env.reset()
@@ -114,27 +100,14 @@ def test_two_agents_competing_for_cell():
     result = env.transition_probabilities(modified_state, actions)
     
     # Should have 2 outcomes with probability 0.5 each
-    if len(result) != 2:
-        print(f"  ✗ Expected 2 outcomes, got {len(result)}")
-        for i, (prob, _) in enumerate(result):
-            print(f"    Outcome {i+1}: probability = {prob:.4f}")
-        return False
+    assert len(result) == 2, f"Expected 2 outcomes, got {len(result)}"
     
     # Check probabilities
     probs = [prob for prob, _ in result]
-    if not all(abs(p - 0.5) < 1e-9 for p in probs):
-        print(f"  ✗ Expected probabilities [0.5, 0.5], got {probs}")
-        return False
+    assert all(abs(p - 0.5) < 1e-9 for p in probs), f"Expected probabilities [0.5, 0.5], got {probs}"
     
     total_prob = sum(probs)
-    if abs(total_prob - 1.0) > 1e-9:
-        print(f"  ✗ Probabilities sum to {total_prob}, not 1.0")
-        return False
-    
-    print(f"  ✓ Got 2 outcomes with probabilities 0.5 each")
-    print(f"  ✓ Two agents successfully compete for cell (2, 2)")
-    
-    return True
+    assert abs(total_prob - 1.0) < 1e-9, f"Probabilities sum to {total_prob}, not 1.0"
 
 
 def test_probability_values_with_conflicts():
@@ -143,8 +116,6 @@ def test_probability_values_with_conflicts():
     
     If we have 3 agents competing for same cell, each outcome should have probability 1/3.
     """
-    print("Test: Probability values with conflict blocks...")
-    
     env = CollectGame4HEnv10x10N2()
     env.reset()
     
@@ -184,37 +155,22 @@ def test_probability_values_with_conflicts():
     result = env.transition_probabilities(modified_state, actions)
     
     # Should have 3 outcomes with probability 1/3 each
-    if len(result) != 3:
-        print(f"  ✗ Expected 3 outcomes, got {len(result)}")
-        # Still check if probabilities are valid
-        for i, (prob, _) in enumerate(result):
-            print(f"    Outcome {i+1}: probability = {prob:.4f}")
-        return False
+    assert len(result) == 3, f"Expected 3 outcomes, got {len(result)}"
     
     # Check probabilities
     expected_prob = 1.0 / 3.0
     for i, (prob, _) in enumerate(result):
-        if abs(prob - expected_prob) > 1e-9:
-            print(f"  ✗ Outcome {i+1}: expected {expected_prob:.4f}, got {prob:.4f}")
-            return False
-        print(f"  ✓ Outcome {i+1}: probability = {prob:.4f} = 1/3")
+        assert abs(prob - expected_prob) < 1e-9, f"Outcome {i+1}: expected {expected_prob:.4f}, got {prob:.4f}"
     
     # Verify sum
     total_prob = sum(prob for prob, _ in result)
-    if abs(total_prob - 1.0) < 1e-9:
-        print(f"  ✓ All probabilities sum to 1.0")
-        return True
-    else:
-        print(f"  ✗ Probabilities sum to {total_prob}")
-        return False
+    assert abs(total_prob - 1.0) < 1e-9, f"Probabilities sum to {total_prob}, not 1.0"
 
 
 def test_independent_agents_deterministic():
     """
     Test that agents with independent actions produce deterministic outcomes.
     """
-    print("Test: Independent agents are deterministic...")
-    
     env = CollectGame4HEnv10x10N2()
     env.reset()
     
@@ -250,15 +206,8 @@ def test_independent_agents_deterministic():
     result = env.transition_probabilities(modified_state, actions)
     
     # Should be deterministic (single outcome)
-    if len(result) == 1:
-        print(f"  ✓ Independent agents produce single outcome (deterministic)")
-        print(f"  ✓ Probability = {result[0][0]}")
-        return True
-    else:
-        print(f"  ✗ Expected 1 outcome, got {len(result)}")
-        for i, (prob, _) in enumerate(result):
-            print(f"    Outcome {i+1}: probability = {prob:.4f}")
-        return False
+    assert len(result) == 1, f"Expected 1 outcome (deterministic), got {len(result)}"
+    assert result[0][0] == 1.0, f"Expected probability 1.0, got {result[0][0]}"
 
 
 def test_two_conflict_blocks():
@@ -267,8 +216,6 @@ def test_two_conflict_blocks():
     
     Should produce 2×2=4 outcomes, each with probability 1/4.
     """
-    print("Test: Two separate conflict blocks (2×2)...")
-    
     # Create a custom environment with 4 agents to test 2 blocks of 2
     class FourAgentEnv(MultiGridEnv):
         def __init__(self):
@@ -337,66 +284,14 @@ def test_two_conflict_blocks():
     
     # Should have 2×2=4 outcomes
     # (agent 0 or 1 wins cell A) × (agent 2 or 3 wins cell B)
-    if len(result) != 4:
-        print(f"  ✗ Expected 4 outcomes (2×2), got {len(result)}")
-        for i, (prob, _) in enumerate(result):
-            print(f"    Outcome {i+1}: probability = {prob:.4f}")
-        return False
+    assert len(result) == 4, f"Expected 4 outcomes (2×2), got {len(result)}"
     
     # Each outcome should have probability 1/4
     expected_prob = 0.25
     for i, (prob, _) in enumerate(result):
-        if abs(prob - expected_prob) > 1e-9:
-            print(f"  ✗ Outcome {i+1}: expected 0.25, got {prob:.4f}")
-            return False
-        print(f"  ✓ Outcome {i+1}: probability = {prob:.4f} = 1/4")
-    
-    print(f"  ✓ Two conflict blocks (2×2) correctly produce 4 outcomes")
-    print(f"  ✓ Each outcome has probability 1/4 (= 1/2 × 1/2)")
-    
-    return True
-
-
-def main():
-    """Run all tests."""
-    print("=" * 70)
-    print("Testing Conflict Block Optimization")
-    print("=" * 70)
-    print()
-    
-    tests = [
-        test_conflict_block_efficiency,
-        test_two_agents_competing_for_cell,
-        test_probability_values_with_conflicts,
-        test_independent_agents_deterministic,
-        test_two_conflict_blocks,
-    ]
-    
-    results = []
-    for test_fn in tests:
-        try:
-            result = test_fn()
-            results.append(result)
-        except Exception as e:
-            print(f"  ✗ Test raised exception: {e}")
-            import traceback
-            traceback.print_exc()
-            results.append(False)
-        print()
-    
-    print("=" * 70)
-    passed = sum(results)
-    total = len(results)
-    print(f"Results: {passed}/{total} tests passed")
-    if passed == total:
-        print("All tests PASSED!")
-    else:
-        print(f"{total - passed} test(s) FAILED")
-    print("=" * 70)
-    
-    return all(results)
+        assert abs(prob - expected_prob) < 1e-9, f"Outcome {i+1}: expected 0.25, got {prob:.4f}"
 
 
 if __name__ == "__main__":
-    success = main()
-    sys.exit(0 if success else 1)
+    import pytest
+    pytest.main([__file__, "-v"])

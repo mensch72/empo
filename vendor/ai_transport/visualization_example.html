@@ -1,0 +1,87 @@
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Transport Network Visualization Example</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background-color: white;
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            border-bottom: 2px solid #4CAF50;
+            padding-bottom: 10px;
+        }
+        .description {
+            margin: 20px 0;
+            padding: 15px;
+            background-color: #f9f9f9;
+            border-left: 4px solid #4CAF50;
+        }
+        .legend {
+            margin: 20px 0;
+            padding: 15px;
+            background-color: #e8f5e9;
+            border-radius: 5px;
+        }
+        .legend-item {
+            margin: 8px 0;
+        }
+        .legend-item strong {
+            color: #2e7d32;
+        }
+        img {
+            width: 100%;
+            max-width: 1000px;
+            height: auto;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            display: block;
+            margin: 20px auto;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>AI Transport Environment - Visualization Example</h1>
+        
+        <div class="description">
+            <p><strong>Scenario:</strong> Random 2D transport network with 10 nodes and 34 edges</p>
+            <p><strong>Agents:</strong> 4 humans (red dots) and 2 vehicles (blue rectangles)</p>
+            <p><strong>Current Step:</strong> Departing (agents can move from nodes to edges)</p>
+        </div>
+        
+        <div class="legend">
+            <h3>Visual Legend:</h3>
+            <div class="legend-item"><strong>Light Blue Circles:</strong> Network nodes with IDs</div>
+            <div class="legend-item"><strong>Gray Arrows:</strong> Roads (single arrow = unidirectional, two parallel arrows = bidirectional)</div>
+            <div class="legend-item"><strong>Blue Rectangles:</strong> Vehicles</div>
+            <div class="legend-item"><strong>Red Dots:</strong> Humans (not visible if aboard a vehicle)</div>
+            <div class="legend-item"><strong>Dashed Blue Lines:</strong> Vehicle destinations</div>
+        </div>
+        
+        <img src="example_visual_design.png" alt="Transport Network Visualization">
+        
+        <div class="description">
+            <h3>Key Features:</h3>
+            <ul>
+                <li>Network layout uses actual 2D coordinates from Delaunay triangulation</li>
+                <li>Bidirectional roads shown with two separate parallel arrows</li>
+                <li>Vehicles display their destinations with dashed lines</li>
+                <li>Humans aboard vehicles are hidden (not shown separately)</li>
+                <li>Title shows real-time and current step type</li>
+            </ul>
+        </div>
+    </div>
+</body>
+</html>

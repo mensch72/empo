@@ -19,8 +19,8 @@ optimizing for possible goals with some uncertainty.
 
 Example usage:
     >>> class ReachCell(PossibleGoal):
-    ...     def __init__(self, world_model, target_pos):
-    ...         super().__init__(world_model)
+    ...     def __init__(self, env, target_pos):
+    ...         super().__init__(env)
     ...         self.target_pos = target_pos
     ...     
     ...     def is_achieved(self, state) -> int:
@@ -37,10 +37,10 @@ Example usage:
 """
 
 from abc import ABC, abstractmethod
-from typing import Tuple, Iterator, Callable, TYPE_CHECKING
+from typing import Tuple, Iterator, Callable, TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from empo.world_model import WorldModel
+    import gymnasium as gym
 
 
 class PossibleGoal(ABC):
@@ -57,22 +57,22 @@ class PossibleGoal(ABC):
         - __eq__(other): Equality comparison
     
     Attributes:
-        world_model: Reference to the world model (environment) this goal applies to.
+        env: Reference to the gymnasium environment this goal applies to.
     
     Note:
         Goals should be immutable after creation to ensure consistent hashing.
     """
 
-    world_model: 'WorldModel'
+    env: Any  # gymnasium.Env or compatible
     
-    def __init__(self, world_model: 'WorldModel'):
+    def __init__(self, env: Any):
         """
         Initialize the possible goal.
         
         Args:
-            world_model: The world model (environment) this goal applies to.
+            env: The gymnasium environment (or compatible) this goal applies to.
         """
-        self.world_model = world_model
+        self.env = env
 
     @abstractmethod
     def is_achieved(self, state) -> int:
@@ -80,7 +80,7 @@ class PossibleGoal(ABC):
         Check if this goal is achieved in the given state.
         
         Args:
-            state: A hashable state tuple as returned by world_model.get_state().
+            state: A hashable state tuple as returned by env.get_state() if available.
                    Format is typically: (step_count, agent_states, mobile_objects, mutable_objects)
         
         Returns:
@@ -110,19 +110,19 @@ class PossibleGoalSampler(ABC):
     This is useful when the goal space is too large for exact enumeration.
     
     Attributes:
-        world_model: Reference to the world model this sampler applies to.
+        env: Reference to the gymnasium environment this sampler applies to.
     """
 
-    world_model: 'WorldModel'
+    env: Any  # gymnasium.Env or compatible
     
-    def __init__(self, world_model: 'WorldModel'):
+    def __init__(self, env: Any):
         """
         Initialize the goal sampler.
         
         Args:
-            world_model: The world model this sampler applies to.
+            env: The gymnasium environment (or compatible) this sampler applies to.
         """
-        self.world_model = world_model
+        self.env = self.world_model = env
 
     @abstractmethod
     def sample(self, state, human_agent_index: int) -> Tuple['PossibleGoal', float]:
@@ -197,28 +197,30 @@ class PossibleGoalGenerator(ABC):
     or all be 1.0 for uniform weighting.
     
     Attributes:
-        world_model: Reference to the world model this generator applies to.
+        env: Reference to the gymnasium environment this generator applies to.
     
     Example implementation:
         >>> class AllCellsGenerator(PossibleGoalGenerator):
         ...     def generate(self, state, human_agent_index: int):
-        ...         for x in range(self.world_model.width):
-        ...             for y in range(self.world_model.height):
-        ...                 goal = ReachCell(self.world_model, (x, y))
-        ...                 weight = 1.0 / (self.world_model.width * self.world_model.height)
+        ...         for x in range(self.env.width):
+        ...             for y in range(self.env.height):
+        ...                 goal = ReachCell(self.env, (x, y))
+        ...                 weight = 1.0 / (self.env.width * self.env.height)
         ...                 yield goal, weight
     """
 
-    world_model: 'WorldModel'
+    env: Any  # gymnasium.Env or compatible
+    world_model: Any  # Alias for env for compatibility
     
-    def __init__(self, world_model: 'WorldModel'):
+    def __init__(self, env: Any):
         """
         Initialize the goal generator.
         
         Args:
-            world_model: The world model this generator applies to.
+            env: The gymnasium environment (or compatible) this generator applies to.
         """
-        self.world_model = world_model
+        self.env = env
+        self.world_model = env  # Alias for compatibility
 
     @abstractmethod
     def generate(self, state, human_agent_index: int) -> Iterator[Tuple['PossibleGoal', float]]:

@@ -14,9 +14,6 @@ import numpy as np
 from collections import defaultdict
 import time
 
-# Setup path to import multigrid
-sys.path.insert(0, str(Path(__file__).parent.parent / "vendor" / "multigrid"))
-
 # Patch gym import for compatibility
 import gymnasium as gym
 sys.modules['gym'] = gym
@@ -261,15 +258,10 @@ def test_statistical_correctness():
         
         # We expect some tests to fail due to random variation (at 99% confidence, ~1% should fail)
         # Allow up to 10% failure rate
-        if pass_rate >= 0.90:
-            print("✓ Statistical test PASSED (≥90% of chi-squared tests passed)")
-            return True
-        else:
-            print("✗ Statistical test FAILED (<90% of chi-squared tests passed)")
-            return False
+        assert pass_rate >= 0.90, f"Statistical test FAILED: only {pass_rate * 100:.1f}% of chi-squared tests passed (<90% required)"
+        print("✓ Statistical test PASSED (≥90% of chi-squared tests passed)")
     else:
         print("⚠ No probabilistic states tested (all states were deterministic)")
-        return True
 
 
 def test_basic_sampling_correctness():
@@ -345,20 +337,15 @@ def test_basic_sampling_correctness():
             print(f"  WARNING: Sampled state not in expected outcomes (count={count})")
             unmatched += count
     
-    if unmatched > samples * 0.1:  # More than 10% unmatched is a problem
-        print(f"  ✗ Too many unmatched outcomes: {unmatched}/{samples}")
-        return False
+    assert unmatched <= samples * 0.1, f"Too many unmatched outcomes: {unmatched}/{samples} (>10%)"
     
     # If there's only one outcome, we just check that all samples match it
     if len(transitions) == 1:
         expected_state = transitions[0][1]
         match_count = observed_counts.get(expected_state, 0)
-        if match_count >= samples * 0.9:  # Allow 10% variance
-            print(f"  ✓ Single deterministic outcome verified ({match_count}/{samples})")
-            return True
-        else:
-            print(f"  ✗ Expected single outcome but got variance: {match_count}/{samples}")
-            return False
+        assert match_count >= samples * 0.9, f"Expected single outcome but got variance: {match_count}/{samples}"
+        print(f"  ✓ Single deterministic outcome verified ({match_count}/{samples})")
+        return
     
     # Chi-squared test for multiple outcomes
     # Only test if we have matching states
@@ -367,15 +354,10 @@ def test_basic_sampling_correctness():
         chi_squared, threshold, passes = chi_squared_test(filtered_counts, expected_probs, sum(filtered_counts.values()))
         print(f"\nχ² = {chi_squared:.2f} (threshold = {threshold:.2f})")
         
-        if passes:
-            print(f"  ✓ Statistical test passed")
-            return True
-        else:
-            print(f"  ✗ Statistical test failed")
-            return False
-    
-    print(f"  ✓ Test completed")
-    return True
+        assert passes, f"Statistical test failed: χ² = {chi_squared:.2f} exceeds threshold {threshold:.2f}"
+        print(f"  ✓ Statistical test passed")
+    else:
+        print(f"  ✓ Test completed")
 
 
 def main():
@@ -387,26 +369,18 @@ def main():
     print()
     
     # Run basic test first
-    basic_passed = test_basic_sampling_correctness()
+    test_basic_sampling_correctness()
     print()
     
     # Run comprehensive statistical test
-    stats_passed = test_statistical_correctness()
+    test_statistical_correctness()
     print()
     
     # Final result
-    if basic_passed and stats_passed:
-        print("=" * 70)
-        print("✓ ALL STATISTICAL TESTS PASSED")
-        print("=" * 70)
-        return True
-    else:
-        print("=" * 70)
-        print("✗ SOME STATISTICAL TESTS FAILED")
-        print("=" * 70)
-        return False
+    print("=" * 70)
+    print("✓ ALL STATISTICAL TESTS PASSED")
+    print("=" * 70)
 
 
 if __name__ == "__main__":
-    success = main()
-    sys.exit(0 if success else 1)
+    main()

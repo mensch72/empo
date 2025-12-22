@@ -23,7 +23,7 @@ from empo import WorldModel
 | `transition_probabilities(state, actions)` | Compute exact transition probabilities |
 | `initial_state()` | Get initial state without permanently resetting |
 | `is_terminal(state=None)` | Check if a state is terminal |
-| `get_dag(return_probabilities=False)` | Compute DAG of reachable states |
+| `get_dag(return_probabilities=False)` | Compute directed acyclic graph (DAG) of reachable states |
 | `get_dag_parallel(return_probabilities=False, num_workers=None)` | Parallel DAG computation |
 | `plot_dag(...)` | Visualize DAG with Graphviz |
 
@@ -61,7 +61,7 @@ from empo import PossibleGoal
 
 | Method | Description |
 |--------|-------------|
-| `is_achieved(state) -> int` | Returns 1 if goal achieved, 0 otherwise |
+| `is_achieved(state) -> int` | Returns 1 if goal achieved, 0 otherwise, to be used as "reward" and episode termination signal in reinforcement learning |
 | `__hash__() -> int` | Hash for use as dictionary key |
 | `__eq__(other) -> bool` | Equality comparison |
 
@@ -90,7 +90,7 @@ class ReachCell(PossibleGoal):
 
 ### PossibleGoalGenerator (empo.possible_goal)
 
-Abstract base class for enumerating possible goals.
+Abstract base class for enumerating all (!) possible goals and assign aggregation weights to them.
 
 ```python
 from empo import PossibleGoalGenerator
@@ -120,7 +120,7 @@ class AllCellsGenerator(PossibleGoalGenerator):
 
 ### HumanPolicyPrior (empo.human_policy_prior)
 
-Abstract base class for human policy priors.
+Abstract base class for human policy priors, optionally conditioned on a particular goal.
 
 ```python
 from empo import HumanPolicyPrior
@@ -149,7 +149,7 @@ Created by `compute_human_policy_prior()` function.
 
 ### compute_human_policy_prior (empo.backward_induction)
 
-Compute human policy prior via backward induction.
+Compute human policy prior via backward induction (only tractable in very small world models).
 
 ```python
 from empo import compute_human_policy_prior
@@ -209,12 +209,11 @@ sampled_action = policy_prior.sample(state, agent_idx=0, goal=my_goal)
 
 ## Environment Module: `src.envs`
 
-Custom MultiGrid environments for human-robot collaboration.
+Concrete example world models or environments.
 
-### SmallOneOrTwoChambersMapEnv
+### OneOrTwoChambersMapEnv and SmallOneOrTwoChambersMapEnv
 
-Simplified environment for tractable computation.
-
+An example where two humans can be given access to different chambers
 ```python
 from src.envs import SmallOneOrTwoChambersMapEnv
 ```
@@ -256,12 +255,37 @@ The vendored `gym_multigrid` in `vendor/multigrid/` extends the original with:
 
 ### New Object Types
 
+#### Pushable Objects
+
 | Type | Description |
 |------|-------------|
 | `Block` | Pushable by any agent |
 | `Rock` | Pushable only by authorized agents (based on `can_push_rocks`) |
-| `UnsteadyGround` | Agents may stumble (stochastic movement) |
-| `MagicWall` | Probabilistic entry from one direction |
+
+#### Terrain Objects
+
+| Type | Description |
+|------|-------------|
+| `UnsteadyGround` | Overlappable ground where agents may stumble (stochastic movement). Has configurable `stumble_probability` (default 0.5). |
+| `MagicWall` | Wall that authorized agents can enter probabilistically from a specific direction. Has `magic_side` (0=right, 1=down, 2=left, 3=up, 4=all), `entry_probability`, `solidify_probability`, and mutable `active` state. |
+
+#### Switches and Buttons
+
+| Type | Description |
+|------|-------------|
+| `Switch` | Basic overlappable switch (floor tile) |
+| `KillButton` | Overlappable button that permanently "kills" agents (restricts to "still" action only). Configured with `trigger_color` (agents that activate it) and `target_color` (agents that get killed). Has `enabled` state. Rendered as red tile with X pattern. |
+| `PauseSwitch` | Non-overlappable toggle switch that pauses agents while ON. Configured with `toggle_color` (agents that can toggle), `target_color` (agents that get paused), `is_on` state, and `enabled` state. Rendered as blue tile with pause/play symbol. |
+| `DisablingSwitch` | Non-overlappable switch that toggles the `enabled` state of other objects. Configured with `toggle_color` and `target_type` ('killbutton', 'pauseswitch', or 'controlbutton'). Rendered as purple tile with disabled symbol. |
+| `ControlButton` | Non-overlappable button enabling two-step agent control: (1) Programming phase - agent of `controlled_color` toggles then performs action to memorize it; (2) Triggering phase - agent of `trigger_color` toggles to force the controlled agent's next action. Has `enabled` state, `controlled_agent`, and `triggered_action`. Rendered as green tile. |
+
+### Unused Object Types
+
+We are *not* planning to use the standard multigrid object types `Goal` (because goals are handled in a different way in our project) and `Box` (too complex and unnecessary behavior).
+
+### Unused "Reward"
+
+We are also not using the (extrinsic) "rewards" returned by the multigrid environment (or other environments) because in our project all rewards are either hypothetical (representing a possible goal the robot considers the humans might have) or intrinsic (representing the robot's internal assessment of human power).
 
 ### Agent Attributes
 
@@ -270,6 +294,8 @@ The vendored `gym_multigrid` in `vendor/multigrid/` extends the original with:
 | `can_push_rocks` | bool | Whether agent can push rocks |
 | `can_enter_magic_walls` | bool | Whether agent can attempt magic wall entry |
 | `on_unsteady_ground` | bool | (Derived) Currently on unsteady ground |
+| `paused` | bool | Whether agent is paused (can only use "still" action) |
+| `forced_next_action` | int/None | If set, overrides the agent's next action (used by ControlButton) |
 
 ### Map Specification
 
@@ -302,8 +328,37 @@ class MyEnv(MultiGridEnv):
 | `Ae` | Grey agent |
 | `Ro` | Rock |
 | `Bl` | Block |
+| `La` | Lava |
 | `Un` | Unsteady ground |
-| `Mn/Ms/Me/Mw` | Magic wall (north/south/east/west side) |
+| `Sw` | Switch |
+| `Mn/Ms/Me/Mw/Ma` | Magic wall (north/south/east/west/all sides) |
+| `Kb` or `Ki` | KillButton (yellow triggers, grey killed) |
+| `Ps` or `Pa` | PauseSwitch (yellow toggles, grey paused) |
+| `Dk` or `dK` | DisablingSwitch for KillButtons (grey toggles) |
+| `Dp` or `dP` | DisablingSwitch for PauseSwitches (grey toggles) |
+| `DC` or `dC` | DisablingSwitch for ControlButtons (grey toggles) |
+| `CB` | ControlButton (yellow triggers, grey controlled) |
+
+### Agent Color Conventions (MultiGrid)
+
+In MultiGrid environments used by the EMPO framework, agent colors distinguish agent types in human-robot collaboration scenarios:
+
+| Color | Agent Type | Description |
+|-------|------------|-------------|
+| `yellow` | Human | Human agents whose empowerment is to be maximized |
+| `grey` | Robot | AI agents that act to maximize human empowerment |
+
+This convention is used throughout the MultiGrid-based environments to identify agent roles:
+
+```python
+# Identify human agents
+human_indices = [i for i, agent in enumerate(env.agents) if agent.color == 'yellow']
+
+# Identify robot agents  
+robot_indices = [i for i, agent in enumerate(env.agents) if agent.color == 'grey']
+```
+
+**Note:** This semantic meaning is specific to the EMPO project's MultiGrid environments. Other environment types (Transport, Minecraft, etc.) may use different conventions for distinguishing agent roles. The underlying MultiGrid library itself supports arbitrary agent colors—we use this subset with defined semantics for human empowerment research.
 
 ---
 

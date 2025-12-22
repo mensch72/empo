@@ -4,46 +4,7 @@ This document lists known bugs, limitations, and potential improvements identifi
 
 ---
 
-## Bugs
-
-### ~~BUG-002: Custom believed_others_policy not supported in parallel mode~~ (FIXED)
-**Status:** ✅ Resolved  
-**Location:** `src/empo/backward_induction.py`  
-**Description:**  
-Custom `believed_others_policy` functions could not be used with `parallel=True` due to pickling constraints with standard pickle.
-
-**Fix:**  
-Implemented cloudpickle-based serialization for custom `believed_others_policy` functions. Cloudpickle can serialize lambdas, closures, and other function types that standard pickle cannot handle. The serialized function is passed to worker processes via module-level globals and deserialized in each worker before use.
-
-See `docs/PARALLELIZATION.md` for detailed documentation of the pickling and data passing strategies used in all parallelizations.
-
----
-
-### ~~BUG-003: TabularHumanPolicyPrior marginal computation may fail~~ (FIXED)
-**Status:** ✅ Resolved  
-**Location:** `src/empo/human_policy_prior.py`  
-**Description:**  
-When computing marginal distribution without a goal, the initial `total = None` pattern could return `None` if no goals are generated (empty generator).
-
-**Fix:**  
-Changed to initialize `total` as a zero array with proper size from `world_model.action_space.n`.
-
----
-
 ## Improvements
-
-### IMP-001: Add type hints throughout codebase
-**Priority:** Medium  
-**Scope:** All source files  
-**Description:**  
-While some modules have type hints, they are inconsistent. Adding comprehensive type hints would improve IDE support and catch bugs earlier.
-
-**Affected files:**
-- `src/empo/backward_induction.py` - partial type hints
-- `src/empo/env_utils.py` - has type hints
-- `vendor/multigrid/gym_multigrid/multigrid.py` - minimal type hints
-
----
 
 ### IMP-002: Add comprehensive test coverage for edge cases
 **Priority:** Medium  
@@ -54,14 +15,6 @@ Several edge cases are not covered by tests:
 - Single-agent environments
 - Environments with max_steps=1
 - Very large state spaces (memory limits)
-
----
-
-### IMP-003: Improve error messages in transition_probabilities
-**Priority:** Low  
-**Location:** `vendor/multigrid/gym_multigrid/multigrid.py:2877-2886`  
-**Description:**  
-When `transition_probabilities` returns `None`, there's no indication of why (terminal state vs. invalid action). Consider returning more informative error information.
 
 ---
 
@@ -85,7 +38,7 @@ def get_dag(self, use_cache=True, return_probabilities=False):
 ---
 
 ### IMP-005: Support for gymnasium's new API (terminated/truncated)
-**Priority:** Medium  
+**Priority:** Low (unclear which behavior is right)  
 **Location:** `vendor/multigrid/gym_multigrid/multigrid.py`  
 **Description:**  
 The step() method still returns the old gym API with 4 values `(obs, reward, done, info)`. The new gymnasium API uses 5 values `(obs, reward, terminated, truncated, info)`.
@@ -104,55 +57,6 @@ return obs, rewards, terminated, truncated, {}
 
 ---
 
-### IMP-008: Add progress callback for long-running computations
-**Priority:** Low  
-**Location:** `src/empo/backward_induction.py`  
-**Description:**  
-For large state spaces, backward induction can take a long time. Adding an optional progress callback would improve user experience.
-
-**Suggested API:**
-```python
-def compute_human_policy_prior(..., progress_callback=None):
-    # ...
-    if progress_callback:
-        progress_callback(states_processed, total_states)
-```
-
----
-
-### IMP-009: UnsteadyGround stumble_probability not configurable via map
-**Priority:** Low  
-**Location:** `vendor/multigrid/gym_multigrid/multigrid.py:1391-1392`  
-**Description:**  
-When creating UnsteadyGround from map specification, the `stumble_probability` defaults to 0.5 and cannot be customized.
-
-**Current behavior:**
-```python
-elif obj_type == 'unsteady':
-    return UnsteadyGround(objects_set)
-```
-
-**Suggested fix:**  
-Add extended map syntax like `U5` for 50% stumble probability, or allow post-creation modification.
-
----
-
-### IMP-010: MagicWall parameters not configurable via map
-**Priority:** Low  
-**Location:** `vendor/multigrid/gym_multigrid/multigrid.py:1394-1396`  
-**Description:**  
-Similar to UnsteadyGround, MagicWall's `entry_probability` and `solidify_probability` default to fixed values when created from map specification.
-
----
-
-### IMP-012: Document agent color semantics
-**Priority:** Low  
-**Location:** Documentation  
-**Description:**  
-The codebase uses colors to distinguish agent types (e.g., grey = robot, yellow = human), but this convention is only documented implicitly. Add explicit documentation.
-
----
-
 ## Performance Issues
 
 ### PERF-001: Object cache not updated during step()
@@ -163,87 +67,7 @@ The `_mobile_objects` and `_mutable_objects` caches are only built during reset(
 
 ---
 
-## Documentation Issues
-
-### ~~DOC-001: README.md references outdated project structure~~ (FIXED)
-**Status:** ✅ Resolved  
-**Description:**  
-README.md has been updated with a "Core Framework" section that documents all new `src/empo/` and `src/envs/` modules, the vendored MultiGrid modifications, and an updated project structure.
-
----
-
-### ~~DOC-002: VENDOR.md doesn't list all modifications~~ (FIXED)
-**Status:** ✅ Resolved  
-**Description:**  
-VENDOR.md now includes a comprehensive "EMPO-Specific Modifications" section documenting:
-- WorldModel integration (get_state, set_state, transition_probabilities)
-- New object types (Block, Rock, UnsteadyGround, MagicWall)
-- New agent attributes (can_push_rocks, can_enter_magic_walls)
-- Map-based environment specification
-- Object caching and helper methods
-
----
-
-### ~~DOC-003: Missing examples for common use cases~~ (FIXED)
-**Status:** ✅ Resolved  
-**Description:**  
-The `examples/` directory now contains comprehensive examples covering all mentioned use cases:
-- `human_policy_prior_example.py` - How to define custom goals and use backward induction for planning
-- `dag_and_episode_example.py` - How to extend MultiGridEnv with custom environments  
-- `magic_wall_demo.py` - How to use new object types (MagicWall)
-- `blocks_rocks_animation.py` - Demonstrates Block/Rock objects
-- `unsteady_ground_animation.py` - Demonstrates UnsteadyGround
-- `state_management_demo.py` - How to use get_state/set_state
-- And many more examples for various features
-
----
-
 ## Redundant Code
-
-### RED-001: `env_utils.py` duplicates `WorldModel` methods
-**Priority:** Low  
-**Location:** `src/empo/env_utils.py`  
-**Description:**  
-The `env_utils.py` module provides standalone functions `get_dag()` and `plot_dag()` that duplicate the corresponding methods in `WorldModel`:
-- `env_utils.get_dag(env)` → delegates to `env.get_dag()` for WorldModel instances
-- `env_utils.plot_dag(...)` → identical to `WorldModel.plot_dag()`
-
-**Current usage:**
-- Examples: `dag_and_episode_example.py`, `dag_visualization_example.py` import from `env_utils`
-- Tests: `test_env_utils.py`, `test_world_model.py` test backward compatibility
-
-**Status:** Intentionally kept for backward compatibility. The docstring explicitly notes that instance methods are preferred:
-```python
-# Preferred Approach:
-# For environments inheriting from WorldModel (including MultiGridEnv), use
-# the instance methods directly:
-#     - env.get_dag() instead of get_dag(env)
-#     - env.plot_dag() instead of plot_dag(...)
-```
-
-**Recommendation:** Can be deprecated in a future version once all examples/tests are migrated.
-
----
-
-### RED-002: Commented-out `Grid.decode()` method
-**Priority:** Low  
-**Location:** `vendor/multigrid/gym_multigrid/multigrid.py:1072-1091`  
-**Description:**  
-There is a commented-out static method `Grid.decode()` that was presumably used to decode grid arrays back into Grid objects. This dead code should either be removed or uncommented if needed.
-
-**Current state:**
-```python
-# @staticmethod
-# def decode(array):
-#     """
-#     Decode an array grid encoding back into a grid
-#     """
-#     ...
-```
-
-**Recommendation:** Remove if not needed, or uncomment and test if the functionality is required.
-
----
 
 ### RED-003: TODO comment for system-1 policy mixing
 **Priority:** Informational  

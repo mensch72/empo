@@ -6,10 +6,6 @@ Debug script to trace exact state transitions and understand value function comp
 import sys
 import os
 
-# Add paths for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
-
 from gym_multigrid.multigrid import MultiGridEnv, World
 from empo.possible_goal import PossibleGoal
 from empo.backward_induction import compute_human_policy_prior

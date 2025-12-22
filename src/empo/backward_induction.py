@@ -49,16 +49,17 @@ from itertools import product
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing as mp
 from collections import defaultdict
-from typing import Optional, Callable, List, Tuple, Dict, Any, Union, overload, Literal
+from typing import Optional, Callable, List, Tuple, Dict, Any, Union, overload, Literal, TypeAlias
 
 import cloudpickle
+from tqdm import tqdm
 
 from empo.possible_goal import PossibleGoal, PossibleGoalGenerator
 from empo.human_policy_prior import TabularHumanPolicyPrior
 from empo.world_model import WorldModel
 
 # Type aliases for complex types used throughout
-State = Any  # State is typically a hashable tuple from WorldModel.get_state()
+State: TypeAlias = Any  # State is typically a hashable tuple from WorldModel.get_state()
 ActionProfile = List[int]
 TransitionData = Tuple[Tuple[int, ...], List[float], List[State]]  # (action_profile, probs, successor_states)
 VhValues = List[List[Dict[PossibleGoal, float]]]  # Indexed as Vh_values[state_index][agent_index][goal]
@@ -365,12 +366,15 @@ def compute_human_policy_prior(
     human_agent_indices: List[int], 
     possible_goal_generator: PossibleGoalGenerator, 
     believed_others_policy: Optional[Callable[[State, int, int], List[Tuple[float, List[int]]]]] = None, 
+    *,
     beta_h: float = 10.0, 
     gamma_h: float = 1.0, 
     parallel: bool = False, 
     num_workers: Optional[int] = None, 
     level_fct: Optional[Callable[[State], int]] = None, 
-    return_Vh: Literal[False] = False
+    return_Vh: Literal[False] = False,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+    quiet: bool = False
 ) -> TabularHumanPolicyPrior: ...
 
 
@@ -380,13 +384,15 @@ def compute_human_policy_prior(
     human_agent_indices: List[int], 
     possible_goal_generator: PossibleGoalGenerator, 
     believed_others_policy: Optional[Callable[[State, int, int], List[Tuple[float, List[int]]]]] = None, 
+    *, 
     beta_h: float = 10.0, 
     gamma_h: float = 1.0, 
     parallel: bool = False, 
     num_workers: Optional[int] = None, 
     level_fct: Optional[Callable[[State], int]] = None, 
-    *, 
-    return_Vh: Literal[True]
+    return_Vh: Literal[True],
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+    quiet: bool = False
 ) -> Tuple[TabularHumanPolicyPrior, Dict[State, Dict[int, Dict[PossibleGoal, float]]]]: ...
 
 
@@ -395,12 +401,14 @@ def compute_human_policy_prior(
     human_agent_indices: List[int], 
     possible_goal_generator: PossibleGoalGenerator, 
     believed_others_policy: Optional[Callable[[State, int, int], List[Tuple[float, List[int]]]]] = None, 
+    *,
     beta_h: float = 10.0, 
     gamma_h: float = 1.0, 
     parallel: bool = False, 
     num_workers: Optional[int] = None, 
     level_fct: Optional[Callable[[State], int]] = None, 
-    return_Vh: bool = False
+    return_Vh: bool = False,
+    quiet: bool = False
 ) -> Union[TabularHumanPolicyPrior, Tuple[TabularHumanPolicyPrior, Dict[State, Dict[int, Dict[PossibleGoal, float]]]]]:
     """
     Compute human policy prior via backward induction on the state DAG.
@@ -497,8 +505,16 @@ def compute_human_policy_prior(
     action_powers: npt.NDArray[np.int64] = num_actions ** np.arange(num_agents)
 
     # first get the dag of the world model:
-    states, state_to_idx, successors, transitions = world_model.get_dag(return_probabilities=True)
-    print(f"No. of states: {len(states)}")
+    states, state_to_idx, successors, transitions = world_model.get_dag(return_probabilities=True, quiet=quiet)
+    
+    # Set up default tqdm progress bar if no callback provided
+    _pbar: Optional[tqdm[int]] = None
+    if progress_callback is None and not quiet:
+        _pbar = tqdm(total=len(states), desc="Backward induction", unit="states")
+        def progress_callback(done: int, total: int) -> None:
+            if _pbar is not None:
+                _pbar.n = done
+                _pbar.refresh()
     
     # Initialize V_values as nested lists for faster access
     Vh_values: VhValues = [[{} for _ in range(num_agents)] for _ in range(len(states))]
@@ -508,18 +524,22 @@ def compute_human_policy_prior(
         if num_workers is None:
             num_workers = mp.cpu_count()
         
-        print(f"Using parallel execution with {num_workers} workers")
+        if not quiet:
+            print(f"Using parallel execution with {num_workers} workers")
         
         # Compute dependency levels
         dependency_levels: List[List[int]]
         if level_fct is not None:
-            print("Using fast level computation with provided level function")
+            if not quiet:
+                print("Using fast level computation with provided level function")
             dependency_levels = compute_dependency_levels_fast(states, level_fct)
         else:
-            print("Using general level computation")
+            if not quiet:
+                print("Using general level computation")
             dependency_levels = compute_dependency_levels_general(successors)
         
-        print(f"Computed {len(dependency_levels)} dependency levels")
+        if not quiet:
+            print(f"Computed {len(dependency_levels)} dependency levels")
         
         # Initialize shared data for worker processes
         # On Linux (fork), workers inherit these as copy-on-write
@@ -653,6 +673,11 @@ def compute_human_policy_prior(
                 
                 if PROFILE_PARALLEL:
                     prof_total_parallel_time += time.perf_counter() - _level_t0
+            
+            # Report progress after each level
+            if progress_callback:
+                states_processed = sum(len(lvl) for lvl in dependency_levels[:level_idx + 1])
+                progress_callback(states_processed, len(states))
         
         # Print profiling results
         if PROFILE_PARALLEL:
@@ -695,7 +720,8 @@ def compute_human_policy_prior(
         _hpp_compute_sequential(states, Vh_values, system2_policies, transitions,
                          human_agent_indices, possible_goal_generator,
                          num_agents, num_actions, action_powers,
-                         believed_others_policy, beta_h, gamma_h)
+                         believed_others_policy, beta_h, gamma_h,
+                         progress_callback)
     
     human_policy_priors = system2_policies # TODO: mix with system-1 policies!
 
@@ -712,8 +738,12 @@ def compute_human_policy_prior(
                 Vh_values_dict[state] = {agent_idx: Vh_values[state_idx][agent_idx] 
                                         for agent_idx in human_agent_indices
                                         if Vh_values[state_idx][agent_idx]}
+        if _pbar is not None:
+            _pbar.close()
         return policy_prior, Vh_values_dict
     
+    if _pbar is not None:
+        _pbar.close()
     return policy_prior
 
 

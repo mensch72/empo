@@ -19,10 +19,16 @@ pettingzoo>=1.24.0
 cloudpickle>=3.0.0
 PyYAML>=6.0
 matplotlib>=3.7.0
+imageio>=2.31.0
+imageio-ffmpeg>=0.4.8
 tensorboard>=2.13.0
 wandb>=0.15.0
 graphviz>=0.20.0
 line_profiler>=4.0.0
+tqdm>=4.65.0
+
+# Machine learning utilities
+scikit-learn>=1.2.0
 
 # MPI for distributed training (optional)
 mpi4py>=3.1.0

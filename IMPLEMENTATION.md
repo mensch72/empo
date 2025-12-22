@@ -55,7 +55,6 @@ empo/
 ├── requirements-dev.txt          # Dev dependencies
 ├── train.py                      # Main training script
 ├── src/empo/                     # Python package
-├── configs/default.yaml          # Example config
 ├── scripts/
 │   ├── run_cluster.sh           # SLURM job script
 │   ├── setup_cluster_image.sh   # Cluster setup helper
@@ -226,14 +225,6 @@ Install in requirements:
 multigrid>=0.1.0
 your-custom-env>=1.0.0
 ```
-
-### Custom Training Logic
-
-Extend `train.py` or create new scripts in `src/empo/`
-
-### Configuration
-
-Use YAML configs in `configs/` directory
 
 ## Known Limitations
 

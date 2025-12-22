@@ -11,9 +11,6 @@ import sys
 from pathlib import Path
 import numpy as np
 
-# Setup path to import multigrid
-sys.path.insert(0, str(Path(__file__).parent.parent / "vendor" / "multigrid"))
-
 # Patch gym import for compatibility
 import gymnasium as gym
 sys.modules['gym'] = gym
@@ -71,6 +68,9 @@ class UnsteadyGroundTestEnv(MultiGridEnv):
         unsteady2 = UnsteadyGround(World, stumble_probability=0.5, color='brown')
         self.grid.set(1, 2, unsteady1)
         self.grid.set(2, 2, unsteady2)
+        # Save terrain to terrain_grid so it persists under agents
+        self.terrain_grid.set(1, 2, unsteady1)
+        self.terrain_grid.set(2, 2, unsteady2)
         
         # Place agent 0 at (1, 1) facing down (dir=1)
         self.agents[0].pos = np.array([1, 1])
@@ -115,19 +115,14 @@ def test_unsteady_ground_probabilities():
     # Compute transition probabilities
     result = env.transition_probabilities(state, actions)
     
-    if result is None:
-        print("  ✗ Got None result")
-        return False
+    assert result is not None, "Got None result (test_unsteady_ground_probabilities)"
     
     print(f"  Number of possible outcomes: {len(result)}")
     
     # Check that probabilities sum to 1.0
     total_prob = sum(prob for prob, _ in result)
-    if abs(total_prob - 1.0) < 1e-10:
-        print(f"  ✓ Probabilities sum to 1.0")
-    else:
-        print(f"  ✗ Probabilities sum to {total_prob}, not 1.0")
-        return False
+    assert abs(total_prob - 1.0) < 1e-10, f"Probabilities sum to {total_prob}, not 1.0"
+    print(f"  ✓ Probabilities sum to 1.0")
     
     # Print all outcomes
     print("\n  Outcomes:")
@@ -148,13 +143,8 @@ def test_unsteady_ground_probabilities():
     # The total should account for these 3 outcomes
     
     # Check that we have reasonable number of outcomes
-    if len(result) >= 3:
-        print(f"\n  ✓ Found {len(result)} outcomes (expected at least 3 for stumbling)")
-    else:
-        print(f"\n  ✗ Found only {len(result)} outcomes (expected at least 3)")
-        return False
-    
-    return True
+    assert len(result) >= 3, f"Found only {len(result)} outcomes (expected at least 3 for stumbling)"
+    print(f"\n  ✓ Found {len(result)} outcomes (expected at least 3 for stumbling)")
 
 
 def test_two_stumbling_agents_same_target():
@@ -213,6 +203,9 @@ def test_two_stumbling_agents_same_target():
             unsteady2 = UnsteadyGround(World, stumble_probability=0.5, color='brown')
             self.grid.set(1, 1, unsteady1)
             self.grid.set(3, 1, unsteady2)
+            # Save terrain to terrain_grid so it persists under agents
+            self.terrain_grid.set(1, 1, unsteady1)
+            self.terrain_grid.set(3, 1, unsteady2)
             
             # Place agent 0 at (1, 1) facing right (dir=0)
             self.agents[0].pos = np.array([1, 1])
@@ -242,19 +235,14 @@ def test_two_stumbling_agents_same_target():
     # Compute transition probabilities
     result = env.transition_probabilities(state, actions)
     
-    if result is None:
-        print("  ✗ Got None result")
-        return False
+    assert result is not None, "Got None result (test_two_stumbling_agents_same_target)"
     
     print(f"  Number of possible outcomes: {len(result)}")
     
     # Check that probabilities sum to 1.0
     total_prob = sum(prob for prob, _ in result)
-    if abs(total_prob - 1.0) < 1e-10:
-        print(f"  ✓ Probabilities sum to 1.0")
-    else:
-        print(f"  ✗ Probabilities sum to {total_prob}, not 1.0")
-        return False
+    assert abs(total_prob - 1.0) < 1e-10, f"Probabilities sum to {total_prob}, not 1.0"
+    print(f"  ✓ Probabilities sum to 1.0")
     
     # With two agents on unsteady ground, each has 3 outcomes
     # Total combinations: 3 * 3 = 9
@@ -277,11 +265,8 @@ def test_two_stumbling_agents_same_target():
               f"Agent1@{agent1_pos} dir={agent1_dir}")
     
     # We expect up to 9 outcomes (3 x 3), but some may collapse to the same state
-    if len(result) >= 3 and len(result) <= 9:
-        print(f"\n  ✓ Found {len(result)} unique outcomes (expected between 3 and 9)")
-    else:
-        print(f"\n  ✗ Found {len(result)} outcomes (expected between 3 and 9)")
-        return False
+    assert len(result) >= 3 and len(result) <= 9, f"Found {len(result)} outcomes (expected between 3 and 9)"
+    print(f"\n  ✓ Found {len(result)} unique outcomes (expected between 3 and 9)")
     
     # Check that each outcome has reasonable probability
     # With 3x3 = 9 total combinations, each base outcome should have prob ~1/9
@@ -295,8 +280,6 @@ def test_two_stumbling_agents_same_target():
             print(f"  ✓ Outcome probability {prob:.4f} is {round(ratio)}x base probability")
         else:
             print(f"  Note: Outcome probability {prob:.4f} is {ratio:.2f}x base probability")
-    
-    return True
 
 
 def run_all_tests():
@@ -311,25 +294,14 @@ def run_all_tests():
         test_two_stumbling_agents_same_target,
     ]
     
-    results = []
     for test_func in tests:
-        try:
-            result = test_func()
-            results.append(result)
-        except Exception as e:
-            print(f"  ✗ Test failed with exception: {e}")
-            import traceback
-            traceback.print_exc()
-            results.append(False)
+        test_func()
         print()
     
     print("=" * 70)
-    print(f"Results: {sum(results)}/{len(results)} tests passed")
+    print(f"All {len(tests)} tests passed")
     print("=" * 70)
-    
-    return all(results)
 
 
 if __name__ == "__main__":
-    success = run_all_tests()
-    sys.exit(0 if success else 1)
+    run_all_tests()

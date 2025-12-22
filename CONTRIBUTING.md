@@ -2,6 +2,11 @@
 
 Thank you for your interest in contributing to EMPO! This document provides guidelines for contributing to the project.
 
+## Most Important
+
+- Before coding something new, make sure the functionality you need is not already there somewhere under `src` or `vendor`. If not, maybe some example under `examples` already has it. If that is the case, turn that functionality into a package functionality  under `src` or `vendor` so that it can be reused. If what you need is really nowhere in the codebase, consider adding it to the package functionality under `src` or `vendor` in a reusable way, rather than just putting it in your script.
+- Try adopting a similar coding and documentation style as the one you see in the existing codebase.
+
 ## Development Setup
 
 ### 1. Fork and Clone
@@ -10,6 +15,8 @@ Thank you for your interest in contributing to EMPO! This document provides guid
 git clone https://github.com/yourusername/empo.git
 cd empo
 ```
+
+(EMPO project members: you should *not* fork but should work with the main repo directly and be given write permission)
 
 ### 2. Set Up Development Environment
 
@@ -45,24 +52,19 @@ python tests/test_structure.py
    ```bash
    git checkout -b feature/your-feature-name
    ```
+   Then make your changes in some editor
 
-2. Make your changes in the container:
+2. Execute code in the container:
    ```bash
    make shell
-   # Edit files, test changes
+
+   # inside container:
+   python examples/whatever.py
    ```
 
-3. Test your changes:
+3. Run tests from outside the container:
    ```bash
-   # Run tests
-   pytest tests/ -v
-   
-   # Run linters
-   ruff check .
-   black .
-   
-   # Test training script
-   python train.py --num-episodes 10
+   make test
    ```
 
 4. Commit your changes:
@@ -80,46 +82,11 @@ python tests/test_structure.py
 
 ### Python
 
-- Follow PEP 8 style guide
+- Follow PEP 8 style guide, but not slavishly
 - Use type hints where appropriate
 - Write docstrings for public functions/classes
-- Format code with `black`
-- Lint with `ruff`
-
-Example:
-```python
-def train_agent(
-    env_name: str,
-    num_episodes: int,
-    learning_rate: float = 0.001
-) -> Dict[str, Any]:
-    """
-    Train a reinforcement learning agent.
-    
-    Args:
-        env_name: Name of the environment
-        num_episodes: Number of training episodes
-        learning_rate: Learning rate for optimizer
-        
-    Returns:
-        Dictionary containing training metrics
-    """
-    # Implementation
-    pass
-```
-
-### Shell Scripts
-
-- Use `#!/bin/bash` shebang
-- Add error handling with `set -e`
-- Include comments for complex logic
-- Test scripts with `bash -n script.sh`
-
-### YAML/Configuration
-
-- Use 2 spaces for indentation
-- Include comments for non-obvious settings
-- Validate with `yamllint` if available
+- maybe format code with `black`
+- maybe lint with `ruff`
 
 ## Testing
 
@@ -139,7 +106,7 @@ def test_feature_functionality():
     assert result == expected_value
 ```
 
-### Running Tests
+### Running tests inside container
 
 ```bash
 # In container
@@ -254,18 +221,59 @@ fix: Resolve GPU memory leak in training loop
 docs: Update cluster deployment instructions
 ```
 
-## Getting Help
-
-- **Issues**: Open an issue on GitHub
-- **Discussions**: Use GitHub Discussions for questions
-- **Pull Requests**: Tag maintainers for review
-
 ## Code Review Process
 
 1. Automated checks run on PR
 2. Maintainer reviews code
 3. Address feedback
 4. Approval and merge
+
+## Example Scripts Guidelines
+
+When creating example scripts (in the `examples/` directory):
+
+### Quick Test Mode
+
+**Always include a command-line parameter for shortened test runs.**
+
+Long-running example scripts should include `--quick`, `--test`, or `--fast` flags that reduce training episodes, environments, and other time-consuming parameters. This allows developers to quickly verify the script works without waiting for the full run.
+
+Example implementation:
+```python
+import argparse
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Example Demo")
+    parser.add_argument(
+        '--quick', '-q',
+        action='store_true',
+        help='Run in quick test mode with reduced parameters'
+    )
+    return parser.parse_args()
+
+def main():
+    args = parse_args()
+    
+    # Use reduced parameters in quick mode
+    num_episodes = 50 if args.quick else 500
+    num_envs = 3 if args.quick else 10
+    
+    # ... rest of script
+```
+
+Usage:
+```bash
+# Full run
+python examples/my_demo.py
+
+# Quick test run
+python examples/my_demo.py --quick
+```
+
+This pattern:
+- Enables CI/CD testing of example scripts without timeouts
+- Allows developers to quickly verify scripts work before long runs
+- Documents expected run time differences
 
 ## License
 

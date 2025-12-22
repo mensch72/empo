@@ -9,7 +9,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
-    PYTHONPATH=/workspace:/workspace/vendor/multigrid
+    PYTHONPATH=/workspace/src:/workspace/vendor/multigrid:/workspace/vendor/ai_transport
 
 # Set working directory
 WORKDIR /workspace
@@ -146,6 +146,11 @@ USER appuser
 
 # Create common output directories
 RUN mkdir -p /workspace/outputs /workspace/logs
+
+# Copy project files (required for CI testing)
+# In development, this is typically overridden by volume mounts via docker-compose
+# Security: relies on .dockerignore to exclude sensitive files (.env, .git, etc.)
+COPY --chown=appuser:appuser . /workspace/
 
 # Default command (can be overridden)
 CMD ["/bin/bash"]

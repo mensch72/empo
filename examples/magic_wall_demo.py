@@ -12,11 +12,8 @@ can attempt to enter them.
 
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
 
 import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.animation as animation
 from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, Wall, World, MagicWall
 
 
@@ -63,7 +60,7 @@ class MagicWallDemoEnv(MultiGridEnv):
                     break
             
             # Create magic wall with random magic side, entry probability, and solidify probability
-            magic_side = self._rand_int(0, 4)  # 0=right, 1=down, 2=left, 3=up
+            magic_side = self._rand_int(0, 5)  # 0=right, 1=down, 2=left, 3=up, 4=all
             entry_prob = 0.5 + 0.5 * np.random.random()  # 50% to 100% for better visibility
             solidify_prob = 0.1 + 0.2 * np.random.random()  # 10% to 30% chance to solidify on failed entry
             magic_wall = MagicWall(World, magic_side=magic_side, 
@@ -86,13 +83,7 @@ class MagicWallDemoEnv(MultiGridEnv):
                     break
 
 
-def render_grid_to_array(env):
-    """Render the environment grid to a numpy array for animation."""
-    img = env.render(mode='rgb_array', highlight=False)
-    return img
-
-
-def create_animation(output_path='magic_wall_animation.mp4', num_steps=50):
+def create_animation(output_path='magic_wall_animation.mp4', num_steps=50, fps=5):
     """Create and save an animation showing agents navigating magic walls."""
     
     print("Creating magic wall animation...")
@@ -114,11 +105,11 @@ def create_animation(output_path='magic_wall_animation.mp4', num_steps=50):
         print(f"  Agent {i} (color {agent.color}): {status} enter magic walls")
     print()
     
-    # Collect frames
-    frames = []
+    # Start video recording using MultiGridEnv's built-in method
+    env.start_video_recording()
     
     # Initial state
-    frames.append(render_grid_to_array(env))
+    env.render(mode='rgb_array')
     
     # Simulate steps with agents moving forward randomly
     print(f"Simulating {num_steps} steps...")
@@ -136,63 +127,13 @@ def create_animation(output_path='magic_wall_animation.mp4', num_steps=50):
                 actions.append(2)  # right
         
         obs, rewards, done, info = env.step(actions)
-        frames.append(render_grid_to_array(env))
+        env.render(mode='rgb_array')  # Frame automatically captured
         
         if (step + 1) % 10 == 0:
             print(f"  Step {step + 1}/{num_steps} complete")
     
-    print(f"\nCollected {len(frames)} frames")
-    
-    # Create animation
-    print(f"Saving animation to {output_path}...")
-    fig, ax = plt.subplots(figsize=(8, 8))
-    ax.set_aspect('equal')
-    ax.axis('off')
-    
-    # Initialize the image
-    im = ax.imshow(frames[0])
-    
-    def update(frame_idx):
-        im.set_array(frames[frame_idx])
-        ax.set_title(f'Magic Wall Demo - Step {frame_idx}/{len(frames)-1}\n'
-                     'Even agents (0,2,4,6) CAN enter magic walls, '
-                     'Odd agents (1,3,5,7) CANNOT', 
-                     fontsize=10, fontweight='bold')
-        return [im]
-    
-    # Create animation
-    anim = animation.FuncAnimation(
-        fig, 
-        update, 
-        frames=len(frames),
-        interval=200,  # 200ms between frames (5 fps)
-        blit=True,
-        repeat=True
-    )
-    
-    # Save as MP4
-    try:
-        writer = animation.FFMpegWriter(fps=5, bitrate=1800)
-        anim.save(output_path, writer=writer)
-        print(f"✓ Animation saved successfully to {output_path}")
-        print(f"  Total frames: {len(frames)}")
-        print(f"  Duration: ~{len(frames)/5:.1f} seconds")
-    except Exception as e:
-        print(f"✗ Error saving animation: {e}")
-        print("  Note: FFmpeg is required to save MP4 files.")
-        print("  Install with: apt-get install ffmpeg  (on Ubuntu)")
-        print("               brew install ffmpeg     (on macOS)")
-        
-        # Try saving as GIF as fallback
-        print("\nTrying to save as GIF instead...")
-        gif_path = output_path.replace('.mp4', '.gif')
-        try:
-            anim.save(gif_path, writer='pillow', fps=5)
-            print(f"✓ Animation saved as GIF to {gif_path}")
-        except Exception as e2:
-            print(f"✗ Error saving GIF: {e2}")
-    
-    plt.close()
+    # Save video using MultiGridEnv's built-in method
+    env.save_video(output_path, fps=fps)
 
 
 def main():
@@ -204,10 +145,12 @@ def main():
     print("This example demonstrates:")
     print("  - Creating a 16x16 multigrid environment with 30 magic walls")
     print("  - 10 agents navigating (9 can enter magic walls, 1 cannot)")
-    print("  - Magic walls that can only be entered from specific directions")
+    print("  - Magic walls that can be entered from specific directions or all directions")
+    print("  - Five magic_side options: right(0), down(1), left(2), up(3), all(4)")
     print("  - Probabilistic entry success (50% to 100%)")
     print("  - Magic walls that may solidify into normal walls on failed entry")
-    print("  - Blue dashed lines indicate which side can be entered")
+    print("  - Blue dashed lines indicate which side(s) can be entered")
+    print("  - All-sides walls have blue lines on all four edges")
     print("  - Magenta flash indicates successful entry")
     print()
     

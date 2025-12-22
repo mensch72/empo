@@ -12,10 +12,6 @@ import os
 import numpy as np
 from itertools import product
 
-# Add paths for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
-
 from envs.one_or_three_chambers import SmallOneOrThreeChambersMapEnv
 from empo.possible_goal import PossibleGoal, PossibleGoalGenerator
 from empo.backward_induction import compute_human_policy_prior
@@ -59,7 +55,7 @@ class SimpleGoalGenerator(PossibleGoalGenerator):
     
     def generate(self, state, human_agent_index: int):
         for pos in self.target_cells:
-            goal = ReachCellGoal(self.world_model, human_agent_index, pos)
+            goal = ReachCellGoal(self.env, human_agent_index, pos)
             yield (goal, 1.0 / len(self.target_cells))
 
 

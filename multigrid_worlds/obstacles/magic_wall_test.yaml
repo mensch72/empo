@@ -1,0 +1,19 @@
+# Grid with magic walls in all four directions
+metadata:
+  name: "Magic Wall Test"
+  description: "6x6 grid with magic walls in all four directions (north, south, east, west) and a single agent. Used for testing magic wall entry mechanics."
+  author: "EMPO Framework"
+  version: "1.0.0"
+  created: "2025-01-01T00:00:00Z"
+  category: "obstacles"
+  tags: ["single-agent", "magic-walls"]
+
+map: |
+  We We We We We We
+  We Mn .. Ms .. We
+  We .. .. .. .. We
+  We Mw .. Me .. We
+  We .. Ar .. .. We
+  We We We We We We
+
+max_steps: 100

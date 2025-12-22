@@ -1,0 +1,22 @@
+# Two humans, one robot - robot controls access via rock
+# Challenge: Robot can push rock to give access to one human or the other
+metadata:
+  name: "Split Access"
+  description: "Two humans on opposite sides, robot in center with a rock. By pushing the rock in different directions, the robot can open paths for one human or the other, distributing empowerment unequally."
+  author: "EMPO Framework"
+  version: "1.0.0"
+  created: "2025-01-01T00:00:00Z"
+  category: "copilot_challenges"
+  tags: ["two-humans", "robot", "rock", "empowerment", "distribution"]
+
+map: |
+  We We We We We We We
+  We Ay .. .. .. Ay We
+  We .. We We We .. We
+  We .. .. Ro .. .. We
+  We .. .. Ae .. .. We
+  We .. .. .. .. .. We
+  We We We We We We We
+
+max_steps: 30
+can_push_rocks: "e"

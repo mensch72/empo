@@ -1,0 +1,23 @@
+# Simple 8x8 world with two rocks creating a maze
+# Challenge: Robot can push rocks to create multiple possible paths for human
+metadata:
+  name: "Double Rock Maze"
+  description: "Two rocks create a simple maze. The robot (grey) can push either rock to open different paths for the human (yellow). The robot doesn't know which path the human prefers."
+  author: "EMPO Framework"
+  version: "1.0.0"
+  created: "2025-01-01T00:00:00Z"
+  category: "copilot_challenges"
+  tags: ["human-robot", "rock", "empowerment", "simple"]
+
+map: |
+  We We We We We We We We
+  We .. Ay .. .. .. .. We
+  We .. .. .. We .. .. We
+  We .. Ro .. We .. .. We
+  We .. .. .. Ro .. .. We
+  We .. .. .. We .. Ae We
+  We .. .. .. .. .. .. We
+  We We We We We We We We
+
+max_steps: 50
+can_push_rocks: "e"

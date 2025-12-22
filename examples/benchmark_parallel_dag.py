@@ -8,8 +8,6 @@ of varying complexity to measure parallelization speedup.
 import sys
 import os
 import time
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from gym_multigrid.multigrid import MultiGridEnv, World
 
@@ -72,10 +70,14 @@ def benchmark_environment(env_name, env, num_workers_list=[1, 2, 4], num_runs=3)
     return results
 
 
-if __name__ == '__main__':
+def run_benchmark(quick_mode=False):
+    """Run benchmarks, optionally in quick mode."""
     import multiprocessing as mp
     max_workers = mp.cpu_count()
+    mode_str = "QUICK TEST MODE" if quick_mode else "FULL MODE"
+    
     print(f"Parallel DAG Computation Benchmark")
+    print(f"  [{mode_str}]")
     print(f"System has {max_workers} CPU cores")
     print("="*70)
     
@@ -92,15 +94,18 @@ We We We We We We We
 ''',
         objects_set=World,
         orientations=['n'],
-        max_steps=4,
+        max_steps=4 if not quick_mode else 2,
         partial_obs=False
     )
-    benchmark_environment("Unsteady Ground (7x7, max_steps=4)", env1,
-                         num_workers_list=[1, 2, 4, max_workers])
+    num_runs = 3 if not quick_mode else 1
+    benchmark_environment("Unsteady Ground (7x7)", env1,
+                         num_workers_list=[1, 2] if quick_mode else [1, 2, 4, max_workers],
+                         num_runs=num_runs)
     
-    # Test 2: Higher complexity - Larger grid with more steps
-    env2 = MultiGridEnv(
-        map='''
+    if not quick_mode:
+        # Test 2: Higher complexity - Larger grid with more steps (skip in quick mode)
+        env2 = MultiGridEnv(
+            map='''
 We We We We We We We We We
 We .. .. .. Un Un .. .. We
 We .. .. .. Un Un .. .. We
@@ -110,17 +115,17 @@ We .. .. .. .. .. .. .. We
 We .. .. .. .. .. .. .. We
 We We We We We We We We We
 ''',
-        objects_set=World,
-        orientations=['e'],
-        max_steps=6,
-        partial_obs=False
-    )
-    benchmark_environment("Larger Grid (9x8, max_steps=6)", env2,
-                         num_workers_list=[1, max_workers])
-    
-    # Test 3: Multiple agents (exponentially more action combinations)
-    env3 = MultiGridEnv(
-        map='''
+            objects_set=World,
+            orientations=['e'],
+            max_steps=6,
+            partial_obs=False
+        )
+        benchmark_environment("Larger Grid (9x8, max_steps=6)", env2,
+                             num_workers_list=[1, max_workers])
+        
+        # Test 3: Multiple agents (exponentially more action combinations)
+        env3 = MultiGridEnv(
+            map='''
 We We We We We We We
 We .. .. .. Un Un We
 We Ar .. .. Un Un We
@@ -128,13 +133,13 @@ We .. .. Ay Un Un We
 We .. .. .. Un Un We
 We We We We We We We
 ''',
-        objects_set=World,
-        orientations=['e', 'n'],
-        max_steps=7,
-        partial_obs=False
-    )
-    benchmark_environment("Multi-Agent (2 agents, max_steps=5)", env3,
-                         num_workers_list=[1, max_workers])
+            objects_set=World,
+            orientations=['e', 'n'],
+            max_steps=7,
+            partial_obs=False
+        )
+        benchmark_environment("Multi-Agent (2 agents, max_steps=5)", env3,
+                             num_workers_list=[1, max_workers])
     
     print(f"\n{'='*70}")
     print("Benchmark complete!")
@@ -144,3 +149,12 @@ We We We We We We We
     print("- Speedup depends on: state count, action combinations, and worker count")
     print("- Single-agent environments may not benefit due to limited parallelism")
     print("- Multi-agent environments have more action combinations to parallelize")
+
+
+if __name__ == '__main__':
+    import argparse
+    parser = argparse.ArgumentParser(description='Benchmark Parallel DAG Computation')
+    parser.add_argument('--quick', '-q', action='store_true',
+                        help='Run in quick test mode with reduced test cases')
+    args = parser.parse_args()
+    run_benchmark(quick_mode=args.quick)

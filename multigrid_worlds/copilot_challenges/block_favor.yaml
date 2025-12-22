@@ -1,0 +1,21 @@
+# Two humans, one robot - block positioning
+# Challenge: Robot can push block to create path for one human or another
+metadata:
+  name: "Block Favor"
+  description: "Two humans in corners, robot with a block in the middle. The robot can push the block to create shortcuts for one human while potentially blocking the other."
+  author: "EMPO Framework"
+  version: "1.0.0"
+  created: "2025-01-01T00:00:00Z"
+  category: "copilot_challenges"
+  tags: ["two-humans", "robot", "block", "empowerment", "distribution"]
+
+map: |
+  We We We We We We We
+  We Ay .. .. .. .. We
+  We .. We Bl We .. We
+  We .. .. Ae .. .. We
+  We .. We .. We .. We
+  We .. .. .. .. Ay We
+  We We We We We We We
+
+max_steps: 30

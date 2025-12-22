@@ -6,8 +6,6 @@ Verifies that parallel and sequential DAG computation produce identical results.
 
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 import numpy as np
 from gym_multigrid.multigrid import (

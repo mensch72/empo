@@ -16,15 +16,9 @@ It then:
 import sys
 import os
 
-# Add paths for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
-
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.animation as animation
 from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, Block, Rock, Wall, World
-from empo.env_utils import get_dag, plot_dag
 
 
 class SmallDAGEnv(MultiGridEnv):
@@ -32,7 +26,7 @@ class SmallDAGEnv(MultiGridEnv):
     
     def __init__(self):
         # Create 2 agents - agent 1 can push rocks, agent 0 cannot
-        self.agents = [Agent(World, 0), Agent(World, 1)]
+        self.agents = [Agent(World, 0, can_push_rocks=False), Agent(World, 1, can_push_rocks=True)]
         
         super().__init__(
             width=4,
@@ -69,11 +63,11 @@ class SmallDAGEnv(MultiGridEnv):
         self.grid.set(1, 2, block2)
         
         # Place 2 rocks at (2,1) and (2,2)
-        # Both rocks pushable only by agent 1 (who can push rocks)
-        rock1 = Rock(World, pushable_by=1)
+        # Only agent 1 can push rocks (has can_push_rocks=True)
+        rock1 = Rock(World)
         self.grid.set(2, 1, rock1)
         
-        rock2 = Rock(World, pushable_by=1)
+        rock2 = Rock(World)
         self.grid.set(2, 2, rock2)
     
     def _is_valid_pos(self, pos):
@@ -152,18 +146,17 @@ class SmallDAGEnv(MultiGridEnv):
         # Return new state
         return self.get_state()
     
-    def _identify_conflict_blocks(self, state, actions, active_agents):
+    def _identify_conflict_blocks(self, actions, active_agents):
         """
         Override to handle out-of-bounds positions gracefully.
+        Note: This method assumes the environment is already set to the relevant state
+        (i.e., the caller has already called set_state() before calling this method).
         """
         # Constants for resource types
         RESOURCE_INDEPENDENT = 'independent'
         RESOURCE_CELL = 'cell'
         RESOURCE_PICKUP = 'pickup'
         RESOURCE_DROP_AGENT = 'drop_agent'
-        
-        # Restore to the query state to inspect agent positions and targets
-        self.set_state(state)
         
         # Track which resource each agent targets
         agent_targets = {}  # agent_idx -> resource identifier
@@ -315,22 +308,18 @@ class SmallDAGEnv(MultiGridEnv):
 
 
 
-def render_grid_to_array(env):
-    """Render the environment grid to a numpy array for animation."""
-    img = env.render(mode='rgb_array', highlight=False)
-    return img
-
-
-def create_sample_episode_gif(env, output_path='sample_episode.gif'):
-    """Create and save a GIF of one sample episode."""
+def create_sample_episode_gif(env, output_path='sample_episode.gif', fps=2):
+    """Create and save a GIF of one sample episode using MultiGridEnv's video recording."""
     print(f"\nCreating sample episode GIF...")
     
     # Reset environment
     env.reset()
     
-    # Collect frames
-    frames = []
-    frames.append(render_grid_to_array(env))
+    # Start video recording using MultiGridEnv's built-in method
+    env.start_video_recording()
+    
+    # Initial frame
+    env.render(mode='rgb_array')
     
     # Run a sample episode with random actions
     done = False
@@ -342,54 +331,22 @@ def create_sample_episode_gif(env, output_path='sample_episode.gif'):
         # Random actions for both agents
         actions = [env.action_space.sample() for _ in env.agents]
         obs, rewards, done, info = env.step(actions)
-        frames.append(render_grid_to_array(env))
+        env.render(mode='rgb_array')  # Frame automatically captured
         step_count += 1
         print(f"  Step {step_count}: actions={actions}, done={done}")
     
-    # Create animation
-    print(f"Saving GIF to {output_path}...")
-    fig, ax = plt.subplots(figsize=(6, 6))
-    ax.set_aspect('equal')
-    ax.axis('off')
-    
-    # Initialize the image
-    im = ax.imshow(frames[0])
-    
-    def update(frame_idx):
-        im.set_array(frames[frame_idx])
-        ax.set_title(f'Sample Episode - Step {frame_idx}/{len(frames)-1}', 
-                     fontsize=12, fontweight='bold')
-        return [im]
-    
-    # Create animation
-    anim = animation.FuncAnimation(
-        fig, 
-        update, 
-        frames=len(frames),
-        interval=500,  # 500ms between frames
-        blit=True,
-        repeat=True
-    )
-    
-    # Save as GIF
-    try:
-        anim.save(output_path, writer='pillow', fps=2)
-        print(f"✓ Sample episode GIF saved to {output_path}")
-        print(f"  Total frames: {len(frames)}")
-    except Exception as e:
-        print(f"✗ Error saving GIF: {e}")
-    
-    plt.close()
+    # Save video using MultiGridEnv's built-in method
+    env.save_video(output_path, fps=fps)
 
 
 def compute_and_plot_dag(env, output_path='dag_plot.pdf'):
-    """Compute and plot the DAG structure."""
+    """Compute and plot the DAG structure using WorldModel methods."""
     print("\nComputing DAG structure...")
     print("  This may take a moment for complex environments...")
     
     try:
-        # Get DAG structure
-        states, state_to_idx, successors = get_dag(env)
+        # env already inherits from WorldModel, so we can call get_dag directly
+        states, state_to_idx, successors = env.get_dag()
         
         print(f"✓ DAG computed successfully!")
         print(f"  Total reachable states: {len(states)}")
@@ -416,11 +373,11 @@ def compute_and_plot_dag(env, output_path='dag_plot.pdf'):
             # Create simple labels showing state index
             state_labels = {state: f"S{idx}" for idx, state in enumerate(states)}
             
-            # Plot with PDF format
-            plot_dag(
-                states, 
-                state_to_idx, 
-                successors, 
+            # Plot with PDF format using env's plot_dag method
+            env.plot_dag(
+                states=states,
+                state_to_idx=state_to_idx,
+                successors=successors,
                 output_file=output_path.replace('.pdf', ''),
                 format='pdf',
                 state_labels=state_labels,

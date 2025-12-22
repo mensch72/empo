@@ -1,0 +1,19 @@
+# Grid with all three door types
+metadata:
+  name: "Door Test"
+  description: "7x6 grid with all three door types (locked, closed, open) and a single agent. Used for testing door mechanics."
+  author: "EMPO Framework"
+  version: "1.0.0"
+  created: "2025-01-01T00:00:00Z"
+  category: "obstacles"
+  tags: ["single-agent", "doors"]
+
+map: |
+  We We We We We We We
+  We Lr .. Cr .. Or We
+  We .. .. .. .. .. We
+  We .. .. Ar .. .. We
+  We .. .. .. .. .. We
+  We We We We We We We
+
+max_steps: 100

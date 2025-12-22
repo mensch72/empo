@@ -23,10 +23,6 @@ except ImportError:
 
 LINE_PROFILER_AVAILABLE = False
 
-# Add paths for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
-
 from envs.one_or_three_chambers import SmallOneOrThreeChambersMapEnv
 from empo.possible_goal import PossibleGoal, PossibleGoalGenerator
 from empo.backward_induction import compute_human_policy_prior
@@ -117,8 +113,7 @@ def setup_line_profiler():
     import empo.backward_induction as backward_induction_module
     import empo.possible_goal as possible_goal_module
     
-    # Import multigrid with the correct path
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
+    # Import multigrid
     import gym_multigrid.multigrid as multigrid_module
     
     # Add functions to profile from backward_induction.py
@@ -173,10 +168,19 @@ def save_profiler_results(profiler, output_path):
     print(f"Line profiling results saved to: {output_path}")
 
 
-def main():
+# Configuration for quick mode vs full mode
+MAX_STEPS_FULL = 3        # Full mode (still relatively small)
+MAX_STEPS_QUICK = 2       # Quick mode (minimal)
+
+
+def main(quick_mode=False):
     """Main function to demonstrate compute_human_policy_prior()."""
+    max_steps = MAX_STEPS_QUICK if quick_mode else MAX_STEPS_FULL
+    mode_str = "QUICK TEST MODE" if quick_mode else "FULL MODE"
+    
     print("=" * 70)
     print("Human Policy Prior Computation Example with Line Profiling")
+    print(f"  [{mode_str}]")
     print("=" * 70)
     print()
     
@@ -191,7 +195,7 @@ def main():
     # Create environment
     print("Creating SmallOneOrThreeChambersMapEnv...")
     world_model = SmallOneOrThreeChambersMapEnv()
-    world_model.max_steps = 3  # Set to 3 for quick testing
+    world_model.max_steps = max_steps
     world_model.reset()
     
     print(f"Environment created successfully!")
@@ -291,4 +295,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description='Human Policy Prior Example')
+    parser.add_argument('--quick', '-q', action='store_true',
+                        help='Run in quick test mode with fewer time steps')
+    args = parser.parse_args()
+    main(quick_mode=args.quick)

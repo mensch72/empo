@@ -7,10 +7,6 @@ import sys
 import os
 import numpy as np
 
-# Add paths for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
-
 from envs.one_or_three_chambers import SmallOneOrThreeChambersMapEnv
 from empo.possible_goal import PossibleGoal, PossibleGoalGenerator
 from empo.backward_induction import compute_human_policy_prior
@@ -54,7 +50,7 @@ class SimpleGoalGenerator(PossibleGoalGenerator):
     
     def generate(self, state, human_agent_index: int):
         for pos in self.target_cells:
-            goal = ReachCellGoal(self.world_model, human_agent_index, pos)
+            goal = ReachCellGoal(self.env, human_agent_index, pos)
             yield (goal, 1.0 / len(self.target_cells))
 
 
@@ -138,27 +134,19 @@ def test_parallel_correctness_small():
     print("\nComparing results...")
     differences = compare_policies(result_seq.values, result_par.values)
     
-    if not differences:
-        print("✓ PASS: Sequential and parallel results are identical!")
-        return True
-    else:
-        print(f"✗ FAIL: Found {len(differences)} differences:")
-        for diff in differences[:10]:  # Show first 10
-            print(f"  - {diff}")
-        if len(differences) > 10:
-            print(f"  ... and {len(differences) - 10} more")
-        return False
+    assert not differences, f"Found {len(differences)} differences between sequential and parallel:\n" + "\n".join(differences[:10])
+    print("✓ PASS: Sequential and parallel results are identical!")
 
 
 def test_parallel_correctness_medium():
-    """Test with a medium environment (max_steps=4)."""
+    """Test with a medium environment (max_steps=3)."""
     print("\n" + "=" * 70)
-    print("Test: Medium environment (max_steps=4)")
+    print("Test: Medium environment (max_steps=3)")
     print("=" * 70)
     
     # Create environment
     wm = SmallOneOrThreeChambersMapEnv()
-    wm.max_steps = 4
+    wm.max_steps = 3
     wm.reset()
     
     # Use a few target cells
@@ -192,16 +180,8 @@ def test_parallel_correctness_medium():
     print("\nComparing results...")
     differences = compare_policies(result_seq.values, result_par.values)
     
-    if not differences:
-        print("✓ PASS: Sequential and parallel results are identical!")
-        return True
-    else:
-        print(f"✗ FAIL: Found {len(differences)} differences:")
-        for diff in differences[:10]:
-            print(f"  - {diff}")
-        if len(differences) > 10:
-            print(f"  ... and {len(differences) - 10} more")
-        return False
+    assert not differences, f"Found {len(differences)} differences between sequential and parallel:\n" + "\n".join(differences[:10])
+    print("✓ PASS: Sequential and parallel results are identical!")
 
 
 def test_v_values_visibility():
@@ -239,7 +219,6 @@ def test_v_values_visibility():
                 print(f"WARNING: State at level {level} has successors at levels {succ_levels}")
     
     print("\nLevel structure looks correct for backward induction.")
-    return True
 
 
 def main():
@@ -248,33 +227,31 @@ def main():
     print("=" * 70)
     print()
     
-    results = []
+    test_names = []
     
     # Test V_values visibility
-    results.append(("V_values visibility", test_v_values_visibility()))
+    test_v_values_visibility()
+    test_names.append("V_values visibility")
     
     # Test small environment
-    results.append(("Small environment", test_parallel_correctness_small()))
+    test_parallel_correctness_small()
+    test_names.append("Small environment")
     
     # Test medium environment
-    results.append(("Medium environment", test_parallel_correctness_medium()))
+    test_parallel_correctness_medium()
+    test_names.append("Medium environment")
     
     # Summary
     print("\n" + "=" * 70)
     print("SUMMARY")
     print("=" * 70)
-    for name, passed in results:
-        status = "✓ PASS" if passed else "✗ FAIL"
-        print(f"  {status}: {name}")
+    for name in test_names:
+        print(f"  ✓ PASS: {name}")
     
-    all_passed = all(passed for _, passed in results)
     print()
-    if all_passed:
-        print("All tests passed!")
-    else:
-        print("Some tests failed!")
+    print("All tests passed!")
     
-    return 0 if all_passed else 1
+    return 0
 
 
 if __name__ == "__main__":

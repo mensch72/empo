@@ -98,52 +98,37 @@ class HumanPolicyPrior(ABC):
         """
         pass
 
-    def profile_distribution(
-        self, 
-        state, 
-        human_agent_index: Optional[int], 
-        possible_goal: Optional['PossibleGoal'] = None,
-    ) -> List[tuple[float, List[int]]]:
+    @staticmethod
+    def _to_probability_array(action_distribution) -> np.ndarray:
         """
-        Get joint action profile distribution for all human agents, 
-        marginalized over all possible goals.
+        Convert action distribution to numpy array.
         
-        Assumes independence between human agents. The joint distribution
-        is computed as the product of individual agent distributions.
+        Handles both dict (from neural policy priors) and array returns.
+        For dict input, assumes keys are consecutive integers starting from 0.
+        Ensures the probabilities sum to 1.0.
         
         Args:
-            state: Current world state.
-            possible_goal_generator: Generator for enumerating possible goals.
-            human_agent_index: If provided, cassume this agent has a particular goal.
-            possible_goal: If provided, condition on this goal for the specified agent.
-                          Only valid when human_agent_index is also provided.
+            action_distribution: Either a dict mapping action index to probability,
+                               or a numpy array of probabilities.
+        
+        Returns:
+            np.ndarray: Probability array indexed by action, normalized to sum to 1.0.
         """
-        from itertools import product
-
-        if human_agent_index is not None:
-            # One agent has a specific goal, others marginalize over goals
-            distributions = []
-            for agent_index in self.human_agent_indices:
-                if agent_index == human_agent_index:
-                    dist = self(state, agent_index, possible_goal)
-                else:
-                    dist = self(state, agent_index)
-                distributions.append(dist)
+        if isinstance(action_distribution, dict):
+            num_actions = len(action_distribution)
+            probs = np.array([action_distribution[i] for i in range(num_actions)])
         else:
-            # All agents marginalize over goals
-            distributions = [
-                self(state, agent_index) 
-                for agent_index in self.human_agent_indices
-            ]
+            probs = np.asarray(action_distribution)
         
-        joint_distribution = []
-        for action_profile in product(*[range(len(dist)) for dist in distributions]):
-            prob = 1.0
-            for agent_idx, action in enumerate(action_profile):
-                prob *= distributions[agent_idx][action]
-            joint_distribution.append((prob, list(action_profile)))
+        # Ensure probabilities sum to 1.0 (handle floating-point errors and edge cases)
+        prob_sum = probs.sum()
+        if prob_sum > 0:
+            probs = probs / prob_sum
+        else:
+            # If all probabilities are zero, use uniform distribution
+            probs = np.ones_like(probs) / len(probs)
         
-        return joint_distribution
+        return probs
 
     def sample(
         self, 
@@ -175,14 +160,16 @@ class HumanPolicyPrior(ABC):
         """
         if human_agent_index is not None:
             action_distribution = self(state, human_agent_index, possible_goal)
-            return int(np.random.choice(len(action_distribution), p=action_distribution))
+            probs = self._to_probability_array(action_distribution)
+            return int(np.random.choice(len(probs), p=probs))
         else:
             assert possible_goal is None, \
                 "When sampling actions for all human agents, no possible goal can be given."
             actions = []
             for agent_index in self.human_agent_indices:
                 action_distribution = self(state, agent_index)
-                action = int(np.random.choice(len(action_distribution), p=action_distribution))
+                probs = self._to_probability_array(action_distribution)
+                action = int(np.random.choice(len(probs), p=probs))
                 actions.append(action)
             return actions
 
@@ -269,3 +256,658 @@ class TabularHumanPolicyPrior(HumanPolicyPrior):
             for goal, weight in self.possible_goal_generator.generate(state, human_agent_index):
                 total += vs[goal] * weight
             return total
+
+
+class HeuristicPotentialPolicy(HumanPolicyPrior):
+    """
+    Heuristic goal-directed policy based on potential function gradients.
+    
+    This policy uses the precomputed shortest paths and potential function from
+    PathDistanceCalculator to guide agents toward goals without learning. At each
+    state, it evaluates the potential at the current position and at all
+    neighboring empty cells, then produces a soft probability distribution over
+    actions that favors moves toward higher potential (closer to goal).
+    
+    Door Handling:
+    If the agent is adjacent to an actionable door, the policy overrides the
+    potential-based action and instead turns toward the door and opens/unlocks it.
+    An actionable door is either:
+    - A locked door where the agent carries a key of matching color
+    - An unlocked but closed door
+    
+    When facing an actionable door:
+    - If num_actions > 6 (full Actions set), uses the toggle action
+    - Otherwise, uses the forward action (which won't actually open the door
+      in SmallActions environments, but represents the agent's intent)
+    
+    Key Pickup:
+    If the agent is adjacent to a key that can open at least one locked door,
+    and the agent is not already carrying a key, the policy overrides the
+    potential-based action and instead turns toward the key and picks it up.
+    - If num_actions > 4 (full Actions set), uses the pickup action
+    - Otherwise, uses the forward action
+    
+    Key Drop:
+    If the agent is carrying a key that can no longer open any locked door
+    (all matching doors have been unlocked), the policy overrides the potential-based
+    action and instead drops the key on the neighboring cell with the worst potential
+    (furthest from goal), freeing the agent to carry other objects if needed.
+    - If num_actions > 5 (full Actions set), uses the drop action
+    - Otherwise, uses the forward action
+    
+    The policy is parameterized by:
+    - softness (beta): Controls how deterministic the policy is.
+      - beta -> 0: Uniform random over all actions
+      - beta -> inf: Deterministic (always pick best action)
+      - Typical values: 1-10 for exploration, 10-100 for exploitation
+    
+    Action selection logic (in priority order):
+    1. Check for adjacent actionable doors (locked with matching key, or closed)
+       - If found and not facing: return turn action to face the door
+       - If found and facing: return toggle (or forward) action
+    2. Check for adjacent useful keys (can open at least one locked door)
+       - If found and not carrying a key: turn toward key and pick it up
+    3. Check for useless key being carried (can't open any locked door)
+       - If carrying useless key: turn toward worst-potential cell and drop it
+    4. Compute potential Φ(current_pos) for current position
+    5. For each of 4 cardinal directions, compute potential Φ(neighbor_pos)
+       for the neighboring cell (if walkable)
+    6. Compute advantage for each direction: A_dir = Φ(neighbor) - Φ(current)
+    7. Convert to action probabilities using softmax:
+       - If facing direction d: forward action gets advantage A_d
+       - Turn actions get advantage of the direction they would face
+       - Still action gets advantage 0 (no improvement)
+    8. Apply softmax: P(action) ∝ exp(beta * advantage)
+    
+    Attributes:
+        path_calculator: PathDistanceCalculator for potential computation.
+        softness: Temperature parameter for softmax (higher = more deterministic).
+        num_actions: Number of available actions (typically 4 for SmallActions).
+    
+    Note:
+        This policy requires a MultiGridEnv-like world model with:
+        - grid attribute for checking cell contents
+        - agents attribute with pos and dir for each agent
+        - get_state() method returning (step_count, agent_states, mobile_objects, mutable_objects)
+    """
+    
+    # Direction vectors: 0=east (+x), 1=south (+y), 2=west (-x), 3=north (-y)
+    DIR_TO_VEC = [
+        (1, 0),   # 0 = east
+        (0, 1),   # 1 = south
+        (-1, 0),  # 2 = west
+        (0, -1),  # 3 = north
+    ]
+    
+    # Action indices for SmallActions: 0=still, 1=left, 2=right, 3=forward
+    ACTION_STILL = 0
+    ACTION_LEFT = 1
+    ACTION_RIGHT = 2
+    ACTION_FORWARD = 3
+    
+    # Action indices for full Actions set
+    ACTION_PICKUP = 4
+    ACTION_DROP = 5
+    ACTION_TOGGLE = 6
+    
+    def __init__(
+        self,
+        world_model: 'WorldModel',
+        human_agent_indices: List[int],
+        path_calculator,  # PathDistanceCalculator from empo.nn_based.multigrid
+        softness: float = 10.0,
+        num_actions: int = 4
+    ):
+        """
+        Initialize the heuristic potential policy.
+        
+        Args:
+            world_model: The multigrid environment.
+            human_agent_indices: Indices of agents to control with this policy.
+            path_calculator: PathDistanceCalculator with precomputed shortest paths.
+            softness: Softmax temperature (beta). Higher = more deterministic.
+                     Default 10.0 provides moderate exploitation.
+            num_actions: Number of actions (default 4 for SmallActions).
+        """
+        super().__init__(world_model, human_agent_indices)
+        self.path_calculator = path_calculator
+        self.softness = softness
+        self.num_actions = num_actions
+    
+    def _get_goal_tuple(self, possible_goal: 'PossibleGoal') -> tuple:
+        """
+        Extract goal coordinates from a PossibleGoal object.
+        
+        Handles both point goals (x, y) and rectangle goals (x1, y1, x2, y2).
+        
+        Args:
+            possible_goal: Goal object with target_pos or target_rect attribute.
+        
+        Returns:
+            Tuple of (x, y) for point goals or (x1, y1, x2, y2) for rectangles.
+        """
+        if hasattr(possible_goal, 'target_rect'):
+            return possible_goal.target_rect
+        elif hasattr(possible_goal, 'target_pos'):
+            return possible_goal.target_pos
+        elif hasattr(possible_goal, 'target'):
+            target = possible_goal.target
+            if isinstance(target, tuple):
+                return target
+        # Fallback: try to extract from string representation or raise error
+        raise ValueError(f"Cannot extract goal coordinates from {possible_goal}")
+    
+    def _is_cell_walkable(self, x: int, y: int, agent_positions: set) -> bool:
+        """
+        Check if a cell is walkable (can be moved into).
+        
+        A cell is walkable if:
+        - It's within grid bounds
+        - It's not a wall, lava, or other impassable obstacle
+        - It's not occupied by another agent
+        - It's not a closed/locked door (unless the agent can open it)
+        
+        Note: Blocks and rocks are considered walkable because they can be pushed.
+        The potential function already accounts for the difficulty of pushing them
+        via higher passing costs in PathDistanceCalculator.
+        
+        Args:
+            x, y: Cell coordinates to check.
+            agent_positions: Set of (x, y) positions occupied by agents.
+        
+        Returns:
+            True if the cell can be entered, False otherwise.
+        """
+        # Check bounds
+        if not (0 <= x < self.world_model.width and 0 <= y < self.world_model.height):
+            return False
+        
+        # Check if occupied by another agent
+        if (x, y) in agent_positions:
+            return False
+        
+        # Check cell contents
+        cell = self.world_model.grid.get(x, y)
+        if cell is None:
+            return True  # Empty cell
+        
+        cell_type = getattr(cell, 'type', None)
+        
+        # Impassable obstacles (cannot be moved through even with pushing)
+        if cell_type in ('wall', 'magicwall', 'lava'):
+            return False
+        
+        # Doors: closed/locked doors are obstacles (for simplicity)
+        if cell_type == 'door':
+            is_open = getattr(cell, 'is_open', False)
+            if not is_open:
+                return False
+        
+        # Blocks and rocks ARE walkable - they can be pushed
+        # The potential function already accounts for the pushing cost
+        # (block cost = 2, rock cost = 50 in DEFAULT_PASSING_COSTS)
+        
+        # Everything else (floor, goal, key, ball, box, switch, block, rock, etc.) is walkable
+        return True
+    
+    def _find_actionable_door(
+        self,
+        agent_x: int,
+        agent_y: int,
+        carrying_type: Optional[str],
+        carrying_color: Optional[str]
+    ) -> Optional[int]:
+        """
+        Find an adjacent door that can be opened/unlocked by the agent.
+        
+        An actionable door is either:
+        - A locked door where the agent carries a key of matching color
+        - An unlocked but closed door
+        
+        Args:
+            agent_x, agent_y: Agent's current position.
+            carrying_type: Type of object the agent is carrying (e.g., 'key'), or None.
+            carrying_color: Color of the carried object, or None.
+        
+        Returns:
+            Direction (0-3) of the actionable door, or None if no actionable door found.
+            Direction 0=east, 1=south, 2=west, 3=north.
+        """
+        for direction in range(4):
+            dx, dy = self.DIR_TO_VEC[direction]
+            neighbor_x, neighbor_y = agent_x + dx, agent_y + dy
+            
+            # Check bounds
+            if not (0 <= neighbor_x < self.world_model.width and 
+                    0 <= neighbor_y < self.world_model.height):
+                continue
+            
+            cell = self.world_model.grid.get(neighbor_x, neighbor_y)
+            if cell is None:
+                continue
+            
+            cell_type = getattr(cell, 'type', None)
+            if cell_type != 'door':
+                continue
+            
+            is_open = getattr(cell, 'is_open', False)
+            is_locked = getattr(cell, 'is_locked', False)
+            door_color = getattr(cell, 'color', None)
+            
+            # Skip already-open doors
+            if is_open:
+                continue
+            
+            # Check if the door can be opened
+            if is_locked:
+                # Locked door: need matching key
+                if carrying_type == 'key' and carrying_color == door_color:
+                    return direction
+            else:
+                # Unlocked but closed door: can be opened by anyone
+                return direction
+        
+        return None
+    
+    def _get_locked_doors_by_color(self) -> dict:
+        """
+        Get a dictionary mapping door colors to lists of locked door positions.
+        
+        Returns:
+            Dict mapping color -> list of (x, y) positions of locked doors.
+        """
+        locked_doors = {}
+        
+        for y in range(self.world_model.height):
+            for x in range(self.world_model.width):
+                cell = self.world_model.grid.get(x, y)
+                if cell is None:
+                    continue
+                
+                cell_type = getattr(cell, 'type', None)
+                if cell_type != 'door':
+                    continue
+                
+                is_locked = getattr(cell, 'is_locked', False)
+                if not is_locked:
+                    continue
+                
+                door_color = getattr(cell, 'color', None)
+                if door_color is not None:
+                    if door_color not in locked_doors:
+                        locked_doors[door_color] = []
+                    locked_doors[door_color].append((x, y))
+        
+        return locked_doors
+    
+    def _find_useful_key(
+        self,
+        agent_x: int,
+        agent_y: int,
+        carrying_type: Optional[str],
+        locked_doors_by_color: dict
+    ) -> Optional[int]:
+        """
+        Find an adjacent key that can open at least one locked door.
+        
+        Only considers picking up a key if:
+        - Agent is not already carrying a key
+        - The key's color matches at least one locked door
+        
+        Args:
+            agent_x, agent_y: Agent's current position.
+            carrying_type: Type of object the agent is carrying, or None.
+            locked_doors_by_color: Dict mapping color -> list of locked door positions.
+        
+        Returns:
+            Direction (0-3) of the useful key, or None if no useful key found.
+        """
+        # Don't pick up a key if already carrying one
+        if carrying_type == 'key':
+            return None
+        
+        for direction in range(4):
+            dx, dy = self.DIR_TO_VEC[direction]
+            neighbor_x, neighbor_y = agent_x + dx, agent_y + dy
+            
+            # Check bounds
+            if not (0 <= neighbor_x < self.world_model.width and 
+                    0 <= neighbor_y < self.world_model.height):
+                continue
+            
+            cell = self.world_model.grid.get(neighbor_x, neighbor_y)
+            if cell is None:
+                continue
+            
+            cell_type = getattr(cell, 'type', None)
+            if cell_type != 'key':
+                continue
+            
+            key_color = getattr(cell, 'color', None)
+            
+            # Check if this key can open at least one locked door
+            if key_color in locked_doors_by_color and len(locked_doors_by_color[key_color]) > 0:
+                return direction
+        
+        return None
+    
+    def _find_drop_cell_for_useless_key(
+        self,
+        agent_x: int,
+        agent_y: int,
+        carrying_type: Optional[str],
+        carrying_color: Optional[str],
+        locked_doors_by_color: dict,
+        goal_tuple: tuple,
+        blocked_positions: set
+    ) -> Optional[int]:
+        """
+        Find an adjacent cell to drop a useless key (one that can't open any locked door).
+        
+        The key is dropped on the neighboring cell with the worst potential (furthest from goal).
+        
+        Args:
+            agent_x, agent_y: Agent's current position.
+            carrying_type: Type of object the agent is carrying.
+            carrying_color: Color of the carried object.
+            locked_doors_by_color: Dict mapping color -> list of locked door positions.
+            goal_tuple: Goal coordinates for potential calculation.
+            blocked_positions: Set of positions blocked by agents/rocks.
+        
+        Returns:
+            Direction (0-3) of the best cell to drop the key, or None if can't/shouldn't drop.
+        """
+        # Only consider dropping if carrying a key
+        if carrying_type != 'key':
+            return None
+        
+        # Check if the key can still open at least one locked door
+        if carrying_color in locked_doors_by_color and len(locked_doors_by_color[carrying_color]) > 0:
+            return None  # Key is still useful, don't drop it
+        
+        # Find the neighboring cell with the worst potential (most negative = furthest from goal)
+        worst_potential = float('inf')
+        worst_direction = None
+        
+        for direction in range(4):
+            dx, dy = self.DIR_TO_VEC[direction]
+            neighbor_x, neighbor_y = agent_x + dx, agent_y + dy
+            
+            # Check bounds
+            if not (0 <= neighbor_x < self.world_model.width and 
+                    0 <= neighbor_y < self.world_model.height):
+                continue
+            
+            # Check if the cell is empty and not blocked
+            if (neighbor_x, neighbor_y) in blocked_positions:
+                continue
+            
+            cell = self.world_model.grid.get(neighbor_x, neighbor_y)
+            
+            # Can only drop on empty cells or cells that can be overlapped
+            if cell is not None:
+                cell_type = getattr(cell, 'type', None)
+                # Can't drop on walls, doors, keys, balls, boxes, etc.
+                if cell_type in ('wall', 'door', 'key', 'ball', 'box', 'block', 'rock', 'lava', 'magicwall'):
+                    continue
+            
+            # Calculate potential for this cell
+            neighbor_potential = self.path_calculator.compute_potential(
+                (neighbor_x, neighbor_y), goal_tuple, self.world_model
+            )
+            
+            if neighbor_potential < worst_potential:
+                worst_potential = neighbor_potential
+                worst_direction = direction
+        
+        return worst_direction
+    
+    def _get_turn_action_to_face(self, current_dir: int, target_dir: int) -> int:
+        """
+        Get the turn action to face from current_dir toward target_dir.
+        
+        Args:
+            current_dir: Current facing direction (0-3).
+            target_dir: Target direction to face (0-3).
+        
+        Returns:
+            Action index (ACTION_LEFT, ACTION_RIGHT, or ACTION_FORWARD if already facing).
+        """
+        if current_dir == target_dir:
+            # Already facing the target direction
+            return self.ACTION_FORWARD
+        
+        # Calculate turn direction
+        diff = (target_dir - current_dir) % 4
+        if diff == 1:
+            return self.ACTION_RIGHT
+        elif diff == 3:
+            return self.ACTION_LEFT
+        else:
+            # diff == 2: Either direction works, prefer right
+            return self.ACTION_RIGHT
+    
+    def __call__(
+        self,
+        state,
+        human_agent_index: int,
+        possible_goal: Optional['PossibleGoal'] = None
+    ) -> np.ndarray:
+        """
+        Compute action distribution based on potential gradients.
+        
+        Args:
+            state: Current world state tuple from get_state().
+            human_agent_index: Index of the agent to get actions for.
+            possible_goal: The goal to move toward. Required for this policy.
+        
+        Returns:
+            np.ndarray: Probability distribution over actions.
+        
+        Raises:
+            ValueError: If possible_goal is None (goal is required).
+        """
+        if possible_goal is None:
+            # Without a goal, return uniform distribution
+            return np.ones(self.num_actions) / self.num_actions
+        
+        # Extract state components
+        step_count, agent_states, mobile_objects, mutable_objects = state
+        
+        # Get agent position and direction
+        if human_agent_index >= len(agent_states):
+            return np.ones(self.num_actions) / self.num_actions
+        
+        agent_state = agent_states[human_agent_index]
+        agent_x, agent_y = int(agent_state[0]), int(agent_state[1])
+        agent_dir = int(agent_state[2]) if len(agent_state) > 2 else 0
+        agent_pos = (agent_x, agent_y)
+        
+        # Extract carrying information from agent state
+        # agent_state format: (x, y, dir, terminated, started, paused, carrying_type, carrying_color, ...)
+        carrying_type = agent_state[6] if len(agent_state) > 6 else None
+        carrying_color = agent_state[7] if len(agent_state) > 7 else None
+        
+        # Check for actionable doors first (override potential-based action)
+        # This handles: locked doors with matching key, or unlocked closed doors
+        door_direction = self._find_actionable_door(
+            agent_x, agent_y, carrying_type, carrying_color
+        )
+        
+        if door_direction is not None:
+            # Found an actionable door - override potential-based action
+            probs = np.zeros(self.num_actions)
+            
+            if agent_dir == door_direction:
+                # Already facing the door - use toggle action if available, otherwise forward
+                # ACTION_TOGGLE is at index 6, so we need num_actions > 6 (i.e., at least 7 actions)
+                if self.num_actions > self.ACTION_TOGGLE:
+                    # Full Actions set with toggle available
+                    probs[self.ACTION_TOGGLE] = 1.0
+                else:
+                    # SmallActions - use forward to bump into door (won't open it, but
+                    # this policy does its best with available actions)
+                    probs[self.ACTION_FORWARD] = 1.0
+            else:
+                # Turn to face the door
+                turn_action = self._get_turn_action_to_face(agent_dir, door_direction)
+                probs[turn_action] = 1.0
+            
+            return probs
+        
+        # Get goal coordinates
+        goal_tuple = self._get_goal_tuple(possible_goal)
+        
+        # Build set of blocked positions (excluding current agent)
+        # These are positions that are truly blocked (can't be pushed through)
+        blocked_positions = set()
+        for i, a_state in enumerate(agent_states):
+            if i != human_agent_index:
+                blocked_positions.add((int(a_state[0]), int(a_state[1])))
+        
+        # Add rocks to blocked positions - humans typically cannot push rocks
+        # Blocks are NOT added - they are pushable by humans
+        for obj_type, obj_x, obj_y in mobile_objects:
+            if obj_type == 'rock':
+                blocked_positions.add((obj_x, obj_y))
+        
+        # Get locked doors by color for key handling logic
+        locked_doors_by_color = self._get_locked_doors_by_color()
+        
+        # Check for useful keys to pick up (override potential-based action)
+        # This handles: keys that can open at least one locked door, when not carrying a key
+        key_direction = self._find_useful_key(
+            agent_x, agent_y, carrying_type, locked_doors_by_color
+        )
+        
+        if key_direction is not None:
+            # Found a useful key - turn toward it and pick it up
+            probs = np.zeros(self.num_actions)
+            
+            if agent_dir == key_direction:
+                # Already facing the key - use pickup action if available, otherwise forward
+                # ACTION_PICKUP is at index 4, so we need num_actions > 4 (i.e., at least 5 actions)
+                if self.num_actions > self.ACTION_PICKUP:
+                    # Full Actions set with pickup available
+                    probs[self.ACTION_PICKUP] = 1.0
+                else:
+                    # SmallActions - use forward to bump into key (won't pick it up, but
+                    # this policy does its best with available actions)
+                    probs[self.ACTION_FORWARD] = 1.0
+            else:
+                # Turn to face the key
+                turn_action = self._get_turn_action_to_face(agent_dir, key_direction)
+                probs[turn_action] = 1.0
+            
+            return probs
+        
+        # Check for useless keys to drop (override potential-based action)
+        # This handles: keys that cannot open any locked door anymore
+        drop_direction = self._find_drop_cell_for_useless_key(
+            agent_x, agent_y, carrying_type, carrying_color,
+            locked_doors_by_color, goal_tuple, blocked_positions
+        )
+        
+        if drop_direction is not None:
+            # Found a cell to drop the useless key - turn toward it and drop
+            probs = np.zeros(self.num_actions)
+            
+            if agent_dir == drop_direction:
+                # Already facing the drop cell - use drop action if available, otherwise forward
+                # ACTION_DROP is at index 5, so we need num_actions > 5 (i.e., at least 6 actions)
+                if self.num_actions > self.ACTION_DROP:
+                    # Full Actions set with drop available
+                    probs[self.ACTION_DROP] = 1.0
+                else:
+                    # SmallActions - use forward (won't drop, but this policy does its best)
+                    probs[self.ACTION_FORWARD] = 1.0
+            else:
+                # Turn to face the drop cell
+                turn_action = self._get_turn_action_to_face(agent_dir, drop_direction)
+                probs[turn_action] = 1.0
+            
+            return probs
+        
+        # Compute potential at current position
+        current_potential = self.path_calculator.compute_potential(
+            agent_pos, goal_tuple, self.world_model
+        )
+        
+        # Check if already at goal
+        if self.path_calculator.is_in_goal(agent_pos, goal_tuple):
+            # At goal: prefer staying still
+            probs = np.zeros(self.num_actions)
+            probs[self.ACTION_STILL] = 1.0
+            return probs
+        
+        # Compute potential for each neighboring direction
+        dir_advantages = {}  # direction -> advantage (potential improvement)
+        
+        for direction in range(4):
+            dx, dy = self.DIR_TO_VEC[direction]
+            neighbor_x, neighbor_y = agent_x + dx, agent_y + dy
+            neighbor_pos = (neighbor_x, neighbor_y)
+            
+            if self._is_cell_walkable(neighbor_x, neighbor_y, blocked_positions):
+                neighbor_potential = self.path_calculator.compute_potential(
+                    neighbor_pos, goal_tuple, self.world_model
+                )
+                # Advantage is improvement in potential (higher is better)
+                dir_advantages[direction] = neighbor_potential - current_potential
+            else:
+                # Can't move there: large negative advantage
+                dir_advantages[direction] = -1.0
+        
+        # Convert direction advantages to action advantages
+        # Actions: 0=still, 1=left, 2=right, 3=forward
+        action_advantages = np.zeros(self.num_actions)
+        
+        # Still: no change in position, advantage = 0
+        action_advantages[self.ACTION_STILL] = 0.0
+        
+        # Forward: move in current facing direction
+        action_advantages[self.ACTION_FORWARD] = dir_advantages.get(agent_dir, -1.0)
+        
+        # Left: turn left (counter-clockwise), then would face (agent_dir - 1) % 4
+        # This doesn't move, but positions for future forward
+        left_dir = (agent_dir - 1) % 4
+        action_advantages[self.ACTION_LEFT] = dir_advantages.get(left_dir, -1.0) * 0.5
+        
+        # Right: turn right (clockwise), then would face (agent_dir + 1) % 4
+        right_dir = (agent_dir + 1) % 4
+        action_advantages[self.ACTION_RIGHT] = dir_advantages.get(right_dir, -1.0) * 0.5
+        
+        # Special case: if facing the best direction and it's walkable, strongly prefer forward
+        best_dir = max(dir_advantages, key=dir_advantages.get)
+        if agent_dir == best_dir and dir_advantages[best_dir] > 0:
+            action_advantages[self.ACTION_FORWARD] = dir_advantages[best_dir]
+        elif dir_advantages[best_dir] > 0:
+            # Need to turn toward best direction
+            # Compute which turn is shorter
+            diff = (best_dir - agent_dir) % 4
+            if diff == 1:
+                # Turn right once
+                action_advantages[self.ACTION_RIGHT] = dir_advantages[best_dir] * 0.8
+            elif diff == 3:
+                # Turn left once
+                action_advantages[self.ACTION_LEFT] = dir_advantages[best_dir] * 0.8
+            elif diff == 2:
+                # Either turn works, slight preference for right
+                action_advantages[self.ACTION_RIGHT] = dir_advantages[best_dir] * 0.6
+                action_advantages[self.ACTION_LEFT] = dir_advantages[best_dir] * 0.6
+        
+        # Apply softmax with temperature
+        scaled = action_advantages * self.softness
+        # Subtract max for numerical stability
+        scaled = scaled - np.max(scaled)
+        exp_scaled = np.exp(scaled)
+        probs = exp_scaled / np.sum(exp_scaled)
+        
+        return probs
+
+
+# Import PathDistanceCalculator for type hints (optional, avoids circular import)
+try:
+    from empo.nn_based.multigrid.path_distance import PathDistanceCalculator
+except ImportError:
+    PathDistanceCalculator = None  # type: ignore

@@ -68,7 +68,6 @@ empo/
 ├── requirements-dev.txt    # Dev deps
 ├── train.py                # Training script
 ├── src/empo/              # Package
-├── configs/               # Configurations
 ├── scripts/               # Deployment helpers
 ├── examples/              # Examples
 ├── tests/                 # Tests
@@ -114,10 +113,9 @@ empo/
 4. **.env.example** - Environment template
 
 ### Configuration
-1. **configs/default.yaml** - Example config
-2. **.dockerignore** - Build optimization
-3. **.gitattributes** - Line endings
-4. **.gitignore** - Updated with Docker/cluster artifacts
+1. **.dockerignore** - Build optimization
+2. **.gitattributes** - Line endings
+3. **.gitignore** - Updated with Docker/cluster artifacts
 
 ## 🎯 Key Features
 

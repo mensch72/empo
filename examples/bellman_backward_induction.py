@@ -5,11 +5,16 @@ Bellman Backward Induction Example
 This script demonstrates backward induction on the SmallOneOrTwoChambersMapEnv:
 1. Computes the DAG of all reachable states
 2. Performs backward induction from terminal states to the initial state
-3. Uses the Bellman equation to compute value functions and optimal policies
+3. Uses the Bellman equation to compute standard value functions and an optimal policy for the robot based on a custom reward function (this is not what we will later do in this project, it is just to show that also standard value functions can be computed this way!)
 4. Assumes humans move randomly and the robot follows an optimal policy
 5. Produces a movie of an episode showing optimal robot play vs random humans
 
 The reward function gives +1 when the robot is in cell (3, 7), 0 otherwise.
+
+Usage:
+    python bellman_backward_induction.py           # Full run (8 time steps)
+    python bellman_backward_induction.py --quick   # Quick test (4 time steps)
+    python bellman_backward_induction.py --profile # Enable line-by-line profiling
 
 Run with --profile to enable line-by-line profiling of multigrid.py.
 """
@@ -19,19 +24,19 @@ import os
 import time
 import argparse
 
-# Add paths for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
-
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.animation as animation
 from itertools import product
+from tqdm import tqdm
 
 from envs.one_or_three_chambers import SmallOneOrTwoChambersMapEnv
 
 # Line profiler global
 line_profiler = None
+
+# Configuration constants
+MAX_STEPS_FULL = 8        # Full run: 8 time steps
+MAX_STEPS_QUICK = 4       # Quick test: 4 time steps for faster DAG computation
 
 
 def setup_line_profiler():
@@ -136,7 +141,7 @@ def print_line_profiler_stats():
 # Target cell where the robot receives a reward of 1
 # In the map, this is position (3, 7) - column 3, row 7:
 # We We We We We .. .. .. .. ..    <- row 0
-# We .. We .. We .. .. .. .. ..    <- row 1 (removed upper human)
+# We .. We .. We .. .. .. .. ..    <- row 1
 # We .. We Ay We We We .. .. ..    <- row 2
 # We Ae Ro .. .. .. We .. .. ..    <- row 3
 # We .. We We We .. We We We ..    <- row 4
@@ -269,13 +274,10 @@ def compute_value_functions_and_policy(env, states, state_to_idx, successors, tr
     
     # Backward induction: process states from last to first
     print("\nPerforming backward induction...")
-    processed_count = 0
-    start_time = time.time()
     
-    for state_idx in reversed(range(num_states)):
+    for state_idx in tqdm(reversed(range(num_states)), total=num_states, desc="Backward induction", unit="states"):
         if state_idx in value_function:
             # Already processed (terminal state)
-            processed_count += 1
             continue
         
         state = states[state_idx]
@@ -358,27 +360,14 @@ def compute_value_functions_and_policy(env, states, state_to_idx, successors, tr
         else:
             value_function[state_idx] = immediate_reward + best_value
             optimal_policy[state_idx] = best_action
-        
-        processed_count += 1
-        if processed_count % 1000 == 0:
-            elapsed = time.time() - start_time
-            print(f"  Processed {processed_count}/{num_states} states... ({elapsed:.1f}s)")
-    
-    elapsed = time.time() - start_time
-    print(f"  Processed {processed_count}/{num_states} states - Done! ({elapsed:.1f}s)")
     
     return value_function, optimal_policy
-
-
-def render_grid_to_array(env):
-    """Render the environment grid to a numpy array for animation."""
-    img = env.render(mode='rgb_array', highlight=False)
-    return img
 
 
 def run_episode_with_optimal_policy(env, states, state_to_idx, optimal_policy, max_steps=None):
     """
     Run an episode where the robot follows the optimal policy and humans act randomly.
+    Uses MultiGridEnv's built-in video recording.
     
     Args:
         env: The environment instance
@@ -388,7 +377,7 @@ def run_episode_with_optimal_policy(env, states, state_to_idx, optimal_policy, m
         max_steps: Maximum number of steps (default: env.max_steps)
         
     Returns:
-        list: List of frames (numpy arrays) for the episode
+        None (video is saved via env.save_video)
     """
     if max_steps is None:
         max_steps = env.max_steps
@@ -405,9 +394,11 @@ def run_episode_with_optimal_policy(env, states, state_to_idx, optimal_policy, m
     
     human_indices = [i for i in range(len(env.agents)) if i != robot_idx]
     
-    # Collect frames
-    frames = []
-    frames.append(render_grid_to_array(env))
+    # Start video recording using MultiGridEnv's built-in method
+    env.start_video_recording()
+    
+    # Initial frame
+    env.render(mode='rgb_array')
     
     print("\nRunning episode with optimal policy...")
     for step in range(max_steps):
@@ -430,7 +421,7 @@ def run_episode_with_optimal_policy(env, states, state_to_idx, optimal_policy, m
         
         # Take step
         obs, rewards, done, info = env.step(actions)
-        frames.append(render_grid_to_array(env))
+        env.render(mode='rgb_array')  # Frame automatically captured
         
         # Check if robot reached target
         robot_pos = tuple(env.agents[robot_idx].pos)
@@ -443,63 +434,28 @@ def run_episode_with_optimal_policy(env, states, state_to_idx, optimal_policy, m
         if done:
             print(f"  Episode ended at step {step + 1}")
             break
-    
-    return frames
 
 
-def create_episode_movie(frames, output_path):
+def save_episode_movie(env, output_path, fps=2):
     """
-    Create and save a movie from episode frames.
+    Save the recorded episode as a movie.
     
     Args:
-        frames: List of numpy arrays (frames)
+        env: The environment with recorded frames
         output_path: Path to save the movie
+        fps: Frames per second (default: 2)
     """
-    print(f"\nCreating movie with {len(frames)} frames...")
-    
-    fig, ax = plt.subplots(figsize=(8, 6))
-    ax.set_aspect('equal')
-    ax.axis('off')
-    
-    # Initialize the image
-    im = ax.imshow(frames[0])
-    
-    def update(frame_idx):
-        im.set_array(frames[frame_idx])
-        ax.set_title(f'Optimal Robot Policy vs Random Humans - Step {frame_idx}/{len(frames)-1}\n'
-                     f'Target: {TARGET_CELL}', fontsize=11, fontweight='bold')
-        return [im]
-    
-    # Create animation
-    anim = animation.FuncAnimation(
-        fig, 
-        update, 
-        frames=len(frames),
-        interval=500,  # 500ms between frames
-        blit=True,
-        repeat=True
-    )
-    
-    # Try saving as MP4 first, fallback to GIF
-    try:
-        writer = animation.FFMpegWriter(fps=2, bitrate=1800)
-        anim.save(output_path, writer=writer)
-        print(f"✓ Movie saved to {output_path}")
-    except Exception as e:
-        print(f"Note: Could not save as MP4 ({e}), trying GIF...")
-        gif_path = output_path.replace('.mp4', '.gif')
-        try:
-            anim.save(gif_path, writer='pillow', fps=2)
-            print(f"✓ Movie saved as GIF to {gif_path}")
-        except Exception as e2:
-            print(f"✗ Error saving movie: {e2}")
-    
-    plt.close()
+    print(f"\nSaving movie to {output_path}...")
+    env.save_video(output_path, fps=fps)
 
 
-def main(enable_profiling=False):
+def main(enable_profiling=False, quick_mode=False):
     """Main function to run the backward induction example."""
     global line_profiler
+    
+    # Determine configuration based on mode
+    max_steps = MAX_STEPS_QUICK if quick_mode else MAX_STEPS_FULL
+    mode_str = "QUICK TEST MODE" if quick_mode else "FULL MODE"
     
     # Set up line profiler if requested
     if enable_profiling:
@@ -510,12 +466,14 @@ def main(enable_profiling=False):
     
     print("=" * 70)
     print("Bellman Backward Induction Example")
+    print(f"  [{mode_str}]")
     print("=" * 70)
     print()
     print("This script demonstrates backward induction on a small gridworld:")
     print(f"  - Target cell: {TARGET_CELL} (robot receives reward=1 here)")
     print("  - Robot follows optimal policy computed via Bellman equation")
     print("  - Humans move randomly")
+    print(f"  - Max steps: {max_steps}")
     if enable_profiling:
         print("  - LINE PROFILING ENABLED")
     print()
@@ -527,6 +485,7 @@ def main(enable_profiling=False):
     # Create environment
     print("Creating environment...")
     env = SmallOneOrTwoChambersMapEnv()
+    env.max_steps = max_steps  # Override max_steps for quick mode
     env.reset()
     print(f"  Grid size: {env.width} x {env.height}")
     print(f"  Number of agents: {len(env.agents)}")
@@ -582,12 +541,12 @@ def main(enable_profiling=False):
     if enable_profiling:
         print_line_profiler_stats()
     
-    # Run episode with optimal policy
-    frames = run_episode_with_optimal_policy(env, states, state_to_idx, optimal_policy)
+    # Run episode with optimal policy (records frames via env.start_video_recording)
+    run_episode_with_optimal_policy(env, states, state_to_idx, optimal_policy)
     
-    # Create movie
+    # Save movie using MultiGridEnv's built-in method
     movie_path = os.path.join(output_dir, 'bellman_optimal_policy.mp4')
-    create_episode_movie(frames, movie_path)
+    save_episode_movie(env, movie_path)
     
     # Summary
     print()
@@ -601,5 +560,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Bellman backward induction example')
     parser.add_argument('--profile', action='store_true', 
                         help='Enable line-by-line profiling of multigrid.py')
+    parser.add_argument('--quick', '-q', action='store_true',
+                        help='Run in quick test mode with reduced time steps')
     args = parser.parse_args()
-    main(enable_profiling=args.profile)
+    main(enable_profiling=args.profile, quick_mode=args.quick)

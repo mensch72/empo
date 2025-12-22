@@ -1,4 +1,10 @@
 import math
+import json
+try:
+    import yaml
+    YAML_AVAILABLE = True
+except ImportError:
+    YAML_AVAILABLE = False
 import gymnasium as gym
 from enum import IntEnum
 import numpy as np
@@ -8,6 +14,54 @@ from .rendering import *
 from .window import Window
 import numpy as np
 from itertools import product
+
+# Optional imports for ControlButton text rendering
+try:
+    import matplotlib
+    # Only set backend if not already configured
+    if matplotlib.get_backend() == 'module://backend_interagg':
+        matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import matplotlib.image as mpimg
+    from io import BytesIO
+    from scipy.ndimage import zoom
+    MATPLOTLIB_AVAILABLE = True
+except (ImportError, RuntimeError):
+    MATPLOTLIB_AVAILABLE = False
+
+# Constants for ControlButton text rendering
+_CONTROLBUTTON_TEXT_ALPHA_THRESHOLD = 0.1  # Alpha threshold for text compositing
+_CONTROLBUTTON_TEXT_DPI = 150  # DPI for text rendering (higher = better quality)
+_CONTROLBUTTON_TEXT_FONTSIZE_SHORT = (12, 18, 2.5)  # (min, max, divisor) for short text (≤4 chars)
+_CONTROLBUTTON_TEXT_FONTSIZE_LONG = (10, 14, 3)     # (min, max, divisor) for longer text
+_CONTROLBUTTON_CORNER_RADIUS = 0.1  # Corner radius for rounded button shape
+_BLOCK_SIZE_RATIO = 0.15  # Inset ratio for blocks (0.15 = 70% size)
+
+"""
+MAINTAINER NOTE - Encoder Synchronization
+=========================================
+When adding new object types, agent features, or modifying transition-relevant
+attributes in this file, the neural network encoders in `empo.nn_based` may need
+to be updated accordingly.
+
+The encoders must encode ALL attributes that:
+1. Can change during a transition (state before -> state after)
+2. Can influence which transitions are possible or their probabilities
+
+Currently encoded attributes are documented in:
+- src/empo/nn_based/neural_policy_prior.py (OBJECT_TYPE_TO_CHANNEL, feature sizes)
+- docs/ENCODER_ARCHITECTURE.md (comprehensive encoder documentation)
+
+Examples of attributes that MUST be encoded:
+- Agent: position, direction, color, terminated, paused, forced_next_action,
+         can_enter_magic_walls, can_push_rocks, carrying
+- Door: is_open, is_locked, color
+- MagicWall: magic_side, active, entry_probability, solidify_probability
+- ControlButton: enabled, trigger_color, target_color, triggered_action, _awaiting_action
+- UnsteadyGround: stumble_probability
+
+If you add a new object type or feature, update the encoders and documentation!
+"""
 
 # Import WorldModel base class from empo
 import sys
@@ -72,7 +126,11 @@ class World:
         'block': 13,
         'rock': 14,
         'unsteadyground': 15,
-        'magicwall': 16
+        'magicwall': 16,
+        'killbutton': 17,
+        'pauseswitch': 18,
+        'disablingswitch': 19,
+        'controlbutton': 20
     }
     IDX_TO_OBJECT = dict(zip(OBJECT_TO_IDX.values(), OBJECT_TO_IDX.keys()))
 
@@ -156,7 +214,7 @@ class WorldObj:
         """Can the agent see behind this object?"""
         return True
 
-    def toggle(self, env, pos):
+    def toggle(self, env, pos, agent_idx=None):
         """Method to trigger/toggle an action this object performs"""
         return False
 
@@ -217,6 +275,513 @@ class Switch(WorldObj):
 
     def render(self, img):
         fill_coords(img, point_in_rect(0, 1, 0, 1), COLORS[self.color])
+
+
+class KillButton(WorldObj):
+    """
+    An overlappable floor type that permanently kills agents when stepped on.
+    
+    When an agent of the trigger_color steps onto this button (and it's enabled),
+    all agents of the target_color become permanently "killed" (can only use "still" action).
+    
+    Attributes:
+        trigger_color: Color of agents that can activate the button (default: 'yellow')
+        target_color: Color of agents that will be killed (default: 'grey')
+        enabled: Whether the button is active (default: True). When disabled, behaves like empty floor.
+    """
+    
+    def __init__(self, world, trigger_color='yellow', target_color='grey', enabled=True):
+        """
+        Args:
+            world: World object defining the environment
+            trigger_color: Color of agents that trigger the kill effect
+            target_color: Color of agents that will be killed
+            enabled: Whether the button is active
+        """
+        # Use red color to distinguish kill button visually
+        super().__init__(world, 'killbutton', 'red')
+        self.trigger_color = trigger_color
+        self.target_color = target_color
+        self.enabled = enabled
+    
+    def can_overlap(self):
+        return True
+    
+    def encode(self, world, current_agent=False):
+        """Encode the kill button with all its attributes for observations."""
+        if world.encode_dim == 3:
+            return (world.OBJECT_TO_IDX[self.type], world.COLOR_TO_IDX[self.color], 
+                    1 if self.enabled else 0)
+        else:
+            # Encode all attributes: trigger_color, target_color, and enabled state
+            trigger_idx = world.COLOR_TO_IDX.get(self.trigger_color, 0)
+            target_idx = world.COLOR_TO_IDX.get(self.target_color, 0)
+            return (world.OBJECT_TO_IDX[self.type], world.COLOR_TO_IDX[self.color],
+                   trigger_idx, target_idx, 1 if self.enabled else 0, 0)
+    
+    def render(self, img):
+        """Render the kill button as a red floor tile with a skull/X pattern."""
+        if self.enabled:
+            # Red background for enabled kill button
+            c = COLORS['red']
+            fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, _CONTROLBUTTON_CORNER_RADIUS), c / 2)
+            # Draw an X pattern in darker red
+            darker_red = np.array([150, 0, 0])
+            fill_coords(img, point_in_line(0.15, 0.15, 0.85, 0.85, r=0.05), darker_red)
+            fill_coords(img, point_in_line(0.15, 0.85, 0.85, 0.15, r=0.05), darker_red)
+        else:
+            # Grey background for disabled kill button
+            c = COLORS['grey']
+            fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, _CONTROLBUTTON_CORNER_RADIUS), c / 3)
+
+
+class PauseSwitch(WorldObj):
+    """
+    A non-overlappable switch that pauses agents when toggled on.
+    
+    Agents of toggle_color can use the "toggle" action on this switch when facing it.
+    While "on", all agents of target_color can only use the "still" action.
+    
+    Attributes:
+        toggle_color: Color of agents that can toggle the switch (default: 'yellow')
+        target_color: Color of agents that will be paused (default: 'grey')
+        is_on: Whether the switch is currently on (default: False)
+        enabled: Whether the switch can be toggled (default: True). When disabled, retains on/off state.
+    """
+    
+    def __init__(self, world, toggle_color='yellow', target_color='grey', is_on=False, enabled=True):
+        """
+        Args:
+            world: World object defining the environment
+            toggle_color: Color of agents that can toggle the switch
+            target_color: Color of agents that will be paused
+            is_on: Initial on/off state
+            enabled: Whether the switch can be toggled
+        """
+        # Use blue color to distinguish pause switch visually
+        super().__init__(world, 'pauseswitch', 'blue')
+        self.toggle_color = toggle_color
+        self.target_color = target_color
+        self.is_on = is_on
+        self.enabled = enabled
+    
+    def can_overlap(self):
+        return False
+    
+    def see_behind(self):
+        return True
+    
+    def toggle(self, env, pos, agent_idx=None):
+        """Toggle the switch on/off if enabled and toggled by correct color agent."""
+        if not self.enabled:
+            return False
+        
+        # Get the toggling agent - use agent_idx if provided, otherwise search
+        if agent_idx is not None:
+            toggler_agent = env.agents[agent_idx]
+        else:
+            # Fallback: find agent facing this position
+            toggler_agent = None
+            for agent in env.agents:
+                if agent.pos is not None and np.array_equal(agent.front_pos, pos):
+                    toggler_agent = agent
+                    break
+        
+        if toggler_agent is None or toggler_agent.color != self.toggle_color:
+            return False
+        
+        self.is_on = not self.is_on
+        
+        # Update paused state of all target color agents
+        for agent in env.agents:
+            if agent.color == self.target_color:
+                agent.paused = self.is_on
+        
+        return True
+    
+    def encode(self, world, current_agent=False):
+        """Encode the pause switch with its state."""
+        if world.encode_dim == 3:
+            # Encode is_on and enabled in state field (2 bits)
+            state = (1 if self.is_on else 0) | ((1 if self.enabled else 0) << 1)
+            return (world.OBJECT_TO_IDX[self.type], world.COLOR_TO_IDX[self.color], state)
+        else:
+            toggle_idx = world.COLOR_TO_IDX.get(self.toggle_color, 0)
+            target_idx = world.COLOR_TO_IDX.get(self.target_color, 0)
+            return (world.OBJECT_TO_IDX[self.type], world.COLOR_TO_IDX[self.color],
+                   toggle_idx, target_idx, 
+                   1 if self.is_on else 0, 
+                   1 if self.enabled else 0)
+    
+    def render(self, img):
+        """Render the pause switch with state indication."""
+        if self.enabled:
+            if self.is_on:
+                # Bright blue when on
+                c = COLORS['blue']
+                fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, _CONTROLBUTTON_CORNER_RADIUS), c)
+                # Draw pause symbol (two vertical bars)
+                fill_coords(img, point_in_rect(0.3, 0.4, 0.25, 0.75), np.array([255, 255, 255]))
+                fill_coords(img, point_in_rect(0.6, 0.7, 0.25, 0.75), np.array([255, 255, 255]))
+            else:
+                # Darker blue when off
+                c = COLORS['blue'] / 2
+                fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, _CONTROLBUTTON_CORNER_RADIUS), c)
+                # Draw play symbol (triangle pointing right)
+                fill_coords(img, point_in_triangle((0.3, 0.25), (0.3, 0.75), (0.7, 0.5)), 
+                           np.array([200, 200, 200]))
+        else:
+            # Grey when disabled
+            c = COLORS['grey']
+            fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, _CONTROLBUTTON_CORNER_RADIUS), c / 2)
+
+
+class DisablingSwitch(WorldObj):
+    """
+    A non-overlappable switch that toggles enabled/disabled state of other objects.
+    
+    Agents of toggle_color can use the "toggle" action on this switch when facing it.
+    This toggles the enabled/disabled state of all objects of target_type.
+    
+    Attributes:
+        toggle_color: Color of agents that can toggle the switch (default: 'grey')
+        target_type: Type of objects to enable/disable ('killbutton', 'pauseswitch', or 'controlbutton')
+    """
+    
+    def __init__(self, world, toggle_color='grey', target_type='killbutton'):
+        """
+        Args:
+            world: World object defining the environment
+            toggle_color: Color of agents that can toggle the switch
+            target_type: Type of objects to enable/disable ('killbutton', 'pauseswitch', or 'controlbutton')
+        """
+        # Use purple color to distinguish disabling switch visually
+        super().__init__(world, 'disablingswitch', 'purple')
+        self.toggle_color = toggle_color
+        self.target_type = target_type
+    
+    def can_overlap(self):
+        return False
+    
+    def see_behind(self):
+        return True
+    
+    def toggle(self, env, pos, agent_idx=None):
+        """Toggle enabled state of all target objects if toggled by correct color agent."""
+        # Get the toggling agent - use agent_idx if provided, otherwise search
+        if agent_idx is not None:
+            toggler_agent = env.agents[agent_idx]
+        else:
+            toggler_agent = None
+            for agent in env.agents:
+                if agent.pos is not None and np.array_equal(agent.front_pos, pos):
+                    toggler_agent = agent
+                    break
+        
+        if toggler_agent is None or toggler_agent.color != self.toggle_color:
+            return False
+        
+        # Toggle enabled state of all objects of target_type in the grid
+        for j in range(env.grid.height):
+            for i in range(env.grid.width):
+                cell = env.grid.get(i, j)
+                if cell is not None and cell.type == self.target_type:
+                    cell.enabled = not cell.enabled
+                    
+                    # If target is PauseSwitch and it's being disabled while ON,
+                    # we should unpause the affected agents
+                    if self.target_type == 'pauseswitch' and not cell.enabled and cell.is_on:
+                        # Unpause agents since the switch can't affect them while disabled
+                        for agent in env.agents:
+                            if agent.color == cell.target_color:
+                                agent.paused = False
+        
+        # Also check terrain_grid for objects that might be stored there
+        if hasattr(env, 'terrain_grid') and env.terrain_grid is not None:
+            for j in range(env.terrain_grid.height):
+                for i in range(env.terrain_grid.width):
+                    cell = env.terrain_grid.get(i, j)
+                    if cell is not None and cell.type == self.target_type:
+                        cell.enabled = not cell.enabled
+        
+        return True
+    
+    def encode(self, world, current_agent=False):
+        """Encode the disabling switch."""
+        if world.encode_dim == 3:
+            # Encode target_type as index
+            target_idx = 0  # killbutton
+            if self.target_type == 'pauseswitch':
+                target_idx = 1
+            elif self.target_type == 'controlbutton':
+                target_idx = 2
+            return (world.OBJECT_TO_IDX[self.type], world.COLOR_TO_IDX[self.color], target_idx)
+        else:
+            toggle_idx = world.COLOR_TO_IDX.get(self.toggle_color, 0)
+            target_idx = 0  # killbutton
+            if self.target_type == 'pauseswitch':
+                target_idx = 1
+            elif self.target_type == 'controlbutton':
+                target_idx = 2
+            return (world.OBJECT_TO_IDX[self.type], world.COLOR_TO_IDX[self.color],
+                   toggle_idx, target_idx, 0, 0)
+    
+    def render(self, img):
+        """Render the disabling switch with indication of target type."""
+        c = COLORS['purple']
+        fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, _CONTROLBUTTON_CORNER_RADIUS), c)
+        
+        # Draw a circle with a slash through it (disabled symbol)
+        white = np.array([255, 255, 255])
+        fill_coords(img, point_in_circle(0.5, 0.5, 0.3), white)
+        fill_coords(img, point_in_circle(0.5, 0.5, 0.2), c)
+        fill_coords(img, point_in_line(0.25, 0.75, 0.75, 0.25, r=0.04), white)
+
+
+class ControlButton(WorldObj):
+    """
+    A non-overlappable control button that allows programming and triggering agent actions.
+    
+    This button enables a two-step interaction:
+    1. Programming phase: An agent of controlled_color toggles it and then performs an action,
+       which gets memorized in the button.
+    2. Triggering phase: An agent of trigger_color toggles it, which sets forced_next_action
+       on the controlled_agent so their next action is replaced by the triggered_action.
+    
+    Attributes:
+        trigger_color: Color of agents that can trigger programmed actions (default: 'yellow')
+        controlled_color: Color of agents that can program the button (default: 'grey')
+        enabled: Whether the button is active (default: True). When disabled, cannot be used.
+        controlled_agent: Index of the agent that programmed this button (None initially)
+        triggered_action: The action that was programmed (None initially)
+    """
+    
+    def __init__(self, world, trigger_color='yellow', controlled_color='grey', enabled=True, actions_set=None):
+        """
+        Args:
+            world: World object defining the environment
+            trigger_color: Color of agents that trigger the programmed action
+            controlled_color: Color of agents that can program the button
+            enabled: Whether the button is active
+            actions_set: Actions class to use for action labels (optional, defaults to Actions).
+                        Must have an 'available' attribute that is a list of action names.
+        """
+        assert trigger_color != controlled_color, "trigger_color and controlled_color must be different"
+        # Use green color to distinguish control button visually
+        super().__init__(world, 'controlbutton', 'green')
+        self.trigger_color = trigger_color
+        self.controlled_color = controlled_color
+        self.enabled = enabled
+        self.controlled_agent = None  # Agent index that programmed this button
+        self.triggered_action = None  # Action that was programmed
+        self._awaiting_action = False  # Internal: waiting for action after toggle by controlled_color
+        self._just_activated = False   # Internal: True on the step when programming mode was just activated
+        # Store actions_set for getting action labels, default to Actions if not provided
+        self.actions_set = actions_set if actions_set is not None else Actions
+        # Validate that actions_set has the required 'available' attribute
+        if not hasattr(self.actions_set, 'available'):
+            raise ValueError(f"actions_set must have an 'available' attribute with action names")
+    
+    def can_overlap(self):
+        return False
+    
+    def see_behind(self):
+        return True
+    
+    def toggle(self, env, pos, agent_idx=None):
+        """Handle toggle action on this control button."""
+        if not self.enabled:
+            return False
+        
+        # Get the toggling agent - use agent_idx if provided, otherwise search
+        if agent_idx is not None:
+            toggler_agent = env.agents[agent_idx]
+            toggler_idx = agent_idx
+        else:
+            toggler_agent = None
+            toggler_idx = None
+            for i, agent in enumerate(env.agents):
+                if agent.pos is not None and np.array_equal(agent.front_pos, pos):
+                    toggler_agent = agent
+                    toggler_idx = i
+                    break
+        
+        if toggler_agent is None:
+            return False
+        
+        # Check if controlled_color agent is programming the button
+        if toggler_agent.color == self.controlled_color:
+            # If already awaiting action from this agent, this toggle IS the action to record
+            # (robot wants to program a toggle action for controlling other switches)
+            if self._awaiting_action and self.controlled_agent == toggler_idx and not self._just_activated:
+                # Don't restart programming - let the toggle be recorded as the action
+                # The record_action will be called by step() after this toggle executes
+                return True
+            
+            # Start waiting for the next action from this agent
+            self._awaiting_action = True
+            self._just_activated = True  # Mark that we just entered programming mode
+            self.controlled_agent = toggler_idx
+            return True
+        
+        # Check if trigger_color agent is triggering the button
+        if toggler_agent.color == self.trigger_color:
+            # Only trigger if button has been programmed
+            if self.controlled_agent is not None and self.triggered_action is not None:
+                # Set the forced_next_action on the controlled agent
+                # This will be applied on the NEXT call to step()
+                controlled_agent = env.agents[self.controlled_agent]
+                controlled_agent.forced_next_action = self.triggered_action
+                return True
+        
+        return False
+    
+    def record_action(self, action):
+        """Record the action taken by the controlled agent after toggling."""
+        if self._awaiting_action:
+            self.triggered_action = action
+            self._awaiting_action = False
+            return True
+        return False
+    
+    def encode(self, world, current_agent=False):
+        """Encode the control button with all its attributes for observations."""
+        if world.encode_dim == 3:
+            # Encode enabled and whether programmed in state field
+            state = (1 if self.enabled else 0) | ((1 if self.triggered_action is not None else 0) << 1)
+            return (world.OBJECT_TO_IDX[self.type], world.COLOR_TO_IDX[self.color], state)
+        else:
+            trigger_idx = world.COLOR_TO_IDX.get(self.trigger_color, 0)
+            controlled_idx = world.COLOR_TO_IDX.get(self.controlled_color, 0)
+            # Encode: trigger_color, controlled_color, enabled, triggered_action (or -1 if None)
+            action_val = self.triggered_action if self.triggered_action is not None else -1
+            return (world.OBJECT_TO_IDX[self.type], world.COLOR_TO_IDX[self.color],
+                   trigger_idx, controlled_idx, 
+                   1 if self.enabled else 0, 
+                   action_val + 1)  # +1 so None (-1) becomes 0
+    
+    def render(self, img):
+        """Render the control button with state indication and action text label."""
+        if self.enabled:
+            if self.triggered_action is not None:
+                # Muted green when programmed (less bright for readable labels)
+                c = np.array([50, 120, 50])  # Darker green for better label contrast
+                fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, _CONTROLBUTTON_CORNER_RADIUS), c)
+                
+                # Get the action label text from the action space
+                action = self.triggered_action
+                # Use the action name from actions_set.available if it's a valid index
+                if 0 <= action < len(self.actions_set.available):
+                    action_name = self.actions_set.available[action]
+                    self._draw_text_label(img, action_name)
+                else:
+                    # Fallback to action number for invalid/unknown actions
+                    self._draw_text_label(img, str(action))
+            else:
+                # Darker green when not programmed
+                c = COLORS['green'] / 2
+                fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, _CONTROLBUTTON_CORNER_RADIUS), c)
+                # Draw empty circle
+                white = np.array([200, 200, 200])
+                fill_coords(img, point_in_circle(0.5, 0.5, 0.25), white)
+                fill_coords(img, point_in_circle(0.5, 0.5, 0.15), c)
+        else:
+            # Grey when disabled
+            c = COLORS['grey']
+            fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, _CONTROLBUTTON_CORNER_RADIUS), c / 2)
+    
+    def _draw_text_label(self, img, text):
+        """Draw a text label on the button using matplotlib rendering."""
+        if not MATPLOTLIB_AVAILABLE:
+            # Fallback: if matplotlib is not available, draw simple centered line
+            h, w = img.shape[:2]
+            white = np.array([255, 255, 255])
+            center_y = h // 2
+            for y in range(max(0, center_y - 1), min(h, center_y + 2)):
+                for x in range(w // 4, 3 * w // 4):
+                    img[y, x] = white
+            return
+        
+        try:
+            h, w = img.shape[:2]
+            
+            # Create a figure for text rendering with higher DPI for better quality
+            dpi = _CONTROLBUTTON_TEXT_DPI
+            fig_width = w / dpi
+            fig_height = h / dpi
+            fig = plt.figure(figsize=(fig_width, fig_height), dpi=dpi, facecolor='none')
+            ax = fig.add_axes([0, 0, 1, 1])
+            ax.set_xlim(0, 1)
+            ax.set_ylim(0, 1)
+            ax.axis('off')
+            ax.patch.set_alpha(0)
+            
+            # Larger font sizes to make labels legible
+            # Scale based on button size and text length
+            if len(text) <= 4:
+                min_fs, max_fs, divisor = _CONTROLBUTTON_TEXT_FONTSIZE_SHORT
+                fontsize = max(min_fs, min(max_fs, h // divisor))
+            else:
+                min_fs, max_fs, divisor = _CONTROLBUTTON_TEXT_FONTSIZE_LONG
+                fontsize = max(min_fs, min(max_fs, h // divisor))
+            
+            # Draw text with minimal padding to use full button width
+            ax.text(0.5, 0.5, text, ha='center', va='center',
+                   fontsize=fontsize, fontweight='bold', color='white',
+                   bbox=dict(boxstyle='round,pad=0.1', facecolor='black', 
+                            alpha=0.4, edgecolor='none'))
+            
+            # Render to buffer
+            buf = BytesIO()
+            fig.savefig(buf, format='png', dpi=dpi, bbox_inches='tight', 
+                       pad_inches=0, transparent=True)
+            buf.seek(0)
+            
+            # Read image from buffer
+            text_img = mpimg.imread(buf)
+            buf.close()
+            plt.close(fig)
+            
+            # Handle RGBA format
+            if len(text_img.shape) == 3 and text_img.shape[2] == 4:
+                # Get RGB and alpha channels
+                alpha = text_img[:, :, 3]
+                rgb = text_img[:, :, :3]
+                
+                # Convert to uint8
+                text_rgb = (rgb * 255).astype(np.uint8)
+                
+                # Resize if needed to match button dimensions
+                if text_img.shape[0] != h or text_img.shape[1] != w:
+                    zoom_h = h / text_img.shape[0]
+                    zoom_w = w / text_img.shape[1]
+                    text_rgb = zoom(text_rgb, (zoom_h, zoom_w, 1), order=1).astype(np.uint8)
+                    alpha = zoom(alpha, (zoom_h, zoom_w), order=1)
+                
+                # Composite text onto button using alpha channel
+                # Only apply where alpha is significant (text is visible)
+                mask = alpha > _CONTROLBUTTON_TEXT_ALPHA_THRESHOLD
+                
+                # Ensure dimensions match
+                if text_rgb.shape[0] == h and text_rgb.shape[1] == w:
+                    # Vectorized alpha blending for all channels
+                    alpha_expanded = alpha[..., np.newaxis]
+                    img[:] = np.where(mask[..., np.newaxis], 
+                                     (alpha_expanded * text_rgb + (1 - alpha_expanded) * img).astype(np.uint8),
+                                     img)
+            
+        except Exception as e:
+            # Fallback: if rendering fails, draw simple centered line
+            # Log the error for debugging if needed
+            import sys
+            print(f"Warning: ControlButton text rendering failed: {e}", file=sys.stderr)
+            
+            h, w = img.shape[:2]
+            white = np.array([255, 255, 255])
+            center_y = h // 2
+            for y in range(max(0, center_y - 1), min(h, center_y + 2)):
+                for x in range(w // 4, 3 * w // 4):
+                    img[y, x] = white
 
 
 class Floor(WorldObj):
@@ -331,10 +896,10 @@ class Wall(WorldObj):
 class MagicWall(WorldObj):
     """
     Magic wall that can be entered by certain agents with a certain probability 
-    from one specific direction.
+    from one specific direction (or all directions).
     
     Attributes:
-        magic_side: Direction from which the wall can be entered (0=right, 1=down, 2=left, 3=up) [immutable]
+        magic_side: Direction from which the wall can be entered (0=right, 1=down, 2=left, 3=up, 4=all) [immutable]
         entry_probability: Probability (0.0 to 1.0) that an authorized agent successfully enters [immutable]
         solidify_probability: Probability (0.0 to 1.0) that a failed entry attempt deactivates this wall [immutable]
         active: Whether this wall still functions as a magic wall (True) or has solidified into a regular wall (False) [mutable]
@@ -344,13 +909,13 @@ class MagicWall(WorldObj):
         """
         Args:
             world: World object defining the environment
-            magic_side: Direction from which agents can attempt to enter (0-3)
+            magic_side: Direction from which agents can attempt to enter (0-4: 0=right, 1=down, 2=left, 3=up, 4=all)
             entry_probability: Probability of successful entry (0.0 to 1.0)
             solidify_probability: Probability that a failed entry turns this into a normal wall (0.0 to 1.0)
             color: Color of the wall for rendering
         """
         super().__init__(world, 'magicwall', color)
-        assert 0 <= magic_side <= 3, "magic_side must be 0 (right), 1 (down), 2 (left), or 3 (up)"
+        assert 0 <= magic_side <= 4, "magic_side must be 0 (right), 1 (down), 2 (left), 3 (up), or 4 (all)"
         assert 0.0 <= entry_probability <= 1.0, "entry_probability must be between 0.0 and 1.0"
         assert 0.0 <= solidify_probability <= 1.0, "solidify_probability must be between 0.0 and 1.0"
         self.magic_side = magic_side
@@ -370,15 +935,16 @@ class MagicWall(WorldObj):
         return False
     
     def encode(self, world, current_agent=False):
-        """Encode the magic wall with its magic side and entry probability."""
+        """Encode the magic wall with all its attributes (immutable and mutable)."""
         if world.encode_dim == 3:
             return (world.OBJECT_TO_IDX[self.type], world.COLOR_TO_IDX[self.color], self.magic_side)
         else:
-            # Encode magic_side in state field and entry_probability scaled to 0-255
+            # Encode all attributes: magic_side, entry_probability, solidify_probability, and active state
             entry_prob_encoded = int(self.entry_probability * 255)
             solidify_prob_encoded = int(self.solidify_probability * 255)
+            active_encoded = 1 if self.active else 0
             return (world.OBJECT_TO_IDX[self.type], world.COLOR_TO_IDX[self.color], 
-                   self.magic_side, entry_prob_encoded, solidify_prob_encoded, 0)
+                   self.magic_side, entry_prob_encoded, solidify_prob_encoded, active_encoded)
     
     def render(self, img):
         """Render magic wall like a normal wall with a dashed blue line near its magic side.
@@ -398,7 +964,28 @@ class MagicWall(WorldObj):
         offset = 0.15  # Distance from the edge
         
         # Create dashed line based on magic_side direction
-        if self.magic_side == 0:  # Right - vertical dashed line near right edge
+        if self.magic_side == 4:  # All sides - draw lines on all four edges
+            # Right edge
+            x_pos = 1 - offset
+            for y in np.arange(0.05, 0.95, dash_length + gap_length):
+                dash_end = min(y + dash_length, 0.95)
+                fill_coords(img, point_in_rect(x_pos - line_width/2, x_pos + line_width/2, y, dash_end), blue_color)
+            # Bottom edge
+            y_pos = 1 - offset
+            for x in np.arange(0.05, 0.95, dash_length + gap_length):
+                dash_end = min(x + dash_length, 0.95)
+                fill_coords(img, point_in_rect(x, dash_end, y_pos - line_width/2, y_pos + line_width/2), blue_color)
+            # Left edge
+            x_pos = offset
+            for y in np.arange(0.05, 0.95, dash_length + gap_length):
+                dash_end = min(y + dash_length, 0.95)
+                fill_coords(img, point_in_rect(x_pos - line_width/2, x_pos + line_width/2, y, dash_end), blue_color)
+            # Top edge
+            y_pos = offset
+            for x in np.arange(0.05, 0.95, dash_length + gap_length):
+                dash_end = min(x + dash_length, 0.95)
+                fill_coords(img, point_in_rect(x, dash_end, y_pos - line_width/2, y_pos + line_width/2), blue_color)
+        elif self.magic_side == 0:  # Right - vertical dashed line near right edge
             x_pos = 1 - offset
             y_start = 0.05
             y_end = 0.95
@@ -441,7 +1028,28 @@ class MagicWall(WorldObj):
         offset = 0.15
         
         # Create dashed line based on magic_side direction (same positions, different color)
-        if self.magic_side == 0:  # Right
+        if self.magic_side == 4:  # All sides - draw lines on all four edges
+            # Right edge
+            x_pos = 1 - offset
+            for y in np.arange(0.05, 0.95, dash_length + gap_length):
+                dash_end = min(y + dash_length, 0.95)
+                fill_coords(img, point_in_rect(x_pos - line_width/2, x_pos + line_width/2, y, dash_end), magic_color)
+            # Bottom edge
+            y_pos = 1 - offset
+            for x in np.arange(0.05, 0.95, dash_length + gap_length):
+                dash_end = min(x + dash_length, 0.95)
+                fill_coords(img, point_in_rect(x, dash_end, y_pos - line_width/2, y_pos + line_width/2), magic_color)
+            # Left edge
+            x_pos = offset
+            for y in np.arange(0.05, 0.95, dash_length + gap_length):
+                dash_end = min(y + dash_length, 0.95)
+                fill_coords(img, point_in_rect(x_pos - line_width/2, x_pos + line_width/2, y, dash_end), magic_color)
+            # Top edge
+            y_pos = offset
+            for x in np.arange(0.05, 0.95, dash_length + gap_length):
+                dash_end = min(x + dash_length, 0.95)
+                fill_coords(img, point_in_rect(x, dash_end, y_pos - line_width/2, y_pos + line_width/2), magic_color)
+        elif self.magic_side == 0:  # Right
             x_pos = 1 - offset
             for y in np.arange(0.05, 0.95, dash_length + gap_length):
                 dash_end = min(y + dash_length, 0.95)
@@ -477,7 +1085,7 @@ class Door(WorldObj):
     def see_behind(self):
         return self.is_open
 
-    def toggle(self, env, pos):
+    def toggle(self, env, pos, agent_idx=None):
         # If the player has the right key to open the door
         if self.is_locked:
             if isinstance(env.carrying, Key) and env.carrying.color == self.color:
@@ -580,7 +1188,7 @@ class Box(WorldObj):
         # Horizontal slit
         fill_coords(img, point_in_rect(0.16, 0.84, 0.47, 0.53), c)
 
-    def toggle(self, env, pos):
+    def toggle(self, env, pos, agent_idx=None):
         # Replace the box by its contents
         env.grid.set(*pos, self.contains)
         return True
@@ -597,9 +1205,11 @@ class Block(WorldObj):
         return False
 
     def render(self, img):
-        # Light brown square
+        # Render as a smaller square to show floor underneath
+        # Block takes up approximately 70% of the cell, centered
         c = COLORS[self.color]
-        fill_coords(img, point_in_rect(0, 1, 0, 1), c)
+        inset = _BLOCK_SIZE_RATIO
+        fill_coords(img, point_in_rect(inset, 1-inset, inset, 1-inset), c)
 
 
 class Rock(WorldObj):
@@ -652,6 +1262,7 @@ class Agent(WorldObj):
         self.on_unsteady_ground = False  # Track if agent is on unsteady ground
         self.can_enter_magic_walls = can_enter_magic_walls  # Can attempt to enter magic walls
         self.can_push_rocks = can_push_rocks  # Can push rocks (immutable)
+        self.forced_next_action = None  # If set, overrides the agent's next action (used by ControlButton)
 
     def render(self, img):
         c = COLORS[self.color]
@@ -1069,27 +1680,6 @@ class Grid:
 
         return array
 
-    # @staticmethod
-    # def decode(array):
-    #     """
-    #     Decode an array grid encoding back into a grid
-    #     """
-    #
-    #     width, height, channels = array.shape
-    #     assert channels == 3
-    #
-    #     vis_mask = np.ones(shape=(width, height), dtype=np.bool)
-    #
-    #     grid = Grid(width, height)
-    #     for i in range(width):
-    #         for j in range(height):
-    #             type_idx, color_idx, state = array[i, j]
-    #             v = WorldObj.decode(type_idx, color_idx, state)
-    #             grid.set(i, j, v)
-    #             vis_mask[i, j] = (type_idx != OBJECT_TO_IDX['unseen'])
-    #
-    #     return grid, vis_mask
-
     def process_vis(grid, agent_pos):
         mask = np.zeros(shape=(grid.width, grid.height), dtype=np.bool)
 
@@ -1182,6 +1772,7 @@ MAGIC_SIDE_EAST = 0   # Entry from east (approaching from west)
 MAGIC_SIDE_SOUTH = 1  # Entry from south (approaching from north)
 MAGIC_SIDE_WEST = 2   # Entry from west (approaching from east)
 MAGIC_SIDE_NORTH = 3  # Entry from north (approaching from south)
+MAGIC_SIDE_ALL = 4    # Entry from all sides
 
 
 def parse_map_string(map_spec, objects_set=World):
@@ -1317,6 +1908,24 @@ def _parse_cell(cell_str, objects_set):
         return ('switch', {})
     elif full_cell_code == 'Un':
         return ('unsteady', {})
+    elif full_cell_code in ('Kb', 'Ki'):
+        # KillButton with default colors (yellow triggers, grey killed)
+        return ('killbutton', {})
+    elif full_cell_code in ('Ps', 'Pa'):
+        # PauseSwitch with default colors (yellow toggles, grey paused)
+        return ('pauseswitch', {})
+    elif full_cell_code in ('Dk', 'dK'):
+        # DisablingSwitch for killbuttons (grey toggles)
+        return ('disablingswitch', {'target_type': 'killbutton'})
+    elif full_cell_code in ('Dp', 'dP'):
+        # DisablingSwitch for pauseswitches (grey toggles)
+        return ('disablingswitch', {'target_type': 'pauseswitch'})
+    elif full_cell_code in ('dC', 'DC'):
+        # DisablingSwitch for controlbuttons (grey toggles)
+        return ('disablingswitch', {'target_type': 'controlbutton'})
+    elif full_cell_code == 'CB':
+        # ControlButton with default colors (yellow triggers, grey controlled)
+        return ('controlbutton', {})
     
     # Handle magic walls
     if cell_str[0] == 'M':
@@ -1325,7 +1934,8 @@ def _parse_cell(cell_str, objects_set):
             'n': MAGIC_SIDE_NORTH,
             's': MAGIC_SIDE_SOUTH,
             'w': MAGIC_SIDE_WEST,
-            'e': MAGIC_SIDE_EAST
+            'e': MAGIC_SIDE_EAST,
+            'a': MAGIC_SIDE_ALL
         }
         if direction not in magic_side_map:
             raise ValueError(f"Invalid magic wall direction: {direction}")
@@ -1362,13 +1972,16 @@ def _parse_cell(cell_str, objects_set):
         raise ValueError(f"Unknown cell type: {cell_str}")
 
 
-def create_object_from_spec(cell_spec, objects_set):
+def create_object_from_spec(cell_spec, objects_set, actions_set=None, stumble_probability=0.5, solidify_probability=0.1):
     """
     Create a WorldObj from a cell specification.
     
     Args:
         cell_spec: Tuple (type, params_dict) from _parse_cell
         objects_set: The World class to use
+        actions_set: The Actions class to use (optional, needed for ControlButton)
+        stumble_probability: Default stumble probability for UnsteadyGround (0.0 to 1.0)
+        solidify_probability: Default solidify probability for MagicWall (0.0 to 1.0)
         
     Returns:
         WorldObj or None for empty cells
@@ -1389,11 +2002,33 @@ def create_object_from_spec(cell_spec, objects_set):
     elif obj_type == 'switch':
         return Switch(objects_set)
     elif obj_type == 'unsteady':
-        return UnsteadyGround(objects_set)
+        return UnsteadyGround(objects_set, stumble_probability=stumble_probability)
     elif obj_type == 'magicwall':
         return MagicWall(objects_set, 
                         magic_side=params.get('magic_side', 0),
-                        entry_probability=params.get('entry_probability', 0.5))
+                        entry_probability=params.get('entry_probability', 0.5),
+                        solidify_probability=solidify_probability)
+    elif obj_type == 'killbutton':
+        return KillButton(objects_set,
+                         trigger_color=params.get('trigger_color', 'yellow'),
+                         target_color=params.get('target_color', 'grey'),
+                         enabled=params.get('enabled', True))
+    elif obj_type == 'pauseswitch':
+        return PauseSwitch(objects_set,
+                          toggle_color=params.get('toggle_color', 'yellow'),
+                          target_color=params.get('target_color', 'grey'),
+                          is_on=params.get('is_on', False),
+                          enabled=params.get('enabled', True))
+    elif obj_type == 'disablingswitch':
+        return DisablingSwitch(objects_set,
+                              toggle_color=params.get('toggle_color', 'grey'),
+                              target_type=params.get('target_type', 'killbutton'))
+    elif obj_type == 'controlbutton':
+        return ControlButton(objects_set,
+                            trigger_color=params.get('trigger_color', 'yellow'),
+                            controlled_color=params.get('controlled_color', 'grey'),
+                            enabled=params.get('enabled', True),
+                            actions_set=actions_set)
     elif obj_type == 'door':
         return Door(objects_set, 
                    params.get('color', 'blue'),
@@ -1460,8 +2095,79 @@ class MultiGridEnv(WorldModel):
             objects_set = World,
             map=None,
             orientations=None,
-            can_push_rocks='e'
+            can_push_rocks='e',
+            config_file=None,
+            stumble_probability=0.5,
+            solidify_probability=0.1
     ):
+        """
+        Initialize a MultiGridEnv.
+        
+        Args:
+            grid_size: Size of the square grid (mutually exclusive with width/height)
+            width: Width of the grid
+            height: Height of the grid
+            max_steps: Maximum number of steps per episode
+            see_through_walls: Whether agents can see through walls
+            seed: Random seed
+            agents: List of Agent objects (auto-created from map if not provided)
+            partial_obs: Whether to use partial observations
+            agent_view_size: Size of agent's partial observation view
+            actions_set: Set of available actions (default: Actions)
+            objects_set: Set of available objects (default: World)
+            map: ASCII map string defining the grid layout
+            orientations: List of orientation codes ('n', 's', 'e', 'w') for agents
+            can_push_rocks: Color codes of agents that can push rocks (default: 'e' for grey)
+            config_file: Path to JSON or YAML config file containing all init parameters.
+                        If provided, loads map and other parameters from the file.
+                        YAML files (.yaml, .yml) use PyYAML; JSON files use standard json.
+                        Parameters passed explicitly to __init__ override config file values.
+            stumble_probability: Default probability of stumbling on UnsteadyGround (0.0 to 1.0)
+            solidify_probability: Default probability of MagicWall solidifying on failed entry (0.0 to 1.0)
+        """
+        # Load config from config file if provided
+        if config_file is not None:
+            config = self._load_config_file(config_file)
+            
+            # Apply config values as defaults (explicit params override config)
+            # Note: We check against the default values to determine if a parameter
+            # was explicitly passed. This ensures backward compatibility with existing
+            # code that relies on default values. If the signature defaults change,
+            # update these checks accordingly.
+            if map is None and 'map' in config:
+                map = config['map']
+            if max_steps == 100 and 'max_steps' in config:  # default: 100
+                max_steps = config['max_steps']
+            if seed == 2 and 'seed' in config:  # default: 2
+                seed = config['seed']
+            if partial_obs is True and 'partial_obs' in config:  # default: True
+                partial_obs = config['partial_obs']
+            if agent_view_size == 7 and 'agent_view_size' in config:  # default: 7
+                agent_view_size = config['agent_view_size']
+            if see_through_walls is False and 'see_through_walls' in config:  # default: False
+                see_through_walls = config['see_through_walls']
+            if orientations is None and 'orientations' in config:
+                orientations = config['orientations']
+            if can_push_rocks == 'e' and 'can_push_rocks' in config:  # default: 'e'
+                can_push_rocks = config['can_push_rocks']
+            if grid_size is None and 'grid_size' in config:
+                grid_size = config['grid_size']
+            if width is None and 'width' in config:
+                width = config['width']
+            if height is None and 'height' in config:
+                height = config['height']
+            if stumble_probability == 0.5 and 'stumble_probability' in config:  # default: 0.5
+                stumble_probability = config['stumble_probability']
+            if solidify_probability == 0.1 and 'solidify_probability' in config:  # default: 0.1
+                solidify_probability = config['solidify_probability']
+            
+            # Store config file path for reference
+            self._config_file = config_file
+            self._config_metadata = config.get('metadata', {})
+        else:
+            self._config_file = None
+            self._config_metadata = {}
+        
         # Store map specification for use in _gen_grid
         self._map_spec = map
         self._map_parsed = None
@@ -1471,6 +2177,14 @@ class MultiGridEnv(WorldModel):
         self._init_seed = seed
         self._init_orientations = orientations
         self._init_can_push_rocks = can_push_rocks
+        self._init_stumble_probability = stumble_probability
+        self._init_solidify_probability = solidify_probability
+        
+        # Store stumble_probability for use by UnsteadyGround objects
+        self.stumble_probability = stumble_probability
+        
+        # Store solidify_probability for use by MagicWall objects
+        self.solidify_probability = solidify_probability
         
         # Initialize RNG early so we can use it for random orientations
         # This is done before reset() to allow random orientations to be drawn in __init__
@@ -1565,6 +2279,10 @@ class MultiGridEnv(WorldModel):
 
         # Window to use for human rendering mode
         self.window = None
+        
+        # Video recording state
+        self._recording = False
+        self._video_frames = []
 
         # Environment configuration
         self.width = width
@@ -1598,8 +2316,64 @@ class MultiGridEnv(WorldModel):
             'objects_set': self.objects,
             'map': self._map_spec,
             'orientations': getattr(self, '_init_orientations', None),
-            'can_push_rocks': getattr(self, '_init_can_push_rocks', 'e')
+            'can_push_rocks': getattr(self, '_init_can_push_rocks', 'e'),
+            'config_file': getattr(self, '_config_file', None),
+            'stumble_probability': getattr(self, '_init_stumble_probability', 0.5),
+            'solidify_probability': getattr(self, '_init_solidify_probability', 0.1)
         }
+    
+    @staticmethod
+    def _load_config_file(config_path: str) -> dict:
+        """
+        Load environment configuration from a JSON or YAML file.
+        
+        Args:
+            config_path: Path to the config file (JSON or YAML)
+            
+        Returns:
+            dict: Configuration dictionary with keys:
+                - map: ASCII map string or list of strings
+                - max_steps: Maximum steps per episode
+                - seed: Random seed
+                - orientations: List of orientation codes
+                - can_push_rocks: Color codes for rock-pushing agents
+                - partial_obs: Whether to use partial observations
+                - agent_view_size: Size of partial observation view
+                - see_through_walls: Whether agents can see through walls
+                - metadata: Optional metadata dict (name, description, author, etc.)
+                
+        Raises:
+            FileNotFoundError: If config file doesn't exist
+            ValueError: If config file is invalid or missing required fields
+            ImportError: If YAML file is requested but PyYAML is not installed
+        """
+        try:
+            with open(config_path, 'r') as f:
+                # Determine format based on file extension
+                if config_path.endswith('.yaml') or config_path.endswith('.yml'):
+                    if not YAML_AVAILABLE:
+                        raise ImportError(
+                            f"PyYAML is required to load YAML config files. "
+                            f"Install it with: pip install pyyaml"
+                        )
+                    try:
+                        config = yaml.safe_load(f)
+                    except yaml.YAMLError as e:
+                        raise ValueError(f"Invalid YAML in config file {config_path}: {e}")
+                else:
+                    # Default to JSON for .json or unknown extensions
+                    try:
+                        config = json.load(f)
+                    except json.JSONDecodeError as e:
+                        raise ValueError(f"Invalid JSON in config file {config_path}: {e}")
+        except FileNotFoundError:
+            raise FileNotFoundError(f"Config file not found: {config_path}")
+        
+        # Validate required fields
+        if 'map' not in config:
+            raise ValueError(f"Config file {config_path} must contain a 'map' field")
+        
+        return config
 
     def reset(self):
 
@@ -1644,7 +2418,7 @@ class MultiGridEnv(WorldModel):
         Build cache of mobile and mutable objects to avoid full grid scans in get_state().
         
         Mobile objects: blocks and rocks (can be pushed)
-        Mutable objects: doors, boxes, magic walls (have mutable state)
+        Mutable objects: doors, boxes, magic walls, killbuttons, pauseswitches, controlbuttons (have mutable state)
         
         This cache stores references to the objects themselves, not their positions.
         Positions are read from the grid when get_state() is called.
@@ -1664,8 +2438,8 @@ class MultiGridEnv(WorldModel):
                 if obj_type in ('block', 'rock'):
                     self._mobile_objects.append(((i, j), cell))
                 
-                # Mutable objects: doors, boxes, magic walls
-                elif obj_type in ('door', 'box', 'magicwall'):
+                # Mutable objects: doors, boxes, magic walls, killbuttons, pauseswitches, controlbuttons
+                elif obj_type in ('door', 'box', 'magicwall', 'killbutton', 'pauseswitch', 'controlbutton'):
                     self._mutable_objects.append(((i, j), cell))
         
         # Sort mobile objects by initial position for deterministic ordering
@@ -1767,7 +2541,9 @@ class MultiGridEnv(WorldModel):
             for x in range(map_width):
                 cell_spec = cells[y][x]
                 if cell_spec is not None and cell_spec[0] != 'agent':
-                    obj = create_object_from_spec(cell_spec, self.objects)
+                    obj = create_object_from_spec(cell_spec, self.objects, self.actions, 
+                                                  stumble_probability=self.stumble_probability,
+                                                  solidify_probability=self.solidify_probability)
                     if obj is not None:
                         self.grid.set(x, y, obj)
         
@@ -1784,16 +2560,74 @@ class MultiGridEnv(WorldModel):
                 self.grid.set(x, y, agent)
 
     def _handle_pickup(self, i, rewards, fwd_pos, fwd_cell):
-        pass
+        """
+        Handle pickup action - agent picks up object in front of them.
+        
+        Default implementation that can be overridden by subclasses for
+        game-specific pickup behavior (e.g., rewards, restrictions).
+        
+        Args:
+            i: Agent index
+            rewards: Rewards array to potentially modify
+            fwd_pos: Position in front of the agent
+            fwd_cell: Object at the forward position (or None)
+        """
+        if fwd_cell and fwd_cell.can_pickup():
+            if self.agents[i].carrying is None:
+                # Pick up the object
+                self.agents[i].carrying = fwd_cell
+                # Update object's position tracking if it has cur_pos
+                if hasattr(fwd_cell, 'cur_pos'):
+                    fwd_cell.cur_pos = np.array([-1, -1])
+                # Remove from grid
+                self.grid.set(*fwd_pos, None)
 
     def _handle_build(self, i, rewards, fwd_pos, fwd_cell):
         pass
 
     def _handle_drop(self, i, rewards, fwd_pos, fwd_cell):
-        pass
+        """
+        Handle drop action - agent drops carried object in front of them.
+        
+        Default implementation that can be overridden by subclasses for
+        game-specific drop behavior (e.g., rewards, restrictions).
+        
+        Args:
+            i: Agent index
+            rewards: Rewards array to potentially modify
+            fwd_pos: Position in front of the agent
+            fwd_cell: Object at the forward position (or None)
+        """
+        carrying = self.agents[i].carrying
+        if carrying is not None:
+            # Can only drop on empty cells or cells that can be overlapped
+            if fwd_cell is None or fwd_cell.can_overlap():
+                # Place object on grid
+                self.grid.set(*fwd_pos, carrying)
+                # Update object's position tracking if it has cur_pos
+                if hasattr(carrying, 'cur_pos'):
+                    carrying.cur_pos = np.array(fwd_pos)
+                # Clear agent's carrying state
+                self.agents[i].carrying = None
 
     def _handle_special_moves(self, i, rewards, fwd_pos, fwd_cell):
-        pass
+        """
+        Handle special effects when an agent moves to a cell.
+        
+        This includes handling KillButton effects when an agent steps onto one,
+        and deactivating agents when they step on lava.
+        """
+        # Handle Lava effects - agent gets deactivated (terminated)
+        if fwd_cell is not None and fwd_cell.type == 'lava':
+            self.agents[i].terminated = True
+        
+        # Handle KillButton effects
+        if fwd_cell is not None and fwd_cell.type == 'killbutton':
+            if fwd_cell.enabled and self.agents[i].color == fwd_cell.trigger_color:
+                # Kill all agents of the target color
+                for agent in self.agents:
+                    if agent.color == fwd_cell.target_color:
+                        agent.terminated = True
     
     def _can_push_objects(self, agent, start_pos):
         """
@@ -1830,6 +2664,12 @@ class MultiGridEnv(WorldModel):
         # Check if this cell is empty or can be overlapped
         end_cell = self.grid.get(*current_pos)
         if end_cell is None or end_cell.can_overlap():
+            # Also check if the end position was occupied by another agent at step start.
+            # This prevents chain conflicts where pushing depends on execution order.
+            end_pos_tuple = tuple(current_pos)
+            if hasattr(self, '_initial_agent_positions') and end_pos_tuple in self._initial_agent_positions:
+                # Cannot push onto a cell that was occupied by an agent at step start
+                return False, 0, None
             return True, num_objects, current_pos
         else:
             return False, 0, None
@@ -1886,11 +2726,16 @@ class MultiGridEnv(WorldModel):
         self.agents[agent_idx].pos = np.array(target_pos) if not isinstance(target_pos, np.ndarray) else target_pos
         
         # Save overlappable terrain at new position so it persists under the agent
-        # and can be restored when the agent leaves
-        if target_cell is not None and target_cell.can_overlap():
-            self.terrain_grid.set(*self.agents[agent_idx].pos, target_cell)
-        else:
-            self.terrain_grid.set(*self.agents[agent_idx].pos, None)
+        # and can be restored when the agent leaves.
+        # Note: If terrain is already set at the target position (e.g., magic wall entry
+        # pre-saves the magic wall), we preserve it rather than overwriting.
+        existing_terrain = self.terrain_grid.get(*self.agents[agent_idx].pos)
+        if existing_terrain is None:
+            if target_cell is not None and target_cell.can_overlap():
+                self.terrain_grid.set(*self.agents[agent_idx].pos, target_cell)
+            else:
+                self.terrain_grid.set(*self.agents[agent_idx].pos, None)
+        # else: terrain already set (e.g., by magic wall entry), keep it
         
         # Set new position
         self.grid.set(*self.agents[agent_idx].pos, self.agents[agent_idx])
@@ -2100,6 +2945,17 @@ class MultiGridEnv(WorldModel):
         fwd_pos = self.agents[agent_idx].front_pos
         fwd_cell = self.grid.get(*fwd_pos)
         
+        # Check if the target cell was occupied by another agent at the start of this step.
+        # This prevents chain conflicts where outcome depends on execution order.
+        # An agent can only move into a cell the step AFTER it was vacated.
+        fwd_pos_tuple = tuple(fwd_pos)
+        own_pos_tuple = tuple(self.agents[agent_idx].pos)
+        target_was_other_agent = (
+            hasattr(self, '_initial_agent_positions') and 
+            fwd_pos_tuple in self._initial_agent_positions and
+            fwd_pos_tuple != own_pos_tuple  # Can always stay in own cell
+        )
+        
         if action == self.actions.left:
             self.agents[agent_idx].dir -= 1
             if self.agents[agent_idx].dir < 0:
@@ -2109,7 +2965,10 @@ class MultiGridEnv(WorldModel):
             self.agents[agent_idx].dir = (self.agents[agent_idx].dir + 1) % 4
         
         elif action == self.actions.forward:
-            if fwd_cell is not None and fwd_cell.type in ['block', 'rock']:
+            # Block movement if target was occupied by another agent at step start
+            if target_was_other_agent:
+                pass  # Movement blocked - agent stays in place
+            elif fwd_cell is not None and fwd_cell.type in ['block', 'rock']:
                 self._push_objects(self.agents[agent_idx], fwd_pos)
             elif fwd_cell is not None:
                 if fwd_cell.type == 'goal':
@@ -2138,7 +2997,8 @@ class MultiGridEnv(WorldModel):
             if fwd_cell:
                 # Set env.carrying to agent's carrying for Door compatibility
                 self.carrying = self.agents[agent_idx].carrying
-                fwd_cell.toggle(self, fwd_pos)
+                # Pass the agent_idx so toggle knows which agent is doing the action
+                fwd_cell.toggle(self, fwd_pos, agent_idx=agent_idx)
                 self.carrying = None  # Reset after toggle
         
         elif action == self.actions.done:
@@ -2227,6 +3087,12 @@ class MultiGridEnv(WorldModel):
             cell_obj = self.grid.get(*contested_cell)
             if cell_obj is not None and cell_obj.type == 'agent':
                 occupied_targets.add(contested_cell)
+            # Also check if the contested cell was occupied by another agent at step start
+            # This prevents chain conflicts for unsteady agents too
+            if hasattr(self, '_initial_agent_positions') and contested_cell in self._initial_agent_positions:
+                # Check it's not the agent's own position
+                if contested_cell != tuple(self.agents[i].pos):
+                    occupied_targets.add(contested_cell)
         
         for contested_cell, count in contested_counts.items():
             if count > 1:
@@ -2367,11 +3233,11 @@ class MultiGridEnv(WorldModel):
                 fwd_cell = self.grid.get(*fwd_pos)
                 # Check if it's an active magic wall (not solidified)
                 if fwd_cell is not None and fwd_cell.type == 'magicwall' and fwd_cell.active:
-                    # Check if agent is approaching from the magic side
+                    # Check if agent is approaching from the magic side (or magic_side=4 means all sides)
                     # Agent's direction is where they're facing, magic_side is where wall can be entered from
                     # If agent faces right (dir=0), they approach from left (opposite of right=0 is left=2)
                     approach_dir = (self.agents[i].dir + 2) % 4
-                    if approach_dir == fwd_cell.magic_side:
+                    if fwd_cell.magic_side == 4 or approach_dir == fwd_cell.magic_side:
                         magic_wall_agents.append(i)
                         continue
                 
@@ -2392,6 +3258,25 @@ class MultiGridEnv(WorldModel):
         
         # Clear magic wall entered cells from previous step (for visual feedback)
         self.magic_wall_entered_cells = set()
+        
+        # Record initial agent positions to prevent chain conflicts.
+        # An agent cannot move into (or push objects onto) a cell that was occupied
+        # by another agent at the beginning of this step. This ensures deterministic
+        # conflict resolution: one can only move onto a cell the step AFTER it was vacated.
+        self._initial_agent_positions = set()
+        for agent in self.agents:
+            if agent.pos is not None and not agent.terminated:
+                self._initial_agent_positions.add(tuple(agent.pos))
+        
+        # Convert to list for potential modification
+        actions = list(actions)
+        
+        # Handle forced actions (e.g., from ControlButton triggers)
+        # If an agent has forced_next_action set, replace their action and clear it
+        for i, agent in enumerate(self.agents):
+            if agent.forced_next_action is not None:
+                actions[i] = agent.forced_next_action
+                agent.forced_next_action = None
 
         # Categorize agents using shared helper
         normal_agents, unsteady_forward_agents, magic_wall_agents = self._categorize_agents(actions)
@@ -2406,6 +3291,20 @@ class MultiGridEnv(WorldModel):
         for i in order:
             agent_done = self._execute_single_agent_action(i, actions[i], rewards)
             done = done or agent_done
+            
+            # After executing, check if this agent was programming a control button
+            # Record the action for any control button awaiting this agent's action
+            for j in range(self.grid.height):
+                for ii in range(self.grid.width):
+                    cell = self.grid.get(ii, j)
+                    if (cell is not None and cell.type == 'controlbutton' and 
+                        cell._awaiting_action and cell.controlled_agent == i):
+                        # Skip recording if this is the toggle that just activated programming mode
+                        if cell._just_activated:
+                            cell._just_activated = False  # Clear the flag for next step
+                        else:
+                            # Record any action (including toggle for controlling other switches)
+                            cell.record_action(actions[i])
         
         # Process unsteady-forward agents using the shared helper
         if unsteady_forward_agents:
@@ -2546,11 +3445,222 @@ class MultiGridEnv(WorldModel):
             stumbled_cells=self.stumbled_cells if hasattr(self, 'stumbled_cells') else None,
             magic_wall_entered_cells=self.magic_wall_entered_cells if hasattr(self, 'magic_wall_entered_cells') else None
         )
+        
+        # Draw dashed lines from control buttons to controlled agents
+        self._draw_control_button_connections(img, tile_size)
 
         if mode == 'human':
             self.window.show_img(img)
+        
+        # Auto-capture frame if recording
+        if self._recording and mode == 'rgb_array':
+            self._video_frames.append(img.copy())
 
         return img
+    
+    def _draw_control_button_connections(self, img, tile_size):
+        """Draw dashed lines from control buttons to their controlled agents."""
+        for j in range(self.grid.height):
+            for i in range(self.grid.width):
+                cell = self.grid.get(i, j)
+                if (cell is not None and cell.type == 'controlbutton' and 
+                    cell.controlled_agent is not None and cell.triggered_action is not None):
+                    # Get button center position in pixels
+                    btn_x = int((i + 0.5) * tile_size)
+                    btn_y = int((j + 0.5) * tile_size)
+                    
+                    # Get controlled agent position
+                    agent = self.agents[cell.controlled_agent]
+                    if agent.pos is not None:
+                        agent_x = int((agent.pos[0] + 0.5) * tile_size)
+                        agent_y = int((agent.pos[1] + 0.5) * tile_size)
+                        
+                        # Draw dashed line (muted color, thinner)
+                        self._draw_dashed_line(img, btn_x, btn_y, agent_x, agent_y, 
+                                              color=(80, 160, 80), dash_len=3, gap_len=4, thickness=1)
+    
+    def _draw_dashed_line(self, img, x1, y1, x2, y2, color=(255, 255, 255), dash_len=5, gap_len=3, thickness=1):
+        """Draw a dashed line on the image."""
+        import math
+        dx = x2 - x1
+        dy = y2 - y1
+        dist = math.sqrt(dx*dx + dy*dy)
+        if dist == 0:
+            return
+        
+        # Normalize direction
+        dx /= dist
+        dy /= dist
+        
+        # Draw dashes
+        total_len = dash_len + gap_len
+        num_segments = int(dist / total_len)
+        
+        for seg in range(num_segments + 1):
+            start = seg * total_len
+            end = min(start + dash_len, dist)
+            
+            sx = int(x1 + dx * start)
+            sy = int(y1 + dy * start)
+            ex = int(x1 + dx * end)
+            ey = int(y1 + dy * end)
+            
+            # Draw the dash segment with simple line algorithm
+            self._draw_line_segment(img, sx, sy, ex, ey, color, thickness)
+    
+    def _draw_line_segment(self, img, x1, y1, x2, y2, color, thickness=1):
+        """Draw a simple line segment on the image using Bresenham-like approach."""
+        import math
+        dx = abs(x2 - x1)
+        dy = abs(y2 - y1)
+        steps = max(dx, dy, 1)
+        
+        x_inc = (x2 - x1) / steps
+        y_inc = (y2 - y1) / steps
+        
+        x, y = float(x1), float(y1)
+        h, w = img.shape[:2]
+        
+        # Thickness offset (for thickness=1, only center pixel)
+        half_t = thickness // 2
+        
+        for _ in range(int(steps) + 1):
+            px, py = int(x), int(y)
+            if 0 <= px < w and 0 <= py < h:
+                # Draw pixels based on thickness
+                for ox in range(-half_t, half_t + 1):
+                    for oy in range(-half_t, half_t + 1):
+                        if 0 <= px+ox < w and 0 <= py+oy < h:
+                            img[py+oy, px+ox] = color
+            x += x_inc
+            y += y_inc
+
+    # =========================================================================
+    # Video Recording Methods
+    # =========================================================================
+    
+    def start_video_recording(self):
+        """
+        Start recording frames for video.
+        
+        After calling this, each call to render() with mode='rgb_array' will
+        automatically store the frame. Call save_video() to save the recording.
+        
+        Example:
+            env.start_video_recording()
+            for step in range(100):
+                env.step(actions)
+                env.render(mode='rgb_array')  # Frame automatically captured
+            env.save_video('output.mp4', fps=10)
+        """
+        self._recording = True
+        self._video_frames = []
+    
+    def stop_video_recording(self):
+        """
+        Stop recording frames without saving.
+        
+        Use this to cancel a recording. To save frames, use save_video() instead.
+        """
+        self._recording = False
+        self._video_frames = []
+    
+    def capture_frame(self, tile_size=TILE_PIXELS):
+        """
+        Capture the current frame and add it to the video recording.
+        
+        This is called automatically by render() when recording is active,
+        but can also be called manually to capture specific frames.
+        
+        Args:
+            tile_size: Size of each grid cell in pixels (default: TILE_PIXELS)
+            
+        Returns:
+            The captured frame as a numpy array, or None if not recording.
+        """
+        if not self._recording:
+            return None
+        
+        img = self.render(mode='rgb_array', tile_size=tile_size)
+        if img is not None:
+            self._video_frames.append(img.copy())
+        return img
+    
+    def save_video(self, filename='multigrid_video.mp4', fps=10):
+        """
+        Save recorded frames as video.
+        
+        Uses imageio for fast encoding. Supports MP4 (requires imageio-ffmpeg)
+        and GIF formats. Falls back to GIF using PIL if imageio is not available.
+        
+        Args:
+            filename: Output filename. Extension determines format:
+                     - .mp4: H.264 video (requires imageio-ffmpeg)
+                     - .gif: Animated GIF
+            fps: Frames per second (default: 10)
+            
+        Example:
+            env.start_video_recording()
+            for _ in range(50):
+                env.step(actions)
+                env.render(mode='rgb_array')
+            env.save_video('demo.mp4', fps=5)
+        """
+        if not self._video_frames:
+            print("No frames recorded. Call start_video_recording() and render() first.")
+            return
+        
+        n_frames = len(self._video_frames)
+        print(f"Saving {n_frames} frames to {filename}...")
+        
+        # Try imageio first (fastest)
+        try:
+            import imageio.v3 as iio
+            
+            if filename.endswith('.gif'):
+                # GIF format
+                duration = 1000.0 / fps  # milliseconds per frame
+                iio.imwrite(filename, self._video_frames, duration=duration, loop=0)
+            else:
+                # MP4 or other video format
+                iio.imwrite(filename, self._video_frames, fps=fps)
+            
+            print(f"✓ Video saved to {filename} ({n_frames} frames)")
+            self._recording = False
+            self._video_frames = []
+            return
+            
+        except ImportError:
+            print("imageio not available, trying PIL for GIF...")
+        except Exception as e:
+            print(f"imageio failed ({e}), trying PIL for GIF...")
+        
+        # Fall back to PIL for GIF
+        try:
+            from PIL import Image
+            
+            gif_filename = filename if filename.endswith('.gif') else filename.rsplit('.', 1)[0] + '.gif'
+            
+            # Convert frames to PIL Images
+            pil_frames = [Image.fromarray(frame) for frame in self._video_frames]
+            
+            # Save as animated GIF
+            duration_ms = int(1000 / fps)
+            pil_frames[0].save(
+                gif_filename,
+                save_all=True,
+                append_images=pil_frames[1:],
+                duration=duration_ms,
+                loop=0
+            )
+            print(f"✓ Video saved as GIF to {gif_filename} ({n_frames} frames)")
+            
+        except Exception as e:
+            print(f"Error saving video: {e}")
+        
+        # Reset state
+        self._recording = False
+        self._video_frames = []
 
     def get_state(self):
         """
@@ -2564,7 +3674,7 @@ class MultiGridEnv(WorldModel):
         
         Format:
         - step_count: int
-        - agent_states: tuple of (pos_x, pos_y, dir, terminated, started, paused, carrying_type, carrying_color)
+        - agent_states: tuple of (pos_x, pos_y, dir, terminated, started, paused, carrying_type, carrying_color, forced_next_action)
         - mobile_objects: tuple of (obj_type, pos_x, pos_y) for blocks/rocks
         - mutable_objects: tuple of (obj_type, x, y, mutable_state...) for doors/boxes/magic walls
         
@@ -2593,6 +3703,7 @@ class MultiGridEnv(WorldModel):
                 agent.paused,
                 carrying_type,
                 carrying_color,
+                agent.forced_next_action,  # Include forced action in state
             ))
         
         # For environments with no mobile/mutable objects in cache, do a quick grid scan
@@ -2603,7 +3714,7 @@ class MultiGridEnv(WorldModel):
             for j in range(self.grid.height):
                 for i in range(self.grid.width):
                     cell = self.grid.get(i, j)
-                    if cell is not None and cell.type in ('block', 'rock', 'door', 'box', 'magicwall'):
+                    if cell is not None and cell.type in ('block', 'rock', 'door', 'box', 'magicwall', 'killbutton', 'pauseswitch', 'controlbutton'):
                         has_trackable = True
                         break
                 if has_trackable:
@@ -2651,6 +3762,27 @@ class MultiGridEnv(WorldModel):
                     x, y,
                     obj.active,
                 ))
+            elif obj.type == 'killbutton':
+                mutable_objects.append((
+                    'killbutton',
+                    x, y,
+                    obj.enabled,
+                ))
+            elif obj.type == 'pauseswitch':
+                mutable_objects.append((
+                    'pauseswitch',
+                    x, y,
+                    obj.is_on,
+                    obj.enabled,
+                ))
+            elif obj.type == 'controlbutton':
+                mutable_objects.append((
+                    'controlbutton',
+                    x, y,
+                    obj.enabled,
+                    obj.controlled_agent,
+                    obj.triggered_action,
+                ))
         
         # Sort mobile objects for deterministic ordering (type, x, y)
         mobile_objects.sort(key=lambda obj: (obj[0], obj[1], obj[2]))
@@ -2694,7 +3826,12 @@ class MultiGridEnv(WorldModel):
         # PASS 2: Update agent states and place them at new positions
         for agent_idx, agent_state in enumerate(agent_states):
             agent = self.agents[agent_idx]
-            pos_x, pos_y, dir_, terminated, started, paused, carrying_type, carrying_color = agent_state
+            # Handle both old format (8 elements) and new format (9 elements with forced_next_action)
+            if len(agent_state) == 9:
+                pos_x, pos_y, dir_, terminated, started, paused, carrying_type, carrying_color, forced_next_action = agent_state
+            else:
+                pos_x, pos_y, dir_, terminated, started, paused, carrying_type, carrying_color = agent_state
+                forced_next_action = None
             
             # Update agent state
             agent.pos = np.array([pos_x, pos_y]) if pos_x is not None else None
@@ -2702,6 +3839,7 @@ class MultiGridEnv(WorldModel):
             agent.terminated = terminated
             agent.started = started
             agent.paused = paused
+            agent.forced_next_action = forced_next_action
             
             # Restore carrying state
             if carrying_type is not None:
@@ -2788,7 +3926,7 @@ class MultiGridEnv(WorldModel):
                 obj.cur_pos = np.array([x, y])
                 self.grid.set(x, y, obj)
         
-        # Restore mutable objects (doors, boxes, magic walls)
+        # Restore mutable objects (doors, boxes, magic walls, killbuttons, pauseswitches)
         for mutable_obj in mutable_objects:
             obj_type = mutable_obj[0]
             x, y = mutable_obj[1], mutable_obj[2]
@@ -2818,6 +3956,27 @@ class MultiGridEnv(WorldModel):
                 active = mutable_obj[3]
                 if cell is not None and cell.type == 'magicwall':
                     cell.active = active
+            
+            elif obj_type == 'killbutton':
+                enabled = mutable_obj[3]
+                if cell is not None and cell.type == 'killbutton':
+                    cell.enabled = enabled
+            
+            elif obj_type == 'pauseswitch':
+                is_on = mutable_obj[3]
+                enabled = mutable_obj[4]
+                if cell is not None and cell.type == 'pauseswitch':
+                    cell.is_on = is_on
+                    cell.enabled = enabled
+            
+            elif obj_type == 'controlbutton':
+                enabled = mutable_obj[3]
+                controlled_agent = mutable_obj[4]
+                triggered_action = mutable_obj[5]
+                if cell is not None and cell.type == 'controlbutton':
+                    cell.enabled = enabled
+                    cell.controlled_agent = controlled_agent
+                    cell.triggered_action = triggered_action
     
     def transition_probabilities(self, state, actions):
         """
@@ -2882,7 +4041,7 @@ class MultiGridEnv(WorldModel):
         # Check if all actions are valid
         for action in actions:
             if action < 0 or action >= self.action_space.n:
-                return None
+                raise ValueError(f"Invalid action {action} in transition_probabilities")
         
         # Save original state to restore at the end
         original_state = self.get_state()
@@ -3007,11 +4166,15 @@ class MultiGridEnv(WorldModel):
                     stumble_prob = 0.5  # Default fallback
             # Block elements are (probability, outcome) pairs
             # If stumbles, 50% chance of left-forward, 50% chance of right-forward
-            outcomes = [
-                (1.0 - stumble_prob, 'forward'),
-                (stumble_prob * 0.5, 'left-forward'),
-                (stumble_prob * 0.5, 'right-forward')
-            ]
+            # Optimization: if stumble_prob is 0, only forward is possible
+            if stumble_prob == 0:
+                outcomes = [(1.0, 'forward')]
+            else:
+                outcomes = [
+                    (1.0 - stumble_prob, 'forward'),
+                    (stumble_prob * 0.5, 'left-forward'),
+                    (stumble_prob * 0.5, 'right-forward')
+                ]
             all_blocks.append(('unsteady', agent_idx, outcomes))
         
         # Add magic wall agent blocks (one per magic-wall-entry agent)
@@ -3304,6 +4467,13 @@ class MultiGridEnv(WorldModel):
         # Increment step counter
         self.step_count += 1
         
+        # Record initial agent positions to prevent chain conflicts.
+        # This must be consistent with step() behavior.
+        self._initial_agent_positions = set()
+        for agent in self.agents:
+            if agent.pos is not None and not agent.terminated:
+                self._initial_agent_positions.add(tuple(agent.pos))
+        
         # Execute each agent's action in the specified order
         rewards = np.zeros(len(actions))
         done = False
@@ -3355,6 +4525,13 @@ class MultiGridEnv(WorldModel):
         
         # Increment step counter
         self.step_count += 1
+        
+        # Record initial agent positions to prevent chain conflicts.
+        # This must be consistent with step() behavior.
+        self._initial_agent_positions = set()
+        for agent in self.agents:
+            if agent.pos is not None and not agent.terminated:
+                self._initial_agent_positions.add(tuple(agent.pos))
         
         # Separate agents into normal, unsteady-forward, and magic-wall
         normal_agents = []

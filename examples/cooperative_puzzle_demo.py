@@ -20,11 +20,8 @@ Object types included:
 
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
 
 import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.animation as animation
 from gym_multigrid.multigrid import (
     MultiGridEnv, Grid, Agent, Wall, Floor, Door, Key, Ball, Box,
     Goal, Lava, Switch, Block, Rock, UnsteadyGround, MagicWall, World
@@ -51,8 +48,8 @@ class CooperativePuzzleEnv(MultiGridEnv):
         # Agent 0 (RED): Can push rocks, can enter magic walls
         # Agent 1 (GREEN): Cannot push rocks, cannot enter magic walls
         self.agents = [
-            Agent(World, 0, can_enter_magic_walls=True),   # RED
-            Agent(World, 1, can_enter_magic_walls=False),  # GREEN
+            Agent(World, 0, can_enter_magic_walls=True, can_push_rocks=True),   # RED
+            Agent(World, 1, can_enter_magic_walls=False, can_push_rocks=False),  # GREEN
         ]
         
         super().__init__(
@@ -108,8 +105,8 @@ class CooperativePuzzleEnv(MultiGridEnv):
         self.grid.set(7, 2, Floor(World, 'yellow'))
         
         # === ROCK BLOCKING PATH TO MAGIC WALL ===
-        # Only RED agent can push this rock (pushable_by=[0])
-        rock = Rock(World, pushable_by=[0])
+        # Only RED agent can push this rock (RED has can_push_rocks=True)
+        rock = Rock(World)
         self.grid.set(5, 2, rock)
         
         # === COOPERATIVE BLOCK PUZZLE ===
@@ -255,7 +252,7 @@ def solve_puzzle_actions():
     return actions
 
 
-def create_animation(output_path='cooperative_puzzle_animation.mp4', num_steps=200):
+def create_animation(output_path='cooperative_puzzle_animation.mp4', num_steps=200, fps=7):
     """Create and save an animation showing the cooperative puzzle."""
     
     print("=" * 70)
@@ -286,20 +283,22 @@ def create_animation(output_path='cooperative_puzzle_animation.mp4', num_steps=2
     env = CooperativePuzzleEnv()
     env.reset()
     
-    # Collect frames
-    frames = []
+    # Start video recording using MultiGridEnv's built-in method
+    env.start_video_recording()
     
     # Initial state
-    frames.append(render_grid_to_array(env))
+    env.render(mode='rgb_array')
     
     # Get solution actions
     puzzle_actions = solve_puzzle_actions()
     
     print(f"Simulating {num_steps} steps...")
+    steps_completed = 0
     for step in range(min(num_steps, len(puzzle_actions))):
         actions = puzzle_actions[step]
         obs, rewards, done, info = env.step(actions)
-        frames.append(render_grid_to_array(env))
+        env.render(mode='rgb_array')  # Frame automatically captured
+        steps_completed += 1
         
         if (step + 1) % 50 == 0:
             print(f"  Step {step + 1}/{num_steps} complete")
@@ -309,68 +308,31 @@ def create_animation(output_path='cooperative_puzzle_animation.mp4', num_steps=2
             break
     
     # Continue with random actions if we haven't reached num_steps
-    while len(frames) - 1 < num_steps:
+    while steps_completed < num_steps:
         actions = [np.random.choice([0, 1, 3, 6]), np.random.choice([0, 1, 3, 6])]
         obs, rewards, done, info = env.step(actions)
-        frames.append(render_grid_to_array(env))
+        env.render(mode='rgb_array')  # Frame automatically captured
+        steps_completed += 1
         
-        if (len(frames) - 1) % 50 == 0:
-            print(f"  Step {len(frames) - 1}/{num_steps} complete")
+        if steps_completed % 50 == 0:
+            print(f"  Step {steps_completed}/{num_steps} complete")
     
-    print(f"\nCollected {len(frames)} frames")
-    
-    # Create animation
-    print(f"Saving animation to {output_path}...")
-    fig, ax = plt.subplots(figsize=(10, 8))
-    ax.set_aspect('equal')
-    ax.axis('off')
-    
-    # Initialize the image
-    im = ax.imshow(frames[0])
-    
-    def update(frame_idx):
-        im.set_array(frames[frame_idx])
-        ax.set_title(f'Cooperative Puzzle - Step {frame_idx}/{len(frames)-1}\n'
-                     'RED: Can push rocks & enter magic walls | '
-                     'GREEN: Cannot', 
-                     fontsize=10, fontweight='bold')
-        return [im]
-    
-    # Create animation
-    anim = animation.FuncAnimation(
-        fig, 
-        update, 
-        frames=len(frames),
-        interval=150,  # 150ms between frames
-        blit=True,
-        repeat=True
-    )
-    
-    # Save as MP4
-    try:
-        writer = animation.FFMpegWriter(fps=7, bitrate=1800)
-        anim.save(output_path, writer=writer)
-        print(f"✓ Animation saved successfully to {output_path}")
-        print(f"  Total frames: {len(frames)}")
-        print(f"  Duration: ~{len(frames)/7:.1f} seconds")
-    except Exception as e:
-        print(f"✗ Error saving animation: {e}")
-        print("  Note: FFmpeg is required to save MP4 files.")
-        
-        # Try saving as GIF as fallback
-        print("\nTrying to save as GIF instead...")
-        gif_path = output_path.replace('.mp4', '.gif')
-        try:
-            anim.save(gif_path, writer='pillow', fps=7)
-            print(f"✓ Animation saved as GIF to {gif_path}")
-        except Exception as e2:
-            print(f"✗ Error saving GIF: {e2}")
-    
-    plt.close()
+    # Save video using MultiGridEnv's built-in method
+    env.save_video(output_path, fps=fps)
 
 
-def main():
+# Configuration for quick mode vs full mode
+NUM_STEPS_FULL = 200   # Full mode: 200 steps
+NUM_STEPS_QUICK = 30   # Quick mode: 30 steps
+
+
+def main(quick_mode=False):
     """Main function to run the cooperative puzzle demo."""
+    num_steps = NUM_STEPS_QUICK if quick_mode else NUM_STEPS_FULL
+    mode_str = "QUICK TEST MODE" if quick_mode else "FULL MODE"
+    
+    print(f"[{mode_str}]")
+    print()
     
     # Create output directory
     output_dir = os.path.join(os.path.dirname(__file__), '..', 'outputs')
@@ -378,8 +340,8 @@ def main():
     
     output_path = os.path.join(output_dir, 'cooperative_puzzle_animation.mp4')
     
-    # Create animation with 200 steps (long episode)
-    create_animation(output_path, num_steps=200)
+    # Create animation with specified number of steps
+    create_animation(output_path, num_steps=num_steps)
     
     print()
     print("=" * 70)
@@ -389,4 +351,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description='Cooperative Puzzle Demo')
+    parser.add_argument('--quick', '-q', action='store_true',
+                        help='Run in quick test mode with fewer steps')
+    args = parser.parse_args()
+    main(quick_mode=args.quick)
