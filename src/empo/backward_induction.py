@@ -408,6 +408,7 @@ def compute_human_policy_prior(
     num_workers: Optional[int] = None, 
     level_fct: Optional[Callable[[State], int]] = None, 
     return_Vh: bool = False,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
     quiet: bool = False
 ) -> Union[TabularHumanPolicyPrior, Tuple[TabularHumanPolicyPrior, Dict[State, Dict[int, Dict[PossibleGoal, float]]]]]:
     """
