@@ -6,7 +6,15 @@ neural networks for multigrid environments.
 """
 
 from .robot_q_network import MultiGridRobotQNetwork
+from .human_goal_ability import MultiGridHumanGoalAchievementNetwork
+from .aggregate_goal_ability import MultiGridAggregateGoalAbilityNetwork
+from .intrinsic_reward_network import MultiGridIntrinsicRewardNetwork
+from .robot_value_network import MultiGridRobotValueNetwork
 
 __all__ = [
     'MultiGridRobotQNetwork',
+    'MultiGridHumanGoalAchievementNetwork',
+    'MultiGridAggregateGoalAbilityNetwork',
+    'MultiGridIntrinsicRewardNetwork',
+    'MultiGridRobotValueNetwork',
 ]
