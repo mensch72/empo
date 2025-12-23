@@ -256,6 +256,112 @@ class TabularHumanPolicyPrior(HumanPolicyPrior):
             for goal, weight in self.possible_goal_generator.generate(state, human_agent_index):
                 total += vs[goal] * weight
             return total
+        
+    def profile_distribution(
+        self, 
+        state,
+        device: Optional[str] = None
+    ) -> List[tuple]:
+        """
+        Get the joint action profile distribution for all human agents. 
+        Assumes independence between agents.
+        Args:
+            state: Current world state.
+            device: Optional computation backend:
+                   - None: NumPy (default, good for small problems)
+                   - 'cuda' or 'cuda:N': PyTorch GPU (best for large problems)
+                   - 'cpu': PyTorch CPU (usually slower than NumPy)
+        Returns:
+            List of tuples (probability, action_profile) where action_profile is
+            a list of actions for each human agent in order of human_agent_indices.
+        """
+        # Pre-compute marginal distributions for all agents
+        marginals = [
+            self._to_probability_array(self(state, agent_index))
+            for agent_index in self.human_agent_indices
+        ]
+        
+        if not marginals:
+            return [(1.0, [])]
+        
+        if device is not None and device.startswith('cuda'):
+            # Use PyTorch for GPU computation
+            return self._profile_distribution_torch(marginals, device)
+        else:
+            # Use NumPy - fastest for CPU
+            return self._profile_distribution_numpy(marginals)
+    
+    def _profile_distribution_numpy(self, marginals: List[np.ndarray]) -> List[tuple]:
+        """NumPy implementation of profile distribution computation."""
+        # Build all action combinations using meshgrid
+        action_ranges = [np.arange(len(m)) for m in marginals]
+        grids = np.meshgrid(*action_ranges, indexing='ij')
+        
+        # Stack all profiles: shape (num_agents, total_combinations)
+        all_profiles = np.stack([g.ravel() for g in grids], axis=0)
+        
+        # Gather probabilities for each agent's action choices
+        probs_matrix = np.array([
+            marginals[i][all_profiles[i]] for i in range(len(marginals))
+        ])
+        
+        # Compute joint probabilities as product across agents
+        joint_probs = np.prod(probs_matrix, axis=0)
+        
+        # Filter out zero probabilities and build result
+        nonzero_mask = joint_probs > 0.0
+        result = [
+            (joint_probs[j], all_profiles[:, j].tolist())
+            for j in np.where(nonzero_mask)[0]
+        ]
+        
+        return result
+    
+    def _profile_distribution_torch(self, marginals: List[np.ndarray], device: str) -> List[tuple]:
+        """
+        PyTorch implementation for GPU-accelerated profile distribution.
+        
+        Uses outer product formulation which is highly parallelizable:
+        P(a1, a2, ..., an) = P(a1) * P(a2) * ... * P(an)
+        
+        For GPU: The joint probability tensor is computed as a series of
+        outer products, which are batched matrix multiplications on GPU.
+        """
+        import torch
+        
+        # Convert marginals to torch tensors on specified device
+        tensors = [torch.tensor(m, dtype=torch.float32, device=device) for m in marginals]
+        
+        # Compute joint probability tensor via iterative outer products
+        # This creates a tensor of shape (A1, A2, ..., An) where Ai = num_actions for agent i
+        joint = tensors[0]
+        for t in tensors[1:]:
+            # outer product: (shape...) x (k,) -> (shape..., k)
+            joint = joint.unsqueeze(-1) * t
+        
+        # Flatten and find non-zero entries
+        flat_probs = joint.flatten()
+        nonzero_mask = flat_probs > 0.0
+        nonzero_indices = torch.where(nonzero_mask)[0]
+        nonzero_probs = flat_probs[nonzero_indices]
+        
+        # Convert flat indices back to multi-dimensional indices
+        # Using torch.unravel_index equivalent
+        shape = joint.shape
+        profiles = []
+        for flat_idx in nonzero_indices:
+            idx = flat_idx.item()
+            profile = []
+            for dim_size in reversed(shape):
+                profile.append(idx % dim_size)
+                idx //= dim_size
+            profiles.append(list(reversed(profile)))
+        
+        # Build result (move probabilities back to CPU for output)
+        probs_cpu = nonzero_probs.cpu().numpy()
+        result = [(float(probs_cpu[i]), profiles[i]) for i in range(len(profiles))]
+        
+        return result
 
 
 class HeuristicPotentialPolicy(HumanPolicyPrior):
