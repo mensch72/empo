@@ -513,7 +513,7 @@ def compute_losses(self, batch: List[Phase2Transition]) -> Dict[str, torch.Tenso
         u_r_pred = self.u_r_network(s)
         x_h = self.x_h_network(s, h)  # Sample human
         # Monte Carlo: target = -(|H| * X_h^{-ξ})^η
-        target = -((len(self.human_indices) * (x_h ** -self.xi)) ** self.eta)
+        target = -((len(self.human_agent_indices) * (x_h ** -self.xi)) ** self.eta)
         # Use log-space MSE for heavy-tailed distribution
         losses['u_r'] += (torch.log(-u_r_pred) - torch.log(-target)) ** 2
         
