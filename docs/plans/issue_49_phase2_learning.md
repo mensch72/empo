@@ -22,13 +22,13 @@ These equations compute what the robot believes about human behavior. They are a
 ```
 
 **Meaning:**
-- `Q_h^m`: Human h's *model-based* Q-value for action `a_h` toward goal `g_h`. Uses `min_{a_r}` because humans are assumed to be cautious about robot behavior.
+- `Q_h^m`: Human h's *model-based* Q-value for action `a_h` toward goal `g_h`. Uses `min_{a_r}` because we want to incentivize the robot (in our case: the robot fleet) to make binding commitments that restrict its actions space and thereby automatically increase this value automatically.
 - `π_h`: Human policy - a mixture of habitual behavior `π_h^0` and boundedly-rational Boltzmann policy.
 - `V_h^m`: Human's *model-based* value - expected Q under their own policy.
 
 ### 1.2 Phase 2: Robot Policy (Equations 4-9)
 
-These equations compute the robot's policy to maximize aggregate human power. **This is what we need to implement.**
+These equations compute the robot's (in our case: the robot fleet's) policy to softly maximize aggregate human power. **This is what we need to implement.**
 
 ```
 (4) Q_r(s, a_r) ← E_g E_{a_H ~ π_H(s,g)} E_{s'|s,a} [γ_r V_r(s')]
@@ -52,10 +52,10 @@ These equations compute the robot's policy to maximize aggregate human power. **
 Q_r(s, a_r) ← E_g E_{a_H ~ π_H(s,g)} E_{s'|s,a} [γ_r V_r(s')]
 ```
 
-**What it computes:** The expected discounted future value `V_r(s')` when the robot takes action `a_r`.
+**What it computes:** The expected discounted future value `V_r(s')` when the robot takes action `a_r` (in our case: when the robot fleet takes action combination `a_r`).
 
 **Key observations:**
-- `Q_r` does NOT include immediate reward `U_r(s)` - only the discounted continuation
+- The equation for `Q_r` does NOT explicitly include immediate reward `U_r(s)` - only the discounted continuation, because the reward from taking some action is assumed to accrue at the time of arrival at the successor state (and it also exclusively depends on that successor state), and so we chose to include in the value function of the successor state (`V_r(s')`, see below) instead of here. So it is included here, but indirectly via `V_r(s')`. 
 - The expectation is over:
   - `g`: goal profile (one goal per human), sampled uniformly
   - `a_H ~ π_H(s,g)`: human actions from their goal-conditioned policies
@@ -74,7 +74,7 @@ Q_r(s, a_r) ← E_g E_{a_H ~ π_H(s,g)} E_{s'|s,a} [γ_r V_r(s')]
 - This is NOT standard Boltzmann softmax `exp(β Q)`
 - Since `Q_r < 0`, we have `-Q_r > 0`, so the expression is well-defined
 - Higher `β_r` → more deterministic (concentrates on best action)
-- The power-law form `(-Q)^{-β}` satisfies certain scale-invariance properties (see paper's Table 2)
+- The power-law form `(-Q)^{-β}` satisfies certain scale-invariance properties (see paper's Table 2).
 
 #### Equation (6): Effective Human Goal Achievement `V_h^e(s, g_h)`
 
@@ -86,9 +86,9 @@ V_h^e(s, g_h) ← E_{g_{-h}} E_{a_H ~ π_H(s,g)} E_{a_r ~ π_r(s)} E_{s'|s,a} [U
 
 **Key observations:**
 - Different from `V_h^m` (eq. 3) which used `min_{a_r}` (worst-case robot assumption)
-- `V_h^e` uses the learned robot policy `π_r(s)` instead
-- `U_h(s', g_h) = 1_{s' ∈ g_h}` is the goal achievement indicator
-- `V_h^e ∈ [0, 1]` since it's a probability
+- `V_h^e` uses the learned robot policy `π_r(s)` instead (this causes a mutual dependency between `V_h^e` and `π_r`, so we cannot first learn one of them and then the other but have to learn them in common)
+- `U_h(s', g_h) = 1_{s' ∈ g_h}` is the goal achievement indicator, and once it is 1 the episode ends for that human (the human gets no further reward in this episode).
+- This implies that `V_h^e ∈ [0, 1]` since it's a (discounted) probability of achieving the goal
 - The expectation over `g_{-h}` (other humans' goals) reflects uncertainty about what goals others are pursuing
 
 #### Equation (7): Aggregate Goal Achievement Ability `X_h(s)`
@@ -101,11 +101,11 @@ X_h(s) ← Σ_{g_h ∈ G_h} V_h^e(s, g_h)^ζ
 
 **Key observations:**
 - Sums over ALL possible goals `g_h ∈ G_h`
-- `ζ > 1` introduces risk/reliability aversion:
+- `ζ > 1` introduces risk aversion/reliability preference:
   - Prefers certain achievement (one goal with V=1) over uncertain (two goals with V=0.5 each)
   - With `ζ = 2`: `1^2 = 1 > 2 × 0.5^2 = 0.5`
-- Human "power in bits" is `W_h(s) = log_2(X_h(s))`
-- `X_h > 0` always (at least one goal is achievable with some probability)
+- Human "power in bits" would be `W_h(s) = log_2(X_h(s))`, but we don't actually use that quantity in any equations but work with `X_h` instead.
+- `X_h > 0` always (at least one goal is achievable with some probability because the goals cover all possible trajectories and at least one trajectory will have positive probability)
 
 #### Equation (8): Intrinsic Robot Reward `U_r(s)`
 
@@ -120,9 +120,9 @@ U_r(s) ← -(Σ_h X_h(s)^{-ξ})^η
 - The `X_h^{-ξ}` term with `ξ > 0` means:
   - Humans with LOW power contribute MORE to the sum
   - This implements inter-human inequality aversion (protects the least powerful)
-  - With `ξ = 1`: reducing one person's power from 1 bit to 0 bits cannot be compensated by any increase to others
-- The outer `η > 1` power implements intertemporal inequality aversion
-- Robot wants to MAXIMIZE `U_r` (make it less negative) → increase human power
+  - With `ξ = 1`: reducing one person's power from 1 bit to 0 bits cannot be compensated by any increase to one other human who has at least one bit already (but can be compensated by large increases in *several* other humans) 
+- The outer `η > 1` power implements *additional inter*temporal inequality aversion (e.g., trajectories with constant `U_r=-2` are preferred to trajectories alternating between `U_r=-1` and `U_r=-3`)
+- Robot wants to SOFTLY MAXIMIZE the expected long-term sum of `U_r` (make it less negative) → increase human power sustainably
 
 #### Equation (9): Robot State Value `V_r(s)`
 
@@ -153,7 +153,7 @@ U_r(s) depends on X_h(s)                 [eq. 8]
 V_r(s) depends on U_r(s) and Q_r(s, ·)   [eq. 9]
 ```
 
-This creates a fixed-point problem that must be solved iteratively (backward induction in acyclic environments, or iterative learning in general).
+This creates a fixed-point problem that must be solved iteratively (backward induction in small enough, acyclic environments, or iterative learning in general).
 
 ## 2. Modifications for Our Implementation
 
@@ -174,7 +174,7 @@ where `k` is the number of robots. The robot policy outputs a joint distribution
 **Equation (7) modification:**
 Instead of summing over all goals `Σ_{g_h ∈ G_h}`, we use expected value with sampling:
 ```
-X_h(s) ← E_{g_h ~ possible_goal_sampler(h)} [|G_h| · V_h^e(s, g_h)^ζ]
+X_h(s) ← E_{g_h ~ possible_goal_sampler(h)} [V_h^e(s, g_h)^ζ]
 ```
 
 This allows Monte Carlo approximation when `G_h` is large.
@@ -182,7 +182,7 @@ This allows Monte Carlo approximation when `G_h` is large.
 **Equation (8) modification:**
 Instead of summing over all humans `Σ_h`, we use expected value with sampling:
 ```
-U_r(s) ← -(|H| · E_{h ~ Unif(H)} [X_h(s)^{-ξ}])^η
+U_r(s) ← -(E_{h ~ Unif(H)} [X_h(s)^{-ξ}])^η
 ```
 
 This allows stochastic approximation when there are many humans.
