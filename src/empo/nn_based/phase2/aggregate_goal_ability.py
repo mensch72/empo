@@ -14,6 +14,8 @@ import torch.nn.functional as F
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional, Tuple
 
+from ..soft_clamp import SoftClamp
+
 
 class BaseAggregateGoalAbilityNetwork(nn.Module, ABC):
     """
@@ -37,14 +39,23 @@ class BaseAggregateGoalAbilityNetwork(nn.Module, ABC):
     
     Args:
         zeta: Risk/reliability preference parameter (ζ ≥ 1, 1 = neutral).
+        feasible_range: Tuple (a, b) for soft clamping bounds, default (0, 1).
     """
     
-    def __init__(self, zeta: float = 2.0):
+    def __init__(
+        self,
+        zeta: float = 2.0,
+        feasible_range: Tuple[float, float] = (0.0, 1.0)
+    ):
         super().__init__()
         self.zeta = zeta
+        self.feasible_range = feasible_range
         
         if zeta < 1.0:
             raise ValueError(f"zeta must be >= 1.0, got {zeta}")
+        
+        # Use SoftClamp for bounding to (0, 1] - maintains gradients unlike sigmoid
+        self.soft_clamp = SoftClamp(a=feasible_range[0], b=feasible_range[1])
     
     @abstractmethod
     def forward(self, *args, **kwargs) -> torch.Tensor:
@@ -83,21 +94,39 @@ class BaseAggregateGoalAbilityNetwork(nn.Module, ABC):
         """Return configuration dict for save/load."""
         pass
     
-    def ensure_positive_bounded(self, raw_values: torch.Tensor) -> torch.Tensor:
+    def apply_soft_clamp(self, raw_values: torch.Tensor) -> torch.Tensor:
         """
-        Ensure X_h values are in (0, 1].
+        Apply soft clamping during training.
         
-        Uses sigmoid to bound to (0, 1), then scales slightly to allow reaching 1.
+        SoftClamp is linear in [a, b] and exponential outside, preserving
+        gradients while bounding values. Use this during training.
         
         Args:
             raw_values: Unbounded network output.
         
         Returns:
-            Values in (0, 1].
+            Soft-clamped values.
         """
-        # Sigmoid gives (0, 1), we use it directly since X_h is an expected
-        # value of V_h^e^ζ where V_h^e ∈ [0, 1]
-        return torch.sigmoid(raw_values)
+        return self.soft_clamp(raw_values)
+    
+    def apply_hard_clamp(self, values: torch.Tensor) -> torch.Tensor:
+        """
+        Apply hard clamping during prediction/inference.
+        
+        Hard clamp ensures values are strictly within bounds. Use this
+        during prediction when gradients are not needed.
+        
+        Args:
+            values: Values to clamp (typically soft-clamped during forward).
+        
+        Returns:
+            Hard-clamped values in [a, b].
+        """
+        return torch.clamp(
+            values,
+            self.feasible_range[0],
+            self.feasible_range[1]
+        )
     
     def compute_target(self, v_h_e: torch.Tensor) -> torch.Tensor:
         """

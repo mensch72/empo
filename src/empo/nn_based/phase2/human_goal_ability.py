@@ -91,7 +91,9 @@ class BaseHumanGoalAchievementNetwork(nn.Module, ABC):
     
     def apply_soft_clamp(self, values: torch.Tensor) -> torch.Tensor:
         """
-        Apply soft clamping to ensure values stay in [0, 1].
+        Apply soft clamping during training.
+        
+        SoftClamp preserves gradients while bounding values. Use during training.
         
         Args:
             values: Raw network output.
@@ -101,30 +103,52 @@ class BaseHumanGoalAchievementNetwork(nn.Module, ABC):
         """
         return self.soft_clamp(values)
     
+    def apply_hard_clamp(self, values: torch.Tensor) -> torch.Tensor:
+        """
+        Apply hard clamping during prediction/inference.
+        
+        Hard clamp ensures values are strictly within bounds. Use during
+        prediction when gradients are not needed.
+        
+        Args:
+            values: Values to clamp.
+        
+        Returns:
+            Hard-clamped values in [a, b].
+        """
+        return torch.clamp(
+            values,
+            self.feasible_range[0],
+            self.feasible_range[1]
+        )
+    
     def compute_td_target(
         self,
         goal_achieved: torch.Tensor,
         next_v_h_e: torch.Tensor
     ) -> torch.Tensor:
         """
-        Compute TD target for V_h^e.
+        Compute TD target for V_h^e using truncated Bellman equation.
         
-        From equation (6):
-            target = U_h(s', g_h) + γ_h * V_h^e(s', g_h)
+        From equation (6), using the truncated form (like V_h^m in Phase 1):
+            - If goal achieved: target = 1 (no continuation)
+            - If goal not achieved: target = γ_h * V_h^e(s', g_h)
         
-        where U_h(s', g_h) = 1 if goal achieved, 0 otherwise.
-        Once the goal is achieved, the episode ends for that human.
+        This is truncated because when U_h(s', g_h) = 1 (goal achieved),
+        the episode ends for that human and we don't add future value.
+        Only when reward is 0 do we add the discounted continuation.
         
         Args:
-            goal_achieved: Boolean tensor indicating if goal was achieved.
+            goal_achieved: Boolean/float tensor (1.0 if achieved, 0.0 otherwise).
             next_v_h_e: V_h^e(s', g_h) from target network.
         
         Returns:
             TD target values.
         """
-        # U_h(s', g_h) = 1 if goal achieved, 0 otherwise
-        # If goal achieved, no continuation (episode ends for this human)
+        # Truncated Bellman: only add future value when reward is 0
+        # If goal achieved (reward=1): target = 1 (episode ends, no continuation)
+        # If goal not achieved (reward=0): target = γ_h * V_h^e(s')
         reward = goal_achieved.float()
-        continuation = (1.0 - goal_achieved.float()) * self.gamma_h * next_v_h_e
+        continuation = (1.0 - reward) * self.gamma_h * next_v_h_e
         
         return reward + continuation
