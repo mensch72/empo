@@ -16,10 +16,16 @@ Phase 2 computes:
 from .config import Phase2Config
 from .robot_q_network import BaseRobotQNetwork
 from .replay_buffer import Phase2Transition, Phase2ReplayBuffer
+from .human_goal_ability import BaseHumanGoalAchievementNetwork
+from .robot_value_network import BaseRobotValueNetwork
+from .intrinsic_reward_network import BaseIntrinsicRewardNetwork
 
 __all__ = [
     'Phase2Config',
     'BaseRobotQNetwork',
     'Phase2Transition',
     'Phase2ReplayBuffer',
+    'BaseHumanGoalAchievementNetwork',
+    'BaseRobotValueNetwork',
+    'BaseIntrinsicRewardNetwork',
 ]

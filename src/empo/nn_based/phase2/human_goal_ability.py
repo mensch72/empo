@@ -1,0 +1,130 @@
+"""
+Base Human Goal Achievement Ability Network for Phase 2.
+
+Implements V_h^e(s, g_h) from equation (6) of the EMPO paper:
+    V_h^e(s, g_h) ← E_{g_{-h}} E_{a_H ~ π_H(s,g)} E_{a_r ~ π_r(s)} E_{s'|s,a} [U_h(s', g_h) + γ_h V_h^e(s', g_h)]
+
+This network estimates the probability that human h achieves goal g_h
+under the actual robot policy π_r (not the worst-case assumption used in Phase 1).
+"""
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from abc import ABC, abstractmethod
+from typing import Any, Dict, Optional, Tuple
+
+from ..soft_clamp import SoftClamp
+
+
+class BaseHumanGoalAchievementNetwork(nn.Module, ABC):
+    """
+    Base class for V_h^e networks in Phase 2.
+    
+    V_h^e(s, g_h) estimates the (discounted) probability that human h achieves
+    goal g_h, given:
+    - The current robot policy π_r
+    - Human policies π_H derived from Phase 1
+    - The current state s
+    
+    Key properties:
+    - V_h^e ∈ [0, 1] since it's a discounted probability
+    - Different from Phase 1's V_h^m which used worst-case robot assumption
+    - Depends on the robot policy, creating a mutual dependency that requires
+      joint training of V_h^e and π_r
+    
+    Args:
+        gamma_h: Human discount factor.
+        feasible_range: Output bounds, defaults to (0, 1) for probabilities.
+    """
+    
+    def __init__(
+        self,
+        gamma_h: float = 0.99,
+        feasible_range: Tuple[float, float] = (0.0, 1.0)
+    ):
+        super().__init__()
+        self.gamma_h = gamma_h
+        self.feasible_range = feasible_range
+        
+        # Soft clamp to keep values in [0, 1]
+        self.soft_clamp = SoftClamp(a=feasible_range[0], b=feasible_range[1])
+    
+    @abstractmethod
+    def forward(self, *args, **kwargs) -> torch.Tensor:
+        """
+        Compute V_h^e values.
+        
+        Returns:
+            Tensor of shape (batch,) with values in [0, 1].
+        """
+        pass
+    
+    @abstractmethod
+    def encode_and_forward(
+        self,
+        state: Any,
+        world_model: Any,
+        human_agent_idx: int,
+        goal: Any,
+        device: str = 'cpu'
+    ) -> torch.Tensor:
+        """
+        Encode state and goal, then compute V_h^e.
+        
+        Args:
+            state: Environment state.
+            world_model: Environment/world model.
+            human_agent_idx: Index of the human agent.
+            goal: The goal g_h for this human.
+            device: Torch device.
+        
+        Returns:
+            Tensor of shape (1,) with V_h^e(s, g_h) in [0, 1].
+        """
+        pass
+    
+    @abstractmethod
+    def get_config(self) -> Dict[str, Any]:
+        """Return configuration dict for save/load."""
+        pass
+    
+    def apply_soft_clamp(self, values: torch.Tensor) -> torch.Tensor:
+        """
+        Apply soft clamping to ensure values stay in [0, 1].
+        
+        Args:
+            values: Raw network output.
+        
+        Returns:
+            Soft-clamped values in feasible_range.
+        """
+        return self.soft_clamp(values)
+    
+    def compute_td_target(
+        self,
+        goal_achieved: torch.Tensor,
+        next_v_h_e: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Compute TD target for V_h^e.
+        
+        From equation (6):
+            target = U_h(s', g_h) + γ_h * V_h^e(s', g_h)
+        
+        where U_h(s', g_h) = 1 if goal achieved, 0 otherwise.
+        Once the goal is achieved, the episode ends for that human.
+        
+        Args:
+            goal_achieved: Boolean tensor indicating if goal was achieved.
+            next_v_h_e: V_h^e(s', g_h) from target network.
+        
+        Returns:
+            TD target values.
+        """
+        # U_h(s', g_h) = 1 if goal achieved, 0 otherwise
+        # If goal achieved, no continuation (episode ends for this human)
+        reward = goal_achieved.float()
+        continuation = (1.0 - goal_achieved.float()) * self.gamma_h * next_v_h_e
+        
+        return reward + continuation
