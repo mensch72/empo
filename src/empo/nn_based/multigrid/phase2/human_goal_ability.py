@@ -150,8 +150,9 @@ class MultiGridHumanGoalAchievementNetwork(BaseHumanGoalAchievementNetwork):
         grid_tensor, global_features, agent_features, interactive_features = \
             self.state_encoder.encode_state(state, world_model, human_agent_idx, device)
         
-        # Encode goal
-        goal_features = self.goal_encoder.encode_goal(goal, device)
+        # Encode goal: first extract coordinates, then pass through encoder network
+        goal_coords = self.goal_encoder.encode_goal(goal, device)
+        goal_features = self.goal_encoder(goal_coords)
         
         return self.forward(
             grid_tensor, global_features, agent_features,

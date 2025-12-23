@@ -10,7 +10,7 @@ For goal sampling and rendering, see empo.multigrid module.
 
 import torch
 import torch.nn as nn
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from ..goal_encoder import BaseGoalEncoder
 
@@ -379,4 +379,12 @@ class MultiGridGoalEncoder(BaseGoalEncoder):
             linewidth=line_width,
             linestyle='--'
         )
+    
+    def get_config(self) -> Dict[str, Any]:
+        """Return configuration for save/load."""
+        return {
+            'grid_height': self.grid_height,
+            'grid_width': self.grid_width,
+            'feature_dim': self.feature_dim,
+        }
     
