@@ -542,6 +542,47 @@ Following Double DQN, we use frozen target networks for:
 
 Target networks are updated every `V_r_target_update_freq` or `V_h_target_update_freq` steps (possibly different).
 
+### 4.5 Loss Function Alternatives for Heavy-Tailed Targets
+
+The `y` target in `U_r` (equation 8) can have a heavy tail since `y = E_h[X_h^{-ξ}]` and `X_h^{-ξ}` becomes very large when a human has low power (`X_h` close to 0). This raises the question of which loss function to use.
+
+**Why MSE is the correct choice:**
+
+We use MSE `(y_pred - target)^2` because it converges to the **arithmetic mean** (expected value) of the targets, which is exactly what equation (8) requires. Alternative loss functions have different convergence properties:
+
+| Loss Function | Converges To | Heavy-Tail Behavior |
+|---------------|--------------|---------------------|
+| MSE `(y - target)²` | Arithmetic mean | High gradient from outliers |
+| Log-MSE `(log y - log target)²` | Geometric mean | Robust but **wrong target** |
+| MAE `|y - target|` | Median | Robust but **wrong target** |
+| Huber loss | Between mean and median | Robust but **biased** |
+
+**Why not Huber loss?**
+
+Huber loss is often recommended for heavy-tailed data because it reduces the influence of outliers:
+- For small errors (|error| < δ): quadratic like MSE
+- For large errors (|error| ≥ δ): linear like MAE
+
+However, Huber loss converges to a value **between the mean and median**, depending on δ. Since our goal is specifically to approximate the **expected value** (arithmetic mean), Huber loss would introduce systematic bias - underestimating `y` when the target distribution is right-skewed (which it is, due to the heavy right tail).
+
+**Recommended approach:**
+
+1. **Use MSE** for correctness (converges to expected value)
+2. **Mitigate heavy-tail issues via:**
+   - Gradient clipping to stabilize training
+   - The network architecture already helps: predicting `log(y-1)` internally provides numerical stability while computing the loss on actual `y` values
+   - Learning rate scheduling if training is unstable
+   - Batch normalization / larger batch sizes to average out extreme samples
+
+**Alternative if MSE proves unstable:**
+
+If training instability persists, consider a **weighted MSE** that down-weights extreme targets:
+```python
+weight = 1.0 / (1.0 + alpha * (target - target.mean()).abs())
+loss = weight * (y_pred - target) ** 2
+```
+This preserves convergence to the arithmetic mean while reducing gradient magnitude from outliers.
+
 ## 5. Configuration
 
 ```python
