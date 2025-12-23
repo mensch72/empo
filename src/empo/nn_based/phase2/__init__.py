@@ -19,6 +19,8 @@ from .replay_buffer import Phase2Transition, Phase2ReplayBuffer
 from .human_goal_ability import BaseHumanGoalAchievementNetwork
 from .robot_value_network import BaseRobotValueNetwork
 from .intrinsic_reward_network import BaseIntrinsicRewardNetwork
+from .aggregate_goal_ability import BaseAggregateGoalAbilityNetwork
+from .trainer import Phase2Networks, BasePhase2Trainer
 
 __all__ = [
     'Phase2Config',
@@ -28,4 +30,7 @@ __all__ = [
     'BaseHumanGoalAchievementNetwork',
     'BaseRobotValueNetwork',
     'BaseIntrinsicRewardNetwork',
+    'BaseAggregateGoalAbilityNetwork',
+    'Phase2Networks',
+    'BasePhase2Trainer',
 ]
