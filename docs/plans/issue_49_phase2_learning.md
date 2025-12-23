@@ -319,7 +319,7 @@ class NeuralHumanGoalAchievementAbility(nn.Module):
 
 ### 3.5 NeuralAggregateGoalAchievementAbility (X_h)
 
-**Approximates equation (7):** `X_h(s) ← E_{g_h}[|G_h| · V_h^e(s, g_h)^ζ]`
+**Approximates equation (7):** `X_h(s) ← E_{g_h}[V_h^e(s, g_h)^ζ]`
 
 ```python
 class NeuralAggregateGoalAchievementAbility(nn.Module):
@@ -474,15 +474,15 @@ where `U_h(s', g_h) = 1` if goal achieved, 0 otherwise.
 
 **For X_h (equation 14 in paper):**
 ```
-target_x_h(s) = |G_h| · V_h^e(s, g_h)^ζ
+target_x_h(s) = V_h^e(s, g_h)^ζ
 ```
-Using sampled goal `g_h` (Monte Carlo approximation of sum).
+Using sampled goal `g_h` (Monte Carlo approximation of expected value).
 
 **For U_r:**
 ```
-target_u_r(s) = -(|H| · X_h(s)^{-ξ})^η
+target_u_r(s) = -(X_h(s)^{-ξ})^η
 ```
-Using sampled human `h` (Monte Carlo approximation of sum).
+Using sampled human `h` (Monte Carlo approximation of expected value).
 
 ### 4.3 Loss Functions
 
@@ -506,14 +506,14 @@ def compute_losses(self, batch: List[Phase2Transition]) -> Dict[str, torch.Tenso
         g_h = self.goal_sampler.sample(s, h)
         x_h_pred = self.x_h_network(s, h)
         v_h_e = self.v_h_e_network(s, h, g_h)
-        target = len(self.goal_space) * (v_h_e ** self.zeta)
+        target = v_h_e ** self.zeta
         losses['x_h'] += (x_h_pred - target) ** 2
         
         # U_r loss
         u_r_pred = self.u_r_network(s)
         x_h = self.x_h_network(s, h)  # Sample human
-        # Monte Carlo: target = -(|H| * X_h^{-ξ})^η
-        target = -((len(self.human_agent_indices) * (x_h ** -self.xi)) ** self.eta)
+        # Monte Carlo: target = -(X_h^{-ξ})^η
+        target = -((x_h ** -self.xi) ** self.eta)
         # Use log-space MSE for heavy-tailed distribution
         losses['u_r'] += (torch.log(-u_r_pred) - torch.log(-target)) ** 2
         
