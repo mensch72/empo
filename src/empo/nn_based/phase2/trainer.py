@@ -145,6 +145,42 @@ class BasePhase2Trainer(ABC):
             'u_r': optim.Adam(self.networks.u_r.parameters(), lr=self.config.lr_u_r),
         }
     
+    def _compute_param_norms(self) -> Dict[str, float]:
+        """Compute L2 norms of network parameters for monitoring."""
+        norms = {}
+        networks = {
+            'q_r': self.networks.q_r,
+            'v_r': self.networks.v_r,
+            'v_h_e': self.networks.v_h_e,
+            'x_h': self.networks.x_h,
+            'u_r': self.networks.u_r,
+        }
+        for name, net in networks.items():
+            total_norm = 0.0
+            for p in net.parameters():
+                if p.grad is not None:
+                    total_norm += p.data.norm(2).item() ** 2
+            norms[name] = total_norm ** 0.5
+        return norms
+    
+    def _compute_grad_norms(self) -> Dict[str, float]:
+        """Compute L2 norms of gradients for monitoring."""
+        norms = {}
+        networks = {
+            'q_r': self.networks.q_r,
+            'v_r': self.networks.v_r,
+            'v_h_e': self.networks.v_h_e,
+            'x_h': self.networks.x_h,
+            'u_r': self.networks.u_r,
+        }
+        for name, net in networks.items():
+            total_norm = 0.0
+            for p in net.parameters():
+                if p.grad is not None:
+                    total_norm += p.grad.data.norm(2).item() ** 2
+            norms[name] = total_norm ** 0.5
+        return norms
+    
     def update_target_networks(self):
         """Update target networks (hard copy)."""
         self.networks.v_r_target.load_state_dict(self.networks.v_r.state_dict())
@@ -428,15 +464,15 @@ class BasePhase2Trainer(ABC):
         n = len(batch)
         return {k: v / n for k, v in losses.items()}
     
-    def training_step(self) -> Dict[str, float]:
+    def training_step(self) -> Tuple[Dict[str, float], Dict[str, float]]:
         """
         Perform one training step (sample batch, compute losses, update).
         
         Returns:
-            Dict of loss values.
+            Tuple of (loss_values dict, grad_norms dict).
         """
         if len(self.replay_buffer) < self.config.batch_size:
-            return {}
+            return {}, {}
         
         # Sample batch
         batch = self.replay_buffer.sample(self.config.batch_size)
@@ -444,12 +480,20 @@ class BasePhase2Trainer(ABC):
         # Compute losses
         losses = self.compute_losses(batch)
         
-        # Update each network
+        # Update each network - need retain_graph=True for all but last backward
+        # since losses may share computational graphs through state encodings
         loss_values = {}
-        for name, loss in losses.items():
+        grad_norms = {}
+        loss_names = list(losses.keys())
+        for i, name in enumerate(loss_names):
+            loss = losses[name]
             if loss.requires_grad:
                 self.optimizers[name].zero_grad()
-                loss.backward()
+                # Retain graph for all but the last loss to allow multiple backwards
+                retain = (i < len(loss_names) - 1)
+                loss.backward(retain_graph=retain)
+                # Compute gradient norm before step
+                grad_norms[name] = self._compute_single_grad_norm(name)
                 self.optimizers[name].step()
             loss_values[name] = loss.item()
         
@@ -457,14 +501,30 @@ class BasePhase2Trainer(ABC):
         if self.total_steps % self.config.v_r_target_update_freq == 0:
             self.update_target_networks()
         
-        return loss_values
+        return loss_values, grad_norms
     
-    def train_episode(self) -> Dict[str, float]:
+    def _compute_single_grad_norm(self, network_name: str) -> float:
+        """Compute gradient L2 norm for a single network."""
+        networks = {
+            'q_r': self.networks.q_r,
+            'v_r': self.networks.v_r,
+            'v_h_e': self.networks.v_h_e,
+            'x_h': self.networks.x_h,
+            'u_r': self.networks.u_r,
+        }
+        net = networks[network_name]
+        total_norm = 0.0
+        for p in net.parameters():
+            if p.grad is not None:
+                total_norm += p.grad.data.norm(2).item() ** 2
+        return total_norm ** 0.5
+    
+    def train_episode(self) -> Tuple[Dict[str, float], Dict[str, float]]:
         """
         Train for one episode.
         
         Returns:
-            Dict of average loss values for the episode.
+            Tuple of (avg_losses, avg_grad_norms) for the episode.
         """
         if self.debug:
             print(f"[DEBUG] train_episode: resetting environment...")
@@ -481,6 +541,9 @@ class BasePhase2Trainer(ABC):
             print(f"[DEBUG] train_episode: goals sampled, starting {self.config.steps_per_episode} steps...")
         
         episode_losses = {
+            'v_h_e': [], 'x_h': [], 'u_r': [], 'q_r': [], 'v_r': []
+        }
+        episode_grad_norms = {
             'v_h_e': [], 'x_h': [], 'u_r': [], 'q_r': [], 'v_r': []
         }
         
@@ -507,9 +570,11 @@ class BasePhase2Trainer(ABC):
             
             # Training updates
             for _ in range(self.config.updates_per_step):
-                losses = self.training_step()
+                losses, grad_norms = self.training_step()
                 for k, v in losses.items():
                     episode_losses[k].append(v)
+                for k, v in grad_norms.items():
+                    episode_grad_norms[k].append(v)
             
             self.total_steps += 1
             state = next_state
@@ -521,11 +586,16 @@ class BasePhase2Trainer(ABC):
         if self.debug:
             print(f"[DEBUG] train_episode: episode complete, averaging losses...")
         
-        # Average losses
-        return {
+        # Average losses and grad norms
+        avg_losses = {
             k: sum(v) / len(v) if v else 0.0
             for k, v in episode_losses.items()
         }
+        avg_grad_norms = {
+            k: sum(v) / len(v) if v else 0.0
+            for k, v in episode_grad_norms.items()
+        }
+        return avg_losses, avg_grad_norms
     
     def train(self, num_episodes: Optional[int] = None) -> List[Dict[str, float]]:
         """
@@ -546,13 +616,19 @@ class BasePhase2Trainer(ABC):
         pbar = tqdm(total=num_episodes, desc="Training", unit="episodes", disable=not self.verbose)
         
         for episode in range(num_episodes):
-            episode_losses = self.train_episode()
+            episode_losses, episode_grad_norms = self.train_episode()
             history.append(episode_losses)
             
             # Log to TensorBoard
             if self.writer is not None:
                 for key, value in episode_losses.items():
                     self.writer.add_scalar(f'Loss/{key}', value, episode)
+                for key, value in episode_grad_norms.items():
+                    self.writer.add_scalar(f'GradNorm/{key}', value, episode)
+                # Also log parameter norms
+                param_norms = self._compute_param_norms()
+                for key, value in param_norms.items():
+                    self.writer.add_scalar(f'ParamNorm/{key}', value, episode)
                 self.writer.add_scalar('Epsilon', self.config.get_epsilon(self.total_steps), episode)
             
             # Update progress bar
