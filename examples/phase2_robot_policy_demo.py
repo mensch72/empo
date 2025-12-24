@@ -36,8 +36,6 @@ import argparse
 
 import numpy as np
 import torch
-import matplotlib.pyplot as plt
-import matplotlib.animation as animation
 
 from gym_multigrid.multigrid import MultiGridEnv, World, SmallActions
 from empo.multigrid import MultiGridGoalSampler, ReachCellGoal
@@ -98,15 +96,18 @@ def run_policy_rollout(
     human_indices,
     robot_indices,
     device: str = 'cpu'
-):
+) -> int:
     """
     Run a single rollout with the learned robot policy.
     
-    Returns list of frames for movie generation.
+    Uses env's internal video recording - frames are captured automatically.
+    
+    Returns:
+        Number of steps taken.
     """
     env.reset()
-    frames = []
     num_actions = env.action_space.n
+    steps_taken = 0
     
     # Sample initial goals for humans
     state = env.get_state()
@@ -115,12 +116,11 @@ def run_policy_rollout(
         goal, _ = goal_sampler.sample(state, h)
         human_goals[h] = goal
     
+    # Render initial frame
+    env.render(mode='rgb_array', highlight=False)
+    
     for step in range(env.max_steps):
         state = env.get_state()
-        
-        # Render frame
-        frame = env.render(mode='rgb_array', highlight=False)
-        frames.append(frame)
         
         # Get actions
         actions = [0] * len(env.agents)
@@ -142,71 +142,15 @@ def run_policy_rollout(
         
         # Step environment
         _, _, done, _ = env.step(actions)
+        steps_taken += 1
+        
+        # Render frame after step
+        env.render(mode='rgb_array', highlight=False)
         
         if done:
             break
     
-    # Final frame
-    frame = env.render(mode='rgb_array', highlight=False)
-    frames.append(frame)
-    
-    return frames
-
-
-def create_rollout_movie(
-    all_frames,
-    output_path: str,
-    num_rollouts: int
-):
-    """Create a movie from rollout frames."""
-    print(f"Creating movie with {len(all_frames)} rollouts...")
-    
-    frames = []
-    rollout_info = []
-    
-    for rollout_idx, rollout_frames in enumerate(all_frames):
-        for frame_idx, frame in enumerate(rollout_frames):
-            frames.append(frame)
-            rollout_info.append((rollout_idx, frame_idx))
-    
-    if len(frames) == 0:
-        print("No frames to create movie!")
-        return
-    
-    fig, ax = plt.subplots(figsize=(8, 8))
-    ax.axis('off')
-    
-    im = ax.imshow(frames[0])
-    title = ax.set_title('', fontsize=12, fontweight='bold')
-    
-    def update(frame_idx):
-        rollout_idx, step_idx = rollout_info[frame_idx]
-        im.set_array(frames[frame_idx])
-        title.set_text(
-            f'Rollout {rollout_idx + 1}/{num_rollouts} | Step {step_idx}\n'
-            f'Humans: heuristic policy | Robots: learned Q_r policy'
-        )
-        return [im, title]
-    
-    anim = animation.FuncAnimation(
-        fig, update, frames=len(frames),
-        interval=300, blit=True, repeat=True
-    )
-    
-    try:
-        writer = animation.FFMpegWriter(fps=MOVIE_FPS, bitrate=2000)
-        anim.save(output_path, writer=writer)
-        print(f"✓ Movie saved to {output_path}")
-    except Exception as e:
-        print(f"Could not save MP4 ({e}), trying GIF...")
-        gif_path = output_path.replace('.mp4', '.gif')
-        try:
-            anim.save(gif_path, writer='pillow', fps=MOVIE_FPS)
-            print(f"✓ Movie saved as GIF to {gif_path}")
-        except Exception as e2:
-            print(f"Error saving movie: {e2}")
-    
-    plt.close()
+    return steps_taken
 
 
 # ============================================================================
@@ -346,13 +290,15 @@ def main(quick_mode: bool = False, debug: bool = False):
             loss_str = ", ".join(f"{k}={v:.4f}" for k, v in losses.items() if v > 0)
             print(f"  Episode {episode_num}: {loss_str}")
     
-    # Generate rollout movie
+    # Generate rollout movie using env's built-in video recording
     print(f"\nGenerating {num_rollouts} rollouts with learned policy...")
-    all_frames = []
+    
+    # Start video recording
+    env.start_video_recording()
     
     for rollout_idx in range(num_rollouts):
         env.reset()
-        frames = run_policy_rollout(
+        steps = run_policy_rollout(
             env=env,
             robot_q_network=robot_q_network,
             human_policy=human_policy,
@@ -361,13 +307,14 @@ def main(quick_mode: bool = False, debug: bool = False):
             robot_indices=robot_indices,
             device=device
         )
-        all_frames.append(frames)
         if (rollout_idx + 1) % 10 == 0:
-            print(f"  Completed {rollout_idx + 1}/{num_rollouts} rollouts")
+            print(f"  Completed {rollout_idx + 1}/{num_rollouts} rollouts ({len(env._video_frames)} total frames)")
     
-    # Create movie
+    # Save movie using env's save_video method (uses imageio[ffmpeg])
     movie_path = os.path.join(output_dir, 'phase2_robot_policy_demo.mp4')
-    create_rollout_movie(all_frames, movie_path, num_rollouts)
+    if os.path.exists(movie_path):
+        os.remove(movie_path)
+    env.save_video(movie_path, fps=MOVIE_FPS)
     
     print()
     print("=" * 70)
