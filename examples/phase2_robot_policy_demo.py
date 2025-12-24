@@ -234,6 +234,8 @@ def main(quick_mode: bool = False, debug: bool = False):
     print()
     
     # Phase 2 configuration
+    # Note: X_h and U_r have lower learning rates for stability since they
+    # depend on V_h^e which is still learning. This avoids chasing a moving target.
     config = Phase2Config(
         gamma_r=0.99,
         gamma_h=0.99,
@@ -247,14 +249,15 @@ def main(quick_mode: bool = False, debug: bool = False):
         lr_q_r=1e-3,
         lr_v_r=1e-3,
         lr_v_h_e=1e-3,
-        lr_x_h=1e-3,
-        lr_u_r=1e-3,
+        lr_x_h=1e-4,   # Lower LR for X_h to let V_h^e stabilize
+        lr_u_r=1e-4,   # Lower LR for U_r since it depends on X_h
         buffer_size=10000,
         batch_size=32,
         num_episodes=num_episodes,
         steps_per_episode=env.max_steps,
         updates_per_step=1,
         goal_resample_prob=0.1,
+        v_h_target_update_freq=200,  # Less frequent updates for more stable X_h targets
     )
     
     # Train Phase 2
