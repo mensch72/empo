@@ -44,6 +44,7 @@ class Phase2Networks:
     # Target networks (frozen copies for stable training)
     v_r_target: Optional[BaseRobotValueNetwork] = None
     v_h_e_target: Optional[BaseHumanGoalAchievementNetwork] = None
+    x_h_target: Optional[BaseAggregateGoalAbilityNetwork] = None
 
 
 class BasePhase2Trainer(ABC):
@@ -128,11 +129,14 @@ class BasePhase2Trainer(ABC):
         """Initialize target networks as copies of main networks."""
         self.networks.v_r_target = copy.deepcopy(self.networks.v_r)
         self.networks.v_h_e_target = copy.deepcopy(self.networks.v_h_e)
+        self.networks.x_h_target = copy.deepcopy(self.networks.x_h)
         
         # Freeze target networks
         for param in self.networks.v_r_target.parameters():
             param.requires_grad = False
         for param in self.networks.v_h_e_target.parameters():
+            param.requires_grad = False
+        for param in self.networks.x_h_target.parameters():
             param.requires_grad = False
     
     def _init_optimizers(self) -> Dict[str, optim.Optimizer]:
@@ -185,6 +189,7 @@ class BasePhase2Trainer(ABC):
         """Update target networks (hard copy)."""
         self.networks.v_r_target.load_state_dict(self.networks.v_r.state_dict())
         self.networks.v_h_e_target.load_state_dict(self.networks.v_h_e.state_dict())
+        self.networks.x_h_target.load_state_dict(self.networks.x_h.state_dict())
     
     @abstractmethod
     def encode_state(self, state: Any) -> Dict[str, torch.Tensor]:
@@ -417,11 +422,11 @@ class BasePhase2Trainer(ABC):
             
             y_pred, _ = self.networks.u_r.encode_and_forward(s, None, self.device)
             
-            # Accumulate X_h^{-ξ} over sampled humans
+            # Accumulate X_h^{-ξ} over sampled humans using X_h target network for stability
             x_h_sum = torch.tensor(0.0, device=self.device)
             for h_u in humans_for_u_r:
                 with torch.no_grad():
-                    x_h_for_h = self.networks.x_h.encode_and_forward(
+                    x_h_for_h = self.networks.x_h_target.encode_and_forward(
                         s, None, h_u, self.device
                     )
                 # Accumulate X_h^{-ξ}
