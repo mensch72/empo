@@ -32,46 +32,110 @@ This will be used in **small gridworld environments** with:
 For multigrid environments, we model goal regions as **axis-aligned rectangles**. Each rectangle goal $g$ is defined by:
 - $(x_1, y_1, x_2, y_2)$: bounding box coordinates (where $x_1 \leq x_2$, $y_1 \leq y_2$)
 
-The parameterized distribution $P(g|\theta)$ factors into independent distributions for each dimension:
+#### 2.1.1 Generalization of MultiGridGoalSampler
 
-$$P(g|\theta) = P(w|\theta_w) \cdot P(h|\theta_h) \cdot P(x_c|\theta_x) \cdot P(y_c|\theta_y)$$
+The existing `MultiGridGoalSampler` uses the distribution:
+
+$$P(x_1, x_2, y_1, y_2) \propto (1 + x_2 - x_1) \cdot (1 + y_2 - y_1)$$
+
+This samples rectangles with probability proportional to their area. We generalize this to a parameterized family that:
+1. **Maintains the width weighting** $(1 + x_2 - x_1)$ which is important for proper goal weighting
+2. **Allows modifying the center distribution** via a parameterized component $P_0$
+3. **Maintains independence** between x and y coordinates
+
+#### 2.1.2 Parameterized Distribution Family
+
+The parameterized distribution factors as:
+
+$$P(g|\theta) = P(x_1, x_2|\theta_x) \cdot P(y_1, y_2|\theta_y)$$
+
+where each coordinate pair follows:
+
+$$P(x_1, x_2|\theta_x) \propto (1 + x_2 - x_1) \cdot P_0\left(\frac{x_1 + x_2}{2} \bigg| \theta_x\right)$$
+
+and analogously for $(y_1, y_2)$.
+
+Here:
+- The factor $(1 + x_2 - x_1)$ preserves the **width weighting** from the original sampler
+- $P_0(c|\theta)$ is a **parameterized center distribution** on $\{x_{\min}, \ldots, x_{\max}\}$
+
+#### 2.1.3 Center Distribution Family $P_0$
+
+We need a family $P_0(c|\theta)$ on discrete values $\{c_{\min}, \ldots, c_{\max}\}$ that:
+1. **Contains uniform** as a special case (to recover the original `MultiGridGoalSampler`)
+2. **Allows concentration** around any point (to express beliefs about goal location)
+3. **Has few parameters** for efficient Bayesian updating
+
+**Recommended: Discretized Gaussian family**
+
+$$P_0(c|\mu, \kappa) \propto \exp\left(-\kappa (c - \mu)^2\right)$$
 
 where:
-- $w = x_2 - x_1 + 1$ is the width
-- $h = y_2 - y_1 + 1$ is the height  
-- $(x_c, y_c) = ((x_1 + x_2)/2, (y_1 + y_2)/2)$ is the center
+- $\mu \in [c_{\min}, c_{\max}]$ is the center mean (continuous parameter)
+- $\kappa \geq 0$ is the concentration (inverse variance)
 
-**Parameterization options:**
+**Special cases:**
+- $\kappa = 0$: Uniform distribution (recovers original `MultiGridGoalSampler`)
+- $\kappa \to \infty$: Point mass at $\lfloor\mu\rfloor$ (rounding $\mu$ to nearest integer)
 
-| Distribution | Parameters | Description |
-|--------------|------------|-------------|
-| Truncated Gaussian | $(\mu, \sigma)$ | Mean and standard deviation |
-| Categorical | $(p_1, ..., p_n)$ | Probability for each value |
-| Beta (scaled) | $(\alpha, \beta)$ | Shape parameters for continuous [0,1] |
+**Alternative: Categorical softmax family**
 
-For a simple implementation with 8 total parameters, we could use:
-- $\theta_w = (\mu_w, \sigma_w)$ for width distribution
-- $\theta_h = (\mu_h, \sigma_h)$ for height distribution
-- $\theta_x = (\mu_x, \sigma_x)$ for x-center distribution
-- $\theta_y = (\mu_y, \sigma_y)$ for y-center distribution
+$$P_0(c|\mathbf{w}) = \frac{\exp(w_c)}{\sum_{c'} \exp(w_{c'})}$$
+
+where $\mathbf{w} = (w_{c_{\min}}, \ldots, w_{c_{\max}})$ are log-weights.
+
+- **Pro**: Most flexible, can represent any distribution
+- **Con**: More parameters (one per grid position), harder to update efficiently
+
+**Recommended parameterization**: Use discretized Gaussian with 2 parameters per axis:
+- $\theta_x = (\mu_x, \kappa_x)$ for x-center distribution
+- $\theta_y = (\mu_y, \kappa_y)$ for y-center distribution
+
+This gives **4 total parameters** while containing the uniform distribution as $\kappa_x = \kappa_y = 0$.
+
+#### 2.1.4 Full Joint Distribution
+
+Combining the coordinate pairs:
+
+$$P(x_1, x_2, y_1, y_2 | \mu_x, \kappa_x, \mu_y, \kappa_y) \propto (1 + x_2 - x_1) \cdot \exp\left(-\kappa_x \left(\frac{x_1+x_2}{2} - \mu_x\right)^2\right) \cdot (1 + y_2 - y_1) \cdot \exp\left(-\kappa_y \left(\frac{y_1+y_2}{2} - \mu_y\right)^2\right)$$
+
+**Verification**: When $\kappa_x = \kappa_y = 0$, this reduces to:
+
+$$P(x_1, x_2, y_1, y_2) \propto (1 + x_2 - x_1) \cdot (1 + y_2 - y_1)$$
+
+which is exactly the existing `MultiGridGoalSampler` distribution. ✓
+
+#### 2.1.5 Sampling Algorithm
+
+To sample from $P(x_1, x_2|\theta_x)$:
+
+1. **Enumerate** all valid $(x_1, x_2)$ pairs with $x_1 \leq x_2$ in $[x_{\min}, x_{\max}]$
+2. **Compute weights** $w_{x_1,x_2} = (1 + x_2 - x_1) \cdot \exp\left(-\kappa_x \left(\frac{x_1+x_2}{2} - \mu_x\right)^2\right)$
+3. **Normalize** and sample
+
+For small grids (e.g., 10×10), this is efficient. For larger grids, approximate sampling may be needed.
 
 ### 2.2 Markov Jump Process for Goal Dynamics
 
-The goal transition model $P(g'|g)$ describes how goals might change between time steps. For rectangle goals in multigrid, we model this as independent random walks:
+The goal transition model $P(g'|g)$ describes how goals might change between time steps. We model this as independent transitions on the coordinate pairs:
 
-$$P(g'|g) = P(w'|w) \cdot P(h'|h) \cdot P(x_c'|x_c) \cdot P(y_c'|y_c)$$
+$$P(g'|g) = P(x_1', x_2' | x_1, x_2) \cdot P(y_1', y_2' | y_1, y_2)$$
 
-**Simple random walk model:**
-$$P(d'|d) = \begin{cases}
-p_{\text{stay}} & \text{if } d' = d \\
-p_{\text{change}} \cdot Z^{-1} \exp(-\lambda|d' - d|) & \text{otherwise}
+For each coordinate pair, we use a **coupled random walk** that:
+1. Keeps the width distribution roughly proportional to $(1 + x_2 - x_1)$
+2. Allows the center $(x_1 + x_2)/2$ to drift
+
+**Transition model:**
+$$P(x_1', x_2' | x_1, x_2) \propto \begin{cases}
+p_{\text{stay}} & \text{if } (x_1', x_2') = (x_1, x_2) \\
+(1 + x_2' - x_1') \cdot \exp\left(-\lambda \left|\frac{x_1'+x_2'}{2} - \frac{x_1+x_2}{2}\right|\right) & \text{otherwise}
 \end{cases}$$
 
-where $d$ is any of $(w, h, x_c, y_c)$, $Z$ is the normalizing constant, and $\lambda$ is the jump rate parameter.
+This preserves the width weighting while allowing the center to drift according to an exponential decay kernel.
 
 **Fixed parameters** (not learned):
-- $p_{\text{stay}}$: probability the goal dimension doesn't change
-- $\lambda$: rate parameter for exponential decay of jump magnitude
+- $p_{\text{stay}}$: probability the goal doesn't change (typically high, e.g., 0.9)
+- $\lambda$: rate parameter controlling how far the center can jump (higher = smaller jumps)
 
 ### 2.3 Action Prediction
 
@@ -230,18 +294,21 @@ class MultiGridParameterizedGoalSampler(ParameterizedGoalSampler):
     """
     Parameterized goal sampler for multigrid environments.
     
-    Models goals as rectangular regions with Gaussian-parameterized
-    distributions over width, height, and center position.
+    Generalizes MultiGridGoalSampler with parameterized center distribution:
+    P(x1,x2,y1,y2|θ) ∝ (1+x2-x1) * exp(-κx*(center_x - μx)²) 
+                      * (1+y2-y1) * exp(-κy*(center_y - μy)²)
+    
+    When kappa_x = kappa_y = 0, this recovers the original MultiGridGoalSampler.
     """
     
     def __init__(
         self,
         env: 'WorldModel',
-        # Initial parameters
-        mu_w: float = 1.0,    sigma_w: float = 0.5,
-        mu_h: float = 1.0,    sigma_h: float = 0.5,
-        mu_x: float = None,   sigma_x: float = 2.0,  # None = grid center
-        mu_y: float = None,   sigma_y: float = 2.0,
+        # Initial center distribution parameters
+        mu_x: float = None,     # x-center mean (None = grid center)
+        kappa_x: float = 0.0,   # x-center concentration (0 = uniform)
+        mu_y: float = None,     # y-center mean (None = grid center)
+        kappa_y: float = 0.0,   # y-center concentration (0 = uniform)
         # Markov transition parameters (fixed)
         p_stay: float = 0.9,
         jump_rate: float = 0.5,
@@ -385,28 +452,37 @@ class HeuristicRobotPolicy:
 ```python
 @dataclass
 class ParameterizedGoalSamplerConfig:
-    """Configuration for parameterized goal sampler."""
+    """Configuration for parameterized goal sampler.
     
-    # Initial distribution parameters
-    # Note: mu_x and mu_y can be None to indicate "use grid center"
+    The parameterized distribution is:
+    P(x1,x2,y1,y2|θ) ∝ (1+x2-x1) * exp(-κx*(center_x - μx)²) 
+                      * (1+y2-y1) * exp(-κy*(center_y - μy)²)
+    
+    When κx = κy = 0, this recovers the original MultiGridGoalSampler distribution
+    P(goal) ∝ (1+x2-x1)*(1+y2-y1).
+    """
+    
+    # Initial distribution parameters (4 parameters total)
+    # mu_x, mu_y: center means (None = use grid center)
+    # kappa_x, kappa_y: concentration parameters (0 = uniform center distribution)
     initial_params: Dict[str, Optional[float]] = field(default_factory=lambda: {
-        'mu_w': 1.0, 'sigma_w': 0.5,
-        'mu_h': 1.0, 'sigma_h': 0.5,
-        'mu_x': None, 'sigma_x': 2.0,  # None = use grid center
-        'mu_y': None, 'sigma_y': 2.0,
+        'mu_x': None,      # x-center mean (None = grid center)
+        'kappa_x': 0.0,    # x-center concentration (0 = uniform, recovers original sampler)
+        'mu_y': None,      # y-center mean (None = grid center)  
+        'kappa_y': 0.0,    # y-center concentration (0 = uniform, recovers original sampler)
     })
     
     # Markov transition model parameters (fixed, not learned)
     transition_params: Dict[str, float] = field(default_factory=lambda: {
-        'p_stay': 0.9,          # Probability goal dimension stays same
-        'jump_rate': 0.5,       # Rate of exponential decay for jump size
+        'p_stay': 0.9,          # Probability goal stays the same
+        'jump_rate': 0.5,       # λ: exponential decay rate for center drift
     })
     
     # Bayesian updating parameters
     learning_rate: float = 0.1
     n_samples: int = 100
-    min_sigma: float = 0.1     # Minimum allowed sigma (prevents collapse)
-    max_sigma: float = 10.0    # Maximum allowed sigma
+    min_kappa: float = 0.0     # Minimum concentration (0 = uniform allowed)
+    max_kappa: float = 10.0    # Maximum concentration (prevents over-concentration)
     
     # Particle filter alternative (if used)
     use_particle_filter: bool = False
@@ -419,10 +495,20 @@ class ParameterizedGoalSamplerConfig:
 ### 7.1 Public Interface
 
 ```python
-# Creating a parameterized goal sampler
+# Creating a parameterized goal sampler (recovers original MultiGridGoalSampler)
 sampler = MultiGridParameterizedGoalSampler(
     env=world_model,
-    config=ParameterizedGoalSamplerConfig(),
+    kappa_x=0.0,  # uniform x-center distribution
+    kappa_y=0.0,  # uniform y-center distribution
+)
+
+# Creating a sampler with concentrated center belief
+sampler = MultiGridParameterizedGoalSampler(
+    env=world_model,
+    mu_x=5.0,     # x-center mean at x=5
+    kappa_x=2.0,  # moderate concentration around x=5
+    mu_y=3.0,     # y-center mean at y=3
+    kappa_y=2.0,  # moderate concentration around y=3
 )
 
 # Sample a goal (inherits from PossibleGoalSampler)
@@ -430,7 +516,7 @@ goal, weight = sampler.sample(state, human_agent_index=0)
 
 # Get current belief parameters
 theta = sampler.get_parameters()
-# Returns: {'mu_w': 1.5, 'sigma_w': 0.3, 'mu_h': ..., ...}
+# Returns: {'mu_x': 5.0, 'kappa_x': 2.0, 'mu_y': 3.0, 'kappa_y': 2.0}
 
 # Predict action distribution
 p_action = sampler.predict_action_distribution(
@@ -509,12 +595,13 @@ def test_multi_human_tracking():
 
 ### 9.1 Goal Representation
 
-**Q1:** Should goals be represented as:
-- Exact rectangles $(x_1, y_1, x_2, y_2)$
-- Center + size $(x_c, y_c, w, h)$
-- Mixture of point goals with spatial correlation
+**Q1:** How should we handle the case where the width distribution needs to be modified?
 
-**Recommendation:** Start with center + size (4 parameters per dimension × 2 = 8 parameters total), which aligns with the problem statement.
+**Current approach:** We keep the width weighting $(1 + x_2 - x_1)$ fixed as in the original `MultiGridGoalSampler`, and only parameterize the center distribution. This preserves the important property that larger rectangles are sampled proportionally more often.
+
+**Future extension:** If needed, we could add a parameterized width preference by using:
+$$P(x_1, x_2|\theta) \propto (1 + x_2 - x_1)^{\alpha} \cdot P_0(\text{center}|\theta)$$
+where $\alpha > 0$ controls width preference ($\alpha = 1$ is the current model).
 
 ### 9.2 Multi-Human Correlation
 
@@ -566,6 +653,7 @@ This work will integrate with the **Phase 2 learning** approach from PR #50, whi
 ## 11. References
 
 - Existing `PossibleGoalSampler` interface: `src/empo/possible_goal.py`
+- `MultiGridGoalSampler` implementation: `src/empo/multigrid.py`
 - `HumanPolicyPrior` interface: `src/empo/human_policy_prior.py`
 - `HeuristicPotentialPolicy` implementation: `src/empo/human_policy_prior.py`
 - Phase 2 learning plan: See PR #50 branch `copilot/create-implementation-document` for `docs/plans/issue_49_phase2_learning.md`
@@ -574,9 +662,13 @@ This work will integrate with the **Phase 2 learning** approach from PR #50, whi
 
 This plan describes an extension to the goal sampling infrastructure that:
 
-1. **Parameterizes** the goal distribution with learnable parameters $\theta$
-2. **Models dynamics** via a Markov jump process with fixed parameters
-3. **Predicts actions** by marginalizing over predicted goals
-4. **Updates beliefs** via variational Bayesian inference
+1. **Generalizes `MultiGridGoalSampler`** with a parameterized center distribution:
+   $$P(x_1, x_2|\theta) \propto (1 + x_2 - x_1) \cdot P_0\left(\frac{x_1+x_2}{2} \bigg| \mu, \kappa\right)$$
+   where $P_0$ is a discretized Gaussian with mean $\mu$ and concentration $\kappa$
+2. **Recovers the original sampler** when $\kappa = 0$ (uniform center distribution)
+3. **Uses 4 parameters** total: $(\mu_x, \kappa_x, \mu_y, \kappa_y)$
+4. **Models dynamics** via a Markov jump process with fixed parameters
+5. **Predicts actions** by marginalizing over predicted goals
+6. **Updates beliefs** via variational Bayesian inference
 
-The implementation builds on existing abstractions (`PossibleGoalSampler`, `HumanPolicyPrior`) and will integrate with both heuristic and learned robot policies for use in small gridworld experiments.
+The implementation builds on existing abstractions (`PossibleGoalSampler`, `MultiGridGoalSampler`, `HumanPolicyPrior`) and will integrate with both heuristic and learned robot policies for use in small gridworld experiments.
