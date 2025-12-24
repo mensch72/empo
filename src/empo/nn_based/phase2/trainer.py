@@ -131,13 +131,18 @@ class BasePhase2Trainer(ABC):
         self.networks.v_h_e_target = copy.deepcopy(self.networks.v_h_e)
         self.networks.x_h_target = copy.deepcopy(self.networks.x_h)
         
-        # Freeze target networks
+        # Freeze target networks (no gradients)
         for param in self.networks.v_r_target.parameters():
             param.requires_grad = False
         for param in self.networks.v_h_e_target.parameters():
             param.requires_grad = False
         for param in self.networks.x_h_target.parameters():
             param.requires_grad = False
+        
+        # Set target networks to eval mode (disables dropout during inference)
+        self.networks.v_r_target.eval()
+        self.networks.v_h_e_target.eval()
+        self.networks.x_h_target.eval()
     
     def _init_optimizers(self) -> Dict[str, optim.Optimizer]:
         """Initialize optimizers for each network with weight decay."""
@@ -217,6 +222,11 @@ class BasePhase2Trainer(ABC):
         self.networks.v_r_target.load_state_dict(self.networks.v_r.state_dict())
         self.networks.v_h_e_target.load_state_dict(self.networks.v_h_e.state_dict())
         self.networks.x_h_target.load_state_dict(self.networks.x_h.state_dict())
+        
+        # Ensure target networks stay in eval mode (disables dropout)
+        self.networks.v_r_target.eval()
+        self.networks.v_h_e_target.eval()
+        self.networks.x_h_target.eval()
     
     @abstractmethod
     def encode_state(self, state: Any) -> Dict[str, torch.Tensor]:
