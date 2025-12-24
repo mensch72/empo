@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from tqdm import tqdm
 
 from .config import Phase2Config
 from .replay_buffer import Phase2Transition, Phase2ReplayBuffer
@@ -22,6 +23,13 @@ from .human_goal_ability import BaseHumanGoalAchievementNetwork
 from .aggregate_goal_ability import BaseAggregateGoalAbilityNetwork
 from .intrinsic_reward_network import BaseIntrinsicRewardNetwork
 from .robot_value_network import BaseRobotValueNetwork
+
+# Try to import tensorboard (optional)
+try:
+    from torch.utils.tensorboard import SummaryWriter
+    HAS_TENSORBOARD = True
+except ImportError:
+    HAS_TENSORBOARD = False
 
 
 @dataclass
@@ -59,7 +67,9 @@ class BasePhase2Trainer(ABC):
         human_policy_prior: Callable that returns human action given state and goal.
         goal_sampler: Callable that samples a goal for a human.
         device: Torch device for computation.
-        verbose: Enable debug output.
+        verbose: Enable progress output (tqdm progress bar).
+        debug: Enable verbose debug output (very detailed, for debugging).
+        tensorboard_dir: Directory for TensorBoard logs (optional).
     """
     
     def __init__(
@@ -71,7 +81,9 @@ class BasePhase2Trainer(ABC):
         human_policy_prior: Callable,
         goal_sampler: Callable,
         device: str = 'cpu',
-        verbose: bool = False
+        verbose: bool = False,
+        debug: bool = False,
+        tensorboard_dir: Optional[str] = None
     ):
         self.networks = networks
         self.config = config
@@ -81,20 +93,26 @@ class BasePhase2Trainer(ABC):
         self.goal_sampler = goal_sampler
         self.device = device
         self.verbose = verbose
+        self.debug = debug
         
-        if self.verbose:
+        # Initialize TensorBoard writer if requested
+        self.writer = None
+        if tensorboard_dir is not None and HAS_TENSORBOARD:
+            self.writer = SummaryWriter(log_dir=tensorboard_dir)
+        
+        if self.debug:
             print("[DEBUG] BasePhase2Trainer.__init__: Initializing target networks...")
         
         # Initialize target networks
         self._init_target_networks()
         
-        if self.verbose:
+        if self.debug:
             print("[DEBUG] BasePhase2Trainer.__init__: Initializing optimizers...")
         
         # Initialize optimizers
         self.optimizers = self._init_optimizers()
         
-        if self.verbose:
+        if self.debug:
             print("[DEBUG] BasePhase2Trainer.__init__: Creating replay buffer...")
         
         # Replay buffer
@@ -103,7 +121,7 @@ class BasePhase2Trainer(ABC):
         # Training step counter
         self.total_steps = 0
         
-        if self.verbose:
+        if self.debug:
             print("[DEBUG] BasePhase2Trainer.__init__: Initialization complete.")
     
     def _init_target_networks(self):
@@ -245,24 +263,24 @@ class BasePhase2Trainer(ABC):
         Returns:
             Tuple of (transition, next_state).
         """
-        if self.verbose:
+        if self.debug:
             print(f"[DEBUG] collect_transition: sampling robot action...")
         
         # Sample actions
         robot_action = self.sample_robot_action(state)
         
-        if self.verbose:
+        if self.debug:
             print(f"[DEBUG] collect_transition: robot_action={robot_action}, sampling human actions...")
         
         human_actions = self.sample_human_actions(state, goals)
         
-        if self.verbose:
+        if self.debug:
             print(f"[DEBUG] collect_transition: human_actions={human_actions}, stepping environment...")
         
         # Step environment
         next_state = self.step_environment(state, robot_action, human_actions)
         
-        if self.verbose:
+        if self.debug:
             print(f"[DEBUG] collect_transition: environment stepped, creating transition...")
         
         # Create transition
@@ -274,7 +292,7 @@ class BasePhase2Trainer(ABC):
             next_state=next_state
         )
         
-        if self.verbose:
+        if self.debug:
             print(f"[DEBUG] collect_transition: done")
         
         return transition, next_state
@@ -448,18 +466,18 @@ class BasePhase2Trainer(ABC):
         Returns:
             Dict of average loss values for the episode.
         """
-        if self.verbose:
+        if self.debug:
             print(f"[DEBUG] train_episode: resetting environment...")
         
         state = self.reset_environment()
         
-        if self.verbose:
+        if self.debug:
             print(f"[DEBUG] train_episode: sampling initial goals...")
         
         # Sample initial goals
         goals = {h: self.goal_sampler(state, h) for h in self.human_agent_indices}
         
-        if self.verbose:
+        if self.debug:
             print(f"[DEBUG] train_episode: goals sampled, starting {self.config.steps_per_episode} steps...")
         
         episode_losses = {
@@ -467,13 +485,13 @@ class BasePhase2Trainer(ABC):
         }
         
         for step in range(self.config.steps_per_episode):
-            if self.verbose and step % 5 == 0:
+            if self.debug and step % 5 == 0:
                 print(f"[DEBUG] train_episode: step {step}/{self.config.steps_per_episode}")
             
             # Collect transition
             transition, next_state = self.collect_transition(state, goals)
             
-            if self.verbose and step == 0:
+            if self.debug and step == 0:
                 print(f"[DEBUG] train_episode: pushing to replay buffer...")
             
             self.replay_buffer.push(
@@ -484,7 +502,7 @@ class BasePhase2Trainer(ABC):
                 transition.next_state
             )
             
-            if self.verbose and step == 0:
+            if self.debug and step == 0:
                 print(f"[DEBUG] train_episode: starting training updates...")
             
             # Training updates
@@ -500,7 +518,7 @@ class BasePhase2Trainer(ABC):
             if random.random() < self.config.goal_resample_prob:
                 goals = {h: self.goal_sampler(state, h) for h in self.human_agent_indices}
         
-        if self.verbose:
+        if self.debug:
             print(f"[DEBUG] train_episode: episode complete, averaging losses...")
         
         # Average losses
@@ -523,11 +541,34 @@ class BasePhase2Trainer(ABC):
             num_episodes = self.config.num_episodes
         
         history = []
+        
+        # Set up progress bar
+        pbar = tqdm(total=num_episodes, desc="Training", unit="episodes", disable=not self.verbose)
+        
         for episode in range(num_episodes):
             episode_losses = self.train_episode()
             history.append(episode_losses)
             
-            if episode % 100 == 0:
+            # Log to TensorBoard
+            if self.writer is not None:
+                for key, value in episode_losses.items():
+                    self.writer.add_scalar(f'Loss/{key}', value, episode)
+                self.writer.add_scalar('Epsilon', self.config.get_epsilon(self.total_steps), episode)
+            
+            # Update progress bar
+            pbar.update(1)
+            if episode_losses:
+                loss_str = ", ".join(f"{k}={v:.4f}" for k, v in episode_losses.items() if v > 0)
+                pbar.set_postfix_str(loss_str[:60])
+            
+            # Print occasional summary if verbose
+            if self.debug and episode % 100 == 0:
                 print(f"Episode {episode}: {episode_losses}")
+        
+        pbar.close()
+        
+        # Close TensorBoard writer
+        if self.writer is not None:
+            self.writer.close()
         
         return history

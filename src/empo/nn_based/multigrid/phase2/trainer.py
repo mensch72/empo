@@ -41,7 +41,9 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         human_policy_prior: Callable returning human action given state, index, goal.
         goal_sampler: Callable returning a goal for a human.
         device: Torch device.
-        verbose: Enable debug output.
+        verbose: Enable progress output (tqdm progress bar).
+        debug: Enable verbose debug output.
+        tensorboard_dir: Directory for TensorBoard logs (optional).
     """
     
     def __init__(
@@ -54,7 +56,9 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         human_policy_prior: Callable,
         goal_sampler: Callable,
         device: str = 'cpu',
-        verbose: bool = False
+        verbose: bool = False,
+        debug: bool = False,
+        tensorboard_dir: Optional[str] = None
     ):
         self.env = env
         super().__init__(
@@ -65,7 +69,9 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
             human_policy_prior=human_policy_prior,
             goal_sampler=goal_sampler,
             device=device,
-            verbose=verbose
+            verbose=verbose,
+            debug=debug,
+            tensorboard_dir=tensorboard_dir
         )
     
     def encode_state(self, state: Any) -> Dict[str, torch.Tensor]:
@@ -219,7 +225,9 @@ def train_multigrid_phase2(
     num_episodes: Optional[int] = None,
     hidden_dim: int = 256,
     device: str = 'cpu',
-    verbose: bool = True
+    verbose: bool = True,
+    debug: bool = False,
+    tensorboard_dir: Optional[str] = None
 ) -> Tuple[MultiGridRobotQNetwork, Phase2Networks, List[Dict[str, float]]]:
     """
     Train Phase 2 robot policy for a multigrid environment.
@@ -237,7 +245,9 @@ def train_multigrid_phase2(
         num_episodes: Override config.num_episodes if provided.
         hidden_dim: Hidden dimension for networks.
         device: Torch device.
-        verbose: Print progress.
+        verbose: Enable progress bar (tqdm).
+        debug: Enable verbose debug output.
+        tensorboard_dir: Directory for TensorBoard logs (optional).
     
     Returns:
         Tuple of (robot_q_network, all_networks, training_history).
@@ -275,7 +285,7 @@ def train_multigrid_phase2(
         device=device
     )
     
-    if verbose:
+    if debug:
         print("[DEBUG] Creating trainer...")
     
     # Create trainer
@@ -288,7 +298,9 @@ def train_multigrid_phase2(
         human_policy_prior=human_policy_prior,
         goal_sampler=goal_sampler,
         device=device,
-        verbose=verbose  # Pass verbose to trainer for debug output
+        verbose=verbose,
+        debug=debug,
+        tensorboard_dir=tensorboard_dir
     )
     
     if verbose:
@@ -296,6 +308,8 @@ def train_multigrid_phase2(
         print(f"  Steps per episode: {config.steps_per_episode}")
         print(f"  Batch size: {config.batch_size}")
         print(f"  Buffer size: {config.buffer_size}")
+        if tensorboard_dir:
+            print(f"  TensorBoard: {tensorboard_dir}")
     
     # Train
     history = trainer.train(config.num_episodes)
