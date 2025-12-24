@@ -27,6 +27,7 @@ class MultiGridRobotValueNetwork(BaseRobotValueNetwork):
         state_feature_dim: State encoder output dimension.
         hidden_dim: Hidden layer dimension.
         gamma_r: Robot discount factor.
+        dropout: Dropout rate for hidden layers (0 = no dropout).
         max_kill_buttons: Max KillButtons.
         max_pause_switches: Max PauseSwitches.
         max_disabling_switches: Max DisablingSwitches.
@@ -42,6 +43,7 @@ class MultiGridRobotValueNetwork(BaseRobotValueNetwork):
         state_feature_dim: int = 256,
         hidden_dim: int = 256,
         gamma_r: float = 0.99,
+        dropout: float = 0.0,
         max_kill_buttons: int = 4,
         max_pause_switches: int = 4,
         max_disabling_switches: int = 4,
@@ -53,6 +55,7 @@ class MultiGridRobotValueNetwork(BaseRobotValueNetwork):
         self.grid_width = grid_width
         self.state_feature_dim = state_feature_dim
         self.hidden_dim = hidden_dim
+        self.dropout_rate = dropout
         
         # State encoder
         self.state_encoder = MultiGridStateEncoder(
@@ -67,14 +70,25 @@ class MultiGridRobotValueNetwork(BaseRobotValueNetwork):
             max_control_buttons=max_control_buttons
         )
         
-        # V_r value head
-        self.value_head = nn.Sequential(
-            nn.Linear(state_feature_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1),
-        )
+        # V_r value head with optional dropout
+        if dropout > 0.0:
+            self.value_head = nn.Sequential(
+                nn.Linear(state_feature_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, 1),
+            )
+        else:
+            self.value_head = nn.Sequential(
+                nn.Linear(state_feature_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, 1),
+            )
     
     def forward(
         self,
@@ -164,5 +178,6 @@ class MultiGridRobotValueNetwork(BaseRobotValueNetwork):
             'state_feature_dim': self.state_feature_dim,
             'hidden_dim': self.hidden_dim,
             'gamma_r': self.gamma_r,
+            'dropout': self.dropout_rate,
             'state_encoder_config': self.state_encoder.get_config(),
         }

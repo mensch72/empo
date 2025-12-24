@@ -88,10 +88,32 @@ class Phase2Config:
     # X_h loss computation: number of human-goal pairs to sample (None = all from transition)
     x_h_sample_humans: Optional[int] = None
     
-    # X_h regularization options (to help with high-variance learning)
-    x_h_weight_decay: float = 1e-4  # L2 regularization for X_h optimizer
-    x_h_grad_clip: float = 1.0  # Max gradient norm for X_h
-    x_h_dropout: float = 0.5  # Dropout rate for X_h hidden layers (not input/output)
+    # Regularization options for all networks (weight decay, gradient clipping, dropout)
+    # These help with training stability, especially for high-variance learning.
+    # Weight decay (L2 regularization) for each network's optimizer
+    q_r_weight_decay: float = 1e-4
+    v_r_weight_decay: float = 1e-4
+    v_h_e_weight_decay: float = 1e-4
+    x_h_weight_decay: float = 1e-4
+    u_r_weight_decay: float = 1e-4
+    
+    # Max gradient norm for each network (0 or None to disable clipping)
+    q_r_grad_clip: float = 1.0
+    v_r_grad_clip: float = 1.0
+    v_h_e_grad_clip: float = 1.0
+    x_h_grad_clip: float = 1.0
+    u_r_grad_clip: float = 1.0
+    
+    # Dropout rate for hidden layers (not input/output) of each network
+    q_r_dropout: float = 0.5
+    v_r_dropout: float = 0.5
+    v_h_e_dropout: float = 0.5
+    x_h_dropout: float = 0.5
+    u_r_dropout: float = 0.5
+    
+    # V_r computation mode: if False (default), compute V_r directly from U_r and Q_r
+    # instead of using a separate network. This reduces complexity since V_r = U_r + π_r · Q_r.
+    v_r_use_network: bool = False
     
     # Network architecture
     hidden_dim: int = 256

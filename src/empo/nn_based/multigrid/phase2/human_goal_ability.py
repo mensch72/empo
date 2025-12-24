@@ -30,6 +30,7 @@ class MultiGridHumanGoalAchievementNetwork(BaseHumanGoalAchievementNetwork):
         hidden_dim: Hidden layer dimension.
         gamma_h: Human discount factor.
         feasible_range: Output bounds for V_h^e.
+        dropout: Dropout rate for hidden layers (0 = no dropout).
         max_kill_buttons: Max KillButtons.
         max_pause_switches: Max PauseSwitches.
         max_disabling_switches: Max DisablingSwitches.
@@ -47,6 +48,7 @@ class MultiGridHumanGoalAchievementNetwork(BaseHumanGoalAchievementNetwork):
         hidden_dim: int = 256,
         gamma_h: float = 0.99,
         feasible_range: Tuple[float, float] = (0.0, 1.0),
+        dropout: float = 0.0,
         max_kill_buttons: int = 4,
         max_pause_switches: int = 4,
         max_disabling_switches: int = 4,
@@ -59,6 +61,7 @@ class MultiGridHumanGoalAchievementNetwork(BaseHumanGoalAchievementNetwork):
         self.state_feature_dim = state_feature_dim
         self.goal_feature_dim = goal_feature_dim
         self.hidden_dim = hidden_dim
+        self.dropout_rate = dropout
         
         # State encoder
         self.state_encoder = MultiGridStateEncoder(
@@ -80,15 +83,26 @@ class MultiGridHumanGoalAchievementNetwork(BaseHumanGoalAchievementNetwork):
             feature_dim=goal_feature_dim
         )
         
-        # Value head: combines state + goal features
+        # Value head: combines state + goal features with optional dropout
         combined_dim = state_feature_dim + goal_feature_dim
-        self.value_head = nn.Sequential(
-            nn.Linear(combined_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1),
-        )
+        if dropout > 0.0:
+            self.value_head = nn.Sequential(
+                nn.Linear(combined_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, 1),
+            )
+        else:
+            self.value_head = nn.Sequential(
+                nn.Linear(combined_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, 1),
+            )
     
     def forward(
         self,
@@ -196,6 +210,7 @@ class MultiGridHumanGoalAchievementNetwork(BaseHumanGoalAchievementNetwork):
             'hidden_dim': self.hidden_dim,
             'gamma_h': self.gamma_h,
             'feasible_range': self.feasible_range,
+            'dropout': self.dropout_rate,
             'state_encoder_config': self.state_encoder.get_config(),
             'goal_encoder_config': self.goal_encoder.get_config(),
         }

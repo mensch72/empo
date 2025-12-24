@@ -158,7 +158,7 @@ def create_phase2_networks(
     grid_height = env.height
     grid_width = env.width
     
-    # Create networks
+    # Create networks with dropout from config
     q_r = MultiGridRobotQNetwork(
         grid_height=grid_height,
         grid_width=grid_width,
@@ -168,6 +168,7 @@ def create_phase2_networks(
         state_feature_dim=hidden_dim,
         hidden_dim=hidden_dim,
         beta_r=config.beta_r,
+        dropout=config.q_r_dropout,
     ).to(device)
     
     v_h_e = MultiGridHumanGoalAchievementNetwork(
@@ -177,6 +178,7 @@ def create_phase2_networks(
         state_feature_dim=hidden_dim,
         hidden_dim=hidden_dim,
         gamma_h=config.gamma_h,
+        dropout=config.v_h_e_dropout,
     ).to(device)
     
     x_h = MultiGridAggregateGoalAbilityNetwork(
@@ -197,6 +199,7 @@ def create_phase2_networks(
         hidden_dim=hidden_dim,
         xi=config.xi,
         eta=config.eta,
+        dropout=config.u_r_dropout,
     ).to(device)
     
     v_r = MultiGridRobotValueNetwork(
@@ -205,6 +208,7 @@ def create_phase2_networks(
         num_agents_per_color=num_agents_per_color,
         state_feature_dim=hidden_dim,
         hidden_dim=hidden_dim,
+        dropout=config.v_r_dropout,
     ).to(device)
     
     return Phase2Networks(

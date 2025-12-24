@@ -34,6 +34,7 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
         hidden_dim: Hidden layer dimension.
         beta_r: Power-law policy exponent.
         feasible_range: Optional Q-value bounds (typically negative).
+        dropout: Dropout rate for hidden layers (0 = no dropout).
         max_kill_buttons: Max KillButtons.
         max_pause_switches: Max PauseSwitches.
         max_disabling_switches: Max DisablingSwitches.
@@ -52,6 +53,7 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
         hidden_dim: int = 256,
         beta_r: float = 10.0,
         feasible_range: Optional[Tuple[float, float]] = None,
+        dropout: float = 0.0,
         max_kill_buttons: int = 4,
         max_pause_switches: int = 4,
         max_disabling_switches: int = 4,
@@ -67,6 +69,7 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
         self.grid_height = grid_height
         self.grid_width = grid_width
         self.hidden_dim = hidden_dim
+        self.dropout_rate = dropout
         
         # State encoder (reuse existing multigrid encoder)
         self.state_encoder = MultiGridStateEncoder(
@@ -81,14 +84,25 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
             max_control_buttons=max_control_buttons
         )
         
-        # Q-value head for joint actions
-        self.q_head = nn.Sequential(
-            nn.Linear(state_feature_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, self.num_action_combinations),
-        )
+        # Q-value head for joint actions with optional dropout
+        if dropout > 0.0:
+            self.q_head = nn.Sequential(
+                nn.Linear(state_feature_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, self.num_action_combinations),
+            )
+        else:
+            self.q_head = nn.Sequential(
+                nn.Linear(state_feature_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, self.num_action_combinations),
+            )
     
     def forward(
         self,
@@ -164,5 +178,6 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
             'hidden_dim': self.hidden_dim,
             'beta_r': self.beta_r,
             'feasible_range': self.feasible_range,
+            'dropout': self.dropout_rate,
             'state_encoder_config': self.state_encoder.get_config(),
         }

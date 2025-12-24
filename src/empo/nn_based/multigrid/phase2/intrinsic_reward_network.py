@@ -30,6 +30,7 @@ class MultiGridIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
         hidden_dim: Hidden layer dimension.
         xi: Inter-human inequality aversion parameter.
         eta: Intertemporal inequality aversion parameter.
+        dropout: Dropout rate for hidden layers (0 = no dropout).
         max_kill_buttons: Max KillButtons.
         max_pause_switches: Max PauseSwitches.
         max_disabling_switches: Max DisablingSwitches.
@@ -46,6 +47,7 @@ class MultiGridIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
         hidden_dim: int = 256,
         xi: float = 1.0,
         eta: float = 1.1,
+        dropout: float = 0.0,
         max_kill_buttons: int = 4,
         max_pause_switches: int = 4,
         max_disabling_switches: int = 4,
@@ -57,6 +59,7 @@ class MultiGridIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
         self.grid_width = grid_width
         self.state_feature_dim = state_feature_dim
         self.hidden_dim = hidden_dim
+        self.dropout_rate = dropout
         
         # State encoder
         self.state_encoder = MultiGridStateEncoder(
@@ -71,15 +74,26 @@ class MultiGridIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
             max_control_buttons=max_control_buttons
         )
         
-        # Network predicts log(y-1) for numerical stability
+        # Network predicts log(y-1) for numerical stability with optional dropout
         # y = 1 + exp(log(y-1)) ensures y > 1
-        self.y_head = nn.Sequential(
-            nn.Linear(state_feature_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1),
-        )
+        if dropout > 0.0:
+            self.y_head = nn.Sequential(
+                nn.Linear(state_feature_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, 1),
+            )
+        else:
+            self.y_head = nn.Sequential(
+                nn.Linear(state_feature_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, 1),
+            )
     
     def forward(
         self,
@@ -177,5 +191,6 @@ class MultiGridIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
             'hidden_dim': self.hidden_dim,
             'xi': self.xi,
             'eta': self.eta,
+            'dropout': self.dropout_rate,
             'state_encoder_config': self.state_encoder.get_config(),
         }

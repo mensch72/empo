@@ -140,29 +140,50 @@ class BasePhase2Trainer(ABC):
             param.requires_grad = False
     
     def _init_optimizers(self) -> Dict[str, optim.Optimizer]:
-        """Initialize optimizers for each network."""
-        return {
-            'q_r': optim.Adam(self.networks.q_r.parameters(), lr=self.config.lr_q_r),
-            'v_r': optim.Adam(self.networks.v_r.parameters(), lr=self.config.lr_v_r),
-            'v_h_e': optim.Adam(self.networks.v_h_e.parameters(), lr=self.config.lr_v_h_e),
+        """Initialize optimizers for each network with weight decay."""
+        optimizers = {
+            'q_r': optim.Adam(
+                self.networks.q_r.parameters(), 
+                lr=self.config.lr_q_r,
+                weight_decay=self.config.q_r_weight_decay
+            ),
+            'v_h_e': optim.Adam(
+                self.networks.v_h_e.parameters(), 
+                lr=self.config.lr_v_h_e,
+                weight_decay=self.config.v_h_e_weight_decay
+            ),
             'x_h': optim.Adam(
                 self.networks.x_h.parameters(), 
                 lr=self.config.lr_x_h,
                 weight_decay=self.config.x_h_weight_decay
             ),
-            'u_r': optim.Adam(self.networks.u_r.parameters(), lr=self.config.lr_u_r),
+            'u_r': optim.Adam(
+                self.networks.u_r.parameters(), 
+                lr=self.config.lr_u_r,
+                weight_decay=self.config.u_r_weight_decay
+            ),
         }
+        # Only create V_r optimizer if using network (not direct computation)
+        if self.config.v_r_use_network:
+            optimizers['v_r'] = optim.Adam(
+                self.networks.v_r.parameters(), 
+                lr=self.config.lr_v_r,
+                weight_decay=self.config.v_r_weight_decay
+            )
+        return optimizers
     
     def _compute_param_norms(self) -> Dict[str, float]:
         """Compute L2 norms of network parameters for monitoring."""
         norms = {}
         networks = {
             'q_r': self.networks.q_r,
-            'v_r': self.networks.v_r,
             'v_h_e': self.networks.v_h_e,
             'x_h': self.networks.x_h,
             'u_r': self.networks.u_r,
         }
+        # Only include V_r if using network mode
+        if self.config.v_r_use_network:
+            networks['v_r'] = self.networks.v_r
         for name, net in networks.items():
             total_norm = 0.0
             for p in net.parameters():
@@ -176,11 +197,13 @@ class BasePhase2Trainer(ABC):
         norms = {}
         networks = {
             'q_r': self.networks.q_r,
-            'v_r': self.networks.v_r,
             'v_h_e': self.networks.v_h_e,
             'x_h': self.networks.x_h,
             'u_r': self.networks.u_r,
         }
+        # Only include V_r if using network mode
+        if self.config.v_r_use_network:
+            networks['v_r'] = self.networks.v_r
         for name, net in networks.items():
             total_norm = 0.0
             for p in net.parameters():
@@ -440,25 +463,36 @@ class BasePhase2Trainer(ABC):
             q_r_pred = q_r_all.squeeze()[a_r_index]
             
             with torch.no_grad():
-                v_r_next = self.networks.v_r_target.encode_and_forward(
-                    s_prime, None, self.device
-                )
+                if self.config.v_r_use_network:
+                    # Use V_r target network
+                    v_r_next = self.networks.v_r_target.encode_and_forward(
+                        s_prime, None, self.device
+                    )
+                else:
+                    # Compute V_r directly: V_r(s') = U_r(s') + π_r(s') · Q_r(s')
+                    _, u_r_next = self.networks.u_r.encode_and_forward(s_prime, None, self.device)
+                    q_r_next = self.networks.q_r.encode_and_forward(s_prime, None, self.device)
+                    pi_r_next = self.networks.q_r.get_policy(q_r_next)
+                    v_r_next = self.networks.v_r.compute_from_components(
+                        u_r_next.squeeze(), q_r_next.squeeze(), pi_r_next.squeeze()
+                    )
             
             target_q_r = self.config.gamma_r * v_r_next.squeeze()
             losses['q_r'] = losses['q_r'] + (q_r_pred - target_q_r) ** 2
             
-            # ===== V_r loss =====
-            v_r_pred = self.networks.v_r.encode_and_forward(s, None, self.device)
-            
-            with torch.no_grad():
-                _, u_r = self.networks.u_r.encode_and_forward(s, None, self.device)
-                q_r_for_v = self.networks.q_r.encode_and_forward(s, None, self.device)
-                pi_r = self.networks.q_r.get_policy(q_r_for_v)
-            
-            target_v_r = self.networks.v_r.compute_from_components(
-                u_r.squeeze(), q_r_for_v.squeeze(), pi_r.squeeze()
-            )
-            losses['v_r'] = losses['v_r'] + (v_r_pred.squeeze() - target_v_r) ** 2
+            # ===== V_r loss (only if using network mode) =====
+            if self.config.v_r_use_network:
+                v_r_pred = self.networks.v_r.encode_and_forward(s, None, self.device)
+                
+                with torch.no_grad():
+                    _, u_r = self.networks.u_r.encode_and_forward(s, None, self.device)
+                    q_r_for_v = self.networks.q_r.encode_and_forward(s, None, self.device)
+                    pi_r = self.networks.q_r.get_policy(q_r_for_v)
+                
+                target_v_r = self.networks.v_r.compute_from_components(
+                    u_r.squeeze(), q_r_for_v.squeeze(), pi_r.squeeze()
+                )
+                losses['v_r'] = losses['v_r'] + (v_r_pred.squeeze() - target_v_r) ** 2
         
         # ===== X_h loss (computed on potentially larger batch) =====
         for transition in x_h_batch:
@@ -492,7 +526,10 @@ class BasePhase2Trainer(ABC):
         
         # Average losses over their respective batch sizes
         n = len(batch)
-        for k in ['v_h_e', 'u_r', 'q_r', 'v_r']:
+        loss_keys_to_avg = ['v_h_e', 'u_r', 'q_r']
+        if self.config.v_r_use_network:
+            loss_keys_to_avg.append('v_r')
+        for k in loss_keys_to_avg:
             losses[k] = losses[k] / n
         # X_h uses its own count (may be from larger batch)
         if x_h_count > 0:
@@ -530,21 +567,35 @@ class BasePhase2Trainer(ABC):
         # since losses may share computational graphs through state encodings
         loss_values = {}
         grad_norms = {}
+        
+        # Map network names to their grad clip configs and network objects
+        grad_clip_configs = {
+            'q_r': (self.config.q_r_grad_clip, self.networks.q_r),
+            'v_h_e': (self.config.v_h_e_grad_clip, self.networks.v_h_e),
+            'x_h': (self.config.x_h_grad_clip, self.networks.x_h),
+            'u_r': (self.config.u_r_grad_clip, self.networks.u_r),
+        }
+        if self.config.v_r_use_network:
+            grad_clip_configs['v_r'] = (self.config.v_r_grad_clip, self.networks.v_r)
+        
         loss_names = list(losses.keys())
         for i, name in enumerate(loss_names):
             loss = losses[name]
+            if name not in self.optimizers:
+                # Skip losses for networks we're not training (e.g., v_r when not using network)
+                loss_values[name] = loss.item()
+                continue
             if loss.requires_grad:
                 self.optimizers[name].zero_grad()
                 # Retain graph for all but the last loss to allow multiple backwards
                 retain = (i < len(loss_names) - 1)
                 loss.backward(retain_graph=retain)
                 
-                # Apply gradient clipping for X_h (always applied with default 1.0)
-                if name == 'x_h' and self.config.x_h_grad_clip > 0:
-                    torch.nn.utils.clip_grad_norm_(
-                        self.networks.x_h.parameters(), 
-                        self.config.x_h_grad_clip
-                    )
+                # Apply gradient clipping for this network
+                if name in grad_clip_configs:
+                    clip_val, net = grad_clip_configs[name]
+                    if clip_val and clip_val > 0:
+                        torch.nn.utils.clip_grad_norm_(net.parameters(), clip_val)
                 
                 # Compute gradient norm before step
                 grad_norms[name] = self._compute_single_grad_norm(name)
@@ -561,11 +612,15 @@ class BasePhase2Trainer(ABC):
         """Compute gradient L2 norm for a single network."""
         networks = {
             'q_r': self.networks.q_r,
-            'v_r': self.networks.v_r,
             'v_h_e': self.networks.v_h_e,
             'x_h': self.networks.x_h,
             'u_r': self.networks.u_r,
         }
+        # Only include V_r if using network mode
+        if self.config.v_r_use_network:
+            networks['v_r'] = self.networks.v_r
+        if network_name not in networks:
+            return 0.0
         net = networks[network_name]
         total_norm = 0.0
         for p in net.parameters():
