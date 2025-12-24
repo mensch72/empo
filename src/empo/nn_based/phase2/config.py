@@ -88,6 +88,11 @@ class Phase2Config:
     # X_h loss computation: number of human-goal pairs to sample (None = all from transition)
     x_h_sample_humans: Optional[int] = None
     
+    # X_h regularization options (to help with high-variance learning)
+    x_h_weight_decay: float = 0.0  # L2 regularization for X_h optimizer (e.g., 1e-4)
+    x_h_grad_clip: Optional[float] = None  # Max gradient norm for X_h (e.g., 1.0)
+    x_h_dropout: float = 0.0  # Dropout rate for X_h network (e.g., 0.1)
+    
     # Network architecture
     hidden_dim: int = 256
     state_feature_dim: int = 256

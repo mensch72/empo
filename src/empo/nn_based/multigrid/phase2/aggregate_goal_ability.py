@@ -28,6 +28,7 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         hidden_dim: Hidden layer dimension.
         zeta: Risk/reliability preference parameter.
         feasible_range: Output bounds for X_h.
+        dropout: Dropout rate (0 = no dropout).
         max_kill_buttons: Max KillButtons.
         max_pause_switches: Max PauseSwitches.
         max_disabling_switches: Max DisablingSwitches.
@@ -44,6 +45,7 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         hidden_dim: int = 256,
         zeta: float = 2.0,
         feasible_range: Tuple[float, float] = (0.0, 1.0),
+        dropout: float = 0.0,
         max_kill_buttons: int = 4,
         max_pause_switches: int = 4,
         max_disabling_switches: int = 4,
@@ -55,6 +57,7 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         self.grid_width = grid_width
         self.state_feature_dim = state_feature_dim
         self.hidden_dim = hidden_dim
+        self.dropout_rate = dropout
         
         # State encoder
         self.state_encoder = MultiGridStateEncoder(
@@ -69,16 +72,27 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
             max_control_buttons=max_control_buttons
         )
         
-        # X_h value head
+        # X_h value head with optional dropout
         # Note: X_h depends on both state and human identity. For Phase 2,
         # we encode the state from the human's perspective (using human_agent_idx as query).
-        self.value_head = nn.Sequential(
-            nn.Linear(state_feature_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, 1),
-        )
+        if dropout > 0.0:
+            self.value_head = nn.Sequential(
+                nn.Linear(state_feature_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(hidden_dim, 1),
+            )
+        else:
+            self.value_head = nn.Sequential(
+                nn.Linear(state_feature_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.ReLU(),
+                nn.Linear(hidden_dim, 1),
+            )
     
     def forward(
         self,
@@ -169,5 +183,6 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
             'hidden_dim': self.hidden_dim,
             'zeta': self.zeta,
             'feasible_range': self.feasible_range,
+            'dropout': self.dropout_rate,
             'state_encoder_config': self.state_encoder.get_config(),
         }

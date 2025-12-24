@@ -145,7 +145,11 @@ class BasePhase2Trainer(ABC):
             'q_r': optim.Adam(self.networks.q_r.parameters(), lr=self.config.lr_q_r),
             'v_r': optim.Adam(self.networks.v_r.parameters(), lr=self.config.lr_v_r),
             'v_h_e': optim.Adam(self.networks.v_h_e.parameters(), lr=self.config.lr_v_h_e),
-            'x_h': optim.Adam(self.networks.x_h.parameters(), lr=self.config.lr_x_h),
+            'x_h': optim.Adam(
+                self.networks.x_h.parameters(), 
+                lr=self.config.lr_x_h,
+                weight_decay=self.config.x_h_weight_decay
+            ),
             'u_r': optim.Adam(self.networks.u_r.parameters(), lr=self.config.lr_u_r),
         }
     
@@ -534,6 +538,14 @@ class BasePhase2Trainer(ABC):
                 # Retain graph for all but the last loss to allow multiple backwards
                 retain = (i < len(loss_names) - 1)
                 loss.backward(retain_graph=retain)
+                
+                # Apply gradient clipping for X_h if configured
+                if name == 'x_h' and self.config.x_h_grad_clip is not None:
+                    torch.nn.utils.clip_grad_norm_(
+                        self.networks.x_h.parameters(), 
+                        self.config.x_h_grad_clip
+                    )
+                
                 # Compute gradient norm before step
                 grad_norms[name] = self._compute_single_grad_norm(name)
                 self.optimizers[name].step()

@@ -186,6 +186,7 @@ def create_phase2_networks(
         state_feature_dim=hidden_dim,
         hidden_dim=hidden_dim,
         zeta=config.zeta,
+        dropout=config.x_h_dropout,
     ).to(device)
     
     u_r = MultiGridIntrinsicRewardNetwork(
