@@ -361,7 +361,8 @@ class BasePhase2Trainer(ABC):
             )
             
             with torch.no_grad():
-                v_h_e_for_x = self.networks.v_h_e.encode_and_forward(
+                # Use target network for more stable X_h targets
+                v_h_e_for_x = self.networks.v_h_e_target.encode_and_forward(
                     s, None, h_sampled, g_h_sampled, self.device
                 )
             
@@ -383,7 +384,6 @@ class BasePhase2Trainer(ABC):
             # Accumulate X_h^{-ξ} over sampled humans
             x_h_sum = torch.tensor(0.0, device=self.device)
             for h_u in humans_for_u_r:
-                g_h_u = self.goal_sampler(s, h_u)
                 with torch.no_grad():
                     x_h_for_h = self.networks.x_h.encode_and_forward(
                         s, None, h_u, self.device
