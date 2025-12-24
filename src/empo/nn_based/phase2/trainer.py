@@ -739,6 +739,8 @@ class BasePhase2Trainer(ABC):
                 for key, value in param_norms.items():
                     self.writer.add_scalar(f'ParamNorm/{key}', value, episode)
                 self.writer.add_scalar('Epsilon', self.config.get_epsilon(self.total_steps), episode)
+                # Flush to ensure data is written to disk for real-time monitoring
+                self.writer.flush()
             
             # Update progress bar
             pbar.update(1)
