@@ -393,22 +393,22 @@ class BasePhase2Trainer(ABC):
                 
                 losses['v_h_e'] = losses['v_h_e'] + (v_h_e_pred.squeeze() - target) ** 2
             
-            # ===== X_h loss (sample one human) =====
-            h_sampled = random.choice(self.human_agent_indices)
-            g_h_sampled = self.goal_sampler(s, h_sampled)
-            
-            x_h_pred = self.networks.x_h.encode_and_forward(
-                s, None, h_sampled, self.device
-            )
-            
-            with torch.no_grad():
-                # Use target network for more stable X_h targets
-                v_h_e_for_x = self.networks.v_h_e_target.encode_and_forward(
-                    s, None, h_sampled, g_h_sampled, self.device
+            # ===== X_h loss (use ALL humans' current goals from transition) =====
+            # This provides more samples per update compared to random goal sampling,
+            # helping X_h learn faster since it's an expectation over many goals.
+            for h_x, g_h_x in goals.items():
+                x_h_pred = self.networks.x_h.encode_and_forward(
+                    s, None, h_x, self.device
                 )
-            
-            target_x_h = self.networks.x_h.compute_target(v_h_e_for_x.squeeze())
-            losses['x_h'] = losses['x_h'] + (x_h_pred.squeeze() - target_x_h) ** 2
+                
+                with torch.no_grad():
+                    # Use target network for more stable X_h targets
+                    v_h_e_for_x = self.networks.v_h_e_target.encode_and_forward(
+                        s, None, h_x, g_h_x, self.device
+                    )
+                
+                target_x_h = self.networks.x_h.compute_target(v_h_e_for_x.squeeze())
+                losses['x_h'] = losses['x_h'] + (x_h_pred.squeeze() - target_x_h) ** 2
             
             # ===== U_r loss (averaged over sampled or all humans) =====
             # Determine which humans to sample for U_r loss
