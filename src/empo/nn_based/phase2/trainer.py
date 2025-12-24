@@ -340,17 +340,22 @@ class BasePhase2Trainer(ABC):
     
     def compute_losses(
         self,
-        batch: List[Phase2Transition]
+        batch: List[Phase2Transition],
+        x_h_batch: Optional[List[Phase2Transition]] = None
     ) -> Dict[str, torch.Tensor]:
         """
         Compute losses for all networks.
         
         Args:
-            batch: List of transitions.
+            batch: List of transitions for most networks.
+            x_h_batch: Optional larger batch for X_h (defaults to batch).
         
         Returns:
             Dict mapping loss names to loss tensors.
         """
+        if x_h_batch is None:
+            x_h_batch = batch
+        
         losses = {
             'v_h_e': torch.tensor(0.0, device=self.device),
             'x_h': torch.tensor(0.0, device=self.device),
@@ -358,6 +363,9 @@ class BasePhase2Trainer(ABC):
             'q_r': torch.tensor(0.0, device=self.device),
             'v_r': torch.tensor(0.0, device=self.device),
         }
+        
+        # Track counts for normalization
+        x_h_count = 0
         
         for transition in batch:
             # Unpack transition
@@ -392,31 +400,6 @@ class BasePhase2Trainer(ABC):
                 )
                 
                 losses['v_h_e'] = losses['v_h_e'] + (v_h_e_pred.squeeze() - target) ** 2
-            
-            # ===== X_h loss (use humans' current goals from transition) =====
-            # Determine which human-goal pairs to use for X_h loss
-            if self.config.x_h_sample_humans is None:
-                # Use all humans' goals from the transition
-                humans_for_x_h = list(goals.keys())
-            else:
-                # Sample a fixed number of humans
-                n_sample = min(self.config.x_h_sample_humans, len(goals))
-                humans_for_x_h = random.sample(list(goals.keys()), n_sample)
-            
-            for h_x in humans_for_x_h:
-                g_h_x = goals[h_x]
-                x_h_pred = self.networks.x_h.encode_and_forward(
-                    s, None, h_x, self.device
-                )
-                
-                with torch.no_grad():
-                    # Use target network for more stable X_h targets
-                    v_h_e_for_x = self.networks.v_h_e_target.encode_and_forward(
-                        s, None, h_x, g_h_x, self.device
-                    )
-                
-                target_x_h = self.networks.x_h.compute_target(v_h_e_for_x.squeeze())
-                losses['x_h'] = losses['x_h'] + (x_h_pred.squeeze() - target_x_h) ** 2
             
             # ===== U_r loss (averaged over sampled or all humans) =====
             # Determine which humans to sample for U_r loss
@@ -473,9 +456,45 @@ class BasePhase2Trainer(ABC):
             )
             losses['v_r'] = losses['v_r'] + (v_r_pred.squeeze() - target_v_r) ** 2
         
-        # Average losses over batch
+        # ===== X_h loss (computed on potentially larger batch) =====
+        for transition in x_h_batch:
+            s = transition.state
+            goals = transition.goals
+            
+            # Determine which human-goal pairs to use for X_h loss
+            if self.config.x_h_sample_humans is None:
+                # Use all humans' goals from the transition
+                humans_for_x_h = list(goals.keys())
+            else:
+                # Sample a fixed number of humans
+                n_sample = min(self.config.x_h_sample_humans, len(goals))
+                humans_for_x_h = random.sample(list(goals.keys()), n_sample)
+            
+            for h_x in humans_for_x_h:
+                g_h_x = goals[h_x]
+                x_h_pred = self.networks.x_h.encode_and_forward(
+                    s, None, h_x, self.device
+                )
+                
+                with torch.no_grad():
+                    # Use target network for more stable X_h targets
+                    v_h_e_for_x = self.networks.v_h_e_target.encode_and_forward(
+                        s, None, h_x, g_h_x, self.device
+                    )
+                
+                target_x_h = self.networks.x_h.compute_target(v_h_e_for_x.squeeze())
+                losses['x_h'] = losses['x_h'] + (x_h_pred.squeeze() - target_x_h) ** 2
+                x_h_count += 1
+        
+        # Average losses over their respective batch sizes
         n = len(batch)
-        return {k: v / n for k, v in losses.items()}
+        for k in ['v_h_e', 'u_r', 'q_r', 'v_r']:
+            losses[k] = losses[k] / n
+        # X_h uses its own count (may be from larger batch)
+        if x_h_count > 0:
+            losses['x_h'] = losses['x_h'] / x_h_count
+        
+        return losses
     
     def training_step(self) -> Tuple[Dict[str, float], Dict[str, float]]:
         """
@@ -484,14 +503,24 @@ class BasePhase2Trainer(ABC):
         Returns:
             Tuple of (loss_values dict, grad_norms dict).
         """
-        if len(self.replay_buffer) < self.config.batch_size:
+        # Determine X_h batch size (can be larger than regular batch)
+        x_h_batch_size = self.config.x_h_batch_size or self.config.batch_size
+        min_required = max(self.config.batch_size, x_h_batch_size)
+        
+        if len(self.replay_buffer) < min_required:
             return {}, {}
         
-        # Sample batch
+        # Sample batch for most networks
         batch = self.replay_buffer.sample(self.config.batch_size)
         
-        # Compute losses
-        losses = self.compute_losses(batch)
+        # Sample potentially larger batch for X_h if configured
+        if x_h_batch_size > self.config.batch_size:
+            x_h_batch = self.replay_buffer.sample(x_h_batch_size)
+        else:
+            x_h_batch = batch
+        
+        # Compute losses (with separate X_h batch)
+        losses = self.compute_losses(batch, x_h_batch)
         
         # Update each network - need retain_graph=True for all but last backward
         # since losses may share computational graphs through state encodings

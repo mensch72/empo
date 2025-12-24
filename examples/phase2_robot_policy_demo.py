@@ -235,8 +235,8 @@ def main(quick_mode: bool = False, debug: bool = False):
     
     # Phase 2 configuration
     # Note: X_h now uses all human-goal pairs from each transition (not random sampling)
-    # which provides more samples per update. We can use a normal learning rate since
-    # the increased sample count reduces variance.
+    # which provides more samples per update. We also use a larger batch specifically
+    # for X_h since it has inherently higher variance (expectation over many goals).
     config = Phase2Config(
         gamma_r=0.99,
         gamma_h=0.99,
@@ -250,10 +250,11 @@ def main(quick_mode: bool = False, debug: bool = False):
         lr_q_r=1e-3,
         lr_v_r=1e-3,
         lr_v_h_e=1e-3,
-        lr_x_h=1e-3,   # Same LR as others - using all human goals reduces variance
+        lr_x_h=1e-3,   # Same LR as others - using larger batch reduces variance
         lr_u_r=1e-3,   # Same LR as others - depends on X_h target network for stability
         buffer_size=10000,
         batch_size=32,
+        x_h_batch_size=128,  # Larger batch for X_h to reduce high variance
         num_episodes=num_episodes,
         steps_per_episode=env.max_steps,
         updates_per_step=1,

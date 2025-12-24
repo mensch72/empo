@@ -72,6 +72,7 @@ class Phase2Config:
     # Replay buffer
     buffer_size: int = 100000
     batch_size: int = 64
+    x_h_batch_size: Optional[int] = None  # Larger batch for X_h (None = use batch_size)
     
     # Training
     num_episodes: int = 10000
