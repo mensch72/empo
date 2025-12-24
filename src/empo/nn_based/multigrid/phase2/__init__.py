@@ -10,6 +10,11 @@ from .human_goal_ability import MultiGridHumanGoalAchievementNetwork
 from .aggregate_goal_ability import MultiGridAggregateGoalAbilityNetwork
 from .intrinsic_reward_network import MultiGridIntrinsicRewardNetwork
 from .robot_value_network import MultiGridRobotValueNetwork
+from .trainer import (
+    MultiGridPhase2Trainer,
+    create_phase2_networks,
+    train_multigrid_phase2,
+)
 
 __all__ = [
     'MultiGridRobotQNetwork',
@@ -17,4 +22,7 @@ __all__ = [
     'MultiGridAggregateGoalAbilityNetwork',
     'MultiGridIntrinsicRewardNetwork',
     'MultiGridRobotValueNetwork',
+    'MultiGridPhase2Trainer',
+    'create_phase2_networks',
+    'train_multigrid_phase2',
 ]
