@@ -1,7 +1,6 @@
 # Implementation Plan: Parameterized Goal Sampler with Bayesian Updating
 
 **Status:** Planning  
-**Author:** GitHub Copilot  
 **Date:** 2025-12-24
 
 ## 1. Overview
@@ -65,14 +64,14 @@ $$P(g'|g) = P(w'|w) \cdot P(h'|h) \cdot P(x_c'|x_c) \cdot P(y_c'|y_c)$$
 **Simple random walk model:**
 $$P(d'|d) = \begin{cases}
 p_{\text{stay}} & \text{if } d' = d \\
-p_{\text{change}} \cdot \text{softmax}(|d' - d|^{-1}) & \text{otherwise}
+p_{\text{change}} \cdot Z^{-1} \exp(-\lambda|d' - d|) & \text{otherwise}
 \end{cases}$$
 
-where $d$ is any of $(w, h, x_c, y_c)$.
+where $d$ is any of $(w, h, x_c, y_c)$, $Z$ is the normalizing constant, and $\lambda$ is the jump rate parameter.
 
 **Fixed parameters** (not learned):
 - $p_{\text{stay}}$: probability the goal dimension doesn't change
-- $\lambda$: rate parameter for jump magnitude (exponential decay)
+- $\lambda$: rate parameter for exponential decay of jump magnitude
 
 ### 2.3 Action Prediction
 
@@ -553,23 +552,23 @@ def test_multi_human_tracking():
 - Regularization toward prior
 - Effective sample size monitoring for importance sampling
 
-## 10. Connection to PR #50
+## 10. Connection to PR #50 (Phase 2 Robot Policy Learning)
 
-This work will integrate with the Phase 2 learning from PR #50:
+This work will integrate with the **Phase 2 learning** approach from PR #50, which implements neural network-based robot policy training using equations (4)-(9) from the EMPO paper. The Phase 2 approach learns robot Q-values, policies, and human goal achievement estimates through experience replay.
 
-1. **HeuristicRobotPolicy** serves as a baseline/fallback
-2. Once learned robot policies are available, they can use the same `ParameterizedGoalSampler` to inform their decisions
+1. **HeuristicRobotPolicy** serves as a baseline/fallback before learned policies are available
+2. Once learned robot policies are trained (per PR #50), they can use the same `ParameterizedGoalSampler` to inform their decisions with updated goal beliefs
 3. The goal beliefs provide a **structured representation** that learned policies can condition on
 4. After each step, both the goal sampler AND the learned policy can be updated:
-   - Goal sampler: via Bayesian updating from observed actions
-   - Learned policy: via gradient updates as in PR #50
+   - Goal sampler: via Bayesian updating from observed human actions
+   - Learned policy: via gradient updates as described in PR #50's implementation plan
 
 ## 11. References
 
 - Existing `PossibleGoalSampler` interface: `src/empo/possible_goal.py`
 - `HumanPolicyPrior` interface: `src/empo/human_policy_prior.py`
 - `HeuristicPotentialPolicy` implementation: `src/empo/human_policy_prior.py`
-- Phase 2 learning plan: `docs/plans/issue_49_phase2_learning.md` (PR #50)
+- Phase 2 learning plan: See PR #50 branch `copilot/create-implementation-document` for `docs/plans/issue_49_phase2_learning.md`
 
 ## 12. Summary
 
