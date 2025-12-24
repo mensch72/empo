@@ -121,21 +121,44 @@ The goal transition model $P(g'|g)$ describes how goals might change between tim
 
 $$P(g'|g) = P(x_1', x_2' | x_1, x_2) \cdot P(y_1', y_2' | y_1, y_2)$$
 
-For each coordinate pair, we use a **coupled random walk** that:
-1. Keeps the width distribution roughly proportional to $(1 + x_2 - x_1)$
-2. Allows the center $(x_1 + x_2)/2$ to drift
+#### 2.2.1 Structure of Goal Centers
 
-**Transition model:**
-$$P(x_1', x_2' | x_1, x_2) \propto \begin{cases}
-p_{\text{stay}} & \text{if } (x_1', x_2') = (x_1, x_2) \\
-(1 + x_2' - x_1') \cdot \exp\left(-\lambda \left|\frac{x_1'+x_2'}{2} - \frac{x_1+x_2}{2}\right|\right) & \text{otherwise}
+For coordinate pair $(x_1, x_2)$ with $x_1 \leq x_2$ in $\{x_{\min}, \ldots, x_{\max}\}$:
+- The **center** $c = (x_1 + x_2)/2$ takes values in $\{x_{\min}, x_{\min}+0.5, x_{\min}+1, \ldots, x_{\max}\}$
+- These are multiples of 0.5 bounded by the grid
+
+#### 2.2.2 Random Walk on Centers
+
+A natural Markov random walk on centers with step size 0.5:
+
+$$P(c' | c) = \begin{cases}
+1 - p_{\text{move}} & \text{if } c' = c \text{ (stay)} \\
+\frac{p_{\text{move}}}{2} & \text{if } c' = c \pm 0.5 \text{ (move left/right)}
 \end{cases}$$
 
-This preserves the width weighting while allowing the center to drift according to an exponential decay kernel.
+At boundaries, the probability mass that would go outside is redirected to staying:
+- At $c = x_{\min}$: $P(c'=c|c) = 1 - p_{\text{move}}/2$, $P(c'=c+0.5|c) = p_{\text{move}}/2$
+- At $c = x_{\max}$: $P(c'=c|c) = 1 - p_{\text{move}}/2$, $P(c'=c-0.5|c) = p_{\text{move}}/2$
+
+**Natural parameter:** $p_{\text{move}} \in [0, 1]$ — probability of moving per time step
+- $p_{\text{move}} = 0$: Goal never changes
+- $p_{\text{move}} = 1$: Maximum drift (always moves ±0.5 if possible)
+- Typical value: $p_{\text{move}} \approx 0.1$ for slow goal drift
+
+#### 2.2.3 Full Transition on $(x_1, x_2)$
+
+To transition from $(x_1, x_2)$ to $(x_1', x_2')$:
+
+1. **Transition the center** $c \to c'$ via the random walk above
+2. **Sample width** $(x_2' - x_1')$ with probability $\propto (1 + x_2' - x_1')$ (preserving width weighting)
+3. **Constrain** so that $x_1' \leq x_2'$ and both are in $[x_{\min}, x_{\max}]$ with center $c'$
+
+Alternatively, a simpler coupled model:
+- **Move both endpoints together**: With probability $p_{\text{move}}/2$, shift $(x_1, x_2) \to (x_1+1, x_2+1)$ or $(x_1-1, x_2-1)$ (if valid)
+- **Stay**: With probability $1 - p_{\text{move}}$, keep $(x_1, x_2)$ unchanged
 
 **Fixed parameters** (not learned):
-- $p_{\text{stay}}$: probability the goal doesn't change (typically high, e.g., 0.9)
-- $\lambda$: rate parameter controlling how far the center can jump (higher = smaller jumps)
+- $p_{\text{move}}$: probability of center moving per time step
 
 ### 2.3 Action Prediction
 
@@ -473,9 +496,9 @@ class ParameterizedGoalSamplerConfig:
     })
     
     # Markov transition model parameters (fixed, not learned)
+    # Goal centers perform a random walk with step size 0.5
     transition_params: Dict[str, float] = field(default_factory=lambda: {
-        'p_stay': 0.9,          # Probability goal stays the same
-        'jump_rate': 0.5,       # λ: exponential decay rate for center drift
+        'p_move': 0.1,          # Probability of center moving ±0.5 per time step
     })
     
     # Bayesian updating parameters
