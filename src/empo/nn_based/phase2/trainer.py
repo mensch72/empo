@@ -539,8 +539,8 @@ class BasePhase2Trainer(ABC):
                 retain = (i < len(loss_names) - 1)
                 loss.backward(retain_graph=retain)
                 
-                # Apply gradient clipping for X_h if configured
-                if name == 'x_h' and self.config.x_h_grad_clip is not None:
+                # Apply gradient clipping for X_h (always applied with default 1.0)
+                if name == 'x_h' and self.config.x_h_grad_clip > 0:
                     torch.nn.utils.clip_grad_norm_(
                         self.networks.x_h.parameters(), 
                         self.config.x_h_grad_clip
