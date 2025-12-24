@@ -393,10 +393,18 @@ class BasePhase2Trainer(ABC):
                 
                 losses['v_h_e'] = losses['v_h_e'] + (v_h_e_pred.squeeze() - target) ** 2
             
-            # ===== X_h loss (use ALL humans' current goals from transition) =====
-            # This provides more samples per update compared to random goal sampling,
-            # helping X_h learn faster since it's an expectation over many goals.
-            for h_x, g_h_x in goals.items():
+            # ===== X_h loss (use humans' current goals from transition) =====
+            # Determine which human-goal pairs to use for X_h loss
+            if self.config.x_h_sample_humans is None:
+                # Use all humans' goals from the transition
+                humans_for_x_h = list(goals.keys())
+            else:
+                # Sample a fixed number of humans
+                n_sample = min(self.config.x_h_sample_humans, len(goals))
+                humans_for_x_h = random.sample(list(goals.keys()), n_sample)
+            
+            for h_x in humans_for_x_h:
+                g_h_x = goals[h_x]
                 x_h_pred = self.networks.x_h.encode_and_forward(
                     s, None, h_x, self.device
                 )

@@ -84,6 +84,9 @@ class Phase2Config:
     # U_r loss computation: number of humans to sample (None = all humans)
     u_r_sample_humans: Optional[int] = None
     
+    # X_h loss computation: number of human-goal pairs to sample (None = all from transition)
+    x_h_sample_humans: Optional[int] = None
+    
     # Network architecture
     hidden_dim: int = 256
     state_feature_dim: int = 256
