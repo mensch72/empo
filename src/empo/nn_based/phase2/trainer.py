@@ -59,6 +59,7 @@ class BasePhase2Trainer(ABC):
         human_policy_prior: Callable that returns human action given state and goal.
         goal_sampler: Callable that samples a goal for a human.
         device: Torch device for computation.
+        verbose: Enable debug output.
     """
     
     def __init__(
@@ -69,7 +70,8 @@ class BasePhase2Trainer(ABC):
         robot_agent_indices: List[int],
         human_policy_prior: Callable,
         goal_sampler: Callable,
-        device: str = 'cpu'
+        device: str = 'cpu',
+        verbose: bool = False
     ):
         self.networks = networks
         self.config = config
@@ -78,18 +80,31 @@ class BasePhase2Trainer(ABC):
         self.human_policy_prior = human_policy_prior
         self.goal_sampler = goal_sampler
         self.device = device
+        self.verbose = verbose
+        
+        if self.verbose:
+            print("[DEBUG] BasePhase2Trainer.__init__: Initializing target networks...")
         
         # Initialize target networks
         self._init_target_networks()
         
+        if self.verbose:
+            print("[DEBUG] BasePhase2Trainer.__init__: Initializing optimizers...")
+        
         # Initialize optimizers
         self.optimizers = self._init_optimizers()
+        
+        if self.verbose:
+            print("[DEBUG] BasePhase2Trainer.__init__: Creating replay buffer...")
         
         # Replay buffer
         self.replay_buffer = Phase2ReplayBuffer(capacity=config.buffer_size)
         
         # Training step counter
         self.total_steps = 0
+        
+        if self.verbose:
+            print("[DEBUG] BasePhase2Trainer.__init__: Initialization complete.")
     
     def _init_target_networks(self):
         """Initialize target networks as copies of main networks."""
@@ -230,12 +245,25 @@ class BasePhase2Trainer(ABC):
         Returns:
             Tuple of (transition, next_state).
         """
+        if self.verbose:
+            print(f"[DEBUG] collect_transition: sampling robot action...")
+        
         # Sample actions
         robot_action = self.sample_robot_action(state)
+        
+        if self.verbose:
+            print(f"[DEBUG] collect_transition: robot_action={robot_action}, sampling human actions...")
+        
         human_actions = self.sample_human_actions(state, goals)
+        
+        if self.verbose:
+            print(f"[DEBUG] collect_transition: human_actions={human_actions}, stepping environment...")
         
         # Step environment
         next_state = self.step_environment(state, robot_action, human_actions)
+        
+        if self.verbose:
+            print(f"[DEBUG] collect_transition: environment stepped, creating transition...")
         
         # Create transition
         transition = Phase2Transition(
@@ -245,6 +273,9 @@ class BasePhase2Trainer(ABC):
             human_actions=human_actions,
             next_state=next_state
         )
+        
+        if self.verbose:
+            print(f"[DEBUG] collect_transition: done")
         
         return transition, next_state
     
@@ -319,15 +350,34 @@ class BasePhase2Trainer(ABC):
             target_x_h = self.networks.x_h.compute_target(v_h_e_for_x.squeeze())
             losses['x_h'] = losses['x_h'] + (x_h_pred.squeeze() - target_x_h) ** 2
             
-            # ===== U_r loss (based on y) =====
+            # ===== U_r loss (averaged over sampled or all humans) =====
+            # Determine which humans to sample for U_r loss
+            if self.config.u_r_sample_humans is None:
+                # Use all humans
+                humans_for_u_r = self.human_agent_indices
+            else:
+                # Sample a fixed number of humans
+                n_sample = min(self.config.u_r_sample_humans, len(self.human_agent_indices))
+                humans_for_u_r = random.sample(self.human_agent_indices, n_sample)
+            
             y_pred, _ = self.networks.u_r.encode_and_forward(s, None, self.device)
             
-            with torch.no_grad():
-                x_h_for_u = self.networks.x_h.encode_and_forward(
-                    s, None, h_sampled, self.device
-                )
+            # Accumulate X_h^{-ξ} over sampled humans
+            x_h_sum = torch.tensor(0.0, device=self.device)
+            for h_u in humans_for_u_r:
+                g_h_u = self.goal_sampler(s, h_u)
+                with torch.no_grad():
+                    x_h_for_h = self.networks.x_h.encode_and_forward(
+                        s, None, h_u, self.device
+                    )
+                # Accumulate X_h^{-ξ}
+                x_h_sum = x_h_sum + x_h_for_h.squeeze() ** (-self.config.xi)
             
-            target_y = self.networks.u_r.compute_target_y(x_h_for_u.squeeze())
+            # Average to get E[X_h^{-ξ}]
+            x_h_avg = x_h_sum / len(humans_for_u_r)
+            
+            # Compute y target: y = E[X_h^{-ξ}]^{1/ξ} (this gives X_h^{-1} if ξ=1)
+            target_y = x_h_avg ** (-1.0 / self.config.xi)
             losses['u_r'] = losses['u_r'] + (y_pred.squeeze() - target_y) ** 2
             
             # ===== Q_r loss =====
@@ -398,18 +448,34 @@ class BasePhase2Trainer(ABC):
         Returns:
             Dict of average loss values for the episode.
         """
+        if self.verbose:
+            print(f"[DEBUG] train_episode: resetting environment...")
+        
         state = self.reset_environment()
+        
+        if self.verbose:
+            print(f"[DEBUG] train_episode: sampling initial goals...")
         
         # Sample initial goals
         goals = {h: self.goal_sampler(state, h) for h in self.human_agent_indices}
+        
+        if self.verbose:
+            print(f"[DEBUG] train_episode: goals sampled, starting {self.config.steps_per_episode} steps...")
         
         episode_losses = {
             'v_h_e': [], 'x_h': [], 'u_r': [], 'q_r': [], 'v_r': []
         }
         
         for step in range(self.config.steps_per_episode):
+            if self.verbose and step % 5 == 0:
+                print(f"[DEBUG] train_episode: step {step}/{self.config.steps_per_episode}")
+            
             # Collect transition
             transition, next_state = self.collect_transition(state, goals)
+            
+            if self.verbose and step == 0:
+                print(f"[DEBUG] train_episode: pushing to replay buffer...")
+            
             self.replay_buffer.push(
                 transition.state,
                 transition.robot_action,
@@ -417,6 +483,9 @@ class BasePhase2Trainer(ABC):
                 transition.human_actions,
                 transition.next_state
             )
+            
+            if self.verbose and step == 0:
+                print(f"[DEBUG] train_episode: starting training updates...")
             
             # Training updates
             for _ in range(self.config.updates_per_step):
@@ -430,6 +499,9 @@ class BasePhase2Trainer(ABC):
             # Resample goals with some probability
             if random.random() < self.config.goal_resample_prob:
                 goals = {h: self.goal_sampler(state, h) for h in self.human_agent_indices}
+        
+        if self.verbose:
+            print(f"[DEBUG] train_episode: episode complete, averaging losses...")
         
         # Average losses
         return {

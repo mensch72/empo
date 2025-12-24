@@ -41,6 +41,7 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         human_policy_prior: Callable returning human action given state, index, goal.
         goal_sampler: Callable returning a goal for a human.
         device: Torch device.
+        verbose: Enable debug output.
     """
     
     def __init__(
@@ -52,7 +53,8 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         robot_agent_indices: List[int],
         human_policy_prior: Callable,
         goal_sampler: Callable,
-        device: str = 'cpu'
+        device: str = 'cpu',
+        verbose: bool = False
     ):
         self.env = env
         super().__init__(
@@ -62,7 +64,8 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
             robot_agent_indices=robot_agent_indices,
             human_policy_prior=human_policy_prior,
             goal_sampler=goal_sampler,
-            device=device
+            device=device,
+            verbose=verbose
         )
     
     def encode_state(self, state: Any) -> Dict[str, torch.Tensor]:
@@ -272,6 +275,9 @@ def train_multigrid_phase2(
         device=device
     )
     
+    if verbose:
+        print("[DEBUG] Creating trainer...")
+    
     # Create trainer
     trainer = MultiGridPhase2Trainer(
         env=world_model,
@@ -281,7 +287,8 @@ def train_multigrid_phase2(
         robot_agent_indices=robot_agent_indices,
         human_policy_prior=human_policy_prior,
         goal_sampler=goal_sampler,
-        device=device
+        device=device,
+        verbose=verbose  # Pass verbose to trainer for debug output
     )
     
     if verbose:

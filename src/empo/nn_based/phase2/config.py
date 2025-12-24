@@ -81,6 +81,9 @@ class Phase2Config:
     # Goal resampling
     goal_resample_prob: float = 0.01
     
+    # U_r loss computation: number of humans to sample (None = all humans)
+    u_r_sample_humans: Optional[int] = None
+    
     # Network architecture
     hidden_dim: int = 256
     state_feature_dim: int = 256
