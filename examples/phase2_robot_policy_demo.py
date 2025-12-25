@@ -39,6 +39,7 @@ import torch
 
 from gym_multigrid.multigrid import MultiGridEnv, World, SmallActions
 from empo.multigrid import MultiGridGoalSampler, ReachCellGoal
+from empo.possible_goal import DeterministicGoalSampler
 from empo.human_policy_prior import HeuristicPotentialPolicy
 from empo.nn_based.multigrid import PathDistanceCalculator
 from empo.nn_based.phase2.config import Phase2Config
@@ -49,27 +50,42 @@ from empo.nn_based.multigrid.phase2 import train_multigrid_phase2
 # Environment Definition
 # ============================================================================
 
-GRID_MAP = """
-We We We We We We We
-We .. .. .. .. .. We
-We .. Ae .. Ay .. We
-We .. .. .. .. .. We
-We .. Ay .. Ae .. We
-We .. .. .. .. .. We
-We We We We We We We
-"""
+env_type = "trivial"
 
-MAX_STEPS = 20
-NUM_ROLLOUTS = 100  # Rollouts for final movie
-MOVIE_FPS = 3
+if env_type == "trivial":
+    GRID_MAP = """
+    We We We We We We
+    We Ae Ro .. .. We
+    We We Ay We We We
+    We We We We We We
+    """
+    # note: human is agent index 1
 
+    MAX_STEPS = 6
+    NUM_ROLLOUTS = 10  # Rollouts for final movie
+    MOVIE_FPS = 2
 
+    goal_sampler_factory = lambda env: DeterministicGoalSampler(ReachCellGoal(env, 1, (2,1)))  # Fixed goal for testing: human goes where rock currently is
+
+else:
+    GRID_MAP = """
+    We We We We We We We
+    We .. .. .. .. .. We
+    We .. Ae .. Ay .. We
+    We .. .. .. .. .. We
+    We .. Ay .. Ae .. We
+    We .. .. .. .. .. We
+    We We We We We We We
+    """
+
+    MAX_STEPS = 20
+    NUM_ROLLOUTS = 100  # Rollouts for final movie
+    MOVIE_FPS = 3
+
+    goal_sampler_factory = MultiGridGoalSampler
 class Phase2DemoEnv(MultiGridEnv):
     """
-    A simple 5x5 grid environment for Phase 2 demo.
-    
-    - 2 yellow agents (humans)
-    - 2 grey agents (robots)
+    A simple grid environment for Phase 2 demo.
     """
     
     def __init__(self, max_steps: int = MAX_STEPS):
@@ -178,7 +194,7 @@ def main(quick_mode: bool = False, debug: bool = False):
     device = 'cpu'
     
     # Create output directory
-    output_dir = os.path.join(os.path.dirname(__file__), '..', 'outputs', 'phase2_demo')
+    output_dir = os.path.join(os.path.dirname(__file__), '..', 'outputs', 'phase2_demo_trivial')
     os.makedirs(output_dir, exist_ok=True)
     tensorboard_dir = os.path.join(output_dir, 'tensorboard')
     
@@ -220,7 +236,7 @@ def main(quick_mode: bool = False, debug: bool = False):
     )
     
     # Create goal sampler using existing MultiGridGoalSampler
-    goal_sampler = MultiGridGoalSampler(env)
+    goal_sampler = goal_sampler_factory(env)
     
     # Wrapper to adapt goal sampler to trainer's expected interface
     def goal_sampler_fn(state, human_idx):

@@ -239,3 +239,194 @@ class PossibleGoalGenerator(ABC):
             Tuple[PossibleGoal, float]: Pairs of (goal, aggregation_weight).
         """
         pass
+
+
+class DeterministicGoalSampler(PossibleGoalSampler):
+    """
+    A goal sampler that always returns a single fixed goal.
+    
+    Useful when the goal is known/fixed and you want to use it with
+    interfaces that expect a PossibleGoalSampler.
+    
+    Args:
+        goal: The fixed PossibleGoal instance to return.
+        weight: The importance weight to return (default 1.0).
+    """
+    
+    def __init__(self, goal: 'PossibleGoal', weight: float = 1.0):
+        """
+        Initialize with a fixed goal.
+        
+        Args:
+            goal: The PossibleGoal instance to always return.
+            weight: The importance weight (default 1.0).
+        """
+        super().__init__(goal.env)
+        self.goal = goal
+        self.weight = weight
+    
+    def sample(self, state, human_agent_index: int) -> Tuple['PossibleGoal', float]:
+        """
+        Return the fixed goal.
+        
+        Args:
+            state: Current world state (unused).
+            human_agent_index: Index of the human agent (unused).
+        
+        Returns:
+            Tuple of (goal, weight).
+        """
+        return self.goal, self.weight
+
+
+class DeterministicGoalGenerator(PossibleGoalGenerator):
+    """
+    A goal generator that yields a single fixed goal.
+    
+    Useful when the goal is known/fixed and you want to use it with
+    interfaces that expect a PossibleGoalGenerator.
+    
+    Args:
+        goal: The fixed PossibleGoal instance to yield.
+        weight: The aggregation weight to yield (default 1.0).
+    """
+    
+    def __init__(self, goal: 'PossibleGoal', weight: float = 1.0):
+        """
+        Initialize with a fixed goal.
+        
+        Args:
+            goal: The PossibleGoal instance to always yield.
+            weight: The aggregation weight (default 1.0).
+        """
+        super().__init__(goal.env)
+        self.goal = goal
+        self.weight = weight
+    
+    def generate(self, state, human_agent_index: int) -> Iterator[Tuple['PossibleGoal', float]]:
+        """
+        Yield the single fixed goal.
+        
+        Args:
+            state: Current world state (unused).
+            human_agent_index: Index of the human agent (unused).
+        
+        Yields:
+            Single tuple of (goal, weight).
+        """
+        yield self.goal, self.weight
+
+
+class TabularGoalSampler(PossibleGoalSampler):
+    """
+    A goal sampler that samples from a fixed list of goals.
+    
+    Samples goals according to the provided probabilities (or uniformly if not given),
+    and returns the specified importance weights (or 1.0 if not given).
+    
+    Args:
+        goals: Iterable of PossibleGoal instances.
+        probabilities: Optional iterable of sampling probabilities. If None, uniform (1/n) is used.
+        weights: Optional iterable of importance weights to return. If None, 1.0 is used for all.
+    """
+    
+    def __init__(self, goals, probabilities=None, weights=None):
+        """
+        Initialize with a list of goals and optional probabilities/weights.
+        
+        Args:
+            goals: Iterable of PossibleGoal instances.
+            probabilities: Optional iterable of sampling probabilities (will be normalized).
+                          If None, uses uniform 1/n probabilities.
+            weights: Optional iterable of importance weights to return.
+                    If None, uses 1.0 for all goals.
+        """
+        self.goals = list(goals)
+        if len(self.goals) == 0:
+            raise ValueError("TabularGoalSampler requires at least one goal")
+        
+        super().__init__(self.goals[0].env)
+        
+        n = len(self.goals)
+        
+        # Set up sampling probabilities
+        if probabilities is None:
+            self.probs = [1.0 / n] * n
+        else:
+            probs = list(probabilities)
+            if len(probs) != n:
+                raise ValueError("Number of probabilities must match number of goals")
+            # Normalize to sum to 1
+            total = sum(probs)
+            self.probs = [p / total for p in probs]
+        
+        # Set up importance weights to return
+        if weights is None:
+            self.weights = [1.0] * n
+        else:
+            self.weights = list(weights)
+            if len(self.weights) != n:
+                raise ValueError("Number of weights must match number of goals")
+    
+    def sample(self, state, human_agent_index: int) -> Tuple['PossibleGoal', float]:
+        """
+        Sample a goal according to the probabilities.
+        
+        Args:
+            state: Current world state (unused).
+            human_agent_index: Index of the human agent (unused).
+        
+        Returns:
+            Tuple of (goal, weight).
+        """
+        import random
+        idx = random.choices(range(len(self.goals)), weights=self.probs, k=1)[0]
+        return self.goals[idx], self.weights[idx]
+
+
+class TabularGoalGenerator(PossibleGoalGenerator):
+    """
+    A goal generator that yields from a fixed list of goals.
+    
+    Yields all goals with their associated weights.
+    
+    Args:
+        goals: Iterable of PossibleGoal instances.
+        weights: Optional iterable of weights. If None, uniform 1/n weights are used.
+    """
+    
+    def __init__(self, goals, weights=None):
+        """
+        Initialize with a list of goals and optional weights.
+        
+        Args:
+            goals: Iterable of PossibleGoal instances.
+            weights: Optional iterable of weights. If None, uses uniform 1/n weights.
+        """
+        self.goals = list(goals)
+        if len(self.goals) == 0:
+            raise ValueError("TabularGoalGenerator requires at least one goal")
+        
+        super().__init__(self.goals[0].env)
+        
+        if weights is None:
+            n = len(self.goals)
+            self.weights = [1.0 / n] * n
+        else:
+            self.weights = list(weights)
+            if len(self.weights) != len(self.goals):
+                raise ValueError("Number of weights must match number of goals")
+    
+    def generate(self, state, human_agent_index: int) -> Iterator[Tuple['PossibleGoal', float]]:
+        """
+        Yield all goals with their weights.
+        
+        Args:
+            state: Current world state (unused).
+            human_agent_index: Index of the human agent (unused).
+        
+        Yields:
+            Tuples of (goal, weight) for each goal.
+        """
+        for goal, weight in zip(self.goals, self.weights):
+            yield goal, weight

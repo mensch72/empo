@@ -660,11 +660,15 @@ class BasePhase2Trainer(ABC):
             print(f"[DEBUG] train_episode: goals sampled, starting {self.config.steps_per_episode} steps...")
         
         episode_losses = {
-            'v_h_e': [], 'x_h': [], 'u_r': [], 'q_r': [], 'v_r': []
+            'v_h_e': [], 'x_h': [], 'u_r': [], 'q_r': []
         }
         episode_grad_norms = {
-            'v_h_e': [], 'x_h': [], 'u_r': [], 'q_r': [], 'v_r': []
+            'v_h_e': [], 'x_h': [], 'u_r': [], 'q_r': []
         }
+        # Only track V_r if using network mode
+        if self.config.v_r_use_network:
+            episode_losses['v_r'] = []
+            episode_grad_norms['v_r'] = []
         
         for step in range(self.config.steps_per_episode):
             if self.debug and step % 5 == 0:
