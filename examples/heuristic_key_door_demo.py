@@ -97,7 +97,7 @@ We We We We We We We
 
 MAX_STEPS = 50
 ROLLOUT_STEPS = 40
-DEFAULT_SOFTNESS = 1000.0  # High = more deterministic
+DEFAULT_BETA = 1000.0  # High = more deterministic
 
 
 # ============================================================================
@@ -132,7 +132,7 @@ def get_human_agent_index(env: MultiGridEnv) -> int:
 def create_heuristic_policy(
     env: MultiGridEnv,
     human_agent_indices: List[int],
-    softness: float = DEFAULT_SOFTNESS
+    beta: float = DEFAULT_BETA
 ) -> HeuristicPotentialPolicy:
     """Create a heuristic potential-based policy."""
     path_calculator = PathDistanceCalculator(
@@ -145,7 +145,7 @@ def create_heuristic_policy(
         world_model=env,
         human_agent_indices=human_agent_indices,
         path_calculator=path_calculator,
-        softness=softness,
+        beta=beta,
         num_actions=8  # Full Actions: still, left, right, forward, pickup, drop, toggle, done
     )
     

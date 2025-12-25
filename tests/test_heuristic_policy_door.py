@@ -260,7 +260,7 @@ def test_policy_override_turn_toward_door():
         human_agent_indices=[0],
         path_calculator=path_calc,
         num_actions=4,
-        softness=10.0
+        beta=10.0
     )
     
     # Agent at (2, 2), facing south (direction 1), door is to the east (direction 0)
@@ -297,7 +297,7 @@ def test_policy_override_forward_when_facing_door():
         human_agent_indices=[0],
         path_calculator=path_calc,
         num_actions=4,  # SmallActions
-        softness=10.0
+        beta=10.0
     )
     
     # Agent at (2, 2), facing east (direction 0) toward the door
@@ -330,7 +330,7 @@ def test_policy_override_toggle_when_facing_door():
         human_agent_indices=[0],
         path_calculator=path_calc,
         num_actions=8,  # Full Actions set (includes toggle at index 6)
-        softness=10.0
+        beta=10.0
     )
     
     # Agent at (2, 2), facing east (direction 0) toward the door
@@ -360,7 +360,7 @@ def test_policy_no_door_uses_potential():
         human_agent_indices=[0],
         path_calculator=path_calc,
         num_actions=4,
-        softness=1000.0  # High softness = deterministic
+        beta=1000.0  # High beta = deterministic
     )
     
     # Agent at (2, 2), facing east (direction 0), goal to the east
@@ -372,7 +372,7 @@ def test_policy_no_door_uses_potential():
     probs = policy(state, human_agent_index=0, possible_goal=goal)
     
     # Should prefer forward (toward goal) since no door override
-    # With high softness, should be nearly 1.0 for forward
+    # With high beta, should be nearly 1.0 for forward
     assert probs[policy.ACTION_FORWARD] > 0.9, \
         f"Expected high prob for ACTION_FORWARD, got probs={probs}"
     print("  ✓ Policy correctly uses potential-based action when no door")
@@ -394,7 +394,7 @@ def test_policy_locked_door_with_key():
         human_agent_indices=[0],
         path_calculator=path_calc,
         num_actions=4,
-        softness=10.0
+        beta=10.0
     )
     
     # Agent at (2, 2), facing south (dir 1), carrying red key
@@ -615,7 +615,7 @@ def test_policy_override_pickup_key():
         human_agent_indices=[0],
         path_calculator=path_calc,
         num_actions=8,  # Full Actions set
-        softness=10.0
+        beta=10.0
     )
     
     # Agent at (2, 2), facing east (direction 0) toward the key
@@ -646,7 +646,7 @@ def test_policy_override_drop_useless_key():
         human_agent_indices=[0],
         path_calculator=path_calc,
         num_actions=8,  # Full Actions set
-        softness=10.0
+        beta=10.0
     )
     
     # Agent at (5, 5), carrying red key (useless), goal to southeast

@@ -24,7 +24,7 @@ The demo:
 Usage:
     python heuristic_multigrid_ensemble_demo.py           # Full run (100 rollouts)
     python heuristic_multigrid_ensemble_demo.py --quick   # Quick test (10 rollouts)
-    python heuristic_multigrid_ensemble_demo.py --softness 50  # More deterministic
+    python heuristic_multigrid_ensemble_demo.py --beta 50  # More deterministic
 
 Requirements:
     - matplotlib
@@ -84,7 +84,7 @@ UNSTEADY_GROUND_PROBABILITY = 0.10
 DOOR_KEY_COLOR = 'r'
 
 # Heuristic policy parameters
-DEFAULT_SOFTNESS = 1000.0  # Softmax temperature (higher = more deterministic)
+DEFAULT_BETA = 1000.0  # Softmax temperature (higher = more deterministic)
 
 # Maximum attempts for rejection sampling
 MAX_REJECTION_SAMPLING_ATTEMPTS = 1000
@@ -178,10 +178,10 @@ def parse_args():
         help='Number of rollouts for the movie (overrides default)'
     )
     parser.add_argument(
-        '--softness', '-s',
+        '--beta', '-s',
         type=float,
-        default=DEFAULT_SOFTNESS,
-        help=f'Softmax temperature for heuristic policy (default: {DEFAULT_SOFTNESS})'
+        default=DEFAULT_BETA,
+        help=f'Softmax temperature for heuristic policy (default: {DEFAULT_BETA})'
     )
     parser.add_argument(
         '--steps', '-t',
@@ -392,7 +392,7 @@ def get_agent_indices(env: RandomMultigridEnv) -> Tuple[List[int], Optional[int]
 def create_heuristic_policy(
     env: RandomMultigridEnv,
     human_agent_indices: List[int],
-    softness: float = DEFAULT_SOFTNESS
+    beta: float = DEFAULT_BETA
 ) -> HeuristicPotentialPolicy:
     """
     Create a heuristic potential-based policy for the given environment.
@@ -400,7 +400,7 @@ def create_heuristic_policy(
     Args:
         env: The multigrid environment.
         human_agent_indices: Indices of human agents.
-        softness: Softmax temperature (higher = more deterministic).
+        beta: Softmax temperature (higher = more deterministic).
     
     Returns:
         HeuristicPotentialPolicy ready for use.
@@ -417,7 +417,7 @@ def create_heuristic_policy(
         world_model=env,
         human_agent_indices=human_agent_indices,
         path_calculator=path_calculator,
-        softness=softness,
+        beta=beta,
         num_actions=8  # Full Actions: still, left, right, forward, pickup, drop, toggle, done
     )
     
@@ -515,7 +515,7 @@ def main():
         num_rollouts = args.rollouts if args.rollouts is not None else NUM_ROLLOUTS
         mode_str = "FULL MODE"
     
-    softness = args.softness
+    beta = args.beta
     rollout_steps = args.steps
     
     print("=" * 70)
@@ -527,7 +527,7 @@ def main():
     print(f"Agents: {NUM_HUMANS} humans + {NUM_ROBOTS} robot")
     print(f"Test environments: {num_test_envs}")
     print(f"Rollouts: {num_rollouts}")
-    print(f"Softness (β): {softness}")
+    print(f"Beta (β): {beta}")
     print(f"Steps per rollout: {rollout_steps}")
     print()
     
@@ -552,7 +552,7 @@ def main():
     
     # Run rollouts
     print(f"Running {num_rollouts} rollouts...")
-    print(f"  Humans: heuristic potential policy (softness={softness})")
+    print(f"  Humans: heuristic potential policy (beta={beta})")
     print(f"  Robot: random policy")
     print()
     
@@ -570,7 +570,7 @@ def main():
         
         # Create heuristic policy for this environment
         # (needs to be recreated per env since PathDistanceCalculator is env-specific)
-        policy = create_heuristic_policy(env, env_human_indices, softness)
+        policy = create_heuristic_policy(env, env_human_indices, beta)
         
         # Sample goals
         goal_sampler = SmallGoalSampler(env)

@@ -402,7 +402,7 @@ class HeuristicPotentialPolicy(HumanPolicyPrior):
     - Otherwise, uses the forward action
     
     The policy is parameterized by:
-    - softness (beta): Controls how deterministic the policy is.
+    - beta: Controls how deterministic the policy is.
       - beta -> 0: Uniform random over all actions
       - beta -> inf: Deterministic (always pick best action)
       - Typical values: 1-10 for exploration, 10-100 for exploitation
@@ -427,7 +427,7 @@ class HeuristicPotentialPolicy(HumanPolicyPrior):
     
     Attributes:
         path_calculator: PathDistanceCalculator for potential computation.
-        softness: Temperature parameter for softmax (higher = more deterministic).
+        beta: Temperature parameter for softmax (higher = more deterministic).
         num_actions: Number of available actions (typically 4 for SmallActions).
     
     Note:
@@ -461,7 +461,7 @@ class HeuristicPotentialPolicy(HumanPolicyPrior):
         world_model: 'WorldModel',
         human_agent_indices: List[int],
         path_calculator,  # PathDistanceCalculator from empo.nn_based.multigrid
-        softness: float = 10.0,
+        beta: float = 10.0,
         num_actions: int = 4
     ):
         """
@@ -471,13 +471,13 @@ class HeuristicPotentialPolicy(HumanPolicyPrior):
             world_model: The multigrid environment.
             human_agent_indices: Indices of agents to control with this policy.
             path_calculator: PathDistanceCalculator with precomputed shortest paths.
-            softness: Softmax temperature (beta). Higher = more deterministic.
-                     Default 10.0 provides moderate exploitation.
+            beta: Softmax temperature. Higher = more deterministic.
+                  Default 10.0 provides moderate exploitation.
             num_actions: Number of actions (default 4 for SmallActions).
         """
         super().__init__(world_model, human_agent_indices)
         self.path_calculator = path_calculator
-        self.softness = softness
+        self.beta = beta
         self.num_actions = num_actions
     
     def _get_goal_tuple(self, possible_goal: 'PossibleGoal') -> tuple:
@@ -1003,7 +1003,7 @@ class HeuristicPotentialPolicy(HumanPolicyPrior):
                 action_advantages[self.ACTION_LEFT] = dir_advantages[best_dir] * 0.6
         
         # Apply softmax with temperature
-        scaled = action_advantages * self.softness
+        scaled = action_advantages * self.beta
         # Subtract max for numerical stability
         scaled = scaled - np.max(scaled)
         exp_scaled = np.exp(scaled)

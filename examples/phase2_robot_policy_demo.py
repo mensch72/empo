@@ -232,7 +232,7 @@ def main(quick_mode: bool = False, debug: bool = False):
         world_model=env,
         human_agent_indices=human_indices,
         path_calculator=path_calc,
-        softness=10.0  # Moderately deterministic
+        beta=10.0  # Quite deterministic
     )
     
     # Create goal sampler using existing MultiGridGoalSampler
@@ -254,12 +254,12 @@ def main(quick_mode: bool = False, debug: bool = False):
     # which provides more samples per update. We also use a larger batch specifically
     # for X_h since it has inherently higher variance (expectation over many goals).
     config = Phase2Config(
-        gamma_r=0.99,
-        gamma_h=0.99,
-        zeta=2.0,      # Risk preference
+        gamma_r=0.95, # relatively impatient
+        gamma_h=0.95, # relatively impatient
+        zeta=2.0,      # Risk aversion
         xi=1.0,        # Inter-human inequality aversion
         eta=1.1,       # Intertemporal inequality aversion
-        beta_r=5.0,    # Robot policy concentration
+        beta_r=100.0,    # Robot policy concentration
         epsilon_r_start=1.0,
         epsilon_r_end=0.1,
         epsilon_r_decay_steps=num_episodes * 10,
