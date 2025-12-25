@@ -173,6 +173,32 @@ class MultiGridHumanGoalAchievementNetwork(BaseHumanGoalAchievementNetwork):
             interactive_features, goal_features
         )
     
+    def forward_with_goal_features(
+        self,
+        grid_tensor: torch.Tensor,
+        global_features: torch.Tensor,
+        agent_features: torch.Tensor,
+        interactive_features: torch.Tensor,
+        goal_features: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Forward pass with pre-encoded state and goal features (for batched training).
+        
+        Args:
+            grid_tensor: (batch, num_grid_channels, H, W)
+            global_features: (batch, NUM_GLOBAL_WORLD_FEATURES)
+            agent_features: (batch, agent_input_size)
+            interactive_features: (batch, interactive_input_size)
+            goal_features: (batch, goal_feature_dim)
+        
+        Returns:
+            V_h^e values tensor (batch,).
+        """
+        return self.forward(
+            grid_tensor, global_features, agent_features,
+            interactive_features, goal_features
+        )
+    
     def predict(
         self,
         state: Any,

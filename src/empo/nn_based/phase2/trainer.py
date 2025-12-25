@@ -286,6 +286,41 @@ class BasePhase2Trainer(ABC):
         """
         pass
     
+    @abstractmethod
+    def encode_states_batch(
+        self,
+        states: List[Any],
+        query_agent_indices: List[int]
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Encode a batch of states into tensor format for batched forward passes.
+        
+        Args:
+            states: List of raw environment states.
+            query_agent_indices: List of query agent indices (one per state).
+        
+        Returns:
+            Tuple of (grid_tensors, global_features, agent_features, interactive_features)
+            all with batch dimension.
+        """
+        pass
+    
+    @abstractmethod
+    def encode_goals_batch(
+        self,
+        goals: List[Any]
+    ) -> torch.Tensor:
+        """
+        Encode a batch of goals into tensor format.
+        
+        Args:
+            goals: List of goals.
+        
+        Returns:
+            Goal features tensor with batch dimension.
+        """
+        pass
+    
     def sample_robot_action(self, state: Any) -> Tuple[int, ...]:
         """
         Sample robot action using policy with epsilon-greedy exploration.
@@ -381,7 +416,7 @@ class BasePhase2Trainer(ABC):
         x_h_batch: Optional[List[Phase2Transition]] = None
     ) -> Dict[str, torch.Tensor]:
         """
-        Compute losses for all networks.
+        Compute losses for all networks using batched forward passes.
         
         Args:
             batch: List of transitions for most networks.
@@ -393,159 +428,229 @@ class BasePhase2Trainer(ABC):
         if x_h_batch is None:
             x_h_batch = batch
         
+        n_batch = len(batch)
+        n_humans = len(self.human_agent_indices)
+        
+        # =====================================================================
+        # Step 1: Prepare data for batched encoding
+        # =====================================================================
+        
+        # For V_h^e: we need (s, h, g_h) and (s', h, g_h) for each human in each transition
+        # This gives us n_batch * n_humans samples
+        v_h_e_states = []
+        v_h_e_next_states = []
+        v_h_e_humans = []
+        v_h_e_goals = []
+        v_h_e_goal_achieved = []
+        
+        for transition in batch:
+            for h in self.human_agent_indices:
+                g_h = transition.goals.get(h)
+                if g_h is not None:
+                    v_h_e_states.append(transition.state)
+                    v_h_e_next_states.append(transition.next_state)
+                    v_h_e_humans.append(h)
+                    v_h_e_goals.append(g_h)
+                    v_h_e_goal_achieved.append(
+                        self.check_goal_achieved(transition.next_state, h, g_h)
+                    )
+        
+        # For U_r: we need (s,) for each transition, and X_h values for target computation
+        u_r_states = [t.state for t in batch]
+        
+        # For Q_r: we need (s,) and (s',) for each transition, plus actions
+        q_r_states = [t.state for t in batch]
+        q_r_next_states = [t.next_state for t in batch]
+        q_r_actions = [t.robot_action for t in batch]
+        
+        # For X_h: collect all (s, h, g_h) pairs from x_h_batch
+        x_h_states = []
+        x_h_humans = []
+        x_h_goals = []
+        
+        for transition in x_h_batch:
+            if self.config.x_h_sample_humans is None:
+                humans_for_x_h = list(transition.goals.keys())
+            else:
+                n_sample = min(self.config.x_h_sample_humans, len(transition.goals))
+                humans_for_x_h = random.sample(list(transition.goals.keys()), n_sample)
+            
+            for h_x in humans_for_x_h:
+                g_h_x = transition.goals.get(h_x)
+                if g_h_x is not None:
+                    x_h_states.append(transition.state)
+                    x_h_humans.append(h_x)
+                    x_h_goals.append(g_h_x)
+        
+        # =====================================================================
+        # Step 2: Batch encode all states and goals
+        # =====================================================================
+        
+        # V_h^e encoding (current states)
+        if len(v_h_e_states) > 0:
+            v_h_e_grid, v_h_e_global, v_h_e_agent, v_h_e_interactive = \
+                self.encode_states_batch(v_h_e_states, v_h_e_humans)
+            v_h_e_goal_features = self.encode_goals_batch(v_h_e_goals)
+            
+            # V_h^e encoding (next states for targets)
+            v_h_e_next_grid, v_h_e_next_global, v_h_e_next_agent, v_h_e_next_interactive = \
+                self.encode_states_batch(v_h_e_next_states, v_h_e_humans)
+        
+        # U_r encoding (uses robot as query agent, index 0 typically)
+        robot_idx = self.robot_agent_indices[0] if self.robot_agent_indices else 0
+        u_r_grid, u_r_global, u_r_agent, u_r_interactive = \
+            self.encode_states_batch(u_r_states, [robot_idx] * n_batch)
+        
+        # Q_r encoding (current and next states)
+        q_r_grid, q_r_global, q_r_agent, q_r_interactive = \
+            self.encode_states_batch(q_r_states, [robot_idx] * n_batch)
+        q_r_next_grid, q_r_next_global, q_r_next_agent, q_r_next_interactive = \
+            self.encode_states_batch(q_r_next_states, [robot_idx] * n_batch)
+        
+        # X_h encoding
+        if len(x_h_states) > 0:
+            x_h_grid, x_h_global, x_h_agent, x_h_interactive = \
+                self.encode_states_batch(x_h_states, x_h_humans)
+            x_h_goal_features = self.encode_goals_batch(x_h_goals)
+        
+        # For U_r target computation, we need X_h values for each human
+        # Encode states once per human for X_h target network
+        x_h_target_values_per_human = {}
+        if self.config.u_r_sample_humans is None:
+            humans_for_u_r = self.human_agent_indices
+        else:
+            n_sample = min(self.config.u_r_sample_humans, len(self.human_agent_indices))
+            humans_for_u_r = random.sample(self.human_agent_indices, n_sample)
+        
+        for h_u in humans_for_u_r:
+            h_grid, h_global, h_agent, h_interactive = \
+                self.encode_states_batch(u_r_states, [h_u] * n_batch)
+            with torch.no_grad():
+                x_h_vals = self.networks.x_h_target.forward_from_encoded(
+                    h_grid, h_global, h_agent, h_interactive
+                )
+            x_h_target_values_per_human[h_u] = x_h_vals
+        
+        # =====================================================================
+        # Step 3: Batched forward passes
+        # =====================================================================
+        
         losses = {
             'v_h_e': torch.tensor(0.0, device=self.device),
             'x_h': torch.tensor(0.0, device=self.device),
             'u_r': torch.tensor(0.0, device=self.device),
             'q_r': torch.tensor(0.0, device=self.device),
         }
-        # Only include V_r loss if using network mode
         if self.config.v_r_use_network:
             losses['v_r'] = torch.tensor(0.0, device=self.device)
         
-        # Track counts for normalization
-        x_h_count = 0
+        # ----- V_h^e loss -----
+        if len(v_h_e_states) > 0:
+            # Forward pass on current states
+            v_h_e_pred = self.networks.v_h_e.forward_with_goal_features(
+                v_h_e_grid, v_h_e_global, v_h_e_agent, v_h_e_interactive, v_h_e_goal_features
+            )
+            
+            # Target computation (next states with target network)
+            with torch.no_grad():
+                v_h_e_next = self.networks.v_h_e_target.forward_with_goal_features(
+                    v_h_e_next_grid, v_h_e_next_global, v_h_e_next_agent,
+                    v_h_e_next_interactive, v_h_e_goal_features
+                )
+            
+            # Compute TD targets
+            goal_achieved_t = torch.tensor(v_h_e_goal_achieved, dtype=torch.float32, device=self.device)
+            # TD target: if goal achieved -> 1, else -> 0 + gamma * V_next
+            v_h_e_targets = goal_achieved_t + (1.0 - goal_achieved_t) * self.config.gamma_h * v_h_e_next.squeeze()
+            
+            losses['v_h_e'] = torch.mean((v_h_e_pred.squeeze() - v_h_e_targets) ** 2)
         
-        for transition in batch:
-            # Unpack transition
-            s = transition.state
-            a_r = transition.robot_action
-            goals = transition.goals
-            s_prime = transition.next_state
-            
-            # ===== V_h^e loss (for each human and their goal) =====
-            for h, g_h in goals.items():
-                # Get V_h^e prediction
-                v_h_e_pred = self.networks.v_h_e.encode_and_forward(
-                    s, None, h, g_h, self.device
+        # ----- U_r loss -----
+        # Forward pass
+        y_pred, _ = self.networks.u_r.forward_from_encoded(
+            u_r_grid, u_r_global, u_r_agent, u_r_interactive
+        )
+        
+        # Compute target y from X_h values (averaged over humans)
+        # Stack X_h values: shape (n_humans, n_batch)
+        x_h_stacked = torch.stack([x_h_target_values_per_human[h].squeeze() for h in humans_for_u_r], dim=0)
+        # Compute X_h^{-xi} and average over humans
+        x_h_neg_xi = x_h_stacked ** (-self.config.xi)  # (n_humans, n_batch)
+        x_h_avg = x_h_neg_xi.mean(dim=0)  # (n_batch,)
+        # Target y = E[X_h^{-xi}]^{-1/xi}
+        target_y = x_h_avg ** (-1.0 / self.config.xi)
+        
+        losses['u_r'] = torch.mean((y_pred.squeeze() - target_y) ** 2)
+        
+        # ----- Q_r loss -----
+        # Forward pass - get all Q values
+        q_r_all = self.networks.q_r.forward_from_encoded(
+            q_r_grid, q_r_global, q_r_agent, q_r_interactive
+        )  # (n_batch, n_actions)
+        
+        # Select Q values for taken actions
+        action_indices = torch.tensor(
+            [self.networks.q_r.action_tuple_to_index(a) for a in q_r_actions],
+            dtype=torch.long, device=self.device
+        )
+        q_r_pred = q_r_all[torch.arange(n_batch, device=self.device), action_indices]
+        
+        # Compute V_r(s') for target
+        with torch.no_grad():
+            if self.config.v_r_use_network:
+                v_r_next = self.networks.v_r_target.forward_from_encoded(
+                    q_r_next_grid, q_r_next_global, q_r_next_agent, q_r_next_interactive
                 )
-                
-                # Check if goal achieved
-                goal_achieved = self.check_goal_achieved(s_prime, h, g_h)
-                goal_achieved_t = torch.tensor(
-                    1.0 if goal_achieved else 0.0, 
-                    device=self.device
-                )
-                
-                # Get target V_h^e(s', g_h)
-                with torch.no_grad():
-                    v_h_e_next = self.networks.v_h_e_target.encode_and_forward(
-                        s_prime, None, h, g_h, self.device
-                    )
-                
-                # TD target: U_h(s') + γ_h * V_h^e(s', g_h) if not achieved
-                target = self.networks.v_h_e.compute_td_target(
-                    goal_achieved_t, v_h_e_next.squeeze()
-                )
-                
-                losses['v_h_e'] = losses['v_h_e'] + (v_h_e_pred.squeeze() - target) ** 2
-            
-            # ===== U_r loss (averaged over sampled or all humans) =====
-            # Determine which humans to sample for U_r loss
-            if self.config.u_r_sample_humans is None:
-                # Use all humans
-                humans_for_u_r = self.human_agent_indices
             else:
-                # Sample a fixed number of humans
-                n_sample = min(self.config.u_r_sample_humans, len(self.human_agent_indices))
-                humans_for_u_r = random.sample(self.human_agent_indices, n_sample)
-            
-            y_pred, _ = self.networks.u_r.encode_and_forward(s, None, self.device)
-            
-            # Accumulate X_h^{-ξ} over sampled humans using X_h target network for stability
-            x_h_sum = torch.tensor(0.0, device=self.device)
-            for h_u in humans_for_u_r:
-                with torch.no_grad():
-                    x_h_for_h = self.networks.x_h_target.encode_and_forward(
-                        s, None, h_u, self.device
-                    )
-                # Accumulate X_h^{-ξ}
-                x_h_sum = x_h_sum + x_h_for_h.squeeze() ** (-self.config.xi)
-            
-            # Average to get E[X_h^{-ξ}]
-            x_h_avg = x_h_sum / len(humans_for_u_r)
-            
-            # Compute y target: y = E[X_h^{-ξ}]^{1/ξ} (this gives X_h^{-1} if ξ=1)
-            target_y = x_h_avg ** (-1.0 / self.config.xi)
-            losses['u_r'] = losses['u_r'] + (y_pred.squeeze() - target_y) ** 2
-            
-            # ===== Q_r loss =====
-            q_r_all = self.networks.q_r.encode_and_forward(s, None, self.device)
-            a_r_index = self.networks.q_r.action_tuple_to_index(a_r)
-            q_r_pred = q_r_all.squeeze()[a_r_index]
+                # Compute V_r directly: V_r(s') = U_r(s') + π_r(s') · Q_r(s')
+                _, u_r_next = self.networks.u_r.forward_from_encoded(
+                    q_r_next_grid, q_r_next_global, q_r_next_agent, q_r_next_interactive
+                )
+                q_r_next = self.networks.q_r.forward_from_encoded(
+                    q_r_next_grid, q_r_next_global, q_r_next_agent, q_r_next_interactive
+                )
+                pi_r_next = self.networks.q_r.get_policy(q_r_next)
+                # V_r = U_r + sum(pi * Q) - compute for each batch element
+                v_r_next = u_r_next.squeeze() + (pi_r_next * q_r_next).sum(dim=-1)
+        
+        target_q_r = self.config.gamma_r * v_r_next.squeeze()
+        losses['q_r'] = torch.mean((q_r_pred - target_q_r) ** 2)
+        
+        # ----- V_r loss (only if using network mode) -----
+        if self.config.v_r_use_network:
+            v_r_pred = self.networks.v_r.forward_from_encoded(
+                q_r_grid, q_r_global, q_r_agent, q_r_interactive
+            )
             
             with torch.no_grad():
-                if self.config.v_r_use_network:
-                    # Use V_r target network
-                    v_r_next = self.networks.v_r_target.encode_and_forward(
-                        s_prime, None, self.device
-                    )
-                else:
-                    # Compute V_r directly: V_r(s') = U_r(s') + π_r(s') · Q_r(s')
-                    _, u_r_next = self.networks.u_r.encode_and_forward(s_prime, None, self.device)
-                    q_r_next = self.networks.q_r.encode_and_forward(s_prime, None, self.device)
-                    pi_r_next = self.networks.q_r.get_policy(q_r_next)
-                    v_r_next = self.networks.v_r.compute_from_components(
-                        u_r_next.squeeze(), q_r_next.squeeze(), pi_r_next.squeeze()
-                    )
-            
-            target_q_r = self.config.gamma_r * v_r_next.squeeze()
-            losses['q_r'] = losses['q_r'] + (q_r_pred - target_q_r) ** 2
-            
-            # ===== V_r loss (only if using network mode) =====
-            if self.config.v_r_use_network:
-                v_r_pred = self.networks.v_r.encode_and_forward(s, None, self.device)
-                
-                with torch.no_grad():
-                    _, u_r = self.networks.u_r.encode_and_forward(s, None, self.device)
-                    q_r_for_v = self.networks.q_r.encode_and_forward(s, None, self.device)
-                    pi_r = self.networks.q_r.get_policy(q_r_for_v)
-                
-                target_v_r = self.networks.v_r.compute_from_components(
-                    u_r.squeeze(), q_r_for_v.squeeze(), pi_r.squeeze()
+                _, u_r_for_v = self.networks.u_r.forward_from_encoded(
+                    q_r_grid, q_r_global, q_r_agent, q_r_interactive
                 )
-                losses['v_r'] = losses['v_r'] + (v_r_pred.squeeze() - target_v_r) ** 2
-        
-        # ===== X_h loss (computed on potentially larger batch) =====
-        for transition in x_h_batch:
-            s = transition.state
-            goals = transition.goals
-            
-            # Determine which human-goal pairs to use for X_h loss
-            if self.config.x_h_sample_humans is None:
-                # Use all humans' goals from the transition
-                humans_for_x_h = list(goals.keys())
-            else:
-                # Sample a fixed number of humans
-                n_sample = min(self.config.x_h_sample_humans, len(goals))
-                humans_for_x_h = random.sample(list(goals.keys()), n_sample)
-            
-            for h_x in humans_for_x_h:
-                g_h_x = goals[h_x]
-                x_h_pred = self.networks.x_h.encode_and_forward(
-                    s, None, h_x, self.device
+                q_r_for_v = self.networks.q_r.forward_from_encoded(
+                    q_r_grid, q_r_global, q_r_agent, q_r_interactive
                 )
-                
-                with torch.no_grad():
-                    # Use target network for more stable X_h targets
-                    v_h_e_for_x = self.networks.v_h_e_target.encode_and_forward(
-                        s, None, h_x, g_h_x, self.device
-                    )
-                
-                target_x_h = self.networks.x_h.compute_target(v_h_e_for_x.squeeze())
-                losses['x_h'] = losses['x_h'] + (x_h_pred.squeeze() - target_x_h) ** 2
-                x_h_count += 1
+                pi_r = self.networks.q_r.get_policy(q_r_for_v)
+            
+            target_v_r = u_r_for_v.squeeze() + (pi_r * q_r_for_v).sum(dim=-1)
+            losses['v_r'] = torch.mean((v_r_pred.squeeze() - target_v_r) ** 2)
         
-        # Average losses over their respective batch sizes
-        n = len(batch)
-        loss_keys_to_avg = ['v_h_e', 'u_r', 'q_r']
-        if self.config.v_r_use_network:
-            loss_keys_to_avg.append('v_r')
-        for k in loss_keys_to_avg:
-            losses[k] = losses[k] / n
-        # X_h uses its own count (may be from larger batch)
-        if x_h_count > 0:
-            losses['x_h'] = losses['x_h'] / x_h_count
+        # ----- X_h loss -----
+        if len(x_h_states) > 0:
+            # Forward pass
+            x_h_pred = self.networks.x_h.forward_from_encoded(
+                x_h_grid, x_h_global, x_h_agent, x_h_interactive
+            )
+            
+            # Target computation using V_h^e target network
+            with torch.no_grad():
+                v_h_e_for_x = self.networks.v_h_e_target.forward_with_goal_features(
+                    x_h_grid, x_h_global, x_h_agent, x_h_interactive, x_h_goal_features
+                )
+            
+            # X_h target = V_h^e^zeta
+            target_x_h = v_h_e_for_x.squeeze() ** self.config.zeta
+            
+            losses['x_h'] = torch.mean((x_h_pred.squeeze() - target_x_h) ** 2)
         
         return losses
     

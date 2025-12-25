@@ -168,6 +168,27 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
         
         return self.forward(grid_tensor, global_features, agent_features, interactive_features)
     
+    def forward_from_encoded(
+        self,
+        grid_tensor: torch.Tensor,
+        global_features: torch.Tensor,
+        agent_features: torch.Tensor,
+        interactive_features: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Forward pass with pre-encoded state features (for batched training).
+        
+        Args:
+            grid_tensor: (batch, num_grid_channels, H, W)
+            global_features: (batch, NUM_GLOBAL_WORLD_FEATURES)
+            agent_features: (batch, agent_input_size)
+            interactive_features: (batch, interactive_input_size)
+        
+        Returns:
+            Q-values tensor (batch, num_action_combinations) with Q_r < 0.
+        """
+        return self.forward(grid_tensor, global_features, agent_features, interactive_features)
+    
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for save/load."""
         return {

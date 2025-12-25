@@ -98,11 +98,11 @@ class Phase2Config:
     u_r_weight_decay: float = 1e-4
     
     # Max gradient norm for each network (0 or None to disable clipping)
-    q_r_grad_clip: float = 1.0
-    v_r_grad_clip: float = 1.0
-    v_h_e_grad_clip: float = 1.0
-    x_h_grad_clip: float = 1.0
-    u_r_grad_clip: float = 1.0
+    q_r_grad_clip: Optional[float] = 1.0
+    v_r_grad_clip: Optional[float] = 1.0
+    v_h_e_grad_clip: Optional[float] = 1.0
+    x_h_grad_clip: Optional[float] = 1.0
+    u_r_grad_clip: Optional[float] = 1.0
     
     # Dropout rate for hidden layers (not input/output) of each network
     q_r_dropout: float = 0.5

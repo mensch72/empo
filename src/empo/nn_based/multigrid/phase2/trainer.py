@@ -124,6 +124,76 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         """Reset environment and return initial state."""
         self.env.reset()
         return self.env.get_state()
+    
+    def encode_states_batch(
+        self,
+        states: List[Any],
+        query_agent_indices: List[int]
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Encode a batch of states into tensor format for batched forward passes.
+        
+        Args:
+            states: List of raw environment states.
+            query_agent_indices: List of query agent indices (one per state).
+        
+        Returns:
+            Tuple of (grid_tensors, global_features, agent_features, interactive_features)
+            all with batch dimension.
+        """
+        # Get the state encoder from any of the networks (they share architecture)
+        state_encoder = self.networks.q_r.state_encoder
+        
+        # Encode each state
+        grid_list = []
+        global_list = []
+        agent_list = []
+        interactive_list = []
+        
+        for state, query_idx in zip(states, query_agent_indices):
+            grid, glob, agent, interactive = state_encoder.encode_state(
+                state, None, query_idx, self.device
+            )
+            grid_list.append(grid)
+            global_list.append(glob)
+            agent_list.append(agent)
+            interactive_list.append(interactive)
+        
+        # Stack into batched tensors
+        return (
+            torch.cat(grid_list, dim=0),
+            torch.cat(global_list, dim=0),
+            torch.cat(agent_list, dim=0),
+            torch.cat(interactive_list, dim=0)
+        )
+    
+    def encode_goals_batch(
+        self,
+        goals: List[Any]
+    ) -> torch.Tensor:
+        """
+        Encode a batch of goals into tensor format.
+        
+        Args:
+            goals: List of goals.
+        
+        Returns:
+            Goal features tensor with batch dimension.
+        """
+        # Get the goal encoder from V_h^e network
+        goal_encoder = self.networks.v_h_e.goal_encoder
+        
+        # Encode each goal
+        goal_features_list = []
+        for goal in goals:
+            # First get goal coordinates
+            goal_coords = goal_encoder.encode_goal(goal, self.device)
+            # Then pass through encoder network
+            goal_features = goal_encoder(goal_coords)
+            goal_features_list.append(goal_features)
+        
+        # Stack into batched tensor
+        return torch.cat(goal_features_list, dim=0)
 
 
 def create_phase2_networks(
