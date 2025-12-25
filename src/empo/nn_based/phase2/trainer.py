@@ -398,8 +398,10 @@ class BasePhase2Trainer(ABC):
             'x_h': torch.tensor(0.0, device=self.device),
             'u_r': torch.tensor(0.0, device=self.device),
             'q_r': torch.tensor(0.0, device=self.device),
-            'v_r': torch.tensor(0.0, device=self.device),
         }
+        # Only include V_r loss if using network mode
+        if self.config.v_r_use_network:
+            losses['v_r'] = torch.tensor(0.0, device=self.device)
         
         # Track counts for normalization
         x_h_count = 0
