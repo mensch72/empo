@@ -65,6 +65,14 @@ class Phase2Config:
     lr_x_h: float = 1e-4
     lr_u_r: float = 1e-4
     
+    # Learning rate schedule for X_h and U_r (which estimate expectations)
+    # After warmup_steps, use 1/t decay to converge to true expectation.
+    # lr(t) = lr_base * warmup_steps / t  for t > warmup_steps
+    lr_x_h_warmup_steps: int = 1000  # Steps before 1/t decay starts (0 = always 1/t)
+    lr_u_r_warmup_steps: int = 1000  # Steps before 1/t decay starts (0 = always 1/t)
+    lr_x_h_use_1_over_t: bool = True  # Whether to use 1/t decay for X_h
+    lr_u_r_use_1_over_t: bool = True  # Whether to use 1/t decay for U_r
+    
     # Target network updates
     v_r_target_update_freq: int = 100
     v_h_target_update_freq: int = 100
@@ -127,3 +135,35 @@ class Phase2Config:
         # Linear decay
         decay_rate = (self.epsilon_r_start - self.epsilon_r_end) / self.epsilon_r_decay_steps
         return self.epsilon_r_start - decay_rate * step
+    
+    def get_lr_x_h(self, update_count: int) -> float:
+        """Get X_h learning rate with optional 1/t decay.
+        
+        After warmup, decays as lr_base * warmup / t to satisfy Robbins-Monro
+        conditions for converging to true expectation.
+        """
+        if not self.lr_x_h_use_1_over_t:
+            return self.lr_x_h
+        
+        warmup = max(1, self.lr_x_h_warmup_steps)
+        if update_count <= warmup:
+            return self.lr_x_h
+        
+        # 1/t decay: lr = lr_base * warmup / t
+        return self.lr_x_h * warmup / update_count
+    
+    def get_lr_u_r(self, update_count: int) -> float:
+        """Get U_r learning rate with optional 1/t decay.
+        
+        After warmup, decays as lr_base * warmup / t to satisfy Robbins-Monro
+        conditions for converging to true expectation.
+        """
+        if not self.lr_u_r_use_1_over_t:
+            return self.lr_u_r
+        
+        warmup = max(1, self.lr_u_r_warmup_steps)
+        if update_count <= warmup:
+            return self.lr_u_r
+        
+        # 1/t decay: lr = lr_base * warmup / t
+        return self.lr_u_r * warmup / update_count

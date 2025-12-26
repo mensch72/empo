@@ -122,6 +122,15 @@ class BasePhase2Trainer(ABC):
         # Training step counter
         self.total_steps = 0
         
+        # Per-network update counters for 1/t learning rate schedules
+        self.update_counts = {
+            'q_r': 0,
+            'v_r': 0,
+            'v_h_e': 0,
+            'x_h': 0,
+            'u_r': 0,
+        }
+        
         if self.debug:
             print("[DEBUG] BasePhase2Trainer.__init__: Initialization complete.")
     
@@ -616,6 +625,17 @@ class BasePhase2Trainer(ABC):
                     if clip_val and clip_val > 0:
                         torch.nn.utils.clip_grad_norm_(net.parameters(), clip_val)
                 
+                # Update learning rate for X_h and U_r with 1/t schedule
+                self.update_counts[name] += 1
+                if name == 'x_h':
+                    new_lr = self.config.get_lr_x_h(self.update_counts[name])
+                    for param_group in self.optimizers[name].param_groups:
+                        param_group['lr'] = new_lr
+                elif name == 'u_r':
+                    new_lr = self.config.get_lr_u_r(self.update_counts[name])
+                    for param_group in self.optimizers[name].param_groups:
+                        param_group['lr'] = new_lr
+                
                 grad_norms[name] = self._compute_single_grad_norm(name)
                 self.optimizers[name].step()
         
@@ -783,6 +803,9 @@ class BasePhase2Trainer(ABC):
                 for key, value in param_norms.items():
                     self.writer.add_scalar(f'ParamNorm/{key}', value, episode)
                 self.writer.add_scalar('Epsilon', self.config.get_epsilon(self.total_steps), episode)
+                # Log learning rates (especially for X_h and U_r with 1/t schedule)
+                self.writer.add_scalar('LearningRate/x_h', self.config.get_lr_x_h(self.update_counts['x_h']), episode)
+                self.writer.add_scalar('LearningRate/u_r', self.config.get_lr_u_r(self.update_counts['u_r']), episode)
                 # Flush to ensure data is written to disk for real-time monitoring
                 self.writer.flush()
             
