@@ -16,7 +16,6 @@ required_files=(
     "docker-compose.yml"
     "requirements.txt"
     "requirements-dev.txt"
-    "train.py"
     "README.md"
     "Makefile"
     ".dockerignore"
