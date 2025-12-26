@@ -383,19 +383,75 @@ class BasePhase2Trainer(ABC):
         if self.debug:
             print(f"[DEBUG] collect_transition: environment stepped, creating transition...")
         
+        # Pre-compute transition probabilities for all robot actions (for model-based targets)
+        transition_probs_by_action = None
+        if self.config.use_model_based_targets and hasattr(self.env, 'transition_probabilities'):
+            transition_probs_by_action = self._precompute_transition_probs(
+                state, human_actions
+            )
+        
         # Create transition
         transition = Phase2Transition(
             state=state,
             robot_action=robot_action,
             goals=goals.copy(),
             human_actions=human_actions,
-            next_state=next_state
+            next_state=next_state,
+            transition_probs_by_action=transition_probs_by_action
         )
         
         if self.debug:
             print(f"[DEBUG] collect_transition: done")
         
         return transition, next_state
+    
+    def _precompute_transition_probs(
+        self,
+        state: Any,
+        human_actions: List[int]
+    ) -> Dict[int, List[Tuple[float, Any]]]:
+        """
+        Pre-compute transition probabilities for all robot actions.
+        
+        This is called once at transition collection time to cache
+        results for efficient reuse during training.
+        
+        Args:
+            state: Current state.
+            human_actions: The actual human actions taken.
+        
+        Returns:
+            Dict mapping robot_action_index -> [(prob, next_state), ...].
+        """
+        num_actions = self.networks.q_r.num_action_combinations
+        result = {}
+        
+        for action_idx in range(num_actions):
+            robot_action = self.networks.q_r.action_index_to_tuple(action_idx)
+            
+            # Build full action vector using ACTUAL human actions
+            actions = []
+            human_idx_iter = 0
+            robot_idx = 0
+            for agent_idx in range(len(self.env.agents)):
+                if agent_idx in self.human_agent_indices:
+                    actions.append(human_actions[human_idx_iter])
+                    human_idx_iter += 1
+                elif agent_idx in self.robot_agent_indices:
+                    actions.append(robot_action[robot_idx])
+                    robot_idx += 1
+                else:
+                    actions.append(0)
+            
+            # Get transition probabilities
+            trans_probs = self.env.transition_probabilities(state, actions)
+            
+            if trans_probs is None:
+                result[action_idx] = []  # Terminal state
+            else:
+                result[action_idx] = trans_probs
+        
+        return result
     
     def compute_losses(
         self,

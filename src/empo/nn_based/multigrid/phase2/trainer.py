@@ -245,6 +245,166 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
             torch.cat(interactive_list, dim=0)
         )
     
+    def _compute_model_based_targets_for_transition(
+        self,
+        state: Any,
+        human_actions: List[int],
+        goals: Dict[int, Any],
+        effective_beta_r: float,
+        human_indices_for_v_h_e: Optional[List[int]] = None,
+        goals_for_v_h_e: Optional[List[Any]] = None,
+        cached_trans_probs: Optional[Dict[int, List[Tuple[float, Any]]]] = None
+    ) -> Tuple[torch.Tensor, Optional[List[Tuple[float, float]]]]:
+        """
+        Compute model-based targets for Q_r and optionally V_h^e for a single transition.
+        
+        Uses the ACTUALLY TAKEN human actions from the transition, combined with
+        ALL possible robot actions. Uses cached transition probabilities if provided,
+        otherwise computes them on the fly.
+        
+        For Q_r: Returns E[V_r(s')] for all robot actions (uniform weighting).
+        For V_h^e: Returns E[goal_achieved], E[V_h^e(s')] averaged over robot actions
+                   weighted by current robot policy.
+        
+        Args:
+            state: Current state s.
+            human_actions: Actually taken human actions from the transition.
+            goals: Human goals dict.
+            effective_beta_r: Beta for robot policy.
+            human_indices_for_v_h_e: Optional list of human indices to compute V_h^e for.
+            goals_for_v_h_e: Optional list of corresponding goals.
+            cached_trans_probs: Optional pre-computed transition probabilities from
+                transition.transition_probs_by_action. If provided, avoids re-computing.
+        
+        Returns:
+            Tuple of:
+            - expected_v_r: Tensor of shape (num_actions,) with E[V_r(s')] per action
+            - v_h_e_targets: List of (exp_achieved, exp_v_h_e) per human, or None
+        """
+        num_actions = self.networks.q_r.num_action_combinations
+        expected_v_r = torch.zeros(num_actions, device=self.device)
+        
+        # If computing V_h^e, we need robot policy weights
+        compute_v_h_e = human_indices_for_v_h_e is not None and goals_for_v_h_e is not None
+        
+        # Get current robot policy for weighting V_h^e (computed once)
+        if compute_v_h_e:
+            s_encoded = self._batch_encode_states([state])
+            own_s_encoded = self._batch_encode_states_with_encoder(
+                [state], self.networks.q_r.own_state_encoder
+            )
+            with torch.no_grad():
+                q_r_current = self.networks.q_r.forward(*s_encoded, *own_s_encoded)
+                robot_policy = self.networks.q_r.get_policy(q_r_current, beta_r=effective_beta_r)
+                robot_policy = robot_policy.squeeze()  # Shape: (num_actions,)
+            
+            # Accumulators for V_h^e: one per human
+            n_humans = len(human_indices_for_v_h_e)
+            v_h_e_achieved_accum = [0.0] * n_humans
+            v_h_e_value_accum = [0.0] * n_humans
+        
+        # Iterate over all robot actions
+        for action_idx in range(num_actions):
+            # Get transition probabilities - use cache if available
+            if cached_trans_probs is not None:
+                trans_probs = cached_trans_probs.get(action_idx, [])
+                if not trans_probs:
+                    # Terminal state or no entry
+                    expected_v_r[action_idx] = 0.0
+                    continue
+            else:
+                # Compute on the fly (fallback)
+                robot_action = self.networks.q_r.action_index_to_tuple(action_idx)
+                
+                # Build full action vector using ACTUAL human actions
+                actions = []
+                human_idx_iter = 0
+                robot_idx = 0
+                for agent_idx in range(len(self.env.agents)):
+                    if agent_idx in self.human_agent_indices:
+                        actions.append(human_actions[human_idx_iter])
+                        human_idx_iter += 1
+                    elif agent_idx in self.robot_agent_indices:
+                        actions.append(robot_action[robot_idx])
+                        robot_idx += 1
+                    else:
+                        actions.append(0)
+                
+                trans_probs = self.env.transition_probabilities(state, actions)
+                
+                if trans_probs is None:
+                    # Terminal state
+                    expected_v_r[action_idx] = 0.0
+                    continue
+            
+            # Compute expected V_r over successor states
+            action_expected_v_r = 0.0
+            
+            # For V_h^e: accumulate per-action contributions
+            if compute_v_h_e:
+                action_achieved = [0.0] * n_humans
+                action_v_h_e = [0.0] * n_humans
+            
+            for prob, next_state in trans_probs:
+                if prob > 0:
+                    # Encode next state once
+                    s_prime_encoded = self._batch_encode_states([next_state])
+                    
+                    # Compute V_r(s')
+                    with torch.no_grad():
+                        if self.config.v_r_use_network:
+                            v_r_next = self.networks.v_r_target.forward(*s_prime_encoded)
+                        else:
+                            _, u_r_next = self.networks.u_r_target.forward(*s_prime_encoded)
+                            own_s_prime = self._batch_encode_states_with_encoder(
+                                [next_state], self.networks.q_r.own_state_encoder
+                            )
+                            q_r_next = self.networks.q_r.forward(*s_prime_encoded, *own_s_prime)
+                            pi_r_next = self.networks.q_r.get_policy(q_r_next, beta_r=effective_beta_r)
+                            v_r_next = self.networks.v_r.compute_from_components(
+                                u_r_next, q_r_next, pi_r_next
+                            )
+                        action_expected_v_r += prob * v_r_next.item()
+                    
+                    # Compute V_h^e contributions (reuse s_prime_encoded)
+                    if compute_v_h_e:
+                        for h_i, (h_idx, goal) in enumerate(zip(human_indices_for_v_h_e, goals_for_v_h_e)):
+                            # Check goal achievement
+                            achieved = self.check_goal_achieved(next_state, h_idx, goal)
+                            action_achieved[h_i] += prob * (1.0 if achieved else 0.0)
+                            
+                            # Compute V_h^e(s')
+                            goal_features = self._batch_encode_goals([goal])
+                            v_h_e_idx, v_h_e_grid, v_h_e_feat = self._batch_encode_agent_identities(
+                                [h_idx], [next_state]
+                            )
+                            with torch.no_grad():
+                                v_h_e_next = self.networks.v_h_e_target.forward(
+                                    s_prime_encoded[0], s_prime_encoded[1],
+                                    s_prime_encoded[2], s_prime_encoded[3],
+                                    goal_features, v_h_e_idx, v_h_e_grid, v_h_e_feat
+                                )
+                                action_v_h_e[h_i] += prob * v_h_e_next.item()
+            
+            expected_v_r[action_idx] = action_expected_v_r
+            
+            # Weight V_h^e by robot policy
+            if compute_v_h_e:
+                weight = robot_policy[action_idx].item()
+                for h_i in range(n_humans):
+                    v_h_e_achieved_accum[h_i] += weight * action_achieved[h_i]
+                    v_h_e_value_accum[h_i] += weight * action_v_h_e[h_i]
+        
+        # Build V_h^e targets
+        v_h_e_targets = None
+        if compute_v_h_e:
+            v_h_e_targets = [
+                (v_h_e_achieved_accum[i], v_h_e_value_accum[i])
+                for i in range(n_humans)
+            ]
+        
+        return expected_v_r, v_h_e_targets
+
     def encode_goals_batch(
         self,
         goals: List[Any]
@@ -331,6 +491,8 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         v_h_e_human_indices = []
         v_h_e_states = []  # states for agent identity encoding
         v_h_e_next_states = []
+        v_h_e_goals_dicts = []  # full goals dict for each entry (for model-based targets)
+        v_h_e_human_actions = []  # actual human actions taken (for model-based targets)
         
         for i, t in enumerate(batch):
             for h, g_h in t.goals.items():
@@ -340,6 +502,8 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
                 v_h_e_human_indices.append(h)
                 v_h_e_states.append(t.state)
                 v_h_e_next_states.append(t.next_state)
+                v_h_e_goals_dicts.append(t.goals)  # Store full goals dict
+                v_h_e_human_actions.append(t.human_actions)  # Store actual human actions
         
         if v_h_e_goals:
             goal_features = self._batch_encode_goals(v_h_e_goals)
@@ -429,27 +593,95 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         )
         q_r_pred = q_r_all.gather(1, action_indices.unsqueeze(1)).squeeze(1)  # (n,)
         
-        # ----- Q_r target: γ_r * V_r(s') -----
+        # ----- Q_r target: γ_r * E[V_r(s')] -----
         # Use effective beta_r for policy (0 during warm-up for independence)
         effective_beta_r = self.config.get_effective_beta_r(self.total_steps)
-        with torch.no_grad():
-            if self.config.v_r_use_network:
-                v_r_next = self.networks.v_r_target.forward(*s_prime_encoded)
-            else:
-                # Use frozen u_r_target for stable V_r computation
-                _, u_r_next = self.networks.u_r_target.forward(*s_prime_encoded)
-                # Q_r needs both encoders for proper inference
-                own_s_prime_encoded = self._batch_encode_states_with_encoder(
-                    [t.next_state for t in batch],
-                    self.networks.q_r.own_state_encoder
-                )
-                q_r_next = self.networks.q_r.forward(*s_prime_encoded, *own_s_prime_encoded)
-                pi_r_next = self.networks.q_r.get_policy(q_r_next, beta_r=effective_beta_r)
-                v_r_next = self.networks.v_r.compute_from_components(
-                    u_r_next, q_r_next, pi_r_next
-                )
-        target_q_r = self.config.gamma_r * v_r_next.squeeze()
-        loss_q_r = ((q_r_pred - target_q_r) ** 2).mean()
+        
+        # Pre-compute model-based targets for both Q_r and V_h^e in a single pass
+        # This avoids calling transition_probabilities twice for the same transitions
+        model_based_q_r_targets = None
+        model_based_v_h_e_targets = None
+        
+        if self.config.use_model_based_targets and hasattr(self.env, 'transition_probabilities'):
+            # Compute both Q_r and V_h^e targets in one pass through transitions
+            with torch.no_grad():
+                all_target_q_r = []
+                
+                # Pre-allocate V_h^e targets (will fill in based on transition index)
+                v_h_e_targets_by_entry = [0.0] * len(v_h_e_goals) if v_h_e_goals else []
+                
+                # Group V_h^e entries by transition index for efficient lookup
+                from collections import defaultdict
+                transition_to_v_h_e_entries = defaultdict(list)  # trans_idx -> [(entry_idx, h_idx, g), ...]
+                if v_h_e_goals:
+                    for entry_idx, trans_idx in enumerate(v_h_e_indices):
+                        h_idx = v_h_e_human_indices[entry_idx]
+                        g = v_h_e_goals[entry_idx]
+                        transition_to_v_h_e_entries[trans_idx].append((entry_idx, h_idx, g))
+                
+                # Process each transition ONCE for both Q_r and V_h^e
+                for trans_idx, t in enumerate(batch):
+                    # Get V_h^e humans/goals for this transition (if any)
+                    v_h_e_entries = transition_to_v_h_e_entries.get(trans_idx, [])
+                    
+                    # Use cached transition probabilities if available
+                    cached_trans_probs = t.transition_probs_by_action
+                    
+                    if v_h_e_entries:
+                        human_indices = [e[1] for e in v_h_e_entries]
+                        goals_list = [e[2] for e in v_h_e_entries]
+                        
+                        # Single call computes BOTH Q_r and V_h^e targets
+                        expected_v_r, v_h_e_results = self._compute_model_based_targets_for_transition(
+                            t.state, t.human_actions, t.goals, effective_beta_r,
+                            human_indices_for_v_h_e=human_indices,
+                            goals_for_v_h_e=goals_list,
+                            cached_trans_probs=cached_trans_probs
+                        )
+                        
+                        # Store V_h^e targets
+                        if v_h_e_results:
+                            for i, (entry_idx, _, _) in enumerate(v_h_e_entries):
+                                exp_achieved, exp_v_h_e_next = v_h_e_results[i]
+                                target_v = exp_achieved + (1.0 - exp_achieved) * exp_v_h_e_next
+                                v_h_e_targets_by_entry[entry_idx] = target_v
+                    else:
+                        # No V_h^e for this transition, just compute Q_r
+                        expected_v_r, _ = self._compute_model_based_targets_for_transition(
+                            t.state, t.human_actions, t.goals, effective_beta_r,
+                            cached_trans_probs=cached_trans_probs
+                        )
+                    
+                    all_target_q_r.append(self.config.gamma_r * expected_v_r)
+                
+                # Store results for use later
+                model_based_q_r_targets = torch.stack(all_target_q_r)
+                if v_h_e_goals:
+                    model_based_v_h_e_targets = torch.tensor(v_h_e_targets_by_entry, device=self.device)
+            
+            # Q_r loss over ALL actions
+            loss_q_r = ((q_r_all - model_based_q_r_targets) ** 2).mean()
+            target_q_r = model_based_q_r_targets.gather(1, action_indices.unsqueeze(1)).squeeze(1)
+        else:
+            # Sample-based targets: use observed next state only
+            with torch.no_grad():
+                if self.config.v_r_use_network:
+                    v_r_next = self.networks.v_r_target.forward(*s_prime_encoded)
+                else:
+                    # Use frozen u_r_target for stable V_r computation
+                    _, u_r_next = self.networks.u_r_target.forward(*s_prime_encoded)
+                    # Q_r needs both encoders for proper inference
+                    own_s_prime_encoded = self._batch_encode_states_with_encoder(
+                        [t.next_state for t in batch],
+                        self.networks.q_r.own_state_encoder
+                    )
+                    q_r_next = self.networks.q_r.forward(*s_prime_encoded, *own_s_prime_encoded)
+                    pi_r_next = self.networks.q_r.get_policy(q_r_next, beta_r=effective_beta_r)
+                    v_r_next = self.networks.v_r.compute_from_components(
+                        u_r_next, q_r_next, pi_r_next
+                    )
+            target_q_r = self.config.gamma_r * v_r_next.squeeze()
+            loss_q_r = ((q_r_pred - target_q_r) ** 2).mean()
         
         # Track Q_r prediction stats
         with torch.no_grad():
@@ -543,20 +775,25 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
                 v_h_e_idx, v_h_e_grid, v_h_e_feat
             )
             
-            goal_achieved_t = torch.tensor(
-                [1.0 if a else 0.0 for a in v_h_e_achieved],
-                device=self.device
-            )
-            
-            with torch.no_grad():
-                v_h_e_next = self.networks.v_h_e_target.forward(
-                    s_prime_h_grid, s_prime_h_glob, s_prime_h_agent, s_prime_h_interactive,
-                    goal_features, v_h_e_prime_idx, v_h_e_prime_grid, v_h_e_prime_feat
+            if model_based_v_h_e_targets is not None:
+                # Use pre-computed model-based targets (computed jointly with Q_r above)
+                target_v_h_e = model_based_v_h_e_targets
+            else:
+                # Sample-based targets: use observed transition
+                goal_achieved_t = torch.tensor(
+                    [1.0 if a else 0.0 for a in v_h_e_achieved],
+                    device=self.device
                 )
-            
-            target_v_h_e = self.networks.v_h_e.compute_td_target(
-                goal_achieved_t, v_h_e_next.squeeze()
-            )
+                
+                with torch.no_grad():
+                    v_h_e_next = self.networks.v_h_e_target.forward(
+                        s_prime_h_grid, s_prime_h_glob, s_prime_h_agent, s_prime_h_interactive,
+                        goal_features, v_h_e_prime_idx, v_h_e_prime_grid, v_h_e_prime_feat
+                    )
+                
+                target_v_h_e = self.networks.v_h_e.compute_td_target(
+                    goal_achieved_t, v_h_e_next.squeeze()
+                )
             
             loss_v_h_e = ((v_h_e_pred.squeeze() - target_v_h_e) ** 2).mean()
             

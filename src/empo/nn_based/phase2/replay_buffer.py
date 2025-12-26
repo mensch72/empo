@@ -20,12 +20,16 @@ class Phase2Transition:
         goals: Dict mapping human index to their goal {h: g_h}.
         human_actions: List of human actions (a_H).
         next_state: The successor state s'.
+        transition_probs_by_action: Optional pre-computed transition probabilities
+            for model-based targets. Maps robot_action_index -> [(prob, next_state), ...].
+            When provided, avoids re-computing transition_probabilities during training.
     """
     state: Any
     robot_action: Tuple[int, ...]
     goals: Dict[int, Any]
     human_actions: List[int]
     next_state: Any
+    transition_probs_by_action: Optional[Dict[int, List[Tuple[float, Any]]]] = None
 
 
 class Phase2ReplayBuffer:

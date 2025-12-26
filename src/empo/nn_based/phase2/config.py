@@ -161,6 +161,14 @@ class Phase2Config:
     # Set to False to verify that identical grid states get identical values.
     include_step_count: bool = True
     
+    # Model-based targets: if True (default), use transition_probabilities() to compute
+    # expected V(s') over all possible successor states instead of using single samples.
+    # This is analogous to Expected SARSA vs SARSA.
+    # Benefits: (1) Lower variance, (2) Actions with same successor get same Q-value,
+    # (3) Updates ALL action Q-values per state, not just the taken action.
+    # Requires the environment to provide a transition_probabilities() method.
+    use_model_based_targets: bool = True
+    
     # Network architecture
     hidden_dim: int = 256
     state_feature_dim: int = 256
