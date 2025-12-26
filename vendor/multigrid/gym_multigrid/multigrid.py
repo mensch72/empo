@@ -3387,9 +3387,17 @@ class MultiGridEnv(WorldModel):
 
         return img
 
-    def render(self, mode='human', close=False, highlight=False, tile_size=TILE_PIXELS):
+    def render(self, mode='human', close=False, highlight=False, tile_size=TILE_PIXELS, annotation_text=None):
         """
-        Render the whole-grid human view
+        Render the whole-grid human view.
+        
+        Args:
+            mode: 'human' for window display, 'rgb_array' for numpy array
+            close: If True, close the rendering window
+            highlight: If True, highlight visible cells for each agent
+            tile_size: Pixel size of each grid cell
+            annotation_text: Optional text to display in a panel to the right of the grid.
+                            Can be a string (rendered as-is) or a list of strings (one per line).
         """
 
         if close:
@@ -3448,6 +3456,10 @@ class MultiGridEnv(WorldModel):
         
         # Draw dashed lines from control buttons to controlled agents
         self._draw_control_button_connections(img, tile_size)
+        
+        # Add annotation panel if text provided
+        if annotation_text is not None:
+            img = self._add_annotation_panel(img, annotation_text)
 
         if mode == 'human':
             self.window.show_img(img)
@@ -3534,6 +3546,77 @@ class MultiGridEnv(WorldModel):
                             img[py+oy, px+ox] = color
             x += x_inc
             y += y_inc
+
+    def _add_annotation_panel(self, img, annotation_text, panel_width=200, font_size=11, bg_color=(255, 255, 255)):
+        """
+        Add a text annotation panel to the right side of the image.
+        
+        Args:
+            img: RGB numpy array (H, W, 3)
+            annotation_text: String or list of strings to display
+            panel_width: Width of the annotation panel in pixels
+            font_size: Font size for the text
+            bg_color: Background color of the panel (R, G, B)
+        
+        Returns:
+            New image with annotation panel appended on the right
+        """
+        import numpy as np
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+        except ImportError:
+            # PIL not available, return original image
+            return img
+        
+        h, w = img.shape[:2]
+        
+        # Create annotation panel
+        panel = np.ones((h, panel_width, 3), dtype=np.uint8)
+        panel[:, :] = bg_color
+        
+        # Concatenate grid and panel
+        combined = np.concatenate([img, panel], axis=1)
+        
+        # Convert to PIL for text drawing
+        pil_img = Image.fromarray(combined)
+        draw = ImageDraw.Draw(pil_img)
+        
+        # Try to use a monospace font, fall back to default
+        try:
+            font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", font_size)
+        except:
+            try:
+                font = ImageFont.truetype("/usr/share/fonts/TTF/DejaVuSansMono.ttf", font_size)
+            except:
+                font = ImageFont.load_default()
+        
+        # Prepare text lines
+        if isinstance(annotation_text, str):
+            lines = annotation_text.split('\n')
+        else:
+            lines = list(annotation_text)
+        
+        # Draw text
+        text_color = (0, 0, 0)  # Black
+        x = w + 5
+        y = 5
+        line_height = font_size + 3
+        
+        for line in lines:
+            # Handle special formatting: lines starting with '>' are highlighted
+            if line.startswith('>'):
+                draw.text((x, y), line[1:], fill=(0, 128, 0), font=font)  # Green
+            elif line.startswith('!'):
+                draw.text((x, y), line[1:], fill=(200, 0, 0), font=font)  # Red
+            else:
+                draw.text((x, y), line, fill=text_color, font=font)
+            y += line_height
+            
+            # Stop if we run out of space
+            if y > h - line_height:
+                break
+        
+        return np.array(pil_img)
 
     # =========================================================================
     # Video Recording Methods

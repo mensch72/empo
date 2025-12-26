@@ -104,7 +104,7 @@ class BaseRobotQNetwork(nn.Module, ABC):
         # softplus(x) = log(1 + exp(x)) is always positive
         return -F.softplus(raw_values)
     
-    def get_policy(self, q_values: torch.Tensor) -> torch.Tensor:
+    def get_policy(self, q_values: torch.Tensor, beta_r: Optional[float] = None) -> torch.Tensor:
         """
         Compute robot policy using power-law softmax (equation 5).
         
@@ -112,13 +112,23 @@ class BaseRobotQNetwork(nn.Module, ABC):
         
         Since Q_r < 0, we have -Q_r > 0, so the expression is well-defined.
         Higher β_r makes the policy more deterministic.
+        When β_r = 0, the policy is uniform.
         
         Args:
             q_values: Tensor of shape (..., num_action_combinations), all negative.
+            beta_r: Optional override for policy concentration. If None, use self.beta_r.
         
         Returns:
             Action probabilities of shape (..., num_action_combinations).
         """
+        if beta_r is None:
+            beta_r = self.beta_r
+        
+        # Special case: beta_r = 0 means uniform random policy
+        if beta_r == 0.0:
+            uniform = torch.ones_like(q_values)
+            return uniform / uniform.sum(dim=-1, keepdim=True)
+        
         # q_values are negative, so -q_values are positive
         neg_q = -q_values
         
@@ -128,7 +138,7 @@ class BaseRobotQNetwork(nn.Module, ABC):
         # Power-law: (-Q)^{-β} = 1 / (-Q)^β
         # Use log-space computation for numerical stability to avoid inf/nan
         # log((-Q)^{-β}) = -β * log(-Q)
-        log_unnormalized = -self.beta_r * torch.log(neg_q)
+        log_unnormalized = -beta_r * torch.log(neg_q)
         
         # Subtract max for numerical stability before exp (log-sum-exp trick)
         log_unnormalized = log_unnormalized - log_unnormalized.max(dim=-1, keepdim=True)[0]
@@ -197,7 +207,8 @@ class BaseRobotQNetwork(nn.Module, ABC):
     def sample_action(
         self,
         q_values: torch.Tensor,
-        epsilon: float = 0.0
+        epsilon: float = 0.0,
+        beta_r: Optional[float] = None
     ) -> Tuple[int, ...]:
         """
         Sample a joint action from the policy with epsilon-greedy exploration.
@@ -205,6 +216,8 @@ class BaseRobotQNetwork(nn.Module, ABC):
         Args:
             q_values: Q-values of shape (1, num_action_combinations).
             epsilon: Exploration probability.
+            beta_r: Optional override for policy concentration. If None, use self.beta_r.
+                   Use beta_r=0 for uniform random policy (during warm-up).
         
         Returns:
             Tuple of actions, one per robot.
@@ -213,8 +226,8 @@ class BaseRobotQNetwork(nn.Module, ABC):
             # Random action
             flat_idx = torch.randint(0, self.num_action_combinations, (1,)).item()
         else:
-            # Sample from policy
-            policy = self.get_policy(q_values)
+            # Sample from policy (with optional beta_r override)
+            policy = self.get_policy(q_values, beta_r=beta_r)
             flat_idx = torch.multinomial(policy.squeeze(0), 1).item()
         
         return self.action_index_to_tuple(flat_idx)

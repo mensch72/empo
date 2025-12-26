@@ -1,0 +1,305 @@
+# Phase 2 Warm-up Design
+
+This document describes the staged warm-up approach used in Phase 2 training to break mutual network dependencies and ensure stable convergence.
+
+## Motivation
+
+Phase 2 training involves multiple interdependent networks:
+
+- **V_h^e**: State- and goal-dependent individual human goal achievement ability (given robot policy)
+- **X_h**: State-dependent individual human power, based on aggregating V_h^e across goals (given robot policy)
+- **U_r**: Robot's state-dependent intrinsic reward, based on aggregating X_h across humans
+- **Q_r**: Robot's action-value function
+- **V_r**: Robot's state-value function (optional, normally directly computed from U_r and Q_r)
+
+These networks have circular dependencies:
+- V_h^e depends on the robot policy π_r (derived from Q_r)
+- X_h depends on π_r
+- U_r depends on X_h and V_h^e
+- Q_r depends on U_r (via V_r)
+
+Training all networks simultaneously from random initialization can lead to:
+1. **Unstable gradients**: Networks chase moving targets
+2. **Poor convergence**: Circular dependencies create feedback loops
+3. **Gradient clipping issues**: Large gradients from random networks
+
+## Solution: Staged Warm-up
+
+We break the circular dependencies by training networks in stages, starting with the most foundational network (V_h^e) and progressively adding dependent networks.
+
+### Training Stages
+
+| Stage | Steps (default) | Active Networks | β_r | Learning Rate |
+|-------|-----------------|-----------------|-----|---------------|
+| 0 | 0 - 1,000 | V_h^e | 0 | constant |
+| 1 | 1,000 - 2,000 | V_h^e, X_h | 0 | constant |
+| 2 | 2,000 - 3,000 | V_h^e, X_h, U_r | 0 | constant |
+| 3 | 3,000 - 4,000 | V_h^e, X_h, U_r, Q_r | 0 | constant |
+| 4 | 4,000 - 6,000 | All | 0 → β_r | constant |
+| 5 | 6,000+ | All | β_r | 1/√t decay |
+
+### Stage Details
+
+#### Stage 0: V_h^e Only (steps 0 - 1,000)
+
+**Goal**: Learn the human value function under a uniform random robot policy.
+
+Since β_r = 0, the robot takes actions uniformly at random. This provides a stable target for V_h^e to learn against. The human value function captures how well humans can achieve their goals when the robot is not strategically helping (or hindering).
+
+**Why start here**: V_h^e is the foundation of the EMPO objective. All other networks ultimately depend on accurate V_h^e estimates.
+
+#### Stage 1: + X_h (steps 1,000 - 2,000)
+
+**Goal**: Learn the expected next-state distribution under the random robot policy.
+
+X_h predicts where the state will be after human and robot actions. With V_h^e already converging, X_h can learn meaningful state expectations.
+
+**Why this order**: X_h is needed by U_r, so it must be trained before U_r becomes active.
+
+#### Stage 2: + U_r (steps 2,000 - 3,000)
+
+**Goal**: Learn the robot's expected future value (excluding current action).
+
+U_r = E[V_r(s')] where the expectation is over next states. With X_h providing state expectations and V_h^e providing human values, U_r has stable inputs to learn from.
+
+**Why this order**: U_r is needed by Q_r for computing action values.
+
+#### Stage 3: + Q_r (steps 3,000 - 4,000)
+
+**Goal**: Learn the robot's action-value function.
+
+Q_r(s, a) = immediate_value(s, a) + γ · U_r(s, a). With U_r already trained, Q_r can learn meaningful action values.
+
+**Note**: Even though Q_r is now trained, β_r remains 0, so the policy is still uniform random. This prevents the policy from affecting V_h^e, X_h, and U_r targets while Q_r is still learning.
+
+#### Stage 4: β_r Ramp-up (steps 4,000 - 6,000)
+
+**Goal**: Gradually transition from random to optimal policy.
+
+β_r controls the "sharpness" of the robot policy:
+- β_r = 0: Uniform random (all actions equally likely)
+- β_r → ∞: Greedy (always take best action)
+
+We use a **sigmoidal ramp-up**:
+
+```
+β_r(t) = β_r_nominal × σ(6 × (t/T - 0.5))
+```
+
+where:
+- t = steps after warmup ends
+- T = beta_r_rampup_steps (default: 2,000)
+- σ = sigmoid function
+
+This provides:
+- **Slow start**: Minimal disruption to learned representations
+- **Fast middle**: Efficient transition
+- **Slow end**: Fine-tuning near optimal policy
+
+The sigmoid is normalized so β_r goes from ~0 at t=0 to ~β_r_nominal at t=T.
+
+#### Stage 5: Full Training (steps 6,000+)
+
+**Goal**: Fine-tune all networks with the optimal policy.
+
+All networks continue training with:
+- β_r at nominal value (default: 10.0)
+- Learning rate decaying as 1/√t
+
+**Replay buffer clearing**: At the transition to Stage 5, the replay buffer is cleared. This removes transitions collected under suboptimal policies, ensuring fine-tuning uses only data from the (nearly) optimal policy.
+
+**Learning rate decay**: After the full warmup, learning rates decay as:
+
+```
+lr(t) = lr_base / √t
+```
+
+where t counts from when Stage 5 begins. This satisfies theoretical convergence requirements while maintaining reasonable learning speed.
+
+## Target Networks
+
+To provide stable training targets and avoid chasing moving targets, the following **target networks** are maintained as frozen copies:
+
+| Target Network | Purpose |
+|----------------|---------|
+| `v_r_target` | Stable V_r for Q_r target computation (when `v_r_use_network=True`) |
+| `v_h_e_target` | Stable V_h^e for TD targets and X_h computation |
+| `x_h_target` | Stable X_h for U_r target computation |
+| `u_r_target` | Stable U_r for V_r computation (both network and direct modes) |
+
+Target networks are updated periodically via hard copy (controlled by `v_r_target_update_freq` and `v_h_target_update_freq`).
+
+### V_r Computation
+
+When `v_r_use_network=False` (default), V_r is computed directly as:
+
+```
+V_r(s) = U_r(s) + π_r(s) · Q_r(s)
+```
+
+For computing Q_r targets, we need V_r(s'). To ensure stability, this uses:
+- **`u_r_target`** (frozen) for U_r(s')
+- **`q_r`** (active) for Q_r(s') and π_r(s')
+
+This prevents the Q_r target from depending on a rapidly-changing U_r, while still using the current policy for action weighting.
+
+## Configuration Parameters
+
+All warmup parameters are in `Phase2Config`:
+
+```python
+@dataclass
+class Phase2Config:
+    # Cumulative step counts for each stage transition
+    warmup_v_h_e_steps: int = 1000   # V_h^e only until this step
+    warmup_x_h_steps: int = 2000     # + X_h until this step
+    warmup_u_r_steps: int = 3000     # + U_r until this step
+    warmup_q_r_steps: int = 4000     # + Q_r until this step (warmup ends)
+    
+    # Beta_r ramp-up after warmup
+    beta_r_rampup_steps: int = 2000  # Steps to ramp β_r from 0 to nominal
+    beta_r: float = 10.0             # Nominal β_r value
+    
+    # Learning rate decay
+    use_sqrt_lr_decay: bool = True   # Use 1/√t decay after full warmup
+```
+
+### Disabling Warmup
+
+To disable warmup entirely (not recommended), set all warmup steps to 0:
+
+```python
+config = Phase2Config(
+    warmup_v_h_e_steps=0,
+    warmup_x_h_steps=0,
+    warmup_u_r_steps=0,
+    warmup_q_r_steps=0,
+    beta_r_rampup_steps=0,
+)
+```
+
+### Shorter Warmup for Simple Environments
+
+For simple environments (e.g., small grids), shorter warmup may suffice:
+
+```python
+config = Phase2Config(
+    warmup_v_h_e_steps=200,
+    warmup_x_h_steps=400,
+    warmup_u_r_steps=600,
+    warmup_q_r_steps=800,
+    beta_r_rampup_steps=400,
+)
+```
+
+## Helper Methods
+
+`Phase2Config` provides several methods for querying warmup state:
+
+```python
+config = Phase2Config()
+
+# Check current phase
+config.is_in_warmup(step)       # True if step < warmup_q_r_steps
+config.is_in_rampup(step)       # True if in β_r ramp-up phase
+config.is_fully_trained(step)   # True if past all warmup/rampup
+
+# Get current values
+config.get_warmup_stage(step)        # Numeric stage (0-5)
+config.get_warmup_stage_name(step)   # Human-readable stage name
+config.get_effective_beta_r(step)    # Current β_r value
+config.get_active_networks(step)     # Set of active network names
+
+# Get learning rate for a network
+config.get_learning_rate('q_r', step, update_count)
+
+# Get stage transition points
+config.get_stage_transition_steps()  # List of (step, description) tuples
+```
+
+## TensorBoard Logging
+
+During training, the following warmup-related metrics are logged:
+
+- `Warmup/stage`: Current stage number (0-5)
+- `Warmup/stage_transition`: 1.0 at stage transitions, 0.0 otherwise (creates vertical lines)
+- `Warmup/effective_beta_r`: Current β_r value
+- `Warmup/is_warmup`: 1.0 during warmup, 0.0 after
+- `Warmup/active_networks_mask`: Bitmask of active networks
+- `LearningRate/*`: Current learning rate for each network
+
+## Console Output
+
+When `verbose=True`, stage transitions are logged to console:
+
+```
+[Warmup] Starting in stage 0: Stage 1: V_h^e only (active networks: {'v_h_e'})
+
+[Warmup] Stage transition at step 1000, episode 20:
+  Stage 1: V_h^e only -> Stage 2: V_h^e + X_h
+  Active networks: {'v_h_e', 'x_h'}
+  Effective beta_r: 0.0000
+
+[Warmup] Stage transition at step 6000, episode 120:
+  β_r ramping (constant LR) -> Full training (LR decay)
+  Active networks: {'v_h_e', 'x_h', 'u_r', 'q_r'}
+  Effective beta_r: 10.0000
+  [Training] Cleared replay buffer (50000 transitions) after β_r ramp-up
+```
+
+## Theoretical Justification
+
+### Breaking Circular Dependencies
+
+The key insight is that with β_r = 0, the robot policy is fixed (uniform random) and independent of Q_r. This breaks the circular dependency:
+
+```
+Without warmup (circular):
+V_h^e ← π_r ← Q_r ← U_r ← X_h ← π_r ← Q_r ← ...
+
+With warmup (acyclic during stages 0-3):
+V_h^e ← π_r(uniform) [fixed]
+X_h ← π_r(uniform) [fixed]
+U_r ← X_h, V_h^e [already trained]
+Q_r ← U_r [already trained]
+```
+
+### Sigmoidal β_r Ramp-up
+
+The sigmoid ramp-up provides several benefits:
+
+1. **Continuity**: Smooth transition avoids sudden policy changes
+2. **Stability**: Slow start allows networks to adapt gradually
+3. **Efficiency**: Fast middle section accelerates convergence
+4. **Precision**: Slow end allows fine-tuning near optimal
+
+### Learning Rate Decay
+
+The 1/√t decay after full warmup satisfies the Robbins-Monro conditions for stochastic approximation:
+
+- Σ lr(t) = ∞ (ensures convergence)
+- Σ lr(t)² < ∞ (ensures bounded variance)
+
+This is a compromise between:
+- 1/t decay (optimal for expectations, but slow)
+- Constant LR (fast but may not converge)
+
+## Troubleshooting
+
+### V_h^e not converging during Stage 0
+
+- **Check gradient clipping**: May be too aggressive (try increasing from 1.0 to 100.0)
+- **Check network size**: May be too small for the environment
+- **Check learning rate**: May need adjustment
+
+### Instability during β_r ramp-up
+
+- **Extend ramp-up**: Increase `beta_r_rampup_steps`
+- **Lower nominal β_r**: Reduce `beta_r` for a softer policy
+- **Increase warmup**: Networks may not be fully trained before ramp-up
+
+### Poor final performance
+
+- **Check total training time**: May need more episodes after warmup
+- **Verify environment rewards**: Ensure human goals are achievable
+- **Inspect TensorBoard**: Look for signs of instability or non-convergence

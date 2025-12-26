@@ -142,6 +142,7 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         Sample robot action using policy with epsilon-greedy exploration.
         
         Uses cached state encoding for efficiency.
+        During warm-up, uses effective beta_r = 0 (uniform random policy).
         
         Args:
             state: Current state.
@@ -150,11 +151,12 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
             Tuple of robot actions.
         """
         epsilon = self.config.get_epsilon(self.total_steps)
+        effective_beta_r = self.config.get_effective_beta_r(self.total_steps)
         
         with torch.no_grad():
             grid, glob, agent, interactive = self._encode_state_cached(state)
             q_values = self.networks.q_r.forward(grid, glob, agent, interactive)
-            return self.networks.q_r.sample_action(q_values, epsilon)
+            return self.networks.q_r.sample_action(q_values, epsilon, beta_r=effective_beta_r)
     
     def check_goal_achieved(self, state: Any, human_idx: int, goal: Any) -> bool:
         """Check if human's goal is achieved."""
@@ -428,18 +430,21 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         q_r_pred = q_r_all.gather(1, action_indices.unsqueeze(1)).squeeze(1)  # (n,)
         
         # ----- Q_r target: γ_r * V_r(s') -----
+        # Use effective beta_r for policy (0 during warm-up for independence)
+        effective_beta_r = self.config.get_effective_beta_r(self.total_steps)
         with torch.no_grad():
             if self.config.v_r_use_network:
                 v_r_next = self.networks.v_r_target.forward(*s_prime_encoded)
             else:
-                _, u_r_next = self.networks.u_r.forward(*s_prime_encoded)
+                # Use frozen u_r_target for stable V_r computation
+                _, u_r_next = self.networks.u_r_target.forward(*s_prime_encoded)
                 # Q_r needs both encoders for proper inference
                 own_s_prime_encoded = self._batch_encode_states_with_encoder(
                     [t.next_state for t in batch],
                     self.networks.q_r.own_state_encoder
                 )
                 q_r_next = self.networks.q_r.forward(*s_prime_encoded, *own_s_prime_encoded)
-                pi_r_next = self.networks.q_r.get_policy(q_r_next)
+                pi_r_next = self.networks.q_r.get_policy(q_r_next, beta_r=effective_beta_r)
                 v_r_next = self.networks.v_r.compute_from_components(
                     u_r_next, q_r_next, pi_r_next
                 )
@@ -450,7 +455,8 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         with torch.no_grad():
             prediction_stats['q_r'] = {
                 'mean': q_r_pred.mean().item(),
-                'std': q_r_pred.std().item() if q_r_pred.numel() > 1 else 0.0
+                'std': q_r_pred.std().item() if q_r_pred.numel() > 1 else 0.0,
+                'target_mean': target_q_r.mean().item()
             }
         
         # ----- U_r: Intrinsic reward -----
@@ -519,9 +525,12 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         # Track U_r prediction stats (the actual U_r values, not y)
         # U_r = -y^η where η = -1/ξ, so U_r is negative
         with torch.no_grad():
+            # Compute target U_r from target y: U_r = -y^η where η = -1/ξ
+            target_u_r = -torch.pow(u_r_targets, -1.0 / self.config.xi)
             prediction_stats['u_r'] = {
                 'mean': u_r_pred.mean().item(),
-                'std': u_r_pred.std().item() if u_r_pred.numel() > 1 else 0.0
+                'std': u_r_pred.std().item() if u_r_pred.numel() > 1 else 0.0,
+                'target_mean': target_u_r.mean().item()
             }
         
         # ----- V_h^e: Human goal achievement -----
@@ -555,7 +564,8 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
             with torch.no_grad():
                 prediction_stats['v_h_e'] = {
                     'mean': v_h_e_pred.mean().item(),
-                    'std': v_h_e_pred.std().item() if v_h_e_pred.numel() > 1 else 0.0
+                    'std': v_h_e_pred.std().item() if v_h_e_pred.numel() > 1 else 0.0,
+                    'target_mean': target_v_h_e.mean().item()
                 }
         
         # ----- X_h: Aggregate goal ability -----
@@ -590,7 +600,8 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
             with torch.no_grad():
                 prediction_stats['x_h'] = {
                     'mean': x_h_pred.mean().item(),
-                    'std': x_h_pred.std().item() if x_h_pred.numel() > 1 else 0.0
+                    'std': x_h_pred.std().item() if x_h_pred.numel() > 1 else 0.0,
+                    'target_mean': target_x_h.mean().item()
                 }
         
         # ----- V_r: Robot value (if using network mode) -----
@@ -606,14 +617,16 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
             v_r_pred = self.networks.v_r.forward(*s_encoded_detached)
             
             with torch.no_grad():
-                _, u_r = self.networks.u_r.forward(*s_encoded_detached)
+                # Use frozen u_r_target for stable V_r target computation
+                _, u_r = self.networks.u_r_target.forward(*s_encoded_detached)
                 # Q_r needs both encoders for proper inference
                 own_s_for_v = self._batch_encode_states_with_encoder(
                     [t.state for t in batch],
                     self.networks.q_r.own_state_encoder
                 )
                 q_r_for_v = self.networks.q_r.forward(*s_encoded_detached, *own_s_for_v)
-                pi_r = self.networks.q_r.get_policy(q_r_for_v)
+                # Use effective beta_r for policy (0 during warm-up for independence)
+                pi_r = self.networks.q_r.get_policy(q_r_for_v, beta_r=effective_beta_r)
             
             target_v_r = self.networks.v_r.compute_from_components(
                 u_r.squeeze(), q_r_for_v, pi_r
@@ -624,7 +637,8 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
             with torch.no_grad():
                 prediction_stats['v_r'] = {
                     'mean': v_r_pred.mean().item(),
-                    'std': v_r_pred.std().item() if v_r_pred.numel() > 1 else 0.0
+                    'std': v_r_pred.std().item() if v_r_pred.numel() > 1 else 0.0,
+                    'target_mean': target_v_r.mean().item()
                 }
         
         # Clear caches after each compute_losses call to prevent memory growth
@@ -977,6 +991,8 @@ def train_multigrid_phase2(
     config: Optional[Phase2Config] = None,
     num_episodes: Optional[int] = None,
     hidden_dim: int = 256,
+    goal_feature_dim: int = 64,
+    agent_embedding_dim: int = 16,
     device: str = 'cpu',
     verbose: bool = True,
     debug: bool = False,
@@ -997,6 +1013,8 @@ def train_multigrid_phase2(
         config: Phase2Config (uses defaults if None).
         num_episodes: Override config.num_episodes if provided.
         hidden_dim: Hidden dimension for networks.
+        goal_feature_dim: Goal encoder output dimension.
+        agent_embedding_dim: Dimension of agent identity embedding.
         device: Torch device.
         verbose: Enable progress bar (tqdm).
         debug: Enable verbose debug output.
@@ -1035,7 +1053,9 @@ def train_multigrid_phase2(
         num_robots=num_robots,
         num_actions=num_actions,
         hidden_dim=hidden_dim,
-        device=device
+        device=device,
+        goal_feature_dim=goal_feature_dim,
+        agent_embedding_dim=agent_embedding_dim
     )
     
     if debug:

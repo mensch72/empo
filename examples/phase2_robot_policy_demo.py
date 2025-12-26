@@ -50,6 +50,8 @@ from empo.nn_based.multigrid.phase2 import train_multigrid_phase2
 # Environment Definition
 # ============================================================================
 
+final_beta_r = 100.0  # Final beta_r for robot policy concentration
+
 env_type = "trivial"
 
 if env_type == "trivial":
@@ -61,14 +63,14 @@ if env_type == "trivial":
     """
     # note: human is agent index 1
 
-    MAX_STEPS = 6
+    MAX_STEPS = 10
     NUM_ROLLOUTS = 10  # Rollouts for final movie
     MOVIE_FPS = 2
 
     goal_sampler_factory = lambda env: TabularGoalSampler([
         ReachCellGoal(env, 1, (2,1)),
         ReachCellGoal(env, 1, (2,2))
-        ])
+        ], probabilities=[0.9, 0.1])
 
 else:
     GRID_MAP = """
@@ -107,6 +109,10 @@ class Phase2DemoEnv(MultiGridEnv):
 # Rollout and Movie Generation
 # ============================================================================
 
+# Action names for SmallActions
+ACTION_NAMES = ['still', 'left', 'right', 'forward']
+
+
 def run_policy_rollout(
     env: MultiGridEnv,
     robot_q_network,
@@ -114,12 +120,15 @@ def run_policy_rollout(
     goal_sampler,
     human_indices,
     robot_indices,
-    device: str = 'cpu'
+    device: str = 'cpu',
+    networks=None,  # Phase2Networks for value annotations
+    config=None,    # Phase2Config for beta_r
 ) -> int:
     """
     Run a single rollout with the learned robot policy.
     
     Uses env's internal video recording - frames are captured automatically.
+    If networks is provided, adds value annotations to each frame.
     
     Returns:
         Number of steps taken.
@@ -135,8 +144,66 @@ def run_policy_rollout(
         goal, _ = goal_sampler.sample(state, h)
         human_goals[h] = goal
     
-    # Render initial frame
-    env.render(mode='rgb_array', highlight=False)
+    def compute_annotation_text(state, selected_action=None):
+        """Compute annotation text for the current state."""
+        if networks is None:
+            return None
+        
+        lines = []
+        
+        with torch.no_grad():
+            # Get Q_r values
+            q_values = robot_q_network.encode_and_forward(state, env, device)
+            q_np = q_values.squeeze().cpu().numpy()
+            
+            # Compute policy probabilities
+            beta_r = config.beta_r if config else 10.0
+            pi_r = robot_q_network.get_policy(q_values, beta_r=beta_r)
+            pi_np = pi_r.squeeze().cpu().numpy()
+            
+            # Compute U_r and V_r
+            state_encoder = networks.u_r.state_encoder if hasattr(networks.u_r, 'state_encoder') else None
+            u_r_val = 0.0
+            v_r_val = 0.0
+            if state_encoder is not None:
+                # Use encode_state method (returns tuple of tensors with batch dim already)
+                s_encoded = state_encoder.encode_state(state, env, device)
+                # s_encoded already has batch dimension, no need to unsqueeze
+                _, u_r = networks.u_r.forward(*s_encoded)
+                u_r_val = u_r.item()
+                v_r_val = u_r_val + (pi_r * q_values).sum().item()
+            
+            # Build annotation lines
+            lines.append(f"U_r: {u_r_val:.4f}")
+            lines.append(f"V_r: {v_r_val:.4f}")
+            lines.append("")
+            lines.append("Q_r values:")
+            
+            for action_idx in range(len(q_np)):
+                action_name = ACTION_NAMES[action_idx] if action_idx < len(ACTION_NAMES) else f"a{action_idx}"
+                marker = ">" if selected_action is not None and action_idx == selected_action else " "
+                lines.append(f"{marker}{action_name:>7}: {q_np[action_idx]:.3f}")
+            
+            lines.append("")
+            lines.append("π_r probs:")
+            
+            for action_idx in range(len(pi_np)):
+                action_name = ACTION_NAMES[action_idx] if action_idx < len(ACTION_NAMES) else f"a{action_idx}"
+                marker = ">" if selected_action is not None and action_idx == selected_action else " "
+                lines.append(f"{marker}{action_name:>7}: {pi_np[action_idx]:.3f}")
+        
+        return lines
+    
+    def get_greedy_action(state):
+        """Get the greedy action for annotation (what robot would do from this state)."""
+        with torch.no_grad():
+            q_values = robot_q_network.encode_and_forward(state, env, device)
+            robot_action = robot_q_network.sample_action(q_values, epsilon=0.0)
+            return robot_action[0] if len(robot_action) > 0 else None
+    
+    # Render initial frame with annotations (showing what action would be taken)
+    annotation = compute_annotation_text(state, get_greedy_action(state))
+    env.render(mode='rgb_array', highlight=False, annotation_text=annotation)
     
     for step in range(env.max_steps):
         state = env.get_state()
@@ -163,14 +230,15 @@ def run_policy_rollout(
         _, _, done, _ = env.step(actions)
         steps_taken += 1
         
-        # Render frame after step
-        env.render(mode='rgb_array', highlight=False)
+        # Render frame showing current state with what action WOULD be taken from it
+        new_state = env.get_state()
+        annotation = compute_annotation_text(new_state, get_greedy_action(new_state))
+        env.render(mode='rgb_array', highlight=False, annotation_text=annotation)
         
         if done:
             break
     
     return steps_taken
-
 
 # ============================================================================
 # Main
@@ -193,13 +261,27 @@ def main(quick_mode: bool = False, debug: bool = False):
         batch_size = 16
         x_h_batch_size = 32
         hidden_dim = 64  # Smaller network for faster forward passes
+        goal_feature_dim = 32
+        agent_embedding_dim = 8
         print("[QUICK MODE] Running with reduced episodes, rollouts, batch sizes, and network size")
+    elif env_type == "trivial":
+        num_episodes = 3000
+        num_rollouts = NUM_ROLLOUTS
+        batch_size = 16
+        x_h_batch_size = 32
+        # Very small networks for trivial task
+        hidden_dim = 16
+        goal_feature_dim = 8
+        agent_embedding_dim = 4
+        print("[TRIVIAL ENV] Using minimal network sizes for simple task")
     else:
         num_episodes = 1000
         num_rollouts = NUM_ROLLOUTS
         batch_size = 32
         x_h_batch_size = 64 #128
         hidden_dim = 128
+        goal_feature_dim = 64
+        agent_embedding_dim = 16
     
     device = 'cpu'
     
@@ -269,7 +351,7 @@ def main(quick_mode: bool = False, debug: bool = False):
         zeta=2.0,      # Risk aversion
         xi=1.0,        # Inter-human inequality aversion
         eta=1.1,       # Intertemporal inequality aversion
-        beta_r=100.0,    # Robot policy concentration
+        beta_r=final_beta_r,    # Robot policy concentration
         epsilon_r_start=1.0,
         epsilon_r_end=0.1,
         epsilon_r_decay_steps=num_episodes * 10,
@@ -304,6 +386,8 @@ def main(quick_mode: bool = False, debug: bool = False):
         goal_sampler=goal_sampler_fn,
         config=config,
         hidden_dim=hidden_dim,
+        goal_feature_dim=goal_feature_dim,
+        agent_embedding_dim=agent_embedding_dim,
         device=device,
         verbose=True,
         debug=debug,
@@ -336,7 +420,9 @@ def main(quick_mode: bool = False, debug: bool = False):
             goal_sampler=goal_sampler,
             human_indices=human_indices,
             robot_indices=robot_indices,
-            device=device
+            device=device,
+            networks=networks,
+            config=config
         )
         if (rollout_idx + 1) % 10 == 0:
             print(f"  Completed {rollout_idx + 1}/{num_rollouts} rollouts ({len(env._video_frames)} total frames)")

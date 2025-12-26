@@ -45,6 +45,7 @@ class Phase2Networks:
     v_r_target: Optional[BaseRobotValueNetwork] = None
     v_h_e_target: Optional[BaseHumanGoalAchievementNetwork] = None
     x_h_target: Optional[BaseAggregateGoalAbilityNetwork] = None
+    u_r_target: Optional[BaseIntrinsicRewardNetwork] = None
 
 
 class BasePhase2Trainer(ABC):
@@ -139,6 +140,7 @@ class BasePhase2Trainer(ABC):
         self.networks.v_r_target = copy.deepcopy(self.networks.v_r)
         self.networks.v_h_e_target = copy.deepcopy(self.networks.v_h_e)
         self.networks.x_h_target = copy.deepcopy(self.networks.x_h)
+        self.networks.u_r_target = copy.deepcopy(self.networks.u_r)
         
         # Freeze target networks (no gradients)
         for param in self.networks.v_r_target.parameters():
@@ -147,11 +149,14 @@ class BasePhase2Trainer(ABC):
             param.requires_grad = False
         for param in self.networks.x_h_target.parameters():
             param.requires_grad = False
+        for param in self.networks.u_r_target.parameters():
+            param.requires_grad = False
         
         # Set target networks to eval mode (disables dropout during inference)
         self.networks.v_r_target.eval()
         self.networks.v_h_e_target.eval()
         self.networks.x_h_target.eval()
+        self.networks.u_r_target.eval()
     
     def _init_optimizers(self) -> Dict[str, optim.Optimizer]:
         """Initialize optimizers for each network with weight decay."""
@@ -231,11 +236,13 @@ class BasePhase2Trainer(ABC):
         self.networks.v_r_target.load_state_dict(self.networks.v_r.state_dict())
         self.networks.v_h_e_target.load_state_dict(self.networks.v_h_e.state_dict())
         self.networks.x_h_target.load_state_dict(self.networks.x_h.state_dict())
+        self.networks.u_r_target.load_state_dict(self.networks.u_r.state_dict())
         
         # Ensure target networks stay in eval mode (disables dropout)
         self.networks.v_r_target.eval()
         self.networks.v_h_e_target.eval()
         self.networks.x_h_target.eval()
+        self.networks.u_r_target.eval()
     
     @abstractmethod
     def encode_state(self, state: Any) -> Dict[str, torch.Tensor]:
@@ -299,6 +306,9 @@ class BasePhase2Trainer(ABC):
         """
         Sample robot action using policy with epsilon-greedy exploration.
         
+        During warm-up, uses effective beta_r = 0 (uniform random policy).
+        After warm-up, beta_r ramps up to nominal value.
+        
         Args:
             state: Current state.
         
@@ -306,12 +316,15 @@ class BasePhase2Trainer(ABC):
             Tuple of robot actions.
         """
         epsilon = self.config.get_epsilon(self.total_steps)
+        effective_beta_r = self.config.get_effective_beta_r(self.total_steps)
         
         with torch.no_grad():
             q_values = self.networks.q_r.encode_and_forward(
                 state, None, self.device
             )
-            return self.networks.q_r.sample_action(q_values, epsilon)
+            return self.networks.q_r.sample_action(
+                q_values, epsilon, beta_r=effective_beta_r
+            )
     
     def sample_human_actions(
         self,
@@ -485,6 +498,9 @@ class BasePhase2Trainer(ABC):
             a_r_index = self.networks.q_r.action_tuple_to_index(a_r)
             q_r_pred = q_r_all.squeeze()[a_r_index]
             
+            # Use effective beta_r for policy (0 during warm-up for independence)
+            effective_beta_r = self.config.get_effective_beta_r(self.total_steps)
+            
             with torch.no_grad():
                 if self.config.v_r_use_network:
                     # Use V_r target network
@@ -495,7 +511,7 @@ class BasePhase2Trainer(ABC):
                     # Compute V_r directly: V_r(s') = U_r(s') + π_r(s') · Q_r(s')
                     _, u_r_next = self.networks.u_r.encode_and_forward(s_prime, None, self.device)
                     q_r_next = self.networks.q_r.encode_and_forward(s_prime, None, self.device)
-                    pi_r_next = self.networks.q_r.get_policy(q_r_next)
+                    pi_r_next = self.networks.q_r.get_policy(q_r_next, beta_r=effective_beta_r)
                     v_r_next = self.networks.v_r.compute_from_components(
                         u_r_next.squeeze(), q_r_next.squeeze(), pi_r_next.squeeze()
                     )
@@ -510,7 +526,7 @@ class BasePhase2Trainer(ABC):
                 with torch.no_grad():
                     _, u_r = self.networks.u_r.encode_and_forward(s, None, self.device)
                     q_r_for_v = self.networks.q_r.encode_and_forward(s, None, self.device)
-                    pi_r = self.networks.q_r.get_policy(q_r_for_v)
+                    pi_r = self.networks.q_r.get_policy(q_r_for_v, beta_r=effective_beta_r)
                 
                 target_v_r = self.networks.v_r.compute_from_components(
                     u_r.squeeze(), q_r_for_v.squeeze(), pi_r.squeeze()
@@ -586,17 +602,21 @@ class BasePhase2Trainer(ABC):
         # Compute losses (with separate X_h batch)
         losses, prediction_stats = self.compute_losses(batch, x_h_batch)
         
+        # Determine which networks are active in this warm-up stage
+        active_networks = self.config.get_active_networks(self.total_steps)
+        
         # Combine all losses and do a SINGLE backward pass to avoid
         # in-place modification conflicts when losses share tensors through
         # the shared encoder's outputs
         loss_values = {}
         grad_norms = {}
         
-        # Collect trainable losses
+        # Collect trainable losses (only for active networks)
         trainable_losses = []
         for name, loss in losses.items():
             loss_values[name] = loss.item()
-            if name in self.optimizers and loss.requires_grad:
+            # Only train if network is active in current warm-up stage
+            if name in self.optimizers and loss.requires_grad and name in active_networks:
                 trainable_losses.append((name, loss))
         
         if trainable_losses:
@@ -625,16 +645,13 @@ class BasePhase2Trainer(ABC):
                     if clip_val and clip_val > 0:
                         torch.nn.utils.clip_grad_norm_(net.parameters(), clip_val)
                 
-                # Update learning rate for X_h and U_r with 1/t schedule
+                # Update learning rate using the new warm-up-aware schedule
                 self.update_counts[name] += 1
-                if name == 'x_h':
-                    new_lr = self.config.get_lr_x_h(self.update_counts[name])
-                    for param_group in self.optimizers[name].param_groups:
-                        param_group['lr'] = new_lr
-                elif name == 'u_r':
-                    new_lr = self.config.get_lr_u_r(self.update_counts[name])
-                    for param_group in self.optimizers[name].param_groups:
-                        param_group['lr'] = new_lr
+                new_lr = self.config.get_learning_rate(
+                    name, self.total_steps, self.update_counts[name]
+                )
+                for param_group in self.optimizers[name].param_groups:
+                    param_group['lr'] = new_lr
                 
                 grad_norms[name] = self._compute_single_grad_norm(name)
                 self.optimizers[name].step()
@@ -781,6 +798,24 @@ class BasePhase2Trainer(ABC):
         
         history = []
         
+        # Track warm-up stage for detecting transitions
+        prev_stage = self.config.get_warmup_stage(self.total_steps)
+        prev_stage_name = self.config.get_warmup_stage_name(self.total_steps)
+        warmup_end_step = self.config.get_total_warmup_steps()
+        
+        # Log initial stage
+        if self.verbose:
+            active = self.config.get_active_networks(self.total_steps)
+            print(f"[Warmup] Starting in stage {prev_stage}: {prev_stage_name} (active networks: {active})")
+        
+        # Log stage transition steps to TensorBoard at start
+        if self.writer is not None:
+            transition_steps = self.config.get_stage_transition_steps()
+            for stage_num, (step, stage_name) in enumerate(transition_steps):
+                self.writer.add_text('Warmup/stage_transitions', 
+                                     f"Stage {stage_num}: {stage_name} starts at step {step}", 
+                                     global_step=0)
+        
         # Set up progress bar
         pbar = tqdm(total=num_episodes, desc="Training", unit="episodes", disable=not self.verbose)
         
@@ -794,20 +829,79 @@ class BasePhase2Trainer(ABC):
                     self.writer.add_scalar(f'Loss/{key}', value, episode)
                 for key, value in episode_grad_norms.items():
                     self.writer.add_scalar(f'GradNorm/{key}', value, episode)
-                # Log prediction statistics (mean and std of predictions)
+                # Log prediction statistics (mean and std of predictions, and target mean)
                 for key, stats in episode_pred_stats.items():
                     self.writer.add_scalar(f'Predictions/{key}_mean', stats['mean'], episode)
                     self.writer.add_scalar(f'Predictions/{key}_std', stats['std'], episode)
+                    if 'target_mean' in stats:
+                        self.writer.add_scalar(f'Targets/{key}_mean', stats['target_mean'], episode)
                 # Also log parameter norms
                 param_norms = self._compute_param_norms()
                 for key, value in param_norms.items():
                     self.writer.add_scalar(f'ParamNorm/{key}', value, episode)
                 self.writer.add_scalar('Epsilon', self.config.get_epsilon(self.total_steps), episode)
-                # Log learning rates (especially for X_h and U_r with 1/t schedule)
-                self.writer.add_scalar('LearningRate/x_h', self.config.get_lr_x_h(self.update_counts['x_h']), episode)
-                self.writer.add_scalar('LearningRate/u_r', self.config.get_lr_u_r(self.update_counts['u_r']), episode)
+                
+                # Log learning rates for all networks
+                for net_name in ['v_h_e', 'x_h', 'u_r', 'q_r', 'v_r']:
+                    lr = self.config.get_learning_rate(
+                        net_name, self.total_steps, self.update_counts.get(net_name, 0)
+                    )
+                    self.writer.add_scalar(f'LearningRate/{net_name}', lr, episode)
+                
+                # Log warm-up phase information
+                self.writer.add_scalar('Warmup/effective_beta_r', 
+                                      self.config.get_effective_beta_r(self.total_steps), episode)
+                self.writer.add_scalar('Warmup/is_warmup', 
+                                      1.0 if self.config.is_in_warmup(self.total_steps) else 0.0, episode)
+                # Log which networks are active (as a bitmask for visualization)
+                active = self.config.get_active_networks(self.total_steps)
+                active_mask = sum(2**i for i, n in enumerate(['v_h_e', 'x_h', 'u_r', 'q_r', 'v_r']) if n in active)
+                self.writer.add_scalar('Warmup/active_networks_mask', active_mask, episode)
+                self.writer.add_scalar('Warmup/stage', 
+                                      self.config.get_warmup_stage(self.total_steps), episode)
+                
                 # Flush to ensure data is written to disk for real-time monitoring
                 self.writer.flush()
+            
+            # Check for warm-up stage transitions
+            current_stage = self.config.get_warmup_stage(self.total_steps)
+            if current_stage != prev_stage:
+                current_stage_name = self.config.get_warmup_stage_name(self.total_steps)
+                active = self.config.get_active_networks(self.total_steps)
+                
+                # Console logging
+                if self.verbose:
+                    print(f"\n[Warmup] Stage transition at step {self.total_steps}, episode {episode}:")
+                    print(f"  {prev_stage_name} -> {current_stage_name}")
+                    print(f"  Active networks: {active}")
+                    effective_beta = self.config.get_effective_beta_r(self.total_steps)
+                    print(f"  Effective beta_r: {effective_beta:.4f}")
+                
+                # TensorBoard vertical line marker (spike in a dedicated series)
+                if self.writer is not None:
+                    self.writer.add_scalar('Warmup/stage_transition', 1.0, episode)
+                    self.writer.add_text('Warmup/transitions', 
+                                        f"Step {self.total_steps}: {prev_stage_name} -> {current_stage_name}",
+                                        global_step=episode)
+                
+                # Clear replay buffer after beta_r ramp-up is done (transition to stage 5)
+                # This ensures we start "full training" with fresh data from the converged policy
+                if current_stage == 5 and prev_stage == 4:
+                    buffer_size_before = len(self.replay_buffer)
+                    self.replay_buffer.clear()
+                    if self.verbose:
+                        print(f"  [Training] Cleared replay buffer ({buffer_size_before} transitions) after β_r ramp-up")
+                    if self.writer is not None:
+                        self.writer.add_text('Warmup/events', 
+                                            f"Cleared replay buffer ({buffer_size_before} transitions) at step {self.total_steps}",
+                                            global_step=episode)
+                
+                prev_stage = current_stage
+                prev_stage_name = current_stage_name
+            else:
+                # No transition - log 0 for the marker
+                if self.writer is not None:
+                    self.writer.add_scalar('Warmup/stage_transition', 0.0, episode)
             
             # Update progress bar
             pbar.update(1)
@@ -817,7 +911,8 @@ class BasePhase2Trainer(ABC):
             
             # Print occasional summary if verbose
             if self.debug and episode % 100 == 0:
-                print(f"Episode {episode}: {episode_losses}")
+                stage = self.config.get_warmup_stage_name(self.total_steps)
+                print(f"Episode {episode} ({stage}): {episode_losses}")
         
         pbar.close()
         
