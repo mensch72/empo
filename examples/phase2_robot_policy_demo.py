@@ -39,7 +39,7 @@ import torch
 
 from gym_multigrid.multigrid import MultiGridEnv, World, SmallActions
 from empo.multigrid import MultiGridGoalSampler, ReachCellGoal
-from empo.possible_goal import DeterministicGoalSampler
+from empo.possible_goal import DeterministicGoalSampler, TabularGoalSampler
 from empo.human_policy_prior import HeuristicPotentialPolicy
 from empo.nn_based.multigrid import PathDistanceCalculator
 from empo.nn_based.phase2.config import Phase2Config
@@ -65,7 +65,10 @@ if env_type == "trivial":
     NUM_ROLLOUTS = 10  # Rollouts for final movie
     MOVIE_FPS = 2
 
-    goal_sampler_factory = lambda env: DeterministicGoalSampler(ReachCellGoal(env, 1, (2,1)))  # Fixed goal for testing: human goes where rock currently is
+    goal_sampler_factory = lambda env: TabularGoalSampler([
+        ReachCellGoal(env, 1, (2,1)),
+        ReachCellGoal(env, 1, (2,2))
+        ])
 
 else:
     GRID_MAP = """
@@ -186,10 +189,17 @@ def main(quick_mode: bool = False, debug: bool = False):
     if quick_mode:
         num_episodes = 100
         num_rollouts = 10
-        print("[QUICK MODE] Running with reduced episodes and rollouts")
+        # Use smaller batches and network for faster iteration in quick mode
+        batch_size = 16
+        x_h_batch_size = 32
+        hidden_dim = 64  # Smaller network for faster forward passes
+        print("[QUICK MODE] Running with reduced episodes, rollouts, batch sizes, and network size")
     else:
         num_episodes = 1000
         num_rollouts = NUM_ROLLOUTS
+        batch_size = 32
+        x_h_batch_size = 64 #128
+        hidden_dim = 128
     
     device = 'cpu'
     
@@ -263,14 +273,14 @@ def main(quick_mode: bool = False, debug: bool = False):
         epsilon_r_start=1.0,
         epsilon_r_end=0.1,
         epsilon_r_decay_steps=num_episodes * 10,
-        lr_q_r=1e-3,
-        lr_v_r=1e-3,
-        lr_v_h_e=1e-3,
-        lr_x_h=1e-3,   # Same LR as others - using larger batch reduces variance
-        lr_u_r=1e-3,   # Same LR as others - depends on X_h target network for stability
+        lr_q_r=1e-4,
+        lr_v_r=1e-4,
+        lr_v_h_e=1e-3,  # faster since V_h^e is critical and the basis for other things
+        lr_x_h=1e-4,
+        lr_u_r=1e-4,
         buffer_size=10000,
-        batch_size=32,
-        x_h_batch_size=128,  # Larger batch for X_h to reduce high variance
+        batch_size=batch_size,
+        x_h_batch_size=x_h_batch_size,  # Larger batch for X_h to reduce high variance
         num_episodes=num_episodes,
         steps_per_episode=env.max_steps,
         updates_per_step=1,
@@ -293,7 +303,7 @@ def main(quick_mode: bool = False, debug: bool = False):
         human_policy_prior=human_policy_fn,
         goal_sampler=goal_sampler_fn,
         config=config,
-        hidden_dim=128,
+        hidden_dim=hidden_dim,
         device=device,
         verbose=True,
         debug=debug,

@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional, Tuple
 from ...phase2.human_goal_ability import BaseHumanGoalAchievementNetwork
 from ..state_encoder import MultiGridStateEncoder
 from ..goal_encoder import MultiGridGoalEncoder
+from ..agent_encoder import AgentIdentityEncoder
 
 
 class MultiGridHumanGoalAchievementNetwork(BaseHumanGoalAchievementNetwork):
@@ -52,7 +53,12 @@ class MultiGridHumanGoalAchievementNetwork(BaseHumanGoalAchievementNetwork):
         max_kill_buttons: int = 4,
         max_pause_switches: int = 4,
         max_disabling_switches: int = 4,
-        max_control_buttons: int = 4
+        max_control_buttons: int = 4,
+        max_agents: int = 10,
+        agent_embedding_dim: int = 16,
+        state_encoder: Optional[MultiGridStateEncoder] = None,
+        goal_encoder: Optional[MultiGridGoalEncoder] = None,
+        agent_encoder: Optional[AgentIdentityEncoder] = None
     ):
         super().__init__(gamma_h=gamma_h, feasible_range=feasible_range)
         
@@ -62,29 +68,49 @@ class MultiGridHumanGoalAchievementNetwork(BaseHumanGoalAchievementNetwork):
         self.goal_feature_dim = goal_feature_dim
         self.hidden_dim = hidden_dim
         self.dropout_rate = dropout
+        self.max_agents = max_agents
+        self.agent_embedding_dim = agent_embedding_dim
         
-        # State encoder
-        self.state_encoder = MultiGridStateEncoder(
-            grid_height=grid_height,
-            grid_width=grid_width,
-            num_agents_per_color=num_agents_per_color,
-            num_agent_colors=num_agent_colors,
-            feature_dim=state_feature_dim,
-            max_kill_buttons=max_kill_buttons,
-            max_pause_switches=max_pause_switches,
-            max_disabling_switches=max_disabling_switches,
-            max_control_buttons=max_control_buttons
-        )
+        # Use shared state encoder or create own
+        if state_encoder is not None:
+            self.state_encoder = state_encoder
+        else:
+            self.state_encoder = MultiGridStateEncoder(
+                grid_height=grid_height,
+                grid_width=grid_width,
+                num_agents_per_color=num_agents_per_color,
+                num_agent_colors=num_agent_colors,
+                feature_dim=state_feature_dim,
+                max_kill_buttons=max_kill_buttons,
+                max_pause_switches=max_pause_switches,
+                max_disabling_switches=max_disabling_switches,
+                max_control_buttons=max_control_buttons
+            )
         
-        # Goal encoder
-        self.goal_encoder = MultiGridGoalEncoder(
-            grid_height=grid_height,
-            grid_width=grid_width,
-            feature_dim=goal_feature_dim
-        )
+        # Use shared goal encoder or create own
+        if goal_encoder is not None:
+            self.goal_encoder = goal_encoder
+        else:
+            self.goal_encoder = MultiGridGoalEncoder(
+                grid_height=grid_height,
+                grid_width=grid_width,
+                feature_dim=goal_feature_dim
+            )
         
-        # Value head: combines state + goal features with optional dropout
-        combined_dim = state_feature_dim + goal_feature_dim
+        # Use shared agent identity encoder or create own
+        if agent_encoder is not None:
+            self.agent_encoder = agent_encoder
+        else:
+            self.agent_encoder = AgentIdentityEncoder(
+                num_agents=max_agents,
+                embedding_dim=agent_embedding_dim,
+                grid_height=grid_height,
+                grid_width=grid_width
+            )
+        
+        # Value head: combines state + goal + agent identity features
+        # agent_encoder.output_dim = embedding_dim + position_feature_dim + agent_feature_dim
+        combined_dim = state_feature_dim + goal_feature_dim + self.agent_encoder.output_dim
         if dropout > 0.0:
             self.value_head = nn.Sequential(
                 nn.Linear(combined_dim, hidden_dim),
@@ -110,7 +136,10 @@ class MultiGridHumanGoalAchievementNetwork(BaseHumanGoalAchievementNetwork):
         global_features: torch.Tensor,
         agent_features: torch.Tensor,
         interactive_features: torch.Tensor,
-        goal_features: torch.Tensor
+        goal_features: torch.Tensor,
+        query_agent_indices: torch.Tensor,
+        query_agent_grid: torch.Tensor,
+        query_agent_features: torch.Tensor
     ) -> torch.Tensor:
         """
         Compute V_h^e(s, g_h).
@@ -121,6 +150,9 @@ class MultiGridHumanGoalAchievementNetwork(BaseHumanGoalAchievementNetwork):
             agent_features: (batch, agent_input_size)
             interactive_features: (batch, interactive_input_size)
             goal_features: (batch, goal_feature_dim)
+            query_agent_indices: (batch,) agent indices for identity encoding
+            query_agent_grid: (batch, 1, H, W) grid marking query agent position
+            query_agent_features: (batch, AGENT_FEATURE_SIZE) query agent features
         
         Returns:
             V_h^e values tensor (batch,) in [0, 1].
@@ -130,8 +162,13 @@ class MultiGridHumanGoalAchievementNetwork(BaseHumanGoalAchievementNetwork):
             grid_tensor, global_features, agent_features, interactive_features
         )
         
-        # Combine state and goal features
-        combined = torch.cat([state_features, goal_features], dim=-1)
+        # Encode agent identity (index + position + features)
+        agent_embedding = self.agent_encoder(
+            query_agent_indices, query_agent_grid, query_agent_features
+        )
+        
+        # Combine state, goal, and agent identity features
+        combined = torch.cat([state_features, goal_features, agent_embedding], dim=-1)
         
         # Compute raw value
         raw_value = self.value_head(combined).squeeze(-1)
@@ -160,18 +197,64 @@ class MultiGridHumanGoalAchievementNetwork(BaseHumanGoalAchievementNetwork):
         Returns:
             V_h^e tensor of shape (1,).
         """
-        # Encode state using human as query agent
+        step_count, agent_states, mobile_objects, mutable_objects = state
+        
+        # Encode state (agent-agnostic)
         grid_tensor, global_features, agent_features, interactive_features = \
-            self.state_encoder.encode_state(state, world_model, human_agent_idx, device)
+            self.state_encoder.encode_state(state, world_model, device)
         
         # Encode goal: first extract coordinates, then pass through encoder network
         goal_coords = self.goal_encoder.encode_goal(goal, device)
         goal_features = self.goal_encoder(goal_coords)
         
+        # Encode agent identity (index + position grid + features)
+        query_idx, query_grid, query_features = self.agent_encoder.encode_single(
+            human_agent_idx, state, world_model, device
+        )
+        
         return self.forward(
             grid_tensor, global_features, agent_features,
-            interactive_features, goal_features
+            interactive_features, goal_features,
+            query_idx, query_grid, query_features
         )
+    
+    def forward_with_preencoded_state(
+        self,
+        state_features: torch.Tensor,
+        goal_features: torch.Tensor,
+        query_agent_indices: torch.Tensor,
+        query_agent_grid: torch.Tensor,
+        query_agent_features: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Forward pass with pre-encoded state features (for efficient batched training).
+        
+        This method skips the state encoder and directly uses pre-computed state features,
+        allowing multiple forward passes with different agent identities on the same state.
+        
+        Args:
+            state_features: (batch, state_feature_dim) pre-encoded state features
+            goal_features: (batch, goal_feature_dim)
+            query_agent_indices: (batch,) agent indices
+            query_agent_grid: (batch, 1, H, W) grid marking query agent position
+            query_agent_features: (batch, AGENT_FEATURE_SIZE) query agent features
+        
+        Returns:
+            V_h^e values tensor (batch,).
+        """
+        # Encode agent identity (index + position + features)
+        agent_embedding = self.agent_encoder(
+            query_agent_indices, query_agent_grid, query_agent_features
+        )
+        
+        # Combine state, goal, and agent identity features
+        combined = torch.cat([state_features, goal_features, agent_embedding], dim=-1)
+        
+        # Compute raw value
+        raw_value = self.value_head(combined).squeeze(-1)
+        
+        # Apply soft clamp
+        return self.apply_soft_clamp(raw_value)
     
     def forward_with_goal_features(
         self,
@@ -179,7 +262,10 @@ class MultiGridHumanGoalAchievementNetwork(BaseHumanGoalAchievementNetwork):
         global_features: torch.Tensor,
         agent_features: torch.Tensor,
         interactive_features: torch.Tensor,
-        goal_features: torch.Tensor
+        goal_features: torch.Tensor,
+        query_agent_indices: torch.Tensor,
+        query_agent_grid: torch.Tensor,
+        query_agent_features: torch.Tensor
     ) -> torch.Tensor:
         """
         Forward pass with pre-encoded state and goal features (for batched training).
@@ -190,13 +276,17 @@ class MultiGridHumanGoalAchievementNetwork(BaseHumanGoalAchievementNetwork):
             agent_features: (batch, agent_input_size)
             interactive_features: (batch, interactive_input_size)
             goal_features: (batch, goal_feature_dim)
+            query_agent_indices: (batch,) agent indices
+            query_agent_grid: (batch, 1, H, W) grid marking query agent position
+            query_agent_features: (batch, AGENT_FEATURE_SIZE) query agent features
         
         Returns:
             V_h^e values tensor (batch,).
         """
         return self.forward(
             grid_tensor, global_features, agent_features,
-            interactive_features, goal_features
+            interactive_features, goal_features,
+            query_agent_indices, query_agent_grid, query_agent_features
         )
     
     def predict(
@@ -237,6 +327,8 @@ class MultiGridHumanGoalAchievementNetwork(BaseHumanGoalAchievementNetwork):
             'gamma_h': self.gamma_h,
             'feasible_range': self.feasible_range,
             'dropout': self.dropout_rate,
+            'max_agents': self.max_agents,
+            'agent_embedding_dim': self.agent_embedding_dim,
             'state_encoder_config': self.state_encoder.get_config(),
             'goal_encoder_config': self.goal_encoder.get_config(),
         }

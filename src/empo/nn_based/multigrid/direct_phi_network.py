@@ -171,14 +171,15 @@ class DirectPhiNetwork(nn.Module):
         Args:
             state: Environment state tuple.
             world_model: Environment.
-            query_agent_idx: Index of query agent.
+            query_agent_idx: Index of query agent (unused, for API compatibility).
             device: Torch device.
         
         Returns:
             Action probabilities (1, num_actions)
         """
+        # State encoding is agent-agnostic
         grid_tensor, global_features, agent_features, interactive_features = \
-            self.state_encoder.encode_state(state, world_model, query_agent_idx, device)
+            self.state_encoder.encode_state(state, world_model, device)
         
         return self.forward(
             grid_tensor, global_features, agent_features, interactive_features

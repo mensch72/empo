@@ -5,6 +5,7 @@ This module provides the training function for Phase 2 of the EMPO framework
 (equations 4-9) specialized for multigrid environments.
 """
 
+import random
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
@@ -13,8 +14,10 @@ from gym_multigrid.multigrid import MultiGridEnv
 
 from empo.nn_based.phase2.config import Phase2Config
 from empo.nn_based.phase2.trainer import BasePhase2Trainer, Phase2Networks
+from empo.nn_based.phase2.replay_buffer import Phase2Transition
 from empo.nn_based.multigrid import MultiGridStateEncoder
 from empo.nn_based.multigrid.goal_encoder import MultiGridGoalEncoder
+from empo.nn_based.multigrid.agent_encoder import AgentIdentityEncoder
 
 from .robot_q_network import MultiGridRobotQNetwork
 from .human_goal_ability import MultiGridHumanGoalAchievementNetwork
@@ -31,6 +34,12 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
     - State encoding using MultiGridStateEncoder
     - Goal achievement checking
     - Environment stepping
+    
+    All networks share the same encoders (state, goal, agent identity), which
+    have internal caching for raw tensor extraction. This ensures:
+    1. Consistent representations across all networks
+    2. Efficient caching without redundant computation
+    3. Proper gradient flow (caches raw tensors, not NN outputs)
     
     Args:
         env: MultiGridEnv instance.
@@ -73,11 +82,79 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
             debug=debug,
             tensorboard_dir=tensorboard_dir
         )
+        
+        # Caching is now handled internally by the shared encoders.
+        # The shared state/goal/agent encoders cache raw tensor extraction
+        # (but not NN output, to preserve gradient flow).
+    
+    def clear_caches(self):
+        """
+        Clear encoder caches. Call after each training step to prevent memory growth.
+        
+        This clears the caches in the shared encoders that all networks use.
+        """
+        # All networks share the same encoders, so we only need to clear once
+        self.networks.q_r.state_encoder.clear_cache()
+        self.networks.v_h_e.goal_encoder.clear_cache()
+        self.networks.v_h_e.agent_encoder.clear_cache()
+    
+    def get_cache_stats(self) -> Dict[str, Tuple[int, int]]:
+        """
+        Get cache hit/miss statistics.
+        
+        Returns:
+            Dict with stats from each encoder type.
+        """
+        return {
+            'state': self.networks.q_r.state_encoder.get_cache_stats(),
+            'goal': self.networks.v_h_e.goal_encoder.get_cache_stats(),
+            'agent': self.networks.v_h_e.agent_encoder.get_cache_stats(),
+        }
+    
+    def _encode_state_cached(
+        self,
+        state: Any
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Encode state using the shared encoder (which handles caching internally).
+        
+        The shared state encoder caches raw tensor extraction (before NN forward)
+        to avoid redundant computation when the same state is encoded multiple times.
+        The encoding is agent-agnostic.
+        
+        Args:
+            state: Raw environment state.
+        
+        Returns:
+            Tuple of (grid_tensor, global_features, agent_features, interactive_features).
+        """
+        # The state encoder now handles caching internally
+        state_encoder = self.networks.q_r.state_encoder
+        return state_encoder.encode_state(state, None, self.device)
     
     def encode_state(self, state: Any) -> Dict[str, torch.Tensor]:
         """Encode multigrid state to tensors."""
         # The networks handle their own encoding
         return {'state': state}
+    
+    def sample_robot_action(self, state: Any) -> Tuple[int, ...]:
+        """
+        Sample robot action using policy with epsilon-greedy exploration.
+        
+        Uses cached state encoding for efficiency.
+        
+        Args:
+            state: Current state.
+        
+        Returns:
+            Tuple of robot actions.
+        """
+        epsilon = self.config.get_epsilon(self.total_steps)
+        
+        with torch.no_grad():
+            grid, glob, agent, interactive = self._encode_state_cached(state)
+            q_values = self.networks.q_r.forward(grid, glob, agent, interactive)
+            return self.networks.q_r.sample_action(q_values, epsilon)
     
     def check_goal_achieved(self, state: Any, human_idx: int, goal: Any) -> bool:
         """Check if human's goal is achieved."""
@@ -127,15 +204,14 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
     
     def encode_states_batch(
         self,
-        states: List[Any],
-        query_agent_indices: List[int]
+        states: List[Any]
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Encode a batch of states into tensor format for batched forward passes.
+        The encoding is agent-agnostic.
         
         Args:
             states: List of raw environment states.
-            query_agent_indices: List of query agent indices (one per state).
         
         Returns:
             Tuple of (grid_tensors, global_features, agent_features, interactive_features)
@@ -150,9 +226,9 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         agent_list = []
         interactive_list = []
         
-        for state, query_idx in zip(states, query_agent_indices):
+        for state in states:
             grid, glob, agent, interactive = state_encoder.encode_state(
-                state, None, query_idx, self.device
+                state, None, self.device
             )
             grid_list.append(grid)
             global_list.append(glob)
@@ -194,6 +270,540 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         
         # Stack into batched tensor
         return torch.cat(goal_features_list, dim=0)
+    
+    def compute_losses(
+        self,
+        batch: List[Phase2Transition],
+        x_h_batch: Optional[List[Phase2Transition]] = None
+    ) -> Tuple[Dict[str, torch.Tensor], Dict[str, Dict[str, float]]]:
+        """
+        Compute losses for all networks using batched operations for efficiency.
+        
+        This implementation encodes each unique state ONCE and passes agent identity
+        separately to human-specific networks (V_h^e, X_h). This dramatically reduces
+        computation compared to encoding the same state multiple times for different
+        agent perspectives.
+        
+        Args:
+            batch: List of transitions for most networks.
+            x_h_batch: Optional larger batch for X_h (defaults to batch).
+        
+        Returns:
+            Tuple of (losses dict, prediction_stats dict).
+            prediction_stats maps network names to {'mean': float, 'std': float}.
+        """
+        if x_h_batch is None:
+            x_h_batch = batch
+        
+        if self.debug:
+            print(f"[DEBUG] compute_losses: processing batch of {len(batch)} transitions (agent-identity mode)")
+        
+        n = len(batch)
+        
+        # Track prediction statistics
+        prediction_stats = {}
+        
+        # Get encoders
+        state_encoder = self.networks.q_r.state_encoder
+        goal_encoder = self.networks.v_h_e.goal_encoder
+        
+        # ========================================================================
+        # Phase 1: Encode all unique states ONCE (agent-agnostic)
+        # ========================================================================
+        # State encoding is agent-agnostic - no query agent needed
+        # Agent identity is handled separately by AgentIdentityEncoder
+        states = [t.state for t in batch]
+        next_states = [t.next_state for t in batch]
+        
+        # Encode states once (agent-agnostic)
+        s_encoded = self._batch_encode_states(states)
+        s_prime_encoded = self._batch_encode_states(next_states)
+        
+        # ========================================================================
+        # Phase 2: Collect human-agent pairs for V_h^e
+        # Each transition may have multiple humans with goals
+        # ========================================================================
+        v_h_e_indices = []  # transition index for each entry
+        v_h_e_goals = []
+        v_h_e_achieved = []
+        v_h_e_human_indices = []
+        v_h_e_states = []  # states for agent identity encoding
+        v_h_e_next_states = []
+        
+        for i, t in enumerate(batch):
+            for h, g_h in t.goals.items():
+                v_h_e_indices.append(i)
+                v_h_e_goals.append(g_h)
+                v_h_e_achieved.append(self.check_goal_achieved(t.next_state, h, g_h))
+                v_h_e_human_indices.append(h)
+                v_h_e_states.append(t.state)
+                v_h_e_next_states.append(t.next_state)
+        
+        if v_h_e_goals:
+            goal_features = self._batch_encode_goals(v_h_e_goals)
+            
+            # Encode agent identities (index + grid + features)
+            v_h_e_idx, v_h_e_grid, v_h_e_feat = self._batch_encode_agent_identities(
+                v_h_e_human_indices, v_h_e_states
+            )
+            v_h_e_prime_idx, v_h_e_prime_grid, v_h_e_prime_feat = self._batch_encode_agent_identities(
+                v_h_e_human_indices, v_h_e_next_states
+            )
+            
+            # Get encoded states for these transitions (index into batched encodings)
+            v_h_e_trans_indices = torch.tensor(v_h_e_indices, device=self.device)
+            s_h_grid = s_encoded[0][v_h_e_trans_indices]
+            s_h_glob = s_encoded[1][v_h_e_trans_indices]
+            s_h_agent = s_encoded[2][v_h_e_trans_indices]
+            s_h_interactive = s_encoded[3][v_h_e_trans_indices]
+            
+            s_prime_h_grid = s_prime_encoded[0][v_h_e_trans_indices]
+            s_prime_h_glob = s_prime_encoded[1][v_h_e_trans_indices]
+            s_prime_h_agent = s_prime_encoded[2][v_h_e_trans_indices]
+            s_prime_h_interactive = s_prime_encoded[3][v_h_e_trans_indices]
+        
+        # ========================================================================
+        # Phase 3: Collect for X_h loss (potentially larger batch)
+        # ========================================================================
+        x_h_transition_indices = []
+        x_h_goals = []
+        x_h_human_indices = []
+        x_h_states_for_identity = []
+        
+        # For X_h, we need to encode states from x_h_batch (which may differ from batch)
+        x_h_states = [t.state for t in x_h_batch]
+        x_h_s_all_encoded = self._batch_encode_states(x_h_states)
+        
+        for i, t in enumerate(x_h_batch):
+            if self.config.x_h_sample_humans is None:
+                humans_for_x_h = list(t.goals.keys())
+            else:
+                n_sample = min(self.config.x_h_sample_humans, len(t.goals))
+                humans_for_x_h = random.sample(list(t.goals.keys()), n_sample)
+            
+            for h_x in humans_for_x_h:
+                x_h_transition_indices.append(i)
+                x_h_goals.append(t.goals[h_x])
+                x_h_human_indices.append(h_x)
+                x_h_states_for_identity.append(t.state)
+        
+        if x_h_goals:
+            x_h_goal_features = self._batch_encode_goals(x_h_goals)
+            
+            # Encode agent identities
+            x_h_idx, x_h_agent_grid, x_h_agent_feat = self._batch_encode_agent_identities(
+                x_h_human_indices, x_h_states_for_identity
+            )
+            
+            # Index into X_h state encodings
+            x_h_trans_indices = torch.tensor(x_h_transition_indices, device=self.device)
+            x_h_grid = x_h_s_all_encoded[0][x_h_trans_indices]
+            x_h_glob = x_h_s_all_encoded[1][x_h_trans_indices]
+            x_h_agent = x_h_s_all_encoded[2][x_h_trans_indices]
+            x_h_interactive = x_h_s_all_encoded[3][x_h_trans_indices]
+        
+        # ========================================================================
+        # Phase 4: Compute all forward passes in batches
+        # ========================================================================
+        # Detach shared encoder outputs for all networks except V_h^e
+        # V_h^e is the only network that trains the shared encoders
+        s_encoded_detached = tuple(t.detach() for t in s_encoded)
+        
+        # ----- Q_r: Robot Q-values -----
+        # Q_r uses: shared encoder (detached) + own encoder (trained)
+        # Encode with Q_r's own state encoder (also agent-agnostic)
+        own_s_encoded = self._batch_encode_states_with_encoder(
+            [t.state for t in batch],
+            self.networks.q_r.own_state_encoder
+        )
+        q_r_all = self.networks.q_r.forward(
+            *s_encoded_detached,  # Shared encoder (frozen for Q_r)
+            *own_s_encoded        # Own encoder (trained with Q_r)
+        )
+        robot_actions = [t.robot_action for t in batch]
+        action_indices = torch.tensor(
+            [self.networks.q_r.action_tuple_to_index(a) for a in robot_actions],
+            device=self.device
+        )
+        q_r_pred = q_r_all.gather(1, action_indices.unsqueeze(1)).squeeze(1)  # (n,)
+        
+        # ----- Q_r target: γ_r * V_r(s') -----
+        with torch.no_grad():
+            if self.config.v_r_use_network:
+                v_r_next = self.networks.v_r_target.forward(*s_prime_encoded)
+            else:
+                _, u_r_next = self.networks.u_r.forward(*s_prime_encoded)
+                # Q_r needs both encoders for proper inference
+                own_s_prime_encoded = self._batch_encode_states_with_encoder(
+                    [t.next_state for t in batch],
+                    self.networks.q_r.own_state_encoder
+                )
+                q_r_next = self.networks.q_r.forward(*s_prime_encoded, *own_s_prime_encoded)
+                pi_r_next = self.networks.q_r.get_policy(q_r_next)
+                v_r_next = self.networks.v_r.compute_from_components(
+                    u_r_next, q_r_next, pi_r_next
+                )
+        target_q_r = self.config.gamma_r * v_r_next.squeeze()
+        loss_q_r = ((q_r_pred - target_q_r) ** 2).mean()
+        
+        # Track Q_r prediction stats
+        with torch.no_grad():
+            prediction_stats['q_r'] = {
+                'mean': q_r_pred.mean().item(),
+                'std': q_r_pred.std().item() if q_r_pred.numel() > 1 else 0.0
+            }
+        
+        # ----- U_r: Intrinsic reward -----
+        # U_r uses only shared encoder (detached) - no own encoder
+        y_pred, u_r_pred = self.networks.u_r.forward(*s_encoded_detached)
+        
+        # Compute X_h for U_r target using agent identity encoding
+        u_r_x_h_transition_indices = []
+        u_r_x_h_human_indices = []
+        u_r_x_h_states = []  # states for agent identity encoding
+        u_r_transition_boundaries = [0]
+        
+        for i, t in enumerate(batch):
+            if self.config.u_r_sample_humans is None:
+                humans_for_u_r = self.human_agent_indices
+            else:
+                n_sample = min(self.config.u_r_sample_humans, len(self.human_agent_indices))
+                humans_for_u_r = random.sample(self.human_agent_indices, n_sample)
+            
+            for h_u in humans_for_u_r:
+                u_r_x_h_transition_indices.append(i)
+                u_r_x_h_human_indices.append(h_u)
+                u_r_x_h_states.append(t.state)
+            u_r_transition_boundaries.append(len(u_r_x_h_transition_indices))
+        
+        with torch.no_grad():
+            u_r_trans_idx = torch.tensor(u_r_x_h_transition_indices, device=self.device)
+            
+            # Encode agent identities for X_h computation
+            u_r_idx, u_r_agent_grid, u_r_agent_feat = self._batch_encode_agent_identities(
+                u_r_x_h_human_indices, u_r_x_h_states
+            )
+            
+            u_r_x_h_grid = s_encoded[0][u_r_trans_idx]
+            u_r_x_h_glob = s_encoded[1][u_r_trans_idx]
+            u_r_x_h_agent = s_encoded[2][u_r_trans_idx]
+            u_r_x_h_interactive = s_encoded[3][u_r_trans_idx]
+            
+            x_h_for_u_r = self.networks.x_h_target.forward(
+                u_r_x_h_grid, u_r_x_h_glob, u_r_x_h_agent, u_r_x_h_interactive,
+                u_r_idx, u_r_agent_grid, u_r_agent_feat
+            )
+            # Hard clamp X_h for inference (soft clamp is only for training X_h)
+            x_h_for_u_r = self.networks.x_h_target.apply_hard_clamp(x_h_for_u_r)
+        
+        # Compute U_r targets by aggregating X_h values for each transition
+        u_r_targets = []
+        for i in range(n):
+            start_idx = u_r_transition_boundaries[i]
+            end_idx = u_r_transition_boundaries[i + 1]
+            x_h_values = x_h_for_u_r[start_idx:end_idx].squeeze()
+            
+            if x_h_values.dim() == 0:
+                x_h_values = x_h_values.unsqueeze(0)
+            # Clamp X_h to (0, 1] to prevent X_h^{-ξ} explosion when X_h is near 0
+            x_h_clamped = torch.clamp(x_h_values, min=1e-3, max=1.0)
+            x_h_sum = (x_h_clamped ** (-self.config.xi)).sum()
+            x_h_avg = x_h_sum / x_h_clamped.numel()
+            # target_y = E[X_h^{-ξ}] directly (y is defined as E[X_h^{-ξ}])
+            target_y = x_h_avg
+            u_r_targets.append(target_y)
+        
+        u_r_targets = torch.stack(u_r_targets)
+        loss_u_r = ((y_pred.squeeze() - u_r_targets) ** 2).mean()
+        
+        # Track U_r prediction stats (the actual U_r values, not y)
+        # U_r = -y^η where η = -1/ξ, so U_r is negative
+        with torch.no_grad():
+            prediction_stats['u_r'] = {
+                'mean': u_r_pred.mean().item(),
+                'std': u_r_pred.std().item() if u_r_pred.numel() > 1 else 0.0
+            }
+        
+        # ----- V_h^e: Human goal achievement -----
+        loss_v_h_e = torch.tensor(0.0, device=self.device)
+        if v_h_e_goals:
+            # V_h^e trains the shared encoders - do NOT detach
+            v_h_e_pred = self.networks.v_h_e.forward(
+                s_h_grid, s_h_glob, s_h_agent, s_h_interactive, 
+                goal_features,
+                v_h_e_idx, v_h_e_grid, v_h_e_feat
+            )
+            
+            goal_achieved_t = torch.tensor(
+                [1.0 if a else 0.0 for a in v_h_e_achieved],
+                device=self.device
+            )
+            
+            with torch.no_grad():
+                v_h_e_next = self.networks.v_h_e_target.forward(
+                    s_prime_h_grid, s_prime_h_glob, s_prime_h_agent, s_prime_h_interactive,
+                    goal_features, v_h_e_prime_idx, v_h_e_prime_grid, v_h_e_prime_feat
+                )
+            
+            target_v_h_e = self.networks.v_h_e.compute_td_target(
+                goal_achieved_t, v_h_e_next.squeeze()
+            )
+            
+            loss_v_h_e = ((v_h_e_pred.squeeze() - target_v_h_e) ** 2).mean()
+            
+            # Track V_h^e prediction stats
+            with torch.no_grad():
+                prediction_stats['v_h_e'] = {
+                    'mean': v_h_e_pred.mean().item(),
+                    'std': v_h_e_pred.std().item() if v_h_e_pred.numel() > 1 else 0.0
+                }
+        
+        # ----- X_h: Aggregate goal ability -----
+        loss_x_h = torch.tensor(0.0, device=self.device)
+        if x_h_goals:
+            # X_h uses: shared agent encoder (detached) + own agent encoder (trained)
+            # Encode with X_h's own agent encoder
+            own_x_h_idx, own_x_h_agent_grid, own_x_h_agent_feat = self._batch_encode_agent_identities_with_encoder(
+                x_h_human_indices, x_h_states_for_identity,
+                self.networks.x_h.own_agent_encoder
+            )
+            
+            # Detach shared state encoder outputs, pass own agent encoder outputs
+            x_h_pred = self.networks.x_h.forward(
+                x_h_grid.detach(), x_h_glob.detach(), x_h_agent.detach(), x_h_interactive.detach(),
+                x_h_idx.detach(), x_h_agent_grid.detach(), x_h_agent_feat.detach(),  # Shared (frozen)
+                own_x_h_idx, own_x_h_agent_grid, own_x_h_agent_feat  # Own (trained)
+            )
+            
+            with torch.no_grad():
+                v_h_e_for_x = self.networks.v_h_e_target.forward(
+                    x_h_grid, x_h_glob, x_h_agent, x_h_interactive, x_h_goal_features,
+                    x_h_idx, x_h_agent_grid, x_h_agent_feat
+                )
+                # Hard clamp V_h^e for inference (soft clamp is only for training V_h^e)
+                v_h_e_for_x = self.networks.v_h_e_target.apply_hard_clamp(v_h_e_for_x)
+            
+            target_x_h = self.networks.x_h.compute_target(v_h_e_for_x.squeeze())
+            loss_x_h = ((x_h_pred.squeeze() - target_x_h) ** 2).mean()
+            
+            # Track X_h prediction stats
+            with torch.no_grad():
+                prediction_stats['x_h'] = {
+                    'mean': x_h_pred.mean().item(),
+                    'std': x_h_pred.std().item() if x_h_pred.numel() > 1 else 0.0
+                }
+        
+        # ----- V_r: Robot value (if using network mode) -----
+        losses = {
+            'v_h_e': loss_v_h_e,
+            'x_h': loss_x_h,
+            'u_r': loss_u_r,
+            'q_r': loss_q_r,
+        }
+        
+        if self.config.v_r_use_network:
+            # V_r uses only shared encoder (detached) - no own encoder
+            v_r_pred = self.networks.v_r.forward(*s_encoded_detached)
+            
+            with torch.no_grad():
+                _, u_r = self.networks.u_r.forward(*s_encoded_detached)
+                # Q_r needs both encoders for proper inference
+                own_s_for_v = self._batch_encode_states_with_encoder(
+                    [t.state for t in batch],
+                    self.networks.q_r.own_state_encoder
+                )
+                q_r_for_v = self.networks.q_r.forward(*s_encoded_detached, *own_s_for_v)
+                pi_r = self.networks.q_r.get_policy(q_r_for_v)
+            
+            target_v_r = self.networks.v_r.compute_from_components(
+                u_r.squeeze(), q_r_for_v, pi_r
+            )
+            losses['v_r'] = ((v_r_pred.squeeze() - target_v_r) ** 2).mean()
+            
+            # Track V_r prediction stats
+            with torch.no_grad():
+                prediction_stats['v_r'] = {
+                    'mean': v_r_pred.mean().item(),
+                    'std': v_r_pred.std().item() if v_r_pred.numel() > 1 else 0.0
+                }
+        
+        # Clear caches after each compute_losses call to prevent memory growth
+        # The caches are useful within a single batch computation but stale afterwards
+        self.clear_caches()
+        
+        return losses, prediction_stats
+    
+    def _batch_encode_states(
+        self,
+        states: List[Any]
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Batch encode multiple states with caching (agent-agnostic).
+        
+        The state encoder produces agent-agnostic representations.
+        Agent identity is handled separately by AgentIdentityEncoder.
+        
+        Args:
+            states: List of states to encode.
+        
+        Returns:
+            Tuple of batched tensors (grid, global, agent, interactive).
+        """
+        state_encoder = self.networks.q_r.state_encoder
+        
+        grid_list = []
+        global_list = []
+        agent_list = []
+        interactive_list = []
+        
+        for state in states:
+            # The encoder handles caching internally
+            # Encoding is agent-agnostic
+            grid, glob, agent, interactive = state_encoder.encode_state(
+                state, None, self.device
+            )
+            
+            grid_list.append(grid)
+            global_list.append(glob)
+            agent_list.append(agent)
+            interactive_list.append(interactive)
+        
+        return (
+            torch.cat(grid_list, dim=0),
+            torch.cat(global_list, dim=0),
+            torch.cat(agent_list, dim=0),
+            torch.cat(interactive_list, dim=0)
+        )
+    
+    def _batch_encode_states_with_encoder(
+        self,
+        states: List[Any],
+        state_encoder: 'MultiGridStateEncoder'
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Batch encode multiple states using a specific encoder (agent-agnostic).
+        
+        This is used for encoding with network-specific encoders (e.g., Q_r's own encoder).
+        The encoding is agent-agnostic - agent identity is handled separately.
+        
+        Args:
+            states: List of states to encode.
+            state_encoder: The specific state encoder to use.
+        
+        Returns:
+            Tuple of batched tensors (grid, global, agent, interactive).
+        """
+        grid_list = []
+        global_list = []
+        agent_list = []
+        interactive_list = []
+        
+        for state in states:
+            # Encoding is agent-agnostic
+            grid, glob, agent, interactive = state_encoder.encode_state(
+                state, None, self.device
+            )
+            
+            grid_list.append(grid)
+            global_list.append(glob)
+            agent_list.append(agent)
+            interactive_list.append(interactive)
+        
+        return (
+            torch.cat(grid_list, dim=0),
+            torch.cat(global_list, dim=0),
+            torch.cat(agent_list, dim=0),
+            torch.cat(interactive_list, dim=0)
+        )
+    
+    def _batch_encode_agent_identities_with_encoder(
+        self,
+        human_indices: List[int],
+        states: List[Any],
+        agent_encoder: 'AgentIdentityEncoder'
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Batch encode agent identities using a specific encoder.
+        
+        This is used for encoding with network-specific encoders (e.g., X_h's own encoder).
+        
+        Args:
+            human_indices: List of human agent indices.
+            states: List of states (for position info).
+            agent_encoder: The specific agent encoder to use.
+        
+        Returns:
+            Tuple of (indices, grids, features) tensors.
+        """
+        idx_list = []
+        grid_list = []
+        feat_list = []
+        
+        for h_idx, state in zip(human_indices, states):
+            idx, grid, feat = agent_encoder.encode_single(
+                h_idx, state, None, self.device
+            )
+            idx_list.append(idx)
+            grid_list.append(grid)
+            feat_list.append(feat)
+        
+        return (
+            torch.cat(idx_list, dim=0),
+            torch.cat(grid_list, dim=0),
+            torch.cat(feat_list, dim=0)
+        )
+    
+    def _batch_encode_goals(self, goals: List[Any]) -> torch.Tensor:
+        """
+        Batch encode multiple goals efficiently using a single forward pass.
+        
+        Note: We intentionally do NOT cache goal encoder outputs because that
+        would break gradient flow. The goal encoder has trainable nn.Linear
+        parameters that need gradients to update during backprop.
+        
+        Args:
+            goals: List of goals to encode.
+        
+        Returns:
+            Batched goal features tensor of shape (len(goals), feature_dim).
+        """
+        goal_encoder = self.networks.v_h_e.goal_encoder
+        
+        # Extract coordinates for all goals (cheap, no neural network)
+        coords_list = []
+        for goal in goals:
+            goal_coords = goal_encoder.encode_goal(goal, self.device)
+            coords_list.append(goal_coords)
+        
+        # Stack coordinates: (num_goals, 4)
+        coords_batch = torch.cat(coords_list, dim=0)
+        
+        # Single batched forward pass - preserves gradient flow
+        return goal_encoder(coords_batch)
+    
+    def _batch_encode_agent_identities(
+        self,
+        agent_indices: List[int],
+        states: List[Any]
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Batch encode agent identities (index + position grid + features).
+        
+        Uses the shared agent encoder which handles caching internally.
+        
+        Args:
+            agent_indices: List of agent indices to encode.
+            states: List of states (to extract agent positions and features).
+        
+        Returns:
+            Tuple of (agent_idx_tensor, query_agent_grids, query_agent_features).
+        """
+        agent_encoder = self.networks.v_h_e.agent_encoder
+        
+        # Use the encoder's batch method which handles caching internally
+        return agent_encoder.encode_batch(
+            agent_indices, states, self.env, self.device
+        )
 
 
 def create_phase2_networks(
@@ -202,21 +812,35 @@ def create_phase2_networks(
     num_robots: int,
     num_actions: int,
     hidden_dim: int = 256,
-    device: str = 'cpu'
+    device: str = 'cpu',
+    goal_feature_dim: int = 64,
+    max_agents: int = 10,
+    agent_embedding_dim: int = 16
 ) -> Phase2Networks:
     """
     Create all Phase 2 networks for a multigrid environment.
+    
+    Creates SHARED encoders that are used by all networks:
+    - One state encoder shared by Q_r, V_h^e, X_h, U_r, V_r
+    - One goal encoder shared by V_h^e
+    - One agent encoder shared by V_h^e, X_h
+    
+    This ensures consistent encoding across networks and enables
+    efficient caching of raw tensor extraction.
     
     Args:
         env: MultiGridEnv instance.
         config: Phase2Config.
         num_robots: Number of robot agents.
         num_actions: Number of actions per robot.
-        hidden_dim: Hidden dimension for networks.
+        hidden_dim: Hidden dimension for networks (also state_feature_dim).
         device: Torch device.
+        goal_feature_dim: Goal encoder output dimension.
+        max_agents: Max number of agents for identity encoding.
+        agent_embedding_dim: Dimension of agent identity embedding.
     
     Returns:
-        Phase2Networks container with all networks.
+        Phase2Networks container with all networks using shared encoders.
     """
     # Count agents per color
     num_agents_per_color = {}
@@ -228,7 +852,46 @@ def create_phase2_networks(
     grid_height = env.height
     grid_width = env.width
     
-    # Create networks with dropout from config
+    # Create SHARED encoders (one instance used by all networks)
+    shared_state_encoder = MultiGridStateEncoder(
+        grid_height=grid_height,
+        grid_width=grid_width,
+        num_agents_per_color=num_agents_per_color,
+        num_agent_colors=7,
+        feature_dim=hidden_dim,
+    ).to(device)
+    
+    shared_goal_encoder = MultiGridGoalEncoder(
+        grid_height=grid_height,
+        grid_width=grid_width,
+        feature_dim=goal_feature_dim
+    ).to(device)
+    
+    shared_agent_encoder = AgentIdentityEncoder(
+        num_agents=max_agents,
+        embedding_dim=agent_embedding_dim,
+        grid_height=grid_height,
+        grid_width=grid_width
+    ).to(device)
+    
+    # Create OWN encoders for Q_r and X_h (trained with their respective losses)
+    # These allow Q_r and X_h to learn additional features beyond those learned by V_h^e
+    q_r_own_state_encoder = MultiGridStateEncoder(
+        grid_height=grid_height,
+        grid_width=grid_width,
+        num_agents_per_color=num_agents_per_color,
+        num_agent_colors=7,
+        feature_dim=hidden_dim,
+    ).to(device)
+    
+    x_h_own_agent_encoder = AgentIdentityEncoder(
+        num_agents=max_agents,
+        embedding_dim=agent_embedding_dim,
+        grid_height=grid_height,
+        grid_width=grid_width
+    ).to(device)
+    
+    # Create networks with SHARED encoders and OWN encoders where applicable
     q_r = MultiGridRobotQNetwork(
         grid_height=grid_height,
         grid_width=grid_width,
@@ -239,6 +902,8 @@ def create_phase2_networks(
         hidden_dim=hidden_dim,
         beta_r=config.beta_r,
         dropout=config.q_r_dropout,
+        state_encoder=shared_state_encoder,       # SHARED (frozen for Q_r)
+        own_state_encoder=q_r_own_state_encoder,  # OWN (trained with Q_r)
     ).to(device)
     
     v_h_e = MultiGridHumanGoalAchievementNetwork(
@@ -246,9 +911,15 @@ def create_phase2_networks(
         grid_width=grid_width,
         num_agents_per_color=num_agents_per_color,
         state_feature_dim=hidden_dim,
+        goal_feature_dim=goal_feature_dim,
         hidden_dim=hidden_dim,
         gamma_h=config.gamma_h,
         dropout=config.v_h_e_dropout,
+        max_agents=max_agents,
+        agent_embedding_dim=agent_embedding_dim,
+        state_encoder=shared_state_encoder,  # SHARED
+        goal_encoder=shared_goal_encoder,    # SHARED
+        agent_encoder=shared_agent_encoder,  # SHARED
     ).to(device)
     
     x_h = MultiGridAggregateGoalAbilityNetwork(
@@ -259,6 +930,11 @@ def create_phase2_networks(
         hidden_dim=hidden_dim,
         zeta=config.zeta,
         dropout=config.x_h_dropout,
+        max_agents=max_agents,
+        agent_embedding_dim=agent_embedding_dim,
+        state_encoder=shared_state_encoder,       # SHARED (frozen for X_h)
+        agent_encoder=shared_agent_encoder,       # SHARED (frozen for X_h)
+        own_agent_encoder=x_h_own_agent_encoder,  # OWN (trained with X_h)
     ).to(device)
     
     u_r = MultiGridIntrinsicRewardNetwork(
@@ -270,6 +946,7 @@ def create_phase2_networks(
         xi=config.xi,
         eta=config.eta,
         dropout=config.u_r_dropout,
+        state_encoder=shared_state_encoder,  # SHARED
     ).to(device)
     
     v_r = MultiGridRobotValueNetwork(
@@ -279,6 +956,7 @@ def create_phase2_networks(
         state_feature_dim=hidden_dim,
         hidden_dim=hidden_dim,
         dropout=config.v_r_dropout,
+        state_encoder=shared_state_encoder,  # SHARED
     ).to(device)
     
     return Phase2Networks(

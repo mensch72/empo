@@ -51,7 +51,8 @@ class MultiGridIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
         max_kill_buttons: int = 4,
         max_pause_switches: int = 4,
         max_disabling_switches: int = 4,
-        max_control_buttons: int = 4
+        max_control_buttons: int = 4,
+        state_encoder: Optional[MultiGridStateEncoder] = None
     ):
         super().__init__(xi=xi, eta=eta)
         
@@ -61,18 +62,21 @@ class MultiGridIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
         self.hidden_dim = hidden_dim
         self.dropout_rate = dropout
         
-        # State encoder
-        self.state_encoder = MultiGridStateEncoder(
-            grid_height=grid_height,
-            grid_width=grid_width,
-            num_agents_per_color=num_agents_per_color,
-            num_agent_colors=num_agent_colors,
-            feature_dim=state_feature_dim,
-            max_kill_buttons=max_kill_buttons,
-            max_pause_switches=max_pause_switches,
-            max_disabling_switches=max_disabling_switches,
-            max_control_buttons=max_control_buttons
-        )
+        # Use shared state encoder or create own
+        if state_encoder is not None:
+            self.state_encoder = state_encoder
+        else:
+            self.state_encoder = MultiGridStateEncoder(
+                grid_height=grid_height,
+                grid_width=grid_width,
+                num_agents_per_color=num_agents_per_color,
+                num_agent_colors=num_agent_colors,
+                feature_dim=state_feature_dim,
+                max_kill_buttons=max_kill_buttons,
+                max_pause_switches=max_pause_switches,
+                max_disabling_switches=max_disabling_switches,
+                max_control_buttons=max_control_buttons
+            )
         
         # Network predicts log(y-1) for numerical stability with optional dropout
         # y = 1 + exp(log(y-1)) ensures y > 1
@@ -149,14 +153,9 @@ class MultiGridIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
         Returns:
             Tuple (y, U_r), each of shape (1,).
         """
-        # Use robot 0 as query agent for state encoding
-        query_agent_idx = 0
-        if hasattr(world_model, 'robot_indices') and world_model.robot_indices:
-            query_agent_idx = world_model.robot_indices[0]
-        
-        # Encode state
+        # Encode state (agent-agnostic)
         grid_tensor, global_features, agent_features, interactive_features = \
-            self.state_encoder.encode_state(state, world_model, query_agent_idx, device)
+            self.state_encoder.encode_state(state, world_model, device)
         
         return self.forward(
             grid_tensor, global_features, agent_features, interactive_features

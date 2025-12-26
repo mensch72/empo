@@ -138,9 +138,9 @@ def test_multigrid_state_encoder():
     grid_tensor = torch.randn(batch_size, encoder.num_grid_channels, 10, 10)
     global_features = torch.randn(batch_size, 4)
     
-    # Calculate agent feature size
+    # Calculate agent feature size (agent-agnostic: no query agent, just per-color lists)
     total_agents = sum(num_agents_per_color.values())
-    agent_feature_size = AGENT_FEATURE_SIZE * (1 + total_agents)  # query + per-color
+    agent_feature_size = AGENT_FEATURE_SIZE * total_agents  # per-color only
     agent_features = torch.randn(batch_size, agent_feature_size)
     
     interactive_features = torch.randn(batch_size, encoder._interactive_input_size)
@@ -170,7 +170,7 @@ def test_multigrid_state_encoder_encode_state():
     )
     
     grid_tensor, global_features, agent_features, interactive_features = \
-        encoder.encode_state(state, world_model, query_agent_idx=0)
+        encoder.encode_state(state, world_model)
     
     assert grid_tensor.shape[0] == 1
     assert global_features.shape == (1, 4)

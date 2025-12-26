@@ -105,27 +105,23 @@ def extract_agent_features(
 def extract_all_agent_features(
     agent_states: List[Tuple],
     world_model: Any,
-    query_agent_idx: int,
     num_agents_per_color: Dict[str, int]
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> Dict[str, torch.Tensor]:
     """
     Extract features for all agents organized by color.
     
-    Returns query agent features separately, plus per-color agent lists.
+    This is agent-agnostic - it extracts features for all agents without
+    any query-agent-specific processing. Agent identity is handled separately
+    by the AgentIdentityEncoder.
     
     Args:
         agent_states: List of agent state tuples.
         world_model: Environment with agents.
-        query_agent_idx: Index of the query agent.
         num_agents_per_color: Dict mapping color to max number of agents of that color.
     
     Returns:
-        Tuple of:
-        - query_features: Tensor (AGENT_FEATURE_SIZE,) for query agent
-        - color_features: Dict mapping color to Tensor (num_agents, AGENT_FEATURE_SIZE)
+        Dict mapping color to Tensor (num_agents, AGENT_FEATURE_SIZE)
     """
-    query_features = extract_agent_features(agent_states, world_model, query_agent_idx)
-    
     # Group agents by color
     color_to_agents: Dict[str, List[int]] = {color: [] for color in num_agents_per_color}
     
@@ -144,7 +140,7 @@ def extract_all_agent_features(
             features[i] = extract_agent_features(agent_states, world_model, agent_idx)
         color_features[color] = features
     
-    return query_features, color_features
+    return color_features
 
 
 def extract_interactive_objects(

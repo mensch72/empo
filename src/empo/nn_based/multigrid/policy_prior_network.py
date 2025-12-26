@@ -103,10 +103,10 @@ class MultiGridPolicyPriorNetwork(BasePolicyPriorNetwork):
         if not goals:
             return torch.ones(self.num_actions, device=device) / self.num_actions
         
-        # Encode state using unified encoder (shared across goals)
+        # Encode state using unified encoder (agent-agnostic)
         grid_tensor, global_features, agent_features, interactive_features = \
             self.q_network.state_encoder.encode_state(
-                state, world_model, query_agent_idx, device
+                state, world_model, device
             )
         
         # Encode goals

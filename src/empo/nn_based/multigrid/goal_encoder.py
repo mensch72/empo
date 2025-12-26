@@ -5,6 +5,9 @@ Encodes goal regions into feature vectors.
 All goals are represented as bounding boxes (x1, y1, x2, y2) with inclusive coordinates.
 Point goals are represented as (x, y, x, y).
 
+The encoder supports internal caching of goal coordinate extraction (before NN forward)
+to avoid redundant computation when the same goal is encoded multiple times.
+
 For goal sampling and rendering, see empo.multigrid module.
 """
 
@@ -44,10 +47,29 @@ class MultiGridGoalEncoder(BaseGoalEncoder):
             nn.Linear(4, feature_dim),
             nn.ReLU(),
         )
+        
+        # Internal cache for goal coordinate extraction (before NN forward)
+        # Keys are goal object ids, values are coordinate tensors
+        self._raw_cache: Dict[int, torch.Tensor] = {}
+        self._cache_hits = 0
+        self._cache_misses = 0
+    
+    def clear_cache(self):
+        """Clear the internal coordinate cache."""
+        self._raw_cache.clear()
+    
+    def get_cache_stats(self) -> Tuple[int, int]:
+        """Return (hits, misses) cache statistics."""
+        return self._cache_hits, self._cache_misses
+    
+    def reset_cache_stats(self):
+        """Reset cache hit/miss counters."""
+        self._cache_hits = 0
+        self._cache_misses = 0
     
     def forward(self, goal_coords: torch.Tensor) -> torch.Tensor:
         """
-        Encode goal coordinates.
+        Encode goal coordinates through the neural network.
         
         Args:
             goal_coords: (batch, 4) with bounding box (x1, y1, x2, y2)
@@ -63,7 +85,11 @@ class MultiGridGoalEncoder(BaseGoalEncoder):
         device: str = 'cpu'
     ) -> torch.Tensor:
         """
-        Encode a goal object as a bounding box.
+        Extract goal coordinates as a bounding box tensor.
+        
+        This method extracts raw coordinates from the goal object. Results are
+        cached by goal object id to avoid redundant extraction. Call forward()
+        on these coordinates to get the final encoded representation.
         
         Handles goal formats:
         1. Rectangle goal with target_rect: (x1, y1, x2, y2)
@@ -77,6 +103,15 @@ class MultiGridGoalEncoder(BaseGoalEncoder):
         Returns:
             Tensor (1, 4) with bounding box (x1, y1, x2, y2)
         """
+        # Check cache first
+        cache_key = id(goal)
+        if cache_key in self._raw_cache:
+            self._cache_hits += 1
+            # Clone to avoid in-place operation conflicts during gradient computation
+            return self._raw_cache[cache_key].clone()
+        
+        self._cache_misses += 1
+        
         # Extract goal coordinates as bounding box (x1, y1, x2, y2)
         if hasattr(goal, 'target_rect'):
             # Rectangle goal: (x1, y1, x2, y2)
@@ -115,6 +150,7 @@ class MultiGridGoalEncoder(BaseGoalEncoder):
             device=device
         )
         
+        self._raw_cache[cache_key] = coords
         return coords
     
     @staticmethod

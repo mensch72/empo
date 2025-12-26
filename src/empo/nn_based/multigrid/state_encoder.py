@@ -1,18 +1,23 @@
 """
 Unified state encoder for multigrid environments.
 
-Encodes the complete world state as seen by a query agent:
-- Grid-based spatial information (objects, doors, magic walls)
-- Agent features (query agent + per-color agent lists)
+Encodes the complete world state in an agent-agnostic way:
+- Grid-based spatial information (objects, doors, magic walls, agents by color)
+- Agent features (per-color agent lists)
 - Interactive object features (buttons/switches)
 - Global world features
 
-This unified approach keeps all state encoding in one class.
+This encoder is fully query-agent agnostic - it encodes the world state
+without any agent-specific perspective. Agent identity is handled separately
+by the AgentIdentityEncoder.
+
+The encoder supports internal caching of raw tensor extraction (before NN forward)
+to avoid redundant computation when the same state is encoded multiple times.
 """
 
 import torch
 import torch.nn as nn
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 from ..state_encoder import BaseStateEncoder
 from .constants import (
@@ -91,11 +96,11 @@ class MultiGridStateEncoder(BaseStateEncoder):
         
         # Grid channel structure
         # Use all standard colors for agent channels to support any color combination
+        # No query agent channel - state encoding is fully agent-agnostic
         self.num_object_channels = NUM_OBJECT_TYPE_CHANNELS
         self.num_other_channels = 3  # overlappable, immobile, mobile
         self.agent_channels_start = self.num_object_channels + self.num_other_channels
-        self.query_agent_channel = self.agent_channels_start + NUM_STANDARD_COLORS  # Use all colors
-        self.num_grid_channels = self.query_agent_channel + 1
+        self.num_grid_channels = self.agent_channels_start + NUM_STANDARD_COLORS
         
         # Grid encoder (CNN)
         self.grid_conv = nn.Sequential(
@@ -114,9 +119,10 @@ class MultiGridStateEncoder(BaseStateEncoder):
         )
         
         # Agent encoder (MLP)
+        # Encodes all agents organized by color (no separate query agent features)
         self.color_order = sorted(num_agents_per_color.keys())
         total_agents = sum(num_agents_per_color.values())
-        agent_input_size = AGENT_FEATURE_SIZE * (1 + total_agents)  # query + per-color lists
+        agent_input_size = AGENT_FEATURE_SIZE * total_agents  # per-color lists only
         agent_feature_dim = 64
         self.agent_fc = nn.Sequential(
             nn.Linear(agent_input_size, agent_feature_dim * 2),
@@ -153,6 +159,26 @@ class MultiGridStateEncoder(BaseStateEncoder):
         self._interactive_feature_dim = interactive_feature_dim
         self._agent_input_size = agent_input_size
         self._interactive_input_size = interactive_input_size
+        
+        # Internal cache for raw tensor extraction (before NN forward)
+        # Keys are state_id (int), values are raw tensor tuples
+        # Cache is query-agent agnostic since state encoding doesn't depend on query agent
+        self._raw_cache: Dict[int, Tuple[torch.Tensor, ...]] = {}
+        self._cache_hits = 0
+        self._cache_misses = 0
+    
+    def clear_cache(self):
+        """Clear the internal raw tensor cache."""
+        self._raw_cache.clear()
+    
+    def get_cache_stats(self) -> Tuple[int, int]:
+        """Return (hits, misses) cache statistics."""
+        return self._cache_hits, self._cache_misses
+    
+    def reset_cache_stats(self):
+        """Reset cache hit/miss counters."""
+        self._cache_hits = 0
+        self._cache_misses = 0
     
     def forward(
         self,
@@ -195,40 +221,62 @@ class MultiGridStateEncoder(BaseStateEncoder):
         self,
         state: Tuple,
         world_model: Any,
-        query_agent_idx: int,
         device: str = 'cpu'
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Encode a single state.
+        Extract raw tensors from a state (before NN forward).
+        
+        This method extracts grid, global, agent, and interactive features from
+        the state tuple. Results are cached by state_id to avoid redundant
+        extraction when the same state is used multiple times.
+        
+        The encoding is fully agent-agnostic - it does not depend on any
+        particular agent's perspective. Agent identity is handled separately
+        by the AgentIdentityEncoder.
+        
+        Note: This returns raw tensors, not NN-processed features. Call forward()
+        on these tensors to get the final encoded representation.
         
         Args:
             state: (step_count, agent_states, mobile_objects, mutable_objects)
             world_model: Environment with grid and agents.
-            query_agent_idx: Index of agent being queried.
             device: Torch device.
         
         Returns:
             Tuple of (grid_tensor, global_features, agent_features, interactive_features)
         """
+        # Check cache first (agent-agnostic, keyed only by state)
+        cache_key = id(state)
+        if cache_key in self._raw_cache:
+            self._cache_hits += 1
+            # Clone cached tensors to avoid in-place operation conflicts
+            # during gradient computation when same state is used multiple times
+            cached = self._raw_cache[cache_key]
+            return tuple(t.clone() for t in cached)
+        
+        self._cache_misses += 1
+        
         step_count, agent_states, mobile_objects, mutable_objects = state
         H, W = self.grid_height, self.grid_width
         
-        # Encode grid
+        # Encode grid (agent-agnostic)
         grid_tensor = torch.zeros(1, self.num_grid_channels, H, W, device=device)
         self._encode_grid(grid_tensor, world_model, agent_states, 
-                          mobile_objects, mutable_objects, query_agent_idx)
+                          mobile_objects, mutable_objects)
         
         # Global features
         global_features = extract_global_world_features(state, world_model, device)
         global_features = global_features.unsqueeze(0)
         
-        # Agent features
-        agent_features = self._encode_agents(agent_states, world_model, query_agent_idx, device)
+        # Agent features (all agents by color, no query-specific features)
+        agent_features = self._encode_agents(agent_states, world_model, device)
         
         # Interactive object features
         interactive_features = self._encode_interactive(state, world_model, device)
         
-        return grid_tensor, global_features, agent_features, interactive_features
+        result = (grid_tensor, global_features, agent_features, interactive_features)
+        self._raw_cache[cache_key] = result
+        return result
     
     def _encode_grid(
         self,
@@ -236,8 +284,7 @@ class MultiGridStateEncoder(BaseStateEncoder):
         world_model: Any,
         agent_states: list,
         mobile_objects: list,
-        mutable_objects: list,
-        query_agent_idx: int
+        mutable_objects: list
     ):
         """Encode grid objects into tensor.
         
@@ -306,14 +353,6 @@ class MultiGridStateEncoder(BaseStateEncoder):
                     if color in COLOR_TO_IDX:
                         channel = self.agent_channels_start + COLOR_TO_IDX[color]
                         grid_tensor[0, channel, y, x] = 1.0
-        
-        # Encode query agent
-        if query_agent_idx is not None and query_agent_idx < len(agent_states):
-            agent_state = agent_states[query_agent_idx]
-            if agent_state[0] is not None:
-                x, y = int(agent_state[0]), int(agent_state[1])
-                if 0 <= x < W and 0 <= y < H:
-                    grid_tensor[0, self.query_agent_channel, y, x] = 1.0
     
     def _encode_door(self, cell, x: int, y: int, mutable_objects, grid_tensor: torch.Tensor):
         """Encode door into per-color channel."""
@@ -383,15 +422,14 @@ class MultiGridStateEncoder(BaseStateEncoder):
         self,
         agent_states: list,
         world_model: Any,
-        query_agent_idx: int,
         device: str
     ) -> torch.Tensor:
-        """Encode agent features."""
-        query_features, color_features = extract_all_agent_features(
-            agent_states, world_model, query_agent_idx, self.num_agents_per_color
+        """Encode agent features (all agents organized by color, agent-agnostic)."""
+        color_features = extract_all_agent_features(
+            agent_states, world_model, self.num_agents_per_color
         )
         
-        all_features = [query_features]
+        all_features = []
         for color in self.color_order:
             if color in color_features:
                 all_features.append(color_features[color].flatten())

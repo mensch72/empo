@@ -1,10 +1,14 @@
-# Encoder Architecture for Neural Policy Priors
+# Encoder Architecture for Neural Networks
 
-This document explains the architecture of the neural network encoders used in the `NeuralHumanPolicyPrior` system, including the rationale for certain design decisions.
+This document explains the architecture of the neural network encoders used in the EMPO system, including Phase 1 (human policy priors) and Phase 2 (robot Q-functions).
 
 ## Overview
 
-The neural policy prior system uses a modular architecture with base classes and domain-specific implementations:
+The neural systems use a modular architecture with base classes and domain-specific implementations.
+
+---
+
+## Phase 1: Human Policy Priors
 
 ### Base Classes (nn_based/)
 
@@ -26,7 +30,104 @@ The neural policy prior system uses a modular architecture with base classes and
 - **MultiGridQNetwork** - Combines state and goal encoders
 - **MultiGridNeuralHumanPolicyPrior** - With multigrid-specific validation
 
-## Design Principle: Unified State Encoding
+---
+
+## Phase 2: Robot Q-Functions with Dual Encoder Architecture
+
+Phase 2 trains five networks for the robot's empowerment-based decision making:
+- **Q_r**: Robot action-value function
+- **V_r**: Robot state-value function
+- **V_h^e**: Human expected value function (for empowerment computation)
+- **X_h**: Aggregate human goal-achievement ability
+- **U_r**: Robot empowerment utility function
+
+### Encoder Sharing Strategy
+
+**Key Design Principle**: To avoid gradient conflicts and enable efficient learning, we use a **shared-plus-own encoder architecture**:
+
+```
+                    ┌─────────────────────────────────────────────────┐
+                    │              SHARED ENCODERS                     │
+                    │  (state_encoder, goal_encoder, agent_encoder)    │
+                    │                                                  │
+                    │     Trained ONLY by V_h^e loss                   │
+                    │     (receives un-detached encoder outputs)       │
+                    └─────────────────────────────────────────────────┘
+                                         │
+                    ┌────────────────────┴────────────────────┐
+                    │                                          │
+                    ▼                                          ▼
+           DETACHED outputs to:                        UN-DETACHED to:
+           - Q_r, V_r, X_h, U_r                        - V_h^e only
+```
+
+### Network-Specific Encoders
+
+**Important**: All state encoders produce **agent-agnostic** representations. They encode the full world state without any query-agent-specific features. Agent identity is handled separately by `AgentIdentityEncoder` which encodes agent index, position on grid, and features.
+
+**Q_r (Robot Q-function)**:
+- Uses `shared_state_encoder` (detached) for general state features (agent-agnostic)
+- Has `own_state_encoder` (trained with Q_r loss) for additional state features (also agent-agnostic)
+- Concatenates both: `[shared_state_features, own_state_features]`
+- Input dimension to MLP is doubled
+
+**X_h (Aggregate Goal Ability)**:
+- Uses `shared_agent_encoder` (detached) for general human identity features
+- Has `own_agent_encoder` (trained with X_h loss) for ability-specific human features
+- Concatenates: `[state_features, shared_agent_embedding, own_agent_embedding]`
+
+**V_h^e, V_r, U_r**:
+- Use only shared encoders
+- V_h^e trains the shared encoders (no detach)
+- V_r and U_r train only their MLP heads (shared encoders detached)
+
+### Gradient Flow Diagram
+
+```
+                          TRAINING STEP
+                               │
+                               ▼
+              ┌────────────────────────────────────┐
+              │         Compute all losses         │
+              │   (Q_r, V_r, V_h^e, X_h, U_r)      │
+              └────────────────────────────────────┘
+                               │
+                               ▼
+              ┌────────────────────────────────────┐
+              │       Single backward() call       │
+              │       (all losses summed)          │
+              └────────────────────────────────────┘
+                               │
+           ┌───────────────────┼───────────────────────────┐
+           │                   │                            │
+           ▼                   ▼                            ▼
+    ┌──────────────┐   ┌──────────────┐            ┌──────────────┐
+    │   V_h^e      │   │  Q_r, V_r    │            │   X_h, U_r   │
+    │  loss        │   │  losses      │            │   losses     │
+    └──────────────┘   └──────────────┘            └──────────────┘
+           │                   │                            │
+           ▼                   ▼                            ▼
+    Updates:             Updates:                    Updates:
+    - shared encoders    - Q_r MLP head             - X_h/U_r MLP heads
+    - V_h^e MLP head     - Q_r own_state_encoder    - X_h own_agent_encoder
+                         - V_r MLP head
+```
+
+### Why This Architecture?
+
+1. **Gradient Conflict Avoidance**: Different networks have different objectives. Having V_h^e train shared encoders while others use detached outputs prevents conflicting gradient signals.
+
+2. **Specialized Feature Learning**: Q_r needs state features optimized for robot action selection, while X_h needs agent features optimized for predicting human goal-achievement. Their own encoders can learn these specialized representations.
+
+3. **Efficient Shared Learning**: V_h^e is trained on human Q-values from Phase 1, which provides a strong learning signal for general state/goal/agent representations that benefit all networks.
+
+4. **Stability**: Detaching shared encoder outputs for most networks prevents loss scale differences from destabilizing the shared encoder training.
+
+---
+
+## Common Design Principles
+
+### Design Principle: Unified State Encoding
 
 The `MultiGridStateEncoder` encodes the **complete world state** as a single feature vector. This includes:
 
@@ -37,7 +138,7 @@ The `MultiGridStateEncoder` encodes the **complete world state** as a single fea
 
 Goals are encoded separately by `GoalEncoder` because they represent the agent's objective, not the world state itself.
 
-## Design Principle: No Normalization
+### Design Principle: No Normalization
 
 **All values are passed as raw integers/floats, NOT normalized.** This is intentional because:
 
@@ -46,7 +147,7 @@ Goals are encoded separately by `GoalEncoder` because they represent the agent's
 3. **Simplicity**: No need for denormalization or scaling factors during inference
 4. **Policy transfer**: Using absolute coordinates enables loading policies trained on larger grids for use on smaller grids
 
-## Cross-Grid Policy Loading
+### Cross-Grid Policy Loading
 
 Policies trained on larger grids can be loaded and used on smaller grids. This enables:
 
@@ -62,7 +163,7 @@ When a policy trained on a larger grid is loaded for a smaller grid:
 
 Loading a policy trained on a **smaller** grid for a **larger** grid is not supported, as coordinates would be out of bounds.
 
-## Design Principle: Grid vs. List Encoding
+### Design Principle: Grid vs. List Encoding
 
 Within the unified StateEncoder, two complementary strategies are used:
 
@@ -73,6 +174,8 @@ This separation enables:
 1. Policy transfer across different entity counts
 2. Rich feature encoding without exponential channel growth
 3. Efficient CNN processing for spatial information
+
+---
 
 ## MultiGridStateEncoder Structure
 
@@ -133,6 +236,8 @@ Note: The `awaiting_action` flag persists across time steps.
 ## MultiGridGoalEncoder
 
 Goals are encoded with raw coordinates (2 values): x, y
+
+---
 
 ## Policy Transfer Capabilities
 

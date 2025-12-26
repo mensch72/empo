@@ -126,11 +126,24 @@ class BaseRobotQNetwork(nn.Module, ABC):
         neg_q = torch.clamp(neg_q, min=1e-10)
         
         # Power-law: (-Q)^{-β} = 1 / (-Q)^β
-        # Higher β makes this more peaked (deterministic)
-        unnormalized = neg_q ** (-self.beta_r)
+        # Use log-space computation for numerical stability to avoid inf/nan
+        # log((-Q)^{-β}) = -β * log(-Q)
+        log_unnormalized = -self.beta_r * torch.log(neg_q)
+        
+        # Subtract max for numerical stability before exp (log-sum-exp trick)
+        log_unnormalized = log_unnormalized - log_unnormalized.max(dim=-1, keepdim=True)[0]
+        
+        # Exponentiate and normalize
+        unnormalized = torch.exp(log_unnormalized)
         
         # Normalize to get probabilities
-        return unnormalized / unnormalized.sum(dim=-1, keepdim=True)
+        policy = unnormalized / unnormalized.sum(dim=-1, keepdim=True)
+        
+        # Final safety clamp to ensure valid probabilities
+        policy = torch.clamp(policy, min=1e-10, max=1.0)
+        policy = policy / policy.sum(dim=-1, keepdim=True)
+        
+        return policy
     
     def get_value(self, q_values: torch.Tensor) -> torch.Tensor:
         """

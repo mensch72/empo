@@ -109,6 +109,21 @@ class BaseIntrinsicRewardNetwork(nn.Module, ABC):
         """
         return 1.0 + torch.exp(log_y_minus_1)
     
+    def y_to_log_y_minus_1(self, y: torch.Tensor) -> torch.Tensor:
+        """
+        Convert y to log(y-1) for loss computation in log-space.
+        
+        This is the inverse of log_y_minus_1_to_y.
+        
+        Args:
+            y: Target y values > 1.
+        
+        Returns:
+            log(y-1) values.
+        """
+        # Clamp y-1 to avoid log(0) when y is very close to 1
+        return torch.log(torch.clamp(y - 1.0, min=1e-6))
+    
     def y_to_u_r(self, y: torch.Tensor) -> torch.Tensor:
         """
         Convert y to U_r.

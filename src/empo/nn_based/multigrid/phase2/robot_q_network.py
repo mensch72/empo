@@ -57,7 +57,9 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
         max_kill_buttons: int = 4,
         max_pause_switches: int = 4,
         max_disabling_switches: int = 4,
-        max_control_buttons: int = 4
+        max_control_buttons: int = 4,
+        state_encoder: Optional[MultiGridStateEncoder] = None,
+        own_state_encoder: Optional[MultiGridStateEncoder] = None
     ):
         super().__init__(
             num_actions=num_robot_actions,
@@ -70,24 +72,47 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
         self.grid_width = grid_width
         self.hidden_dim = hidden_dim
         self.dropout_rate = dropout
+        self.state_feature_dim = state_feature_dim
         
-        # State encoder (reuse existing multigrid encoder)
-        self.state_encoder = MultiGridStateEncoder(
-            grid_height=grid_height,
-            grid_width=grid_width,
-            num_agents_per_color=num_agents_per_color,
-            num_agent_colors=num_agent_colors,
-            feature_dim=state_feature_dim,
-            max_kill_buttons=max_kill_buttons,
-            max_pause_switches=max_pause_switches,
-            max_disabling_switches=max_disabling_switches,
-            max_control_buttons=max_control_buttons
-        )
+        # Use shared state encoder or create own
+        if state_encoder is not None:
+            self.state_encoder = state_encoder
+        else:
+            self.state_encoder = MultiGridStateEncoder(
+                grid_height=grid_height,
+                grid_width=grid_width,
+                num_agents_per_color=num_agents_per_color,
+                num_agent_colors=num_agent_colors,
+                feature_dim=state_feature_dim,
+                max_kill_buttons=max_kill_buttons,
+                max_pause_switches=max_pause_switches,
+                max_disabling_switches=max_disabling_switches,
+                max_control_buttons=max_control_buttons
+            )
+        
+        # Own state encoder for Q_r-specific features (trained with Q_r loss)
+        # This allows Q_r to learn additional state features beyond those learned by V_h^e
+        if own_state_encoder is not None:
+            self.own_state_encoder = own_state_encoder
+        else:
+            self.own_state_encoder = MultiGridStateEncoder(
+                grid_height=grid_height,
+                grid_width=grid_width,
+                num_agents_per_color=num_agents_per_color,
+                num_agent_colors=num_agent_colors,
+                feature_dim=state_feature_dim,
+                max_kill_buttons=max_kill_buttons,
+                max_pause_switches=max_pause_switches,
+                max_disabling_switches=max_disabling_switches,
+                max_control_buttons=max_control_buttons
+            )
         
         # Q-value head for joint actions with optional dropout
+        # Uses BOTH shared state encoder (frozen) and own state encoder (trained)
+        combined_state_dim = state_feature_dim * 2  # Two encoders
         if dropout > 0.0:
             self.q_head = nn.Sequential(
-                nn.Linear(state_feature_dim, hidden_dim),
+                nn.Linear(combined_state_dim, hidden_dim),
                 nn.ReLU(),
                 nn.Dropout(dropout),
                 nn.Linear(hidden_dim, hidden_dim),
@@ -97,7 +122,7 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
             )
         else:
             self.q_head = nn.Sequential(
-                nn.Linear(state_feature_dim, hidden_dim),
+                nn.Linear(combined_state_dim, hidden_dim),
                 nn.ReLU(),
                 nn.Linear(hidden_dim, hidden_dim),
                 nn.ReLU(),
@@ -109,27 +134,46 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
         grid_tensor: torch.Tensor,
         global_features: torch.Tensor,
         agent_features: torch.Tensor,
-        interactive_features: torch.Tensor
+        interactive_features: torch.Tensor,
+        own_grid_tensor: Optional[torch.Tensor] = None,
+        own_global_features: Optional[torch.Tensor] = None,
+        own_agent_features: Optional[torch.Tensor] = None,
+        own_interactive_features: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
         Compute Q_r(s, a_r) for all joint robot actions.
         
         Args:
-            grid_tensor: (batch, num_grid_channels, H, W)
-            global_features: (batch, NUM_GLOBAL_WORLD_FEATURES)
-            agent_features: (batch, agent_input_size)
-            interactive_features: (batch, interactive_input_size)
+            grid_tensor: (batch, num_grid_channels, H, W) for shared encoder
+            global_features: (batch, NUM_GLOBAL_WORLD_FEATURES) for shared encoder
+            agent_features: (batch, agent_input_size) for shared encoder
+            interactive_features: (batch, interactive_input_size) for shared encoder
+            own_grid_tensor: (batch, num_grid_channels, H, W) for own encoder (uses shared if None)
+            own_global_features: for own encoder
+            own_agent_features: for own encoder
+            own_interactive_features: for own encoder
         
         Returns:
             Q-values tensor (batch, num_action_combinations) with Q_r < 0.
         """
-        # Encode state
-        state_features = self.state_encoder(
+        # Encode state with shared encoder (frozen during Q_r training)
+        shared_state_features = self.state_encoder(
             grid_tensor, global_features, agent_features, interactive_features
         )
         
+        # Encode state with own encoder (trained with Q_r loss)
+        # Use same inputs if own_ versions not provided
+        own_grid = own_grid_tensor if own_grid_tensor is not None else grid_tensor
+        own_glob = own_global_features if own_global_features is not None else global_features
+        own_agent = own_agent_features if own_agent_features is not None else agent_features
+        own_inter = own_interactive_features if own_interactive_features is not None else interactive_features
+        own_state_features = self.own_state_encoder(own_grid, own_glob, own_agent, own_inter)
+        
+        # Concatenate both state encodings
+        combined_features = torch.cat([shared_state_features, own_state_features], dim=-1)
+        
         # Compute raw Q-values
-        raw_q = self.q_head(state_features)
+        raw_q = self.q_head(combined_features)
         
         # Ensure Q_r < 0
         q_values = self.ensure_negative(raw_q)
@@ -156,38 +200,50 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
         Returns:
             Q-values tensor (1, num_action_combinations).
         """
-        # Use first robot as query agent for encoding
-        # (state encoding doesn't depend much on query agent for Q_r)
-        query_agent_idx = 0
-        if hasattr(world_model, 'robot_indices') and world_model.robot_indices:
-            query_agent_idx = world_model.robot_indices[0]
-        
-        # Encode state
+        # Encode state with shared encoder (agent-agnostic)
         grid_tensor, global_features, agent_features, interactive_features = \
-            self.state_encoder.encode_state(state, world_model, query_agent_idx, device)
+            self.state_encoder.encode_state(state, world_model, device)
         
-        return self.forward(grid_tensor, global_features, agent_features, interactive_features)
+        # Encode state with own encoder (same state, separate encoding)
+        own_grid, own_glob, own_agent, own_inter = \
+            self.own_state_encoder.encode_state(state, world_model, device)
+        
+        return self.forward(
+            grid_tensor, global_features, agent_features, interactive_features,
+            own_grid, own_glob, own_agent, own_inter
+        )
     
     def forward_from_encoded(
         self,
         grid_tensor: torch.Tensor,
         global_features: torch.Tensor,
         agent_features: torch.Tensor,
-        interactive_features: torch.Tensor
+        interactive_features: torch.Tensor,
+        own_grid_tensor: Optional[torch.Tensor] = None,
+        own_global_features: Optional[torch.Tensor] = None,
+        own_agent_features: Optional[torch.Tensor] = None,
+        own_interactive_features: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
         Forward pass with pre-encoded state features (for batched training).
         
         Args:
-            grid_tensor: (batch, num_grid_channels, H, W)
-            global_features: (batch, NUM_GLOBAL_WORLD_FEATURES)
-            agent_features: (batch, agent_input_size)
-            interactive_features: (batch, interactive_input_size)
+            grid_tensor: (batch, num_grid_channels, H, W) for shared encoder
+            global_features: (batch, NUM_GLOBAL_WORLD_FEATURES) for shared encoder
+            agent_features: (batch, agent_input_size) for shared encoder
+            interactive_features: (batch, interactive_input_size) for shared encoder
+            own_grid_tensor: for own encoder (uses shared if None)
+            own_global_features: for own encoder
+            own_agent_features: for own encoder
+            own_interactive_features: for own encoder
         
         Returns:
             Q-values tensor (batch, num_action_combinations) with Q_r < 0.
         """
-        return self.forward(grid_tensor, global_features, agent_features, interactive_features)
+        return self.forward(
+            grid_tensor, global_features, agent_features, interactive_features,
+            own_grid_tensor, own_global_features, own_agent_features, own_interactive_features
+        )
     
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for save/load."""

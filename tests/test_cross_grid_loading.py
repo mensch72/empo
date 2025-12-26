@@ -123,9 +123,9 @@ def test_state_encoder_padding():
     world_model = MockWorldModel(width=10, height=10)
     state = create_mock_state()
     
-    # Encode state
+    # Encode state (agent-agnostic)
     grid_tensor, global_features, agent_features, interactive_features = \
-        encoder.encode_state(state, world_model, query_agent_idx=0)
+        encoder.encode_state(state, world_model)
     
     # Check dimensions
     assert grid_tensor.shape == (1, encoder.num_grid_channels, 15, 15)

@@ -59,11 +59,11 @@ class Phase2Config:
     epsilon_r_decay_steps: int = 10000
     
     # Learning rates (may need adjustment for time-scale separation)
-    lr_q_r: float = 1e-3
-    lr_v_r: float = 1e-3
+    lr_q_r: float = 1e-4
+    lr_v_r: float = 1e-4
     lr_v_h_e: float = 1e-3
-    lr_x_h: float = 1e-3
-    lr_u_r: float = 1e-3
+    lr_x_h: float = 1e-4
+    lr_u_r: float = 1e-4
     
     # Target network updates
     v_r_target_update_freq: int = 100
