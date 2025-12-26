@@ -282,18 +282,27 @@ def _extract_control_button(cell: Any, x: int, y: int) -> torch.Tensor:
 def extract_global_world_features(
     state: Tuple,
     world_model: Any,
-    device: str = 'cpu'
+    device: str = 'cpu',
+    include_step_count: bool = True
 ) -> torch.Tensor:
     """
     Extract global world features.
     
     Returns tensor with: remaining_time, stumble_prob, magic_entry_prob, magic_solidify_prob
+    
+    Args:
+        state: Environment state tuple.
+        world_model: Environment with max_steps, stumble_prob, etc.
+        device: Torch device.
+        include_step_count: If False, set remaining_time to 0 (for debugging time influence).
     """
     features = torch.zeros(4, device=device)
     
-    step_count = state[0] if state else 0
-    max_steps = getattr(world_model, 'max_steps', 100) if world_model else 100
-    features[0] = float(max_steps - step_count)  # remaining_time (raw integer)
+    if include_step_count:
+        step_count = state[0] if state else 0
+        max_steps = getattr(world_model, 'max_steps', 100) if world_model else 100
+        features[0] = float(max_steps - step_count)  # remaining_time (raw integer)
+    # else: features[0] remains 0
     
     if world_model is not None:
         features[1] = float(getattr(world_model, 'stumble_prob', 0.0))

@@ -82,7 +82,8 @@ class MultiGridStateEncoder(BaseStateEncoder):
         max_kill_buttons: int = 4,
         max_pause_switches: int = 4,
         max_disabling_switches: int = 4,
-        max_control_buttons: int = 4
+        max_control_buttons: int = 4,
+        include_step_count: bool = True
     ):
         super().__init__(feature_dim)
         self.grid_height = grid_height
@@ -93,6 +94,7 @@ class MultiGridStateEncoder(BaseStateEncoder):
         self.max_pause_switches = max_pause_switches
         self.max_disabling_switches = max_disabling_switches
         self.max_control_buttons = max_control_buttons
+        self.include_step_count = include_step_count
         
         # Grid channel structure
         # Use all standard colors for agent channels to support any color combination
@@ -268,8 +270,10 @@ class MultiGridStateEncoder(BaseStateEncoder):
         self._encode_grid(grid_tensor, world_model, agent_states, 
                           mobile_objects, mutable_objects)
         
-        # Global features
-        global_features = extract_global_world_features(state, world_model, device)
+        # Global features (with optional step count)
+        global_features = extract_global_world_features(
+            state, world_model, device, include_step_count=self.include_step_count
+        )
         global_features = global_features.unsqueeze(0)
         
         # Agent features (all agents by color, no query-specific features)
@@ -476,4 +480,5 @@ class MultiGridStateEncoder(BaseStateEncoder):
             'max_pause_switches': self.max_pause_switches,
             'max_disabling_switches': self.max_disabling_switches,
             'max_control_buttons': self.max_control_buttons,
+            'include_step_count': self.include_step_count,
         }

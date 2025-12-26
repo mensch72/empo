@@ -7,6 +7,9 @@ Verifies basic repository structure and imports.
 import sys
 from pathlib import Path
 
+# Get project root directory (resolve to handle symlinks properly)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
 
 def test_import_empo():
     """Test that the empo package can be imported.
@@ -26,22 +29,22 @@ def test_import_empo():
 
 def test_requirements_exist():
     """Test that requirement files exist."""
-    req_file = Path(__file__).parent.parent / "requirements.txt"
-    req_dev_file = Path(__file__).parent.parent / "requirements-dev.txt"
-    assert req_file.exists(), "requirements.txt not found"
-    assert req_dev_file.exists(), "requirements-dev.txt not found"
+    req_file = PROJECT_ROOT / "requirements.txt"
+    req_dev_file = PROJECT_ROOT / "requirements-dev.txt"
+    assert req_file.exists(), f"requirements.txt not found at {req_file}"
+    assert req_dev_file.exists(), f"requirements-dev.txt not found at {req_dev_file}"
 
 
 def test_dockerfile_exists():
     """Test that Dockerfile exists."""
-    dockerfile = Path(__file__).parent.parent / "Dockerfile"
-    assert dockerfile.exists(), "Dockerfile not found"
+    dockerfile = PROJECT_ROOT / "Dockerfile"
+    assert dockerfile.exists(), f"Dockerfile not found at {dockerfile}"
 
 
 def test_docker_compose_exists():
     """Test that docker-compose.yml exists."""
-    compose_file = Path(__file__).parent.parent / "docker-compose.yml"
-    assert compose_file.exists(), "docker-compose.yml not found"
+    compose_file = PROJECT_ROOT / "docker-compose.yml"
+    assert compose_file.exists(), f"docker-compose.yml not found at {compose_file}"
 
 
 def main():

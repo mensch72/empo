@@ -157,6 +157,10 @@ class Phase2Config:
     # instead of using a separate network. This reduces complexity since V_r = U_r + π_r · Q_r.
     v_r_use_network: bool = False
     
+    # Whether to include step count (remaining time) in state encoding.
+    # Set to False to verify that identical grid states get identical values.
+    include_step_count: bool = True
+    
     # Network architecture
     hidden_dim: int = 256
     state_feature_dim: int = 256

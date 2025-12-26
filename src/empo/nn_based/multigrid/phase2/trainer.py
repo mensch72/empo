@@ -873,6 +873,7 @@ def create_phase2_networks(
         num_agents_per_color=num_agents_per_color,
         num_agent_colors=7,
         feature_dim=hidden_dim,
+        include_step_count=config.include_step_count,
     ).to(device)
     
     shared_goal_encoder = MultiGridGoalEncoder(
@@ -896,6 +897,7 @@ def create_phase2_networks(
         num_agents_per_color=num_agents_per_color,
         num_agent_colors=7,
         feature_dim=hidden_dim,
+        include_step_count=config.include_step_count,
     ).to(device)
     
     x_h_own_agent_encoder = AgentIdentityEncoder(

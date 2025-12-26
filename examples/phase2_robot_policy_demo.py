@@ -133,6 +133,15 @@ def run_policy_rollout(
     Returns:
         Number of steps taken.
     """
+    # Set all networks to eval mode to disable dropout during inference
+    # This ensures consistent value predictions for the same state
+    robot_q_network.eval()
+    if networks is not None:
+        networks.u_r.eval()
+        networks.v_r.eval()
+        networks.v_h_e.eval()
+        networks.x_h.eval()
+    
     env.reset()
     num_actions = env.action_space.n
     steps_taken = 0
@@ -198,7 +207,8 @@ def run_policy_rollout(
         """Get the greedy action for annotation (what robot would do from this state)."""
         with torch.no_grad():
             q_values = robot_q_network.encode_and_forward(state, env, device)
-            robot_action = robot_q_network.sample_action(q_values, epsilon=0.0)
+            beta_r = config.beta_r if config else 10.0
+            robot_action = robot_q_network.sample_action(q_values, epsilon=0.0, beta_r=beta_r)
             return robot_action[0] if len(robot_action) > 0 else None
     
     # Render initial frame with annotations (showing what action would be taken)
@@ -218,8 +228,9 @@ def run_policy_rollout(
         # Robots use learned Q-network
         with torch.no_grad():
             q_values = robot_q_network.encode_and_forward(state, env, device)
-            # Use greedy action (epsilon=0)
-            robot_action = robot_q_network.sample_action(q_values, epsilon=0.0)
+            # Use greedy action (epsilon=0) with final beta_r for concentrated policy
+            beta_r = config.beta_r if config else 10.0
+            robot_action = robot_q_network.sample_action(q_values, epsilon=0.0, beta_r=beta_r)
             
             # Assign actions to robots
             for i, r in enumerate(robot_indices):
