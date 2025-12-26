@@ -20,8 +20,8 @@ def test_import_empo():
     except ImportError:
         # Dependencies not installed - skip this test gracefully
         # The Docker build will catch real import issues
-        import pytest
-        pytest.skip("Missing dependencies - run in Docker for full validation")
+        print("SKIPPED: Missing dependencies - run in Docker for full validation")
+        return  # Skip without pytest
 
 
 def test_requirements_exist():
@@ -46,8 +46,31 @@ def test_docker_compose_exists():
 
 def main():
     """Run all tests when executed directly."""
-    import pytest
-    pytest.main([__file__, "-v"])
+    tests = [
+        test_import_empo,
+        test_requirements_exist,
+        test_dockerfile_exists,
+        test_docker_compose_exists,
+    ]
+    
+    failed = []
+    for test in tests:
+        try:
+            print(f"Running {test.__name__}...", end=" ")
+            test()
+            print("PASSED")
+        except AssertionError as e:
+            print(f"FAILED: {e}")
+            failed.append(test.__name__)
+        except Exception as e:
+            print(f"ERROR: {e}")
+            failed.append(test.__name__)
+    
+    if failed:
+        print(f"\n{len(failed)} test(s) failed: {failed}")
+        sys.exit(1)
+    else:
+        print(f"\nAll {len(tests)} tests passed!")
 
 
 if __name__ == "__main__":
