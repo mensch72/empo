@@ -81,14 +81,14 @@ class BaseRobotPolicy(ABC):
         """
         pass
     
-    def get_action(
+    def sample(
         self,
         state: Any,
         world_model: Any,
         epsilon: float = 0.0
     ) -> Tuple[int, ...]:
         """
-        Get robot action for a state.
+        Sample robot action for a state.
         
         Args:
             state: Current environment state.
@@ -114,7 +114,7 @@ class BaseRobotPolicy(ABC):
         Returns:
             Tuple of robot actions.
         """
-        return self.get_action(state, world_model, epsilon=0.0)
+        return self.sample(state, world_model, epsilon=0.0)
     
     def get_q_values(self, state: Any, world_model: Any) -> torch.Tensor:
         """
