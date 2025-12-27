@@ -141,31 +141,21 @@ The `Phase2Transition` dataclass correctly documents this as a 4-tuple, but `pus
 
 ---
 
-### P2-DISC-002: U_r loss always computed even when `u_r_use_network=False`
-**Priority:** Medium  
+### P2-DISC-002: U_r loss computed in `compute_losses()` but conditionally used
+**Priority:** Low  
 **Location:** `src/empo/nn_based/multigrid/phase2/trainer.py:766-826`  
 **Description:**  
-In `MultiGridPhase2Trainer.compute_losses()`, the U_r loss computation is always performed (lines 766-826), but the loss dict only conditionally includes it when `v_r_use_network=True` (line 919). When `u_r_use_network=False` (the default), this computation is wasted.
+In `MultiGridPhase2Trainer.compute_losses()`, U_r forward pass and loss computation are always performed, but when `u_r_use_network=False` the loss is never used for training (no optimizer is created, see `_init_optimizers`). This is a minor efficiency issue—the computation is wasted but the network is correctly NOT trained.
 
-However, this is partially intentional since U_r values are still needed for Q_r targets. The issue is that the code computes a full loss but never uses it, which is inefficient.
+Note: The U_r network's forward pass is intentional since U_r values are needed for Q_r targets and other computations regardless of the `u_r_use_network` setting.
 
 ---
 
-### P2-DOC-001: WARMUP_DESIGN.md Stage 2 description mentions X_h dependency incorrectly
+### ~~P2-DOC-001: WARMUP_DESIGN.md Stage 2 description mentions X_h dependency incorrectly~~ [FIXED]
 **Priority:** Low  
-**Location:** `docs/WARMUP_DESIGN.md:57-59`  
+**Location:** `docs/WARMUP_DESIGN.md:55-58`  
 **Description:**  
-The documentation states "X_h predicts where the state will be after human and robot actions" which is incorrect. X_h predicts the aggregate goal achievement ability E[V_h^e^ζ] across goals for a human, not state transitions.
-
-**Current text:**
-```
-X_h predicts where the state will be after human and robot actions.
-```
-
-**Suggested fix:**
-```
-X_h predicts the aggregate goal achievement ability of human h, computed as E_{g_h}[V_h^e(s, g_h)^ζ] over possible goals.
-```
+~~The documentation stated "X_h predicts where the state will be after human and robot actions" which is incorrect.~~ Fixed to correctly describe X_h as predicting aggregate goal achievement ability.
 
 ---
 
@@ -177,23 +167,25 @@ The comment mentions "warmup_v_r_steps would be set to 0 if v_r_use_network=Fals
 
 ---
 
-### P2-DOC-003: Stale example in WARMUP_DESIGN.md
+### ~~P2-DOC-003: Stale example in WARMUP_DESIGN.md~~ [FIXED]
 **Priority:** Low  
-**Location:** `docs/WARMUP_DESIGN.md:197-211`  
+**Location:** `docs/WARMUP_DESIGN.md:211`  
 **Description:**  
-The "Shorter Warmup for Simple Environments" example ends with triple backticks that look like leftover formatting. The last line is:
-```python
-# Total: 800-1000 steps warmup + 400 steps ramp-up
-```
-followed by another triple-backtick block marker that creates empty formatting.
+~~The "Shorter Warmup for Simple Environments" example had an extra triple-backtick creating empty formatting.~~ Fixed by removing the duplicate backticks.
 
 ---
 
-### P2-PERF-001: Model-based targets recompute transition probabilities for some cases
-**Priority:** Medium  
+### ~~P2-PERF-001: Model-based targets recompute transition probabilities for some cases~~ [INVALID]
+**Status:** Invalid - transition probabilities ARE cached at collection time  
 **Location:** `src/empo/nn_based/multigrid/phase2/trainer.py:379-397`  
 **Description:**  
-In `_compute_model_based_targets_for_transition()`, when `cached_trans_probs` is None, transition probabilities are recomputed on the fly. However, this fallback path recomputes for each call even when the same state/actions would be queried multiple times. The caching at collection time handles most cases, but during early warmup when transition probs aren't cached, this could be inefficient.
+The fallback path in `_compute_model_based_targets_for_transition()` that recomputes transition probabilities is a safety net that should rarely be hit. Transition probabilities are pre-computed at collection time via `_precompute_transition_probs()` (lines 422-468 in base trainer) and stored in `Phase2Transition.transition_probs_by_action`. The trainer uses these cached values via `cached_trans_probs = t.transition_probs_by_action` (line 698).
+
+The fallback only triggers when:
+1. `use_model_based_targets=True` but Q_r was not active during collection (early warmup)
+2. The environment doesn't support `transition_probabilities()`
+
+This is correct design, not a performance issue.
 
 ---
 
@@ -317,17 +309,15 @@ This is especially relevant during beta_r ramp-up when the policy changes rapidl
 
 ---
 
-### P2-EXPECT-002: Ensemble training not explicitly demonstrated
-**Priority:** Medium  
-**Location:** `examples/phase2_robot_policy_demo.py` (as mentioned in problem statement)  
+### P2-EXPECT-002: "Ensemble" clarification
+**Priority:** Informational  
+**Location:** `examples/phase2_robot_policy_demo.py`  
 **Description:**  
-The problem statement mentions "training on an ensemble" but the Phase 2 training pipeline doesn't have explicit ensemble support. Each training run produces a single policy. If ensemble training is intended:
+"Ensemble" in the Phase 2 training context refers to training on an **ensemble of gridworlds** (multiple environment configurations), not:
+- An ensemble of robot policies (which would require separate implementation)
+- The ensemble of human agents in a single environment (which is standard multi-agent training)
 
-1. **Multiple independent runs** would need to be orchestrated externally
-2. **Ensemble inference** combining multiple Q_r predictions is not implemented
-3. **Diversity mechanisms** (different seeds, architectures, or training subsets) are not built-in
-
-If "ensemble" refers to the ensemble of humans in the multi-agent environment, that IS supported. But ensemble of robot policies would require additional implementation.
+The current implementation supports training on multiple gridworld configurations by resetting to different world layouts between episodes.
 
 ---
 

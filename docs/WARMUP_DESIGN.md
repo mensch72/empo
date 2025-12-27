@@ -52,9 +52,9 @@ Since β_r = 0, the robot takes actions uniformly at random. This provides a sta
 
 #### Stage 1: + X_h (steps 1,000 - 2,000)
 
-**Goal**: Learn the expected next-state distribution under the random robot policy.
+**Goal**: Learn the aggregate goal achievement ability under the random robot policy.
 
-X_h predicts where the state will be after human and robot actions. With V_h^e already converging, X_h can learn meaningful state expectations.
+X_h predicts the aggregate ability of human h to achieve various goals, computed as E_{g_h}[V_h^e(s, g_h)^ζ] over possible goals. With V_h^e already converging, X_h can learn meaningful ability estimates.
 
 **Why this order**: X_h is needed by U_r (or directly for computing U_r when no U_r network), so it must be trained first.
 
@@ -208,7 +208,6 @@ config = Phase2Config(
     beta_r_rampup_steps=400,  # 400 steps β_r ramp-up
 )
 # Total: 800-1000 steps warmup + 400 steps ramp-up
-```
 ```
 
 ## Helper Methods
