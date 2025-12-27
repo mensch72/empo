@@ -175,18 +175,11 @@ This is correct design, not a performance issue.
 
 ---
 
-### P2-PERF-002: Goal encoder forward pass called inside loop without batching
+### ~~P2-PERF-002: Goal encoder forward pass called inside loop without batching~~ [FIXED]
 **Priority:** Medium  
-**Location:** `src/empo/nn_based/multigrid/phase2/trainer.py:486-498`  
+**Location:** *(removed from `src/empo/nn_based/multigrid/phase2/trainer.py`)*  
 **Description:**  
-In `tensorize_goals_batch()`, goals are encoded one at a time in a loop:
-```python
-for goal in goals:
-    goal_coords = goal_encoder.tensorize_goal(goal, self.device)
-    goal_features = goal_encoder(goal_coords)  # NN forward pass per goal
-    goal_features_list.append(goal_features)
-```
-This could be batched into a single forward pass for efficiency. While `_batch_tensorize_goals()` does batch the coordinate extraction, the same concern applies.
+~~The old `tensorize_goals_batch()` method encoded goals one at a time in a loop with individual NN forward passes.~~ Fixed by removing the unused method. The codebase already has `_batch_tensorize_goals()` (line ~1130) which properly batches goal encoding with a single forward pass.
 
 ---
 

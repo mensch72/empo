@@ -469,34 +469,6 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         
         return expected_v_r, v_h_e_targets
 
-    def tensorize_goals_batch(
-        self,
-        goals: List[Any]
-    ) -> torch.Tensor:
-        """
-        Encode a batch of goals into tensor format.
-        
-        Args:
-            goals: List of goals.
-        
-        Returns:
-            Goal features tensor with batch dimension.
-        """
-        # Get the goal encoder from V_h^e network
-        goal_encoder = self.networks.v_h_e.goal_encoder
-        
-        # Encode each goal
-        goal_features_list = []
-        for goal in goals:
-            # First get goal coordinates
-            goal_coords = goal_encoder.tensorize_goal(goal, self.device)
-            # Then pass through encoder network
-            goal_features = goal_encoder(goal_coords)
-            goal_features_list.append(goal_features)
-        
-        # Stack into batched tensor
-        return torch.cat(goal_features_list, dim=0)
-    
     def compute_losses(
         self,
         batch: List[Phase2Transition],
