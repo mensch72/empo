@@ -84,16 +84,16 @@ class BaseRobotPolicy(ABC):
     def sample(
         self,
         state: Any,
-        world_model: Any,
-        epsilon: float = 0.0
+        world_model: Any
     ) -> Tuple[int, ...]:
         """
         Sample robot action for a state.
         
+        Uses the power-law policy with beta_r to sample from Q-values.
+        
         Args:
             state: Current environment state.
             world_model: Environment/world model for state encoding.
-            epsilon: Exploration rate (0 = greedy, 1 = random).
         
         Returns:
             Tuple of robot actions.
@@ -101,20 +101,7 @@ class BaseRobotPolicy(ABC):
         with torch.no_grad():
             encoded = self.encode_state(state, world_model)
             q_values = self.q_network.forward(*encoded)
-            return self.q_network.sample_action(q_values, epsilon, beta_r=self.beta_r)
-    
-    def get_greedy_action(self, state: Any, world_model: Any) -> Tuple[int, ...]:
-        """
-        Get greedy (deterministic) robot action for a state.
-        
-        Args:
-            state: Current environment state.
-            world_model: Environment/world model for state encoding.
-        
-        Returns:
-            Tuple of robot actions.
-        """
-        return self.sample(state, world_model, epsilon=0.0)
+            return self.q_network.sample_action(q_values, epsilon=0.0, beta_r=self.beta_r)
     
     def get_q_values(self, state: Any, world_model: Any) -> torch.Tensor:
         """
