@@ -121,33 +121,19 @@ The `Phase2ReplayBuffer` class only has `__len__()` method, but the async traini
 
 ---
 
-### P2-DISC-001: Discrepancy between compact_features tuple size in docstring vs usage
+### ~~P2-DISC-001: Discrepancy between compact_features tuple size in docstring vs usage~~ [FIXED]
 **Priority:** Medium  
-**Location:** `src/empo/nn_based/phase2/replay_buffer.py:75-76`, `src/empo/nn_based/multigrid/phase2/trainer.py:262-263`  
+**Location:** `src/empo/nn_based/phase2/replay_buffer.py:75-76`  
 **Description:**  
-The `push()` method signature and docstring indicate `compact_features` is a 3-tuple `(global, agent, interactive)`, but in the trainer it's stored and used as a 4-tuple `(global, agent, interactive, compressed_grid)`. This inconsistency could cause confusion.
-
-**In replay_buffer.py:**
-```python
-compact_features: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None,  # 3 elements
-```
-
-**In trainer.py (actual usage):**
-```python
-compact_features = (global_feats, agent_feats, interactive_feats, compressed_grid)  # 4 elements
-```
-
-The `Phase2Transition` dataclass correctly documents this as a 4-tuple, but `push()` signature doesn't match.
+~~The `push()` method signature indicated `compact_features` as a 3-tuple, but it was used as a 4-tuple including `compressed_grid`.~~ Fixed to correctly use 4-tuple type hints matching `Phase2Transition`.
 
 ---
 
-### P2-DISC-002: U_r loss computed in `compute_losses()` but conditionally used
+### ~~P2-DISC-002: U_r loss computed in `compute_losses()` but conditionally used~~ [FIXED]
 **Priority:** Low  
-**Location:** `src/empo/nn_based/multigrid/phase2/trainer.py:766-826`  
+**Location:** `src/empo/nn_based/multigrid/phase2/trainer.py:764-837`  
 **Description:**  
-In `MultiGridPhase2Trainer.compute_losses()`, U_r forward pass and loss computation are always performed, but when `u_r_use_network=False` the loss is never used for training (no optimizer is created, see `_init_optimizers`). This is a minor efficiency issue—the computation is wasted but the network is correctly NOT trained.
-
-Note: The U_r network's forward pass is intentional since U_r values are needed for Q_r targets and other computations regardless of the `u_r_use_network` setting.
+~~U_r forward pass and loss computation were always performed even when not used for training.~~ Fixed to only compute U_r loss when `u_r_use_network=True`.
 
 ---
 
@@ -159,11 +145,11 @@ Note: The U_r network's forward pass is intentional since U_r values are needed 
 
 ---
 
-### P2-DOC-002: Config docstring mentions V_r warmup stage that doesn't exist
+### ~~P2-DOC-002: Config docstring mentions V_r warmup stage that doesn't exist~~ [FIXED]
 **Priority:** Low  
 **Location:** `src/empo/nn_based/phase2/config.py:93`  
 **Description:**  
-The comment mentions "warmup_v_r_steps would be set to 0 if v_r_use_network=False" but there is no `warmup_v_r_steps` parameter, and V_r has no dedicated warmup stage. V_r is enabled after Q_r warmup (stage 4+) when `v_r_use_network=True`.
+~~The comment mentioned "warmup_v_r_steps would be set to 0 if v_r_use_network=False" but there is no `warmup_v_r_steps` parameter.~~ Fixed by removing the confusing comment.
 
 ---
 

@@ -761,79 +761,81 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
                 'target_mean': target_q_r.mean().item()
             }
         
-        # ----- U_r: Intrinsic reward -----
-        # U_r uses only shared encoder (detached) - no own encoder
-        y_pred, u_r_pred = self.networks.u_r.forward(*s_encoded_detached)
-        
-        # Compute X_h for U_r target using agent identity encoding
-        u_r_x_h_transition_indices = []
-        u_r_x_h_human_indices = []
-        u_r_x_h_states = []  # states for agent identity encoding
-        u_r_transition_boundaries = [0]
-        
-        for i, t in enumerate(batch):
-            if self.config.u_r_sample_humans is None:
-                humans_for_u_r = self.human_agent_indices
-            else:
-                n_sample = min(self.config.u_r_sample_humans, len(self.human_agent_indices))
-                humans_for_u_r = random.sample(self.human_agent_indices, n_sample)
+        # ----- U_r: Intrinsic reward (only when using network mode) -----
+        loss_u_r = torch.tensor(0.0, device=self.device)
+        if self.config.u_r_use_network:
+            # U_r uses only shared encoder (detached) - no own encoder
+            y_pred, u_r_pred = self.networks.u_r.forward(*s_encoded_detached)
             
-            for h_u in humans_for_u_r:
-                u_r_x_h_transition_indices.append(i)
-                u_r_x_h_human_indices.append(h_u)
-                u_r_x_h_states.append(t.state)
-            u_r_transition_boundaries.append(len(u_r_x_h_transition_indices))
-        
-        with torch.no_grad():
-            u_r_trans_idx = torch.tensor(u_r_x_h_transition_indices, device=self.device)
+            # Compute X_h for U_r target using agent identity encoding
+            u_r_x_h_transition_indices = []
+            u_r_x_h_human_indices = []
+            u_r_x_h_states = []  # states for agent identity encoding
+            u_r_transition_boundaries = [0]
             
-            # Encode agent identities for X_h computation
-            u_r_idx, u_r_agent_grid, u_r_agent_feat = self._batch_tensorize_agent_identities(
-                u_r_x_h_human_indices, u_r_x_h_states
-            )
+            for i, t in enumerate(batch):
+                if self.config.u_r_sample_humans is None:
+                    humans_for_u_r = self.human_agent_indices
+                else:
+                    n_sample = min(self.config.u_r_sample_humans, len(self.human_agent_indices))
+                    humans_for_u_r = random.sample(self.human_agent_indices, n_sample)
+                
+                for h_u in humans_for_u_r:
+                    u_r_x_h_transition_indices.append(i)
+                    u_r_x_h_human_indices.append(h_u)
+                    u_r_x_h_states.append(t.state)
+                u_r_transition_boundaries.append(len(u_r_x_h_transition_indices))
             
-            u_r_x_h_grid = s_encoded[0][u_r_trans_idx]
-            u_r_x_h_glob = s_encoded[1][u_r_trans_idx]
-            u_r_x_h_agent = s_encoded[2][u_r_trans_idx]
-            u_r_x_h_interactive = s_encoded[3][u_r_trans_idx]
+            with torch.no_grad():
+                u_r_trans_idx = torch.tensor(u_r_x_h_transition_indices, device=self.device)
+                
+                # Encode agent identities for X_h computation
+                u_r_idx, u_r_agent_grid, u_r_agent_feat = self._batch_tensorize_agent_identities(
+                    u_r_x_h_human_indices, u_r_x_h_states
+                )
+                
+                u_r_x_h_grid = s_encoded[0][u_r_trans_idx]
+                u_r_x_h_glob = s_encoded[1][u_r_trans_idx]
+                u_r_x_h_agent = s_encoded[2][u_r_trans_idx]
+                u_r_x_h_interactive = s_encoded[3][u_r_trans_idx]
+                
+                x_h_for_u_r = self.networks.x_h_target.forward(
+                    u_r_x_h_grid, u_r_x_h_glob, u_r_x_h_agent, u_r_x_h_interactive,
+                    u_r_idx, u_r_agent_grid, u_r_agent_feat
+                )
+                # Hard clamp X_h for inference (soft clamp is only for training X_h)
+                x_h_for_u_r = self.networks.x_h_target.apply_hard_clamp(x_h_for_u_r)
             
-            x_h_for_u_r = self.networks.x_h_target.forward(
-                u_r_x_h_grid, u_r_x_h_glob, u_r_x_h_agent, u_r_x_h_interactive,
-                u_r_idx, u_r_agent_grid, u_r_agent_feat
-            )
-            # Hard clamp X_h for inference (soft clamp is only for training X_h)
-            x_h_for_u_r = self.networks.x_h_target.apply_hard_clamp(x_h_for_u_r)
-        
-        # Compute U_r targets by aggregating X_h values for each transition
-        u_r_targets = []
-        for i in range(n):
-            start_idx = u_r_transition_boundaries[i]
-            end_idx = u_r_transition_boundaries[i + 1]
-            x_h_values = x_h_for_u_r[start_idx:end_idx].squeeze()
+            # Compute U_r targets by aggregating X_h values for each transition
+            u_r_targets = []
+            for i in range(n):
+                start_idx = u_r_transition_boundaries[i]
+                end_idx = u_r_transition_boundaries[i + 1]
+                x_h_values = x_h_for_u_r[start_idx:end_idx].squeeze()
+                
+                if x_h_values.dim() == 0:
+                    x_h_values = x_h_values.unsqueeze(0)
+                # Clamp X_h to (0, 1] to prevent X_h^{-ξ} explosion when X_h is near 0
+                x_h_clamped = torch.clamp(x_h_values, min=1e-3, max=1.0)
+                x_h_sum = (x_h_clamped ** (-self.config.xi)).sum()
+                x_h_avg = x_h_sum / x_h_clamped.numel()
+                # target_y = E[X_h^{-ξ}] directly (y is defined as E[X_h^{-ξ}])
+                target_y = x_h_avg
+                u_r_targets.append(target_y)
             
-            if x_h_values.dim() == 0:
-                x_h_values = x_h_values.unsqueeze(0)
-            # Clamp X_h to (0, 1] to prevent X_h^{-ξ} explosion when X_h is near 0
-            x_h_clamped = torch.clamp(x_h_values, min=1e-3, max=1.0)
-            x_h_sum = (x_h_clamped ** (-self.config.xi)).sum()
-            x_h_avg = x_h_sum / x_h_clamped.numel()
-            # target_y = E[X_h^{-ξ}] directly (y is defined as E[X_h^{-ξ}])
-            target_y = x_h_avg
-            u_r_targets.append(target_y)
-        
-        u_r_targets = torch.stack(u_r_targets)
-        loss_u_r = ((y_pred.squeeze() - u_r_targets) ** 2).mean()
-        
-        # Track U_r prediction stats (the actual U_r values, not y)
-        # U_r = -y^η where η = -1/ξ, so U_r is negative
-        with torch.no_grad():
-            # Compute target U_r from target y: U_r = -y^η where η = -1/ξ
-            target_u_r = -torch.pow(u_r_targets, -1.0 / self.config.xi)
-            prediction_stats['u_r'] = {
-                'mean': u_r_pred.mean().item(),
-                'std': u_r_pred.std().item() if u_r_pred.numel() > 1 else 0.0,
-                'target_mean': target_u_r.mean().item()
-            }
+            u_r_targets = torch.stack(u_r_targets)
+            loss_u_r = ((y_pred.squeeze() - u_r_targets) ** 2).mean()
+            
+            # Track U_r prediction stats (the actual U_r values, not y)
+            # U_r = -y^η where η = -1/ξ, so U_r is negative
+            with torch.no_grad():
+                # Compute target U_r from target y: U_r = -y^η where η = -1/ξ
+                target_u_r = -torch.pow(u_r_targets, -1.0 / self.config.xi)
+                prediction_stats['u_r'] = {
+                    'mean': u_r_pred.mean().item(),
+                    'std': u_r_pred.std().item() if u_r_pred.numel() > 1 else 0.0,
+                    'target_mean': target_u_r.mean().item()
+                }
         
         # ----- V_h^e: Human goal achievement -----
         loss_v_h_e = torch.tensor(0.0, device=self.device)

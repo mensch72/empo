@@ -90,7 +90,6 @@ class Phase2Config:
     # Stage 6: Full training with LR decay (remainder)
     # 
     # NOTE: warmup_u_r_steps is set to 0 if u_r_use_network=False (in __post_init__)
-    #       warmup_v_r_steps would be set to 0 if v_r_use_network=False (but V_r has no warmup stage)
     warmup_v_h_e_steps: int = 1000   # Duration of V_h^e-only stage
     warmup_x_h_steps: int = 1000     # Duration of V_h^e + X_h stage  
     warmup_u_r_steps: int = 1000     # Duration of V_h^e + X_h + U_r stage (0 if u_r_use_network=False)
