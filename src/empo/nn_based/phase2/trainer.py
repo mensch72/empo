@@ -1563,11 +1563,12 @@ class BasePhase2Trainer(ABC):
         """
         Save only the robot policy network (Q_r) for deployment/rollouts.
         
-        This saves a minimal checkpoint containing only what's needed to
-        run the robot policy: Q_r network with its shared and own encoders.
+        This saves a checkpoint containing:
+        - Q_r network state dict (weights)
+        - Q_r network config (for reconstruction)
+        - beta_r parameter
         
-        The checkpoint includes metadata (num_robots, num_actions) for
-        network reconstruction if needed.
+        The policy can be loaded with MultiGridRobotPolicy.from_checkpoint(path).
         
         Args:
             path: Path to save the policy file.
@@ -1575,8 +1576,7 @@ class BasePhase2Trainer(ABC):
         checkpoint = {
             'q_r': self.networks.q_r.state_dict(),
             'beta_r': self.config.beta_r,
-            # Metadata for network reconstruction
-            'num_robots': self.networks.q_r.num_robots,
-            'num_actions': self.networks.q_r.num_actions,
+            # Network config for reconstruction
+            'q_r_config': self.networks.q_r.get_config(),
         }
         torch.save(checkpoint, path)
