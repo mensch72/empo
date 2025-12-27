@@ -581,6 +581,8 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         # For X_h, we need to encode states from x_h_batch (which may differ from batch)
         x_h_states = [t.state for t in x_h_batch]
         x_h_s_all_encoded = self._batch_tensorize_states(x_h_states)
+        # X_h uses shared encoder frozen, so create detached version
+        x_h_s_all_encoded_detached = self._detach_encoded_states(x_h_s_all_encoded)
         
         for i, t in enumerate(x_h_batch):
             if self.config.x_h_sample_humans is None:
@@ -598,24 +600,31 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         if x_h_goals:
             x_h_goal_features = self._batch_tensorize_goals(x_h_goals)
             
-            # Encode agent identities
+            # Encode agent identities (shared encoder - will be detached when used)
             x_h_idx, x_h_agent_grid, x_h_agent_feat = self._batch_tensorize_agent_identities(
                 x_h_human_indices, x_h_states_for_identity
             )
             
             # Index into X_h state encodings
+            # We keep un-detached versions for target computation (runs under no_grad anyway)
             x_h_trans_indices = torch.tensor(x_h_transition_indices, device=self.device)
             x_h_grid = x_h_s_all_encoded[0][x_h_trans_indices]
             x_h_glob = x_h_s_all_encoded[1][x_h_trans_indices]
             x_h_agent = x_h_s_all_encoded[2][x_h_trans_indices]
             x_h_interactive = x_h_s_all_encoded[3][x_h_trans_indices]
+            
+            # Pre-compute detached versions for X_h forward pass (freezes shared encoder)
+            x_h_grid_detached = x_h_s_all_encoded_detached[0][x_h_trans_indices]
+            x_h_glob_detached = x_h_s_all_encoded_detached[1][x_h_trans_indices]
+            x_h_agent_detached = x_h_s_all_encoded_detached[2][x_h_trans_indices]
+            x_h_interactive_detached = x_h_s_all_encoded_detached[3][x_h_trans_indices]
         
         # ========================================================================
         # Phase 4: Compute all forward passes in batches
         # ========================================================================
         # Detach shared encoder outputs for all networks except V_h^e
         # V_h^e is the only network that trains the shared encoders
-        s_encoded_detached = tuple(t.detach() for t in s_encoded)
+        s_encoded_detached = self._detach_encoded_states(s_encoded)
         
         # ----- Q_r: Robot Q-values -----
         # Q_r uses: shared encoder (detached) + own encoder (trained)
@@ -859,10 +868,12 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
                 self.networks.x_h.own_agent_encoder
             )
             
-            # Detach shared state encoder outputs, pass own agent encoder outputs
+            # X_h forward: use detached shared encoder outputs, trained own encoder
+            # Note: x_h_idx/agent_grid/agent_feat are raw input tensors (not NN outputs)
+            # so they don't require detachment - they don't carry gradients
             x_h_pred = self.networks.x_h.forward(
-                x_h_grid.detach(), x_h_glob.detach(), x_h_agent.detach(), x_h_interactive.detach(),
-                x_h_idx.detach(), x_h_agent_grid.detach(), x_h_agent_feat.detach(),  # Shared (frozen)
+                x_h_grid_detached, x_h_glob_detached, x_h_agent_detached, x_h_interactive_detached,
+                x_h_idx, x_h_agent_grid, x_h_agent_feat,  # Shared agent identity (raw tensors)
                 own_x_h_idx, own_x_h_agent_grid, own_x_h_agent_feat  # Own (trained)
             )
             
@@ -1006,6 +1017,27 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
             torch.cat(agent_list, dim=0),
             torch.cat(interactive_list, dim=0)
         )
+    
+    @staticmethod
+    def _detach_encoded_states(
+        encoded: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Detach all tensors in an encoded state tuple to stop gradient flow.
+        
+        This is used to freeze the shared encoder outputs for networks that
+        should NOT train the shared encoders (Q_r, X_h, U_r, V_r).
+        
+        Only V_h^e should receive un-detached encoder outputs because it is
+        the designated network for training the shared encoders.
+        
+        Args:
+            encoded: Tuple of (grid, global, agent, interactive) tensors.
+        
+        Returns:
+            Tuple with all tensors detached from the computation graph.
+        """
+        return tuple(t.detach() for t in encoded)
     
     def _batch_tensorize_states(
         self,

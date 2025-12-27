@@ -231,18 +231,16 @@ For example, after 10,000 steps in stage 5: `lr ≈ base_lr / 100`, so `effectiv
 
 ---
 
-### P2-ARCH-001: Shared vs Own encoder gradient flow not enforced programmatically
+### ~~P2-ARCH-001: Shared vs Own encoder gradient flow not enforced programmatically~~ [FIXED]
 **Priority:** Medium  
-**Location:** `src/empo/nn_based/multigrid/phase2/trainer.py:646`  
+**Location:** `src/empo/nn_based/multigrid/phase2/trainer.py`  
 **Description:**  
-The documentation states shared encoders are detached for all networks except V_h^e, but this detachment is done manually in `compute_losses()`:
-```python
-s_encoded_detached = tuple(t.detach() for t in s_encoded)
-```
+~~The detachment was done with inline `tuple(t.detach() for t in s_encoded)` which was error-prone.~~
 
-This manual approach is error-prone. If someone adds code that uses `s_encoded` instead of `s_encoded_detached` for Q_r/X_h/U_r, the shared encoder would receive gradients from those losses.
-
-**Recommendation:** Consider a more robust approach like having separate `encode_for_training()` vs `encode_frozen()` methods.
+Fixed by:
+1. Adding `_detach_encoded_states()` helper method with clear documentation explaining which networks should use detached vs undetached outputs
+2. Using the helper consistently for both `s_encoded_detached` and `x_h_s_all_encoded_detached`
+3. Pre-computing detached versions of X_h state tensors instead of calling `.detach()` inline
 
 ---
 
