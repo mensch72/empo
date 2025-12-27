@@ -135,8 +135,21 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         return state_encoder.tensorize_state(state, None, self.device)
     
     def tensorize_state(self, state: Any) -> Dict[str, torch.Tensor]:
-        """Encode multigrid state to tensors."""
-        # The networks handle their own encoding
+        """
+        Encode multigrid state to tensors.
+        
+        Note: This method is required by BasePhase2Trainer but is not actually used
+        in the multigrid trainer. The multigrid implementation uses specialized methods
+        like `_batch_tensorize_states()` and `_batch_tensorize_from_compact()` instead,
+        which handle efficient batched encoding with caching.
+        
+        Args:
+            state: Raw multigrid state tuple.
+        
+        Returns:
+            Dict with raw state (no actual tensorization).
+        """
+        # The networks handle their own encoding via specialized batch methods
         return {'state': state}
     
     def sample_robot_action(self, state: Any) -> Tuple[int, ...]:

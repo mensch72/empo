@@ -183,21 +183,19 @@ This is correct design, not a performance issue.
 
 ---
 
-### P2-ORPHAN-001: `forward_with_preencoded_state` method has inconsistent input dimensions
+### ~~P2-ORPHAN-001: `forward_with_preencoded_state` method has inconsistent input dimensions~~ [FIXED]
 **Priority:** Low  
-**Location:** `src/empo/nn_based/multigrid/phase2/aggregate_goal_ability.py:233-267`  
+**Location:** `src/empo/nn_based/multigrid/phase2/aggregate_goal_ability.py`, `src/empo/nn_based/multigrid/phase2/human_goal_ability.py`  
 **Description:**  
-The `forward_with_preencoded_state()` method in `MultiGridAggregateGoalAbilityNetwork` uses only the shared agent encoder, not the own_agent_encoder. This creates a dimension mismatch since `forward()` concatenates both encoders' outputs but this method only uses one.
-
-The method would fail at runtime if called, since the combined dimension expected by `value_head` includes both encoder outputs.
+~~The `forward_with_preencoded_state()` methods only used the shared agent encoder, not the own_agent_encoder, creating a dimension mismatch. These methods were dead code (never called).~~ Fixed by removing the broken methods.
 
 ---
 
-### P2-ORPHAN-002: `tensorize_state` method returns raw state dict, unused
+### ~~P2-ORPHAN-002: `tensorize_state` method returns raw state dict, unused~~ [FIXED]
 **Priority:** Low  
-**Location:** `src/empo/nn_based/multigrid/phase2/trainer.py:137-141`  
+**Location:** `src/empo/nn_based/multigrid/phase2/trainer.py:137-152`  
 **Description:**  
-The `tensorize_state()` method in `MultiGridPhase2Trainer` returns `{'state': state}` which just wraps the raw state. This method is inherited from `BasePhase2Trainer` but isn't used in the multigrid trainer since direct tensor methods are used instead. Consider removing or marking as deprecated.
+~~The `tensorize_state()` method is required by the abstract base class but not actually used in the multigrid trainer.~~ Fixed by updating the docstring to clearly document this is a placeholder required by the base class, and that specialized batch methods are used instead.
 
 ---
 
@@ -209,15 +207,14 @@ The `get_config()` abstract method is defined in base classes but its implementa
 
 ---
 
-### P2-CONF-001: Legacy 1/t learning rate decay settings are confusing alongside new sqrt decay
+### ~~P2-CONF-001: Legacy 1/t learning rate decay settings are confusing alongside new sqrt decay~~ [FIXED]
 **Priority:** Low  
 **Location:** `src/empo/nn_based/phase2/config.py:107-111`  
 **Description:**  
-The config has both:
-- New `use_sqrt_lr_decay` system (1/√t decay after warmup)
-- Legacy `lr_x_h_use_1_over_t` and `lr_u_r_use_1_over_t` flags
-
-This creates potential confusion about which decay system is active. The legacy flags are checked first in `get_learning_rate()` and take precedence, which could lead to unexpected behavior if both are enabled.
+~~The legacy `lr_x_h_use_1_over_t` and `lr_u_r_use_1_over_t` flags coexisted with new `use_sqrt_lr_decay` without clear documentation.~~ Fixed by:
+1. Adding DEPRECATED markers to the legacy flags
+2. Adding a deprecation warning in `__post_init__()` when legacy flags are enabled
+3. Documenting that legacy flags take precedence if enabled
 
 ---
 

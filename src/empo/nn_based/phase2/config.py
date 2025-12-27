@@ -2,6 +2,7 @@
 Configuration for Phase 2 robot policy learning.
 """
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Optional, Set
 import math
@@ -103,11 +104,12 @@ class Phase2Config:
     # This is a compromise between 1/t (for expectations) and constant (for Q-learning)
     use_sqrt_lr_decay: bool = True
     
-    # Legacy 1/t decay settings (kept for backward compatibility)
+    # Legacy 1/t decay settings (DEPRECATED - use use_sqrt_lr_decay instead)
+    # These flags take precedence over use_sqrt_lr_decay if enabled.
     lr_x_h_warmup_steps: int = 1000  # Steps before 1/t decay starts (0 = always 1/t)
     lr_u_r_warmup_steps: int = 1000  # Steps before 1/t decay starts (0 = always 1/t)
-    lr_x_h_use_1_over_t: bool = False  # Whether to use legacy 1/t decay for X_h
-    lr_u_r_use_1_over_t: bool = False  # Whether to use legacy 1/t decay for U_r
+    lr_x_h_use_1_over_t: bool = False  # DEPRECATED: Whether to use legacy 1/t decay for X_h
+    lr_u_r_use_1_over_t: bool = False  # DEPRECATED: Whether to use legacy 1/t decay for U_r
     
     # Target network updates
     v_r_target_update_freq: int = 100
@@ -185,6 +187,16 @@ class Phase2Config:
     
     def __post_init__(self):
         """Compute cumulative warmup thresholds and apply network flags."""
+        # Warn about deprecated legacy LR decay flags
+        if self.lr_x_h_use_1_over_t or self.lr_u_r_use_1_over_t:
+            warnings.warn(
+                "lr_x_h_use_1_over_t and lr_u_r_use_1_over_t are deprecated. "
+                "Use use_sqrt_lr_decay=True instead for 1/√t decay. "
+                "Legacy 1/t flags take precedence if enabled.",
+                DeprecationWarning,
+                stacklevel=2
+            )
+        
         # Override U_r warmup duration to 0 if not using U_r network
         if not self.u_r_use_network:
             self.warmup_u_r_steps = 0
