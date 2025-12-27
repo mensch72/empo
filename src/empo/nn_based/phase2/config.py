@@ -169,6 +169,32 @@ class Phase2Config:
     # Requires the environment to provide a transition_probabilities() method.
     use_model_based_targets: bool = True
     
+    # =========================================================================
+    # Async training configuration (actor-learner architecture)
+    # =========================================================================
+    # When enabled, data collection runs in separate processes while the learner
+    # trains on GPU. This allows CPU-bound environment stepping and transition
+    # probability computation to overlap with GPU-bound training.
+    async_training: bool = False
+    
+    # Number of parallel actor processes for data collection.
+    # Each actor has its own environment copy and runs with a frozen policy.
+    # More actors = more diverse data, but diminishing returns after ~4-8.
+    num_actors: int = 4
+    
+    # Steps between syncing frozen policy from learner to actors.
+    # Lower = more on-policy but more sync overhead.
+    # Higher = more off-policy but more efficient.
+    actor_sync_freq: int = 100
+    
+    # Minimum transitions in buffer before training starts (for async mode).
+    # Ensures actors have collected enough initial data.
+    async_min_buffer_size: int = 1000
+    
+    # Queue size for actor-to-learner transition queue.
+    # Should be large enough to buffer actor output during learner training.
+    async_queue_size: int = 10000
+    
     # Network architecture
     hidden_dim: int = 256
     state_feature_dim: int = 256

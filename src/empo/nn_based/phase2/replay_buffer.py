@@ -61,7 +61,8 @@ class Phase2ReplayBuffer:
         robot_action: Tuple[int, ...],
         goals: Dict[int, Any],
         human_actions: List[int],
-        next_state: Any
+        next_state: Any,
+        transition_probs_by_action: Optional[Dict[int, List[Tuple[float, Any]]]] = None
     ) -> None:
         """
         Add a transition to the buffer.
@@ -72,13 +73,15 @@ class Phase2ReplayBuffer:
             goals: Dict mapping human index to goal.
             human_actions: List of human actions.
             next_state: Next state.
+            transition_probs_by_action: Optional pre-computed transition probabilities.
         """
         transition = Phase2Transition(
             state=state,
             robot_action=robot_action,
             goals=goals,
             human_actions=human_actions,
-            next_state=next_state
+            next_state=next_state,
+            transition_probs_by_action=transition_probs_by_action
         )
         
         if len(self.buffer) < self.capacity:

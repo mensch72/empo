@@ -7,8 +7,10 @@ of the EMPO framework (equations 4-9).
 
 import random
 import copy
+import multiprocessing as mp
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from queue import Empty
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
@@ -792,7 +794,8 @@ class BasePhase2Trainer(ABC):
                 transition.robot_action,
                 transition.goals,
                 transition.human_actions,
-                transition.next_state
+                transition.next_state,
+                transition.transition_probs_by_action
             )
             
             if self.debug and step == 0:
@@ -851,6 +854,10 @@ class BasePhase2Trainer(ABC):
         """
         if num_episodes is None:
             num_episodes = self.config.num_episodes
+        
+        # Use async training if configured
+        if self.config.async_training:
+            return self._train_async(num_episodes)
         
         history = []
         
@@ -940,8 +947,20 @@ class BasePhase2Trainer(ABC):
                                         f"Step {self.total_steps}: {prev_stage_name} -> {current_stage_name}",
                                         global_step=episode)
                 
+                # Clear replay buffer at start of beta_r ramp-up (transition to stage 4)
+                # This discards data collected with beta_r=0 (uniform random policy)
+                if current_stage == 4 and prev_stage == 3:
+                    buffer_size_before = len(self.replay_buffer)
+                    self.replay_buffer.clear()
+                    if self.verbose:
+                        print(f"  [Training] Cleared replay buffer ({buffer_size_before} transitions) at start of β_r ramp-up")
+                    if self.writer is not None:
+                        self.writer.add_text('Warmup/events', 
+                                            f"Cleared replay buffer ({buffer_size_before} transitions) at start of β_r ramp-up, step {self.total_steps}",
+                                            global_step=episode)
+                
                 # Clear replay buffer after beta_r ramp-up is done (transition to stage 5)
-                # This ensures we start "full training" with fresh data from the converged policy
+                # This discards data collected during ramp-up with varying beta_r
                 if current_stage == 5 and prev_stage == 4:
                     buffer_size_before = len(self.replay_buffer)
                     self.replay_buffer.clear()
@@ -949,7 +968,7 @@ class BasePhase2Trainer(ABC):
                         print(f"  [Training] Cleared replay buffer ({buffer_size_before} transitions) after β_r ramp-up")
                     if self.writer is not None:
                         self.writer.add_text('Warmup/events', 
-                                            f"Cleared replay buffer ({buffer_size_before} transitions) at step {self.total_steps}",
+                                            f"Cleared replay buffer ({buffer_size_before} transitions) after β_r ramp-up, step {self.total_steps}",
                                             global_step=episode)
                 
                 prev_stage = current_stage
@@ -977,3 +996,402 @@ class BasePhase2Trainer(ABC):
             self.writer.close()
         
         return history
+
+    # ==================== Async Training Methods ====================
+    
+    def _get_policy_state_dict(self) -> Dict[str, Any]:
+        """
+        Get the state dict for policy networks needed by actors.
+        
+        Override this in subclasses if actors need different networks.
+        
+        Returns:
+            Dict with network state dicts for action selection.
+        """
+        return {
+            'q_r': self.networks.q_r.state_dict(),
+        }
+    
+    def _load_policy_state_dict(self, state_dict: Dict[str, Any]) -> None:
+        """
+        Load policy state dict into networks.
+        
+        Override this in subclasses if actors need different networks.
+        
+        Args:
+            state_dict: Dict with network state dicts.
+        """
+        self.networks.q_r.load_state_dict(state_dict['q_r'])
+    
+    def _train_async(self, num_episodes: int) -> List[Dict[str, float]]:
+        """
+        Async actor-learner training loop.
+        
+        Spawns multiple actor processes that collect transitions in parallel,
+        while the main process runs the learner with GPU training.
+        
+        Args:
+            num_episodes: Total number of episodes to train.
+            
+        Returns:
+            List of episode loss dicts (from learner).
+        """
+        # Use 'spawn' context for CUDA compatibility
+        ctx = mp.get_context('spawn')
+        
+        # Shared queue for transitions from actors to learner
+        transition_queue = ctx.Queue(maxsize=self.config.async_queue_size)
+        
+        # Event to signal actors to stop
+        stop_event = ctx.Event()
+        
+        # Shared counter for total episodes collected (approximate)
+        episode_counter = ctx.Value('i', 0)
+        
+        # Shared counter for total training steps (for epsilon/beta_r/warmup)
+        # Actors read this to get correct exploration parameters
+        shared_total_steps = ctx.Value('i', self.total_steps)
+        
+        # Manager for sharing policy weights
+        manager = ctx.Manager()
+        policy_lock = manager.Lock()
+        # Use a shared dict to hold serialized policy state
+        shared_policy = manager.dict()
+        shared_policy['state_dict'] = self._serialize_policy_state()
+        shared_policy['version'] = 0
+        
+        # Start actor processes
+        actors = []
+        for actor_id in range(self.config.num_actors):
+            p = ctx.Process(
+                target=self._actor_process_entry,
+                args=(
+                    actor_id,
+                    transition_queue,
+                    stop_event,
+                    episode_counter,
+                    shared_total_steps,
+                    shared_policy,
+                    policy_lock,
+                    num_episodes,
+                ),
+                daemon=True
+            )
+            p.start()
+            actors.append(p)
+        
+        if self.verbose:
+            print(f"[Async] Started {self.config.num_actors} actor processes")
+        
+        # Run learner loop in main process
+        history = self._learner_loop(
+            transition_queue=transition_queue,
+            stop_event=stop_event,
+            episode_counter=episode_counter,
+            shared_total_steps=shared_total_steps,
+            shared_policy=shared_policy,
+            policy_lock=policy_lock,
+            num_episodes=num_episodes,
+        )
+        
+        # Signal actors to stop and wait for them
+        stop_event.set()
+        for p in actors:
+            p.join(timeout=5.0)
+            if p.is_alive():
+                p.terminate()
+        
+        if self.verbose:
+            print(f"[Async] Training complete. All actors stopped.")
+        
+        return history
+    
+    def _serialize_policy_state(self) -> bytes:
+        """Serialize policy state dict to bytes for sharing."""
+        import pickle
+        import io
+        state = self._get_policy_state_dict()
+        # Move to CPU for sharing
+        cpu_state = {k: {kk: vv.cpu() for kk, vv in v.items()} for k, v in state.items()}
+        buffer = io.BytesIO()
+        torch.save(cpu_state, buffer)
+        return buffer.getvalue()
+    
+    def _deserialize_policy_state(self, data: bytes) -> Dict[str, Any]:
+        """Deserialize policy state dict from bytes."""
+        import io
+        buffer = io.BytesIO(data)
+        return torch.load(buffer, weights_only=False)
+    
+    def _actor_process_entry(
+        self,
+        actor_id: int,
+        transition_queue: mp.Queue,
+        stop_event: mp.Event,
+        episode_counter: mp.Value,
+        shared_total_steps: mp.Value,
+        shared_policy: Dict,
+        policy_lock,
+        num_episodes: int,
+    ) -> None:
+        """
+        Entry point for actor process. Re-creates trainer and runs actor loop.
+        
+        This is needed because we can't pickle the full trainer object.
+        Subclasses should override _create_actor_env() to provide the environment.
+        """
+        try:
+            self._actor_loop(
+                actor_id=actor_id,
+                transition_queue=transition_queue,
+                stop_event=stop_event,
+                episode_counter=episode_counter,
+                shared_total_steps=shared_total_steps,
+                shared_policy=shared_policy,
+                policy_lock=policy_lock,
+                num_episodes=num_episodes,
+            )
+        except Exception as e:
+            print(f"[Actor {actor_id}] Error: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _actor_loop(
+        self,
+        actor_id: int,
+        transition_queue: mp.Queue,
+        stop_event: mp.Event,
+        episode_counter: mp.Value,
+        shared_total_steps: mp.Value,
+        shared_policy: Dict,
+        policy_lock,
+        num_episodes: int,
+    ) -> None:
+        """
+        Actor loop: collect transitions and send to learner.
+        
+        Runs in a separate process. Periodically syncs policy from learner.
+        Reads shared_total_steps to get correct epsilon/beta_r values.
+        """
+        local_policy_version = -1
+        steps_since_sync = 0
+        
+        while not stop_event.is_set():
+            # Check if we've collected enough episodes
+            with episode_counter.get_lock():
+                if episode_counter.value >= num_episodes:
+                    break
+            
+            # Sync policy and total_steps periodically
+            steps_since_sync += 1
+            if steps_since_sync >= self.config.actor_sync_freq or local_policy_version < 0:
+                with policy_lock:
+                    current_version = shared_policy['version']
+                    if current_version > local_policy_version:
+                        state = self._deserialize_policy_state(shared_policy['state_dict'])
+                        self._load_policy_state_dict(state)
+                        local_policy_version = current_version
+                        steps_since_sync = 0
+                # Update local total_steps from shared counter (for epsilon/beta_r)
+                self.total_steps = shared_total_steps.value
+            
+            # Collect one episode
+            state = self.reset_environment()
+            done = False
+            episode_steps = 0
+            max_steps = self.config.steps_per_episode
+            
+            # Sample initial goals for humans
+            goals = {h: self.goal_sampler(state, h) for h in self.human_agent_indices}
+            
+            while not done and episode_steps < max_steps and not stop_event.is_set():
+                # Collect transition (uses self.total_steps for epsilon/beta_r)
+                transition, next_state = self.collect_transition(state, goals)
+                
+                # Check if episode is done (transition would be None if env ends)
+                if transition is None:
+                    break
+                
+                # Serialize transition for queue (goals are stored in transition)
+                trans_dict = {
+                    'state': transition.state,
+                    'robot_action': transition.robot_action,
+                    'goals': transition.goals,
+                    'human_actions': transition.human_actions,
+                    'next_state': transition.next_state,
+                    'transition_probs_by_action': transition.transition_probs_by_action,
+                }
+                
+                try:
+                    transition_queue.put_nowait(trans_dict)
+                except:
+                    # Queue full, skip this transition
+                    pass
+                
+                state = next_state
+                episode_steps += 1
+                
+                # Resample goals with some probability
+                if random.random() < self.config.goal_resample_prob:
+                    goals = {h: self.goal_sampler(state, h) for h in self.human_agent_indices}
+            
+            # Increment episode counter
+            with episode_counter.get_lock():
+                episode_counter.value += 1
+    
+    def _learner_loop(
+        self,
+        transition_queue: mp.Queue,
+        stop_event: mp.Event,
+        episode_counter: mp.Value,
+        shared_total_steps: mp.Value,
+        shared_policy: Dict,
+        policy_lock,
+        num_episodes: int,
+    ) -> List[Dict[str, float]]:
+        """
+        Learner loop: consume transitions and train networks.
+        
+        Runs in main process with GPU access.
+        Updates shared_total_steps so actors can track warmup/epsilon progress.
+        """
+        history = []
+        training_steps = 0
+        policy_updates = 0
+        
+        # Track warmup stage for logging
+        prev_stage = self.config.get_warmup_stage(self.total_steps)
+        prev_stage_name = self.config.get_warmup_stage_name(self.total_steps)
+        
+        if self.verbose:
+            active = self.config.get_active_networks(self.total_steps)
+            print(f"[Learner] Starting in warmup stage {prev_stage}: {prev_stage_name} (active: {active})")
+        
+        # Progress bar
+        pbar = tqdm(total=num_episodes, desc="Async Training")
+        last_episode_count = 0
+        
+        # Wait for minimum buffer size
+        if self.verbose:
+            print(f"[Learner] Waiting for {self.config.async_min_buffer_size} transitions...")
+        
+        while self.buffer.size() < self.config.async_min_buffer_size:
+            self._consume_transitions(transition_queue, max_items=100)
+            if stop_event.is_set():
+                break
+        
+        if self.verbose:
+            print(f"[Learner] Buffer ready with {self.buffer.size()} transitions. Starting training.")
+        
+        # Main training loop
+        while True:
+            # Check termination
+            with episode_counter.get_lock():
+                current_episodes = episode_counter.value
+            
+            if current_episodes >= num_episodes:
+                break
+            
+            # Update progress bar
+            if current_episodes > last_episode_count:
+                pbar.update(current_episodes - last_episode_count)
+                last_episode_count = current_episodes
+            
+            # Consume new transitions from queue
+            self._consume_transitions(transition_queue, max_items=50)
+            
+            # Do training step if buffer has enough samples
+            if self.buffer.size() >= self.config.batch_size:
+                losses, grad_norms, pred_stats = self.training_step()
+                training_steps += 1
+                
+                # Update shared total_steps so actors get correct epsilon/beta_r
+                shared_total_steps.value = self.total_steps
+                
+                # Check for warmup stage transitions
+                current_stage = self.config.get_warmup_stage(self.total_steps)
+                if current_stage != prev_stage:
+                    current_stage_name = self.config.get_warmup_stage_name(self.total_steps)
+                    if self.verbose:
+                        active = self.config.get_active_networks(self.total_steps)
+                        epsilon = self.config.get_epsilon(self.total_steps)
+                        beta_r = self.config.get_effective_beta_r(self.total_steps)
+                        print(f"\n[Learner] Warmup transition: {prev_stage_name} -> {current_stage_name}")
+                        print(f"  Active networks: {active}, epsilon={epsilon:.3f}, beta_r={beta_r:.3f}")
+                    
+                    # Clear replay buffer at start of beta_r ramp-up (transition to stage 4)
+                    # This discards data collected with beta_r=0 (uniform random policy)
+                    if current_stage == 4 and prev_stage == 3:
+                        buffer_size_before = self.replay_buffer.size()
+                        self.replay_buffer.clear()
+                        if self.verbose:
+                            print(f"  [Learner] Cleared replay buffer ({buffer_size_before} transitions) at start of β_r ramp-up")
+                    
+                    # Clear replay buffer after beta_r ramp-up is done (transition to stage 5)
+                    # This discards data collected during ramp-up with varying beta_r
+                    if current_stage == 5 and prev_stage == 4:
+                        buffer_size_before = self.replay_buffer.size()
+                        self.replay_buffer.clear()
+                        if self.verbose:
+                            print(f"  [Learner] Cleared replay buffer ({buffer_size_before} transitions) after β_r ramp-up")
+                    
+                    prev_stage = current_stage
+                    prev_stage_name = current_stage_name
+                
+                # Log to history periodically
+                if training_steps % 100 == 0:
+                    history.append(losses)
+                    if losses:
+                        loss_str = ", ".join(f"{k}={v:.4f}" for k, v in losses.items() if v > 0)
+                        pbar.set_postfix_str(loss_str[:60])
+                
+                # Update shared policy periodically
+                if training_steps % self.config.actor_sync_freq == 0:
+                    with policy_lock:
+                        shared_policy['state_dict'] = self._serialize_policy_state()
+                        shared_policy['version'] += 1
+                        policy_updates += 1
+        
+        pbar.close()
+        
+        if self.verbose:
+            print(f"[Learner] Completed {training_steps} training steps, {policy_updates} policy updates")
+        
+        # Close TensorBoard writer
+        if self.writer is not None:
+            self.writer.close()
+        
+        return history
+    
+    def _consume_transitions(self, transition_queue: mp.Queue, max_items: int = 100) -> int:
+        """
+        Consume transitions from queue and add to replay buffer.
+        
+        Args:
+            transition_queue: Queue with serialized transitions.
+            max_items: Maximum number of items to consume.
+            
+        Returns:
+            Number of transitions consumed.
+        """
+        consumed = 0
+        while consumed < max_items:
+            try:
+                trans_dict = transition_queue.get_nowait()
+                
+                # Add to buffer using individual fields (matching push signature)
+                self.replay_buffer.push(
+                    state=trans_dict['state'],
+                    robot_action=trans_dict['robot_action'],
+                    goals=trans_dict['goals'],
+                    human_actions=trans_dict['human_actions'],
+                    next_state=trans_dict['next_state'],
+                    transition_probs_by_action=trans_dict.get('transition_probs_by_action')
+                )
+                consumed += 1
+            except Empty:
+                break
+            except Exception:
+                break
+        
+        return consumed
