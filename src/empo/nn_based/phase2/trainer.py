@@ -87,7 +87,8 @@ class BasePhase2Trainer(ABC):
         device: str = 'cpu',
         verbose: bool = False,
         debug: bool = False,
-        tensorboard_dir: Optional[str] = None
+        tensorboard_dir: Optional[str] = None,
+        profiler: Optional[Any] = None,
     ):
         self.networks = networks
         self.config = config
@@ -98,6 +99,7 @@ class BasePhase2Trainer(ABC):
         self.device = device
         self.verbose = verbose
         self.debug = debug
+        self.profiler = profiler
         
         # Initialize TensorBoard writer if requested
         self.writer = None
@@ -983,6 +985,10 @@ class BasePhase2Trainer(ABC):
             if episode_losses:
                 loss_str = ", ".join(f"{k}={v:.4f}" for k, v in episode_losses.items() if v > 0)
                 pbar.set_postfix_str(loss_str[:60])
+            
+            # Step profiler if provided (for TensorBoard profiler integration)
+            if self.profiler is not None:
+                self.profiler.step()
             
             # Print occasional summary if verbose
             if self.debug and episode % 100 == 0:

@@ -67,7 +67,8 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         device: str = 'cpu',
         verbose: bool = False,
         debug: bool = False,
-        tensorboard_dir: Optional[str] = None
+        tensorboard_dir: Optional[str] = None,
+        profiler: Optional[Any] = None,
     ):
         self.env = env
         super().__init__(
@@ -80,7 +81,8 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
             device=device,
             verbose=verbose,
             debug=debug,
-            tensorboard_dir=tensorboard_dir
+            tensorboard_dir=tensorboard_dir,
+            profiler=profiler,
         )
         
         # Caching is now handled internally by the shared encoders.
@@ -1235,7 +1237,8 @@ def train_multigrid_phase2(
     device: str = 'cpu',
     verbose: bool = True,
     debug: bool = False,
-    tensorboard_dir: Optional[str] = None
+    tensorboard_dir: Optional[str] = None,
+    profiler: Optional[Any] = None,
 ) -> Tuple[MultiGridRobotQNetwork, Phase2Networks, List[Dict[str, float]]]:
     """
     Train Phase 2 robot policy for a multigrid environment.
@@ -1312,7 +1315,8 @@ def train_multigrid_phase2(
         device=device,
         verbose=verbose,
         debug=debug,
-        tensorboard_dir=tensorboard_dir
+        tensorboard_dir=tensorboard_dir,
+        profiler=profiler,
     )
     
     if verbose:

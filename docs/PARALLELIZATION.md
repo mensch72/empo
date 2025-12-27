@@ -4,10 +4,11 @@ This document describes the different forms of pickling and data passing used in
 
 ## Overview
 
-EMPO uses Python's `multiprocessing` module with `ProcessPoolExecutor` for parallel computation, in addition to the parallelization that pytorch does internally. There are currently two such non-pytorch parallelization sites:
+EMPO uses Python's `multiprocessing` module with `ProcessPoolExecutor` for parallel computation, in addition to the parallelization that pytorch does internally. There are currently three such non-pytorch parallelization sites:
 
 1. **DAG Construction** (`src/empo/world_model.py`) - Parallelizes BFS exploration of the state space
 2. **Backward Induction** (`src/empo/backward_induction.py`) - Parallelizes policy computation across states
+3. **Async Phase 2 Training** (`src/empo/nn_based/phase2/trainer.py`) - Parallel actor-learner architecture
 
 Each site uses different data passing strategies optimized for its specific workload.
 
@@ -213,16 +214,17 @@ for level_idx, level in enumerate(dependency_levels):
 
 ## Comparison of Approaches
 
-| Aspect | DAG Construction | Backward Induction |
-|--------|------------------|-------------------|
-| **Context** | `spawn` | `fork` |
-| **Platform** | Cross-platform | Docker/Unix-only |
-| **Data Passing** | Pickle + initializer | Module globals (fork inheritance) |
-| **Large Data** | Copied per worker | Shared (copy-on-write) |
-| **Custom Functions** | N/A | cloudpickle |
-| **Initialization** | Once per worker | Once per level |
-| **Task Arguments** | State tuples | State indices only |
-| **Memory Usage** | Higher (copies) | Lower (shared) |
+| Aspect | DAG Construction | Backward Induction | Async Phase 2 Training |
+|--------|------------------|-------------------|------------------------|
+| **Context** | `spawn` | `fork` | `spawn` |
+| **Platform** | Cross-platform | Docker/Unix-only | Cross-platform |
+| **Data Passing** | Pickle + initializer | Module globals (fork inheritance) | Queue + Manager dict |
+| **Large Data** | Copied per worker | Shared (copy-on-write) | Each actor has local copy |
+| **Custom Functions** | N/A | cloudpickle | N/A |
+| **Initialization** | Once per worker | Once per level | Once per actor |
+| **Task Arguments** | State tuples | State indices only | Transitions via queue |
+| **Memory Usage** | Higher (copies) | Lower (shared) | Moderate (local envs) |
+| **GPU Support** | N/A | N/A | Yes (spawn required) |
 
 ---
 
@@ -300,6 +302,166 @@ result = restored_fn(21)  # Returns 42
 ### High memory usage with many workers
 - **Cause:** Each worker has copy of large data (spawn context)
 - **Fix:** Use fork context with shared globals, or reduce worker count
+
+---
+
+## 3. Async Actor-Learner Training (Phase 2)
+
+**Location:** `src/empo/nn_based/phase2/trainer.py`
+
+### Overview
+
+Phase 2 training supports an async actor-learner architecture where multiple actor processes
+collect environment transitions in parallel while a learner process updates the neural networks.
+
+```
+Enable with: Phase2Config(async_training=True, num_actors=4)
+```
+
+### Multiprocessing Context: `spawn`
+
+Async training uses the `spawn` context:
+
+```python
+ctx = mp.get_context('spawn')
+```
+
+**Why `spawn`?**
+- CUDA tensors cannot be forked safely
+- Neural networks with GPU state require fresh process initialization
+- Cross-platform compatible (necessary for Colab, Windows)
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         Main Process                                │
+│                                                                     │
+│  ┌─────────────┐                              ┌─────────────────┐   │
+│  │   Learner   │◄─────── Transitions ─────────│  Shared Queue   │   │
+│  │   Process   │                              │   (mp.Queue)    │   │
+│  │             │                              │                 │   │
+│  │ - Update    │     ┌───────────────────────►│  Transitions    │   │
+│  │   networks  │     │                        │  from actors    │   │
+│  │ - Manage    │     │                        └─────────────────┘   │
+│  │   warmup    │     │                                              │
+│  │             │     │   ┌──────────────────────────────────────┐   │
+│  └─────────────┘     │   │        Shared State (Manager)        │   │
+│        │             │   │                                      │   │
+│        │ Sync policy │   │  - policy_state_dict (for actors)    │   │
+│        ▼             │   │  - shared_total_steps (Value)        │   │
+│  ┌─────────────┐     │   │  - done_flag (Value)                 │   │
+│  │   Manager   │─────┘   │                                      │   │
+│  │   Dict      │         └──────────────────────────────────────┘   │
+│  └─────────────┘                        ▲                           │
+│                                         │                           │
+└─────────────────────────────────────────┼───────────────────────────┘
+                                          │
+        ┌─────────────────────────────────┼─────────────────────────┐
+        │                                 │                         │
+        ▼                                 ▼                         ▼
+┌───────────────┐               ┌───────────────┐          ┌───────────────┐
+│   Actor 0     │               │   Actor 1     │   ...    │   Actor N     │
+│               │               │               │          │               │
+│ - Local env   │               │ - Local env   │          │ - Local env   │
+│ - Local nets  │               │ - Local nets  │          │ - Local nets  │
+│ - Collect     │               │ - Collect     │          │ - Collect     │
+│   transitions │               │   transitions │          │   transitions │
+│ - Push to     │               │ - Push to     │          │ - Push to     │
+│   queue       │               │   queue       │          │   queue       │
+└───────────────┘               └───────────────┘          └───────────────┘
+```
+
+### Shared State for Warmup Coordination
+
+A key challenge is coordinating warmup stages across processes. The solution uses
+`multiprocessing.Value` for a shared step counter:
+
+```python
+# Shared counter for warmup/epsilon coordination
+shared_total_steps = mp.Value('i', 0)  # Integer, lock=True by default
+
+# Actors read to determine current warmup stage
+with shared_total_steps.get_lock():
+    current_steps = shared_total_steps.value
+
+# Only learner increments the counter
+with shared_total_steps.get_lock():
+    shared_total_steps.value += batch_size
+```
+
+**Why shared steps matter:**
+- `epsilon` (exploration) depends on total steps
+- `beta_r` (policy softness) ramps up based on steps
+- All actors must use consistent epsilon/beta_r values
+
+### Policy Synchronization
+
+Actors periodically sync their local networks with the learner's updated weights:
+
+```python
+# Every actor_sync_freq steps, actors check for new weights
+if manager_dict.get('policy_state_dict') is not None:
+    local_q_r.load_state_dict(manager_dict['policy_state_dict'])
+```
+
+The learner publishes updated weights at configurable intervals.
+
+### Transition Queue
+
+Actors push transitions to a shared queue; the learner consumes them:
+
+```python
+# Actor: push transition (as dict, not tensor)
+transition_dict = {
+    'state': state,  # Numpy arrays or lists
+    'action': action,
+    'reward': reward,
+    'next_state': next_state,
+    'done': done,
+    'goal': goal,
+    'transition_probs_by_action': cached_probs,  # For model-based targets
+}
+transition_queue.put(transition_dict)
+
+# Learner: consume and add to replay buffer
+while not transition_queue.empty():
+    transition_dict = transition_queue.get_nowait()
+    replay_buffer.add(**transition_dict)
+```
+
+### Configuration Options
+
+```python
+@dataclass
+class Phase2Config:
+    # Async training options
+    async_training: bool = False        # Enable async mode
+    num_actors: int = 4                 # Number of parallel actors
+    actor_sync_freq: int = 100          # Steps between policy syncs
+    async_min_buffer_size: int = 1000   # Min buffer before training starts
+    async_queue_size: int = 10000       # Max transitions in queue
+```
+
+### Buffer Clearing in Async Mode
+
+Buffer clearing at warmup stage transitions works the same way as synchronous training:
+- Cleared at start of β_r ramp-up (stage 3→4)
+- Cleared at end of β_r ramp-up (stage 4→5)
+
+The learner tracks `last_stage` and clears when stage changes.
+
+### Fallback Behavior
+
+If async training fails (e.g., spawn not supported), it falls back to synchronous training:
+
+```python
+try:
+    self._train_async(env, ...)
+except Exception as e:
+    logger.warning(f"Async training failed: {e}. Falling back to synchronous.")
+    self._train_sync(env, ...)
+```
 
 ---
 

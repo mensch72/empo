@@ -106,7 +106,9 @@ All networks continue training with:
 - β_r at nominal value (default: 10.0)
 - Learning rate decaying as 1/√t
 
-**Replay buffer clearing**: At the transition to Stage 5, the replay buffer is cleared. This removes transitions collected under suboptimal policies, ensuring fine-tuning uses only data from the (nearly) optimal policy.
+**Replay buffer clearing**: The replay buffer is cleared at BOTH transitions around the ramp-up phase:
+- **Start of ramp-up (stage 3→4)**: Removes all transitions collected during warmup when β_r = 0 (uniform random robot policy)
+- **End of ramp-up (stage 4→5)**: Removes transitions collected during ramp-up when β_r was increasing, ensuring fine-tuning uses only data collected with full β_r
 
 **Learning rate decay**: After the full warmup, learning rates decay as:
 
@@ -283,6 +285,63 @@ The 1/√t decay after full warmup satisfies the Robbins-Monro conditions for st
 This is a compromise between:
 - 1/t decay (optimal for expectations, but slow)
 - Constant LR (fast but may not converge)
+
+## Model-Based Targets
+
+When `use_model_based_targets=True` (default), the trainer computes targets using the
+expected value over all possible successor states, weighted by transition probabilities:
+
+```python
+# Instead of: target = reward + gamma * V(s'_observed)
+# We compute: target = reward + gamma * E_{s'}[V(s')]
+#                    = reward + gamma * sum_s' p(s'|s,a) * V(s')
+```
+
+**Benefits:**
+- **Lower variance**: Reduces variance in target estimates
+- **Action consistency**: Actions with identical transition distributions get identical Q-values
+- **Better credit assignment**: All possible successor states contribute to the gradient
+
+**Implementation details:**
+- Transition probabilities are cached at collection time (stored in replay buffer)
+- Caching reduces `transition_probabilities()` calls by ~300× during training
+- Both Q_r and V_h^e use model-based targets when enabled
+
+To disable model-based targets (not recommended):
+
+```python
+config = Phase2Config(use_model_based_targets=False)
+```
+
+## Understanding the Loss Values
+
+**Important:** The MSE losses for Q_r, U_r, and X_h will NOT converge to zero, even with
+perfect training. This is expected behavior due to irreducible variance.
+
+### Why losses don't go to zero
+
+These networks predict *expected values* of stochastic quantities:
+
+- **Q_r(s, a_r)** predicts E[γ_r V_r(s')], but each sampled s' has different V_r(s')
+- **U_r(s)** predicts the intrinsic reward, which varies with sampled goals
+- **X_h(s)** predicts E[V_h^e(s, g_h)^ζ], aggregated over sampled goals
+
+The MSE loss is bounded from below by the **irreducible variance** of the target:
+
+```
+MSE = E[(prediction - target)²]
+    = E[(prediction - E[target])²] + E[(target - E[target])²]
+    = (bias)² + (irreducible variance)
+```
+
+Even with zero bias (perfect prediction of the expected value), the variance term remains.
+
+### What to look for instead
+
+- **Loss plateau**: Losses stabilizing (not increasing) indicates convergence
+- **Policy behavior**: The learned policy should produce reasonable robot behavior
+- **V_h^e convergence**: V_h^e losses should be lower (bounded [0,1] with binary rewards)
+- **TensorBoard metrics**: Monitor `Metrics/mean_episode_reward` and policy entropy
 
 ## Troubleshooting
 

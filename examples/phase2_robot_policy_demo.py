@@ -22,10 +22,12 @@ Usage:
     python phase2_robot_policy_demo.py           # Full run (1000 episodes)
     python phase2_robot_policy_demo.py --quick   # Quick test (100 episodes)
     python phase2_robot_policy_demo.py --debug   # Enable verbose debug output
+    python phase2_robot_policy_demo.py --profile # Profile training with torch.profiler
 
 Output:
 - TensorBoard logs in outputs/phase2_demo/
 - Movie of 100 rollouts with the learned policy
+- Profiler trace (with --profile): outputs/phase2_demo/profiler_trace.json
 """
 
 import sys
@@ -255,7 +257,7 @@ def run_policy_rollout(
 # Main
 # ============================================================================
 
-def main(quick_mode: bool = False, debug: bool = False):
+def main(quick_mode: bool = False, debug: bool = False, profile: bool = False):
     """Run Phase 2 demo."""
     print("=" * 70)
     print("Phase 2 Robot Policy Learning Demo")
@@ -264,18 +266,8 @@ def main(quick_mode: bool = False, debug: bool = False):
     print("=" * 70)
     print()
     
-    # Configuration
-    if quick_mode:
-        num_episodes = 100
-        num_rollouts = 10
-        # Use smaller batches and network for faster iteration in quick mode
-        batch_size = 16
-        x_h_batch_size = 32
-        hidden_dim = 64  # Smaller network for faster forward passes
-        goal_feature_dim = 32
-        agent_embedding_dim = 8
-        print("[QUICK MODE] Running with reduced episodes, rollouts, batch sizes, and network size")
-    elif env_type == "trivial":
+    # Configuration - start with environment-based defaults
+    if env_type == "trivial":
         num_episodes = 3000
         num_rollouts = NUM_ROLLOUTS
         batch_size = 16
@@ -293,6 +285,26 @@ def main(quick_mode: bool = False, debug: bool = False):
         hidden_dim = 128
         goal_feature_dim = 64
         agent_embedding_dim = 16
+    
+    # Override with quick_mode settings
+    if quick_mode:
+        num_episodes = 100
+        num_rollouts = 10
+        # Use smaller batches and network for faster iteration in quick mode
+        batch_size = 16
+        x_h_batch_size = 32
+        hidden_dim = 64  # Smaller network for faster forward passes
+        goal_feature_dim = 32
+        agent_embedding_dim = 8
+        print("[QUICK MODE] Running with reduced episodes, rollouts, batch sizes, and network size")
+    
+    # Override with profile settings
+    if profile:
+        print("[PROFILE MODE] Will profile training with torch.profiler")
+        # Reduce episodes for profiling to get meaningful trace without waiting too long
+        if not quick_mode:
+            num_episodes = min(num_episodes, 50)
+            print(f"  Reduced to {num_episodes} episodes for profiling")
     
     device = 'cpu'
     
@@ -389,21 +401,82 @@ def main(quick_mode: bool = False, debug: bool = False):
     print()
     
     t0 = time.time()
-    robot_q_network, networks, history = train_multigrid_phase2(
-        world_model=env,
-        human_agent_indices=human_indices,
-        robot_agent_indices=robot_indices,
-        human_policy_prior=human_policy_fn,
-        goal_sampler=goal_sampler_fn,
-        config=config,
-        hidden_dim=hidden_dim,
-        goal_feature_dim=goal_feature_dim,
-        agent_embedding_dim=agent_embedding_dim,
-        device=device,
-        verbose=True,
-        debug=debug,
-        tensorboard_dir=tensorboard_dir
-    )
+    
+    if profile:
+        # Profile training with torch.profiler + TensorBoard integration
+        from torch.profiler import profile as torch_profile, ProfilerActivity, schedule, tensorboard_trace_handler
+        
+        profiler_dir = os.path.join(output_dir, 'profiler')
+        os.makedirs(profiler_dir, exist_ok=True)
+        profiler_trace_path = os.path.join(output_dir, 'profiler_trace.json')
+        
+        print(f"  Profiler TensorBoard output: {profiler_dir}")
+        print(f"  View with: tensorboard --logdir={profiler_dir}")
+        print()
+        
+        # Schedule: skip first 2 episodes (wait), warm up for 2, actively profile 6, repeat
+        # This captures steady-state behavior, not just initialization overhead
+        with torch_profile(
+            activities=[ProfilerActivity.CPU] + ([ProfilerActivity.CUDA] if device != 'cpu' else []),
+            schedule=schedule(wait=2, warmup=2, active=6, repeat=2),
+            on_trace_ready=tensorboard_trace_handler(profiler_dir),
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True,
+        ) as prof:
+            robot_q_network, networks, history = train_multigrid_phase2(
+                world_model=env,
+                human_agent_indices=human_indices,
+                robot_agent_indices=robot_indices,
+                human_policy_prior=human_policy_fn,
+                goal_sampler=goal_sampler_fn,
+                config=config,
+                hidden_dim=hidden_dim,
+                goal_feature_dim=goal_feature_dim,
+                agent_embedding_dim=agent_embedding_dim,
+                device=device,
+                verbose=True,
+                debug=debug,
+                tensorboard_dir=tensorboard_dir,
+                profiler=prof,
+            )
+        
+        # Print profiler summary
+        print("\n" + "=" * 70)
+        print("PROFILER RESULTS")
+        print("=" * 70)
+        print("\nTop 30 operations by CPU time:")
+        print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=30))
+        
+        print("\nTop 20 operations by self CPU time (excluding children):")
+        print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=20))
+        
+        # Also export Chrome trace as backup
+        prof.export_chrome_trace(profiler_trace_path)
+        print(f"\nProfiler outputs:")
+        print(f"  TensorBoard: {profiler_dir}")
+        print(f"    View: tensorboard --logdir={profiler_dir}")
+        print(f"    Then open: http://localhost:6006/#pytorch_profiler")
+        print(f"  Chrome trace: {profiler_trace_path}")
+        print(f"    View in Chrome: chrome://tracing")
+        print(f"    Or use: https://ui.perfetto.dev/")
+    else:
+        robot_q_network, networks, history = train_multigrid_phase2(
+            world_model=env,
+            human_agent_indices=human_indices,
+            robot_agent_indices=robot_indices,
+            human_policy_prior=human_policy_fn,
+            goal_sampler=goal_sampler_fn,
+            config=config,
+            hidden_dim=hidden_dim,
+            goal_feature_dim=goal_feature_dim,
+            agent_embedding_dim=agent_embedding_dim,
+            device=device,
+            verbose=True,
+            debug=debug,
+            tensorboard_dir=tensorboard_dir
+        )
+    
     elapsed = time.time() - t0
     
     print(f"\nTraining completed in {elapsed:.2f} seconds")
@@ -459,5 +532,7 @@ if __name__ == "__main__":
                         help='Run in quick test mode with fewer episodes')
     parser.add_argument('--debug', '-d', action='store_true',
                         help='Enable verbose debug output')
+    parser.add_argument('--profile', '-p', action='store_true',
+                        help='Profile training with torch.profiler (outputs trace.json)')
     args = parser.parse_args()
-    main(quick_mode=args.quick, debug=args.debug)
+    main(quick_mode=args.quick, debug=args.debug, profile=args.profile)
