@@ -1,19 +1,17 @@
 """
 Robot Policy for Phase 2.
 
-This module provides a deployable robot policy class that can be loaded
-from a saved checkpoint and used for rollouts/inference on any compatible
-environment.
+This module provides the abstract base class for robot policies that can be used
+for rollouts/inference after training.
 
 The policy is trained on an ENSEMBLE of environments, so it does not store
 any specific environment reference. The policy's sample(state) method takes
-a state that contains all information needed for action selection.
+only the state - any environment-specific context needed should be provided
+via reset(world_model) at the start of each episode.
 """
 
 from abc import ABC, abstractmethod
 from typing import Any
-
-import torch
 
 
 class RobotPolicy(ABC):
@@ -22,6 +20,20 @@ class RobotPolicy(ABC):
     
     Defines the minimal interface for sampling actions from a policy.
     All robot policies (learned, random, etc.) should inherit from this.
+    
+    The interface has two methods:
+    - sample(state): Sample action(s) for the given state (required)
+    - reset(world_model): Called at episode start to provide environment context (optional)
+    
+    Example usage:
+        policy = SomeRobotPolicy(path="policy.pt")
+        
+        # At start of each episode
+        policy.reset(env)
+        
+        # During episode
+        state = env.get_state()
+        action = policy.sample(state)
     """
     
     @abstractmethod
@@ -30,11 +42,23 @@ class RobotPolicy(ABC):
         Sample an action for the given state.
         
         Args:
-            state: Environment state. The format depends on the implementation.
-                   For neural policies on multigrid, this should be a tuple of
-                   (state_tuple, env) where env provides tensorization context.
+            state: Environment state. Format depends on implementation.
         
         Returns:
-            Action to take (format depends on implementation).
+            Action to take. Format depends on implementation.
         """
         pass
+    
+    def reset(self, world_model: Any) -> None:
+        """
+        Reset the policy at the start of an episode.
+        
+        Called at the start of each episode to provide the policy with
+        any world-model-specific context it needs (e.g., static grid layout).
+        
+        Some policies may not need this (e.g., if state contains all info).
+        
+        Args:
+            world_model: The environment/world model for this episode.
+        """
+        pass  # Default: no-op

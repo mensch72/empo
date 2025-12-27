@@ -8,27 +8,32 @@ from typing import Any, Dict, Optional, Tuple
 
 import torch
 
-from ...phase2.robot_policy import BaseRobotPolicy
+from ...phase2.robot_policy import RobotPolicy
 from .robot_q_network import MultiGridRobotQNetwork
 
 
-class MultiGridRobotPolicy(BaseRobotPolicy):
+class MultiGridRobotPolicy(RobotPolicy):
     """
     Robot policy for multigrid environments.
     
     This provides a minimal interface for running a trained robot policy
     in rollouts without the full training infrastructure.
     
+    The policy loads from a checkpoint containing the Q network, its config,
+    and the beta_r parameter. At deployment time:
+    1. Call reset(world_model) at the start of each episode
+    2. Call sample(state) to get actions during the episode
+    
     Example usage:
-        # Load policy from checkpoint (recommended)
+        # Load policy from checkpoint
         policy = MultiGridRobotPolicy(path="policy.pt")
         
-        # Get actions during rollout
-        action = policy.get_action(state, env)
+        # At start of episode
+        policy.reset(env)
         
-        # Alternative: provide your own Q network
-        q_network = MultiGridRobotQNetwork(...)
-        policy = MultiGridRobotPolicy(q_network=q_network, policy_path="policy.pt")
+        # During episode
+        state = env.get_state()
+        action = policy.sample(state)
     """
     
     def __init__(
@@ -36,43 +41,37 @@ class MultiGridRobotPolicy(BaseRobotPolicy):
         q_network: Optional[MultiGridRobotQNetwork] = None,
         beta_r: float = 10.0,
         device: str = 'cpu',
-        policy_path: Optional[str] = None,
         path: Optional[str] = None
     ):
         """
         Initialize the multigrid robot policy.
         
-        Can be initialized either from a checkpoint path (recommended) or with
-        a pre-created Q network.
-        
         Args:
             q_network: Optional Q_r network. If None, must provide path to load from.
-            beta_r: Power-law policy exponent (used if q_network provided without path).
+            beta_r: Power-law policy exponent (default if not in checkpoint).
             device: Torch device for inference.
-            policy_path: Deprecated, use 'path' instead.
             path: Path to policy checkpoint saved by trainer.save_policy().
-                  If provided, reconstructs Q network from checkpoint config.
+                  If provided without q_network, reconstructs network from config.
         
         Examples:
             # From checkpoint (recommended):
             policy = MultiGridRobotPolicy(path="policy.pt")
             
             # With custom Q network:
-            policy = MultiGridRobotPolicy(q_network=my_q_network, path="policy.pt")
+            policy = MultiGridRobotPolicy(q_network=my_q_network)
         """
-        # Handle path parameter (prefer 'path' over 'policy_path')
-        checkpoint_path = path or policy_path
+        self.device = device
+        self._world_model = None  # Set by reset()
         
         if q_network is None:
-            # Must have path to reconstruct network
-            if checkpoint_path is None:
+            if path is None:
                 raise ValueError(
                     "Either q_network or path must be provided. "
                     "Use: MultiGridRobotPolicy(path='policy.pt')"
                 )
             
             # Load checkpoint and reconstruct Q network
-            checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+            checkpoint = torch.load(path, map_location=device, weights_only=False)
             
             if 'q_r_config' not in checkpoint:
                 raise ValueError(
@@ -80,16 +79,16 @@ class MultiGridRobotPolicy(BaseRobotPolicy):
                 )
             
             config = checkpoint['q_r_config']
-            beta_r = checkpoint.get('beta_r', beta_r)
+            self.beta_r = checkpoint.get('beta_r', beta_r)
             
             # Reconstruct Q network from config
-            q_network = MultiGridRobotQNetwork(
+            self.q_network = MultiGridRobotQNetwork(
                 grid_height=config['grid_height'],
                 grid_width=config['grid_width'],
                 num_robot_actions=config['num_robot_actions'],
                 num_robots=config['num_robots'],
                 hidden_dim=config['hidden_dim'],
-                beta_r=config.get('beta_r', beta_r),
+                beta_r=self.beta_r,
                 feasible_range=config.get('feasible_range'),
                 dropout=config.get('dropout', 0.0),
                 # State encoder config
@@ -102,35 +101,68 @@ class MultiGridRobotPolicy(BaseRobotPolicy):
                 max_control_buttons=config['state_encoder_config'].get('max_control_buttons', 4),
             )
             
-            # Initialize base class without loading (we'll load below)
-            super().__init__(q_network, beta_r, device, policy_path=None)
-            
             # Load weights
             self.q_network.load_state_dict(checkpoint['q_r'])
-            self.q_network.eval()
         else:
-            # Q network provided, use normal initialization
-            super().__init__(q_network, beta_r, device, checkpoint_path)
+            self.q_network = q_network
+            self.beta_r = beta_r
+            
+            # Load weights if path provided
+            if path is not None:
+                checkpoint = torch.load(path, map_location=device, weights_only=False)
+                self.q_network.load_state_dict(checkpoint['q_r'])
+                self.beta_r = checkpoint.get('beta_r', beta_r)
+        
+        self.q_network.to(device)
+        self.q_network.eval()
     
-    def encode_state(self, state: Any, world_model: Any) -> Tuple[torch.Tensor, ...]:
+    def reset(self, world_model: Any) -> None:
         """
-        Encode multigrid state for the Q network.
+        Reset the policy at the start of an episode.
+        
+        Caches the world model reference needed for state tensorization.
+        The world model provides static grid information (walls, doors, etc.)
+        that is needed to convert states to tensor form.
+        
+        Args:
+            world_model: MultiGridEnv or similar with grid information.
+        """
+        self._world_model = world_model
+    
+    def sample(self, state: Any) -> Any:
+        """
+        Sample an action for the given state.
         
         Args:
             state: Multigrid state tuple (step_count, agent_states, mobile_objects, mutable_objects).
-            world_model: MultiGridEnv or similar with grid information.
         
         Returns:
-            Tuple of encoded state tensors (shared_encoded..., own_encoded...).
+            Tuple of actions, one per robot. Each action is an integer.
+        
+        Raises:
+            RuntimeError: If reset() was not called before sample().
         """
-        # Encode with shared state encoder
-        shared = self.q_network.state_encoder.tensorize_state(
-            state, world_model, self.device
-        )
+        if self._world_model is None:
+            raise RuntimeError(
+                "Must call reset(world_model) before sample(). "
+                "The world model is needed to tensorize the state."
+            )
         
-        # Encode with own state encoder
-        own = self.q_network.own_state_encoder.tensorize_state(
-            state, world_model, self.device
-        )
-        
-        return (*shared, *own)
+        with torch.no_grad():
+            # Tensorize state using both encoders
+            shared_tensors = self.q_network.state_encoder.tensorize_state(
+                state, self._world_model, self.device
+            )
+            own_tensors = self.q_network.own_state_encoder.tensorize_state(
+                state, self._world_model, self.device
+            )
+            
+            # Combine into input format expected by Q network
+            # shared: (grid, global, agent, interactive)
+            # own: (grid, global, agent, interactive)
+            all_tensors = (*shared_tensors, *own_tensors)
+            
+            # Sample action using the power-law policy
+            actions = self.q_network.sample_action(*all_tensors)
+            
+            return actions
