@@ -112,7 +112,7 @@ class TransportPolicyPriorNetwork(BasePolicyPriorNetwork):
         # Encode all goals
         goal_tensors_list = []
         for goal in goals:
-            goal_tensor = self.q_network.goal_encoder.encode_goal(goal, device, env=world_model)
+            goal_tensor = self.q_network.goal_encoder.tensorize_goal(goal, device, env=world_model)
             goal_tensors_list.append(goal_tensor)
         
         goal_tensors = torch.cat(goal_tensors_list, dim=0)  # (num_goals, goal_input_dim)

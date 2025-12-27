@@ -180,12 +180,14 @@ class BasePhase2Trainer(ABC):
                 lr=self.config.lr_x_h,
                 weight_decay=self.config.x_h_weight_decay
             ),
-            'u_r': optim.Adam(
+        }
+        # Only create U_r optimizer if using network (not direct computation)
+        if self.config.u_r_use_network:
+            optimizers['u_r'] = optim.Adam(
                 self.networks.u_r.parameters(), 
                 lr=self.config.lr_u_r,
                 weight_decay=self.config.u_r_weight_decay
-            ),
-        }
+            )
         # Only create V_r optimizer if using network (not direct computation)
         if self.config.v_r_use_network:
             optimizers['v_r'] = optim.Adam(
@@ -202,8 +204,10 @@ class BasePhase2Trainer(ABC):
             'q_r': self.networks.q_r,
             'v_h_e': self.networks.v_h_e,
             'x_h': self.networks.x_h,
-            'u_r': self.networks.u_r,
         }
+        # Only include U_r if using network mode
+        if self.config.u_r_use_network:
+            networks['u_r'] = self.networks.u_r
         # Only include V_r if using network mode
         if self.config.v_r_use_network:
             networks['v_r'] = self.networks.v_r
@@ -222,8 +226,10 @@ class BasePhase2Trainer(ABC):
             'q_r': self.networks.q_r,
             'v_h_e': self.networks.v_h_e,
             'x_h': self.networks.x_h,
-            'u_r': self.networks.u_r,
         }
+        # Only include U_r if using network mode
+        if self.config.u_r_use_network:
+            networks['u_r'] = self.networks.u_r
         # Only include V_r if using network mode
         if self.config.v_r_use_network:
             networks['v_r'] = self.networks.v_r
@@ -240,7 +246,8 @@ class BasePhase2Trainer(ABC):
         self.networks.v_r_target.load_state_dict(self.networks.v_r.state_dict())
         self.networks.v_h_e_target.load_state_dict(self.networks.v_h_e.state_dict())
         self.networks.x_h_target.load_state_dict(self.networks.x_h.state_dict())
-        self.networks.u_r_target.load_state_dict(self.networks.u_r.state_dict())
+        if self.config.u_r_use_network:
+            self.networks.u_r_target.load_state_dict(self.networks.u_r.state_dict())
         
         # Ensure target networks stay in eval mode (disables dropout)
         self.networks.v_r_target.eval()
@@ -249,15 +256,15 @@ class BasePhase2Trainer(ABC):
         self.networks.u_r_target.eval()
     
     @abstractmethod
-    def encode_state(self, state: Any) -> Dict[str, torch.Tensor]:
+    def tensorize_state(self, state: Any) -> Dict[str, torch.Tensor]:
         """
-        Encode environment state into tensor format.
+        Convert raw state to tensors (preprocessing, NOT neural network encoding).
         
         Args:
             state: Raw environment state.
         
         Returns:
-            Dict of encoded state tensors.
+            Dict of input tensors.
         """
         pass
     
@@ -388,8 +395,11 @@ class BasePhase2Trainer(ABC):
             print(f"[DEBUG] collect_transition: environment stepped, creating transition...")
         
         # Pre-compute transition probabilities for all robot actions (for model-based targets)
+        # OPTIMIZATION: Only cache when Q_r is active - during early warmup we use
+        # the cheaper V_h^e-only targets that don't need all action combinations.
         transition_probs_by_action = None
-        if self.config.use_model_based_targets and hasattr(self.env, 'transition_probabilities'):
+        q_r_active = 'q_r' in self.config.get_active_networks(self.total_steps)
+        if self.config.use_model_based_targets and q_r_active and hasattr(self.env, 'transition_probabilities'):
             transition_probs_by_action = self._precompute_transition_probs(
                 state, human_actions
             )
@@ -457,6 +467,42 @@ class BasePhase2Trainer(ABC):
         
         return result
     
+    def _compute_u_r_for_state(self, state: Any) -> torch.Tensor:
+        """
+        Compute U_r for a state, either from network or directly from X_h.
+        
+        U_r(s) = -(E_h[X_h(s)^{-ξ}])^η
+        
+        When u_r_use_network=True, uses the U_r network.
+        When u_r_use_network=False, computes directly from X_h values.
+        
+        Args:
+            state: Environment state.
+            
+        Returns:
+            U_r value as a tensor.
+        """
+        if self.config.u_r_use_network:
+            # Use U_r network (or target network depending on context)
+            _, u_r = self.networks.u_r.encode_and_forward(state, None, self.device)
+            return u_r
+        else:
+            # Compute directly from X_h values
+            x_h_values = []
+            for h in self.human_agent_indices:
+                x_h = self.networks.x_h.encode_and_forward(state, None, h, self.device)
+                # Clamp X_h to (0, 1] to prevent explosion when X_h is near 0
+                x_h_clamped = torch.clamp(x_h.squeeze(), min=1e-3, max=1.0)
+                x_h_values.append(x_h_clamped)
+            
+            # Stack and compute U_r using the formula:
+            # y = E_h[X_h^{-ξ}], U_r = -y^η
+            x_h_tensor = torch.stack(x_h_values)  # (num_humans,)
+            x_h_powered = x_h_tensor ** (-self.config.xi)
+            y = x_h_powered.mean()
+            u_r = -(y ** self.config.eta)
+            return u_r.unsqueeze(0)  # Return with batch dim
+    
     def compute_losses(
         self,
         batch: List[Phase2Transition],
@@ -475,12 +521,20 @@ class BasePhase2Trainer(ABC):
         if x_h_batch is None:
             x_h_batch = batch
         
+        # Check which networks are active - determines what we need to compute
+        active_networks = self.config.get_active_networks(self.total_steps)
+        x_h_active = 'x_h' in active_networks
+        u_r_active = 'u_r' in active_networks
+        q_r_active = 'q_r' in active_networks
+        
         losses = {
             'v_h_e': torch.tensor(0.0, device=self.device),
             'x_h': torch.tensor(0.0, device=self.device),
-            'u_r': torch.tensor(0.0, device=self.device),
             'q_r': torch.tensor(0.0, device=self.device),
         }
+        # Only include U_r loss if using network mode
+        if self.config.u_r_use_network:
+            losses['u_r'] = torch.tensor(0.0, device=self.device)
         # Only include V_r loss if using network mode
         if self.config.v_r_use_network:
             losses['v_r'] = torch.tensor(0.0, device=self.device)
@@ -522,69 +576,71 @@ class BasePhase2Trainer(ABC):
                 
                 losses['v_h_e'] = losses['v_h_e'] + (v_h_e_pred.squeeze() - target) ** 2
             
-            # ===== U_r loss (averaged over sampled or all humans) =====
-            # Determine which humans to sample for U_r loss
-            if self.config.u_r_sample_humans is None:
-                # Use all humans
-                humans_for_u_r = self.human_agent_indices
-            else:
-                # Sample a fixed number of humans
-                n_sample = min(self.config.u_r_sample_humans, len(self.human_agent_indices))
-                humans_for_u_r = random.sample(self.human_agent_indices, n_sample)
-            
-            y_pred, _ = self.networks.u_r.encode_and_forward(s, None, self.device)
-            
-            # Accumulate X_h^{-ξ} over sampled humans using X_h target network for stability
-            x_h_sum = torch.tensor(0.0, device=self.device)
-            for h_u in humans_for_u_r:
-                with torch.no_grad():
-                    x_h_for_h = self.networks.x_h_target.encode_and_forward(
-                        s, None, h_u, self.device
-                    )
-                # Clamp X_h to (0, 1] to prevent X_h^{-ξ} explosion when X_h is near 0
-                x_h_clamped = torch.clamp(x_h_for_h.squeeze(), min=1e-3, max=1.0)
-                # Accumulate X_h^{-ξ}
-                x_h_sum = x_h_sum + x_h_clamped ** (-self.config.xi)
-            
-            # Average to get E[X_h^{-ξ}] = y (the target)
-            x_h_avg = x_h_sum / len(humans_for_u_r)
-            
-            # target_y = E[X_h^{-ξ}] directly (y is defined as E[X_h^{-ξ}])
-            target_y = x_h_avg
-            losses['u_r'] = losses['u_r'] + (y_pred.squeeze() - target_y) ** 2
-            
-            # ===== Q_r loss =====
-            q_r_all = self.networks.q_r.encode_and_forward(s, None, self.device)
-            a_r_index = self.networks.q_r.action_tuple_to_index(a_r)
-            q_r_pred = q_r_all.squeeze()[a_r_index]
-            
-            # Use effective beta_r for policy (0 during warm-up for independence)
-            effective_beta_r = self.config.get_effective_beta_r(self.total_steps)
-            
-            with torch.no_grad():
-                if self.config.v_r_use_network:
-                    # Use V_r target network
-                    v_r_next = self.networks.v_r_target.encode_and_forward(
-                        s_prime, None, self.device
-                    )
+            # ===== U_r loss (only if using network mode AND U_r is active) =====
+            if self.config.u_r_use_network and u_r_active:
+                # Determine which humans to sample for U_r loss
+                if self.config.u_r_sample_humans is None:
+                    # Use all humans
+                    humans_for_u_r = self.human_agent_indices
                 else:
-                    # Compute V_r directly: V_r(s') = U_r(s') + π_r(s') · Q_r(s')
-                    _, u_r_next = self.networks.u_r.encode_and_forward(s_prime, None, self.device)
-                    q_r_next = self.networks.q_r.encode_and_forward(s_prime, None, self.device)
-                    pi_r_next = self.networks.q_r.get_policy(q_r_next, beta_r=effective_beta_r)
-                    v_r_next = self.networks.v_r.compute_from_components(
-                        u_r_next.squeeze(), q_r_next.squeeze(), pi_r_next.squeeze()
-                    )
+                    # Sample a fixed number of humans
+                    n_sample = min(self.config.u_r_sample_humans, len(self.human_agent_indices))
+                    humans_for_u_r = random.sample(self.human_agent_indices, n_sample)
+                
+                y_pred, _ = self.networks.u_r.encode_and_forward(s, None, self.device)
+                
+                # Accumulate X_h^{-ξ} over sampled humans using X_h target network for stability
+                x_h_sum = torch.tensor(0.0, device=self.device)
+                for h_u in humans_for_u_r:
+                    with torch.no_grad():
+                        x_h_for_h = self.networks.x_h_target.encode_and_forward(
+                            s, None, h_u, self.device
+                        )
+                    # Clamp X_h to (0, 1] to prevent X_h^{-ξ} explosion when X_h is near 0
+                    x_h_clamped = torch.clamp(x_h_for_h.squeeze(), min=1e-3, max=1.0)
+                    # Accumulate X_h^{-ξ}
+                    x_h_sum = x_h_sum + x_h_clamped ** (-self.config.xi)
+                
+                # Average to get E[X_h^{-ξ}] = y (the target)
+                x_h_avg = x_h_sum / len(humans_for_u_r)
+                
+                # target_y = E[X_h^{-ξ}] directly (y is defined as E[X_h^{-ξ}])
+                target_y = x_h_avg
+                losses['u_r'] = losses['u_r'] + (y_pred.squeeze() - target_y) ** 2
             
-            target_q_r = self.config.gamma_r * v_r_next.squeeze()
-            losses['q_r'] = losses['q_r'] + (q_r_pred - target_q_r) ** 2
+            # ===== Q_r loss (only when Q_r is active) =====
+            if q_r_active:
+                q_r_all = self.networks.q_r.encode_and_forward(s, None, self.device)
+                a_r_index = self.networks.q_r.action_tuple_to_index(a_r)
+                q_r_pred = q_r_all.squeeze()[a_r_index]
+                
+                # Use effective beta_r for policy (0 during warm-up for independence)
+                effective_beta_r = self.config.get_effective_beta_r(self.total_steps)
+                
+                with torch.no_grad():
+                    if self.config.v_r_use_network:
+                        # Use V_r target network
+                        v_r_next = self.networks.v_r_target.encode_and_forward(
+                            s_prime, None, self.device
+                        )
+                    else:
+                        # Compute V_r directly: V_r(s') = U_r(s') + π_r(s') · Q_r(s')
+                        u_r_next = self._compute_u_r_for_state(s_prime)
+                        q_r_next = self.networks.q_r.encode_and_forward(s_prime, None, self.device)
+                        pi_r_next = self.networks.q_r.get_policy(q_r_next, beta_r=effective_beta_r)
+                        v_r_next = self.networks.v_r.compute_from_components(
+                            u_r_next.squeeze(), q_r_next.squeeze(), pi_r_next.squeeze()
+                        )
+                
+                target_q_r = self.config.gamma_r * v_r_next.squeeze()
+                losses['q_r'] = losses['q_r'] + (q_r_pred - target_q_r) ** 2
             
             # ===== V_r loss (only if using network mode) =====
             if self.config.v_r_use_network:
                 v_r_pred = self.networks.v_r.encode_and_forward(s, None, self.device)
                 
                 with torch.no_grad():
-                    _, u_r = self.networks.u_r.encode_and_forward(s, None, self.device)
+                    u_r = self._compute_u_r_for_state(s)
                     q_r_for_v = self.networks.q_r.encode_and_forward(s, None, self.device)
                     pi_r = self.networks.q_r.get_policy(q_r_for_v, beta_r=effective_beta_r)
                 
@@ -593,45 +649,50 @@ class BasePhase2Trainer(ABC):
                 )
                 losses['v_r'] = losses['v_r'] + (v_r_pred.squeeze() - target_v_r) ** 2
         
-        # ===== X_h loss (computed on potentially larger batch) =====
-        for transition in x_h_batch:
-            s = transition.state
-            goals = transition.goals
-            
-            # Determine which human-goal pairs to use for X_h loss
-            if self.config.x_h_sample_humans is None:
-                # Use all humans' goals from the transition
-                humans_for_x_h = list(goals.keys())
-            else:
-                # Sample a fixed number of humans
-                n_sample = min(self.config.x_h_sample_humans, len(goals))
-                humans_for_x_h = random.sample(list(goals.keys()), n_sample)
-            
-            for h_x in humans_for_x_h:
-                g_h_x = goals[h_x]
-                x_h_pred = self.networks.x_h.encode_and_forward(
-                    s, None, h_x, self.device
-                )
+        # ===== X_h loss (computed on potentially larger batch, only when X_h is active) =====
+        if x_h_active:
+            for transition in x_h_batch:
+                s = transition.state
+                goals = transition.goals
                 
-                with torch.no_grad():
-                    # Use target network for more stable X_h targets
-                    v_h_e_for_x = self.networks.v_h_e_target.encode_and_forward(
-                        s, None, h_x, g_h_x, self.device
+                # Determine which human-goal pairs to use for X_h loss
+                if self.config.x_h_sample_humans is None:
+                    # Use all humans' goals from the transition
+                    humans_for_x_h = list(goals.keys())
+                else:
+                    # Sample a fixed number of humans
+                    n_sample = min(self.config.x_h_sample_humans, len(goals))
+                    humans_for_x_h = random.sample(list(goals.keys()), n_sample)
+                
+                for h_x in humans_for_x_h:
+                    g_h_x = goals[h_x]
+                    x_h_pred = self.networks.x_h.encode_and_forward(
+                        s, None, h_x, self.device
                     )
-                
-                target_x_h = self.networks.x_h.compute_target(v_h_e_for_x.squeeze())
-                losses['x_h'] = losses['x_h'] + (x_h_pred.squeeze() - target_x_h) ** 2
-                x_h_count += 1
+                    
+                    with torch.no_grad():
+                        # Use target network for more stable X_h targets
+                        v_h_e_for_x = self.networks.v_h_e_target.encode_and_forward(
+                            s, None, h_x, g_h_x, self.device
+                        )
+                    
+                    target_x_h = self.networks.x_h.compute_target(v_h_e_for_x.squeeze())
+                    losses['x_h'] = losses['x_h'] + (x_h_pred.squeeze() - target_x_h) ** 2
+                    x_h_count += 1
         
         # Average losses over their respective batch sizes
         n = len(batch)
-        loss_keys_to_avg = ['v_h_e', 'u_r', 'q_r']
+        loss_keys_to_avg = ['v_h_e']
+        if q_r_active:
+            loss_keys_to_avg.append('q_r')
+        if self.config.u_r_use_network and u_r_active:
+            loss_keys_to_avg.append('u_r')
         if self.config.v_r_use_network:
             loss_keys_to_avg.append('v_r')
         for k in loss_keys_to_avg:
             losses[k] = losses[k] / n
         # X_h uses its own count (may be from larger batch)
-        if x_h_count > 0:
+        if x_h_active and x_h_count > 0:
             losses['x_h'] = losses['x_h'] / x_h_count
         
         return losses, {}
@@ -688,23 +749,19 @@ class BasePhase2Trainer(ABC):
             total_loss = sum(loss for _, loss in trainable_losses)
             total_loss.backward()
             
-            # Map network names to their grad clip configs and network objects
-            grad_clip_configs = {
-                'q_r': (self.config.q_r_grad_clip, self.networks.q_r),
-                'v_h_e': (self.config.v_h_e_grad_clip, self.networks.v_h_e),
-                'x_h': (self.config.x_h_grad_clip, self.networks.x_h),
-                'u_r': (self.config.u_r_grad_clip, self.networks.u_r),
+            # Map network names to their network objects
+            network_map = {
+                'q_r': self.networks.q_r,
+                'v_h_e': self.networks.v_h_e,
+                'x_h': self.networks.x_h,
             }
+            if self.config.u_r_use_network:
+                network_map['u_r'] = self.networks.u_r
             if self.config.v_r_use_network:
-                grad_clip_configs['v_r'] = (self.config.v_r_grad_clip, self.networks.v_r)
+                network_map['v_r'] = self.networks.v_r
             
             # Apply gradient clipping and step each optimizer
             for name, _ in trainable_losses:
-                if name in grad_clip_configs:
-                    clip_val, net = grad_clip_configs[name]
-                    if clip_val and clip_val > 0:
-                        torch.nn.utils.clip_grad_norm_(net.parameters(), clip_val)
-                
                 # Update learning rate using the new warm-up-aware schedule
                 self.update_counts[name] += 1
                 new_lr = self.config.get_learning_rate(
@@ -712,6 +769,13 @@ class BasePhase2Trainer(ABC):
                 )
                 for param_group in self.optimizers[name].param_groups:
                     param_group['lr'] = new_lr
+                
+                # Apply gradient clipping (optionally scaled by learning rate)
+                if name in network_map:
+                    net = network_map[name]
+                    clip_val = self.config.get_effective_grad_clip(name, new_lr)
+                    if clip_val and clip_val > 0:
+                        torch.nn.utils.clip_grad_norm_(net.parameters(), clip_val)
                 
                 grad_norms[name] = self._compute_single_grad_norm(name)
                 self.optimizers[name].step()
@@ -728,8 +792,9 @@ class BasePhase2Trainer(ABC):
             'q_r': self.networks.q_r,
             'v_h_e': self.networks.v_h_e,
             'x_h': self.networks.x_h,
-            'u_r': self.networks.u_r,
         }
+        if self.config.u_r_use_network:
+            networks['u_r'] = self.networks.u_r
         # Only include V_r if using network mode
         if self.config.v_r_use_network:
             networks['v_r'] = self.networks.v_r
@@ -764,17 +829,21 @@ class BasePhase2Trainer(ABC):
             print(f"[DEBUG] train_episode: goals sampled, starting {self.config.steps_per_episode} steps...")
         
         episode_losses = {
-            'v_h_e': [], 'x_h': [], 'u_r': [], 'q_r': []
+            'v_h_e': [], 'x_h': [], 'q_r': []
         }
         episode_grad_norms = {
-            'v_h_e': [], 'x_h': [], 'u_r': [], 'q_r': []
+            'v_h_e': [], 'x_h': [], 'q_r': []
         }
         episode_pred_stats = {
             'v_h_e': {'mean': [], 'std': []},
             'x_h': {'mean': [], 'std': []},
-            'u_r': {'mean': [], 'std': []},
             'q_r': {'mean': [], 'std': []}
         }
+        # Only track U_r if using network mode
+        if self.config.u_r_use_network:
+            episode_losses['u_r'] = []
+            episode_grad_norms['u_r'] = []
+            episode_pred_stats['u_r'] = {'mean': [], 'std': []}
         # Only track V_r if using network mode
         if self.config.v_r_use_network:
             episode_losses['v_r'] = []
@@ -807,9 +876,11 @@ class BasePhase2Trainer(ABC):
             for _ in range(self.config.updates_per_step):
                 losses, grad_norms, pred_stats = self.training_step()
                 for k, v in losses.items():
-                    episode_losses[k].append(v)
+                    if k in episode_losses:
+                        episode_losses[k].append(v)
                 for k, v in grad_norms.items():
-                    episode_grad_norms[k].append(v)
+                    if k in episode_grad_norms:
+                        episode_grad_norms[k].append(v)
                 for k, stats in pred_stats.items():
                     if k in episode_pred_stats:
                         episode_pred_stats[k]['mean'].append(stats['mean'])
@@ -891,8 +962,14 @@ class BasePhase2Trainer(ABC):
             # Log to TensorBoard
             if self.writer is not None:
                 for key, value in episode_losses.items():
+                    # Skip U_r loss if not using U_r network
+                    if key == 'u_r' and not self.config.u_r_use_network:
+                        continue
                     self.writer.add_scalar(f'Loss/{key}', value, episode)
                 for key, value in episode_grad_norms.items():
+                    # Skip U_r grad norm if not using U_r network
+                    if key == 'u_r' and not self.config.u_r_use_network:
+                        continue
                     self.writer.add_scalar(f'GradNorm/{key}', value, episode)
                 # Log prediction statistics (mean and std of predictions, and target mean)
                 for key, stats in episode_pred_stats.items():
@@ -906,8 +983,13 @@ class BasePhase2Trainer(ABC):
                     self.writer.add_scalar(f'ParamNorm/{key}', value, episode)
                 self.writer.add_scalar('Epsilon', self.config.get_epsilon(self.total_steps), episode)
                 
-                # Log learning rates for all networks
-                for net_name in ['v_h_e', 'x_h', 'u_r', 'q_r', 'v_r']:
+                # Log learning rates for networks that are being trained
+                networks_to_log_lr = ['v_h_e', 'x_h', 'q_r']
+                if self.config.u_r_use_network:
+                    networks_to_log_lr.append('u_r')
+                if self.config.v_r_use_network:
+                    networks_to_log_lr.append('v_r')
+                for net_name in networks_to_log_lr:
                     lr = self.config.get_learning_rate(
                         net_name, self.total_steps, self.update_counts.get(net_name, 0)
                     )

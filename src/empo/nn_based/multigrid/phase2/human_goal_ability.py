@@ -201,10 +201,10 @@ class MultiGridHumanGoalAchievementNetwork(BaseHumanGoalAchievementNetwork):
         
         # Encode state (agent-agnostic)
         grid_tensor, global_features, agent_features, interactive_features = \
-            self.state_encoder.encode_state(state, world_model, device)
+            self.state_encoder.tensorize_state(state, world_model, device)
         
         # Encode goal: first extract coordinates, then pass through encoder network
-        goal_coords = self.goal_encoder.encode_goal(goal, device)
+        goal_coords = self.goal_encoder.tensorize_goal(goal, device)
         goal_features = self.goal_encoder(goal_coords)
         
         # Encode agent identity (index + position grid + features)

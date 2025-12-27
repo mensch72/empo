@@ -212,7 +212,7 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         
         # Encode state (agent-agnostic)
         grid_tensor, global_features, agent_features, interactive_features = \
-            self.state_encoder.encode_state(state, world_model, device)
+            self.state_encoder.tensorize_state(state, world_model, device)
         
         # Encode agent identity with shared encoder
         query_idx, query_grid, query_features = self.agent_encoder.encode_single(

@@ -26,9 +26,12 @@ The neural systems use a modular architecture with base classes and domain-speci
   - List-based MLP for agent features
   - List-based MLP for interactive object features
   - Global world features
+  - **Compressed grid format** for efficient replay buffer storage (see below)
 - **MultiGridGoalEncoder** - Encodes goal positions (not part of world state)
 - **MultiGridQNetwork** - Combines state and goal encoders
 - **MultiGridNeuralHumanPolicyPrior** - With multigrid-specific validation
+
+**Terminology Note**: The state encoder performs **tensorization** (converting raw state tuples to tensors), not encoding in the neural network sense. The actual "encoding" (feature extraction via NN forward pass) happens in the Q-network's convolutional and MLP layers.
 
 ---
 
@@ -138,6 +141,12 @@ The `MultiGridStateEncoder` encodes the **complete world state** as a single fea
 
 Goals are encoded separately by `GoalEncoder` because they represent the agent's objective, not the world state itself.
 
+**Split Tensorization**: For efficient training, tensorization is split between actor and trainer:
+- **Actor** (at collection time): Computes expensive features (global, agent, interactive) + compressed grid
+- **Trainer** (at training time): Decompresses grid in fully vectorized batch operations
+
+See [BATCHED_COMPUTATION.md](BATCHED_COMPUTATION.md#split-tensorization-optimization) for the complete data flow.
+
 ### Design Principle: No Normalization
 
 **All values are passed as raw integers/floats, NOT normalized.** This is intentional because:
@@ -206,6 +215,25 @@ Total Channels = num_object_types + 3 + num_colors + 1
 - Stumble probability (for unsteady ground)
 - Magic wall entry probability
 - Magic wall solidify probability
+
+### Compressed Grid Format (for Replay Buffer)
+
+For off-policy learning, the full grid tensor (39 channels × H × W = 7644 bytes for 7×7) must be stored efficiently. The **compressed grid format** packs all grid information into a single `int32` per cell:
+
+| Bits | Field | Description |
+|------|-------|-------------|
+| 0-4 | object_type | 0-29 standard types, 30=door, 31=key |
+| 5-7 | object_color | 0-6 color index (for doors/keys) |
+| 8-9 | object_state | 0-3 door state (none/open/closed/locked) |
+| 10-12 | agent_color | 0-6 agent color, 7=no agent |
+| 13-15 | magic_state | 0=none, 1-4=active+side, 5=inactive |
+| 16-17 | other_category | 0=none, 1=overlappable, 2=immobile, 3=mobile |
+
+**Storage**: 196 bytes (7×7×4) vs 7644 bytes = **39× smaller** per grid
+
+**Key insight**: The compressed grid captures ALL static and dynamic grid information, so the trainer can reconstruct the full grid tensor **without access to world_model**. This is essential for off-policy learning where transitions may come from different episodes with different world layouts.
+
+See [BATCHED_COMPUTATION.md](BATCHED_COMPUTATION.md#compressed-grid-format) for full implementation details.
 
 ### Agent Features (13 per agent, all raw)
 

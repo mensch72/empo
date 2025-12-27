@@ -21,10 +21,10 @@ class BaseGoalEncoder(nn.Module, ABC):
     
     @abstractmethod
     def forward(self, *args, **kwargs) -> torch.Tensor:
-        """Encode goal(s) into feature vectors."""
+        """Encode goal(s) into feature vectors (neural network forward pass)."""
         pass
     
     @abstractmethod
-    def encode_goal(self, goal: Any, device: str = 'cpu') -> torch.Tensor:
-        """Encode a single goal."""
+    def tensorize_goal(self, goal: Any, device: str = 'cpu') -> torch.Tensor:
+        """Convert a goal to input tensor (preprocessing, NOT neural network encoding)."""
         pass

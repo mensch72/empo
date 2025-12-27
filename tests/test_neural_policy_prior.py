@@ -154,9 +154,9 @@ def test_multigrid_state_encoder():
     print("  ✓ MultiGridStateEncoder test passed!")
 
 
-def test_multigrid_state_encoder_encode_state():
+def test_multigrid_state_encoder_tensorize_state():
     """Test state encoding from actual state tuple."""
-    print("Testing MultiGridStateEncoder.encode_state...")
+    print("Testing MultiGridStateEncoder.tensorize_state...")
     
     world_model = MockWorldModel()
     state = create_mock_state(num_agents=2)
@@ -170,7 +170,7 @@ def test_multigrid_state_encoder_encode_state():
     )
     
     grid_tensor, global_features, agent_features, interactive_features = \
-        encoder.encode_state(state, world_model)
+        encoder.tensorize_state(state, world_model)
     
     assert grid_tensor.shape[0] == 1
     assert global_features.shape == (1, 4)
@@ -178,7 +178,7 @@ def test_multigrid_state_encoder_encode_state():
     print(f"  ✓ Global features shape: {global_features.shape}")
     print(f"  ✓ Agent features shape: {agent_features.shape}")
     print(f"  ✓ Interactive features shape: {interactive_features.shape}")
-    print("  ✓ MultiGridStateEncoder.encode_state test passed!")
+    print("  ✓ MultiGridStateEncoder.tensorize_state test passed!")
 
 
 def test_multigrid_goal_encoder():
@@ -208,7 +208,7 @@ def test_multigrid_goal_encoder():
             self.target_rect = (2, 3, 5, 7)
     
     rect_goal = RectGoal()
-    encoded = encoder.encode_goal(rect_goal)
+    encoded = encoder.tensorize_goal(rect_goal)
     assert encoded.shape == (1, 4), f"Expected (1, 4), got {encoded.shape}"
     # Verify bounding box encoding (x1, y1, x2, y2)
     assert encoded[0, 0] == 2 and encoded[0, 1] == 3  # x1, y1
@@ -221,7 +221,7 @@ def test_multigrid_goal_encoder():
             self.target_pos = (5, 5)
     
     point_goal = PointGoal()
-    encoded = encoder.encode_goal(point_goal)
+    encoded = encoder.tensorize_goal(point_goal)
     assert encoded.shape == (1, 4), f"Expected (1, 4), got {encoded.shape}"
     # For point goals, bounding box is (x, y, x, y)
     assert encoded[0, 0] == 5 and encoded[0, 1] == 5  # x1, y1
@@ -750,7 +750,7 @@ def run_all_tests():
     test_multigrid_state_encoder()
     print()
     
-    test_multigrid_state_encoder_encode_state()
+    test_multigrid_state_encoder_tensorize_state()
     print()
     
     test_multigrid_goal_encoder()

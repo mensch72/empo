@@ -179,7 +179,7 @@ class DirectPhiNetwork(nn.Module):
         """
         # State encoding is agent-agnostic
         grid_tensor, global_features, agent_features, interactive_features = \
-            self.state_encoder.encode_state(state, world_model, device)
+            self.state_encoder.tensorize_state(state, world_model, device)
         
         return self.forward(
             grid_tensor, global_features, agent_features, interactive_features

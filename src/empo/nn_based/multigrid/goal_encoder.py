@@ -79,17 +79,17 @@ class MultiGridGoalEncoder(BaseGoalEncoder):
         """
         return self.fc(goal_coords)
     
-    def encode_goal(
+    def tensorize_goal(
         self,
         goal: Any,
         device: str = 'cpu'
     ) -> torch.Tensor:
         """
-        Extract goal coordinates as a bounding box tensor.
+        Convert goal to input tensor (preprocessing, NOT neural network encoding).
         
         This method extracts raw coordinates from the goal object. Results are
         cached by goal object id to avoid redundant extraction. Call forward()
-        on these coordinates to get the final encoded representation.
+        on these coordinates to get the actual neural network encoding.
         
         Handles goal formats:
         1. Rectangle goal with target_rect: (x1, y1, x2, y2)

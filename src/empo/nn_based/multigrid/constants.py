@@ -135,3 +135,53 @@ SMALL_ACTION_ENCODING = {
     2: 'right',
     3: 'forward',
 }
+
+# =============================================================================
+# COMPRESSED GRID FORMAT (for replay buffer storage)
+# =============================================================================
+# 
+# Each cell is encoded as a single int32 with the following bit layout:
+# Bits 0-4 (5 bits): object_type (0-31, maps to OBJECT_TYPE_TO_CHANNEL or special values)
+# Bits 5-7 (3 bits): object_color (0-7, maps to COLOR_TO_IDX)
+# Bits 8-9 (2 bits): object_state (0-3, for doors: 0=none, 1=open, 2=closed, 3=locked)
+# Bits 10-12 (3 bits): agent_color (0-7, 7 means no agent)
+# Bits 13-15 (3 bits): magic_wall_state (0-6, 0=none, 1-5=active with magic_side, 6=inactive)
+# Bits 16-18 (3 bits): other_category (0=none, 1=overlappable, 2=immobile, 3=mobile)
+#
+# Special object_type values:
+#   30 = door (color in bits 5-7, state in bits 8-9)
+#   31 = key (color in bits 5-7)
+#
+# This encoding allows reconstructing the full grid tensor without access to world_model.
+
+COMPRESSED_GRID_OBJECT_TYPE_BITS = 5
+COMPRESSED_GRID_OBJECT_TYPE_MASK = (1 << COMPRESSED_GRID_OBJECT_TYPE_BITS) - 1  # 0x1F
+
+COMPRESSED_GRID_COLOR_SHIFT = 5
+COMPRESSED_GRID_COLOR_BITS = 3
+COMPRESSED_GRID_COLOR_MASK = ((1 << COMPRESSED_GRID_COLOR_BITS) - 1) << COMPRESSED_GRID_COLOR_SHIFT  # 0xE0
+
+COMPRESSED_GRID_STATE_SHIFT = 8
+COMPRESSED_GRID_STATE_BITS = 2
+COMPRESSED_GRID_STATE_MASK = ((1 << COMPRESSED_GRID_STATE_BITS) - 1) << COMPRESSED_GRID_STATE_SHIFT  # 0x300
+
+COMPRESSED_GRID_AGENT_COLOR_SHIFT = 10
+COMPRESSED_GRID_AGENT_COLOR_BITS = 3
+COMPRESSED_GRID_AGENT_COLOR_MASK = ((1 << COMPRESSED_GRID_AGENT_COLOR_BITS) - 1) << COMPRESSED_GRID_AGENT_COLOR_SHIFT  # 0x1C00
+COMPRESSED_GRID_NO_AGENT = 7  # Special value meaning no agent at this cell
+
+COMPRESSED_GRID_MAGIC_SHIFT = 13
+COMPRESSED_GRID_MAGIC_BITS = 3
+COMPRESSED_GRID_MAGIC_MASK = ((1 << COMPRESSED_GRID_MAGIC_BITS) - 1) << COMPRESSED_GRID_MAGIC_SHIFT  # 0xE000
+
+COMPRESSED_GRID_OTHER_SHIFT = 16
+COMPRESSED_GRID_OTHER_BITS = 2
+COMPRESSED_GRID_OTHER_MASK = ((1 << COMPRESSED_GRID_OTHER_BITS) - 1) << COMPRESSED_GRID_OTHER_SHIFT  # 0x30000
+COMPRESSED_GRID_OTHER_NONE = 0
+COMPRESSED_GRID_OTHER_OVERLAPPABLE = 1
+COMPRESSED_GRID_OTHER_IMMOBILE = 2
+COMPRESSED_GRID_OTHER_MOBILE = 3
+
+# Special object type codes for door and key (which need color)
+COMPRESSED_GRID_DOOR_TYPE = 30
+COMPRESSED_GRID_KEY_TYPE = 31

@@ -765,7 +765,7 @@ def test_transport_q_network_forward():
     graph_data = observation_to_graph_data(env, query_agent_idx=0)
     
     # Create a simple goal tensor
-    goal_tensor = goal_encoder.encode_goal(0, device='cpu', env=env)
+    goal_tensor = goal_encoder.tensorize_goal(0, device='cpu', env=env)
     
     # Forward pass
     with torch.no_grad():

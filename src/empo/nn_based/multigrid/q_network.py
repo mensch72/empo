@@ -147,8 +147,8 @@ class MultiGridQNetwork(BaseQNetwork):
         """
         # State encoding is agent-agnostic
         grid_tensor, global_features, agent_features, interactive_features = \
-            self.state_encoder.encode_state(state, world_model, device)
-        goal_coords = self.goal_encoder.encode_goal(goal, device)
+            self.state_encoder.tensorize_state(state, world_model, device)
+        goal_coords = self.goal_encoder.tensorize_goal(goal, device)
         
         return self.forward(
             grid_tensor, global_features, agent_features,

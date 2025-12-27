@@ -105,14 +105,14 @@ class MultiGridPolicyPriorNetwork(BasePolicyPriorNetwork):
         
         # Encode state using unified encoder (agent-agnostic)
         grid_tensor, global_features, agent_features, interactive_features = \
-            self.q_network.state_encoder.encode_state(
+            self.q_network.state_encoder.tensorize_state(
                 state, world_model, device
             )
         
         # Encode goals
         goal_coords_list = []
         for goal in goals:
-            coords = self.q_network.goal_encoder.encode_goal(goal, device)
+            coords = self.q_network.goal_encoder.tensorize_goal(goal, device)
             goal_coords_list.append(coords)
         
         goal_coords_batch = torch.cat(goal_coords_list, dim=0).unsqueeze(0)  # (1, num_goals, 2)

@@ -51,7 +51,7 @@ class TransportQNetwork(BaseQNetwork):
         ...     max_nodes=100, num_clusters=10, num_actions=42
         ... )
         >>> graph_data = observation_to_graph_data(env, query_agent_idx=0)
-        >>> goal_tensor = q_network.goal_encoder.encode_goal(goal)
+        >>> goal_tensor = q_network.goal_encoder.tensorize_goal(goal)
         >>> q_values = q_network.forward_graph(graph_data, goal_tensor)
     """
     
@@ -119,7 +119,7 @@ class TransportQNetwork(BaseQNetwork):
         
         Args:
             graph_data: Dictionary from observation_to_graph_data()
-            goal_tensor: Encoded goal tensor from goal_encoder.encode_goal()
+            goal_tensor: Encoded goal tensor from goal_encoder.tensorize_goal()
             action_mask: Optional (batch, num_actions) boolean mask, True = valid
         
         Returns:
@@ -178,7 +178,7 @@ class TransportQNetwork(BaseQNetwork):
         from .feature_extraction import observation_to_graph_data
         
         graph_data = observation_to_graph_data(world_model, query_agent_idx, device)
-        goal_tensor = self.goal_encoder.encode_goal(goal, device, env=world_model)
+        goal_tensor = self.goal_encoder.tensorize_goal(goal, device, env=world_model)
         
         return self.forward(graph_data, goal_tensor)
     

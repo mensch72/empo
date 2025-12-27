@@ -202,11 +202,11 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
         """
         # Encode state with shared encoder (agent-agnostic)
         grid_tensor, global_features, agent_features, interactive_features = \
-            self.state_encoder.encode_state(state, world_model, device)
+            self.state_encoder.tensorize_state(state, world_model, device)
         
         # Encode state with own encoder (same state, separate encoding)
         own_grid, own_glob, own_agent, own_inter = \
-            self.own_state_encoder.encode_state(state, world_model, device)
+            self.own_state_encoder.tensorize_state(state, world_model, device)
         
         return self.forward(
             grid_tensor, global_features, agent_features, interactive_features,

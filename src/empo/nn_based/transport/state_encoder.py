@@ -201,23 +201,21 @@ class TransportStateEncoder(BaseStateEncoder):
         
         return output
     
-    def encode_state(
+    def tensorize_state(
         self,
         state: Any,
         world_model: Any,
-        query_agent_idx: int,
         device: str = 'cpu'
     ) -> Dict[str, torch.Tensor]:
         """
-        Encode a single state from the transport environment.
+        Convert raw state to input tensors (preprocessing, NOT neural network encoding).
         
         This method extracts features from the environment and prepares them
-        for the forward pass.
+        as tensors for the forward() pass.
         
         Args:
             state: Ignored (transport env doesn't have separate state)
             world_model: TransportEnvWrapper instance
-            query_agent_idx: Index of the agent making decisions
             device: Torch device
         
         Returns:
@@ -225,7 +223,7 @@ class TransportStateEncoder(BaseStateEncoder):
         """
         from .feature_extraction import observation_to_graph_data
         
-        return observation_to_graph_data(world_model, query_agent_idx, device)
+        return observation_to_graph_data(world_model, device)
     
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for save/load."""
