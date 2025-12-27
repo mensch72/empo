@@ -1405,7 +1405,8 @@ def train_multigrid_phase2(
     debug: bool = False,
     tensorboard_dir: Optional[str] = None,
     profiler: Optional[Any] = None,
-) -> Tuple[MultiGridRobotQNetwork, Phase2Networks, List[Dict[str, float]]]:
+    restore_networks_path: Optional[str] = None,
+) -> Tuple[MultiGridRobotQNetwork, Phase2Networks, List[Dict[str, float]], "MultiGridPhase2Trainer"]:
     """
     Train Phase 2 robot policy for a multigrid environment.
     
@@ -1427,9 +1428,12 @@ def train_multigrid_phase2(
         verbose: Enable progress bar (tqdm).
         debug: Enable verbose debug output.
         tensorboard_dir: Directory for TensorBoard logs (optional).
+        profiler: Torch profiler instance (optional).
+        restore_networks_path: Path to checkpoint for restoring networks.
+                               Skips warmup/rampup stages since they were already done.
     
     Returns:
-        Tuple of (robot_q_network, all_networks, training_history).
+        Tuple of (robot_q_network, all_networks, training_history, trainer).
     """
     if config is None:
         config = Phase2Config()
@@ -1485,6 +1489,15 @@ def train_multigrid_phase2(
         profiler=profiler,
     )
     
+    # Restore networks if checkpoint provided (skips warmup/rampup since already done)
+    if restore_networks_path is not None:
+        if verbose:
+            print(f"\nRestoring networks from: {restore_networks_path}")
+        trainer.load_all_networks(restore_networks_path)
+        if verbose:
+            print(f"  Restored networks at step {trainer.total_steps}")
+            print(f"  Warmup/rampup stages will be skipped")
+    
     if verbose:
         print(f"\nTraining for {config.num_episodes} episodes...")
         print(f"  Steps per episode: {config.steps_per_episode}")
@@ -1502,4 +1515,4 @@ def train_multigrid_phase2(
             final_losses = history[-1]
             print(f"  Final losses: {final_losses}")
     
-    return networks.q_r, networks, history
+    return networks.q_r, networks, history, trainer
