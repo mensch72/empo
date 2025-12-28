@@ -42,25 +42,25 @@ These intervals are called the **target update intervals** or **target sync inte
 **Batch size** (default: 64) is the number of transitions sampled from the replay buffer for each training step. Most networks use this size, but X_h can optionally use a larger `x_h_batch_size` to reduce variance in its Monte Carlo target estimates. Batch size is independent of episode length.
 
 ### Numerical Relationships (Synchronous Training)
+- **Training steps per episode**: `steps_per_episode × updates_per_step` (default: 50 × 1 = 50)
 - **Environment steps per episode**: `steps_per_episode` (default: 50)
 - **Training steps per environment step**: `updates_per_step` (default: 1)
-- **Training steps per episode**: `steps_per_episode × updates_per_step` (default: 50)
-- **Total environment steps**: `num_episodes × steps_per_episode` (default: 10,000 × 50 = 500,000)
-- **Total training steps**: `total_env_steps × updates_per_step` (default: 500,000)
+- **Total training steps**: `num_training_steps` (default: 500,000, set in config)
+- **Total environment steps**: `num_training_steps / updates_per_step` (default: 500,000)
 - **Batches per training step**: Always 1 (we sample one batch, compute loss, update)
 
-**Key distinction**: Environment steps track data collection (`total_steps`), training steps track gradient updates (`training_step_count`). In sync mode with `updates_per_step=1`, they're equal.
+**Key distinction**: Training steps track gradient updates (`training_step_count`), environment steps track data collection (`total_steps`). In sync mode with `updates_per_step=1`, they're equal.
 
-### Numerical Relationships (Async Training)
+### Numerical Relationships (Asynchronous Training)
 In async mode, actors and learner are decoupled:
 - **Actors**: Generate environment steps continuously, `num_actors` in parallel (e.g., 4 actors each running episodes)
 - **Learner**: Performs training steps whenever `buffer.size() >= batch_size`, independent of actor speed
 - **Episodes**: Still tracked by actors (for logging), but learner doesn't operate on episode boundaries
 - **Policy sync**: Actors pull updated policy from learner every `actor_sync_freq` training steps (default: 100)
-- **Env steps to training steps ratio**: Not fixed — determined by relative speeds:
-  - If actors are faster (CPU-bound env stepping), the buffer fills quickly, learner trains frequently
+- **Training steps to environment steps ratio**: Not fixed — determined by relative speeds:
+  - If actors are faster (CPU-bound environment stepping), the buffer fills quickly, learner trains frequently
   - If learner is faster (GPU-bound training), it waits for actors to generate data
-  - Typical ratio: Multiple env steps per training step (e.g., 4 actors × 50 steps/episode = 200 env steps collected while learner performs ~50-100 training steps, depending on hardware)
+  - Typical ratio: Multiple environment steps per training step (e.g., 4 actors × 50 steps/episode = 200 environment steps collected while learner performs ~50-100 training steps, depending on hardware)
 
 **Key point**: Warmup stages, target network updates, and all training schedules use `training_step_count` in both sync and async modes, ensuring consistent behavior regardless of data collection speed.
 

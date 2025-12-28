@@ -51,9 +51,8 @@ class Phase2Config:
         u_r_target_update_interval: Training steps between U_r target network updates.
         buffer_size: Replay buffer capacity.
         batch_size: Training batch size.
-        num_training_steps: Total training steps (gradient updates) - primary stopping criterion.
-        num_episodes: Total training episodes (deprecated, computed from num_training_steps if not provided).
-        steps_per_episode: Steps per episode.
+        num_training_steps: Total training steps (gradient updates) - fundamental time unit.
+        steps_per_episode: Environment steps per episode (affects data collection frequency only).
         updates_per_step: Gradient updates per environment step.
         goal_resample_prob: Probability of resampling goals each step.
         hidden_dim: Hidden layer dimension for networks.
@@ -128,8 +127,7 @@ class Phase2Config:
     x_h_batch_size: Optional[int] = None  # Larger batch for X_h (None = use batch_size)
     
     # Training
-    num_training_steps: Optional[int] = None  # Total training steps (gradient updates) - primary stopping criterion
-    num_episodes: Optional[int] = 10000  # Total training episodes (deprecated, for backward compatibility)
+    num_training_steps: int = 500000  # Total training steps (gradient updates)
     steps_per_episode: int = 50
     updates_per_step: int = 1
     
@@ -195,15 +193,6 @@ class Phase2Config:
     
     def __post_init__(self):
         """Compute cumulative warmup thresholds and apply network flags."""
-        # Compute num_training_steps from num_episodes if not provided
-        if self.num_training_steps is None and self.num_episodes is not None:
-            self.num_training_steps = self.num_episodes * self.steps_per_episode * self.updates_per_step
-        elif self.num_training_steps is not None and self.num_episodes is None:
-            # Compute num_episodes for backward compatibility (used only by actors in async mode)
-            self.num_episodes = self.num_training_steps // (self.steps_per_episode * self.updates_per_step)
-        elif self.num_training_steps is None and self.num_episodes is None:
-            raise ValueError("Must specify either num_training_steps or num_episodes")
-        
         # Warn about deprecated legacy LR decay flags
         if self.lr_x_h_use_1_over_t or self.lr_u_r_use_1_over_t:
             warnings.warn(
