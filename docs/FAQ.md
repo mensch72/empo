@@ -27,8 +27,14 @@ A warm-up **stage** is a phase where specific networks are active for training. 
 
 Stages are determined by `total_steps` (cumulative environment steps), not episodes. **Important**: In async training, `total_steps` still counts environment steps collected by actors, not training steps performed by the learner, so warmup progresses based on data collection, not gradient updates.
 
-### Target Network Update Interval
-Target networks are updated (via full copy from main networks) every `target_update_interval` environment steps (default: 100). This interval is called the **target update interval** or **target sync interval**. All four target networks (`v_r_target`, `v_h_e_target`, `x_h_target`, `u_r_target`) are updated simultaneously when `total_steps % target_update_interval == 0`, meaning it's tied to environment steps, not training steps or episodes.
+### Target Network Update Intervals
+Each target network is updated independently (via full copy from its corresponding main network) at its own interval:
+- `v_r_target`: Every `v_r_target_update_interval` steps (default: 100)
+- `v_h_e_target`: Every `v_h_e_target_update_interval` steps (default: 100)
+- `x_h_target`: Every `x_h_target_update_interval` steps (default: 100)
+- `u_r_target`: Every `u_r_target_update_interval` steps (default: 100)
+
+These intervals are called the **target update intervals** or **target sync intervals**. Each update happens when `total_steps % <network>_target_update_interval == 0`, meaning they're tied to environment steps, not training steps or episodes. This allows different update frequencies for different networks if needed.
 
 ### Batch Size
 **Batch size** (default: 64) is the number of transitions sampled from the replay buffer for each training step. Most networks use this size, but X_h can optionally use a larger `x_h_batch_size` to reduce variance in its Monte Carlo target estimates. Batch size is independent of episode length.
@@ -123,7 +129,7 @@ Since V_r = U_r + π_r · Q_r is a deterministic weighted average, computing it 
 This separation prevents the "moving target problem" where updating the network changes the targets it's trying to match, causing training instability. Similarly, in async training mode, actor processes use a frozen copy of the policy (periodically synced from the learner) to generate training data, ensuring data collection doesn't change mid-episode as the learner updates the policy.
 
 ### Using target networks for V_r, V_h^e, X_h, and U_r
-Frozen target networks prevent the moving target problem where the TD target changes as the network being trained updates, improving training stability. All four target networks (`v_r_target`, `v_h_e_target`, `x_h_target`, `u_r_target`) are updated simultaneously at the same interval.
+Frozen target networks prevent the moving target problem where the TD target changes as the network being trained updates, improving training stability. Each of the four target networks (`v_r_target`, `v_h_e_target`, `x_h_target`, `u_r_target`) can be updated at its own interval, allowing flexibility in how frequently each is synchronized.
 
 ### Periodic full-copy target network updates
 Target networks are updated by copying the full state dict every N steps, following the DQN approach rather than continuous blending.

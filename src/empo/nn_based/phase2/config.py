@@ -43,7 +43,10 @@ class Phase2Config:
         lr_v_h_e: Learning rate for V_h^e network.
         lr_x_h: Learning rate for X_h network.
         lr_u_r: Learning rate for U_r network.
-        target_update_interval: Steps between target network updates (all targets updated simultaneously).
+        v_r_target_update_interval: Steps between V_r target network updates.
+        v_h_e_target_update_interval: Steps between V_h^e target network updates.
+        x_h_target_update_interval: Steps between X_h target network updates.
+        u_r_target_update_interval: Steps between U_r target network updates.
         buffer_size: Replay buffer capacity.
         batch_size: Training batch size.
         num_episodes: Total training episodes.
@@ -110,8 +113,11 @@ class Phase2Config:
     lr_x_h_use_1_over_t: bool = False  # DEPRECATED: Whether to use legacy 1/t decay for X_h
     lr_u_r_use_1_over_t: bool = False  # DEPRECATED: Whether to use legacy 1/t decay for U_r
     
-    # Target network updates (all target networks updated simultaneously)
-    target_update_interval: int = 100
+    # Target network updates
+    v_r_target_update_interval: int = 100
+    v_h_e_target_update_interval: int = 100
+    x_h_target_update_interval: int = 100
+    u_r_target_update_interval: int = 100
     
     # Replay buffer
     buffer_size: int = 100000

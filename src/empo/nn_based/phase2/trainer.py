@@ -242,18 +242,22 @@ class BasePhase2Trainer(ABC):
         return norms
     
     def update_target_networks(self):
-        """Update target networks (hard copy)."""
-        self.networks.v_r_target.load_state_dict(self.networks.v_r.state_dict())
-        self.networks.v_h_e_target.load_state_dict(self.networks.v_h_e.state_dict())
-        self.networks.x_h_target.load_state_dict(self.networks.x_h.state_dict())
-        if self.config.u_r_use_network:
-            self.networks.u_r_target.load_state_dict(self.networks.u_r.state_dict())
+        """Update target networks (hard copy) based on their individual intervals."""
+        if self.total_steps % self.config.v_r_target_update_interval == 0:
+            self.networks.v_r_target.load_state_dict(self.networks.v_r.state_dict())
+            self.networks.v_r_target.eval()
         
-        # Ensure target networks stay in eval mode (disables dropout)
-        self.networks.v_r_target.eval()
-        self.networks.v_h_e_target.eval()
-        self.networks.x_h_target.eval()
-        self.networks.u_r_target.eval()
+        if self.total_steps % self.config.v_h_e_target_update_interval == 0:
+            self.networks.v_h_e_target.load_state_dict(self.networks.v_h_e.state_dict())
+            self.networks.v_h_e_target.eval()
+        
+        if self.total_steps % self.config.x_h_target_update_interval == 0:
+            self.networks.x_h_target.load_state_dict(self.networks.x_h.state_dict())
+            self.networks.x_h_target.eval()
+        
+        if self.config.u_r_use_network and self.total_steps % self.config.u_r_target_update_interval == 0:
+            self.networks.u_r_target.load_state_dict(self.networks.u_r.state_dict())
+            self.networks.u_r_target.eval()
     
     @abstractmethod
     def tensorize_state(self, state: Any) -> Dict[str, torch.Tensor]:
@@ -780,9 +784,8 @@ class BasePhase2Trainer(ABC):
                 grad_norms[name] = self._compute_single_grad_norm(name)
                 self.optimizers[name].step()
         
-        # Update target networks periodically
-        if self.total_steps % self.config.target_update_interval == 0:
-            self.update_target_networks()
+        # Update target networks periodically (each checked independently)
+        self.update_target_networks()
         
         return loss_values, grad_norms, prediction_stats
     
