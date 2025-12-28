@@ -131,16 +131,21 @@ class MultiGridStateEncoder(BaseStateEncoder):
         agent_feature_dim = max(8, feature_dim // 4)  # e.g., 16->4->8, 64->16, 256->64
         interactive_feature_dim = max(4, feature_dim // 8)  # e.g., 16->2->4, 64->8, 256->32
         
-        # Grid encoder (CNN)
+        # Grid encoder (CNN) - reduced architecture for speed
+        # 2 conv layers with pooling instead of 3 conv layers without pooling
         self.grid_conv = nn.Sequential(
             nn.Conv2d(self.num_grid_channels, conv_channels, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Conv2d(conv_channels, conv_channels * 2, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(conv_channels * 2, conv_channels * 2, kernel_size=3, padding=1),
+            nn.MaxPool2d(2, 2),  # Halves spatial dimensions -> 4x fewer values to process
+            nn.Conv2d(conv_channels, conv_channels, kernel_size=3, padding=1),
             nn.ReLU(),
         )
-        grid_conv_out_size = conv_channels * 2 * grid_height * grid_width
+        # Compute actual output size with a dummy forward pass
+        with torch.no_grad():
+            dummy_input = torch.zeros(1, self.num_grid_channels, grid_height, grid_width)
+            dummy_output = self.grid_conv(dummy_input)
+            grid_conv_out_size = dummy_output.numel()
+        
         self.grid_fc = nn.Sequential(
             nn.Linear(grid_conv_out_size + NUM_GLOBAL_WORLD_FEATURES, grid_feature_dim),
             nn.ReLU(),
