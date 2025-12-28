@@ -28,7 +28,7 @@ A warm-up **stage** is a phase where specific networks are active for training. 
 Stages are determined by `total_steps` (cumulative environment steps), not episodes. **Important**: In async training, `total_steps` still counts environment steps collected by actors, not training steps performed by the learner, so warmup progresses based on data collection, not gradient updates.
 
 ### Target Network Update Interval
-Target networks are updated (via full copy from main networks) every `v_r_target_update_interval` environment steps (default: 100). This interval is called the **target update interval** or **target sync interval**. The update happens whenever `total_steps % target_update_interval == 0`, meaning it's tied to environment steps, not training steps or episodes.
+Target networks are updated (via full copy from main networks) every `target_update_interval` environment steps (default: 100). This interval is called the **target update interval** or **target sync interval**. All four target networks (`v_r_target`, `v_h_e_target`, `x_h_target`, `u_r_target`) are updated simultaneously when `total_steps % target_update_interval == 0`, meaning it's tied to environment steps, not training steps or episodes.
 
 ### Batch Size
 **Batch size** (default: 64) is the number of transitions sampled from the replay buffer for each training step. Most networks use this size, but X_h can optionally use a larger `x_h_batch_size` to reduce variance in its Monte Carlo target estimates. Batch size is independent of episode length.
@@ -109,7 +109,7 @@ Since V_r = U_r + π_r · Q_r is a deterministic weighted average, computing it 
 - Used for computing predictions that are compared against targets (the left side of the loss equation)
 - Used during policy execution and rollout collection
 
-**Target networks** (e.g., `v_h_e_target`, `x_h_target`) are frozen copies of the main networks:
+**Target networks** (e.g., `v_h_e_target`, `x_h_target`, `u_r_target`, `v_r_target`) are frozen copies of the main networks:
 - NOT updated by gradient descent (requires_grad=False)
 - Updated periodically by copying weights from the corresponding main network (every N steps)
 - Used ONLY for computing training targets (the right side of the loss equation)
@@ -123,7 +123,7 @@ Since V_r = U_r + π_r · Q_r is a deterministic weighted average, computing it 
 This separation prevents the "moving target problem" where updating the network changes the targets it's trying to match, causing training instability. Similarly, in async training mode, actor processes use a frozen copy of the policy (periodically synced from the learner) to generate training data, ensuring data collection doesn't change mid-episode as the learner updates the policy.
 
 ### Using target networks for V_r, V_h^e, X_h, and U_r
-Frozen target networks prevent the moving target problem where the TD target changes as the network being trained updates, improving training stability.
+Frozen target networks prevent the moving target problem where the TD target changes as the network being trained updates, improving training stability. All four target networks (`v_r_target`, `v_h_e_target`, `x_h_target`, `u_r_target`) are updated simultaneously at the same interval.
 
 ### Periodic full-copy target network updates
 Target networks are updated by copying the full state dict every N steps, following the DQN approach rather than continuous blending.
