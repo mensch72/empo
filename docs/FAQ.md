@@ -114,6 +114,9 @@ Processing multiple queries (e.g., all robot actions, all humans) in parallel wi
 
 ## Policy and Exploration
 
+### Finite beta_r as a normative choice to prevent overoptimization (not for exploration)
+Beta_r < ∞ is a permanent normative constraint that prevents the robot from exploiting model errors through overoptimization, not a temporary exploration mechanism — it remains constant after warm-up while epsilon decays to near-zero.
+
 ### Epsilon-greedy exploration in addition to power-law stochasticity
 Even with beta_r < ∞ providing some exploration, epsilon-greedy adds directed exploration to ensure sufficient coverage of the state-action space early in training.
 
