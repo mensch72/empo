@@ -4,13 +4,15 @@ This document provides brief justifications for design choices in the Phase 2 tr
 
 ## Glossary of Training Terminology
 
-### Step
-An **environment step** (also called **timestep**) is a single state transition: the robot and humans take actions, and the environment transitions from state s to s'. We use `total_steps` to track the cumulative count of environment steps across all episodes. The term "step" without qualification usually refers to environment steps in the context of data collection and episodes.
-
 ### Training Step / Learning Step
-A **training step** (or **learning step**) is one gradient update cycle: sample a batch from the replay buffer, compute losses, backpropagate, and update network weights. We use `training_step_count` to track the cumulative count of training steps. In synchronous training, we perform `updates_per_step` training steps after each environment step (default: 1). In async training, the learner performs training steps continuously whenever the buffer has enough data, decoupled from environment stepping.
+A **training step** (or **learning step**) is one gradient update cycle: sample a batch from the replay buffer, compute losses, backpropagate, and update network weights. We use `training_step_count` to track the cumulative count of training steps. This is the **fundamental time unit** in Phase 2 training.
 
-**Important**: Warmup stages, target network update intervals, learning rate schedules, and beta_r/epsilon schedules are all measured in **training steps**, not environment steps. This ensures consistent behavior in async mode where environment and training steps are decoupled.
+**Important**: Warmup stages, target network update intervals, learning rate schedules, beta_r/epsilon schedules, and the total training duration are all measured in **training steps**, not environment steps. This ensures consistent behavior in async mode where environment and training steps are decoupled.
+
+In synchronous training, we perform `updates_per_step` training steps after each environment step (default: 1). In async training, the learner performs training steps continuously whenever the buffer has enough data, decoupled from environment stepping.
+
+### Environment Step
+An **environment step** (also called **timestep**) is a single state transition: the robot and humans take actions, and the environment transitions from state s to s'. We use `total_steps` to track the cumulative count of environment steps across all episodes. Environment steps are used for data collection but do not control training schedules or stopping criteria.
 
 ### Episode
 An **episode** is a sequence of `steps_per_episode` consecutive environment steps (default: 50) starting from a reset environment. Episodes are the basic unit of data collection in synchronous training. During each episode, we collect transitions into the replay buffer and perform training steps that sample batches from the buffer (containing data from current and past episodes). We report average losses over training steps performed during that episode for logging purposes. The term "episode" matches standard RL usage.
