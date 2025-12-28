@@ -36,16 +36,16 @@ The 1/sqrt(t) schedule balances convergence guarantees for expectation learning 
 ### Separate (potentially larger) batch size for X_h network
 Since X_h targets are computed by sampling goals (Monte Carlo approximation of E_g[V_h^e^ζ]), larger batches reduce variance in the expectation estimate.
 
-### Sampling humans for U_r loss instead of summing over all
-With many humans, computing X_h^{-ξ} for all humans per training step is expensive, so we use stochastic gradient descent with sampled humans as an unbiased estimator.
+### Optional human sampling for U_r network training (when u_r_use_network=True)
+When using a U_r network with many humans, computing X_h^{-ξ} for all humans per training step is expensive, so we optionally sample a subset as an unbiased estimator of E_h[X_h^{-ξ}].
 
 ### Using MSE loss for y (not Huber loss) despite heavy tails
 MSE converges to the arithmetic mean which is exactly E[X_h^{-ξ}] as required by Eq. 8, while Huber loss would introduce systematic bias toward the median.
 
 ## Network Computation Modes
 
-### Computing U_r directly from X_h instead of using a network (default)
-Since U_r = -(E_h[X_h^{-ξ}])^η is a deterministic function of X_h values, computing it directly eliminates one source of approximation error and speeds up training.
+### Computing U_r directly from X_h instead of using a network (default, few humans)
+When there are few humans, computing U_r = -(E_h[X_h^{-ξ}])^η directly from X_h values for all humans is fast, eliminates approximation error, and avoids training an extra network.
 
 ### Computing V_r directly from U_r and Q_r instead of using a network (default)
 Since V_r = U_r + π_r · Q_r is a deterministic weighted average, computing it directly from its components is exact and avoids training an unnecessary network.
@@ -55,8 +55,8 @@ Since V_r = U_r + π_r · Q_r is a deterministic weighted average, computing it 
 ### Using target networks for V_r, V_h^e, X_h, and U_r
 Frozen target networks prevent the moving target problem where the TD target changes as the network being trained updates, improving training stability.
 
-### Hard target updates instead of soft (Polyak averaging)
-Hard updates (complete copy) every N steps are simpler to implement and provide clear separation between learning and target computation phases.
+### Periodic full-copy target network updates
+Target networks are updated by copying the full state dict every N steps, following the DQN approach rather than continuous blending.
 
 ### Using V_h^e target network (not main) in X_h target computation
 Using the target network for V_h^e when computing X_h targets creates more stable gradient flow since X_h depends on V_h^e which is also being updated.
