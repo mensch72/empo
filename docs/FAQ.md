@@ -52,6 +52,26 @@ Since V_r = U_r + π_r · Q_r is a deterministic weighted average, computing it 
 
 ## Target Networks and Stability
 
+### What is the difference between "main" and "target" networks?
+
+**Main networks** (e.g., `v_h_e`, `x_h`, `q_r`) are the networks being actively trained:
+- Updated by gradient descent on every training step
+- Used for computing predictions that are compared against targets (the left side of the loss equation)
+- Used during policy execution and rollout collection
+
+**Target networks** (e.g., `v_h_e_target`, `x_h_target`) are frozen copies of the main networks:
+- NOT updated by gradient descent (requires_grad=False)
+- Updated periodically by copying weights from the corresponding main network (every N steps)
+- Used ONLY for computing training targets (the right side of the loss equation)
+- Always in eval mode (disables dropout) for consistent target computation
+
+**Example from V_h^e training:**
+- Main network `v_h_e` predicts V_h^e(s, g_h) — this prediction is trained
+- Target network `v_h_e_target` provides V_h^e(s', g_h) for the TD target — this is frozen
+- Loss: (v_h_e(s, g_h) - [goal_achieved + γ * v_h_e_target(s', g_h)])²
+
+This separation prevents the "moving target problem" where updating the network changes the targets it's trying to match, causing training instability.
+
 ### Using target networks for V_r, V_h^e, X_h, and U_r
 Frozen target networks prevent the moving target problem where the TD target changes as the network being trained updates, improving training stability.
 
