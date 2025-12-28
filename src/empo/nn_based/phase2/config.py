@@ -18,15 +18,17 @@ class Phase2Config:
     
     Warm-up Phase:
         Training proceeds in stages to break mutual network dependencies:
-        1. V_h^e only (steps 0 to warmup_v_h_e_steps)
-        2. V_h^e + X_h (steps warmup_v_h_e_steps to warmup_x_h_steps)
-        3. V_h^e + X_h + U_r (steps warmup_x_h_steps to warmup_u_r_steps)
-        4. V_h^e + X_h + U_r + Q_r (steps warmup_u_r_steps to warmup_q_r_steps)
+        1. V_h^e only (training steps 0 to warmup_v_h_e_steps)
+        2. V_h^e + X_h (training steps warmup_v_h_e_steps to warmup_x_h_steps)
+        3. V_h^e + X_h + U_r (training steps warmup_x_h_steps to warmup_u_r_steps)
+        4. V_h^e + X_h + U_r + Q_r (training steps warmup_u_r_steps to warmup_q_r_steps)
         5. All networks including V_r if enabled (after warmup_q_r_steps)
         
         During warm-up, beta_r=0 (uniform random robot policy).
         After warm-up, beta_r ramps up to nominal value over beta_r_rampup_steps.
         Learning rates are constant during warm-up, then decay as 1/sqrt(t).
+        
+        Note: Warmup stages are measured in training steps (gradient updates), not environment steps.
     
     Attributes:
         gamma_r: Robot discount factor.
@@ -43,13 +45,15 @@ class Phase2Config:
         lr_v_h_e: Learning rate for V_h^e network.
         lr_x_h: Learning rate for X_h network.
         lr_u_r: Learning rate for U_r network.
-        v_r_target_update_freq: Steps between V_r target network updates.
-        v_h_target_update_freq: Steps between V_h^e target network updates.
+        v_r_target_update_interval: Training steps between V_r target network updates.
+        v_h_e_target_update_interval: Training steps between V_h^e target network updates.
+        x_h_target_update_interval: Training steps between X_h target network updates.
+        u_r_target_update_interval: Training steps between U_r target network updates.
         buffer_size: Replay buffer capacity.
         batch_size: Training batch size.
-        num_episodes: Total training episodes.
-        steps_per_episode: Steps per episode.
-        updates_per_step: Gradient updates per environment step.
+        num_training_steps: Total training steps (gradient updates) - fundamental time unit.
+        steps_per_episode: Environment steps per episode (affects data collection frequency only).
+        training_steps_per_env_step: Training steps (gradient updates) per environment step (can be fractional).
         goal_resample_prob: Probability of resampling goals each step.
         hidden_dim: Hidden layer dimension for networks.
         state_feature_dim: State encoder output dimension.
@@ -112,8 +116,10 @@ class Phase2Config:
     lr_u_r_use_1_over_t: bool = False  # DEPRECATED: Whether to use legacy 1/t decay for U_r
     
     # Target network updates
-    v_r_target_update_freq: int = 100
-    v_h_target_update_freq: int = 100
+    v_r_target_update_interval: int = 100
+    v_h_e_target_update_interval: int = 100
+    x_h_target_update_interval: int = 100
+    u_r_target_update_interval: int = 100
     
     # Replay buffer
     buffer_size: int = 100000
@@ -121,9 +127,9 @@ class Phase2Config:
     x_h_batch_size: Optional[int] = None  # Larger batch for X_h (None = use batch_size)
     
     # Training
-    num_episodes: int = 10000
+    num_training_steps: int = 500000  # Total training steps (gradient updates)
     steps_per_episode: int = 50
-    updates_per_step: int = 1
+    training_steps_per_env_step: float = 1.0  # Can be >1 (multiple training steps per env step) or <1 (train every N env steps)
     
     # Goal resampling
     goal_resample_prob: float = 0.01

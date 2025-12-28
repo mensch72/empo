@@ -587,7 +587,7 @@ def main(
     
     # Configuration - start with environment-based defaults
     if env_type == "trivial":
-        num_episodes = 1500 #3000
+        num_training_steps = 75000  # 1500 episodes * 50 steps/episode
         num_rollouts = NUM_ROLLOUTS
         batch_size = 16
         x_h_batch_size = 32
@@ -598,7 +598,7 @@ def main(
         print("[TRIVIAL ENV] Using minimal network sizes for simple task")
     elif env_type == "ensemble":
         # Ensemble needs more training due to varied layouts
-        num_episodes = 5000
+        num_training_steps = 250000  # 5000 episodes * 50 steps/episode
         num_rollouts = NUM_ROLLOUTS
         batch_size = 32  # Reduced batch size for faster training
         x_h_batch_size = 64
@@ -608,7 +608,7 @@ def main(
         agent_embedding_dim = 8
         print(f"[ENSEMBLE ENV] Random {ENSEMBLE_GRID_SIZE}x{ENSEMBLE_GRID_SIZE} grids with {ENSEMBLE_NUM_HUMANS} humans, {ENSEMBLE_NUM_ROBOTS} robots")
     else:
-        num_episodes = 1000
+        num_training_steps = 50000  # 1000 episodes * 50 steps/episode
         num_rollouts = NUM_ROLLOUTS
         batch_size = 32
         x_h_batch_size = 64
@@ -618,7 +618,7 @@ def main(
     
     # Override with quick_mode settings
     if quick_mode:
-        num_episodes = 100
+        num_training_steps = 5000  # 100 episodes * 50 steps/episode
         num_rollouts = 10
         # Use smaller batches and network for faster iteration in quick mode
         batch_size = 16
@@ -626,7 +626,7 @@ def main(
         hidden_dim = 64  # Smaller network for faster forward passes
         goal_feature_dim = 32
         agent_embedding_dim = 8
-        # Shorter warmup stages to fit within 100 episodes (1000 steps)
+        # Shorter warmup stages to fit within quick mode training
         # Default warmup is 3000+ steps, which won't complete in quick mode
         warmup_v_h_e_steps = 100  # ~10 episodes
         warmup_x_h_steps = 100   # ~10 episodes  
@@ -646,10 +646,10 @@ def main(
     # Override with profile settings
     if profile:
         print("[PROFILE MODE] Will profile training with torch.profiler")
-        # Reduce episodes for profiling to get meaningful trace without waiting too long
+        # Reduce training steps for profiling to get meaningful trace without waiting too long
         if not quick_mode:
-            num_episodes = min(num_episodes, 50)
-            print(f"  Reduced to {num_episodes} episodes for profiling")
+            num_training_steps = min(num_training_steps, 2500)  # 50 episodes * 50 steps/episode
+            print(f"  Reduced to {num_training_steps} training steps for profiling")
     
     device = 'cpu'
     
@@ -726,7 +726,7 @@ def main(
         beta_r=final_beta_r,    # Robot policy concentration
         epsilon_r_start=1.0,
         epsilon_r_end=0.1,
-        epsilon_r_decay_steps=num_episodes * 10,
+        epsilon_r_decay_steps=num_training_steps // 5,  # Decay over 20% of training
         lr_q_r=1e-4,
         lr_v_r=1e-4,
         lr_v_h_e=1e-3,  # faster since V_h^e is critical and the basis for other things
@@ -735,9 +735,9 @@ def main(
         buffer_size=10000,
         batch_size=batch_size,
         x_h_batch_size=x_h_batch_size,  # Larger batch for X_h to reduce high variance
-        num_episodes=num_episodes,
+        num_training_steps=num_training_steps,
         steps_per_episode=env.max_steps,
-        updates_per_step=1,
+        training_steps_per_env_step=1.0,
         goal_resample_prob=0.1,
         v_h_target_update_freq=100,  # Standard target network update frequency
         # Warmup stage durations (each is duration in steps, not cumulative)
@@ -764,8 +764,8 @@ def main(
     else:
         # Train Phase 2
         print("Training Phase 2 robot policy...")
-        print(f"  Episodes: {config.num_episodes}")
-        print(f"  Steps per episode: {config.steps_per_episode}")
+        print(f"  Training steps: {config.num_training_steps:,}")
+        print(f"  Environment steps per episode: {config.steps_per_episode}")
         print(f"  TensorBoard: {tensorboard_dir}")
         if restore_networks_path:
             print(f"  Restoring from: {restore_networks_path}")
