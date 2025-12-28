@@ -781,7 +781,7 @@ class BasePhase2Trainer(ABC):
                 self.optimizers[name].step()
         
         # Update target networks periodically
-        if self.total_steps % self.config.v_r_target_update_freq == 0:
+        if self.total_steps % self.config.v_r_target_update_interval == 0:
             self.update_target_networks()
         
         return loss_values, grad_norms, prediction_stats
