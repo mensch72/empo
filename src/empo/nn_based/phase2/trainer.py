@@ -1483,3 +1483,100 @@ class BasePhase2Trainer(ABC):
                 break
         
         return consumed
+    
+    # ==================== Save/Load Methods ====================
+    
+    def save_all_networks(self, path: str) -> None:
+        """
+        Save all networks to a file.
+        
+        Saves all trained networks (Q_r, V_h^e, X_h, U_r, V_r) along with their
+        target networks. This allows resuming training or using the full model.
+        
+        Args:
+            path: Path to save the checkpoint file.
+        """
+        checkpoint = {
+            'q_r': self.networks.q_r.state_dict(),
+            'v_h_e': self.networks.v_h_e.state_dict(),
+            'x_h': self.networks.x_h.state_dict(),
+            'u_r': self.networks.u_r.state_dict(),
+            'v_r': self.networks.v_r.state_dict(),
+            'total_steps': self.total_steps,
+            'config': {
+                'gamma_r': self.config.gamma_r,
+                'gamma_h': self.config.gamma_h,
+                'beta_r': self.config.beta_r,
+                'zeta': self.config.zeta,
+                'xi': self.config.xi,
+                'eta': self.config.eta,
+            }
+        }
+        
+        # Save target networks if they exist
+        if self.networks.v_r_target is not None:
+            checkpoint['v_r_target'] = self.networks.v_r_target.state_dict()
+        if self.networks.v_h_e_target is not None:
+            checkpoint['v_h_e_target'] = self.networks.v_h_e_target.state_dict()
+        if self.networks.x_h_target is not None:
+            checkpoint['x_h_target'] = self.networks.x_h_target.state_dict()
+        if self.networks.u_r_target is not None:
+            checkpoint['u_r_target'] = self.networks.u_r_target.state_dict()
+        
+        torch.save(checkpoint, path)
+    
+    def load_all_networks(self, path: str, strict: bool = True) -> None:
+        """
+        Load all networks from a file.
+        
+        Restores all trained networks and target networks from a checkpoint.
+        
+        Args:
+            path: Path to the checkpoint file.
+            strict: If True, requires all keys to match exactly.
+        """
+        # Note: weights_only=False is required for loading checkpoints with
+        # complex nested structures. The checkpoint is trusted since it was
+        # created by save_all_networks().
+        checkpoint = torch.load(path, weights_only=False)
+        
+        self.networks.q_r.load_state_dict(checkpoint['q_r'], strict=strict)
+        self.networks.v_h_e.load_state_dict(checkpoint['v_h_e'], strict=strict)
+        self.networks.x_h.load_state_dict(checkpoint['x_h'], strict=strict)
+        self.networks.u_r.load_state_dict(checkpoint['u_r'], strict=strict)
+        self.networks.v_r.load_state_dict(checkpoint['v_r'], strict=strict)
+        
+        if 'total_steps' in checkpoint:
+            self.total_steps = checkpoint['total_steps']
+        
+        # Load target networks if they exist
+        if 'v_r_target' in checkpoint and self.networks.v_r_target is not None:
+            self.networks.v_r_target.load_state_dict(checkpoint['v_r_target'], strict=strict)
+        if 'v_h_e_target' in checkpoint and self.networks.v_h_e_target is not None:
+            self.networks.v_h_e_target.load_state_dict(checkpoint['v_h_e_target'], strict=strict)
+        if 'x_h_target' in checkpoint and self.networks.x_h_target is not None:
+            self.networks.x_h_target.load_state_dict(checkpoint['x_h_target'], strict=strict)
+        if 'u_r_target' in checkpoint and self.networks.u_r_target is not None:
+            self.networks.u_r_target.load_state_dict(checkpoint['u_r_target'], strict=strict)
+    
+    def save_policy(self, path: str) -> None:
+        """
+        Save only the robot policy network (Q_r) for deployment/rollouts.
+        
+        This saves a checkpoint containing:
+        - Q_r network state dict (weights)
+        - Q_r network config (for reconstruction)
+        - beta_r parameter
+        
+        The policy can be loaded with MultiGridRobotPolicy.from_checkpoint(path).
+        
+        Args:
+            path: Path to save the policy file.
+        """
+        checkpoint = {
+            'q_r': self.networks.q_r.state_dict(),
+            'beta_r': self.config.beta_r,
+            # Network config for reconstruction
+            'q_r_config': self.networks.q_r.get_config(),
+        }
+        torch.save(checkpoint, path)

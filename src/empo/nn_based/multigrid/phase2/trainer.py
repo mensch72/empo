@@ -135,8 +135,21 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         return state_encoder.tensorize_state(state, None, self.device)
     
     def tensorize_state(self, state: Any) -> Dict[str, torch.Tensor]:
-        """Encode multigrid state to tensors."""
-        # The networks handle their own encoding
+        """
+        Encode multigrid state to tensors.
+        
+        Note: This method is required by BasePhase2Trainer but is not actually used
+        in the multigrid trainer. The multigrid implementation uses specialized methods
+        like `_batch_tensorize_states()` and `_batch_tensorize_from_compact()` instead,
+        which handle efficient batched encoding with caching.
+        
+        Args:
+            state: Raw multigrid state tuple.
+        
+        Returns:
+            Dict with raw state (no actual tensorization).
+        """
+        # The networks handle their own encoding via specialized batch methods
         return {'state': state}
     
     def sample_robot_action(self, state: Any) -> Tuple[int, ...]:
@@ -469,34 +482,6 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         
         return expected_v_r, v_h_e_targets
 
-    def tensorize_goals_batch(
-        self,
-        goals: List[Any]
-    ) -> torch.Tensor:
-        """
-        Encode a batch of goals into tensor format.
-        
-        Args:
-            goals: List of goals.
-        
-        Returns:
-            Goal features tensor with batch dimension.
-        """
-        # Get the goal encoder from V_h^e network
-        goal_encoder = self.networks.v_h_e.goal_encoder
-        
-        # Encode each goal
-        goal_features_list = []
-        for goal in goals:
-            # First get goal coordinates
-            goal_coords = goal_encoder.tensorize_goal(goal, self.device)
-            # Then pass through encoder network
-            goal_features = goal_encoder(goal_coords)
-            goal_features_list.append(goal_features)
-        
-        # Stack into batched tensor
-        return torch.cat(goal_features_list, dim=0)
-    
     def compute_losses(
         self,
         batch: List[Phase2Transition],
@@ -609,6 +594,8 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         # For X_h, we need to encode states from x_h_batch (which may differ from batch)
         x_h_states = [t.state for t in x_h_batch]
         x_h_s_all_encoded = self._batch_tensorize_states(x_h_states)
+        # X_h uses shared encoder frozen, so create detached version
+        x_h_s_all_encoded_detached = self._detach_encoded_states(x_h_s_all_encoded)
         
         for i, t in enumerate(x_h_batch):
             if self.config.x_h_sample_humans is None:
@@ -626,24 +613,31 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         if x_h_goals:
             x_h_goal_features = self._batch_tensorize_goals(x_h_goals)
             
-            # Encode agent identities
+            # Encode agent identities (shared encoder - will be detached when used)
             x_h_idx, x_h_agent_grid, x_h_agent_feat = self._batch_tensorize_agent_identities(
                 x_h_human_indices, x_h_states_for_identity
             )
             
             # Index into X_h state encodings
+            # We keep un-detached versions for target computation (runs under no_grad anyway)
             x_h_trans_indices = torch.tensor(x_h_transition_indices, device=self.device)
             x_h_grid = x_h_s_all_encoded[0][x_h_trans_indices]
             x_h_glob = x_h_s_all_encoded[1][x_h_trans_indices]
             x_h_agent = x_h_s_all_encoded[2][x_h_trans_indices]
             x_h_interactive = x_h_s_all_encoded[3][x_h_trans_indices]
+            
+            # Pre-compute detached versions for X_h forward pass (freezes shared encoder)
+            x_h_grid_detached = x_h_s_all_encoded_detached[0][x_h_trans_indices]
+            x_h_glob_detached = x_h_s_all_encoded_detached[1][x_h_trans_indices]
+            x_h_agent_detached = x_h_s_all_encoded_detached[2][x_h_trans_indices]
+            x_h_interactive_detached = x_h_s_all_encoded_detached[3][x_h_trans_indices]
         
         # ========================================================================
         # Phase 4: Compute all forward passes in batches
         # ========================================================================
         # Detach shared encoder outputs for all networks except V_h^e
         # V_h^e is the only network that trains the shared encoders
-        s_encoded_detached = tuple(t.detach() for t in s_encoded)
+        s_encoded_detached = self._detach_encoded_states(s_encoded)
         
         # ----- Q_r: Robot Q-values -----
         # Q_r uses: shared encoder (detached) + own encoder (trained)
@@ -761,79 +755,81 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
                 'target_mean': target_q_r.mean().item()
             }
         
-        # ----- U_r: Intrinsic reward -----
-        # U_r uses only shared encoder (detached) - no own encoder
-        y_pred, u_r_pred = self.networks.u_r.forward(*s_encoded_detached)
-        
-        # Compute X_h for U_r target using agent identity encoding
-        u_r_x_h_transition_indices = []
-        u_r_x_h_human_indices = []
-        u_r_x_h_states = []  # states for agent identity encoding
-        u_r_transition_boundaries = [0]
-        
-        for i, t in enumerate(batch):
-            if self.config.u_r_sample_humans is None:
-                humans_for_u_r = self.human_agent_indices
-            else:
-                n_sample = min(self.config.u_r_sample_humans, len(self.human_agent_indices))
-                humans_for_u_r = random.sample(self.human_agent_indices, n_sample)
+        # ----- U_r: Intrinsic reward (only when using network mode) -----
+        loss_u_r = torch.tensor(0.0, device=self.device)
+        if self.config.u_r_use_network:
+            # U_r uses only shared encoder (detached) - no own encoder
+            y_pred, u_r_pred = self.networks.u_r.forward(*s_encoded_detached)
             
-            for h_u in humans_for_u_r:
-                u_r_x_h_transition_indices.append(i)
-                u_r_x_h_human_indices.append(h_u)
-                u_r_x_h_states.append(t.state)
-            u_r_transition_boundaries.append(len(u_r_x_h_transition_indices))
-        
-        with torch.no_grad():
-            u_r_trans_idx = torch.tensor(u_r_x_h_transition_indices, device=self.device)
+            # Compute X_h for U_r target using agent identity encoding
+            u_r_x_h_transition_indices = []
+            u_r_x_h_human_indices = []
+            u_r_x_h_states = []  # states for agent identity encoding
+            u_r_transition_boundaries = [0]
             
-            # Encode agent identities for X_h computation
-            u_r_idx, u_r_agent_grid, u_r_agent_feat = self._batch_tensorize_agent_identities(
-                u_r_x_h_human_indices, u_r_x_h_states
-            )
+            for i, t in enumerate(batch):
+                if self.config.u_r_sample_humans is None:
+                    humans_for_u_r = self.human_agent_indices
+                else:
+                    n_sample = min(self.config.u_r_sample_humans, len(self.human_agent_indices))
+                    humans_for_u_r = random.sample(self.human_agent_indices, n_sample)
+                
+                for h_u in humans_for_u_r:
+                    u_r_x_h_transition_indices.append(i)
+                    u_r_x_h_human_indices.append(h_u)
+                    u_r_x_h_states.append(t.state)
+                u_r_transition_boundaries.append(len(u_r_x_h_transition_indices))
             
-            u_r_x_h_grid = s_encoded[0][u_r_trans_idx]
-            u_r_x_h_glob = s_encoded[1][u_r_trans_idx]
-            u_r_x_h_agent = s_encoded[2][u_r_trans_idx]
-            u_r_x_h_interactive = s_encoded[3][u_r_trans_idx]
+            with torch.no_grad():
+                u_r_trans_idx = torch.tensor(u_r_x_h_transition_indices, device=self.device)
+                
+                # Encode agent identities for X_h computation
+                u_r_idx, u_r_agent_grid, u_r_agent_feat = self._batch_tensorize_agent_identities(
+                    u_r_x_h_human_indices, u_r_x_h_states
+                )
+                
+                u_r_x_h_grid = s_encoded[0][u_r_trans_idx]
+                u_r_x_h_glob = s_encoded[1][u_r_trans_idx]
+                u_r_x_h_agent = s_encoded[2][u_r_trans_idx]
+                u_r_x_h_interactive = s_encoded[3][u_r_trans_idx]
+                
+                x_h_for_u_r = self.networks.x_h_target.forward(
+                    u_r_x_h_grid, u_r_x_h_glob, u_r_x_h_agent, u_r_x_h_interactive,
+                    u_r_idx, u_r_agent_grid, u_r_agent_feat
+                )
+                # Hard clamp X_h for inference (soft clamp is only for training X_h)
+                x_h_for_u_r = self.networks.x_h_target.apply_hard_clamp(x_h_for_u_r)
             
-            x_h_for_u_r = self.networks.x_h_target.forward(
-                u_r_x_h_grid, u_r_x_h_glob, u_r_x_h_agent, u_r_x_h_interactive,
-                u_r_idx, u_r_agent_grid, u_r_agent_feat
-            )
-            # Hard clamp X_h for inference (soft clamp is only for training X_h)
-            x_h_for_u_r = self.networks.x_h_target.apply_hard_clamp(x_h_for_u_r)
-        
-        # Compute U_r targets by aggregating X_h values for each transition
-        u_r_targets = []
-        for i in range(n):
-            start_idx = u_r_transition_boundaries[i]
-            end_idx = u_r_transition_boundaries[i + 1]
-            x_h_values = x_h_for_u_r[start_idx:end_idx].squeeze()
+            # Compute U_r targets by aggregating X_h values for each transition
+            u_r_targets = []
+            for i in range(n):
+                start_idx = u_r_transition_boundaries[i]
+                end_idx = u_r_transition_boundaries[i + 1]
+                x_h_values = x_h_for_u_r[start_idx:end_idx].squeeze()
+                
+                if x_h_values.dim() == 0:
+                    x_h_values = x_h_values.unsqueeze(0)
+                # Clamp X_h to (0, 1] to prevent X_h^{-ξ} explosion when X_h is near 0
+                x_h_clamped = torch.clamp(x_h_values, min=1e-3, max=1.0)
+                x_h_sum = (x_h_clamped ** (-self.config.xi)).sum()
+                x_h_avg = x_h_sum / x_h_clamped.numel()
+                # target_y = E[X_h^{-ξ}] directly (y is defined as E[X_h^{-ξ}])
+                target_y = x_h_avg
+                u_r_targets.append(target_y)
             
-            if x_h_values.dim() == 0:
-                x_h_values = x_h_values.unsqueeze(0)
-            # Clamp X_h to (0, 1] to prevent X_h^{-ξ} explosion when X_h is near 0
-            x_h_clamped = torch.clamp(x_h_values, min=1e-3, max=1.0)
-            x_h_sum = (x_h_clamped ** (-self.config.xi)).sum()
-            x_h_avg = x_h_sum / x_h_clamped.numel()
-            # target_y = E[X_h^{-ξ}] directly (y is defined as E[X_h^{-ξ}])
-            target_y = x_h_avg
-            u_r_targets.append(target_y)
-        
-        u_r_targets = torch.stack(u_r_targets)
-        loss_u_r = ((y_pred.squeeze() - u_r_targets) ** 2).mean()
-        
-        # Track U_r prediction stats (the actual U_r values, not y)
-        # U_r = -y^η where η = -1/ξ, so U_r is negative
-        with torch.no_grad():
-            # Compute target U_r from target y: U_r = -y^η where η = -1/ξ
-            target_u_r = -torch.pow(u_r_targets, -1.0 / self.config.xi)
-            prediction_stats['u_r'] = {
-                'mean': u_r_pred.mean().item(),
-                'std': u_r_pred.std().item() if u_r_pred.numel() > 1 else 0.0,
-                'target_mean': target_u_r.mean().item()
-            }
+            u_r_targets = torch.stack(u_r_targets)
+            loss_u_r = ((y_pred.squeeze() - u_r_targets) ** 2).mean()
+            
+            # Track U_r prediction stats (the actual U_r values, not y)
+            # U_r = -y^η where η = -1/ξ, so U_r is negative
+            with torch.no_grad():
+                # Compute target U_r from target y: U_r = -y^η where η = -1/ξ
+                target_u_r = -torch.pow(u_r_targets, -1.0 / self.config.xi)
+                prediction_stats['u_r'] = {
+                    'mean': u_r_pred.mean().item(),
+                    'std': u_r_pred.std().item() if u_r_pred.numel() > 1 else 0.0,
+                    'target_mean': target_u_r.mean().item()
+                }
         
         # ----- V_h^e: Human goal achievement -----
         loss_v_h_e = torch.tensor(0.0, device=self.device)
@@ -885,10 +881,12 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
                 self.networks.x_h.own_agent_encoder
             )
             
-            # Detach shared state encoder outputs, pass own agent encoder outputs
+            # X_h forward: use detached shared encoder outputs, trained own encoder
+            # Note: x_h_idx/agent_grid/agent_feat are raw input tensors (not NN outputs)
+            # so they don't require detachment - they don't carry gradients
             x_h_pred = self.networks.x_h.forward(
-                x_h_grid.detach(), x_h_glob.detach(), x_h_agent.detach(), x_h_interactive.detach(),
-                x_h_idx.detach(), x_h_agent_grid.detach(), x_h_agent_feat.detach(),  # Shared (frozen)
+                x_h_grid_detached, x_h_glob_detached, x_h_agent_detached, x_h_interactive_detached,
+                x_h_idx, x_h_agent_grid, x_h_agent_feat,  # Shared agent identity (raw tensors)
                 own_x_h_idx, own_x_h_agent_grid, own_x_h_agent_feat  # Own (trained)
             )
             
@@ -1032,6 +1030,27 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
             torch.cat(agent_list, dim=0),
             torch.cat(interactive_list, dim=0)
         )
+    
+    @staticmethod
+    def _detach_encoded_states(
+        encoded: Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Detach all tensors in an encoded state tuple to stop gradient flow.
+        
+        This is used to freeze the shared encoder outputs for networks that
+        should NOT train the shared encoders (Q_r, X_h, U_r, V_r).
+        
+        Only V_h^e should receive un-detached encoder outputs because it is
+        the designated network for training the shared encoders.
+        
+        Args:
+            encoded: Tuple of (grid, global, agent, interactive) tensors.
+        
+        Returns:
+            Tuple with all tensors detached from the computation graph.
+        """
+        return tuple(t.detach() for t in encoded)
     
     def _batch_tensorize_states(
         self,
@@ -1386,7 +1405,8 @@ def train_multigrid_phase2(
     debug: bool = False,
     tensorboard_dir: Optional[str] = None,
     profiler: Optional[Any] = None,
-) -> Tuple[MultiGridRobotQNetwork, Phase2Networks, List[Dict[str, float]]]:
+    restore_networks_path: Optional[str] = None,
+) -> Tuple[MultiGridRobotQNetwork, Phase2Networks, List[Dict[str, float]], "MultiGridPhase2Trainer"]:
     """
     Train Phase 2 robot policy for a multigrid environment.
     
@@ -1408,9 +1428,12 @@ def train_multigrid_phase2(
         verbose: Enable progress bar (tqdm).
         debug: Enable verbose debug output.
         tensorboard_dir: Directory for TensorBoard logs (optional).
+        profiler: Torch profiler instance (optional).
+        restore_networks_path: Path to checkpoint for restoring networks.
+                               Skips warmup/rampup stages since they were already done.
     
     Returns:
-        Tuple of (robot_q_network, all_networks, training_history).
+        Tuple of (robot_q_network, all_networks, training_history, trainer).
     """
     if config is None:
         config = Phase2Config()
@@ -1466,6 +1489,15 @@ def train_multigrid_phase2(
         profiler=profiler,
     )
     
+    # Restore networks if checkpoint provided (skips warmup/rampup since already done)
+    if restore_networks_path is not None:
+        if verbose:
+            print(f"\nRestoring networks from: {restore_networks_path}")
+        trainer.load_all_networks(restore_networks_path)
+        if verbose:
+            print(f"  Restored networks at step {trainer.total_steps}")
+            print(f"  Warmup/rampup stages will be skipped")
+    
     if verbose:
         print(f"\nTraining for {config.num_episodes} episodes...")
         print(f"  Steps per episode: {config.steps_per_episode}")
@@ -1483,4 +1515,4 @@ def train_multigrid_phase2(
             final_losses = history[-1]
             print(f"  Final losses: {final_losses}")
     
-    return networks.q_r, networks, history
+    return networks.q_r, networks, history, trainer

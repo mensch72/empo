@@ -18,11 +18,23 @@ The demo trains:
 - V_r: Robot state value (eq. 9)
 
 Usage:
-    python phase2_robot_policy_demo.py           # Full run
+    # Basic usage
+    python phase2_robot_policy_demo.py           # Full run (trivial env)
     python phase2_robot_policy_demo.py --quick   # Quick test (100 episodes)
     python phase2_robot_policy_demo.py --ensemble # Use random ensemble environment
+    
+    # Save/restore for continued training
+    python phase2_robot_policy_demo.py --save_networks model.pt  # Save all networks
+    python phase2_robot_policy_demo.py --restore_networks model.pt  # Resume training
+    
+    # Save and use policy for rollouts
+    python phase2_robot_policy_demo.py --save_policy policy.pt  # Save policy after training
+    python phase2_robot_policy_demo.py --use_policy policy.pt --rollouts 50  # Load & run
+    
+    # Advanced options
     python phase2_robot_policy_demo.py --debug   # Enable verbose debug output
     python phase2_robot_policy_demo.py --profile # Profile training with torch.profiler
+    python phase2_robot_policy_demo.py --rollouts 100 --save_video my_rollouts.mp4
 
 Output:
 - TensorBoard logs in outputs/phase2_demo_<env_type>/
@@ -49,6 +61,7 @@ from empo.human_policy_prior import HeuristicPotentialPolicy
 from empo.nn_based.multigrid import PathDistanceCalculator
 from empo.nn_based.phase2.config import Phase2Config
 from empo.nn_based.multigrid.phase2 import train_multigrid_phase2
+from empo.nn_based.multigrid.phase2.robot_policy import MultiGridRobotPolicy
 
 
 # ============================================================================
@@ -549,7 +562,18 @@ def run_policy_rollout(
 # Main
 # ============================================================================
 
-def main(quick_mode: bool = False, debug: bool = False, profile: bool = False, use_ensemble: bool = False):
+def main(
+    quick_mode: bool = False,
+    debug: bool = False,
+    profile: bool = False,
+    use_ensemble: bool = False,
+    save_networks_path: str = None,
+    save_policy_path: str = None,
+    restore_networks_path: str = None,
+    use_policy_path: str = None,
+    num_rollouts_override: int = None,
+    save_video_path: str = None,
+):
     """Run Phase 2 demo."""
     # Configure environment based on command line option
     configure_environment(use_ensemble)
@@ -724,38 +748,92 @@ def main(quick_mode: bool = False, debug: bool = False, profile: bool = False, u
         beta_r_rampup_steps=beta_r_rampup_steps,
     )
     
-    # Train Phase 2
-    print("Training Phase 2 robot policy...")
-    print(f"  Episodes: {config.num_episodes}")
-    print(f"  Steps per episode: {config.steps_per_episode}")
-    print(f"  TensorBoard: {tensorboard_dir}")
-    print()
-    
-    t0 = time.time()
-    
-    if profile:
-        # Profile training with torch.profiler + TensorBoard integration
-        from torch.profiler import profile as torch_profile, ProfilerActivity, schedule, tensorboard_trace_handler
+    # If using policy directly (no training), skip to rollouts
+    if use_policy_path:
+        print("=" * 70)
+        print(f"Loading policy from: {use_policy_path}")
+        print("Skipping training, running rollouts only")
+        print("=" * 70)
         
-        profiler_dir = os.path.join(output_dir, 'profiler')
-        os.makedirs(profiler_dir, exist_ok=True)
-        profiler_trace_path = os.path.join(output_dir, 'profiler_trace.json')
-        
-        print(f"  Profiler TensorBoard output: {profiler_dir}")
-        print(f"  View with: tensorboard --logdir={profiler_dir}")
+        policy = MultiGridRobotPolicy(path=use_policy_path, device=device)
+        robot_q_network = policy.q_network
+        networks = None  # No networks for annotations
+        trainer = None
+        history = []
+        elapsed = 0.0
+    else:
+        # Train Phase 2
+        print("Training Phase 2 robot policy...")
+        print(f"  Episodes: {config.num_episodes}")
+        print(f"  Steps per episode: {config.steps_per_episode}")
+        print(f"  TensorBoard: {tensorboard_dir}")
+        if restore_networks_path:
+            print(f"  Restoring from: {restore_networks_path}")
         print()
         
-        # Schedule: skip first 2 episodes (wait), warm up for 2, actively profile 6, repeat
-        # This captures steady-state behavior, not just initialization overhead
-        with torch_profile(
-            activities=[ProfilerActivity.CPU] + ([ProfilerActivity.CUDA] if device != 'cpu' else []),
-            schedule=schedule(wait=2, warmup=2, active=6, repeat=2),
-            on_trace_ready=tensorboard_trace_handler(profiler_dir),
-            record_shapes=True,
-            profile_memory=True,
-            with_stack=True,
-        ) as prof:
-            robot_q_network, networks, history = train_multigrid_phase2(
+        t0 = time.time()
+        
+        if profile:
+            # Profile training with torch.profiler + TensorBoard integration
+            from torch.profiler import profile as torch_profile, ProfilerActivity, schedule, tensorboard_trace_handler
+            
+            profiler_dir = os.path.join(output_dir, 'profiler')
+            os.makedirs(profiler_dir, exist_ok=True)
+            profiler_trace_path = os.path.join(output_dir, 'profiler_trace.json')
+            
+            print(f"  Profiler TensorBoard output: {profiler_dir}")
+            print(f"  View with: tensorboard --logdir={profiler_dir}")
+            print()
+            
+            # Schedule: skip first 2 episodes (wait), warm up for 2, actively profile 6, repeat
+            # This captures steady-state behavior, not just initialization overhead
+            with torch_profile(
+                activities=[ProfilerActivity.CPU] + ([ProfilerActivity.CUDA] if device != 'cpu' else []),
+                schedule=schedule(wait=2, warmup=2, active=6, repeat=2),
+                on_trace_ready=tensorboard_trace_handler(profiler_dir),
+                record_shapes=True,
+                profile_memory=True,
+                with_stack=True,
+            ) as prof:
+                robot_q_network, networks, history, trainer = train_multigrid_phase2(
+                    world_model=env,
+                    human_agent_indices=human_indices,
+                    robot_agent_indices=robot_indices,
+                    human_policy_prior=human_policy_fn,
+                    goal_sampler=goal_sampler_fn,
+                    config=config,
+                    hidden_dim=hidden_dim,
+                    goal_feature_dim=goal_feature_dim,
+                    agent_embedding_dim=agent_embedding_dim,
+                    device=device,
+                    verbose=True,
+                    debug=debug,
+                    tensorboard_dir=tensorboard_dir,
+                    profiler=prof,
+                    restore_networks_path=restore_networks_path,
+                )
+            
+            # Print profiler summary
+            print("\n" + "=" * 70)
+            print("PROFILER RESULTS")
+            print("=" * 70)
+            print("\nTop 30 operations by CPU time:")
+            print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=30))
+            
+            print("\nTop 20 operations by self CPU time (excluding children):")
+            print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=20))
+            
+            # Also export Chrome trace as backup
+            prof.export_chrome_trace(profiler_trace_path)
+            print(f"\nProfiler outputs:")
+            print(f"  TensorBoard: {profiler_dir}")
+            print(f"    View: tensorboard --logdir={profiler_dir}")
+            print(f"    Then open: http://localhost:6006/#pytorch_profiler")
+            print(f"  Chrome trace: {profiler_trace_path}")
+            print(f"    View in Chrome: chrome://tracing")
+            print(f"    Or use: https://ui.perfetto.dev/")
+        else:
+            robot_q_network, networks, history, trainer = train_multigrid_phase2(
                 world_model=env,
                 human_agent_indices=human_indices,
                 robot_agent_indices=robot_indices,
@@ -769,48 +847,12 @@ def main(quick_mode: bool = False, debug: bool = False, profile: bool = False, u
                 verbose=True,
                 debug=debug,
                 tensorboard_dir=tensorboard_dir,
-                profiler=prof,
+                restore_networks_path=restore_networks_path,
             )
         
-        # Print profiler summary
-        print("\n" + "=" * 70)
-        print("PROFILER RESULTS")
-        print("=" * 70)
-        print("\nTop 30 operations by CPU time:")
-        print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=30))
+        elapsed = time.time() - t0
         
-        print("\nTop 20 operations by self CPU time (excluding children):")
-        print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=20))
-        
-        # Also export Chrome trace as backup
-        prof.export_chrome_trace(profiler_trace_path)
-        print(f"\nProfiler outputs:")
-        print(f"  TensorBoard: {profiler_dir}")
-        print(f"    View: tensorboard --logdir={profiler_dir}")
-        print(f"    Then open: http://localhost:6006/#pytorch_profiler")
-        print(f"  Chrome trace: {profiler_trace_path}")
-        print(f"    View in Chrome: chrome://tracing")
-        print(f"    Or use: https://ui.perfetto.dev/")
-    else:
-        robot_q_network, networks, history = train_multigrid_phase2(
-            world_model=env,
-            human_agent_indices=human_indices,
-            robot_agent_indices=robot_indices,
-            human_policy_prior=human_policy_fn,
-            goal_sampler=goal_sampler_fn,
-            config=config,
-            hidden_dim=hidden_dim,
-            goal_feature_dim=goal_feature_dim,
-            agent_embedding_dim=agent_embedding_dim,
-            device=device,
-            verbose=True,
-            debug=debug,
-            tensorboard_dir=tensorboard_dir
-        )
-    
-    elapsed = time.time() - t0
-    
-    print(f"\nTraining completed in {elapsed:.2f} seconds")
+        print(f"\nTraining completed in {elapsed:.2f} seconds")
     
     # Show loss history
     if history and len(history) > 0:
@@ -820,17 +862,38 @@ def main(quick_mode: bool = False, debug: bool = False, profile: bool = False, u
             loss_str = ", ".join(f"{k}={v:.4f}" for k, v in losses.items() if v > 0)
             print(f"  Episode {episode_num}: {loss_str}")
     
+    # Save networks/policy after training if requested (only if trainer is available)
+    if trainer is not None:
+        if save_networks_path:
+            print(f"\nSaving all networks to: {save_networks_path}")
+            trainer.save_all_networks(save_networks_path)
+        
+        if save_policy_path:
+            print(f"\nSaving policy to: {save_policy_path}")
+            trainer.save_policy(save_policy_path)
+    
     # Generate rollout movie using env's built-in video recording
+    # Override num_rollouts if specified
+    if num_rollouts_override is not None:
+        num_rollouts = num_rollouts_override
+    
     print(f"\nGenerating {num_rollouts} rollouts with learned policy...")
+    
+    # Create policy from trained Q network for rollouts (or use loaded policy in use_policy mode)
+    if use_policy_path:
+        policy = MultiGridRobotPolicy(path=use_policy_path, device=device)
+    else:
+        policy = MultiGridRobotPolicy(q_network=robot_q_network, beta_r=config.beta_r, device=device)
     
     # Start video recording
     env.start_video_recording()
     
     for rollout_idx in range(num_rollouts):
         env.reset()
+        policy.reset(env)  # Set world model for episode
         steps = run_policy_rollout(
             env=env,
-            robot_q_network=robot_q_network,
+            robot_q_network=policy.q_network,  # Use policy's Q network
             human_policy=human_policy,
             goal_sampler=goal_sampler,
             human_indices=human_indices,
@@ -843,7 +906,11 @@ def main(quick_mode: bool = False, debug: bool = False, profile: bool = False, u
             print(f"  Completed {rollout_idx + 1}/{num_rollouts} rollouts ({len(env._video_frames)} total frames)")
     
     # Save movie using env's save_video method (uses imageio[ffmpeg])
-    movie_path = os.path.join(output_dir, 'phase2_robot_policy_demo.mp4')
+    # Use custom path if specified
+    if save_video_path:
+        movie_path = save_video_path
+    else:
+        movie_path = os.path.join(output_dir, 'phase2_robot_policy_demo.mp4')
     if os.path.exists(movie_path):
         os.remove(movie_path)
     env.save_video(movie_path, fps=MOVIE_FPS)
@@ -851,8 +918,9 @@ def main(quick_mode: bool = False, debug: bool = False, profile: bool = False, u
     print()
     print("=" * 70)
     print("Demo completed!")
-    print(f"  TensorBoard logs: {tensorboard_dir}")
-    print(f"  View with: tensorboard --logdir={tensorboard_dir}")
+    if trainer is not None:
+        print(f"  TensorBoard logs: {tensorboard_dir}")
+        print(f"  View with: tensorboard --logdir={tensorboard_dir}")
     print(f"  Movie: {os.path.abspath(movie_path)}")
     print("=" * 70)
 
@@ -867,5 +935,33 @@ if __name__ == "__main__":
                         help='Enable verbose debug output')
     parser.add_argument('--profile', '-p', action='store_true',
                         help='Profile training with torch.profiler (outputs trace.json)')
+    
+    # Save/restore options
+    parser.add_argument('--save_networks', type=str, default=None, metavar='PATH',
+                        help='Save all trained networks to PATH after training')
+    parser.add_argument('--save_policy', type=str, default=None, metavar='PATH',
+                        help='Save trained policy (Q_r network only) to PATH after training')
+    parser.add_argument('--restore_networks', type=str, default=None, metavar='PATH',
+                        help='Restore networks from PATH before training (skips warmup/rampup)')
+    parser.add_argument('--use_policy', type=str, default=None, metavar='PATH',
+                        help='Skip training and only run rollouts using policy from PATH')
+    
+    # Rollout options
+    parser.add_argument('--rollouts', type=int, default=None, metavar='N',
+                        help='Number of rollouts to generate (overrides default)')
+    parser.add_argument('--save_video', type=str, default=None, metavar='PATH',
+                        help='Path to save rollout video (default: outputs/phase2_demo_<env>/...mp4)')
+    
     args = parser.parse_args()
-    main(quick_mode=args.quick, debug=args.debug, profile=args.profile, use_ensemble=args.ensemble)
+    main(
+        quick_mode=args.quick,
+        debug=args.debug,
+        profile=args.profile,
+        use_ensemble=args.ensemble,
+        save_networks_path=args.save_networks,
+        save_policy_path=args.save_policy,
+        restore_networks_path=args.restore_networks,
+        use_policy_path=args.use_policy,
+        num_rollouts_override=args.rollouts,
+        save_video_path=args.save_video,
+    )

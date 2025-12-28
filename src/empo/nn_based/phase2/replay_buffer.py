@@ -72,8 +72,8 @@ class Phase2ReplayBuffer:
         human_actions: List[int],
         next_state: Any,
         transition_probs_by_action: Optional[Dict[int, List[Tuple[float, Any]]]] = None,
-        compact_features: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None,
-        next_compact_features: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = None
+        compact_features: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = None,
+        next_compact_features: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = None
     ) -> None:
         """
         Add a transition to the buffer.
@@ -85,8 +85,8 @@ class Phase2ReplayBuffer:
             human_actions: List of human actions.
             next_state: Next state.
             transition_probs_by_action: Optional pre-computed transition probabilities.
-            compact_features: Optional pre-computed (global, agent, interactive) tensors for state.
-            next_compact_features: Optional pre-computed (global, agent, interactive) tensors for next_state.
+            compact_features: Optional pre-computed (global, agent, interactive, compressed_grid) tensors for state.
+            next_compact_features: Optional pre-computed (global, agent, interactive, compressed_grid) tensors for next_state.
         """
         transition = Phase2Transition(
             state=state,

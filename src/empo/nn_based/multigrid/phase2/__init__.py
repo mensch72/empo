@@ -15,6 +15,7 @@ from .trainer import (
     create_phase2_networks,
     train_multigrid_phase2,
 )
+from .robot_policy import MultiGridRobotPolicy
 
 __all__ = [
     'MultiGridRobotQNetwork',
@@ -25,4 +26,5 @@ __all__ = [
     'MultiGridPhase2Trainer',
     'create_phase2_networks',
     'train_multigrid_phase2',
+    'MultiGridRobotPolicy',
 ]
