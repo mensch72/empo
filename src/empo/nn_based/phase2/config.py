@@ -18,15 +18,17 @@ class Phase2Config:
     
     Warm-up Phase:
         Training proceeds in stages to break mutual network dependencies:
-        1. V_h^e only (steps 0 to warmup_v_h_e_steps)
-        2. V_h^e + X_h (steps warmup_v_h_e_steps to warmup_x_h_steps)
-        3. V_h^e + X_h + U_r (steps warmup_x_h_steps to warmup_u_r_steps)
-        4. V_h^e + X_h + U_r + Q_r (steps warmup_u_r_steps to warmup_q_r_steps)
+        1. V_h^e only (training steps 0 to warmup_v_h_e_steps)
+        2. V_h^e + X_h (training steps warmup_v_h_e_steps to warmup_x_h_steps)
+        3. V_h^e + X_h + U_r (training steps warmup_x_h_steps to warmup_u_r_steps)
+        4. V_h^e + X_h + U_r + Q_r (training steps warmup_u_r_steps to warmup_q_r_steps)
         5. All networks including V_r if enabled (after warmup_q_r_steps)
         
         During warm-up, beta_r=0 (uniform random robot policy).
         After warm-up, beta_r ramps up to nominal value over beta_r_rampup_steps.
         Learning rates are constant during warm-up, then decay as 1/sqrt(t).
+        
+        Note: Warmup stages are measured in training steps (gradient updates), not environment steps.
     
     Attributes:
         gamma_r: Robot discount factor.
@@ -43,10 +45,10 @@ class Phase2Config:
         lr_v_h_e: Learning rate for V_h^e network.
         lr_x_h: Learning rate for X_h network.
         lr_u_r: Learning rate for U_r network.
-        v_r_target_update_interval: Steps between V_r target network updates.
-        v_h_e_target_update_interval: Steps between V_h^e target network updates.
-        x_h_target_update_interval: Steps between X_h target network updates.
-        u_r_target_update_interval: Steps between U_r target network updates.
+        v_r_target_update_interval: Training steps between V_r target network updates.
+        v_h_e_target_update_interval: Training steps between V_h^e target network updates.
+        x_h_target_update_interval: Training steps between X_h target network updates.
+        u_r_target_update_interval: Training steps between U_r target network updates.
         buffer_size: Replay buffer capacity.
         batch_size: Training batch size.
         num_episodes: Total training episodes.

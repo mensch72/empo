@@ -5,10 +5,12 @@ This document provides brief justifications for design choices in the Phase 2 tr
 ## Glossary of Training Terminology
 
 ### Step
-An **environment step** (also called **timestep**) is a single state transition: the robot and humans take actions, and the environment transitions from state s to s'. We use `total_steps` to track the cumulative count of environment steps across all episodes, which determines warm-up stages, learning rate schedules, and exploration parameters. The term "step" always refers to environment steps, not gradient updates.
+An **environment step** (also called **timestep**) is a single state transition: the robot and humans take actions, and the environment transitions from state s to s'. We use `total_steps` to track the cumulative count of environment steps across all episodes. The term "step" without qualification usually refers to environment steps in the context of data collection and episodes.
 
 ### Training Step / Learning Step
-A **training step** (or **learning step**) is one gradient update cycle: sample a batch from the replay buffer, compute losses, backpropagate, and update network weights. In synchronous training, we perform `updates_per_step` training steps after each environment step (default: 1). In async training, the learner performs training steps continuously whenever the buffer has enough data, decoupled from environment stepping.
+A **training step** (or **learning step**) is one gradient update cycle: sample a batch from the replay buffer, compute losses, backpropagate, and update network weights. We use `training_step_count` to track the cumulative count of training steps. In synchronous training, we perform `updates_per_step` training steps after each environment step (default: 1). In async training, the learner performs training steps continuously whenever the buffer has enough data, decoupled from environment stepping.
+
+**Important**: Warmup stages, target network update intervals, learning rate schedules, and beta_r/epsilon schedules are all measured in **training steps**, not environment steps. This ensures consistent behavior in async mode where environment and training steps are decoupled.
 
 ### Episode
 An **episode** is a sequence of `steps_per_episode` consecutive environment steps (default: 50) starting from a reset environment. Episodes are the basic unit of data collection in synchronous training. During each episode, we collect transitions into the replay buffer and perform training steps that sample batches from the buffer (containing data from current and past episodes). We report average losses over training steps performed during that episode for logging purposes. The term "episode" matches standard RL usage.
@@ -18,23 +20,23 @@ We do NOT use the term "epoch" in Phase 2 training. Unlike supervised learning w
 
 ### Stage (Warm-up)
 A warm-up **stage** is a phase where specific networks are active for training. There are 6 stages total:
-- Stage 0 (steps 0 to warmup_v_h_e_steps): Only V_h^e trained
+- Stage 0 (training steps 0 to warmup_v_h_e_steps): Only V_h^e trained
 - Stage 1 (+warmup_x_h_steps): V_h^e + X_h trained
 - Stage 2 (+warmup_u_r_steps): V_h^e + X_h + U_r trained (skipped if u_r_use_network=False)
 - Stage 3 (+warmup_q_r_steps): V_h^e + X_h + (U_r) + Q_r trained
 - Stage 4 (+beta_r_rampup_steps): All networks, beta_r ramping from 0 to nominal
 - Stage 5 (remainder): Full training with LR decay
 
-Stages are determined by `total_steps` (cumulative environment steps), not episodes. **Important**: In async training, `total_steps` still counts environment steps collected by actors, not training steps performed by the learner, so warmup progresses based on data collection, not gradient updates.
+Stages are determined by `training_step_count` (cumulative training steps/gradient updates), not environment steps or episodes. This ensures warmup progresses based on actual network updates, which is especially important in async mode where training and environment steps are decoupled.
 
 ### Target Network Update Intervals
-Each target network is updated independently (via full copy from its corresponding main network) at its own interval:
-- `v_r_target`: Every `v_r_target_update_interval` steps (default: 100)
-- `v_h_e_target`: Every `v_h_e_target_update_interval` steps (default: 100)
-- `x_h_target`: Every `x_h_target_update_interval` steps (default: 100)
-- `u_r_target`: Every `u_r_target_update_interval` steps (default: 100)
+Each target network is updated independently (via full copy from its corresponding main network) at its own interval measured in **training steps** (gradient updates):
+- `v_r_target`: Every `v_r_target_update_interval` training steps (default: 100)
+- `v_h_e_target`: Every `v_h_e_target_update_interval` training steps (default: 100)
+- `x_h_target`: Every `x_h_target_update_interval` training steps (default: 100)
+- `u_r_target`: Every `u_r_target_update_interval` training steps (default: 100)
 
-These intervals are called the **target update intervals** or **target sync intervals**. Each update happens when `total_steps % <network>_target_update_interval == 0`, meaning they're tied to environment steps, not training steps or episodes. This allows different update frequencies for different networks if needed.
+These intervals are called the **target update intervals** or **target sync intervals**. Each update happens when `training_step_count % <network>_target_update_interval == 0`, meaning they're tied to **training steps** (gradient updates), not environment steps or episodes. This makes sense in async mode where training steps and environment steps are decoupled, ensuring consistent target network update frequency regardless of data collection speed.
 
 ### Batch Size
 **Batch size** (default: 64) is the number of transitions sampled from the replay buffer for each training step. Most networks use this size, but X_h can optionally use a larger `x_h_batch_size` to reduce variance in its Monte Carlo target estimates. Batch size is independent of episode length.
@@ -47,6 +49,8 @@ These intervals are called the **target update intervals** or **target sync inte
 - **Total training steps**: `total_env_steps × updates_per_step` (default: 500,000)
 - **Batches per training step**: Always 1 (we sample one batch, compute loss, update)
 
+**Key distinction**: Environment steps track data collection (`total_steps`), training steps track gradient updates (`training_step_count`). In sync mode with `updates_per_step=1`, they're equal.
+
 ### Numerical Relationships (Async Training)
 In async mode, actors and learner are decoupled:
 - **Actors**: Generate environment steps continuously, `num_actors` in parallel (e.g., 4 actors each running episodes)
@@ -57,6 +61,8 @@ In async mode, actors and learner are decoupled:
   - If actors are faster (CPU-bound env stepping), the buffer fills quickly, learner trains frequently
   - If learner is faster (GPU-bound training), it waits for actors to generate data
   - Typical ratio: Multiple env steps per training step (e.g., 4 actors × 50 steps/episode = 200 env steps collected while learner performs ~50-100 training steps, depending on hardware)
+
+**Key point**: Warmup stages, target network updates, and all training schedules use `training_step_count` in both sync and async modes, ensuring consistent behavior regardless of data collection speed.
 
 ## Network Architecture
 

@@ -124,8 +124,11 @@ class BasePhase2Trainer(ABC):
         # Replay buffer
         self.replay_buffer = Phase2ReplayBuffer(capacity=config.buffer_size)
         
-        # Training step counter
+        # Training step counter (environment steps)
         self.total_steps = 0
+        
+        # Global training step counter (gradient updates)
+        self.training_step_count = 0
         
         # Per-network update counters for 1/t learning rate schedules
         self.update_counts = {
@@ -242,20 +245,23 @@ class BasePhase2Trainer(ABC):
         return norms
     
     def update_target_networks(self):
-        """Update target networks (hard copy) based on their individual intervals."""
-        if self.total_steps % self.config.v_r_target_update_interval == 0:
+        """Update target networks (hard copy) based on their individual intervals.
+        
+        Intervals are measured in training steps (gradient updates), not environment steps.
+        """
+        if self.training_step_count % self.config.v_r_target_update_interval == 0:
             self.networks.v_r_target.load_state_dict(self.networks.v_r.state_dict())
             self.networks.v_r_target.eval()
         
-        if self.total_steps % self.config.v_h_e_target_update_interval == 0:
+        if self.training_step_count % self.config.v_h_e_target_update_interval == 0:
             self.networks.v_h_e_target.load_state_dict(self.networks.v_h_e.state_dict())
             self.networks.v_h_e_target.eval()
         
-        if self.total_steps % self.config.x_h_target_update_interval == 0:
+        if self.training_step_count % self.config.x_h_target_update_interval == 0:
             self.networks.x_h_target.load_state_dict(self.networks.x_h.state_dict())
             self.networks.x_h_target.eval()
         
-        if self.config.u_r_use_network and self.total_steps % self.config.u_r_target_update_interval == 0:
+        if self.config.u_r_use_network and self.training_step_count % self.config.u_r_target_update_interval == 0:
             self.networks.u_r_target.load_state_dict(self.networks.u_r.state_dict())
             self.networks.u_r_target.eval()
     
@@ -330,7 +336,7 @@ class BasePhase2Trainer(ABC):
         Returns:
             Tuple of robot actions.
         """
-        epsilon = self.config.get_epsilon(self.total_steps)
+        epsilon = self.config.get_epsilon(self.training_step_count)
         effective_beta_r = self.config.get_effective_beta_r(self.total_steps)
         
         with torch.no_grad():
@@ -402,7 +408,7 @@ class BasePhase2Trainer(ABC):
         # OPTIMIZATION: Only cache when Q_r is active - during early warmup we use
         # the cheaper V_h^e-only targets that don't need all action combinations.
         transition_probs_by_action = None
-        q_r_active = 'q_r' in self.config.get_active_networks(self.total_steps)
+        q_r_active = 'q_r' in self.config.get_active_networks(self.training_step_count)
         if self.config.use_model_based_targets and q_r_active and hasattr(self.env, 'transition_probabilities'):
             transition_probs_by_action = self._precompute_transition_probs(
                 state, human_actions
@@ -526,7 +532,7 @@ class BasePhase2Trainer(ABC):
             x_h_batch = batch
         
         # Check which networks are active - determines what we need to compute
-        active_networks = self.config.get_active_networks(self.total_steps)
+        active_networks = self.config.get_active_networks(self.training_step_count)
         x_h_active = 'x_h' in active_networks
         u_r_active = 'u_r' in active_networks
         q_r_active = 'q_r' in active_networks
@@ -728,7 +734,7 @@ class BasePhase2Trainer(ABC):
         losses, prediction_stats = self.compute_losses(batch, x_h_batch)
         
         # Determine which networks are active in this warm-up stage
-        active_networks = self.config.get_active_networks(self.total_steps)
+        active_networks = self.config.get_active_networks(self.training_step_count)
         
         # Combine all losses and do a SINGLE backward pass to avoid
         # in-place modification conflicts when losses share tensors through
@@ -783,6 +789,9 @@ class BasePhase2Trainer(ABC):
                 
                 grad_norms[name] = self._compute_single_grad_norm(name)
                 self.optimizers[name].step()
+        
+        # Increment training step counter
+        self.training_step_count += 1
         
         # Update target networks periodically (each checked independently)
         self.update_target_networks()
@@ -938,13 +947,13 @@ class BasePhase2Trainer(ABC):
         history = []
         
         # Track warm-up stage for detecting transitions
-        prev_stage = self.config.get_warmup_stage(self.total_steps)
+        prev_stage = self.config.get_warmup_stage(self.training_step_count)
         prev_stage_name = self.config.get_warmup_stage_name(self.total_steps)
         warmup_end_step = self.config.get_total_warmup_steps()
         
         # Log initial stage
         if self.verbose:
-            active = self.config.get_active_networks(self.total_steps)
+            active = self.config.get_active_networks(self.training_step_count)
             print(f"[Warmup] Starting in stage {prev_stage}: {prev_stage_name} (active networks: {active})")
         
         # Log stage transition steps to TensorBoard at start
@@ -984,7 +993,7 @@ class BasePhase2Trainer(ABC):
                 param_norms = self._compute_param_norms()
                 for key, value in param_norms.items():
                     self.writer.add_scalar(f'ParamNorm/{key}', value, episode)
-                self.writer.add_scalar('Epsilon', self.config.get_epsilon(self.total_steps), episode)
+                self.writer.add_scalar('Epsilon', self.config.get_epsilon(self.training_step_count), episode)
                 
                 # Log learning rates for networks that are being trained
                 networks_to_log_lr = ['v_h_e', 'x_h', 'q_r']
@@ -1004,20 +1013,20 @@ class BasePhase2Trainer(ABC):
                 self.writer.add_scalar('Warmup/is_warmup', 
                                       1.0 if self.config.is_in_warmup(self.total_steps) else 0.0, episode)
                 # Log which networks are active (as a bitmask for visualization)
-                active = self.config.get_active_networks(self.total_steps)
+                active = self.config.get_active_networks(self.training_step_count)
                 active_mask = sum(2**i for i, n in enumerate(['v_h_e', 'x_h', 'u_r', 'q_r', 'v_r']) if n in active)
                 self.writer.add_scalar('Warmup/active_networks_mask', active_mask, episode)
                 self.writer.add_scalar('Warmup/stage', 
-                                      self.config.get_warmup_stage(self.total_steps), episode)
+                                      self.config.get_warmup_stage(self.training_step_count), episode)
                 
                 # Flush to ensure data is written to disk for real-time monitoring
                 self.writer.flush()
             
             # Check for warm-up stage transitions
-            current_stage = self.config.get_warmup_stage(self.total_steps)
+            current_stage = self.config.get_warmup_stage(self.training_step_count)
             if current_stage != prev_stage:
                 current_stage_name = self.config.get_warmup_stage_name(self.total_steps)
-                active = self.config.get_active_networks(self.total_steps)
+                active = self.config.get_active_networks(self.training_step_count)
                 
                 # Console logging
                 if self.verbose:
@@ -1351,11 +1360,11 @@ class BasePhase2Trainer(ABC):
         policy_updates = 0
         
         # Track warmup stage for logging
-        prev_stage = self.config.get_warmup_stage(self.total_steps)
+        prev_stage = self.config.get_warmup_stage(self.training_step_count)
         prev_stage_name = self.config.get_warmup_stage_name(self.total_steps)
         
         if self.verbose:
-            active = self.config.get_active_networks(self.total_steps)
+            active = self.config.get_active_networks(self.training_step_count)
             print(f"[Learner] Starting in warmup stage {prev_stage}: {prev_stage_name} (active: {active})")
         
         # Progress bar
@@ -1400,12 +1409,12 @@ class BasePhase2Trainer(ABC):
                 shared_total_steps.value = self.total_steps
                 
                 # Check for warmup stage transitions
-                current_stage = self.config.get_warmup_stage(self.total_steps)
+                current_stage = self.config.get_warmup_stage(self.training_step_count)
                 if current_stage != prev_stage:
                     current_stage_name = self.config.get_warmup_stage_name(self.total_steps)
                     if self.verbose:
-                        active = self.config.get_active_networks(self.total_steps)
-                        epsilon = self.config.get_epsilon(self.total_steps)
+                        active = self.config.get_active_networks(self.training_step_count)
+                        epsilon = self.config.get_epsilon(self.training_step_count)
                         beta_r = self.config.get_effective_beta_r(self.total_steps)
                         print(f"\n[Learner] Warmup transition: {prev_stage_name} -> {current_stage_name}")
                         print(f"  Active networks: {active}, epsilon={epsilon:.3f}, beta_r={beta_r:.3f}")
@@ -1505,7 +1514,8 @@ class BasePhase2Trainer(ABC):
             'x_h': self.networks.x_h.state_dict(),
             'u_r': self.networks.u_r.state_dict(),
             'v_r': self.networks.v_r.state_dict(),
-            'total_steps': self.total_steps,
+            'total_steps': self.total_steps,  # Environment steps (for logging)
+            'training_step_count': self.training_step_count,  # Training steps (for warmup/schedules)
             'config': {
                 'gamma_r': self.config.gamma_r,
                 'gamma_h': self.config.gamma_h,
