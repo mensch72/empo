@@ -782,7 +782,7 @@ class BasePhase2Trainer(ABC):
                 self.optimizers[name].step()
         
         # Update target networks periodically (based on learning steps)
-        if self.training_step_count % self.config.v_r_target_update_freq == 0:
+        if self.training_step_count % self.config.v_r_target_update_interval == 0:
             self.update_target_networks()
         
         return loss_values, grad_norms, prediction_stats
@@ -865,16 +865,27 @@ class BasePhase2Trainer(ABC):
         return transition
     
     class _LearnerState:
-        """Mutable state for learner (warmup tracking)."""
-        def __init__(self, prev_stage: int, prev_stage_name: str):
+        """Mutable state for learner (warmup tracking and progress metrics)."""
+        def __init__(self, prev_stage: int, prev_stage_name: str, 
+                     prev_param_norms: Optional[Dict[str, float]] = None):
             self.prev_stage = prev_stage
             self.prev_stage_name = prev_stage_name
+            # For tracking network parameter changes
+            self.prev_param_norms = prev_param_norms or {}
+            # For tracking average time per step
+            self.start_time: Optional[float] = None
+            self.start_step: int = 0
     
     def _init_learner_state(self) -> "_LearnerState":
         """Initialize learner state for warmup tracking."""
+        import time
         prev_stage = self.config.get_warmup_stage(self.training_step_count)
         prev_stage_name = self.config.get_warmup_stage_name(self.training_step_count)
-        return BasePhase2Trainer._LearnerState(prev_stage, prev_stage_name)
+        prev_param_norms = self._compute_param_norms()
+        state = BasePhase2Trainer._LearnerState(prev_stage, prev_stage_name, prev_param_norms)
+        state.start_time = time.time()
+        state.start_step = self.training_step_count
+        return state
     
     def _learner_step(self, learner_state: "_LearnerState", pbar: Optional[tqdm] = None) -> Dict[str, float]:
         """
@@ -890,12 +901,41 @@ class BasePhase2Trainer(ABC):
         Returns:
             Dict of losses from the training step.
         """
+        import time
+        
         # Do training step
         losses, grad_norms, pred_stats = self.training_step()
         
-        # Update progress bar
+        # Increment training step counter (this is the gradient update counter)
+        self.training_step_count += 1
+        
+        # Compute current parameter norms to track network changes
+        current_param_norms = self._compute_param_norms()
+        
+        # Update progress bar with meaningful metrics
         if pbar is not None:
             pbar.update(1)
+            
+            # Compute average seconds per step
+            elapsed = time.time() - learner_state.start_time
+            steps_done = self.training_step_count - learner_state.start_step
+            avg_sec_per_step = elapsed / max(1, steps_done)
+            
+            # Compute parameter change magnitudes for x_h and q_r
+            x_h_change = abs(current_param_norms.get('x_h', 0) - learner_state.prev_param_norms.get('x_h', 0))
+            q_r_change = abs(current_param_norms.get('q_r', 0) - learner_state.prev_param_norms.get('q_r', 0))
+            
+            # Build postfix dict with v_h_e loss and network changes
+            postfix = {
+                'v_h_e': f"{losses.get('v_h_e', 0):.4f}",
+                'Δx_h': f"{x_h_change:.4f}",
+                'Δq_r': f"{q_r_change:.4f}",
+                's/step': f"{avg_sec_per_step:.2f}",
+            }
+            pbar.set_postfix(postfix, refresh=False)
+            
+            # Update prev_param_norms for next step
+            learner_state.prev_param_norms = current_param_norms
         
         # Log to TensorBoard
         if self.writer is not None:
@@ -1033,6 +1073,13 @@ class BasePhase2Trainer(ABC):
         actor_state = self._init_actor_state()
         learner_state = self._init_learner_state()
         
+        # Set main networks to train mode (enables dropout)
+        self.networks.q_r.train()
+        self.networks.v_h_e.train()
+        self.networks.x_h.train()
+        self.networks.u_r.train()
+        self.networks.v_r.train()
+        
         # Log initial stage
         if self.verbose:
             active = self.config.get_active_networks(self.training_step_count)
@@ -1046,8 +1093,14 @@ class BasePhase2Trainer(ABC):
                                      f"Stage {stage_num}: {stage_name} starts at step {step}", 
                                      global_step=0)
         
-        # Set up progress bar
-        pbar = tqdm(total=num_training_steps, desc="Training", unit="steps", disable=not self.verbose)
+        # Set up progress bar with proper formatting
+        pbar = tqdm(
+            total=num_training_steps, 
+            desc="Training", 
+            unit=" steps",  # Space before 'steps' for readability
+            disable=not self.verbose,
+            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {postfix}]'
+        )
         pbar.update(self.training_step_count)  # Start from current position if resuming
         
         while self.training_step_count < num_training_steps:
@@ -1078,6 +1131,13 @@ class BasePhase2Trainer(ABC):
                     history.append(losses)
         
         pbar.close()
+        
+        # Set all networks to eval mode (disables dropout for rollouts)
+        self.networks.q_r.eval()
+        self.networks.v_h_e.eval()
+        self.networks.x_h.eval()
+        self.networks.u_r.eval()
+        self.networks.v_r.eval()
         
         # Close TensorBoard writer
         if self.writer is not None:
@@ -1310,6 +1370,13 @@ class BasePhase2Trainer(ABC):
         # Initialize learner state
         learner_state = self._init_learner_state()
         
+        # Set main networks to train mode (enables dropout)
+        self.networks.q_r.train()
+        self.networks.v_h_e.train()
+        self.networks.x_h.train()
+        self.networks.u_r.train()
+        self.networks.v_r.train()
+        
         if self.verbose:
             active = self.config.get_active_networks(self.training_step_count)
             print(f"[Learner] Starting in warmup stage {learner_state.prev_stage}: {learner_state.prev_stage_name} (active: {active})")
@@ -1358,6 +1425,13 @@ class BasePhase2Trainer(ABC):
         
         if self.verbose:
             print(f"[Learner] Completed {self.training_step_count} training steps, {policy_updates} policy updates")
+        
+        # Set all networks to eval mode (disables dropout for rollouts)
+        self.networks.q_r.eval()
+        self.networks.v_h_e.eval()
+        self.networks.x_h.eval()
+        self.networks.u_r.eval()
+        self.networks.v_r.eval()
         
         # Close TensorBoard writer
         if self.writer is not None:

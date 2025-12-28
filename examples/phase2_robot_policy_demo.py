@@ -618,7 +618,7 @@ def main(
     
     # Override with quick_mode settings
     if quick_mode:
-        num_training_steps = 5000
+        num_training_steps = 1000
         num_rollouts = 10
         # Use smaller batches and network for faster iteration in quick mode
         batch_size = 16
