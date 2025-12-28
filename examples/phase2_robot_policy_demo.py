@@ -587,7 +587,7 @@ def main(
     
     # Configuration - start with environment-based defaults
     if env_type == "trivial":
-        num_training_steps = 75000  # 1500 episodes * 50 steps/episode
+        num_training_steps = 10000
         num_rollouts = NUM_ROLLOUTS
         batch_size = 16
         x_h_batch_size = 32
@@ -598,7 +598,7 @@ def main(
         print("[TRIVIAL ENV] Using minimal network sizes for simple task")
     elif env_type == "ensemble":
         # Ensemble needs more training due to varied layouts
-        num_training_steps = 250000  # 5000 episodes * 50 steps/episode
+        num_training_steps = 50000
         num_rollouts = NUM_ROLLOUTS
         batch_size = 32  # Reduced batch size for faster training
         x_h_batch_size = 64
@@ -608,7 +608,7 @@ def main(
         agent_embedding_dim = 8
         print(f"[ENSEMBLE ENV] Random {ENSEMBLE_GRID_SIZE}x{ENSEMBLE_GRID_SIZE} grids with {ENSEMBLE_NUM_HUMANS} humans, {ENSEMBLE_NUM_ROBOTS} robots")
     else:
-        num_training_steps = 50000  # 1000 episodes * 50 steps/episode
+        num_training_steps = 50000
         num_rollouts = NUM_ROLLOUTS
         batch_size = 32
         x_h_batch_size = 64
@@ -618,7 +618,7 @@ def main(
     
     # Override with quick_mode settings
     if quick_mode:
-        num_training_steps = 5000  # 100 episodes * 50 steps/episode
+        num_training_steps = 5000
         num_rollouts = 10
         # Use smaller batches and network for faster iteration in quick mode
         batch_size = 16
@@ -739,7 +739,7 @@ def main(
         steps_per_episode=env.max_steps,
         training_steps_per_env_step=1.0,
         goal_resample_prob=0.1,
-        v_h_target_update_freq=100,  # Standard target network update frequency
+        v_h_e_target_update_interval=100,  # Standard target network update frequency
         # Warmup stage durations (each is duration in steps, not cumulative)
         warmup_v_h_e_steps=warmup_v_h_e_steps,
         warmup_x_h_steps=warmup_x_h_steps,

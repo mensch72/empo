@@ -124,11 +124,8 @@ class BasePhase2Trainer(ABC):
         # Replay buffer
         self.replay_buffer = Phase2ReplayBuffer(capacity=config.buffer_size)
         
-        # Training step counter (environment steps)
+        # Training step counter
         self.total_steps = 0
-        
-        # Global training step counter (gradient updates)
-        self.training_step_count = 0
         
         # Per-network update counters for 1/t learning rate schedules
         self.update_counts = {
@@ -245,25 +242,18 @@ class BasePhase2Trainer(ABC):
         return norms
     
     def update_target_networks(self):
-        """Update target networks (hard copy) based on their individual intervals.
-        
-        Intervals are measured in training steps (gradient updates), not environment steps.
-        """
-        if self.training_step_count % self.config.v_r_target_update_interval == 0:
-            self.networks.v_r_target.load_state_dict(self.networks.v_r.state_dict())
-            self.networks.v_r_target.eval()
-        
-        if self.training_step_count % self.config.v_h_e_target_update_interval == 0:
-            self.networks.v_h_e_target.load_state_dict(self.networks.v_h_e.state_dict())
-            self.networks.v_h_e_target.eval()
-        
-        if self.training_step_count % self.config.x_h_target_update_interval == 0:
-            self.networks.x_h_target.load_state_dict(self.networks.x_h.state_dict())
-            self.networks.x_h_target.eval()
-        
-        if self.config.u_r_use_network and self.training_step_count % self.config.u_r_target_update_interval == 0:
+        """Update target networks (hard copy)."""
+        self.networks.v_r_target.load_state_dict(self.networks.v_r.state_dict())
+        self.networks.v_h_e_target.load_state_dict(self.networks.v_h_e.state_dict())
+        self.networks.x_h_target.load_state_dict(self.networks.x_h.state_dict())
+        if self.config.u_r_use_network:
             self.networks.u_r_target.load_state_dict(self.networks.u_r.state_dict())
-            self.networks.u_r_target.eval()
+        
+        # Ensure target networks stay in eval mode (disables dropout)
+        self.networks.v_r_target.eval()
+        self.networks.v_h_e_target.eval()
+        self.networks.x_h_target.eval()
+        self.networks.u_r_target.eval()
     
     @abstractmethod
     def tensorize_state(self, state: Any) -> Dict[str, torch.Tensor]:
@@ -336,7 +326,7 @@ class BasePhase2Trainer(ABC):
         Returns:
             Tuple of robot actions.
         """
-        epsilon = self.config.get_epsilon(self.training_step_count)
+        epsilon = self.config.get_epsilon(self.total_steps)
         effective_beta_r = self.config.get_effective_beta_r(self.total_steps)
         
         with torch.no_grad():
@@ -408,7 +398,7 @@ class BasePhase2Trainer(ABC):
         # OPTIMIZATION: Only cache when Q_r is active - during early warmup we use
         # the cheaper V_h^e-only targets that don't need all action combinations.
         transition_probs_by_action = None
-        q_r_active = 'q_r' in self.config.get_active_networks(self.training_step_count)
+        q_r_active = 'q_r' in self.config.get_active_networks(self.total_steps)
         if self.config.use_model_based_targets and q_r_active and hasattr(self.env, 'transition_probabilities'):
             transition_probs_by_action = self._precompute_transition_probs(
                 state, human_actions
@@ -532,7 +522,7 @@ class BasePhase2Trainer(ABC):
             x_h_batch = batch
         
         # Check which networks are active - determines what we need to compute
-        active_networks = self.config.get_active_networks(self.training_step_count)
+        active_networks = self.config.get_active_networks(self.total_steps)
         x_h_active = 'x_h' in active_networks
         u_r_active = 'u_r' in active_networks
         q_r_active = 'q_r' in active_networks
@@ -734,7 +724,7 @@ class BasePhase2Trainer(ABC):
         losses, prediction_stats = self.compute_losses(batch, x_h_batch)
         
         # Determine which networks are active in this warm-up stage
-        active_networks = self.config.get_active_networks(self.training_step_count)
+        active_networks = self.config.get_active_networks(self.total_steps)
         
         # Combine all losses and do a SINGLE backward pass to avoid
         # in-place modification conflicts when losses share tensors through
@@ -790,11 +780,9 @@ class BasePhase2Trainer(ABC):
                 grad_norms[name] = self._compute_single_grad_norm(name)
                 self.optimizers[name].step()
         
-        # Increment training step counter
-        self.training_step_count += 1
-        
-        # Update target networks periodically (each checked independently)
-        self.update_target_networks()
+        # Update target networks periodically
+        if self.total_steps % self.config.v_r_target_update_freq == 0:
+            self.update_target_networks()
         
         return loss_values, grad_norms, prediction_stats
     
@@ -819,131 +807,217 @@ class BasePhase2Trainer(ABC):
                 total_norm += p.grad.data.norm(2).item() ** 2
         return total_norm ** 0.5
     
-    def train_episode(self) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, Dict[str, float]]]:
-        """
-        Train for one episode.
-        
-        Returns:
-            Tuple of (avg_losses, avg_grad_norms, avg_prediction_stats) for the episode.
-        """
-        if self.debug:
-            print(f"[DEBUG] train_episode: resetting environment...")
-        
+    # ==================== Shared Actor/Learner Logic ====================
+    
+    class _ActorState:
+        """Mutable state for actor (environment interaction)."""
+        def __init__(self, state, goals, env_step_count: int = 0):
+            self.state = state
+            self.goals = goals
+            self.env_step_count = env_step_count  # Steps since last env reset
+    
+    def _init_actor_state(self) -> "_ActorState":
+        """Initialize actor state with fresh environment."""
         state = self.reset_environment()
-        
-        if self.debug:
-            print(f"[DEBUG] train_episode: sampling initial goals...")
-        
-        # Sample initial goals
         goals = {h: self.goal_sampler(state, h) for h in self.human_agent_indices}
+        return Phase2Trainer._ActorState(state, goals, 0)
+    
+    def _actor_step(self, actor_state: "_ActorState") -> Optional[Phase2Transition]:
+        """
+        Collect one transition from the environment.
         
-        if self.debug:
-            print(f"[DEBUG] train_episode: goals sampled, starting {self.config.steps_per_episode} steps...")
+        This is the shared actor logic used by both sync and async training.
+        Updates actor_state in place (state, goals, env_step_count).
+        Handles environment reset when steps_per_episode is reached.
         
-        episode_losses = {
-            'v_h_e': [], 'x_h': [], 'q_r': []
-        }
-        episode_grad_norms = {
-            'v_h_e': [], 'x_h': [], 'q_r': []
-        }
-        episode_pred_stats = {
-            'v_h_e': {'mean': [], 'std': []},
-            'x_h': {'mean': [], 'std': []},
-            'q_r': {'mean': [], 'std': []}
-        }
-        # Only track U_r if using network mode
-        if self.config.u_r_use_network:
-            episode_losses['u_r'] = []
-            episode_grad_norms['u_r'] = []
-            episode_pred_stats['u_r'] = {'mean': [], 'std': []}
-        # Only track V_r if using network mode
-        if self.config.v_r_use_network:
-            episode_losses['v_r'] = []
-            episode_grad_norms['v_r'] = []
-            episode_pred_stats['v_r'] = {'mean': [], 'std': []}
+        Args:
+            actor_state: Mutable actor state to update.
+            
+        Returns:
+            The collected transition, or None if collection failed.
+        """
+        # Collect one transition
+        transition, next_state = self.collect_transition(actor_state.state, actor_state.goals)
         
-        # Accumulator for fractional training_steps_per_env_step
-        training_step_accumulator = 0.0
+        # Check if transition failed (environment ended or error)
+        if transition is None:
+            # Reset environment and return None
+            actor_state.state = self.reset_environment()
+            actor_state.goals = {h: self.goal_sampler(actor_state.state, h) for h in self.human_agent_indices}
+            actor_state.env_step_count = 0
+            return None
         
-        for step in range(self.config.steps_per_episode):
-            if self.debug and step % 5 == 0:
-                print(f"[DEBUG] train_episode: step {step}/{self.config.steps_per_episode}")
-            
-            # Collect transition
-            transition, next_state = self.collect_transition(state, goals)
-            
-            if self.debug and step == 0:
-                print(f"[DEBUG] train_episode: pushing to replay buffer...")
-            
-            self.replay_buffer.push(
-                transition.state,
-                transition.robot_action,
-                transition.goals,
-                transition.human_actions,
-                transition.next_state,
-                transition.transition_probs_by_action
-            )
-            
-            if self.debug and step == 0:
-                print(f"[DEBUG] train_episode: starting training updates...")
-            
-            # Training updates - handle fractional training_steps_per_env_step
-            training_step_accumulator += self.config.training_steps_per_env_step
-            num_training_steps_this_env_step = int(training_step_accumulator)
-            training_step_accumulator -= num_training_steps_this_env_step
-            
-            for _ in range(num_training_steps_this_env_step):
-                losses, grad_norms, pred_stats = self.training_step()
-                for k, v in losses.items():
-                    if k in episode_losses:
-                        episode_losses[k].append(v)
-                for k, v in grad_norms.items():
-                    if k in episode_grad_norms:
-                        episode_grad_norms[k].append(v)
-                for k, stats in pred_stats.items():
-                    if k in episode_pred_stats:
-                        episode_pred_stats[k]['mean'].append(stats['mean'])
-                        episode_pred_stats[k]['std'].append(stats['std'])
-            
-            self.total_steps += 1
-            state = next_state
-            
-            # Resample goals with some probability
-            if random.random() < self.config.goal_resample_prob:
-                goals = {h: self.goal_sampler(state, h) for h in self.human_agent_indices}
+        # Update actor state
+        actor_state.state = next_state
+        actor_state.env_step_count += 1
         
-        if self.debug:
-            print(f"[DEBUG] train_episode: episode complete, averaging losses...")
+        # Resample goals with some probability
+        if random.random() < self.config.goal_resample_prob:
+            actor_state.goals = {h: self.goal_sampler(actor_state.state, h) for h in self.human_agent_indices}
         
-        # Average losses and grad norms
-        avg_losses = {
-            k: sum(v) / len(v) if v else 0.0
-            for k, v in episode_losses.items()
-        }
-        avg_grad_norms = {
-            k: sum(v) / len(v) if v else 0.0
-            for k, v in episode_grad_norms.items()
-        }
-        # Average prediction stats
-        avg_pred_stats = {}
-        for k, stats in episode_pred_stats.items():
-            if stats['mean']:
-                avg_pred_stats[k] = {
-                    'mean': sum(stats['mean']) / len(stats['mean']),
-                    'std': sum(stats['std']) / len(stats['std'])
-                }
-        return avg_losses, avg_grad_norms, avg_pred_stats
+        # Reset environment periodically
+        if actor_state.env_step_count >= self.config.steps_per_episode:
+            actor_state.state = self.reset_environment()
+            actor_state.goals = {h: self.goal_sampler(actor_state.state, h) for h in self.human_agent_indices}
+            actor_state.env_step_count = 0
+        
+        return transition
+    
+    class _LearnerState:
+        """Mutable state for learner (warmup tracking)."""
+        def __init__(self, prev_stage: int, prev_stage_name: str):
+            self.prev_stage = prev_stage
+            self.prev_stage_name = prev_stage_name
+    
+    def _init_learner_state(self) -> "_LearnerState":
+        """Initialize learner state for warmup tracking."""
+        prev_stage = self.config.get_warmup_stage(self.training_step_count)
+        prev_stage_name = self.config.get_warmup_stage_name(self.training_step_count)
+        return Phase2Trainer._LearnerState(prev_stage, prev_stage_name)
+    
+    def _learner_step(self, learner_state: "_LearnerState", pbar: Optional[tqdm] = None) -> Dict[str, float]:
+        """
+        Perform one training step with all logging and warmup handling.
+        
+        This is the shared learner logic used by both sync and async training.
+        Updates learner_state in place for warmup stage tracking.
+        
+        Args:
+            learner_state: Mutable learner state to update.
+            pbar: Optional progress bar to update.
+            
+        Returns:
+            Dict of losses from the training step.
+        """
+        # Do training step
+        losses, grad_norms, pred_stats = self.training_step()
+        
+        # Update progress bar
+        if pbar is not None:
+            pbar.update(1)
+        
+        # Log to TensorBoard
+        if self.writer is not None:
+            self.writer.add_scalar('Progress/environment_steps', self.total_steps, self.training_step_count)
+            
+            for key, value in losses.items():
+                if key == 'u_r' and not self.config.u_r_use_network:
+                    continue
+                self.writer.add_scalar(f'Loss/{key}', value, self.training_step_count)
+            for key, value in grad_norms.items():
+                if key == 'u_r' and not self.config.u_r_use_network:
+                    continue
+                self.writer.add_scalar(f'GradNorm/{key}', value, self.training_step_count)
+            for key, stats in pred_stats.items():
+                self.writer.add_scalar(f'Predictions/{key}_mean', stats['mean'], self.training_step_count)
+                self.writer.add_scalar(f'Predictions/{key}_std', stats['std'], self.training_step_count)
+                if 'target_mean' in stats:
+                    self.writer.add_scalar(f'Targets/{key}_mean', stats['target_mean'], self.training_step_count)
+            
+            # Log parameter norms
+            param_norms = self._compute_param_norms()
+            for key, value in param_norms.items():
+                self.writer.add_scalar(f'ParamNorm/{key}', value, self.training_step_count)
+            self.writer.add_scalar('Epsilon', self.config.get_epsilon(self.training_step_count), self.training_step_count)
+            
+            # Log learning rates
+            networks_to_log_lr = ['v_h_e', 'x_h', 'q_r']
+            if self.config.u_r_use_network:
+                networks_to_log_lr.append('u_r')
+            if self.config.v_r_use_network:
+                networks_to_log_lr.append('v_r')
+            for net_name in networks_to_log_lr:
+                lr = self.config.get_learning_rate(
+                    net_name, self.training_step_count, self.update_counts.get(net_name, 0)
+                )
+                self.writer.add_scalar(f'LearningRate/{net_name}', lr, self.training_step_count)
+            
+            # Log warm-up phase information
+            self.writer.add_scalar('Warmup/effective_beta_r', 
+                                  self.config.get_effective_beta_r(self.training_step_count), self.training_step_count)
+            self.writer.add_scalar('Warmup/is_warmup', 
+                                  1.0 if self.config.is_in_warmup(self.training_step_count) else 0.0, self.training_step_count)
+            active = self.config.get_active_networks(self.training_step_count)
+            active_mask = sum(2**i for i, n in enumerate(['v_h_e', 'x_h', 'u_r', 'q_r', 'v_r']) if n in active)
+            self.writer.add_scalar('Warmup/active_networks_mask', active_mask, self.training_step_count)
+            self.writer.add_scalar('Warmup/stage', 
+                                  self.config.get_warmup_stage(self.training_step_count), self.training_step_count)
+        
+        # Check for warm-up stage transitions
+        current_stage = self.config.get_warmup_stage(self.training_step_count)
+        if current_stage != learner_state.prev_stage:
+            current_stage_name = self.config.get_warmup_stage_name(self.training_step_count)
+            active = self.config.get_active_networks(self.training_step_count)
+            
+            if self.verbose:
+                print(f"\n[Warmup] Stage transition at training step {self.training_step_count}:")
+                print(f"  {learner_state.prev_stage_name} -> {current_stage_name}")
+                print(f"  Active networks: {active}")
+                effective_beta = self.config.get_effective_beta_r(self.training_step_count)
+                print(f"  Effective beta_r: {effective_beta:.4f}")
+            
+            if self.writer is not None:
+                self.writer.add_scalar('Warmup/stage_transition', 1.0, self.training_step_count)
+                self.writer.add_text('Warmup/transitions', 
+                                    f"Step {self.training_step_count}: {learner_state.prev_stage_name} -> {current_stage_name}",
+                                    global_step=self.training_step_count)
+            
+            # Clear replay buffer at start of beta_r ramp-up (transition to stage 4)
+            if current_stage == 4 and learner_state.prev_stage == 3:
+                buffer_size_before = len(self.replay_buffer)
+                self.replay_buffer.clear()
+                if self.verbose:
+                    print(f"  [Training] Cleared replay buffer ({buffer_size_before} transitions) at start of β_r ramp-up")
+                if self.writer is not None:
+                    self.writer.add_text('Warmup/events', 
+                                        f"Cleared replay buffer ({buffer_size_before} transitions) at start of β_r ramp-up",
+                                        global_step=self.training_step_count)
+            
+            # Clear replay buffer after beta_r ramp-up is done (transition to stage 5)
+            if current_stage == 5 and learner_state.prev_stage == 4:
+                buffer_size_before = len(self.replay_buffer)
+                self.replay_buffer.clear()
+                if self.verbose:
+                    print(f"  [Training] Cleared replay buffer ({buffer_size_before} transitions) after β_r ramp-up")
+                if self.writer is not None:
+                    self.writer.add_text('Warmup/events', 
+                                        f"Cleared replay buffer ({buffer_size_before} transitions) after β_r ramp-up",
+                                        global_step=self.training_step_count)
+            
+            learner_state.prev_stage = current_stage
+            learner_state.prev_stage_name = current_stage_name
+        
+        # Periodic logging
+        if self.training_step_count % 100 == 0:
+            if losses and pbar is not None:
+                loss_str = ", ".join(f"{k}={v:.4f}" for k, v in losses.items() if v > 0)
+                pbar.set_postfix_str(loss_str[:60])
+            
+            if self.debug:
+                stage = self.config.get_warmup_stage_name(self.training_step_count)
+                print(f"Step {self.training_step_count} ({stage}): {losses}")
+            
+            if self.writer is not None:
+                self.writer.flush()
+        
+        # Step profiler if provided
+        if self.profiler is not None:
+            self.profiler.step()
+        
+        return losses
+
+    # ==================== Main Training Entry Point ====================
     
     def train(self, num_training_steps: Optional[int] = None) -> List[Dict[str, float]]:
         """
-        Train the agent for a specified number of training steps.
+        Main training loop. Runs until the specified number of training steps.
         
         Args:
             num_training_steps: Number of training steps (gradient updates) to perform.
                                If None, uses self.config.num_training_steps.
         
         Returns:
-            List of episode loss dicts (for logging).
+            List of loss dicts (logged periodically).
         """
         if num_training_steps is None:
             num_training_steps = self.config.num_training_steps
@@ -954,15 +1028,14 @@ class BasePhase2Trainer(ABC):
         
         history = []
         
-        # Track warm-up stage for detecting transitions
-        prev_stage = self.config.get_warmup_stage(self.training_step_count)
-        prev_stage_name = self.config.get_warmup_stage_name(self.total_steps)
-        warmup_end_step = self.config.get_total_warmup_steps()
+        # Initialize states
+        actor_state = self._init_actor_state()
+        learner_state = self._init_learner_state()
         
         # Log initial stage
         if self.verbose:
             active = self.config.get_active_networks(self.training_step_count)
-            print(f"[Warmup] Starting in stage {prev_stage}: {prev_stage_name} (active networks: {active})")
+            print(f"[Warmup] Starting in stage {learner_state.prev_stage}: {learner_state.prev_stage_name} (active networks: {active})")
         
         # Log stage transition steps to TensorBoard at start
         if self.writer is not None:
@@ -972,143 +1045,36 @@ class BasePhase2Trainer(ABC):
                                      f"Stage {stage_num}: {stage_name} starts at step {step}", 
                                      global_step=0)
         
-        # Set up progress bar (measured in training steps)
+        # Set up progress bar
         pbar = tqdm(total=num_training_steps, desc="Training", unit="steps", disable=not self.verbose)
-        
-        # Track episodes for logging
-        episode_count = 0
+        pbar.update(self.training_step_count)  # Start from current position if resuming
         
         while self.training_step_count < num_training_steps:
-            # Run one episode to collect data and perform training steps
-            episode_losses, episode_grad_norms, episode_pred_stats = self.train_episode()
-            history.append(episode_losses)
-            episode_count += 1
+            # Actor: collect one transition
+            transition = self._actor_step(actor_state)
             
-            # Log to TensorBoard (using training_step_count as x-axis)
-            if self.writer is not None:
-                # Log environment steps alongside training steps
-                self.writer.add_scalar('Progress/environment_steps', self.total_steps, self.training_step_count)
-                
-                for key, value in episode_losses.items():
-                    # Skip U_r loss if not using U_r network
-                    if key == 'u_r' and not self.config.u_r_use_network:
-                        continue
-                    self.writer.add_scalar(f'Loss/{key}', value, self.training_step_count)
-                for key, value in episode_grad_norms.items():
-                    # Skip U_r grad norm if not using U_r network
-                    if key == 'u_r' and not self.config.u_r_use_network:
-                        continue
-                    self.writer.add_scalar(f'GradNorm/{key}', value, self.training_step_count)
-                # Log prediction statistics (mean and std of predictions, and target mean)
-                for key, stats in episode_pred_stats.items():
-                    self.writer.add_scalar(f'Predictions/{key}_mean', stats['mean'], self.training_step_count)
-                    self.writer.add_scalar(f'Predictions/{key}_std', stats['std'], self.training_step_count)
-                    if 'target_mean' in stats:
-                        self.writer.add_scalar(f'Targets/{key}_mean', stats['target_mean'], self.training_step_count)
-                # Also log parameter norms
-                param_norms = self._compute_param_norms()
-                for key, value in param_norms.items():
-                    self.writer.add_scalar(f'ParamNorm/{key}', value, self.training_step_count)
-                self.writer.add_scalar('Epsilon', self.config.get_epsilon(self.training_step_count), self.training_step_count)
-                
-                # Log learning rates for networks that are being trained
-                networks_to_log_lr = ['v_h_e', 'x_h', 'q_r']
-                if self.config.u_r_use_network:
-                    networks_to_log_lr.append('u_r')
-                if self.config.v_r_use_network:
-                    networks_to_log_lr.append('v_r')
-                for net_name in networks_to_log_lr:
-                    lr = self.config.get_learning_rate(
-                        net_name, self.total_steps, self.update_counts.get(net_name, 0)
-                    )
-                    self.writer.add_scalar(f'LearningRate/{net_name}', lr, self.training_step_count)
-                
-                # Log warm-up phase information
-                self.writer.add_scalar('Warmup/effective_beta_r', 
-                                      self.config.get_effective_beta_r(self.training_step_count), self.training_step_count)
-                self.writer.add_scalar('Warmup/is_warmup', 
-                                      1.0 if self.config.is_in_warmup(self.training_step_count) else 0.0, self.training_step_count)
-                # Log which networks are active (as a bitmask for visualization)
-                active = self.config.get_active_networks(self.training_step_count)
-                active_mask = sum(2**i for i, n in enumerate(['v_h_e', 'x_h', 'u_r', 'q_r', 'v_r']) if n in active)
-                self.writer.add_scalar('Warmup/active_networks_mask', active_mask, self.training_step_count)
-                self.writer.add_scalar('Warmup/stage', 
-                                      self.config.get_warmup_stage(self.training_step_count), self.training_step_count)
-                
-                # Flush to ensure data is written to disk for real-time monitoring
-                self.writer.flush()
+            if transition is not None:
+                # Push to replay buffer
+                self.replay_buffer.push(
+                    transition.state,
+                    transition.robot_action,
+                    transition.goals,
+                    transition.human_actions,
+                    transition.next_state,
+                    transition.transition_probs_by_action
+                )
+                self.total_steps += 1
             
-            # Check for warm-up stage transitions
-            current_stage = self.config.get_warmup_stage(self.training_step_count)
-            if current_stage != prev_stage:
-                current_stage_name = self.config.get_warmup_stage_name(self.training_step_count)
-                active = self.config.get_active_networks(self.training_step_count)
+            # Learner: perform training updates
+            for _ in range(self.config.training_steps_per_env_step):
+                if self.training_step_count >= num_training_steps:
+                    break
                 
-                # Console logging
-                if self.verbose:
-                    print(f"\n[Warmup] Stage transition at training step {self.training_step_count} (env step {self.total_steps}, episode {episode_count}):")
-                    print(f"  {prev_stage_name} -> {current_stage_name}")
-                    print(f"  Active networks: {active}")
-                    effective_beta = self.config.get_effective_beta_r(self.training_step_count)
-                    print(f"  Effective beta_r: {effective_beta:.4f}")
+                losses = self._learner_step(learner_state, pbar)
                 
-                # TensorBoard vertical line marker (spike in a dedicated series)
-                if self.writer is not None:
-                    self.writer.add_scalar('Warmup/stage_transition', 1.0, self.training_step_count)
-                    self.writer.add_text('Warmup/transitions', 
-                                        f"Training step {self.training_step_count}: {prev_stage_name} -> {current_stage_name}",
-                                        global_step=self.training_step_count)
-                
-                # Clear replay buffer at start of beta_r ramp-up (transition to stage 4)
-                # This discards data collected with beta_r=0 (uniform random policy)
-                if current_stage == 4 and prev_stage == 3:
-                    buffer_size_before = len(self.replay_buffer)
-                    self.replay_buffer.clear()
-                    if self.verbose:
-                        print(f"  [Training] Cleared replay buffer ({buffer_size_before} transitions) at start of β_r ramp-up")
-                    if self.writer is not None:
-                        self.writer.add_text('Warmup/events', 
-                                            f"Cleared replay buffer ({buffer_size_before} transitions) at start of β_r ramp-up, training step {self.training_step_count}",
-                                            global_step=self.training_step_count)
-                
-                # Clear replay buffer after beta_r ramp-up is done (transition to stage 5)
-                # This discards data collected during ramp-up with varying beta_r
-                if current_stage == 5 and prev_stage == 4:
-                    buffer_size_before = len(self.replay_buffer)
-                    self.replay_buffer.clear()
-                    if self.verbose:
-                        print(f"  [Training] Cleared replay buffer ({buffer_size_before} transitions) after β_r ramp-up")
-                    if self.writer is not None:
-                        self.writer.add_text('Warmup/events', 
-                                            f"Cleared replay buffer ({buffer_size_before} transitions) after β_r ramp-up, training step {self.training_step_count}",
-                                            global_step=self.training_step_count)
-                
-                prev_stage = current_stage
-                prev_stage_name = current_stage_name
-            else:
-                # No transition - log 0 for the marker
-                if self.writer is not None:
-                    self.writer.add_scalar('Warmup/stage_transition', 0.0, self.training_step_count)
-            
-            # Update progress bar (by the number of training steps performed in this episode)
-            steps_this_episode = int(self.config.steps_per_episode * self.config.training_steps_per_env_step)
-            pbar.update(min(steps_this_episode, num_training_steps - (self.training_step_count - steps_this_episode)))
-            if episode_losses:
-                loss_str = ", ".join(f"{k}={v:.4f}" for k, v in episode_losses.items() if v > 0)
-                pbar.set_postfix_str(loss_str[:60])
-            
-            # Early termination check
-            if self.training_step_count >= num_training_steps:
-                break
-            
-            # Step profiler if provided (for TensorBoard profiler integration)
-            if self.profiler is not None:
-                self.profiler.step()
-            
-            # Print occasional summary if verbose
-            if self.debug and episode % 100 == 0:
-                stage = self.config.get_warmup_stage_name(self.total_steps)
-                print(f"Episode {episode} ({stage}): {episode_losses}")
+                # Log to history periodically
+                if self.training_step_count % 100 == 0:
+                    history.append(losses)
         
         pbar.close()
         
@@ -1155,7 +1121,7 @@ class BasePhase2Trainer(ABC):
             num_training_steps: Total number of training steps (gradient updates) to perform.
             
         Returns:
-            List of episode loss dicts (from learner).
+            List of loss dicts (logged periodically from learner).
         """
         # Use 'spawn' context for CUDA compatibility
         ctx = mp.get_context('spawn')
@@ -1166,12 +1132,9 @@ class BasePhase2Trainer(ABC):
         # Event to signal actors to stop
         stop_event = ctx.Event()
         
-        # Shared counter for total episodes collected (approximate, for actors)
-        episode_counter = ctx.Value('i', 0)
-        
-        # Shared counter for total training steps (for epsilon/beta_r/warmup)
+        # Shared counter for training steps (for epsilon/beta_r/warmup)
         # Actors read this to get correct exploration parameters
-        shared_total_steps = ctx.Value('i', self.total_steps)
+        shared_training_steps = ctx.Value('i', self.training_step_count)
         
         # Manager for sharing policy weights
         manager = ctx.Manager()
@@ -1190,11 +1153,9 @@ class BasePhase2Trainer(ABC):
                     actor_id,
                     transition_queue,
                     stop_event,
-                    episode_counter,
-                    shared_total_steps,
+                    shared_training_steps,
                     shared_policy,
                     policy_lock,
-                    num_training_steps,  # Pass training steps instead of episodes
                 ),
                 daemon=True
             )
@@ -1208,11 +1169,10 @@ class BasePhase2Trainer(ABC):
         history = self._learner_loop(
             transition_queue=transition_queue,
             stop_event=stop_event,
-            episode_counter=episode_counter,
-            shared_total_steps=shared_total_steps,
+            shared_training_steps=shared_training_steps,
             shared_policy=shared_policy,
             policy_lock=policy_lock,
-            num_training_steps=num_training_steps,  # Pass training steps instead of episodes
+            num_training_steps=num_training_steps,
         )
         
         # Signal actors to stop and wait for them
@@ -1249,91 +1209,70 @@ class BasePhase2Trainer(ABC):
         actor_id: int,
         transition_queue: mp.Queue,
         stop_event: mp.Event,
-        episode_counter: mp.Value,
-        shared_total_steps: mp.Value,
+        shared_training_steps: mp.Value,
         shared_policy: Dict,
         policy_lock,
-        num_training_steps: int,  # For consistency, though actors don't use this for termination
     ) -> None:
         """
-        Entry point for actor process. Re-creates trainer and runs actor loop.
+        Entry point for actor process. Runs actor loop until stop_event is set.
         
         This is needed because we can't pickle the full trainer object.
         Subclasses should override _create_actor_env() to provide the environment.
         """
         try:
-            self._actor_loop(
+            self._actor_loop_async(
                 actor_id=actor_id,
                 transition_queue=transition_queue,
                 stop_event=stop_event,
-                episode_counter=episode_counter,
-                shared_total_steps=shared_total_steps,
+                shared_training_steps=shared_training_steps,
                 shared_policy=shared_policy,
                 policy_lock=policy_lock,
-                num_episodes=num_episodes,
             )
         except Exception as e:
             print(f"[Actor {actor_id}] Error: {e}")
             import traceback
             traceback.print_exc()
     
-    def _actor_loop(
+    def _actor_loop_async(
         self,
         actor_id: int,
         transition_queue: mp.Queue,
         stop_event: mp.Event,
-        episode_counter: mp.Value,
-        shared_total_steps: mp.Value,
+        shared_training_steps: mp.Value,
         shared_policy: Dict,
         policy_lock,
-        num_episodes: int,
     ) -> None:
         """
-        Actor loop: collect transitions and send to learner.
+        Async actor loop: collect transitions and send to learner via queue.
         
-        Runs in a separate process. Periodically syncs policy from learner.
-        Reads shared_total_steps to get correct epsilon/beta_r values.
+        Uses shared _actor_step() logic, but sends transitions via queue
+        instead of pushing directly to replay buffer.
         """
         local_policy_version = -1
         steps_since_sync = 0
         
+        # Initialize actor state
+        actor_state = self._init_actor_state()
+        
         while not stop_event.is_set():
-            # Check if we've collected enough episodes
-            with episode_counter.get_lock():
-                if episode_counter.value >= num_episodes:
-                    break
-            
-            # Sync policy and total_steps periodically
+            # Sync policy and training_step_count periodically
             steps_since_sync += 1
             if steps_since_sync >= self.config.actor_sync_freq or local_policy_version < 0:
                 with policy_lock:
                     current_version = shared_policy['version']
                     if current_version > local_policy_version:
-                        state = self._deserialize_policy_state(shared_policy['state_dict'])
-                        self._load_policy_state_dict(state)
+                        policy_state = self._deserialize_policy_state(shared_policy['state_dict'])
+                        self._load_policy_state_dict(policy_state)
                         local_policy_version = current_version
                         steps_since_sync = 0
-                # Update local total_steps from shared counter (for epsilon/beta_r)
-                self.total_steps = shared_total_steps.value
+                # Update local training_step_count from shared counter (for epsilon/beta_r)
+                self.training_step_count = shared_training_steps.value
             
-            # Collect one episode
-            state = self.reset_environment()
-            done = False
-            episode_steps = 0
-            max_steps = self.config.steps_per_episode
+            # Use shared actor logic to collect one transition
+            transition = self._actor_step(actor_state)
             
-            # Sample initial goals for humans
-            goals = {h: self.goal_sampler(state, h) for h in self.human_agent_indices}
-            
-            while not done and episode_steps < max_steps and not stop_event.is_set():
-                # Collect transition (uses self.total_steps for epsilon/beta_r)
-                transition, next_state = self.collect_transition(state, goals)
-                
-                # Check if episode is done (transition would be None if env ends)
-                if transition is None:
-                    break
-                
-                # Serialize transition for queue (goals are stored in transition)
+            if transition is not None:
+                # Serialize transition for queue (instead of pushing to buffer directly)
                 trans_dict = {
                     'state': transition.state,
                     'robot_action': transition.robot_action,
@@ -1348,50 +1287,35 @@ class BasePhase2Trainer(ABC):
                 except:
                     # Queue full, skip this transition
                     pass
-                
-                state = next_state
-                episode_steps += 1
-                
-                # Resample goals with some probability
-                if random.random() < self.config.goal_resample_prob:
-                    goals = {h: self.goal_sampler(state, h) for h in self.human_agent_indices}
-            
-            # Increment episode counter
-            with episode_counter.get_lock():
-                episode_counter.value += 1
     
     def _learner_loop(
         self,
         transition_queue: mp.Queue,
         stop_event: mp.Event,
-        episode_counter: mp.Value,
-        shared_total_steps: mp.Value,
+        shared_training_steps: mp.Value,
         shared_policy: Dict,
         policy_lock,
         num_training_steps: int,
     ) -> List[Dict[str, float]]:
         """
-        Learner loop: consume transitions and train networks.
+        Async learner loop: consume transitions from queue and train.
         
-        Runs in main process with GPU access.
-        Updates shared_total_steps so actors can track warmup/epsilon progress.
-        
-        Args:
-            num_training_steps: Total training steps (gradient updates) to perform.
+        Uses shared _learner_step() logic for training, but consumes
+        transitions from queue instead of collecting them directly.
         """
         history = []
         policy_updates = 0
         
-        # Track warmup stage for logging
-        prev_stage = self.config.get_warmup_stage(self.training_step_count)
-        prev_stage_name = self.config.get_warmup_stage_name(self.training_step_count)
+        # Initialize learner state
+        learner_state = self._init_learner_state()
         
         if self.verbose:
             active = self.config.get_active_networks(self.training_step_count)
-            print(f"[Learner] Starting in warmup stage {prev_stage}: {prev_stage_name} (active: {active})")
+            print(f"[Learner] Starting in warmup stage {learner_state.prev_stage}: {learner_state.prev_stage_name} (active: {active})")
         
-        # Progress bar (measured in training steps)
+        # Progress bar measured in training steps
         pbar = tqdm(total=num_training_steps, desc="Async Training", unit="steps")
+        pbar.update(self.training_step_count)  # Start from current position if resuming
         
         # Wait for minimum buffer size
         if self.verbose:
@@ -1412,61 +1336,15 @@ class BasePhase2Trainer(ABC):
             
             # Do training step if buffer has enough samples
             if self.buffer.size() >= self.config.batch_size:
-                losses, grad_norms, pred_stats = self.training_step()
+                # Use shared learner logic
+                losses = self._learner_step(learner_state, pbar)
                 
-                # Update progress bar
-                pbar.update(1)
-                
-                # Log to TensorBoard
-                if self.writer is not None:
-                    # Log environment steps alongside training steps
-                    self.writer.add_scalar('Progress/environment_steps', self.total_steps, self.training_step_count)
-                    
-                    for key, value in losses.items():
-                        if key == 'u_r' and not self.config.u_r_use_network:
-                            continue
-                        self.writer.add_scalar(f'Loss/{key}', value, self.training_step_count)
-                
-                # Update shared total_steps so actors get correct epsilon/beta_r
-                shared_total_steps.value = self.total_steps
-                
-                # Check for warmup stage transitions
-                current_stage = self.config.get_warmup_stage(self.training_step_count)
-                if current_stage != prev_stage:
-                    current_stage_name = self.config.get_warmup_stage_name(self.training_step_count)
-                    if self.verbose:
-                        active = self.config.get_active_networks(self.training_step_count)
-                        epsilon = self.config.get_epsilon(self.training_step_count)
-                        beta_r = self.config.get_effective_beta_r(self.training_step_count)
-                        print(f"\n[Learner] Warmup transition at training step {self.training_step_count}:")
-                        print(f"  {prev_stage_name} -> {current_stage_name}")
-                        print(f"  Active networks: {active}, epsilon={epsilon:.3f}, beta_r={beta_r:.3f}")
-                    
-                    # Clear replay buffer at start of beta_r ramp-up (transition to stage 4)
-                    # This discards data collected with beta_r=0 (uniform random policy)
-                    if current_stage == 4 and prev_stage == 3:
-                        buffer_size_before = self.replay_buffer.size()
-                        self.replay_buffer.clear()
-                        if self.verbose:
-                            print(f"  [Learner] Cleared replay buffer ({buffer_size_before} transitions) at start of β_r ramp-up")
-                    
-                    # Clear replay buffer after beta_r ramp-up is done (transition to stage 5)
-                    # This discards data collected during ramp-up with varying beta_r
-                    if current_stage == 5 and prev_stage == 4:
-                        buffer_size_before = self.replay_buffer.size()
-                        self.replay_buffer.clear()
-                        if self.verbose:
-                            print(f"  [Learner] Cleared replay buffer ({buffer_size_before} transitions) after β_r ramp-up")
-                    
-                    prev_stage = current_stage
-                    prev_stage_name = current_stage_name
+                # Update shared training_step_count so actors get correct epsilon/beta_r
+                shared_training_steps.value = self.training_step_count
                 
                 # Log to history periodically
                 if self.training_step_count % 100 == 0:
                     history.append(losses)
-                    if losses:
-                        loss_str = ", ".join(f"{k}={v:.4f}" for k, v in losses.items() if v > 0)
-                        pbar.set_postfix_str(loss_str[:60])
                 
                 # Update shared policy periodically
                 if self.training_step_count % self.config.actor_sync_freq == 0:
@@ -1518,101 +1396,3 @@ class BasePhase2Trainer(ABC):
                 break
         
         return consumed
-    
-    # ==================== Save/Load Methods ====================
-    
-    def save_all_networks(self, path: str) -> None:
-        """
-        Save all networks to a file.
-        
-        Saves all trained networks (Q_r, V_h^e, X_h, U_r, V_r) along with their
-        target networks. This allows resuming training or using the full model.
-        
-        Args:
-            path: Path to save the checkpoint file.
-        """
-        checkpoint = {
-            'q_r': self.networks.q_r.state_dict(),
-            'v_h_e': self.networks.v_h_e.state_dict(),
-            'x_h': self.networks.x_h.state_dict(),
-            'u_r': self.networks.u_r.state_dict(),
-            'v_r': self.networks.v_r.state_dict(),
-            'total_steps': self.total_steps,  # Environment steps (for logging)
-            'training_step_count': self.training_step_count,  # Training steps (for warmup/schedules)
-            'config': {
-                'gamma_r': self.config.gamma_r,
-                'gamma_h': self.config.gamma_h,
-                'beta_r': self.config.beta_r,
-                'zeta': self.config.zeta,
-                'xi': self.config.xi,
-                'eta': self.config.eta,
-            }
-        }
-        
-        # Save target networks if they exist
-        if self.networks.v_r_target is not None:
-            checkpoint['v_r_target'] = self.networks.v_r_target.state_dict()
-        if self.networks.v_h_e_target is not None:
-            checkpoint['v_h_e_target'] = self.networks.v_h_e_target.state_dict()
-        if self.networks.x_h_target is not None:
-            checkpoint['x_h_target'] = self.networks.x_h_target.state_dict()
-        if self.networks.u_r_target is not None:
-            checkpoint['u_r_target'] = self.networks.u_r_target.state_dict()
-        
-        torch.save(checkpoint, path)
-    
-    def load_all_networks(self, path: str, strict: bool = True) -> None:
-        """
-        Load all networks from a file.
-        
-        Restores all trained networks and target networks from a checkpoint.
-        
-        Args:
-            path: Path to the checkpoint file.
-            strict: If True, requires all keys to match exactly.
-        """
-        # Note: weights_only=False is required for loading checkpoints with
-        # complex nested structures. The checkpoint is trusted since it was
-        # created by save_all_networks().
-        checkpoint = torch.load(path, weights_only=False)
-        
-        self.networks.q_r.load_state_dict(checkpoint['q_r'], strict=strict)
-        self.networks.v_h_e.load_state_dict(checkpoint['v_h_e'], strict=strict)
-        self.networks.x_h.load_state_dict(checkpoint['x_h'], strict=strict)
-        self.networks.u_r.load_state_dict(checkpoint['u_r'], strict=strict)
-        self.networks.v_r.load_state_dict(checkpoint['v_r'], strict=strict)
-        
-        if 'total_steps' in checkpoint:
-            self.total_steps = checkpoint['total_steps']
-        
-        # Load target networks if they exist
-        if 'v_r_target' in checkpoint and self.networks.v_r_target is not None:
-            self.networks.v_r_target.load_state_dict(checkpoint['v_r_target'], strict=strict)
-        if 'v_h_e_target' in checkpoint and self.networks.v_h_e_target is not None:
-            self.networks.v_h_e_target.load_state_dict(checkpoint['v_h_e_target'], strict=strict)
-        if 'x_h_target' in checkpoint and self.networks.x_h_target is not None:
-            self.networks.x_h_target.load_state_dict(checkpoint['x_h_target'], strict=strict)
-        if 'u_r_target' in checkpoint and self.networks.u_r_target is not None:
-            self.networks.u_r_target.load_state_dict(checkpoint['u_r_target'], strict=strict)
-    
-    def save_policy(self, path: str) -> None:
-        """
-        Save only the robot policy network (Q_r) for deployment/rollouts.
-        
-        This saves a checkpoint containing:
-        - Q_r network state dict (weights)
-        - Q_r network config (for reconstruction)
-        - beta_r parameter
-        
-        The policy can be loaded with MultiGridRobotPolicy.from_checkpoint(path).
-        
-        Args:
-            path: Path to save the policy file.
-        """
-        checkpoint = {
-            'q_r': self.networks.q_r.state_dict(),
-            'beta_r': self.config.beta_r,
-            # Network config for reconstruction
-            'q_r_config': self.networks.q_r.get_config(),
-        }
-        torch.save(checkpoint, path)

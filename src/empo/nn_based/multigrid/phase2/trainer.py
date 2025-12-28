@@ -1396,7 +1396,7 @@ def train_multigrid_phase2(
     human_policy_prior: Callable,
     goal_sampler: Callable,
     config: Optional[Phase2Config] = None,
-    num_episodes: Optional[int] = None,
+    num_training_steps: Optional[int] = None,
     hidden_dim: int = 256,
     goal_feature_dim: int = 64,
     agent_embedding_dim: int = 16,
@@ -1420,7 +1420,7 @@ def train_multigrid_phase2(
         human_policy_prior: Callable(state, human_idx, goal) -> action.
         goal_sampler: Callable(state, human_idx) -> goal.
         config: Phase2Config (uses defaults if None).
-        num_episodes: Override config.num_episodes if provided.
+        num_training_steps: Override config.num_training_steps if provided.
         hidden_dim: Hidden dimension for networks.
         goal_feature_dim: Goal encoder output dimension.
         agent_embedding_dim: Dimension of agent identity embedding.
@@ -1438,8 +1438,8 @@ def train_multigrid_phase2(
     if config is None:
         config = Phase2Config()
     
-    if num_episodes is not None:
-        config.num_episodes = num_episodes
+    if num_training_steps is not None:
+        config.num_training_steps = num_training_steps
     
     # Determine number of actions from environment
     if hasattr(world_model.actions, 'n'):
@@ -1499,15 +1499,16 @@ def train_multigrid_phase2(
             print(f"  Warmup/rampup stages will be skipped")
     
     if verbose:
-        print(f"\nTraining for {config.num_episodes} episodes...")
+        print(f"\nTraining for {config.num_training_steps} training steps...")
         print(f"  Steps per episode: {config.steps_per_episode}")
+        print(f"  Training steps per env step: {config.training_steps_per_env_step}")
         print(f"  Batch size: {config.batch_size}")
         print(f"  Buffer size: {config.buffer_size}")
         if tensorboard_dir:
             print(f"  TensorBoard: {tensorboard_dir}")
     
     # Train
-    history = trainer.train(config.num_episodes)
+    history = trainer.train(config.num_training_steps)
     
     if verbose:
         print(f"\nTraining completed!")
