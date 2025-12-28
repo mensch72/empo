@@ -70,7 +70,7 @@ Since V_r = U_r + π_r · Q_r is a deterministic weighted average, computing it 
 - Target network `v_h_e_target` provides V_h^e(s', g_h) for the TD target — this is frozen
 - Loss: (v_h_e(s, g_h) - [goal_achieved + γ * v_h_e_target(s', g_h)])²
 
-This separation prevents the "moving target problem" where updating the network changes the targets it's trying to match, causing training instability.
+This separation prevents the "moving target problem" where updating the network changes the targets it's trying to match, causing training instability. Similarly, in async training mode, actor processes use a frozen copy of the policy (periodically synced from the learner) to generate training data, ensuring data collection doesn't change mid-episode as the learner updates the policy.
 
 ### Using target networks for V_r, V_h^e, X_h, and U_r
 Frozen target networks prevent the moving target problem where the TD target changes as the network being trained updates, improving training stability.
