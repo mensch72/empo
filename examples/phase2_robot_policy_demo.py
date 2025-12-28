@@ -737,7 +737,7 @@ def main(
         x_h_batch_size=x_h_batch_size,  # Larger batch for X_h to reduce high variance
         num_training_steps=num_training_steps,
         steps_per_episode=env.max_steps,
-        updates_per_step=1,
+        training_steps_per_env_step=1.0,
         goal_resample_prob=0.1,
         v_h_target_update_freq=100,  # Standard target network update frequency
         # Warmup stage durations (each is duration in steps, not cumulative)

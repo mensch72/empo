@@ -9,7 +9,7 @@ A **training step** (or **learning step**) is one gradient update cycle: sample 
 
 **Important**: Warmup stages, target network update intervals, learning rate schedules, beta_r/epsilon schedules, and the total training duration are all measured in **training steps**, not environment steps. This ensures consistent behavior in async mode where environment and training steps are decoupled.
 
-In synchronous training, we perform `updates_per_step` training steps after each environment step (default: 1). In async training, the learner performs training steps continuously whenever the buffer has enough data, decoupled from environment stepping.
+In synchronous training, we perform `training_steps_per_env_step` training steps after each environment step (default: 1.0, can be fractional). In async training, the learner performs training steps continuously whenever the buffer has enough data, decoupled from environment stepping.
 
 ### Environment Step
 An **environment step** (also called **timestep**) is a single state transition: the robot and humans take actions, and the environment transitions from state s to s'. We use `total_steps` to track the cumulative count of environment steps across all episodes. Environment steps are used for data collection but do not control training schedules or stopping criteria.
@@ -44,14 +44,14 @@ These intervals are called the **target update intervals** or **target sync inte
 **Batch size** (default: 64) is the number of transitions sampled from the replay buffer for each training step. Most networks use this size, but X_h can optionally use a larger `x_h_batch_size` to reduce variance in its Monte Carlo target estimates. Batch size is independent of episode length.
 
 ### Numerical Relationships (Synchronous Training)
-- **Training steps per episode**: `steps_per_episode × updates_per_step` (default: 50 × 1 = 50)
+- **Training steps per episode**: `steps_per_episode × training_steps_per_env_step` (default: 50 × 1.0 = 50)
 - **Environment steps per episode**: `steps_per_episode` (default: 50)
-- **Training steps per environment step**: `updates_per_step` (default: 1)
+- **Training steps per environment step**: `training_steps_per_env_step` (default: 1.0, can be >1 for multiple updates per env step, or <1 for updates every N env steps)
 - **Total training steps**: `num_training_steps` (default: 500,000, set in config)
-- **Total environment steps**: `num_training_steps / updates_per_step` (default: 500,000)
+- **Total environment steps**: `num_training_steps / training_steps_per_env_step` (default: 500,000)
 - **Batches per training step**: Always 1 (we sample one batch, compute loss, update)
 
-**Key distinction**: Training steps track gradient updates (`training_step_count`), environment steps track data collection (`total_steps`). In sync mode with `updates_per_step=1`, they're equal.
+**Key distinction**: Training steps track gradient updates (`training_step_count`), environment steps track data collection (`total_steps`). In sync mode with `training_steps_per_env_step=1.0`, they're equal. With `training_steps_per_env_step=0.5`, we train every 2nd environment step. With `training_steps_per_env_step=2.0`, we train twice per environment step.
 
 ### Numerical Relationships (Asynchronous Training)
 In async mode, actors and learner are decoupled:

@@ -53,7 +53,7 @@ class Phase2Config:
         batch_size: Training batch size.
         num_training_steps: Total training steps (gradient updates) - fundamental time unit.
         steps_per_episode: Environment steps per episode (affects data collection frequency only).
-        updates_per_step: Gradient updates per environment step.
+        training_steps_per_env_step: Training steps (gradient updates) per environment step (can be fractional).
         goal_resample_prob: Probability of resampling goals each step.
         hidden_dim: Hidden layer dimension for networks.
         state_feature_dim: State encoder output dimension.
@@ -129,7 +129,7 @@ class Phase2Config:
     # Training
     num_training_steps: int = 500000  # Total training steps (gradient updates)
     steps_per_episode: int = 50
-    updates_per_step: int = 1
+    training_steps_per_env_step: float = 1.0  # Can be >1 (multiple training steps per env step) or <1 (train every N env steps)
     
     # Goal resampling
     goal_resample_prob: float = 0.01

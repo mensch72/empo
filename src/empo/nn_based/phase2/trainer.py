@@ -862,6 +862,9 @@ class BasePhase2Trainer(ABC):
             episode_grad_norms['v_r'] = []
             episode_pred_stats['v_r'] = {'mean': [], 'std': []}
         
+        # Accumulator for fractional training_steps_per_env_step
+        training_step_accumulator = 0.0
+        
         for step in range(self.config.steps_per_episode):
             if self.debug and step % 5 == 0:
                 print(f"[DEBUG] train_episode: step {step}/{self.config.steps_per_episode}")
@@ -884,8 +887,12 @@ class BasePhase2Trainer(ABC):
             if self.debug and step == 0:
                 print(f"[DEBUG] train_episode: starting training updates...")
             
-            # Training updates
-            for _ in range(self.config.updates_per_step):
+            # Training updates - handle fractional training_steps_per_env_step
+            training_step_accumulator += self.config.training_steps_per_env_step
+            num_training_steps_this_env_step = int(training_step_accumulator)
+            training_step_accumulator -= num_training_steps_this_env_step
+            
+            for _ in range(num_training_steps_this_env_step):
                 losses, grad_norms, pred_stats = self.training_step()
                 for k, v in losses.items():
                     if k in episode_losses:
@@ -1084,7 +1091,7 @@ class BasePhase2Trainer(ABC):
                     self.writer.add_scalar('Warmup/stage_transition', 0.0, self.training_step_count)
             
             # Update progress bar (by the number of training steps performed in this episode)
-            steps_this_episode = self.config.steps_per_episode * self.config.updates_per_step
+            steps_this_episode = int(self.config.steps_per_episode * self.config.training_steps_per_env_step)
             pbar.update(min(steps_this_episode, num_training_steps - (self.training_step_count - steps_this_episode)))
             if episode_losses:
                 loss_str = ", ".join(f"{k}={v:.4f}" for k, v in episode_losses.items() if v > 0)
