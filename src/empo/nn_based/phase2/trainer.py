@@ -742,45 +742,53 @@ class BasePhase2Trainer(ABC):
             if name in self.optimizers and loss.requires_grad and name in active_networks:
                 trainable_losses.append((name, loss))
         
-        if trainable_losses:
-            # Zero all gradients first
-            for name, _ in trainable_losses:
-                self.optimizers[name].zero_grad()
+        # Map network names to their network objects
+        network_map = {
+            'q_r': self.networks.q_r,
+            'v_h_e': self.networks.v_h_e,
+            'x_h': self.networks.x_h,
+        }
+        if self.config.u_r_use_network:
+            network_map['u_r'] = self.networks.u_r
+        if self.config.v_r_use_network:
+            network_map['v_r'] = self.networks.v_r
+        
+        # Train each network INDEPENDENTLY with its own backward pass
+        # This is critical because networks use detached encoder outputs
+        # to prevent gradient interference between networks
+        #
+        # IMPORTANT: We must do ALL backward passes BEFORE any optimizer.step()
+        # because step() modifies weights in-place, which would invalidate
+        # the computation graph for subsequent backward passes.
+        
+        # Phase 1: Zero gradients and compute all backward passes
+        for name, loss in trainable_losses:
+            self.optimizers[name].zero_grad()
+        
+        for i, (name, loss) in enumerate(trainable_losses):
+            # Use retain_graph=True for all but the last backward pass
+            retain = (i < len(trainable_losses) - 1)
+            loss.backward(retain_graph=retain)
+        
+        # Phase 2: Apply gradient clipping and optimizer steps
+        for name, loss in trainable_losses:
+            # Update learning rate using the new warm-up-aware schedule
+            self.update_counts[name] += 1
+            new_lr = self.config.get_learning_rate(
+                name, self.training_step_count, self.update_counts[name]
+            )
+            for param_group in self.optimizers[name].param_groups:
+                param_group['lr'] = new_lr
             
-            # Sum all losses and do single backward
-            total_loss = sum(loss for _, loss in trainable_losses)
-            total_loss.backward()
+            # Apply gradient clipping (optionally scaled by learning rate)
+            if name in network_map:
+                net = network_map[name]
+                clip_val = self.config.get_effective_grad_clip(name, new_lr)
+                if clip_val and clip_val > 0:
+                    torch.nn.utils.clip_grad_norm_(net.parameters(), clip_val)
             
-            # Map network names to their network objects
-            network_map = {
-                'q_r': self.networks.q_r,
-                'v_h_e': self.networks.v_h_e,
-                'x_h': self.networks.x_h,
-            }
-            if self.config.u_r_use_network:
-                network_map['u_r'] = self.networks.u_r
-            if self.config.v_r_use_network:
-                network_map['v_r'] = self.networks.v_r
-            
-            # Apply gradient clipping and step each optimizer
-            for name, _ in trainable_losses:
-                # Update learning rate using the new warm-up-aware schedule
-                self.update_counts[name] += 1
-                new_lr = self.config.get_learning_rate(
-                    name, self.training_step_count, self.update_counts[name]
-                )
-                for param_group in self.optimizers[name].param_groups:
-                    param_group['lr'] = new_lr
-                
-                # Apply gradient clipping (optionally scaled by learning rate)
-                if name in network_map:
-                    net = network_map[name]
-                    clip_val = self.config.get_effective_grad_clip(name, new_lr)
-                    if clip_val and clip_val > 0:
-                        torch.nn.utils.clip_grad_norm_(net.parameters(), clip_val)
-                
-                grad_norms[name] = self._compute_single_grad_norm(name)
-                self.optimizers[name].step()
+            grad_norms[name] = self._compute_single_grad_norm(name)
+            self.optimizers[name].step()
         
         # Update target networks periodically (based on learning steps)
         if self.training_step_count % self.config.v_r_target_update_interval == 0:
