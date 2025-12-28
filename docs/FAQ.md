@@ -25,7 +25,10 @@ A warm-up **stage** is a phase where specific networks are active for training. 
 - Stage 4 (+beta_r_rampup_steps): All networks, beta_r ramping from 0 to nominal
 - Stage 5 (remainder): Full training with LR decay
 
-Stages are determined by `total_steps` (cumulative environment steps), not episodes.
+Stages are determined by `total_steps` (cumulative environment steps), not episodes. **Important**: In async training, `total_steps` still counts environment steps collected by actors, not training steps performed by the learner, so warmup progresses based on data collection, not gradient updates.
+
+### Target Network Update Frequency
+Target networks are updated (via full copy from main networks) every `v_r_target_update_freq` environment steps (default: 100). This interval is called the **target update frequency** or **target sync frequency**. The update happens whenever `total_steps % target_update_freq == 0`, meaning it's tied to environment steps, not training steps or episodes.
 
 ### Batch Size
 **Batch size** (default: 64) is the number of transitions sampled from the replay buffer for each training step. Most networks use this size, but X_h can optionally use a larger `x_h_batch_size` to reduce variance in its Monte Carlo target estimates. Batch size is independent of episode length.
