@@ -124,8 +124,9 @@ class BasePhase2Trainer(ABC):
         # Replay buffer
         self.replay_buffer = Phase2ReplayBuffer(capacity=config.buffer_size)
         
-        # Training step counter
-        self.total_steps = 0
+        # Training step counters
+        self.total_env_steps = 0  # environment interaction steps
+        self.training_step_count = 0  # gradient update steps (learning steps)
         
         # Per-network update counters for 1/t learning rate schedules
         self.update_counts = {
@@ -326,8 +327,8 @@ class BasePhase2Trainer(ABC):
         Returns:
             Tuple of robot actions.
         """
-        epsilon = self.config.get_epsilon(self.total_steps)
-        effective_beta_r = self.config.get_effective_beta_r(self.total_steps)
+        epsilon = self.config.get_epsilon(self.training_step_count)
+        effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
         
         with torch.no_grad():
             q_values = self.networks.q_r.encode_and_forward(
@@ -398,7 +399,7 @@ class BasePhase2Trainer(ABC):
         # OPTIMIZATION: Only cache when Q_r is active - during early warmup we use
         # the cheaper V_h^e-only targets that don't need all action combinations.
         transition_probs_by_action = None
-        q_r_active = 'q_r' in self.config.get_active_networks(self.total_steps)
+        q_r_active = 'q_r' in self.config.get_active_networks(self.training_step_count)
         if self.config.use_model_based_targets and q_r_active and hasattr(self.env, 'transition_probabilities'):
             transition_probs_by_action = self._precompute_transition_probs(
                 state, human_actions
@@ -522,7 +523,7 @@ class BasePhase2Trainer(ABC):
             x_h_batch = batch
         
         # Check which networks are active - determines what we need to compute
-        active_networks = self.config.get_active_networks(self.total_steps)
+        active_networks = self.config.get_active_networks(self.training_step_count)
         x_h_active = 'x_h' in active_networks
         u_r_active = 'u_r' in active_networks
         q_r_active = 'q_r' in active_networks
@@ -615,7 +616,7 @@ class BasePhase2Trainer(ABC):
                 q_r_pred = q_r_all.squeeze()[a_r_index]
                 
                 # Use effective beta_r for policy (0 during warm-up for independence)
-                effective_beta_r = self.config.get_effective_beta_r(self.total_steps)
+                effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
                 
                 with torch.no_grad():
                     if self.config.v_r_use_network:
@@ -724,7 +725,7 @@ class BasePhase2Trainer(ABC):
         losses, prediction_stats = self.compute_losses(batch, x_h_batch)
         
         # Determine which networks are active in this warm-up stage
-        active_networks = self.config.get_active_networks(self.total_steps)
+        active_networks = self.config.get_active_networks(self.training_step_count)
         
         # Combine all losses and do a SINGLE backward pass to avoid
         # in-place modification conflicts when losses share tensors through
@@ -765,7 +766,7 @@ class BasePhase2Trainer(ABC):
                 # Update learning rate using the new warm-up-aware schedule
                 self.update_counts[name] += 1
                 new_lr = self.config.get_learning_rate(
-                    name, self.total_steps, self.update_counts[name]
+                    name, self.training_step_count, self.update_counts[name]
                 )
                 for param_group in self.optimizers[name].param_groups:
                     param_group['lr'] = new_lr
@@ -780,8 +781,8 @@ class BasePhase2Trainer(ABC):
                 grad_norms[name] = self._compute_single_grad_norm(name)
                 self.optimizers[name].step()
         
-        # Update target networks periodically
-        if self.total_steps % self.config.v_r_target_update_freq == 0:
+        # Update target networks periodically (based on learning steps)
+        if self.training_step_count % self.config.v_r_target_update_freq == 0:
             self.update_target_networks()
         
         return loss_values, grad_norms, prediction_stats
@@ -820,7 +821,7 @@ class BasePhase2Trainer(ABC):
         """Initialize actor state with fresh environment."""
         state = self.reset_environment()
         goals = {h: self.goal_sampler(state, h) for h in self.human_agent_indices}
-        return Phase2Trainer._ActorState(state, goals, 0)
+        return BasePhase2Trainer._ActorState(state, goals, 0)
     
     def _actor_step(self, actor_state: "_ActorState") -> Optional[Phase2Transition]:
         """
@@ -873,7 +874,7 @@ class BasePhase2Trainer(ABC):
         """Initialize learner state for warmup tracking."""
         prev_stage = self.config.get_warmup_stage(self.training_step_count)
         prev_stage_name = self.config.get_warmup_stage_name(self.training_step_count)
-        return Phase2Trainer._LearnerState(prev_stage, prev_stage_name)
+        return BasePhase2Trainer._LearnerState(prev_stage, prev_stage_name)
     
     def _learner_step(self, learner_state: "_LearnerState", pbar: Optional[tqdm] = None) -> Dict[str, float]:
         """
@@ -898,7 +899,7 @@ class BasePhase2Trainer(ABC):
         
         # Log to TensorBoard
         if self.writer is not None:
-            self.writer.add_scalar('Progress/environment_steps', self.total_steps, self.training_step_count)
+            self.writer.add_scalar('Progress/environment_steps', self.total_env_steps, self.training_step_count)
             
             for key, value in losses.items():
                 if key == 'u_r' and not self.config.u_r_use_network:
@@ -1063,10 +1064,10 @@ class BasePhase2Trainer(ABC):
                     transition.next_state,
                     transition.transition_probs_by_action
                 )
-                self.total_steps += 1
+                self.total_env_steps += 1
             
             # Learner: perform training updates
-            for _ in range(self.config.training_steps_per_env_step):
+            for _ in range(int(self.config.training_steps_per_env_step)):
                 if self.training_step_count >= num_training_steps:
                     break
                 

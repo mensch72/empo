@@ -165,8 +165,8 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         Returns:
             Tuple of robot actions.
         """
-        epsilon = self.config.get_epsilon(self.total_steps)
-        effective_beta_r = self.config.get_effective_beta_r(self.total_steps)
+        epsilon = self.config.get_epsilon(self.training_step_count)
+        effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
         
         with torch.no_grad():
             grid, glob, agent, interactive = self._tensorize_state_cached(state)
@@ -659,7 +659,7 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         
         # ----- Q_r target: γ_r * E[V_r(s')] -----
         # Use effective beta_r for policy (0 during warm-up for independence)
-        effective_beta_r = self.config.get_effective_beta_r(self.total_steps)
+        effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
         
         # Pre-compute model-based targets for both Q_r and V_h^e in a single pass
         # This avoids calling transition_probabilities twice for the same transitions
@@ -1495,7 +1495,7 @@ def train_multigrid_phase2(
             print(f"\nRestoring networks from: {restore_networks_path}")
         trainer.load_all_networks(restore_networks_path)
         if verbose:
-            print(f"  Restored networks at step {trainer.total_steps}")
+            print(f"  Restored networks at env step {trainer.total_env_steps}")
             print(f"  Warmup/rampup stages will be skipped")
     
     if verbose:
