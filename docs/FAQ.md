@@ -2,6 +2,50 @@
 
 This document provides brief justifications for design choices in the Phase 2 training code that might appear nonstandard.
 
+## Glossary of Training Terminology
+
+### Step
+An **environment step** (also called **timestep**) is a single state transition: the robot and humans take actions, and the environment transitions from state s to s'. We use `total_steps` to track the cumulative count of environment steps across all episodes, which determines warm-up stages, learning rate schedules, and exploration parameters. The term "step" always refers to environment steps, not gradient updates.
+
+### Training Step / Learning Step
+A **training step** (or **learning step**) is one gradient update cycle: sample a batch from the replay buffer, compute losses, backpropagate, and update network weights. In synchronous training, we perform `updates_per_step` training steps after each environment step (default: 1). In async training, the learner performs training steps continuously whenever the buffer has enough data, decoupled from environment stepping.
+
+### Episode
+An **episode** is a sequence of `steps_per_episode` consecutive environment steps (default: 50) starting from a reset environment. Episodes are the basic unit of data collection in synchronous training. After each episode, we compute average losses over all training steps performed during that episode. The term "episode" matches standard RL usage.
+
+### Epoch
+We do NOT use the term "epoch" in Phase 2 training. Unlike supervised learning where an epoch means one pass through the entire dataset, we use online RL with a replay buffer that continuously cycles old and new data.
+
+### Stage (Warm-up)
+A warm-up **stage** is a phase where specific networks are active for training. There are 6 stages total:
+- Stage 0 (steps 0 to warmup_v_h_e_steps): Only V_h^e trained
+- Stage 1 (+warmup_x_h_steps): V_h^e + X_h trained
+- Stage 2 (+warmup_u_r_steps): V_h^e + X_h + U_r trained (skipped if u_r_use_network=False)
+- Stage 3 (+warmup_q_r_steps): V_h^e + X_h + (U_r) + Q_r trained
+- Stage 4 (+beta_r_rampup_steps): All networks, beta_r ramping from 0 to nominal
+- Stage 5 (remainder): Full training with LR decay
+
+Stages are determined by `total_steps` (cumulative environment steps), not episodes.
+
+### Batch Size
+**Batch size** (default: 64) is the number of transitions sampled from the replay buffer for each training step. Most networks use this size, but X_h can optionally use a larger `x_h_batch_size` to reduce variance in its Monte Carlo target estimates. Batch size is independent of episode length.
+
+### Numerical Relationships (Synchronous Training)
+- **Environment steps per episode**: `steps_per_episode` (default: 50)
+- **Training steps per environment step**: `updates_per_step` (default: 1)
+- **Training steps per episode**: `steps_per_episode × updates_per_step` (default: 50)
+- **Total environment steps**: `num_episodes × steps_per_episode` (default: 10,000 × 50 = 500,000)
+- **Total training steps**: `total_env_steps × updates_per_step` (default: 500,000)
+- **Batches per training step**: Always 1 (we sample one batch, compute loss, update)
+
+### Numerical Relationships (Async Training)
+In async mode, actors and learner are decoupled:
+- **Actors**: Generate environment steps continuously, `num_actors` in parallel
+- **Learner**: Performs training steps whenever `buffer.size() >= batch_size`, independent of actor speed
+- **Episodes**: Still tracked by actors (for logging), but learner doesn't operate on episode boundaries
+- **Policy sync**: Actors pull updated policy from learner every `actor_sync_freq` training steps (default: 100)
+- The relationship between environment steps and training steps depends on relative CPU/GPU speed and is not fixed
+
 ## Network Architecture
 
 ### Power-law softmax instead of Boltzmann softmax for robot policy (Eq. 5)
