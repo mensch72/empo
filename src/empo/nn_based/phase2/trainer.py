@@ -256,18 +256,19 @@ class BasePhase2Trainer(ABC):
         self.networks.x_h_target.eval()
         self.networks.u_r_target.eval()
     
-    @abstractmethod
-    def tensorize_state(self, state: Any) -> Dict[str, torch.Tensor]:
-        """
-        Convert raw state to tensors (preprocessing, NOT neural network encoding).
-        
-        Args:
-            state: Raw environment state.
-        
-        Returns:
-            Dict of input tensors.
-        """
-        pass
+    # NOTE: tensorize_state commented out - never called anywhere in codebase
+    # @abstractmethod
+    # def tensorize_state(self, state: Any) -> Dict[str, torch.Tensor]:
+    #     """
+    #     Convert raw state to tensors (preprocessing, NOT neural network encoding).
+    #     
+    #     Args:
+    #         state: Raw environment state.
+    #     
+    #     Returns:
+    #         Dict of input tensors.
+    #     """
+    #     pass
     
     @abstractmethod
     def check_goal_achieved(self, state: Any, human_idx: int, goal: Any) -> bool:

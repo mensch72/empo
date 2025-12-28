@@ -6,6 +6,7 @@ This module provides the training function for Phase 2 of the EMPO framework
 """
 
 import random
+from collections import defaultdict
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
@@ -100,18 +101,19 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         self.networks.v_h_e.goal_encoder.clear_cache()
         self.networks.v_h_e.agent_encoder.clear_cache()
     
-    def get_cache_stats(self) -> Dict[str, Tuple[int, int]]:
-        """
-        Get cache hit/miss statistics.
-        
-        Returns:
-            Dict with stats from each encoder type.
-        """
-        return {
-            'state': self.networks.q_r.state_encoder.get_cache_stats(),
-            'goal': self.networks.v_h_e.goal_encoder.get_cache_stats(),
-            'agent': self.networks.v_h_e.agent_encoder.get_cache_stats(),
-        }
+    # NOTE: get_cache_stats commented out - never called anywhere in codebase
+    # def get_cache_stats(self) -> Dict[str, Tuple[int, int]]:
+    #     """
+    #     Get cache hit/miss statistics.
+    #     
+    #     Returns:
+    #         Dict with stats from each encoder type.
+    #     """
+    #     return {
+    #         'state': self.networks.q_r.state_encoder.get_cache_stats(),
+    #         'goal': self.networks.v_h_e.goal_encoder.get_cache_stats(),
+    #         'agent': self.networks.v_h_e.agent_encoder.get_cache_stats(),
+    #     }
     
     def _tensorize_state_cached(
         self,
@@ -134,23 +136,24 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         state_encoder = self.networks.q_r.state_encoder
         return state_encoder.tensorize_state(state, None, self.device)
     
-    def tensorize_state(self, state: Any) -> Dict[str, torch.Tensor]:
-        """
-        Encode multigrid state to tensors.
-        
-        Note: This method is required by BasePhase2Trainer but is not actually used
-        in the multigrid trainer. The multigrid implementation uses specialized methods
-        like `_batch_tensorize_states()` and `_batch_tensorize_from_compact()` instead,
-        which handle efficient batched encoding with caching.
-        
-        Args:
-            state: Raw multigrid state tuple.
-        
-        Returns:
-            Dict with raw state (no actual tensorization).
-        """
-        # The networks handle their own encoding via specialized batch methods
-        return {'state': state}
+    # NOTE: tensorize_state commented out - never called anywhere in codebase
+    # def tensorize_state(self, state: Any) -> Dict[str, torch.Tensor]:
+    #     """
+    #     Encode multigrid state to tensors.
+    #     
+    #     Note: This method is required by BasePhase2Trainer but is not actually used
+    #     in the multigrid trainer. The multigrid implementation uses specialized methods
+    #     like `_batch_tensorize_states()` and `_batch_tensorize_from_compact()` instead,
+    #     which handle efficient batched encoding with caching.
+    #     
+    #     Args:
+    #         state: Raw multigrid state tuple.
+    #     
+    #     Returns:
+    #         Dict with raw state (no actual tensorization).
+    #     """
+    #     # The networks handle their own encoding via specialized batch methods
+    #     return {'state': state}
     
     def sample_robot_action(self, state: Any) -> Tuple[int, ...]:
         """
@@ -281,46 +284,48 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         
         return transition, next_state
     
-    def tensorize_states_batch(
-        self,
-        states: List[Any]
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Encode a batch of states into tensor format for batched forward passes.
-        The encoding is agent-agnostic.
-        
-        Args:
-            states: List of raw environment states.
-        
-        Returns:
-            Tuple of (grid_tensors, global_features, agent_features, interactive_features)
-            all with batch dimension.
-        """
-        # Get the state encoder from any of the networks (they share architecture)
-        state_encoder = self.networks.q_r.state_encoder
-        
-        # Encode each state
-        grid_list = []
-        global_list = []
-        agent_list = []
-        interactive_list = []
-        
-        for state in states:
-            grid, glob, agent, interactive = state_encoder.tensorize_state(
-                state, None, self.device
-            )
-            grid_list.append(grid)
-            global_list.append(glob)
-            agent_list.append(agent)
-            interactive_list.append(interactive)
-        
-        # Stack into batched tensors
-        return (
-            torch.cat(grid_list, dim=0),
-            torch.cat(global_list, dim=0),
-            torch.cat(agent_list, dim=0),
-            torch.cat(interactive_list, dim=0)
-        )
+    # NOTE: tensorize_states_batch commented out - never called anywhere in codebase.
+    # The implementation uses _batch_tensorize_states and _batch_tensorize_from_compact instead.
+    # def tensorize_states_batch(
+    #     self,
+    #     states: List[Any]
+    # ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    #     """
+    #     Encode a batch of states into tensor format for batched forward passes.
+    #     The encoding is agent-agnostic.
+    #     
+    #     Args:
+    #         states: List of raw environment states.
+    #     
+    #     Returns:
+    #         Tuple of (grid_tensors, global_features, agent_features, interactive_features)
+    #         all with batch dimension.
+    #     """
+    #     # Get the state encoder from any of the networks (they share architecture)
+    #     state_encoder = self.networks.q_r.state_encoder
+    #     
+    #     # Encode each state
+    #     grid_list = []
+    #     global_list = []
+    #     agent_list = []
+    #     interactive_list = []
+    #     
+    #     for state in states:
+    #         grid, glob, agent, interactive = state_encoder.tensorize_state(
+    #             state, None, self.device
+    #         )
+    #         grid_list.append(grid)
+    #         global_list.append(glob)
+    #         agent_list.append(agent)
+    #         interactive_list.append(interactive)
+    #     
+    #     # Stack into batched tensors
+    #     return (
+    #         torch.cat(grid_list, dim=0),
+    #         torch.cat(global_list, dim=0),
+    #         torch.cat(agent_list, dim=0),
+    #         torch.cat(interactive_list, dim=0)
+    #     )
     
     def _compute_model_based_targets_for_transition(
         self,
@@ -567,8 +572,10 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         v_h_e_human_indices = []
         v_h_e_states = []  # states for agent identity encoding
         v_h_e_next_states = []
-        v_h_e_goals_dicts = []  # full goals dict for each entry (for model-based targets)
-        v_h_e_human_actions = []  # actual human actions taken (for model-based targets)
+        # NOTE: v_h_e_goals_dicts and v_h_e_human_actions commented out - populated but never used.
+        # The code accesses t.goals and t.human_actions directly when iterating over batch.
+        # v_h_e_goals_dicts = []  # full goals dict for each entry (for model-based targets)
+        # v_h_e_human_actions = []  # actual human actions taken (for model-based targets)
         
         for i, t in enumerate(batch):
             for h, g_h in t.goals.items():
@@ -578,8 +585,8 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
                 v_h_e_human_indices.append(h)
                 v_h_e_states.append(t.state)
                 v_h_e_next_states.append(t.next_state)
-                v_h_e_goals_dicts.append(t.goals)  # Store full goals dict
-                v_h_e_human_actions.append(t.human_actions)  # Store actual human actions
+                # v_h_e_goals_dicts.append(t.goals)  # Store full goals dict
+                # v_h_e_human_actions.append(t.human_actions)  # Store actual human actions
         
         if v_h_e_goals:
             goal_features = self._batch_tensorize_goals(v_h_e_goals)
@@ -702,7 +709,6 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
                 v_h_e_targets_by_entry = [0.0] * len(v_h_e_goals)
                 
                 # Group V_h^e entries by transition index for efficient lookup
-                from collections import defaultdict
                 transition_to_v_h_e_entries = defaultdict(list)  # trans_idx -> [(entry_idx, h_idx, g), ...]
                 for entry_idx, trans_idx in enumerate(v_h_e_indices):
                     h_idx = v_h_e_human_indices[entry_idx]
