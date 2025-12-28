@@ -11,7 +11,7 @@ An **environment step** (also called **timestep**) is a single state transition:
 A **training step** (or **learning step**) is one gradient update cycle: sample a batch from the replay buffer, compute losses, backpropagate, and update network weights. In synchronous training, we perform `updates_per_step` training steps after each environment step (default: 1). In async training, the learner performs training steps continuously whenever the buffer has enough data, decoupled from environment stepping.
 
 ### Episode
-An **episode** is a sequence of `steps_per_episode` consecutive environment steps (default: 50) starting from a reset environment. Episodes are the basic unit of data collection in synchronous training. After each episode, we compute average losses over all training steps performed during that episode. The term "episode" matches standard RL usage.
+An **episode** is a sequence of `steps_per_episode` consecutive environment steps (default: 50) starting from a reset environment. Episodes are the basic unit of data collection in synchronous training. During each episode, we collect transitions into the replay buffer and perform training steps that sample batches from the buffer (containing data from current and past episodes). We report average losses over training steps performed during that episode for logging purposes. The term "episode" matches standard RL usage.
 
 ### Epoch
 We do NOT use the term "epoch" in Phase 2 training. Unlike supervised learning where an epoch means one pass through the entire dataset, we use online RL with a replay buffer that continuously cycles old and new data.
@@ -40,11 +40,14 @@ Stages are determined by `total_steps` (cumulative environment steps), not episo
 
 ### Numerical Relationships (Async Training)
 In async mode, actors and learner are decoupled:
-- **Actors**: Generate environment steps continuously, `num_actors` in parallel
+- **Actors**: Generate environment steps continuously, `num_actors` in parallel (e.g., 4 actors each running episodes)
 - **Learner**: Performs training steps whenever `buffer.size() >= batch_size`, independent of actor speed
 - **Episodes**: Still tracked by actors (for logging), but learner doesn't operate on episode boundaries
 - **Policy sync**: Actors pull updated policy from learner every `actor_sync_freq` training steps (default: 100)
-- The relationship between environment steps and training steps depends on relative CPU/GPU speed and is not fixed
+- **Env steps to training steps ratio**: Not fixed — determined by relative speeds:
+  - If actors are faster (CPU-bound env stepping), the buffer fills quickly, learner trains frequently
+  - If learner is faster (GPU-bound training), it waits for actors to generate data
+  - Typical ratio: Multiple env steps per training step (e.g., 4 actors × 50 steps/episode = 200 env steps collected while learner performs ~50-100 training steps, depending on hardware)
 
 ## Network Architecture
 
