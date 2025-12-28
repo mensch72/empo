@@ -927,22 +927,29 @@ class BasePhase2Trainer(ABC):
                 }
         return avg_losses, avg_grad_norms, avg_pred_stats
     
-    def train(self, num_episodes: Optional[int] = None) -> List[Dict[str, float]]:
+    def train(self, num_training_steps: Optional[int] = None, num_episodes: Optional[int] = None) -> List[Dict[str, float]]:
         """
-        Main training loop.
+        Train the agent for a specified number of training steps or episodes.
         
         Args:
-            num_episodes: Number of episodes to train (default: from config).
+            num_training_steps: Number of training steps (gradient updates) to perform.
+                               If None, uses self.config.num_training_steps.
+            num_episodes: (Deprecated) Number of episodes. If specified, overrides num_training_steps.
+                         Provided for backward compatibility.
         
         Returns:
-            List of episode loss dicts.
+            List of episode loss dicts (for backward compatibility in logging).
         """
-        if num_episodes is None:
-            num_episodes = self.config.num_episodes
+        # Determine stopping criterion
+        if num_episodes is not None:
+            # Backward compatibility: convert episodes to training steps
+            num_training_steps = num_episodes * self.config.steps_per_episode * self.config.updates_per_step
+        elif num_training_steps is None:
+            num_training_steps = self.config.num_training_steps
         
         # Use async training if configured
         if self.config.async_training:
-            return self._train_async(num_episodes)
+            return self._train_async(num_training_steps)
         
         history = []
         
