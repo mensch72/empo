@@ -183,7 +183,7 @@ class _EnsembleEnvCreator:
     
     def __call__(self):
         """Create a new RandomMultigridEnv with stored configuration."""
-        return RandomMultigridEnv(
+        env = RandomMultigridEnv(
             grid_size=self.grid_size,
             num_humans=self.num_humans,
             num_robots=self.num_robots,
@@ -196,6 +196,16 @@ class _EnsembleEnvCreator:
             unsteady_prob=self.unsteady_prob,
             door_key_color=self.door_key_color
         )
+        # Debug: output hash of grid to verify environments are actually changing
+        # Build a simple string representation of grid contents for hashing
+        grid_str = ""
+        for y in range(env.height):
+            for x in range(env.width):
+                cell = env.grid.get(x, y)
+                grid_str += f"{type(cell).__name__ if cell else 'None'},"
+        grid_hash = hash(grid_str)
+        print(f"[DEBUG _EnsembleEnvCreator] Created new env, grid hash: {grid_hash:016x}")
+        return env
 
 
 # ============================================================================
@@ -455,29 +465,39 @@ class Phase2DemoEnv(MultiGridEnv):
         self.num_robots = sum(1 for a in self.agents if a.color == 'grey')
 
 
-def create_ensemble_env(seed: int = None) -> RandomMultigridEnv:
-    """Create a random ensemble environment with the configured parameters."""
-    return RandomMultigridEnv(
-        grid_size=ENSEMBLE_GRID_SIZE,
-        num_humans=ENSEMBLE_NUM_HUMANS,
-        num_robots=ENSEMBLE_NUM_ROBOTS,
-        max_steps=MAX_STEPS,
-        seed=seed,
-        wall_prob=WALL_PROBABILITY,
-        door_prob=DOOR_PROBABILITY,
-        block_prob=BLOCK_PROBABILITY,
-        rock_prob=ROCK_PROBABILITY,
-        unsteady_prob=UNSTEADY_GROUND_PROBABILITY,
-        door_key_color=DOOR_KEY_COLOR
-    )
-
-
 # ============================================================================
 # Rollout and Movie Generation
 # ============================================================================
 
-# Action names for SmallActions
-ACTION_NAMES = ['still', 'left', 'right', 'forward']
+# Action names for SmallActions (single agent)
+SINGLE_ACTION_NAMES = ['still', 'left', 'right', 'forward']
+
+# Rendering configuration for annotations
+RENDER_TILE_SIZE = 64  # Increased from default 32 for higher resolution
+ANNOTATION_PANEL_WIDTH = 280  # Wider panel to fit joint action names
+ANNOTATION_FONT_SIZE = 10  # Smaller font to fit all 16 actions
+
+
+def get_joint_action_names(num_robots: int, num_single_actions: int = 4) -> list:
+    """
+    Generate joint action names for multiple robots.
+    
+    For 2 robots with 4 actions each, generates names like:
+    'still, still', 'still, left', 'still, right', 'still, forward',
+    'left, still', 'left, left', ...
+    
+    Args:
+        num_robots: Number of robots.
+        num_single_actions: Number of single-agent actions (default 4 for SmallActions).
+    
+    Returns:
+        List of joint action name strings.
+    """
+    import itertools
+    single_names = SINGLE_ACTION_NAMES[:num_single_actions]
+    # Generate all combinations as tuples, then join with comma
+    combinations = list(itertools.product(single_names, repeat=num_robots))
+    return [', '.join(combo) for combo in combinations]
 
 
 def run_policy_rollout(
@@ -500,6 +520,9 @@ def run_policy_rollout(
     Returns:
         Number of steps taken.
     """
+    # Generate joint action names based on number of robots
+    num_robots = len(robot_indices)
+    joint_action_names = get_joint_action_names(num_robots)
     # Set all networks to eval mode to disable dropout during inference
     # This ensures consistent value predictions for the same state
     robot_q_network.eval()
@@ -574,18 +597,21 @@ def run_policy_rollout(
             lines.append("")
             lines.append("Q_r values:")
             
+            # Determine max action name width for alignment
+            max_name_len = max(len(name) for name in joint_action_names) if joint_action_names else 7
+            
             for action_idx in range(len(q_np)):
-                action_name = ACTION_NAMES[action_idx] if action_idx < len(ACTION_NAMES) else f"a{action_idx}"
+                action_name = joint_action_names[action_idx] if action_idx < len(joint_action_names) else f"a{action_idx}"
                 marker = ">" if selected_action is not None and action_idx == selected_action else " "
-                lines.append(f"{marker}{action_name:>7}: {q_np[action_idx]:.3f}")
+                lines.append(f"{marker}{action_name:>{max_name_len}}: {q_np[action_idx]:.3f}")
             
             lines.append("")
             lines.append("π_r probs:")
             
             for action_idx in range(len(pi_np)):
-                action_name = ACTION_NAMES[action_idx] if action_idx < len(ACTION_NAMES) else f"a{action_idx}"
+                action_name = joint_action_names[action_idx] if action_idx < len(joint_action_names) else f"a{action_idx}"
                 marker = ">" if selected_action is not None and action_idx == selected_action else " "
-                lines.append(f"{marker}{action_name:>7}: {pi_np[action_idx]:.3f}")
+                lines.append(f"{marker}{action_name:>{max_name_len}}: {pi_np[action_idx]:.3f}")
         
         return lines
     
@@ -599,7 +625,9 @@ def run_policy_rollout(
     
     # Render initial frame with annotations (showing what action would be taken)
     annotation = compute_annotation_text(state, get_greedy_action(state))
-    env.render(mode='rgb_array', highlight=False, annotation_text=annotation)
+    env.render(mode='rgb_array', highlight=False, tile_size=RENDER_TILE_SIZE,
+               annotation_text=annotation, annotation_panel_width=ANNOTATION_PANEL_WIDTH,
+               annotation_font_size=ANNOTATION_FONT_SIZE)
     
     for step in range(env.max_steps):
         state = env.get_state()
@@ -630,7 +658,9 @@ def run_policy_rollout(
         # Render frame showing current state with what action WOULD be taken from it
         new_state = env.get_state()
         annotation = compute_annotation_text(new_state, get_greedy_action(new_state))
-        env.render(mode='rgb_array', highlight=False, annotation_text=annotation)
+        env.render(mode='rgb_array', highlight=False, tile_size=RENDER_TILE_SIZE,
+                   annotation_text=annotation, annotation_panel_width=ANNOTATION_PANEL_WIDTH,
+                   annotation_font_size=ANNOTATION_FONT_SIZE)
         
         if done:
             break
@@ -776,27 +806,25 @@ def main(
     # Create environment
     print("Creating environment...")
     if env_type == "ensemble":
-        env = create_ensemble_env(seed=42)  # Use fixed seed for reproducibility
+        # Create world model factory for ensemble mode (used for training AND rollouts)
+        # This ensures each episode uses a fresh random environment
+        env_creator = _EnsembleEnvCreator(
+            grid_size=ENSEMBLE_GRID_SIZE,
+            num_humans=ENSEMBLE_NUM_HUMANS,
+            num_robots=ENSEMBLE_NUM_ROBOTS,
+            max_steps=MAX_STEPS,
+            wall_prob=WALL_PROBABILITY,
+            door_prob=DOOR_PROBABILITY,
+            block_prob=BLOCK_PROBABILITY,
+            rock_prob=ROCK_PROBABILITY,
+            unsteady_prob=UNSTEADY_GROUND_PROBABILITY,
+            door_key_color=DOOR_KEY_COLOR
+        )
+        # Create initial env using the factory
+        env = env_creator()
         goal_sampler = SmallGoalSampler(env, seed=123)
-        
-        # Create world model factory for async training (ensemble mode)
-        if use_async:
-            env_creator = _EnsembleEnvCreator(
-                grid_size=ENSEMBLE_GRID_SIZE,
-                num_humans=ENSEMBLE_NUM_HUMANS,
-                num_robots=ENSEMBLE_NUM_ROBOTS,
-                max_steps=MAX_STEPS,
-                wall_prob=WALL_PROBABILITY,
-                door_prob=DOOR_PROBABILITY,
-                block_prob=BLOCK_PROBABILITY,
-                rock_prob=ROCK_PROBABILITY,
-                unsteady_prob=UNSTEADY_GROUND_PROBABILITY,
-                door_key_color=DOOR_KEY_COLOR
-            )
-            # Ensemble mode: create new env each episode
-            world_model_factory = EnsembleWorldModelFactory(env_creator, episodes_per_env=1)
-        else:
-            world_model_factory = None
+        # Ensemble mode: create new env each episode
+        world_model_factory = EnsembleWorldModelFactory(env_creator, episodes_per_env=1)
     else:
         env = Phase2DemoEnv(max_steps=MAX_STEPS)
         goal_sampler = goal_sampler_factory(env)
@@ -1036,7 +1064,19 @@ def main(
     # Start video recording
     env.start_video_recording()
     
+    # Track frames across environments for ensemble mode
+    all_video_frames = []
+    
     for rollout_idx in range(num_rollouts):
+        # In ensemble mode, create a new random environment for each rollout
+        if env_type == "ensemble":
+            env = env_creator()  # Uses same factory as training
+            goal_sampler.set_world_model(env)  # Update goal sampler's world model
+            human_policy.set_world_model(env)  # Update human policy (also recreates path_calc)
+            # Re-identify agents (positions may differ but indices should be consistent)
+            human_indices = [i for i, a in enumerate(env.agents) if a.color == 'yellow']
+            robot_indices = [i for i, a in enumerate(env.agents) if a.color == 'grey']
+            env.start_video_recording()  # Start recording for this env
         env.reset()
         policy.reset(env)  # Set world model for episode
         steps = run_policy_rollout(
@@ -1050,8 +1090,12 @@ def main(
             networks=networks,
             config=config
         )
+        # Collect frames from this rollout
+        if env_type == "ensemble":
+            all_video_frames.extend(env._video_frames)
         if (rollout_idx + 1) % 10 == 0:
-            print(f"  Completed {rollout_idx + 1}/{num_rollouts} rollouts ({len(env._video_frames)} total frames)")
+            total_frames = len(all_video_frames) if env_type == "ensemble" else len(env._video_frames)
+            print(f"  Completed {rollout_idx + 1}/{num_rollouts} rollouts ({total_frames} total frames)")
     
     # Save movie using env's save_video method (uses imageio[ffmpeg])
     # Use custom path if specified
@@ -1061,6 +1105,9 @@ def main(
         movie_path = os.path.join(output_dir, 'phase2_robot_policy_demo.mp4')
     if os.path.exists(movie_path):
         os.remove(movie_path)
+    # In ensemble mode, we collected frames from multiple envs
+    if env_type == "ensemble" and all_video_frames:
+        env._video_frames = all_video_frames
     env.save_video(movie_path, fps=MOVIE_FPS)
     
     print()

@@ -127,13 +127,22 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
                     "No world_model_factory provided. For async training, "
                     "you must pass a world_model_factory to the trainer."
                 )
-            # Create env from factory
-            self.env = self.world_model_factory.create()
-            # Update goal_sampler and human_policy_prior with new env
-            if hasattr(self.goal_sampler, 'set_world_model'):
-                self.goal_sampler.set_world_model(self.env)
-            if hasattr(self.human_policy_prior, 'set_world_model'):
-                self.human_policy_prior.set_world_model(self.env)
+            self._create_env_from_factory()
+    
+    def _create_env_from_factory(self):
+        """
+        Create environment from factory and update dependent components.
+        
+        Called by _ensure_world_model() for initial creation, and by
+        reset_environment() for ensemble mode (new env each episode).
+        """
+        # Create env from factory
+        self.env = self.world_model_factory.create()
+        # Update goal_sampler and human_policy_prior with new env
+        if hasattr(self.goal_sampler, 'set_world_model'):
+            self.goal_sampler.set_world_model(self.env)
+        if hasattr(self.human_policy_prior, 'set_world_model'):
+            self.human_policy_prior.set_world_model(self.env)
     
     def clear_caches(self):
         """
@@ -330,9 +339,19 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
     def reset_environment(self) -> Any:
         """Reset environment and return initial state.
         
-        For async training, creates env from factory if not yet created.
+        Always uses the world_model_factory if available. The factory determines
+        whether to create a new environment or reuse an existing one:
+        - CachedWorldModelFactory: returns same env (reset by env.reset() below)
+        - EnsembleWorldModelFactory: returns new env each episode
         """
-        self._ensure_world_model()
+        if self.world_model_factory is not None:
+            self._create_env_from_factory()
+        elif self.env is None:
+            raise RuntimeError(
+                "No world_model_factory provided and env is None. "
+                "For async training, you must pass a world_model_factory."
+            )
+        
         self.env.reset()
         return self.env.get_state()
     

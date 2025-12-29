@@ -139,6 +139,10 @@ class BasePhase2Trainer(ABC):
         self.total_env_steps = 0  # environment interaction steps
         self.training_step_count = 0  # gradient update steps (learning steps)
         
+        # Shared env_steps counter for async mode (set by _learner_loop)
+        # When buffer is cleared, this gets reset to allow actors to resume production
+        self._shared_env_steps = None
+        
         # Per-network update counters for 1/t learning rate schedules
         self.update_counts = {
             'q_r': 0,
@@ -1177,6 +1181,13 @@ class BasePhase2Trainer(ABC):
             if current_stage == 4 and learner_state.prev_stage == 3:
                 buffer_size_before = len(self.replay_buffer)
                 self.replay_buffer.clear()
+                # In async mode, reset shared_env_steps so actors can resume production
+                # (otherwise throttling keeps them paused since env_steps >> training_steps)
+                if self._shared_env_steps is not None:
+                    with self._shared_env_steps.get_lock():
+                        self._shared_env_steps.value = 0
+                    if self.verbose:
+                        print(f"  [Async] Reset shared_env_steps to 0 to unthrottle actors")
                 if self.verbose:
                     print(f"  [Training] Cleared replay buffer ({buffer_size_before} transitions) at start of β_r ramp-up")
                 if self.writer is not None:
@@ -1188,6 +1199,12 @@ class BasePhase2Trainer(ABC):
             if current_stage == 5 and learner_state.prev_stage == 4:
                 buffer_size_before = len(self.replay_buffer)
                 self.replay_buffer.clear()
+                # In async mode, reset shared_env_steps so actors can resume production
+                if self._shared_env_steps is not None:
+                    with self._shared_env_steps.get_lock():
+                        self._shared_env_steps.value = 0
+                    if self.verbose:
+                        print(f"  [Async] Reset shared_env_steps to 0 to unthrottle actors")
                 if self.verbose:
                     print(f"  [Training] Cleared replay buffer ({buffer_size_before} transitions) after β_r ramp-up")
                 if self.writer is not None:
@@ -1593,6 +1610,9 @@ class BasePhase2Trainer(ABC):
         pbar.update(self.training_step_count)  # Start from current position if resuming
         
         # Wait for minimum buffer size
+        # Store shared_env_steps so _learner_step can reset it when buffer is cleared
+        self._shared_env_steps = shared_env_steps
+        
         if self.verbose:
             print(f"[Learner] Waiting for {self.config.async_min_buffer_size} transitions...")
         

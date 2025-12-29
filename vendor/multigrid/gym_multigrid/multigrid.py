@@ -3387,7 +3387,8 @@ class MultiGridEnv(WorldModel):
 
         return img
 
-    def render(self, mode='human', close=False, highlight=False, tile_size=TILE_PIXELS, annotation_text=None):
+    def render(self, mode='human', close=False, highlight=False, tile_size=TILE_PIXELS, annotation_text=None,
+               annotation_panel_width=200, annotation_font_size=11):
         """
         Render the whole-grid human view.
         
@@ -3398,6 +3399,8 @@ class MultiGridEnv(WorldModel):
             tile_size: Pixel size of each grid cell
             annotation_text: Optional text to display in a panel to the right of the grid.
                             Can be a string (rendered as-is) or a list of strings (one per line).
+            annotation_panel_width: Width of the annotation panel in pixels (default 200).
+            annotation_font_size: Font size for annotation text (default 11).
         """
 
         if close:
@@ -3459,7 +3462,9 @@ class MultiGridEnv(WorldModel):
         
         # Add annotation panel if text provided
         if annotation_text is not None:
-            img = self._add_annotation_panel(img, annotation_text)
+            img = self._add_annotation_panel(img, annotation_text, 
+                                             panel_width=annotation_panel_width,
+                                             font_size=annotation_font_size)
 
         if mode == 'human':
             self.window.show_img(img)
