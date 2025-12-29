@@ -230,3 +230,12 @@ class AgentIdentityEncoder(nn.Module):
             torch.cat(grid_list, dim=0),
             torch.cat(features_list, dim=0)
         )
+
+    def get_config(self) -> Dict[str, Any]:
+        """Return configuration for save/load."""
+        return {
+            'num_agents': self.num_agents,
+            'embedding_dim': self.embedding_dim,
+            'grid_height': self.grid_height,
+            'grid_width': self.grid_width,
+        }

@@ -249,6 +249,7 @@ class TestReplayBuffer:
                 state=f"state_{i}",
                 robot_action=(0,),
                 goals={0: "goal"},
+                goal_weights={0: 1.0},
                 human_actions=[0],
                 next_state=f"state_{i+1}",
             )
@@ -268,6 +269,7 @@ class TestReplayBuffer:
                 state=f"state_{i}",
                 robot_action=(0,),
                 goals={0: "goal"},
+                goal_weights={0: 1.0},
                 human_actions=[0],
                 next_state=f"state_{i+1}",
             )
