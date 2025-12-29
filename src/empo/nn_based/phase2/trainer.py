@@ -130,6 +130,15 @@ class BasePhase2Trainer(ABC):
         self.total_env_steps = 0  # environment interaction steps
         self.training_step_count = 0  # gradient update steps (learning steps)
         
+        # Compute minimum target network update interval once for efficiency
+        self._min_target_update_interval = min(
+            config.q_r_target_update_interval,
+            config.v_r_target_update_interval,
+            config.v_h_e_target_update_interval,
+            config.x_h_target_update_interval,
+            config.u_r_target_update_interval
+        )
+        
         # Per-network update counters for 1/t learning rate schedules
         self.update_counts = {
             'q_r': 0,
@@ -861,14 +870,7 @@ class BasePhase2Trainer(ABC):
         
         # Update target networks periodically (each network checks its own interval)
         # Only call if at least one network's interval has been reached to avoid unnecessary checks
-        min_interval = min(
-            self.config.q_r_target_update_interval,
-            self.config.v_r_target_update_interval,
-            self.config.v_h_e_target_update_interval,
-            self.config.x_h_target_update_interval,
-            self.config.u_r_target_update_interval
-        )
-        if self.training_step_count % min_interval == 0:
+        if self.training_step_count % self._min_target_update_interval == 0:
             self.update_target_networks()
         
         return loss_values, grad_norms, prediction_stats
