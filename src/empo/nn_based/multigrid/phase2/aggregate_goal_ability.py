@@ -212,7 +212,7 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         
         # Encode state (agent-agnostic)
         grid_tensor, global_features, agent_features, interactive_features = \
-            self.state_encoder.encode_state(state, world_model, device)
+            self.state_encoder.tensorize_state(state, world_model, device)
         
         # Encode agent identity with shared encoder
         query_idx, query_grid, query_features = self.agent_encoder.encode_single(
@@ -229,42 +229,6 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
             query_idx, query_grid, query_features,
             own_idx, own_grid, own_features
         )
-    
-    def forward_with_preencoded_state(
-        self,
-        state_features: torch.Tensor,
-        query_agent_indices: torch.Tensor,
-        query_agent_grid: torch.Tensor,
-        query_agent_features: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        Forward pass with pre-encoded state features (for efficient batched training).
-        
-        This method skips the state encoder and directly uses pre-computed state features,
-        allowing multiple forward passes with different agent identities on the same state.
-        
-        Args:
-            state_features: (batch, state_feature_dim) pre-encoded state features
-            query_agent_indices: (batch,) agent indices
-            query_agent_grid: (batch, 1, H, W) grid marking query agent position
-            query_agent_features: (batch, AGENT_FEATURE_SIZE) query agent features
-        
-        Returns:
-            X_h values tensor (batch,).
-        """
-        # Encode agent identity (index + position + features)
-        agent_embedding = self.agent_encoder(
-            query_agent_indices, query_agent_grid, query_agent_features
-        )
-        
-        # Combine state and agent identity features
-        combined = torch.cat([state_features, agent_embedding], dim=-1)
-        
-        # Compute raw value
-        raw_value = self.value_head(combined).squeeze(-1)
-        
-        # Apply soft clamp
-        return self.apply_soft_clamp(raw_value)
     
     def forward_from_encoded(
         self,

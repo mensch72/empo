@@ -36,7 +36,7 @@ class TransportGoalEncoder(BaseGoalEncoder):
     Example:
         >>> encoder = TransportGoalEncoder(max_nodes=100, num_clusters=10)
         >>> # Encode a node goal
-        >>> goal_tensor = encoder.encode_goal(goal, device='cpu')
+        >>> goal_tensor = encoder.tensorize_goal(goal, device='cpu')
         >>> encoded = encoder(goal_tensor)
         >>> print(encoded.shape)
         torch.Size([1, 32])
@@ -68,30 +68,30 @@ class TransportGoalEncoder(BaseGoalEncoder):
     
     def forward(self, goal_tensor: torch.Tensor) -> torch.Tensor:
         """
-        Encode goal tensor.
+        Encode goal tensor (neural network forward pass).
         
         Args:
-            goal_tensor: (batch, input_dim) goal encoding
+            goal_tensor: (batch, input_dim) goal input tensor
         
         Returns:
             Feature tensor (batch, feature_dim)
         """
         return self.fc(goal_tensor)
     
-    def encode_goal(
+    def tensorize_goal(
         self,
         goal: Any,
         device: str = 'cpu',
         env: Any = None
     ) -> torch.Tensor:
         """
-        Encode a goal object.
+        Convert goal to input tensor (preprocessing, NOT neural network encoding).
         
         Handles goal formats:
-        1. TransportGoal: encode target_node
-        2. TransportClusterGoal: encode target_cluster
-        3. int (node ID): encode as node goal
-        4. tuple (cluster_id, 'cluster'): encode as cluster goal
+        1. TransportGoal: tensorize target_node
+        2. TransportClusterGoal: tensorize target_cluster
+        3. int (node ID): tensorize as node goal
+        4. tuple (cluster_id, 'cluster'): tensorize as cluster goal
         
         Args:
             goal: Goal object or node/cluster ID

@@ -8,6 +8,8 @@ import random
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+import torch
+
 
 @dataclass
 class Phase2Transition:
@@ -23,6 +25,11 @@ class Phase2Transition:
         transition_probs_by_action: Optional pre-computed transition probabilities
             for model-based targets. Maps robot_action_index -> [(prob, next_state), ...].
             When provided, avoids re-computing transition_probabilities during training.
+        compact_features: Optional pre-computed compact features for current state.
+            Tuple of (global_features, agent_features, interactive_features, compressed_grid).
+            The compressed_grid is a (H, W) int32 tensor that encodes all grid information.
+            When provided, avoids expensive tensorization during training.
+        next_compact_features: Optional pre-computed compact features for next state.
     """
     state: Any
     robot_action: Tuple[int, ...]
@@ -30,6 +37,8 @@ class Phase2Transition:
     human_actions: List[int]
     next_state: Any
     transition_probs_by_action: Optional[Dict[int, List[Tuple[float, Any]]]] = None
+    compact_features: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = None
+    next_compact_features: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = None
 
 
 class Phase2ReplayBuffer:
@@ -61,7 +70,10 @@ class Phase2ReplayBuffer:
         robot_action: Tuple[int, ...],
         goals: Dict[int, Any],
         human_actions: List[int],
-        next_state: Any
+        next_state: Any,
+        transition_probs_by_action: Optional[Dict[int, List[Tuple[float, Any]]]] = None,
+        compact_features: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = None,
+        next_compact_features: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = None
     ) -> None:
         """
         Add a transition to the buffer.
@@ -72,13 +84,19 @@ class Phase2ReplayBuffer:
             goals: Dict mapping human index to goal.
             human_actions: List of human actions.
             next_state: Next state.
+            transition_probs_by_action: Optional pre-computed transition probabilities.
+            compact_features: Optional pre-computed (global, agent, interactive, compressed_grid) tensors for state.
+            next_compact_features: Optional pre-computed (global, agent, interactive, compressed_grid) tensors for next_state.
         """
         transition = Phase2Transition(
             state=state,
             robot_action=robot_action,
             goals=goals,
             human_actions=human_actions,
-            next_state=next_state
+            next_state=next_state,
+            transition_probs_by_action=transition_probs_by_action,
+            compact_features=compact_features,
+            next_compact_features=next_compact_features
         )
         
         if len(self.buffer) < self.capacity:

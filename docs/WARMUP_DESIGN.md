@@ -29,14 +29,16 @@ We break the circular dependencies by training networks in stages, starting with
 
 ### Training Stages
 
-| Stage | Steps (default) | Active Networks | β_r | Learning Rate |
-|-------|-----------------|-----------------|-----|---------------|
-| 0 | 0 - 1,000 | V_h^e | 0 | constant |
-| 1 | 1,000 - 2,000 | V_h^e, X_h | 0 | constant |
-| 2 | 2,000 - 3,000 | V_h^e, X_h, U_r | 0 | constant |
-| 3 | 3,000 - 4,000 | V_h^e, X_h, U_r, Q_r | 0 | constant |
-| 4 | 4,000 - 6,000 | All | 0 → β_r | constant |
-| 5 | 6,000+ | All | β_r | 1/√t decay |
+| Stage | Duration (default) | Cumulative End | Active Networks | β_r | Learning Rate |
+|-------|-------------------|----------------|-----------------|-----|---------------|
+| 0 | 1,000 steps | 1,000 | V_h^e | 0 | constant |
+| 1 | 1,000 steps | 2,000 | V_h^e, X_h | 0 | constant |
+| 2 | 1,000 steps* | 3,000 | V_h^e, X_h, U_r | 0 | constant |
+| 3 | 1,000 steps | 4,000 | V_h^e, X_h, U_r, Q_r | 0 | constant |
+| 4 | 2,000 steps | 6,000 | All | 0 → β_r | constant |
+| 5 | remainder | — | All | β_r | 1/√t decay |
+
+*Stage 2 (U_r) is skipped when `u_r_use_network=False` (default), reducing total warmup by 1,000 steps.
 
 ### Stage Details
 
@@ -50,13 +52,13 @@ Since β_r = 0, the robot takes actions uniformly at random. This provides a sta
 
 #### Stage 1: + X_h (steps 1,000 - 2,000)
 
-**Goal**: Learn the expected next-state distribution under the random robot policy.
+**Goal**: Learn the aggregate goal achievement ability under the random robot policy.
 
-X_h predicts where the state will be after human and robot actions. With V_h^e already converging, X_h can learn meaningful state expectations.
+X_h predicts the aggregate ability of human h to achieve various goals, computed as E_{g_h}[V_h^e(s, g_h)^ζ] over possible goals. With V_h^e already converging, X_h can learn meaningful ability estimates.
 
-**Why this order**: X_h is needed by U_r, so it must be trained before U_r becomes active.
+**Why this order**: X_h is needed by U_r (or directly for computing U_r when no U_r network), so it must be trained first.
 
-#### Stage 2: + U_r (steps 2,000 - 3,000)
+#### Stage 2: + U_r (optional, skipped when `u_r_use_network=False`)
 
 **Goal**: Learn the robot's expected future value (excluding current action).
 
@@ -64,15 +66,17 @@ U_r = E[V_r(s')] where the expectation is over next states. With X_h providing s
 
 **Why this order**: U_r is needed by Q_r for computing action values.
 
-#### Stage 3: + Q_r (steps 3,000 - 4,000)
+**Note**: When `u_r_use_network=False` (the default), U_r is computed directly from X_h values without a separate network, and this stage is skipped entirely (`warmup_u_r_steps` is set to 0).
+
+#### Stage 3: + Q_r
 
 **Goal**: Learn the robot's action-value function.
 
-Q_r(s, a) = immediate_value(s, a) + γ · U_r(s, a). With U_r already trained, Q_r can learn meaningful action values.
+Q_r(s, a) = immediate_value(s, a) + γ · U_r(s, a). With U_r already trained (or computed directly from X_h), Q_r can learn meaningful action values.
 
 **Note**: Even though Q_r is now trained, β_r remains 0, so the policy is still uniform random. This prevents the policy from affecting V_h^e, X_h, and U_r targets while Q_r is still learning.
 
-#### Stage 4: β_r Ramp-up (steps 4,000 - 6,000)
+#### Stage 4: β_r Ramp-up
 
 **Goal**: Gradually transition from random to optimal policy.
 
@@ -106,7 +110,9 @@ All networks continue training with:
 - β_r at nominal value (default: 10.0)
 - Learning rate decaying as 1/√t
 
-**Replay buffer clearing**: At the transition to Stage 5, the replay buffer is cleared. This removes transitions collected under suboptimal policies, ensuring fine-tuning uses only data from the (nearly) optimal policy.
+**Replay buffer clearing**: The replay buffer is cleared at BOTH transitions around the ramp-up phase:
+- **Start of ramp-up (stage 3→4)**: Removes all transitions collected during warmup when β_r = 0 (uniform random robot policy)
+- **End of ramp-up (stage 4→5)**: Removes transitions collected during ramp-up when β_r was increasing, ensuring fine-tuning uses only data collected with full β_r
 
 **Learning rate decay**: After the full warmup, learning rates decay as:
 
@@ -145,16 +151,16 @@ This prevents the Q_r target from depending on a rapidly-changing U_r, while sti
 
 ## Configuration Parameters
 
-All warmup parameters are in `Phase2Config`:
+All warmup parameters are in `Phase2Config`. Each `warmup_*_steps` parameter specifies the **duration** of that stage (not cumulative):
 
 ```python
 @dataclass
 class Phase2Config:
-    # Cumulative step counts for each stage transition
-    warmup_v_h_e_steps: int = 1000   # V_h^e only until this step
-    warmup_x_h_steps: int = 2000     # + X_h until this step
-    warmup_u_r_steps: int = 3000     # + U_r until this step
-    warmup_q_r_steps: int = 4000     # + Q_r until this step (warmup ends)
+    # Duration of each warmup stage (absolute, not cumulative)
+    warmup_v_h_e_steps: int = 1000   # Duration of V_h^e-only stage
+    warmup_x_h_steps: int = 1000     # Duration of V_h^e + X_h stage
+    warmup_u_r_steps: int = 1000     # Duration of V_h^e + X_h + U_r stage (0 if u_r_use_network=False)
+    warmup_q_r_steps: int = 1000     # Duration of V_h^e + X_h + (U_r) + Q_r stage
     
     # Beta_r ramp-up after warmup
     beta_r_rampup_steps: int = 2000  # Steps to ramp β_r from 0 to nominal
@@ -162,11 +168,22 @@ class Phase2Config:
     
     # Learning rate decay
     use_sqrt_lr_decay: bool = True   # Use 1/√t decay after full warmup
+    
+    # U_r computation mode
+    u_r_use_network: bool = False    # If False, warmup_u_r_steps is set to 0
 ```
+
+**Note:** When `u_r_use_network=False` (the default), `warmup_u_r_steps` is automatically set to 0 in `__post_init__`, effectively skipping the U_r warmup stage.
+
+Internally, cumulative thresholds are computed:
+- `_warmup_v_h_e_end = warmup_v_h_e_steps` (1000)
+- `_warmup_x_h_end = _warmup_v_h_e_end + warmup_x_h_steps` (2000)
+- `_warmup_u_r_end = _warmup_x_h_end + warmup_u_r_steps` (3000 or 2000 if u_r skipped)
+- `_warmup_q_r_end = _warmup_u_r_end + warmup_q_r_steps` (4000 or 3000 if u_r skipped)
 
 ### Disabling Warmup
 
-To disable warmup entirely (not recommended), set all warmup steps to 0:
+To disable warmup entirely (not recommended), set all warmup durations to 0:
 
 ```python
 config = Phase2Config(
@@ -184,12 +201,13 @@ For simple environments (e.g., small grids), shorter warmup may suffice:
 
 ```python
 config = Phase2Config(
-    warmup_v_h_e_steps=200,
-    warmup_x_h_steps=400,
-    warmup_u_r_steps=600,
-    warmup_q_r_steps=800,
-    beta_r_rampup_steps=400,
+    warmup_v_h_e_steps=200,   # 200 steps V_h^e only
+    warmup_x_h_steps=200,     # 200 steps + X_h
+    warmup_u_r_steps=200,     # 200 steps + U_r (only if u_r_use_network=True)
+    warmup_q_r_steps=200,     # 200 steps + Q_r
+    beta_r_rampup_steps=400,  # 400 steps β_r ramp-up
 )
+# Total: 800-1000 steps warmup + 400 steps ramp-up
 ```
 
 ## Helper Methods
@@ -283,6 +301,63 @@ The 1/√t decay after full warmup satisfies the Robbins-Monro conditions for st
 This is a compromise between:
 - 1/t decay (optimal for expectations, but slow)
 - Constant LR (fast but may not converge)
+
+## Model-Based Targets
+
+When `use_model_based_targets=True` (default), the trainer computes targets using the
+expected value over all possible successor states, weighted by transition probabilities:
+
+```python
+# Instead of: target = reward + gamma * V(s'_observed)
+# We compute: target = reward + gamma * E_{s'}[V(s')]
+#                    = reward + gamma * sum_s' p(s'|s,a) * V(s')
+```
+
+**Benefits:**
+- **Lower variance**: Reduces variance in target estimates
+- **Action consistency**: Actions with identical transition distributions get identical Q-values
+- **Better credit assignment**: All possible successor states contribute to the gradient
+
+**Implementation details:**
+- Transition probabilities are cached at collection time (stored in replay buffer)
+- Caching reduces `transition_probabilities()` calls by ~300× during training
+- Both Q_r and V_h^e use model-based targets when enabled
+
+To disable model-based targets (not recommended):
+
+```python
+config = Phase2Config(use_model_based_targets=False)
+```
+
+## Understanding the Loss Values
+
+**Important:** The MSE losses for Q_r, U_r, and X_h will NOT converge to zero, even with
+perfect training. This is expected behavior due to irreducible variance.
+
+### Why losses don't go to zero
+
+These networks predict *expected values* of stochastic quantities:
+
+- **Q_r(s, a_r)** predicts E[γ_r V_r(s')], but each sampled s' has different V_r(s')
+- **U_r(s)** predicts the intrinsic reward, which varies with sampled goals
+- **X_h(s)** predicts E[V_h^e(s, g_h)^ζ], aggregated over sampled goals
+
+The MSE loss is bounded from below by the **irreducible variance** of the target:
+
+```
+MSE = E[(prediction - target)²]
+    = E[(prediction - E[target])²] + E[(target - E[target])²]
+    = (bias)² + (irreducible variance)
+```
+
+Even with zero bias (perfect prediction of the expected value), the variance term remains.
+
+### What to look for instead
+
+- **Loss plateau**: Losses stabilizing (not increasing) indicates convergence
+- **Policy behavior**: The learned policy should produce reasonable robot behavior
+- **V_h^e convergence**: V_h^e losses should be lower (bounded [0,1] with binary rewards)
+- **TensorBoard metrics**: Monitor `Metrics/mean_episode_reward` and policy entropy
 
 ## Troubleshooting
 

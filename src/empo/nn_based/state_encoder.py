@@ -33,24 +33,25 @@ class BaseStateEncoder(nn.Module, ABC):
         pass
     
     @abstractmethod
-    def encode_state(
+    def tensorize_state(
         self,
         state: Any,
         world_model: Any,
-        query_agent_idx: int,
         device: str = 'cpu'
     ) -> torch.Tensor:
         """
-        Encode a single state from the environment.
+        Convert a raw state to input tensors (preprocessing, NOT neural network encoding).
+        
+        This is tensorization/featurization, not encoding. Call forward() on the
+        returned tensors to get the actual neural network encoding.
         
         Args:
             state: Environment state.
-            world_model: Environment/world model.
-            query_agent_idx: Index of the agent making decisions.
+            world_model: Environment/world model (or None).
             device: Torch device.
         
         Returns:
-            Encoded state tensor ready for forward().
+            Input tensors ready for forward().
         """
         pass
     

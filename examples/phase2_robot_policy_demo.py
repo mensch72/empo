@@ -5,10 +5,9 @@ Phase 2 Robot Policy Learning Demo.
 This script demonstrates Phase 2 of the EMPO framework - learning a robot policy
 that maximizes aggregate human power. Based on equations (4)-(9) from the paper.
 
-Environment:
-- 5x5 grid with 2 human agents (yellow) and 2 robot agents (grey)
-- Humans follow HeuristicPotentialPolicy toward their goals
-- Robots learn to help humans achieve their goals
+Environment options (set env_type variable):
+- "trivial": Small 4x6 grid with 1 human, 1 robot (quick testing)
+- "ensemble": Random 7x7 grids with 2 humans, 2 robots, walls, and objects
 
 The demo trains:
 - Q_r: Robot state-action value (eq. 4)
@@ -19,13 +18,28 @@ The demo trains:
 - V_r: Robot state value (eq. 9)
 
 Usage:
-    python phase2_robot_policy_demo.py           # Full run (1000 episodes)
+    # Basic usage
+    python phase2_robot_policy_demo.py           # Full run (trivial env)
     python phase2_robot_policy_demo.py --quick   # Quick test (100 episodes)
+    python phase2_robot_policy_demo.py --ensemble # Use random ensemble environment
+    
+    # Save/restore for continued training
+    python phase2_robot_policy_demo.py --save_networks model.pt  # Save all networks
+    python phase2_robot_policy_demo.py --restore_networks model.pt  # Resume training
+    
+    # Save and use policy for rollouts
+    python phase2_robot_policy_demo.py --save_policy policy.pt  # Save policy after training
+    python phase2_robot_policy_demo.py --use_policy policy.pt --rollouts 50  # Load & run
+    
+    # Advanced options
     python phase2_robot_policy_demo.py --debug   # Enable verbose debug output
+    python phase2_robot_policy_demo.py --profile # Profile training with torch.profiler
+    python phase2_robot_policy_demo.py --rollouts 100 --save_video my_rollouts.mp4
 
 Output:
-- TensorBoard logs in outputs/phase2_demo/
-- Movie of 100 rollouts with the learned policy
+- TensorBoard logs in outputs/phase2_demo_<env_type>/
+- Movie of rollouts with the learned policy
+- Profiler trace (with --profile): outputs/phase2_demo_<env_type>/profiler_trace.json
 """
 
 import sys
@@ -37,13 +51,17 @@ import argparse
 import numpy as np
 import torch
 
-from gym_multigrid.multigrid import MultiGridEnv, World, SmallActions
-from empo.multigrid import MultiGridGoalSampler, ReachCellGoal
-from empo.possible_goal import DeterministicGoalSampler, TabularGoalSampler
+from gym_multigrid.multigrid import (
+    MultiGridEnv, Grid, Agent, Wall, World, SmallActions,
+    Key, Ball, Box, Door, Lava, Block, Goal
+)
+from empo.multigrid import MultiGridGoalSampler, ReachCellGoal, ReachRectangleGoal
+from empo.possible_goal import DeterministicGoalSampler, TabularGoalSampler, PossibleGoalSampler
 from empo.human_policy_prior import HeuristicPotentialPolicy
 from empo.nn_based.multigrid import PathDistanceCalculator
 from empo.nn_based.phase2.config import Phase2Config
 from empo.nn_based.multigrid.phase2 import train_multigrid_phase2
+from empo.nn_based.multigrid.phase2.robot_policy import MultiGridRobotPolicy
 
 
 # ============================================================================
@@ -52,48 +70,303 @@ from empo.nn_based.multigrid.phase2 import train_multigrid_phase2
 
 final_beta_r = 100.0  # Final beta_r for robot policy concentration
 
+# Default environment type (can be overridden via --ensemble flag)
+# These will be set properly in main() based on command line args
 env_type = "trivial"
 
-if env_type == "trivial":
-    GRID_MAP = """
-    We We We We We We
-    We Ae Ro .. .. We
-    We We Ay We We We
-    We We We We We We
-    """
-    # note: human is agent index 1
+# --- Configuration variables (set based on env_type) ---
+GRID_MAP = None
+MAX_STEPS = 10
+NUM_ROLLOUTS = 10
+MOVIE_FPS = 2
+goal_sampler_factory = None
 
-    MAX_STEPS = 10
-    NUM_ROLLOUTS = 10  # Rollouts for final movie
-    MOVIE_FPS = 2
+# Ensemble-specific config (only used when env_type == "ensemble")
+ENSEMBLE_GRID_SIZE = 7
+ENSEMBLE_NUM_HUMANS = 2
+ENSEMBLE_NUM_ROBOTS = 2
+WALL_PROBABILITY = 0.12
+DOOR_PROBABILITY = 0.02
+BLOCK_PROBABILITY = 0.02
+ROCK_PROBABILITY = 0.02
+UNSTEADY_GROUND_PROBABILITY = 0.08
+DOOR_KEY_COLOR = 'r'
 
-    goal_sampler_factory = lambda env: TabularGoalSampler([
-        ReachCellGoal(env, 1, (2,1)),
-        ReachCellGoal(env, 1, (2,2))
+
+def configure_environment(use_ensemble: bool):
+    """Configure global environment variables based on mode."""
+    global env_type, GRID_MAP, MAX_STEPS, NUM_ROLLOUTS, MOVIE_FPS, goal_sampler_factory
+    
+    if use_ensemble:
+        env_type = "ensemble"
+        GRID_MAP = None  # Not used for ensemble
+        MAX_STEPS = 30
+        NUM_ROLLOUTS = 20
+        MOVIE_FPS = 3
+        goal_sampler_factory = None  # Will use SmallGoalSampler
+    else:
+        env_type = "trivial"
+        GRID_MAP = """
+        We We We We We We
+        We Ae Ro .. .. We
+        We We Ay We We We
+        We We We We We We
+        """
+        MAX_STEPS = 10
+        NUM_ROLLOUTS = 10
+        MOVIE_FPS = 2
+        goal_sampler_factory = lambda env: TabularGoalSampler([
+            ReachCellGoal(env, 1, (2,1)),
+            ReachCellGoal(env, 1, (2,2))
         ], probabilities=[0.9, 0.1])
 
-else:
-    GRID_MAP = """
-    We We We We We We We
-    We .. .. .. .. .. We
-    We .. Ae .. Ay .. We
-    We .. .. .. .. .. We
-    We .. Ay .. Ae .. We
-    We .. .. .. .. .. We
-    We We We We We We We
-    """
 
-    MAX_STEPS = 20
-    NUM_ROLLOUTS = 100  # Rollouts for final movie
-    MOVIE_FPS = 3
+# ============================================================================
+# Random Ensemble Environment Generator
+# ============================================================================
 
-    goal_sampler_factory = MultiGridGoalSampler
-class Phase2DemoEnv(MultiGridEnv):
+class RandomMultigridEnv(MultiGridEnv):
     """
-    A simple grid environment for Phase 2 demo.
+    A randomly generated multigrid environment with configurable agents and objects.
+    
+    The environment creates a grid with:
+    - Outer walls on all edges
+    - Random internal walls and obstacles
+    - Random objects (keys, doors, blocks, rocks, unsteady ground)
+    - Specified number of human (yellow) and robot (grey) agents
+    
+    Doors and keys are paired: when a door is placed, a matching key is also placed.
     """
     
-    def __init__(self, max_steps: int = MAX_STEPS):
+    def __init__(
+        self,
+        grid_size: int = 7,
+        num_humans: int = 2,
+        num_robots: int = 2,
+        max_steps: int = 30,
+        seed: int = None,
+        wall_prob: float = 0.12,
+        door_prob: float = 0.02,
+        block_prob: float = 0.02,
+        rock_prob: float = 0.02,
+        unsteady_prob: float = 0.08,
+        door_key_color: str = 'r'
+    ):
+        """
+        Initialize the random multigrid environment.
+        
+        Args:
+            grid_size: Size of the grid (including outer walls).
+            num_humans: Number of human agents (yellow).
+            num_robots: Number of robot agents (grey).
+            max_steps: Maximum steps per episode.
+            seed: Random seed for reproducibility.
+            wall_prob: Probability of internal walls.
+            door_prob: Probability of placing doors (also places matching key).
+            block_prob: Probability of placing blocks.
+            rock_prob: Probability of placing rocks.
+            unsteady_prob: Probability of placing unsteady ground.
+            door_key_color: Color code for doors and keys.
+        """
+        self.grid_size = grid_size
+        self.num_humans = num_humans
+        self.num_robots = num_robots
+        self.wall_prob = wall_prob
+        self.door_prob = door_prob
+        self.block_prob = block_prob
+        self.rock_prob = rock_prob
+        self.unsteady_prob = unsteady_prob
+        self.door_key_color = door_key_color
+        self._seed = seed
+        
+        if seed is not None:
+            random.seed(seed)
+            np.random.seed(seed)
+        
+        # Build the map string
+        map_str = self._generate_random_map()
+        
+        super().__init__(
+            map=map_str,
+            max_steps=max_steps,
+            partial_obs=False,
+            objects_set=World,
+            actions_set=SmallActions
+        )
+    
+    def _generate_random_map(self) -> str:
+        """
+        Generate a random map string for the environment.
+        
+        Doors and keys are paired: when a door is placed, a matching key
+        is also placed in a random available cell.
+        """
+        # Track which cells are available for agents
+        available_cells = []
+        
+        # Track cells where we'll place keys (for doors placed)
+        pending_keys = []
+        
+        # Generate the grid
+        grid = []
+        for y in range(self.grid_size):
+            row = []
+            for x in range(self.grid_size):
+                # Outer walls
+                if x == 0 or y == 0 or x == self.grid_size - 1 or y == self.grid_size - 1:
+                    row.append('We')  # Grey wall
+                else:
+                    # Inner cells - randomly place objects
+                    r = random.random()
+                    cumulative = 0
+                    
+                    cumulative += self.wall_prob
+                    if r < cumulative:
+                        row.append('We')  # Grey wall
+                        continue
+                    
+                    cumulative += self.rock_prob
+                    if r < cumulative:
+                        row.append('Ro')  # Rock
+                        available_cells.append((x, y))  # Can push rocks
+                        continue
+                    
+                    cumulative += self.door_prob
+                    if r < cumulative:
+                        row.append(f'C{self.door_key_color}')  # Closed door
+                        pending_keys.append(self.door_key_color)
+                        available_cells.append((x, y))
+                        continue
+                    
+                    cumulative += self.block_prob
+                    if r < cumulative:
+                        row.append('Bl')  # Block (pushable)
+                        available_cells.append((x, y))
+                        continue
+                    
+                    cumulative += self.unsteady_prob
+                    if r < cumulative:
+                        row.append('Un')  # Unsteady ground
+                        available_cells.append((x, y))
+                        continue
+                    
+                    # Empty cell
+                    row.append('..')
+                    available_cells.append((x, y))
+            
+            grid.append(row)
+        
+        # Place keys for each door in random empty cells
+        empty_cells_for_keys = [(x, y) for (x, y) in available_cells 
+                                if grid[y][x] == '..']
+        random.shuffle(empty_cells_for_keys)
+        for i, key_color in enumerate(pending_keys):
+            if i < len(empty_cells_for_keys):
+                kx, ky = empty_cells_for_keys[i]
+                grid[ky][kx] = f'K{key_color}'  # Place key
+        
+        # Ensure we have enough cells for agents
+        num_agents = self.num_humans + self.num_robots
+        
+        # Find all empty cells
+        empty_cells = []
+        for y in range(1, self.grid_size - 1):
+            for x in range(1, self.grid_size - 1):
+                if grid[y][x] == '..':
+                    empty_cells.append((x, y))
+        
+        # If not enough empty cells, clear some
+        while len(empty_cells) < num_agents:
+            for y in range(1, self.grid_size - 1):
+                for x in range(1, self.grid_size - 1):
+                    if grid[y][x] not in ['..', 'Ay', 'Ae'] and (x, y) not in empty_cells:
+                        grid[y][x] = '..'
+                        empty_cells.append((x, y))
+                        if len(empty_cells) >= num_agents:
+                            break
+                if len(empty_cells) >= num_agents:
+                    break
+        
+        # Place agents randomly
+        random.shuffle(empty_cells)
+        agent_positions = empty_cells[:num_agents]
+        
+        # Place human agents (yellow)
+        for i in range(self.num_humans):
+            x, y = agent_positions[i]
+            grid[y][x] = 'Ay'  # Yellow agent
+        
+        # Place robot agents (grey)
+        for i in range(self.num_robots):
+            x, y = agent_positions[self.num_humans + i]
+            grid[y][x] = 'Ae'  # Grey agent
+        
+        # Build map string
+        return '\n'.join(' '.join(row) for row in grid)
+
+
+class SmallGoalSampler(PossibleGoalSampler):
+    """
+    Goal sampler that samples small rectangle goals (at most 3x3).
+    
+    Uses rejection sampling to ensure goals are small enough for efficient learning.
+    """
+    
+    MAX_REJECTION_ATTEMPTS = 1000
+    
+    def __init__(self, world_model, seed: int = None):
+        super().__init__(world_model)
+        self._rng = np.random.default_rng(seed)
+        self._update_valid_range()
+    
+    def _update_valid_range(self):
+        """Update valid coordinate ranges for goal placement."""
+        env = self.world_model
+        self._x_range = (1, env.width - 2)
+        self._y_range = (1, env.height - 2)
+    
+    def set_world_model(self, world_model):
+        """Update world model and refresh valid ranges."""
+        self.world_model = world_model
+        self._update_valid_range()
+    
+    def sample_rectangle(self):
+        """Sample a small rectangle (at most 3x3) via rejection sampling."""
+        x_min, x_max = self._x_range
+        y_min, y_max = self._y_range
+        
+        for _ in range(self.MAX_REJECTION_ATTEMPTS):
+            x1 = self._rng.integers(x_min, x_max + 1)
+            y1 = self._rng.integers(y_min, y_max + 1)
+            x2 = self._rng.integers(x_min, x_max + 1)
+            y2 = self._rng.integers(y_min, y_max + 1)
+            
+            if x2 < x1 or y2 < y1:
+                continue
+            if x2 - x1 > 2 or y2 - y1 > 2:
+                continue
+            
+            return (x1, y1, x2, y2)
+        
+        # Fallback: point goal
+        x = self._rng.integers(x_min, x_max + 1)
+        y = self._rng.integers(y_min, y_max + 1)
+        return (x, y, x, y)
+    
+    def sample(self, state, human_agent_index: int):
+        """Sample a small rectangle goal with uniform weight."""
+        x1, y1, x2, y2 = self.sample_rectangle()
+        goal = ReachRectangleGoal(self.world_model, human_agent_index, (x1, y1, x2, y2))
+        return goal, 1.0
+class Phase2DemoEnv(MultiGridEnv):
+    """
+    A simple grid environment for Phase 2 demo (trivial mode only).
+    For ensemble mode, use RandomMultigridEnv instead.
+    """
+    
+    def __init__(self, max_steps: int = 10):
+        if GRID_MAP is None:
+            raise ValueError("Phase2DemoEnv requires GRID_MAP to be set (use trivial mode)")
         super().__init__(
             map=GRID_MAP,
             max_steps=max_steps,
@@ -103,6 +376,23 @@ class Phase2DemoEnv(MultiGridEnv):
         )
         self.num_humans = sum(1 for a in self.agents if a.color == 'yellow')
         self.num_robots = sum(1 for a in self.agents if a.color == 'grey')
+
+
+def create_ensemble_env(seed: int = None) -> RandomMultigridEnv:
+    """Create a random ensemble environment with the configured parameters."""
+    return RandomMultigridEnv(
+        grid_size=ENSEMBLE_GRID_SIZE,
+        num_humans=ENSEMBLE_NUM_HUMANS,
+        num_robots=ENSEMBLE_NUM_ROBOTS,
+        max_steps=MAX_STEPS,
+        seed=seed,
+        wall_prob=WALL_PROBABILITY,
+        door_prob=DOOR_PROBABILITY,
+        block_prob=BLOCK_PROBABILITY,
+        rock_prob=ROCK_PROBABILITY,
+        unsteady_prob=UNSTEADY_GROUND_PROBABILITY,
+        door_key_color=DOOR_KEY_COLOR
+    )
 
 
 # ============================================================================
@@ -171,16 +461,33 @@ def run_policy_rollout(
             pi_np = pi_r.squeeze().cpu().numpy()
             
             # Compute U_r and V_r
-            state_encoder = networks.u_r.state_encoder if hasattr(networks.u_r, 'state_encoder') else None
+            # U_r can be computed either from network or directly from X_h
             u_r_val = 0.0
             v_r_val = 0.0
-            if state_encoder is not None:
+            
+            # Check if we have a U_r network with encoder, otherwise compute from X_h
+            if hasattr(networks.u_r, 'state_encoder') and networks.u_r.state_encoder is not None:
+                state_encoder = networks.u_r.state_encoder
                 # Use encode_state method (returns tuple of tensors with batch dim already)
-                s_encoded = state_encoder.encode_state(state, env, device)
+                s_encoded = state_encoder.tensorize_state(state, env, device)
                 # s_encoded already has batch dimension, no need to unsqueeze
                 _, u_r = networks.u_r.forward(*s_encoded)
                 u_r_val = u_r.item()
-                v_r_val = u_r_val + (pi_r * q_values).sum().item()
+            else:
+                # Compute U_r directly from X_h values
+                x_h_vals = []
+                for h in human_indices:
+                    x_h = networks.x_h.encode_and_forward(state, env, h, device)
+                    x_h_clamped = torch.clamp(x_h.squeeze(), min=1e-3, max=1.0)
+                    x_h_vals.append(x_h_clamped)
+                if x_h_vals:
+                    x_h_tensor = torch.stack(x_h_vals)
+                    xi = config.xi if config else 1.0
+                    eta = config.eta if config else 1.1
+                    y = (x_h_tensor ** (-xi)).mean()
+                    u_r_val = -(y ** eta).item()
+            
+            v_r_val = u_r_val + (pi_r * q_values).sum().item()
             
             # Build annotation lines
             lines.append(f"U_r: {u_r_val:.4f}")
@@ -255,8 +562,22 @@ def run_policy_rollout(
 # Main
 # ============================================================================
 
-def main(quick_mode: bool = False, debug: bool = False):
+def main(
+    quick_mode: bool = False,
+    debug: bool = False,
+    profile: bool = False,
+    use_ensemble: bool = False,
+    save_networks_path: str = None,
+    save_policy_path: str = None,
+    restore_networks_path: str = None,
+    use_policy_path: str = None,
+    num_rollouts_override: int = None,
+    save_video_path: str = None,
+):
     """Run Phase 2 demo."""
+    # Configure environment based on command line option
+    configure_environment(use_ensemble)
+    
     print("=" * 70)
     print("Phase 2 Robot Policy Learning Demo")
     print("Learning robot policy to maximize aggregate human power")
@@ -264,19 +585,9 @@ def main(quick_mode: bool = False, debug: bool = False):
     print("=" * 70)
     print()
     
-    # Configuration
-    if quick_mode:
-        num_episodes = 100
-        num_rollouts = 10
-        # Use smaller batches and network for faster iteration in quick mode
-        batch_size = 16
-        x_h_batch_size = 32
-        hidden_dim = 64  # Smaller network for faster forward passes
-        goal_feature_dim = 32
-        agent_embedding_dim = 8
-        print("[QUICK MODE] Running with reduced episodes, rollouts, batch sizes, and network size")
-    elif env_type == "trivial":
-        num_episodes = 3000
+    # Configuration - start with environment-based defaults
+    if env_type == "trivial":
+        num_training_steps = 10000
         num_rollouts = NUM_ROLLOUTS
         batch_size = 16
         x_h_batch_size = 32
@@ -285,25 +596,76 @@ def main(quick_mode: bool = False, debug: bool = False):
         goal_feature_dim = 8
         agent_embedding_dim = 4
         print("[TRIVIAL ENV] Using minimal network sizes for simple task")
+    elif env_type == "ensemble":
+        # Ensemble needs more training due to varied layouts
+        num_training_steps = 50000
+        num_rollouts = NUM_ROLLOUTS
+        batch_size = 32  # Reduced batch size for faster training
+        x_h_batch_size = 64
+        # Moderate networks - don't need to be huge for 7x7 grids
+        hidden_dim = 64
+        goal_feature_dim = 32
+        agent_embedding_dim = 8
+        print(f"[ENSEMBLE ENV] Random {ENSEMBLE_GRID_SIZE}x{ENSEMBLE_GRID_SIZE} grids with {ENSEMBLE_NUM_HUMANS} humans, {ENSEMBLE_NUM_ROBOTS} robots")
     else:
-        num_episodes = 1000
+        num_training_steps = 50000
         num_rollouts = NUM_ROLLOUTS
         batch_size = 32
-        x_h_batch_size = 64 #128
+        x_h_batch_size = 64
         hidden_dim = 128
         goal_feature_dim = 64
         agent_embedding_dim = 16
     
+    # Override with quick_mode settings
+    if quick_mode:
+        num_training_steps = 1000
+        num_rollouts = 10
+        # Use smaller batches and network for faster iteration in quick mode
+        batch_size = 16
+        x_h_batch_size = 32
+        hidden_dim = 64  # Smaller network for faster forward passes
+        goal_feature_dim = 32
+        agent_embedding_dim = 8
+        # Shorter warmup stages to fit within quick mode training
+        # Default warmup is 3000+ steps, which won't complete in quick mode
+        warmup_v_h_e_steps = 100  # ~10 episodes
+        warmup_x_h_steps = 100   # ~10 episodes  
+        warmup_u_r_steps = 0     # Skipped (u_r_use_network=False by default)
+        warmup_q_r_steps = 100   # ~10 episodes
+        beta_r_rampup_steps = 200  # ~20 episodes
+        # Total warmup: 500 steps, leaving 500 steps for actual training
+        print("[QUICK MODE] Running with reduced episodes, rollouts, batch sizes, network size, and warmup stages")
+    else:
+        # Use default warmup stages (each stage ~1000 steps)
+        warmup_v_h_e_steps = 1000
+        warmup_x_h_steps = 1000
+        warmup_u_r_steps = 1000  # Will be set to 0 if u_r_use_network=False
+        warmup_q_r_steps = 1000
+        beta_r_rampup_steps = 2000
+    
+    # Override with profile settings
+    if profile:
+        print("[PROFILE MODE] Will profile training with torch.profiler")
+        # Reduce training steps for profiling to get meaningful trace without waiting too long
+        if not quick_mode:
+            num_training_steps = min(num_training_steps, 2500)  # 50 episodes * 50 steps/episode
+            print(f"  Reduced to {num_training_steps} training steps for profiling")
+    
     device = 'cpu'
     
-    # Create output directory
-    output_dir = os.path.join(os.path.dirname(__file__), '..', 'outputs', 'phase2_demo_trivial')
+    # Create output directory (includes env_type in name)
+    output_dir = os.path.join(os.path.dirname(__file__), '..', 'outputs', f'phase2_demo_{env_type}')
     os.makedirs(output_dir, exist_ok=True)
     tensorboard_dir = os.path.join(output_dir, 'tensorboard')
     
     # Create environment
     print("Creating environment...")
-    env = Phase2DemoEnv(max_steps=MAX_STEPS)
+    if env_type == "ensemble":
+        env = create_ensemble_env(seed=42)  # Use fixed seed for reproducibility
+        goal_sampler = SmallGoalSampler(env, seed=123)
+    else:
+        env = Phase2DemoEnv(max_steps=MAX_STEPS)
+        goal_sampler = goal_sampler_factory(env)
     env.reset()
     
     # Identify agents
@@ -338,8 +700,7 @@ def main(quick_mode: bool = False, debug: bool = False):
         beta=10.0  # Quite deterministic
     )
     
-    # Create goal sampler using existing MultiGridGoalSampler
-    goal_sampler = goal_sampler_factory(env)
+    # goal_sampler was already created above (ensemble uses SmallGoalSampler, trivial uses factory)
     
     # Wrapper to adapt goal sampler to trainer's expected interface
     def goal_sampler_fn(state, human_idx):
@@ -365,7 +726,7 @@ def main(quick_mode: bool = False, debug: bool = False):
         beta_r=final_beta_r,    # Robot policy concentration
         epsilon_r_start=1.0,
         epsilon_r_end=0.1,
-        epsilon_r_decay_steps=num_episodes * 10,
+        epsilon_r_decay_steps=num_training_steps // 5,  # Decay over 20% of training
         lr_q_r=1e-4,
         lr_v_r=1e-4,
         lr_v_h_e=1e-3,  # faster since V_h^e is critical and the basis for other things
@@ -374,39 +735,124 @@ def main(quick_mode: bool = False, debug: bool = False):
         buffer_size=10000,
         batch_size=batch_size,
         x_h_batch_size=x_h_batch_size,  # Larger batch for X_h to reduce high variance
-        num_episodes=num_episodes,
+        num_training_steps=num_training_steps,
         steps_per_episode=env.max_steps,
-        updates_per_step=1,
+        training_steps_per_env_step=1.0,
         goal_resample_prob=0.1,
-        v_h_target_update_freq=100,  # Standard target network update frequency
+        v_h_e_target_update_interval=100,  # Standard target network update frequency
+        # Warmup stage durations (each is duration in steps, not cumulative)
+        warmup_v_h_e_steps=warmup_v_h_e_steps,
+        warmup_x_h_steps=warmup_x_h_steps,
+        warmup_u_r_steps=warmup_u_r_steps,
+        warmup_q_r_steps=warmup_q_r_steps,
+        beta_r_rampup_steps=beta_r_rampup_steps,
     )
     
-    # Train Phase 2
-    print("Training Phase 2 robot policy...")
-    print(f"  Episodes: {config.num_episodes}")
-    print(f"  Steps per episode: {config.steps_per_episode}")
-    print(f"  TensorBoard: {tensorboard_dir}")
-    print()
-    
-    t0 = time.time()
-    robot_q_network, networks, history = train_multigrid_phase2(
-        world_model=env,
-        human_agent_indices=human_indices,
-        robot_agent_indices=robot_indices,
-        human_policy_prior=human_policy_fn,
-        goal_sampler=goal_sampler_fn,
-        config=config,
-        hidden_dim=hidden_dim,
-        goal_feature_dim=goal_feature_dim,
-        agent_embedding_dim=agent_embedding_dim,
-        device=device,
-        verbose=True,
-        debug=debug,
-        tensorboard_dir=tensorboard_dir
-    )
-    elapsed = time.time() - t0
-    
-    print(f"\nTraining completed in {elapsed:.2f} seconds")
+    # If using policy directly (no training), skip to rollouts
+    if use_policy_path:
+        print("=" * 70)
+        print(f"Loading policy from: {use_policy_path}")
+        print("Skipping training, running rollouts only")
+        print("=" * 70)
+        
+        policy = MultiGridRobotPolicy(path=use_policy_path, device=device)
+        robot_q_network = policy.q_network
+        networks = None  # No networks for annotations
+        trainer = None
+        history = []
+        elapsed = 0.0
+    else:
+        # Train Phase 2
+        print("Training Phase 2 robot policy...")
+        print(f"  Training steps: {config.num_training_steps:,}")
+        print(f"  Environment steps per episode: {config.steps_per_episode}")
+        print(f"  TensorBoard: {tensorboard_dir}")
+        if restore_networks_path:
+            print(f"  Restoring from: {restore_networks_path}")
+        print()
+        
+        t0 = time.time()
+        
+        if profile:
+            # Profile training with torch.profiler + TensorBoard integration
+            from torch.profiler import profile as torch_profile, ProfilerActivity, schedule, tensorboard_trace_handler
+            
+            profiler_dir = os.path.join(output_dir, 'profiler')
+            os.makedirs(profiler_dir, exist_ok=True)
+            profiler_trace_path = os.path.join(output_dir, 'profiler_trace.json')
+            
+            print(f"  Profiler TensorBoard output: {profiler_dir}")
+            print(f"  View with: tensorboard --logdir={profiler_dir}")
+            print()
+            
+            # Schedule: skip first 2 episodes (wait), warm up for 2, actively profile 6, repeat
+            # This captures steady-state behavior, not just initialization overhead
+            with torch_profile(
+                activities=[ProfilerActivity.CPU] + ([ProfilerActivity.CUDA] if device != 'cpu' else []),
+                schedule=schedule(wait=2, warmup=2, active=6, repeat=2),
+                on_trace_ready=tensorboard_trace_handler(profiler_dir),
+                record_shapes=True,
+                profile_memory=True,
+                with_stack=True,
+            ) as prof:
+                robot_q_network, networks, history, trainer = train_multigrid_phase2(
+                    world_model=env,
+                    human_agent_indices=human_indices,
+                    robot_agent_indices=robot_indices,
+                    human_policy_prior=human_policy_fn,
+                    goal_sampler=goal_sampler_fn,
+                    config=config,
+                    hidden_dim=hidden_dim,
+                    goal_feature_dim=goal_feature_dim,
+                    agent_embedding_dim=agent_embedding_dim,
+                    device=device,
+                    verbose=True,
+                    debug=debug,
+                    tensorboard_dir=tensorboard_dir,
+                    profiler=prof,
+                    restore_networks_path=restore_networks_path,
+                )
+            
+            # Print profiler summary
+            print("\n" + "=" * 70)
+            print("PROFILER RESULTS")
+            print("=" * 70)
+            print("\nTop 30 operations by CPU time:")
+            print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=30))
+            
+            print("\nTop 20 operations by self CPU time (excluding children):")
+            print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=20))
+            
+            # Also export Chrome trace as backup
+            prof.export_chrome_trace(profiler_trace_path)
+            print(f"\nProfiler outputs:")
+            print(f"  TensorBoard: {profiler_dir}")
+            print(f"    View: tensorboard --logdir={profiler_dir}")
+            print(f"    Then open: http://localhost:6006/#pytorch_profiler")
+            print(f"  Chrome trace: {profiler_trace_path}")
+            print(f"    View in Chrome: chrome://tracing")
+            print(f"    Or use: https://ui.perfetto.dev/")
+        else:
+            robot_q_network, networks, history, trainer = train_multigrid_phase2(
+                world_model=env,
+                human_agent_indices=human_indices,
+                robot_agent_indices=robot_indices,
+                human_policy_prior=human_policy_fn,
+                goal_sampler=goal_sampler_fn,
+                config=config,
+                hidden_dim=hidden_dim,
+                goal_feature_dim=goal_feature_dim,
+                agent_embedding_dim=agent_embedding_dim,
+                device=device,
+                verbose=True,
+                debug=debug,
+                tensorboard_dir=tensorboard_dir,
+                restore_networks_path=restore_networks_path,
+            )
+        
+        elapsed = time.time() - t0
+        
+        print(f"\nTraining completed in {elapsed:.2f} seconds")
     
     # Show loss history
     if history and len(history) > 0:
@@ -416,17 +862,38 @@ def main(quick_mode: bool = False, debug: bool = False):
             loss_str = ", ".join(f"{k}={v:.4f}" for k, v in losses.items() if v > 0)
             print(f"  Episode {episode_num}: {loss_str}")
     
+    # Save networks/policy after training if requested (only if trainer is available)
+    if trainer is not None:
+        if save_networks_path:
+            print(f"\nSaving all networks to: {save_networks_path}")
+            trainer.save_all_networks(save_networks_path)
+        
+        if save_policy_path:
+            print(f"\nSaving policy to: {save_policy_path}")
+            trainer.save_policy(save_policy_path)
+    
     # Generate rollout movie using env's built-in video recording
+    # Override num_rollouts if specified
+    if num_rollouts_override is not None:
+        num_rollouts = num_rollouts_override
+    
     print(f"\nGenerating {num_rollouts} rollouts with learned policy...")
+    
+    # Create policy from trained Q network for rollouts (or use loaded policy in use_policy mode)
+    if use_policy_path:
+        policy = MultiGridRobotPolicy(path=use_policy_path, device=device)
+    else:
+        policy = MultiGridRobotPolicy(q_network=robot_q_network, beta_r=config.beta_r, device=device)
     
     # Start video recording
     env.start_video_recording()
     
     for rollout_idx in range(num_rollouts):
         env.reset()
+        policy.reset(env)  # Set world model for episode
         steps = run_policy_rollout(
             env=env,
-            robot_q_network=robot_q_network,
+            robot_q_network=policy.q_network,  # Use policy's Q network
             human_policy=human_policy,
             goal_sampler=goal_sampler,
             human_indices=human_indices,
@@ -439,7 +906,11 @@ def main(quick_mode: bool = False, debug: bool = False):
             print(f"  Completed {rollout_idx + 1}/{num_rollouts} rollouts ({len(env._video_frames)} total frames)")
     
     # Save movie using env's save_video method (uses imageio[ffmpeg])
-    movie_path = os.path.join(output_dir, 'phase2_robot_policy_demo.mp4')
+    # Use custom path if specified
+    if save_video_path:
+        movie_path = save_video_path
+    else:
+        movie_path = os.path.join(output_dir, 'phase2_robot_policy_demo.mp4')
     if os.path.exists(movie_path):
         os.remove(movie_path)
     env.save_video(movie_path, fps=MOVIE_FPS)
@@ -447,8 +918,9 @@ def main(quick_mode: bool = False, debug: bool = False):
     print()
     print("=" * 70)
     print("Demo completed!")
-    print(f"  TensorBoard logs: {tensorboard_dir}")
-    print(f"  View with: tensorboard --logdir={tensorboard_dir}")
+    if trainer is not None:
+        print(f"  TensorBoard logs: {tensorboard_dir}")
+        print(f"  View with: tensorboard --logdir={tensorboard_dir}")
     print(f"  Movie: {os.path.abspath(movie_path)}")
     print("=" * 70)
 
@@ -457,7 +929,39 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Phase 2 Robot Policy Learning Demo')
     parser.add_argument('--quick', '-q', action='store_true',
                         help='Run in quick test mode with fewer episodes')
+    parser.add_argument('--ensemble', '-e', action='store_true',
+                        help='Use random ensemble environment (7x7 grids, 2 humans, 2 robots)')
     parser.add_argument('--debug', '-d', action='store_true',
                         help='Enable verbose debug output')
+    parser.add_argument('--profile', '-p', action='store_true',
+                        help='Profile training with torch.profiler (outputs trace.json)')
+    
+    # Save/restore options
+    parser.add_argument('--save_networks', type=str, default=None, metavar='PATH',
+                        help='Save all trained networks to PATH after training')
+    parser.add_argument('--save_policy', type=str, default=None, metavar='PATH',
+                        help='Save trained policy (Q_r network only) to PATH after training')
+    parser.add_argument('--restore_networks', type=str, default=None, metavar='PATH',
+                        help='Restore networks from PATH before training (skips warmup/rampup)')
+    parser.add_argument('--use_policy', type=str, default=None, metavar='PATH',
+                        help='Skip training and only run rollouts using policy from PATH')
+    
+    # Rollout options
+    parser.add_argument('--rollouts', type=int, default=None, metavar='N',
+                        help='Number of rollouts to generate (overrides default)')
+    parser.add_argument('--save_video', type=str, default=None, metavar='PATH',
+                        help='Path to save rollout video (default: outputs/phase2_demo_<env>/...mp4)')
+    
     args = parser.parse_args()
-    main(quick_mode=args.quick, debug=args.debug)
+    main(
+        quick_mode=args.quick,
+        debug=args.debug,
+        profile=args.profile,
+        use_ensemble=args.ensemble,
+        save_networks_path=args.save_networks,
+        save_policy_path=args.save_policy,
+        restore_networks_path=args.restore_networks,
+        use_policy_path=args.use_policy,
+        num_rollouts_override=args.rollouts,
+        save_video_path=args.save_video,
+    )

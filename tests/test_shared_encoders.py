@@ -149,8 +149,8 @@ def test_encoder_caching():
     state = create_mock_state(num_agents=2)
     
     # Encode the same state twice
-    enc1 = state_encoder.encode_state(state, world_model, 'cpu')
-    enc2 = state_encoder.encode_state(state, world_model, 'cpu')
+    enc1 = state_encoder.tensorize_state(state, world_model, 'cpu')
+    enc2 = state_encoder.tensorize_state(state, world_model, 'cpu')
     
     # Check cache stats
     stats = state_encoder.get_cache_stats()
@@ -170,7 +170,7 @@ def test_encoder_caching():
     
     # Test with different state (should be a new cache entry)
     state2 = create_mock_state(num_agents=2)  # New state object
-    enc3 = state_encoder.encode_state(state2, world_model, 'cpu')
+    enc3 = state_encoder.tensorize_state(state2, world_model, 'cpu')
     stats = state_encoder.get_cache_stats()
     hits, misses = stats
     print(f"  Cache stats after encode of different state: hits={hits}, misses={misses}")
@@ -217,7 +217,7 @@ def test_gradient_flow():
     
     # Encode state
     grid_tensor, global_features, agent_features, interactive_features = \
-        state_encoder.encode_state(state, world_model, 'cpu')
+        state_encoder.tensorize_state(state, world_model, 'cpu')
     
     # Forward through state encoder NN
     state_features = state_encoder(grid_tensor, global_features, agent_features, interactive_features)

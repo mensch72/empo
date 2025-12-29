@@ -125,7 +125,7 @@ def test_state_encoder_padding():
     
     # Encode state (agent-agnostic)
     grid_tensor, global_features, agent_features, interactive_features = \
-        encoder.encode_state(state, world_model)
+        encoder.tensorize_state(state, world_model)
     
     # Check dimensions
     assert grid_tensor.shape == (1, encoder.num_grid_channels, 15, 15)

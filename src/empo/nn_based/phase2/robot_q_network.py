@@ -104,7 +104,7 @@ class BaseRobotQNetwork(nn.Module, ABC):
         # softplus(x) = log(1 + exp(x)) is always positive
         return -F.softplus(raw_values)
     
-    def get_policy(self, q_values: torch.Tensor, beta_r: Optional[float] = None) -> torch.Tensor:
+    def get_policy(self, q_values: Optional[torch.Tensor], beta_r: Optional[float] = None) -> torch.Tensor:
         """
         Compute robot policy using power-law softmax (equation 5).
         
@@ -112,10 +112,11 @@ class BaseRobotQNetwork(nn.Module, ABC):
         
         Since Q_r < 0, we have -Q_r > 0, so the expression is well-defined.
         Higher β_r makes the policy more deterministic.
-        When β_r = 0, the policy is uniform.
+        When β_r = 0 or q_values is None, the policy is uniform.
         
         Args:
             q_values: Tensor of shape (..., num_action_combinations), all negative.
+                     If None, returns uniform distribution (requires beta_r=0 or None with self.beta_r=0).
             beta_r: Optional override for policy concentration. If None, use self.beta_r.
         
         Returns:
@@ -124,10 +125,20 @@ class BaseRobotQNetwork(nn.Module, ABC):
         if beta_r is None:
             beta_r = self.beta_r
         
-        # Special case: beta_r = 0 means uniform random policy
+        # Special case: beta_r = 0 means uniform random policy (no Q_r needed)
         if beta_r == 0.0:
-            uniform = torch.ones_like(q_values)
-            return uniform / uniform.sum(dim=-1, keepdim=True)
+            if q_values is None:
+                # Return uniform distribution without knowing batch size
+                # Caller must handle this case or provide a template tensor
+                uniform = torch.ones(self.num_action_combinations)
+                return uniform / uniform.sum()
+            else:
+                uniform = torch.ones_like(q_values)
+                return uniform / uniform.sum(dim=-1, keepdim=True)
+        
+        # For non-zero beta_r, q_values is required
+        if q_values is None:
+            raise ValueError("q_values cannot be None when beta_r != 0")
         
         # q_values are negative, so -q_values are positive
         neg_q = -q_values
