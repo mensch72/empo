@@ -123,6 +123,29 @@ class PossibleGoalSampler(ABC):
             env: The gymnasium environment (or compatible) this sampler applies to.
         """
         self.env = self.world_model = env
+    
+    def set_world_model(self, world_model: Any) -> None:
+        """
+        Set or update the world model reference.
+        
+        This is used for async training where the world_model cannot be pickled
+        and must be recreated in child processes.
+        
+        Args:
+            world_model: The world model (environment) to use.
+        """
+        self.env = self.world_model = world_model
+    
+    def __getstate__(self):
+        """Exclude world_model/env from pickling (it contains thread locks)."""
+        state = self.__dict__.copy()
+        state['env'] = None
+        state['world_model'] = None
+        return state
+    
+    def __setstate__(self, state):
+        """Restore state after unpickling (world_model will be set later)."""
+        self.__dict__.update(state)
 
     @abstractmethod
     def sample(self, state, human_agent_index: int) -> Tuple['PossibleGoal', float]:

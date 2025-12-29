@@ -22,6 +22,11 @@ from .intrinsic_reward_network import BaseIntrinsicRewardNetwork
 from .aggregate_goal_ability import BaseAggregateGoalAbilityNetwork
 from .trainer import Phase2Networks, BasePhase2Trainer
 from .robot_policy import RobotPolicy
+from .world_model_factory import (
+    WorldModelFactory, 
+    CachedWorldModelFactory, 
+    EnsembleWorldModelFactory
+)
 
 __all__ = [
     'Phase2Config',
@@ -35,4 +40,7 @@ __all__ = [
     'Phase2Networks',
     'BasePhase2Trainer',
     'RobotPolicy',
+    'WorldModelFactory',
+    'CachedWorldModelFactory',
+    'EnsembleWorldModelFactory',
 ]

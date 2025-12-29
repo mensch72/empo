@@ -20,6 +20,8 @@ class Phase2Transition:
         state: The current state s.
         robot_action: Tuple of actions, one per robot (a_r).
         goals: Dict mapping human index to their goal {h: g_h}.
+        goal_weights: Dict mapping human index to their goal's importance weight {h: w_h}.
+            Used for proper X_h target computation with importance sampling.
         human_actions: List of human actions (a_H).
         next_state: The successor state s'.
         transition_probs_by_action: Optional pre-computed transition probabilities
@@ -34,6 +36,7 @@ class Phase2Transition:
     state: Any
     robot_action: Tuple[int, ...]
     goals: Dict[int, Any]
+    goal_weights: Dict[int, float]
     human_actions: List[int]
     next_state: Any
     transition_probs_by_action: Optional[Dict[int, List[Tuple[float, Any]]]] = None
@@ -69,6 +72,7 @@ class Phase2ReplayBuffer:
         state: Any,
         robot_action: Tuple[int, ...],
         goals: Dict[int, Any],
+        goal_weights: Dict[int, float],
         human_actions: List[int],
         next_state: Any,
         transition_probs_by_action: Optional[Dict[int, List[Tuple[float, Any]]]] = None,
@@ -82,6 +86,7 @@ class Phase2ReplayBuffer:
             state: Current state.
             robot_action: Tuple of robot actions.
             goals: Dict mapping human index to goal.
+            goal_weights: Dict mapping human index to goal weight.
             human_actions: List of human actions.
             next_state: Next state.
             transition_probs_by_action: Optional pre-computed transition probabilities.
@@ -92,6 +97,7 @@ class Phase2ReplayBuffer:
             state=state,
             robot_action=robot_action,
             goals=goals,
+            goal_weights=goal_weights,
             human_actions=human_actions,
             next_state=next_state,
             transition_probs_by_action=transition_probs_by_action,
