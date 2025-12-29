@@ -70,6 +70,21 @@ from .feature_extraction import (
 )
 
 
+def _make_hashable(obj):
+    """
+    Recursively convert lists to tuples to make state hashable for caching.
+    
+    The state tuple contains lists (agent_states, mobile_objects, mutable_objects)
+    which are not hashable. This function converts them to tuples.
+    """
+    if isinstance(obj, list):
+        return tuple(_make_hashable(item) for item in obj)
+    elif isinstance(obj, tuple):
+        return tuple(_make_hashable(item) for item in obj)
+    else:
+        return obj
+
+
 class MultiGridStateEncoder(BaseStateEncoder):
     """
     Unified encoder for multigrid environment states.
@@ -195,7 +210,7 @@ class MultiGridStateEncoder(BaseStateEncoder):
         # Internal cache for raw tensor extraction (before NN forward)
         # Keys are state_id (int), values are raw tensor tuples
         # Cache is query-agent agnostic since state encoding doesn't depend on query agent
-        self._raw_cache: Dict[int, Tuple[torch.Tensor, ...]] = {}
+        self._raw_cache: Dict[Tuple, Tuple[torch.Tensor, ...]] = {}
         self._cache_hits = 0
         self._cache_misses = 0
     
@@ -277,8 +292,9 @@ class MultiGridStateEncoder(BaseStateEncoder):
         Returns:
             Tuple of (grid_tensor, global_features, agent_features, interactive_features)
         """
-        # Check cache first (agent-agnostic, keyed only by state)
-        cache_key = id(state)
+        # Check cache first (agent-agnostic, keyed by state content)
+        # State contains lists, so convert to hashable form (tuples)
+        cache_key = _make_hashable(state)
         if cache_key in self._raw_cache:
             self._cache_hits += 1
             # Clone cached tensors to avoid in-place operation conflicts

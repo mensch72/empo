@@ -155,19 +155,24 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         self.networks.v_h_e.goal_encoder.clear_cache()
         self.networks.v_h_e.agent_encoder.clear_cache()
     
-    # NOTE: get_cache_stats commented out - never called anywhere in codebase
-    # def get_cache_stats(self) -> Dict[str, Tuple[int, int]]:
-    #     """
-    #     Get cache hit/miss statistics.
-    #     
-    #     Returns:
-    #         Dict with stats from each encoder type.
-    #     """
-    #     return {
-    #         'state': self.networks.q_r.state_encoder.get_cache_stats(),
-    #         'goal': self.networks.v_h_e.goal_encoder.get_cache_stats(),
-    #         'agent': self.networks.v_h_e.agent_encoder.get_cache_stats(),
-    #     }
+    def get_cache_stats(self) -> Dict[str, Tuple[int, int]]:
+        """
+        Get cache hit/miss statistics from all encoders.
+        
+        Returns:
+            Dict mapping encoder name to (hits, misses) tuple.
+        """
+        return {
+            'state': self.networks.q_r.state_encoder.get_cache_stats(),
+            'goal': self.networks.v_h_e.goal_encoder.get_cache_stats(),
+            'agent': self.networks.v_h_e.agent_encoder.get_cache_stats(),
+        }
+    
+    def reset_cache_stats(self):
+        """Reset cache hit/miss counters for all encoders."""
+        self.networks.q_r.state_encoder.reset_cache_stats()
+        self.networks.v_h_e.goal_encoder.reset_cache_stats()
+        self.networks.v_h_e.agent_encoder.reset_cache_stats()
     
     def _tensorize_state_cached(
         self,

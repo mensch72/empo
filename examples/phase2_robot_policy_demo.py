@@ -7,6 +7,7 @@ that maximizes aggregate human power. Based on equations (4)-(9) from the paper.
 
 Environment options (set env_type variable):
 - "trivial": Small 4x6 grid with 1 human, 1 robot (quick testing)
+- "small": 6x6 grid with 1 human, 1 robot, more space to maneuver
 - "ensemble": Random 7x7 grids with 2 humans, 2 robots, walls, and objects
 
 The demo trains:
@@ -21,6 +22,7 @@ Usage:
     # Basic usage
     python phase2_robot_policy_demo.py           # Full run (trivial env)
     python phase2_robot_policy_demo.py --quick   # Quick test (100 episodes)
+    python phase2_robot_policy_demo.py --small   # Use small 6x6 environment
     python phase2_robot_policy_demo.py --ensemble # Use random ensemble environment
     python phase2_robot_policy_demo.py --async   # Use async actor-learner training
     
@@ -57,7 +59,7 @@ from gym_multigrid.multigrid import (
     MultiGridEnv, Grid, Agent, Wall, World, SmallActions,
     Key, Ball, Box, Door, Lava, Block, Goal
 )
-from empo.multigrid import MultiGridGoalSampler, ReachCellGoal, ReachRectangleGoal
+from empo.multigrid import MultiGridGoalSampler, ReachCellGoal, ReachRectangleGoal, render_test_map_values
 from empo.possible_goal import DeterministicGoalSampler, TabularGoalSampler, PossibleGoalSampler
 from empo.human_policy_prior import HeuristicPotentialPolicy
 from empo.nn_based.multigrid import PathDistanceCalculator
@@ -71,9 +73,9 @@ from empo.nn_based.multigrid.phase2.robot_policy import MultiGridRobotPolicy
 # Environment Definition
 # ============================================================================
 
-final_beta_r = 100.0  # Final beta_r for robot policy concentration
+final_beta_r = 1000.0  # Final beta_r for robot policy concentration
 
-# Default environment type (can be overridden via --ensemble flag)
+# Default environment type (can be overridden via --ensemble or --small flags)
 # These will be set properly in main() based on command line args
 env_type = "trivial"
 
@@ -83,6 +85,8 @@ MAX_STEPS = 10
 NUM_ROLLOUTS = 10
 MOVIE_FPS = 2
 goal_sampler_factory = None
+TEST_MAPS = None  # Only set for trivial env
+DEFINED_GOALS = None  # Goals to evaluate V_h^e for (trivial env only)
 
 # Ensemble-specific config (only used when env_type == "ensemble")
 ENSEMBLE_GRID_SIZE = 7
@@ -96,9 +100,9 @@ UNSTEADY_GROUND_PROBABILITY = 0.08
 DOOR_KEY_COLOR = 'r'
 
 
-def configure_environment(use_ensemble: bool):
+def configure_environment(use_ensemble: bool, use_small: bool = False):
     """Configure global environment variables based on mode."""
-    global env_type, GRID_MAP, MAX_STEPS, NUM_ROLLOUTS, MOVIE_FPS, goal_sampler_factory
+    global env_type, GRID_MAP, MAX_STEPS, NUM_ROLLOUTS, MOVIE_FPS, goal_sampler_factory, TEST_MAPS, DEFINED_GOALS
     
     if use_ensemble:
         env_type = "ensemble"
@@ -107,6 +111,25 @@ def configure_environment(use_ensemble: bool):
         NUM_ROLLOUTS = 20
         MOVIE_FPS = 3
         goal_sampler_factory = None  # Will use SmallGoalSampler
+    elif use_small:
+        env_type = "small"
+        GRID_MAP = """
+        We We We We We We
+        We .. .. .. Ae We
+        We .. .. .. .. We 
+        We .. Ro .. .. We
+        We We Ay We We We
+        We We We We We We
+        """
+        MAX_STEPS = 15
+        NUM_ROLLOUTS = 10
+        MOVIE_FPS = 2
+        goal_sampler_factory = lambda env: TabularGoalSampler([
+            ReachCellGoal(env, 1, (2,1)),
+            ReachCellGoal(env, 1, (2,2)),
+            ReachCellGoal(env, 1, (3,2)),
+            ReachCellGoal(env, 1, (4,2)),
+        ], probabilities=[0.4, 0.3, 0.2, 0.1])
     else:
         env_type = "trivial"
         GRID_MAP = """
@@ -118,11 +141,76 @@ def configure_environment(use_ensemble: bool):
         MAX_STEPS = 10
         NUM_ROLLOUTS = 10
         MOVIE_FPS = 2
+        
+        # Define goals for V_h^e evaluation
+        DEFINED_GOALS = [
+            (1, (2,1)),  # easy once robot has pushed rock twice or once and moved back 
+            (1, (1,1)),  # medium difficulty
+            (1, (3,1)),  # hardest since robot must move back to (1,1) after pushing rock twice
+            (1, (2,2)),  # already reached
+        ]
+        
         goal_sampler_factory = lambda env: TabularGoalSampler([
-            ReachCellGoal(env, 1, (2,1)),
-            ReachCellGoal(env, 1, (2,2))
-        ], probabilities=[0.9, 0.1])
+            ReachCellGoal(env, human_idx, pos) for human_idx, pos in DEFINED_GOALS
+        ], probabilities=[0.5, 0.2, 0.2, 0.1])
 
+        TEST_MAPS = [
+            (GRID_MAP, "Worst V_r: human locked behind rock"),
+            ("""
+            We We We We We We
+            We .. Ae Ro .. We
+            We We Ay We We We
+            We We We We We We
+            """, "Slightly better: robot closer to freeing human"),
+            ("""
+            We We We We We We
+            We Ae .. Ro .. We
+            We We Ay We We We
+            We We We We We We
+            """, "Better: robot freed human, can reach 2 goals"),
+            ("""
+            We We We We We We
+            We Ae Ay Ro .. We
+            We We .. We We We
+            We We We We We We
+            """, "Better: human on higher-prob goal, can reach 2"),
+            ("""
+            We We We We We We
+            We Ae .. .. Ro We
+            We We Ay We We We
+            We We We We We We
+            """, "Higher V_r: human can reach 3 goals"),
+            ("""
+            We We We We We We
+            We .. .. Ae Ro We
+            We We Ay We We We
+            We We We We We We
+            """, "Same V_r: human can reach 3 other equal-prob goals"),
+            ("""
+            We We We We We We
+            We Ay .. Ae Ro We
+            We We .. We We We
+            We We We We We We
+            """, "Higher V_r: human on higher-prob goal, can reach 3"),
+            ("""
+            We We We We We We
+            We Ae .. Ay Ro We
+            We We .. We We We
+            We We We We We We
+            """, "Same V_r: symmetric situation"),
+            ("""
+            We We We We We We
+            We .. Ay Ae Ro We
+            We We .. We We We
+            We We We We We We
+            """, "Highest V_r: human on highest-prob goal"),
+            ("""
+            We We We We We We
+            We Ae Ay .. Ro We
+            We We .. We We We
+            We We We We We We
+            """, "Same V_r: symmetric situation"),
+            ]
 
 # ============================================================================
 # World Model Factory Functions (for async training)
@@ -131,17 +219,9 @@ def configure_environment(use_ensemble: bool):
 
 def _create_trivial_env():
     """Create the trivial demo environment."""
-    # Hardcoded grid map (same as configure_environment sets)
-    grid_map = """
-    We We We We We We
-    We Ae Ro .. .. We
-    We We Ay We We We
-    We We We We We We
-    """
-    
     # Create environment using MultiGridEnv directly (not Phase2DemoEnv which uses globals)
     env = MultiGridEnv(
-        map=grid_map,
+        map=GRID_MAP,
         max_steps=10,  # Fixed for trivial
         partial_obs=False,
         objects_set=World,
@@ -149,6 +229,18 @@ def _create_trivial_env():
     )
     return env
 
+
+def _create_small_env():
+    """Create the small demo environment."""
+    # Create environment using MultiGridEnv directly (not Phase2DemoEnv which uses globals)
+    env = MultiGridEnv(
+        map=GRID_MAP,
+        max_steps=10,  # Fixed for trivial
+        partial_obs=False,
+        objects_set=World,
+        actions_set=SmallActions
+    )
+    return env
 
 class _EnsembleEnvCreator:
     """
@@ -473,9 +565,9 @@ class Phase2DemoEnv(MultiGridEnv):
 SINGLE_ACTION_NAMES = ['still', 'left', 'right', 'forward']
 
 # Rendering configuration for annotations
-RENDER_TILE_SIZE = 64  # Increased from default 32 for higher resolution
-ANNOTATION_PANEL_WIDTH = 280  # Wider panel to fit joint action names
-ANNOTATION_FONT_SIZE = 10  # Smaller font to fit all 16 actions
+RENDER_TILE_SIZE = 96  # Increased for higher resolution and longer text visibility
+ANNOTATION_PANEL_WIDTH = 380  # Wider panel to fit longer descriptions
+ANNOTATION_FONT_SIZE = 12  # Larger font for better readability
 
 
 def get_joint_action_names(num_robots: int, num_single_actions: int = 4) -> list:
@@ -627,7 +719,7 @@ def run_policy_rollout(
     annotation = compute_annotation_text(state, get_greedy_action(state))
     env.render(mode='rgb_array', highlight=False, tile_size=RENDER_TILE_SIZE,
                annotation_text=annotation, annotation_panel_width=ANNOTATION_PANEL_WIDTH,
-               annotation_font_size=ANNOTATION_FONT_SIZE)
+               annotation_font_size=ANNOTATION_FONT_SIZE, goal_overlays=human_goals)
     
     for step in range(env.max_steps):
         state = env.get_state()
@@ -660,7 +752,7 @@ def run_policy_rollout(
         annotation = compute_annotation_text(new_state, get_greedy_action(new_state))
         env.render(mode='rgb_array', highlight=False, tile_size=RENDER_TILE_SIZE,
                    annotation_text=annotation, annotation_panel_width=ANNOTATION_PANEL_WIDTH,
-                   annotation_font_size=ANNOTATION_FONT_SIZE)
+                   annotation_font_size=ANNOTATION_FONT_SIZE, goal_overlays=human_goals)
         
         if done:
             break
@@ -677,6 +769,7 @@ def main(
     debug: bool = False,
     profile: bool = False,
     use_ensemble: bool = False,
+    use_small: bool = False,
     use_async: bool = False,
     save_networks_path: str = None,
     save_policy_path: str = None,
@@ -687,7 +780,7 @@ def main(
 ):
     """Run Phase 2 demo."""
     # Configure environment based on command line option
-    configure_environment(use_ensemble)
+    configure_environment(use_ensemble, use_small)
     
     print("=" * 70)
     print("Phase 2 Robot Policy Learning Demo")
@@ -707,6 +800,16 @@ def main(
         goal_feature_dim = 8
         agent_embedding_dim = 4
         print("[TRIVIAL ENV] Using minimal network sizes for simple task")
+    elif env_type == "small":
+        num_training_steps = 20000
+        num_rollouts = NUM_ROLLOUTS
+        batch_size = 16
+        x_h_batch_size = 32
+        # Small networks for small task
+        hidden_dim = 32
+        goal_feature_dim = 16
+        agent_embedding_dim = 8
+        print("[SMALL ENV] Using small network sizes for 6x6 grid")
     elif env_type == "ensemble":
         # Ensemble needs more training due to varied layouts
         num_training_steps = 50000
@@ -829,10 +932,13 @@ def main(
         env = Phase2DemoEnv(max_steps=MAX_STEPS)
         goal_sampler = goal_sampler_factory(env)
         
-        # Create world model factory for async training (trivial mode)
+        # Create world model factory for async training (trivial/small mode)
         if use_async:
-            # Trivial mode: use cached (same env for all episodes)
-            world_model_factory = CachedWorldModelFactory(_create_trivial_env)
+            # Trivial/small mode: use cached (same env for all episodes)
+            if env_type == "small":
+                world_model_factory = CachedWorldModelFactory(_create_small_env)
+            else:
+                world_model_factory = CachedWorldModelFactory(_create_trivial_env)
         else:
             world_model_factory = None
     env.reset()
@@ -866,7 +972,7 @@ def main(
         world_model=env,
         human_agent_indices=human_indices,
         path_calculator=path_calc,
-        beta=10.0  # Quite deterministic
+        beta=1000.0  # Quite deterministic
     )
     
     # goal_sampler was already created above (ensemble uses SmallGoalSampler, trivial uses factory)
@@ -880,8 +986,8 @@ def main(
     # which provides more samples per update. We also use a larger batch specifically
     # for X_h since it has inherently higher variance (expectation over many goals).
     config = Phase2Config(
-        gamma_r=0.95, # relatively impatient
-        gamma_h=0.95, # relatively impatient
+        gamma_r=0.99, # relatively impatient
+        gamma_h=0.99, # relatively impatient
         zeta=2.0,      # Risk aversion
         xi=1.0,        # Inter-human inequality aversion
         eta=1.1,       # Intertemporal inequality aversion
@@ -912,6 +1018,8 @@ def main(
         async_training=use_async,
         num_actors=1,  # 1 actor is usually fast enough
         async_min_buffer_size=50 if lightningfast_mode else (100 if quick_mode else 500),  # Smaller for quick/lightningfast mode
+        # State encoding options
+        include_step_count=False,  # Don't include step count in state encoding
     )
     
     # If using policy directly (no training), skip to rollouts
@@ -1110,6 +1218,32 @@ def main(
         env._video_frames = all_video_frames
     env.save_video(movie_path, fps=MOVIE_FPS)
     
+    # Generate test map values video (trivial env only)
+    if env_type == "trivial" and TEST_MAPS is not None and trainer is not None:
+        print(f"\nGenerating test map values video ({len(TEST_MAPS)} maps)...")
+        
+        # Render frames for all test maps (goals created fresh for each map)
+        test_map_frames = render_test_map_values(
+            test_maps=TEST_MAPS,
+            goal_specs=DEFINED_GOALS,  # List of (human_idx, target_pos) tuples
+            trainer=trainer,
+            human_indices=human_indices,
+            robot_indices=robot_indices,
+            tile_size=RENDER_TILE_SIZE,
+            annotation_panel_width=ANNOTATION_PANEL_WIDTH,
+            annotation_font_size=ANNOTATION_FONT_SIZE,
+        )
+        
+        # Save test map values video
+        test_map_video_path = os.path.join(output_dir, 'test_map_values.mp4')
+        if os.path.exists(test_map_video_path):
+            os.remove(test_map_video_path)
+        
+        # Use env's video save mechanism
+        env._video_frames = test_map_frames
+        env._recording = True
+        env.save_video(test_map_video_path, fps=1)  # 1 fps for test maps
+        print(f"  Test map values video saved to: {test_map_video_path}")
     print()
     print("=" * 70)
     print("Demo completed!")
@@ -1128,6 +1262,8 @@ if __name__ == "__main__":
                         help='Run in lightning fast mode (1/10th of quick mode, for syntax checking)')
     parser.add_argument('--ensemble', '-e', action='store_true',
                         help='Use random ensemble environment (7x7 grids, 2 humans, 2 robots)')
+    parser.add_argument('--small', '-s', action='store_true',
+                        help='Use small environment (6x6 grid, 1 human, 1 robot, more space)')
     parser.add_argument('--debug', '-d', action='store_true',
                         help='Enable verbose debug output')
     parser.add_argument('--profile', '-p', action='store_true',
@@ -1158,6 +1294,7 @@ if __name__ == "__main__":
         debug=args.debug,
         profile=args.profile,
         use_ensemble=args.ensemble,
+        use_small=args.small,
         use_async=args.use_async,
         save_networks_path=args.save_networks,
         save_policy_path=args.save_policy,

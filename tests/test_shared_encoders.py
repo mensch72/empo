@@ -59,9 +59,13 @@ class MockAgent:
         self.forced_next_action = None
 
 
-def create_mock_state(num_agents=2):
-    """Create a mock state tuple."""
-    step_count = 0
+def create_mock_state(num_agents=2, step_count=0):
+    """Create a mock state tuple.
+    
+    Args:
+        num_agents: Number of agents
+        step_count: Step count value (change this to create states with different content)
+    """
     agent_states = [(i, i, 0, False, False) for i in range(num_agents)]
     mobile_objects = []
     mutable_objects = []
@@ -170,7 +174,8 @@ def test_encoder_caching():
     print("  ✓ Cached tensors are identical")
     
     # Test with different state (should be a new cache entry)
-    state2 = create_mock_state(num_agents=2)  # New state object
+    # Note: With content-based caching, we need states with DIFFERENT content
+    state2 = create_mock_state(num_agents=2, step_count=1)  # Different step_count
     enc3 = state_encoder.tensorize_state(state2, world_model, 'cpu')
     stats = state_encoder.get_cache_stats()
     hits, misses = stats

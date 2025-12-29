@@ -20,6 +20,7 @@ from datetime import datetime
 from queue import Empty
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -1157,6 +1158,19 @@ class BasePhase2Trainer(ABC):
             self.writer.add_scalar('Warmup/active_networks_mask', active_mask, self.training_step_count)
             self.writer.add_scalar('Warmup/stage', 
                                   self.config.get_warmup_stage(self.training_step_count), self.training_step_count)
+            
+            # Log encoder cache hit rates (if available)
+            if hasattr(self, 'get_cache_stats'):
+                cache_stats = self.get_cache_stats()
+                for encoder_name, (hits, misses) in cache_stats.items():
+                    total = hits + misses
+                    if total > 0:
+                        hit_rate = hits / total
+                        self.writer.add_scalar(f'Cache/{encoder_name}_hit_rate', hit_rate, self.training_step_count)
+                        self.writer.add_scalar(f'Cache/{encoder_name}_calls', total, self.training_step_count)
+                # Reset stats after logging so we get per-step rates
+                if hasattr(self, 'reset_cache_stats'):
+                    self.reset_cache_stats()
         
         # Check for warm-up stage transitions
         current_stage = self.config.get_warmup_stage(self.training_step_count)
@@ -1847,3 +1861,170 @@ class BasePhase2Trainer(ABC):
             print(f"WARNING: Cannot save to {path}: {e}")
             print(f"Saving to fallback location: {tmp_path}")
             torch.save(checkpoint, tmp_path)
+
+    # ==================== Convenience Evaluation Methods ====================
+    
+    def get_v_h_e(
+        self,
+        state: Any,
+        world_model: Any,
+        human_agent_idx: int,
+        goal: Any
+    ) -> float:
+        """
+        Get V_h^e(s, g_h) - probability human h achieves goal g_h.
+        
+        Args:
+            state: Environment state.
+            world_model: Environment/world model.
+            human_agent_idx: Index of the human agent.
+            goal: The goal for this human.
+        
+        Returns:
+            V_h^e value in [0, 1].
+        """
+        self.networks.v_h_e.eval()
+        with torch.no_grad():
+            v_h_e = self.networks.v_h_e.encode_and_forward(
+                state, world_model, human_agent_idx, goal, self.device
+            )
+            return v_h_e.squeeze().item()
+    
+    def get_x_h(
+        self,
+        state: Any,
+        world_model: Any,
+        human_agent_idx: int
+    ) -> float:
+        """
+        Get X_h(s) - aggregate goal achievement ability for human h.
+        
+        Args:
+            state: Environment state.
+            world_model: Environment/world model.
+            human_agent_idx: Index of the human agent.
+        
+        Returns:
+            X_h value in (0, 1].
+        """
+        self.networks.x_h.eval()
+        with torch.no_grad():
+            x_h = self.networks.x_h.encode_and_forward(
+                state, world_model, human_agent_idx, self.device
+            )
+            x_h_clamped = torch.clamp(x_h.squeeze(), min=1e-3, max=1.0)
+            return x_h_clamped.item()
+    
+    def get_q_r(
+        self,
+        state: Any,
+        world_model: Any
+    ) -> np.ndarray:
+        """
+        Get Q_r(s, a_r) - robot Q-values for all joint actions.
+        
+        Args:
+            state: Environment state.
+            world_model: Environment/world model.
+        
+        Returns:
+            Array of Q-values for each joint action.
+        """
+        self.networks.q_r.eval()
+        with torch.no_grad():
+            q_values = self.networks.q_r.encode_and_forward(state, world_model, self.device)
+            return q_values.squeeze().cpu().numpy()
+    
+    def get_pi_r(
+        self,
+        state: Any,
+        world_model: Any,
+        beta_r: Optional[float] = None
+    ) -> np.ndarray:
+        """
+        Get π_r(a_r|s) - robot policy probabilities.
+        
+        Args:
+            state: Environment state.
+            world_model: Environment/world model.
+            beta_r: Policy concentration parameter. Uses config.beta_r if None.
+        
+        Returns:
+            Array of probabilities for each joint action.
+        """
+        if beta_r is None:
+            beta_r = self.config.beta_r
+        
+        self.networks.q_r.eval()
+        with torch.no_grad():
+            q_values = self.networks.q_r.encode_and_forward(state, world_model, self.device)
+            pi_r = self.networks.q_r.get_policy(q_values, beta_r=beta_r)
+            return pi_r.squeeze().cpu().numpy()
+    
+    def get_u_r(
+        self,
+        state: Any,
+        world_model: Any
+    ) -> float:
+        """
+        Get U_r(s) - intrinsic robot reward.
+        
+        If u_r_use_network is True, uses the U_r network.
+        Otherwise, computes directly from X_h values:
+            y = E_h[X_h^{-ξ}], U_r = -y^η
+        
+        Args:
+            state: Environment state.
+            world_model: Environment/world model.
+        
+        Returns:
+            U_r value (negative).
+        """
+        with torch.no_grad():
+            if self.config.u_r_use_network and self.networks.u_r is not None:
+                self.networks.u_r.eval()
+                _, u_r = self.networks.u_r.encode_and_forward(state, world_model, self.device)
+                return u_r.item()
+            else:
+                # Compute directly from X_h values
+                x_h_vals = []
+                for h in self.human_agent_indices:
+                    x_h = self.get_x_h(state, world_model, h)
+                    x_h_vals.append(x_h)
+                
+                x_h_tensor = torch.tensor(x_h_vals, device=self.device)
+                y = (x_h_tensor ** (-self.config.xi)).mean()
+                u_r_val = -(y ** self.config.eta)
+                return u_r_val.item()
+    
+    def get_v_r(
+        self,
+        state: Any,
+        world_model: Any,
+        beta_r: Optional[float] = None
+    ) -> float:
+        """
+        Get V_r(s) - robot state value.
+        
+        Computed as V_r = U_r + E_{a~π_r}[Q_r(s,a)]
+        
+        Args:
+            state: Environment state.
+            world_model: Environment/world model.
+            beta_r: Policy concentration parameter. Uses config.beta_r if None.
+        
+        Returns:
+            V_r value.
+        """
+        if beta_r is None:
+            beta_r = self.config.beta_r
+        
+        with torch.no_grad():
+            u_r = self.get_u_r(state, world_model)
+            
+            self.networks.q_r.eval()
+            q_values = self.networks.q_r.encode_and_forward(state, world_model, self.device)
+            pi_r = self.networks.q_r.get_policy(q_values, beta_r=beta_r)
+            expected_q = (pi_r * q_values).sum().item()
+            
+            return u_r + expected_q
