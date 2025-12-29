@@ -45,6 +45,7 @@ class Phase2Networks:
     v_r: BaseRobotValueNetwork
     
     # Target networks (frozen copies for stable training)
+    q_r_target: Optional[BaseRobotQNetwork] = None
     v_r_target: Optional[BaseRobotValueNetwork] = None
     v_h_e_target: Optional[BaseHumanGoalAchievementNetwork] = None
     x_h_target: Optional[BaseAggregateGoalAbilityNetwork] = None
@@ -166,13 +167,26 @@ class BasePhase2Trainer(ABC):
             self.replay_buffer = Phase2ReplayBuffer(capacity=self.config.buffer_size)
     
     def _init_target_networks(self):
-        """Initialize target networks as copies of main networks."""
+        """Initialize target networks as copies of main networks.
+        
+        Target networks are maintained for all value networks (Q_r, V_r, V_h^e, X_h, U_r)
+        to provide stable TD targets during training. Using target networks helps prevent
+        the "moving target" problem in temporal difference learning.
+        
+        The Q_r target network is particularly important during beta_r ramp-up when
+        the policy changes rapidly, as it stabilizes both:
+        - V_r targets that use Q_r's policy (via get_policy())
+        - V_h^e model-based targets that also use Q_r's policy
+        """
+        self.networks.q_r_target = copy.deepcopy(self.networks.q_r)
         self.networks.v_r_target = copy.deepcopy(self.networks.v_r)
         self.networks.v_h_e_target = copy.deepcopy(self.networks.v_h_e)
         self.networks.x_h_target = copy.deepcopy(self.networks.x_h)
         self.networks.u_r_target = copy.deepcopy(self.networks.u_r)
         
         # Freeze target networks (no gradients)
+        for param in self.networks.q_r_target.parameters():
+            param.requires_grad = False
         for param in self.networks.v_r_target.parameters():
             param.requires_grad = False
         for param in self.networks.v_h_e_target.parameters():
@@ -183,6 +197,7 @@ class BasePhase2Trainer(ABC):
             param.requires_grad = False
         
         # Set target networks to eval mode (disables dropout during inference)
+        self.networks.q_r_target.eval()
         self.networks.v_r_target.eval()
         self.networks.v_h_e_target.eval()
         self.networks.x_h_target.eval()
@@ -268,18 +283,40 @@ class BasePhase2Trainer(ABC):
         return norms
     
     def update_target_networks(self):
-        """Update target networks (hard copy)."""
-        self.networks.v_r_target.load_state_dict(self.networks.v_r.state_dict())
-        self.networks.v_h_e_target.load_state_dict(self.networks.v_h_e.state_dict())
-        self.networks.x_h_target.load_state_dict(self.networks.x_h.state_dict())
-        if self.config.u_r_use_network:
-            self.networks.u_r_target.load_state_dict(self.networks.u_r.state_dict())
+        """Update target networks (hard copy) respecting individual update intervals.
         
-        # Ensure target networks stay in eval mode (disables dropout)
-        self.networks.v_r_target.eval()
-        self.networks.v_h_e_target.eval()
-        self.networks.x_h_target.eval()
-        self.networks.u_r_target.eval()
+        Each target network has its own update interval configured in Phase2Config:
+        - q_r_target_update_interval
+        - v_r_target_update_interval
+        - v_h_e_target_update_interval
+        - x_h_target_update_interval
+        - u_r_target_update_interval
+        """
+        # Update Q_r target if interval reached
+        if self.training_step_count % self.config.q_r_target_update_interval == 0:
+            self.networks.q_r_target.load_state_dict(self.networks.q_r.state_dict())
+            self.networks.q_r_target.eval()
+        
+        # Update V_r target if interval reached
+        if self.training_step_count % self.config.v_r_target_update_interval == 0:
+            self.networks.v_r_target.load_state_dict(self.networks.v_r.state_dict())
+            self.networks.v_r_target.eval()
+        
+        # Update V_h^e target if interval reached
+        if self.training_step_count % self.config.v_h_e_target_update_interval == 0:
+            self.networks.v_h_e_target.load_state_dict(self.networks.v_h_e.state_dict())
+            self.networks.v_h_e_target.eval()
+        
+        # Update X_h target if interval reached
+        if self.training_step_count % self.config.x_h_target_update_interval == 0:
+            self.networks.x_h_target.load_state_dict(self.networks.x_h.state_dict())
+            self.networks.x_h_target.eval()
+        
+        # Update U_r target if interval reached and network mode is enabled
+        if self.config.u_r_use_network:
+            if self.training_step_count % self.config.u_r_target_update_interval == 0:
+                self.networks.u_r_target.load_state_dict(self.networks.u_r.state_dict())
+                self.networks.u_r_target.eval()
     
     # NOTE: tensorize_state commented out - never called anywhere in codebase
     # @abstractmethod
@@ -572,6 +609,11 @@ class BasePhase2Trainer(ABC):
         # Track counts for normalization
         x_h_count = 0
         
+        # Compute effective beta_r once per batch (used by both Q_r and V_r losses)
+        # This is defined outside the q_r_active block to ensure it's available
+        # for V_r loss computation even when Q_r is not active (e.g., during warmup)
+        effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
+        
         for transition in batch:
             # Unpack transition
             s = transition.state
@@ -644,9 +686,6 @@ class BasePhase2Trainer(ABC):
                 a_r_index = self.networks.q_r.action_tuple_to_index(a_r)
                 q_r_pred = q_r_all.squeeze()[a_r_index]
                 
-                # Use effective beta_r for policy (0 during warm-up for independence)
-                effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
-                
                 with torch.no_grad():
                     if self.config.v_r_use_network:
                         # Use V_r target network
@@ -655,9 +694,10 @@ class BasePhase2Trainer(ABC):
                         )
                     else:
                         # Compute V_r directly: V_r(s') = U_r(s') + π_r(s') · Q_r(s')
+                        # Use Q_r target network for stable TD targets
                         u_r_next = self._compute_u_r_for_state(s_prime)
-                        q_r_next = self.networks.q_r.encode_and_forward(s_prime, None, self.device)
-                        pi_r_next = self.networks.q_r.get_policy(q_r_next, beta_r=effective_beta_r)
+                        q_r_next = self.networks.q_r_target.encode_and_forward(s_prime, None, self.device)
+                        pi_r_next = self.networks.q_r_target.get_policy(q_r_next, beta_r=effective_beta_r)
                         v_r_next = self.networks.v_r.compute_from_components(
                             u_r_next.squeeze(), q_r_next.squeeze(), pi_r_next.squeeze()
                         )
@@ -671,8 +711,9 @@ class BasePhase2Trainer(ABC):
                 
                 with torch.no_grad():
                     u_r = self._compute_u_r_for_state(s)
-                    q_r_for_v = self.networks.q_r.encode_and_forward(s, None, self.device)
-                    pi_r = self.networks.q_r.get_policy(q_r_for_v, beta_r=effective_beta_r)
+                    # Use Q_r target network for stable targets
+                    q_r_for_v = self.networks.q_r_target.encode_and_forward(s, None, self.device)
+                    pi_r = self.networks.q_r_target.get_policy(q_r_for_v, beta_r=effective_beta_r)
                 
                 target_v_r = self.networks.v_r.compute_from_components(
                     u_r.squeeze(), q_r_for_v.squeeze(), pi_r.squeeze()
@@ -820,9 +861,8 @@ class BasePhase2Trainer(ABC):
             grad_norms[name] = self._compute_single_grad_norm(name)
             self.optimizers[name].step()
         
-        # Update target networks periodically (based on learning steps)
-        if self.training_step_count % self.config.v_r_target_update_interval == 0:
-            self.update_target_networks()
+        # Update target networks periodically (each network checks its own interval)
+        self.update_target_networks()
         
         return loss_values, grad_norms, prediction_stats
     

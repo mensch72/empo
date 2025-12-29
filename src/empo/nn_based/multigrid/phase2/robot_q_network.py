@@ -246,7 +246,14 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
         )
     
     def get_config(self) -> Dict[str, Any]:
-        """Return configuration for save/load."""
+        """Return configuration for save/load.
+        
+        Note: This method returns an incomplete configuration that does not include
+        all parameters needed for full reconstruction (e.g., own_state_encoder_config
+        is missing). This is currently a placeholder for potential future serialization
+        support. For now, this method should not be relied upon for complete
+        model save/load functionality.
+        """
         return {
             'grid_height': self.grid_height,
             'grid_width': self.grid_width,
