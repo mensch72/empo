@@ -311,12 +311,31 @@ result = restored_fn(21)  # Returns 42
 
 ### Overview
 
-Phase 2 training supports an async actor-learner architecture where multiple actor processes
-collect environment transitions in parallel while a learner process updates the neural networks.
+Phase 2 training supports an async actor-learner architecture where actor processes
+collect environment transitions in parallel while the main learner process updates 
+the neural networks on the GPU.
 
+```python
+from empo.nn_based.phase2.config import Phase2Config
+
+config = Phase2Config(
+    async_training=True,
+    num_actors=1,  # Often 1 actor is sufficient (very fast)
+)
 ```
-Enable with: Phase2Config(async_training=True, num_actors=4)
-```
+
+### When to Use Async Mode
+
+**Benefits:**
+- Decouples data collection from training
+- Actors can run on CPU while learner uses GPU
+- Better GPU utilization (no waiting for environment steps)
+- Scales to environments with slow transitions
+
+**When NOT needed:**
+- Fast environments where sync mode already saturates the GPU
+- Single-threaded debugging/development
+- Environments that are difficult to parallelize
 
 ### Multiprocessing Context: `spawn`
 
@@ -329,138 +348,237 @@ ctx = mp.get_context('spawn')
 **Why `spawn`?**
 - CUDA tensors cannot be forked safely
 - Neural networks with GPU state require fresh process initialization
-- Cross-platform compatible (necessary for Colab, Windows)
+- Cross-platform compatible (Windows, macOS, Linux, Colab)
 
 ### Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                         Main Process                                │
-│                                                                     │
-│  ┌─────────────┐                              ┌─────────────────┐   │
-│  │   Learner   │◄─────── Transitions ─────────│  Shared Queue   │   │
-│  │   Process   │                              │   (mp.Queue)    │   │
-│  │             │                              │                 │   │
-│  │ - Update    │     ┌───────────────────────►│  Transitions    │   │
-│  │   networks  │     │                        │  from actors    │   │
-│  │ - Manage    │     │                        └─────────────────┘   │
-│  │   warmup    │     │                                              │
-│  │             │     │   ┌──────────────────────────────────────┐   │
-│  └─────────────┘     │   │        Shared State (Manager)        │   │
-│        │             │   │                                      │   │
-│        │ Sync policy │   │  - policy_state_dict (for actors)    │   │
-│        ▼             │   │  - shared_total_steps (Value)        │   │
-│  ┌─────────────┐     │   │  - done_flag (Value)                 │   │
-│  │   Manager   │─────┘   │                                      │   │
-│  │   Dict      │         └──────────────────────────────────────┘   │
-│  └─────────────┘                        ▲                           │
-│                                         │                           │
-└─────────────────────────────────────────┼───────────────────────────┘
-                                          │
-        ┌─────────────────────────────────┼─────────────────────────┐
-        │                                 │                         │
-        ▼                                 ▼                         ▼
-┌───────────────┐               ┌───────────────┐          ┌───────────────┐
-│   Actor 0     │               │   Actor 1     │   ...    │   Actor N     │
-│               │               │               │          │               │
-│ - Local env   │               │ - Local env   │          │ - Local env   │
-│ - Local nets  │               │ - Local nets  │          │ - Local nets  │
-│ - Collect     │               │ - Collect     │          │ - Collect     │
-│   transitions │               │   transitions │          │   transitions │
-│ - Push to     │               │ - Push to     │          │ - Push to     │
-│   queue       │               │   queue       │          │   queue       │
-└───────────────┘               └───────────────┘          └───────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                           Main Process (Learner)                        │
+│                                                                         │
+│  ┌──────────────────┐     ┌──────────────────┐     ┌────────────────┐   │
+│  │   Replay Buffer  │◄────│ _consume_trans() │◄────│ Transition     │   │
+│  │                  │     │                  │     │ Queue          │   │
+│  │  transitions for │     │ pulls from queue │     │ (mp.Queue)     │   │
+│  │  training        │     │ into buffer      │     │                │   │
+│  └────────┬─────────┘     └──────────────────┘     └───────▲────────┘   │
+│           │                                                │            │
+│           ▼                                                │            │
+│  ┌──────────────────┐                                      │            │
+│  │  _learner_step() │     ┌──────────────────────────────┐ │            │
+│  │                  │     │      Shared State            │ │            │
+│  │ - Sample batch   │     │                              │ │            │
+│  │ - Compute losses │     │ shared_training_steps (Value)│─┼───────┐    │
+│  │ - Update networks│     │ shared_env_steps (Value)     │─┼───────┤    │
+│  │ - Log to TB      │     │ shared_policy (Manager dict) │─┼───────┤    │
+│  │                  │     │ stop_event (Event)           │─┼───────┤    │
+│  └──────────────────┘     └──────────────────────────────┘ │       │    │
+│                                                            │       │    │
+└────────────────────────────────────────────────────────────┼───────┼────┘
+                                                             │       │
+                      ┌──────────────────────────────────────┘       │
+                      │                                              │
+                      ▼                                              ▼
+            ┌─────────────────┐                            ┌─────────────────┐
+            │    Actor 0      │          ...               │    Actor N      │
+            │                 │                            │                 │
+            │ torch.set_num_  │                            │ torch.set_num_  │
+            │   threads(1)    │                            │   threads(1)    │
+            │                 │                            │                 │
+            │ ┌─────────────┐ │                            │ ┌─────────────┐ │
+            │ │ Local Env   │ │                            │ │ Local Env   │ │
+            │ │ (fresh copy)│ │                            │ │ (fresh copy)│ │
+            │ └─────────────┘ │                            │ └─────────────┘ │
+            │                 │                            │                 │
+            │ ┌─────────────┐ │                            │ ┌─────────────┐ │
+            │ │ Local Q-net │ │                            │ │ Local Q-net │ │
+            │ │ (synced     │ │                            │ │ (synced     │ │
+            │ │  from       │ │                            │ │  from       │ │
+            │ │  learner)   │ │                            │ │  learner)   │ │
+            │ └─────────────┘ │                            │ └─────────────┘ │
+            │                 │                            │                 │
+            │ _actor_step()   │                            │ _actor_step()   │
+            │ → put to queue  │                            │ → put to queue  │
+            │ → increment     │                            │ → increment     │
+            │   env_steps     │                            │   env_steps     │
+            └─────────────────┘                            └─────────────────┘
 ```
 
-### Shared State for Warmup Coordination
+### Data Flow
 
-A key challenge is coordinating warmup stages across processes. The solution uses
-`multiprocessing.Value` for a shared step counter:
+1. **Actors collect transitions:**
+   - Each actor has its own environment copy (created via world model factory)
+   - Actors run `_actor_step()` using local copy of Q-network
+   - Transitions are serialized as dicts and put into the shared queue
+   - Actors increment `shared_env_steps` after each successful queue put
+
+2. **Learner consumes and trains:**
+   - `_consume_transitions()` pulls transitions from queue into replay buffer
+   - Learner reads `shared_env_steps.value` to update `total_env_steps` for TensorBoard
+   - `_learner_step()` samples from buffer and updates networks
+   - Learner updates `shared_training_steps` so actors know current progress
+
+3. **Policy synchronization:**
+   - Every `actor_sync_freq` steps, learner serializes Q-network state
+   - Actors periodically check `shared_policy['version']` and load new weights
+   - This keeps actors' behavior reasonably on-policy
+
+### Shared Counters
 
 ```python
-# Shared counter for warmup/epsilon coordination
-shared_total_steps = mp.Value('i', 0)  # Integer, lock=True by default
-
-# Actors read to determine current warmup stage
-with shared_total_steps.get_lock():
-    current_steps = shared_total_steps.value
-
-# Only learner increments the counter
-with shared_total_steps.get_lock():
-    shared_total_steps.value += batch_size
+# Created in _train_async():
+shared_training_steps = ctx.Value('i', self.training_step_count)  # Gradient updates
+shared_env_steps = ctx.Value('i', self.total_env_steps)           # Env transitions
 ```
 
-**Why shared steps matter:**
-- `epsilon` (exploration) depends on total steps
-- `beta_r` (policy softness) ramps up based on steps
-- All actors must use consistent epsilon/beta_r values
+**shared_training_steps:** 
+- Incremented by learner after each gradient update
+- Read by actors to compute current epsilon (exploration rate)
+- Ensures all actors use consistent warmup-aware exploration
 
-### Policy Synchronization
+**shared_env_steps:**
+- Incremented by actors when they successfully produce a transition
+- Read by learner for TensorBoard logging (`Progress/environment_steps`)
+- Tracks true data collection rate (produced, not consumed)
 
-Actors periodically sync their local networks with the learner's updated weights:
+### Actor Throttling
+
+Actors can produce transitions much faster than the learner trains. To prevent:
+- Unbounded queue/buffer growth
+- Extremely off-policy data
+- Wasted CPU cycles
+
+A throttling mechanism pauses actors when too far ahead:
 
 ```python
-# Every actor_sync_freq steps, actors check for new weights
-if manager_dict.get('policy_state_dict') is not None:
-    local_q_r.load_state_dict(manager_dict['policy_state_dict'])
+# In _actor_loop_async():
+if self.config.max_env_steps_per_training_step is not None:
+    while not stop_event.is_set():
+        training_steps = shared_training_steps.value
+        env_steps = shared_env_steps.value
+        max_env = training_steps * self.config.max_env_steps_per_training_step
+        if env_steps < max_env or training_steps == 0:
+            break
+        time.sleep(0.01)  # Wait 10ms before checking again
 ```
 
-The learner publishes updated weights at configurable intervals.
+With `max_env_steps_per_training_step=10.0` (default), actors pause when 
+`env_steps >= training_steps * 10`.
 
-### Transition Queue
+### Thread Limiting
 
-Actors push transitions to a shared queue; the learner consumes them:
+Each actor limits PyTorch to 1 thread to avoid CPU oversubscription:
 
 ```python
-# Actor: push transition (as dict, not tensor)
-transition_dict = {
-    'state': state,  # Numpy arrays or lists
-    'action': action,
-    'reward': reward,
-    'next_state': next_state,
-    'done': done,
-    'goal': goal,
-    'transition_probs_by_action': cached_probs,  # For model-based targets
-}
-transition_queue.put(transition_dict)
-
-# Learner: consume and add to replay buffer
-while not transition_queue.empty():
-    transition_dict = transition_queue.get_nowait()
-    replay_buffer.add(**transition_dict)
+def _actor_process_entry(self, ...):
+    torch.set_num_threads(1)  # Actors do lightweight inference only
+    ...
 ```
+
+This ensures actors don't compete for CPU cores with the learner's training.
 
 ### Configuration Options
 
 ```python
 @dataclass
 class Phase2Config:
-    # Async training options
-    async_training: bool = False        # Enable async mode
-    num_actors: int = 4                 # Number of parallel actors
-    actor_sync_freq: int = 100          # Steps between policy syncs
-    async_min_buffer_size: int = 1000   # Min buffer before training starts
-    async_queue_size: int = 10000       # Max transitions in queue
+    # Async training configuration
+    async_training: bool = False
+    """Enable async actor-learner architecture."""
+    
+    num_actors: int = 1
+    """Number of parallel actor processes. Often 1 is sufficient."""
+    
+    actor_sync_freq: int = 100
+    """Steps between syncing policy from learner to actors."""
+    
+    async_min_buffer_size: int = 1000
+    """Minimum transitions in buffer before training starts."""
+    
+    async_queue_size: int = 10000
+    """Maximum capacity of transition queue."""
+    
+    max_env_steps_per_training_step: Optional[float] = 10.0
+    """Throttle actors when env_steps > training_steps * this value.
+    Set to None to disable throttling."""
 ```
 
-### Buffer Clearing in Async Mode
+### World Model Factory
 
-Buffer clearing at warmup stage transitions works the same way as synchronous training:
-- Cleared at start of β_r ramp-up (stage 3→4)
-- Cleared at end of β_r ramp-up (stage 4→5)
-
-The learner tracks `last_stage` and clears when stage changes.
-
-### Fallback Behavior
-
-If async training fails (e.g., spawn not supported), it falls back to synchronous training:
+Because environments often cannot be pickled (they may contain unpicklable objects 
+like Pygame surfaces), async training uses a factory pattern:
 
 ```python
-try:
-    self._train_async(env, ...)
-except Exception as e:
-    logger.warning(f"Async training failed: {e}. Falling back to synchronous.")
-    self._train_sync(env, ...)
+# Instead of passing the environment directly:
+trainer = MultiGridPhase2Trainer(
+    world_model=world_model,  # Used by learner
+    world_model_factory=world_model_factory,  # Used by actors
+    ...
+)
+
+# Factory is a callable that creates fresh environment instances:
+def world_model_factory():
+    env = MyEnvironment(...)
+    return MyWorldModel(env)
+```
+
+Each actor calls the factory to create its own independent environment copy.
+
+### Warmup Stage Coordination
+
+Warmup stages (v_h_e → x_h → u_r → q_r → β_r ramp) are tracked by `training_step_count`:
+
+1. **Learner** tracks the canonical `training_step_count` and warmup stage
+2. **Actors** read `shared_training_steps.value` to compute current epsilon
+3. Buffer clears at stage transitions happen only in the learner
+
+This ensures consistent exploration behavior across all actors during warmup.
+
+### TensorBoard Logging
+
+In async mode, TensorBoard shows:
+- `Progress/environment_steps`: Total transitions produced by actors (from `shared_env_steps`)
+- `Loss/*`: Training losses from learner
+- `GradNorm/*`: Gradient norms
+- `Predictions/*`: Network prediction statistics
+- `Epsilon`: Current exploration rate
+
+The environment steps metric reflects actual data collection, not consumed transitions.
+
+### Error Handling
+
+Actor errors are caught and logged without crashing the learner:
+
+```python
+def _actor_process_entry(self, ...):
+    try:
+        self._actor_loop_async(...)
+    except Exception as e:
+        print(f"[Actor {actor_id}] Error: {e}")
+        traceback.print_exc()
+```
+
+The learner sets `stop_event` when training completes, and actors exit gracefully.
+
+### Example Usage
+
+```python
+from empo.nn_based.multigrid.phase2.trainer import train_multigrid_phase2
+
+# Define factory for actors (creates fresh environments)
+def world_model_factory():
+    env = MultiGridEnv.from_textfile("my_world.txt")
+    return MultiGridWorldModel(env)
+
+# Train with async mode
+q_network, networks, history, trainer = train_multigrid_phase2(
+    world_model=world_model,  # For learner
+    world_model_factory=world_model_factory,  # For actors
+    async_training=True,
+    num_actors=1,
+    max_env_steps_per_training_step=10.0,
+    num_training_steps=50000,
+)
 ```
 
 ---

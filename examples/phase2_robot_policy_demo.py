@@ -853,7 +853,7 @@ def main(
         beta_r_rampup_steps=beta_r_rampup_steps,
         # Async training mode (actor-learner architecture)
         async_training=use_async,
-        num_actors=2 if use_async else 1,  # 2 actors for CPU testing
+        num_actors=1,  # 1 actor is usually fast enough
         async_min_buffer_size=100 if quick_mode else 500,  # Smaller for quick mode
     )
     

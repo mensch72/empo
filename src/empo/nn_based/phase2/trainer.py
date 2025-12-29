@@ -8,6 +8,7 @@ of the EMPO framework (equations 4-9).
 import random
 import copy
 import multiprocessing as mp
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from queue import Empty
@@ -1253,6 +1254,9 @@ class BasePhase2Trainer(ABC):
         # Actors read this to get correct exploration parameters
         shared_training_steps = ctx.Value('i', self.training_step_count)
         
+        # Shared counter for environment steps (actors increment, learner reads for logging)
+        shared_env_steps = ctx.Value('i', self.total_env_steps)
+
         # Manager for sharing policy weights
         manager = ctx.Manager()
         policy_lock = manager.Lock()
@@ -1271,6 +1275,7 @@ class BasePhase2Trainer(ABC):
                     transition_queue,
                     stop_event,
                     shared_training_steps,
+                    shared_env_steps,
                     shared_policy,
                     policy_lock,
                 ),
@@ -1287,6 +1292,7 @@ class BasePhase2Trainer(ABC):
             transition_queue=transition_queue,
             stop_event=stop_event,
             shared_training_steps=shared_training_steps,
+            shared_env_steps=shared_env_steps,
             shared_policy=shared_policy,
             policy_lock=policy_lock,
             num_training_steps=num_training_steps,
@@ -1327,6 +1333,7 @@ class BasePhase2Trainer(ABC):
         transition_queue: mp.Queue,
         stop_event: mp.Event,
         shared_training_steps: mp.Value,
+        shared_env_steps: mp.Value,
         shared_policy: Dict,
         policy_lock,
     ) -> None:
@@ -1336,12 +1343,17 @@ class BasePhase2Trainer(ABC):
         This is needed because we can't pickle the full trainer object.
         Subclasses should override _create_actor_env() to provide the environment.
         """
+        # Limit PyTorch threads to avoid CPU oversubscription
+        # Each actor only needs 1 thread since it does lightweight inference
+        torch.set_num_threads(1)
+        
         try:
             self._actor_loop_async(
                 actor_id=actor_id,
                 transition_queue=transition_queue,
                 stop_event=stop_event,
                 shared_training_steps=shared_training_steps,
+                shared_env_steps=shared_env_steps,
                 shared_policy=shared_policy,
                 policy_lock=policy_lock,
             )
@@ -1356,6 +1368,7 @@ class BasePhase2Trainer(ABC):
         transition_queue: mp.Queue,
         stop_event: mp.Event,
         shared_training_steps: mp.Value,
+        shared_env_steps: mp.Value,
         shared_policy: Dict,
         policy_lock,
     ) -> None:
@@ -1372,6 +1385,16 @@ class BasePhase2Trainer(ABC):
         actor_state = self._init_actor_state()
         
         while not stop_event.is_set():
+            # Throttle if actors are too far ahead of learner
+            if self.config.max_env_steps_per_training_step is not None:
+                while not stop_event.is_set():
+                    training_steps = shared_training_steps.value
+                    env_steps = shared_env_steps.value
+                    max_env = training_steps * self.config.max_env_steps_per_training_step
+                    if env_steps < max_env or training_steps == 0:
+                        break
+                    time.sleep(0.01)  # Wait 10ms before checking again
+            
             # Sync policy and training_step_count periodically
             steps_since_sync += 1
             if steps_since_sync >= self.config.actor_sync_freq or local_policy_version < 0:
@@ -1402,15 +1425,19 @@ class BasePhase2Trainer(ABC):
                 
                 try:
                     transition_queue.put(trans_dict, timeout=1.0)
+                    # Increment shared env steps counter (for TensorBoard logging)
+                    with shared_env_steps.get_lock():
+                        shared_env_steps.value += 1
                 except Exception as e:
                     # Queue full or serialization error - skip transition
                     pass
-    
+
     def _learner_loop(
         self,
         transition_queue: mp.Queue,
         stop_event: mp.Event,
         shared_training_steps: mp.Value,
+        shared_env_steps: mp.Value,
         shared_policy: Dict,
         policy_lock,
         num_training_steps: int,
@@ -1420,6 +1447,9 @@ class BasePhase2Trainer(ABC):
         
         Uses shared _learner_step() logic for training, but consumes
         transitions from queue instead of collecting them directly.
+        
+        Args:
+            shared_env_steps: Shared counter of env steps produced by actors (for logging).
         """
         history = []
         policy_updates = 0
@@ -1461,6 +1491,9 @@ class BasePhase2Trainer(ABC):
             
             # Do training step if buffer has enough samples
             if len(self.replay_buffer) >= self.config.batch_size:
+                # Update total_env_steps from shared counter before logging
+                self.total_env_steps = shared_env_steps.value
+                
                 # Use shared learner logic
                 losses = self._learner_step(learner_state, pbar)
                 
