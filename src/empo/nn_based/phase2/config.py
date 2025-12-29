@@ -116,7 +116,6 @@ class Phase2Config:
     lr_u_r_use_1_over_t: bool = False  # DEPRECATED: Whether to use legacy 1/t decay for U_r
     
     # Target network updates
-    q_r_target_update_interval: int = 100
     v_r_target_update_interval: int = 100
     v_h_e_target_update_interval: int = 100
     x_h_target_update_interval: int = 100
@@ -152,11 +151,11 @@ class Phase2Config:
     
     # Max gradient norm for each network (0 or None to disable clipping)
     # If auto_grad_clip is True, these values are scaled by the learning rate.
-    q_r_grad_clip: Optional[float] = 10.0
-    v_r_grad_clip: Optional[float] = 10.0
-    v_h_e_grad_clip: Optional[float] = 10.0
-    x_h_grad_clip: Optional[float] = 10.0
-    u_r_grad_clip: Optional[float] = 10.0
+    q_r_grad_clip: Optional[float] = 1.0
+    v_r_grad_clip: Optional[float] = 1.0
+    v_h_e_grad_clip: Optional[float] = 1.0
+    x_h_grad_clip: Optional[float] = 1.0
+    u_r_grad_clip: Optional[float] = 1.0
     
     # Automatic gradient clipping: if True, the effective grad clip is scaled by
     # learning rate to keep step sizes bounded regardless of LR magnitude.
