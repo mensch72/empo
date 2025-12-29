@@ -22,13 +22,13 @@ Usage:
     python phase2_robot_policy_demo.py           # Full run (trivial env)
     python phase2_robot_policy_demo.py --quick   # Quick test (100 episodes)
     python phase2_robot_policy_demo.py --ensemble # Use random ensemble environment
+    python phase2_robot_policy_demo.py --async   # Use async actor-learner training
     
-    # Save/restore for continued training
-    python phase2_robot_policy_demo.py --save_networks model.pt  # Save all networks
+    # Save/restore for continued training (networks/policy saved by default)
+    python phase2_robot_policy_demo.py --save_networks model.pt  # Custom path for networks
     python phase2_robot_policy_demo.py --restore_networks model.pt  # Resume training
     
-    # Save and use policy for rollouts
-    python phase2_robot_policy_demo.py --save_policy policy.pt  # Save policy after training
+    # Use saved policy for rollouts only (skip training)
     python phase2_robot_policy_demo.py --use_policy policy.pt --rollouts 50  # Load & run
     
     # Advanced options
@@ -38,7 +38,9 @@ Usage:
 
 Output:
 - TensorBoard logs in outputs/phase2_demo_<env_type>/
-- Movie of rollouts with the learned policy
+- All networks saved to outputs/phase2_demo_<env_type>/all_networks.pt
+- Policy saved to outputs/phase2_demo_<env_type>/policy.pt  
+- Movie of rollouts with the learned policy (loaded from disk to verify save/restore)
 - Profiler trace (with --profile): outputs/phase2_demo_<env_type>/profiler_trace.json
 """
 
@@ -60,6 +62,7 @@ from empo.possible_goal import DeterministicGoalSampler, TabularGoalSampler, Pos
 from empo.human_policy_prior import HeuristicPotentialPolicy
 from empo.nn_based.multigrid import PathDistanceCalculator
 from empo.nn_based.phase2.config import Phase2Config
+from empo.nn_based.phase2.world_model_factory import CachedWorldModelFactory, EnsembleWorldModelFactory
 from empo.nn_based.multigrid.phase2 import train_multigrid_phase2
 from empo.nn_based.multigrid.phase2.robot_policy import MultiGridRobotPolicy
 
@@ -119,6 +122,80 @@ def configure_environment(use_ensemble: bool):
             ReachCellGoal(env, 1, (2,1)),
             ReachCellGoal(env, 1, (2,2))
         ], probabilities=[0.9, 0.1])
+
+
+# ============================================================================
+# World Model Factory Functions (for async training)
+# ============================================================================
+# These are module-level functions/classes that can be pickled for multiprocessing.
+
+def _create_trivial_env():
+    """Create the trivial demo environment."""
+    # Hardcoded grid map (same as configure_environment sets)
+    grid_map = """
+    We We We We We We
+    We Ae Ro .. .. We
+    We We Ay We We We
+    We We We We We We
+    """
+    
+    # Create environment using MultiGridEnv directly (not Phase2DemoEnv which uses globals)
+    env = MultiGridEnv(
+        map=grid_map,
+        max_steps=10,  # Fixed for trivial
+        partial_obs=False,
+        objects_set=World,
+        actions_set=SmallActions
+    )
+    return env
+
+
+class _EnsembleEnvCreator:
+    """
+    Picklable callable class for creating RandomMultigridEnv instances.
+    
+    Stores configuration as instance attributes, making it picklable for multiprocessing.
+    """
+    
+    def __init__(
+        self,
+        grid_size: int,
+        num_humans: int, 
+        num_robots: int,
+        max_steps: int,
+        wall_prob: float,
+        door_prob: float,
+        block_prob: float,
+        rock_prob: float,
+        unsteady_prob: float,
+        door_key_color: str
+    ):
+        self.grid_size = grid_size
+        self.num_humans = num_humans
+        self.num_robots = num_robots
+        self.max_steps = max_steps
+        self.wall_prob = wall_prob
+        self.door_prob = door_prob
+        self.block_prob = block_prob
+        self.rock_prob = rock_prob
+        self.unsteady_prob = unsteady_prob
+        self.door_key_color = door_key_color
+    
+    def __call__(self):
+        """Create a new RandomMultigridEnv with stored configuration."""
+        return RandomMultigridEnv(
+            grid_size=self.grid_size,
+            num_humans=self.num_humans,
+            num_robots=self.num_robots,
+            max_steps=self.max_steps,
+            seed=None,  # New seed each time for variety
+            wall_prob=self.wall_prob,
+            door_prob=self.door_prob,
+            block_prob=self.block_prob,
+            rock_prob=self.rock_prob,
+            unsteady_prob=self.unsteady_prob,
+            door_key_color=self.door_key_color
+        )
 
 
 # ============================================================================
@@ -567,6 +644,7 @@ def main(
     debug: bool = False,
     profile: bool = False,
     use_ensemble: bool = False,
+    use_async: bool = False,
     save_networks_path: str = None,
     save_policy_path: str = None,
     restore_networks_path: str = None,
@@ -643,6 +721,10 @@ def main(
         warmup_q_r_steps = 1000
         beta_r_rampup_steps = 2000
     
+    # Print async mode status
+    if use_async:
+        print("[ASYNC MODE] Using actor-learner architecture for parallel training")
+    
     # Override with profile settings
     if profile:
         print("[PROFILE MODE] Will profile training with torch.profiler")
@@ -658,14 +740,44 @@ def main(
     os.makedirs(output_dir, exist_ok=True)
     tensorboard_dir = os.path.join(output_dir, 'tensorboard')
     
+    # Default save paths for networks and policy
+    default_networks_path = os.path.join(output_dir, 'all_networks.pt')
+    default_policy_path = os.path.join(output_dir, 'policy.pt')
+    
     # Create environment
     print("Creating environment...")
     if env_type == "ensemble":
         env = create_ensemble_env(seed=42)  # Use fixed seed for reproducibility
         goal_sampler = SmallGoalSampler(env, seed=123)
+        
+        # Create world model factory for async training (ensemble mode)
+        if use_async:
+            env_creator = _EnsembleEnvCreator(
+                grid_size=ENSEMBLE_GRID_SIZE,
+                num_humans=ENSEMBLE_NUM_HUMANS,
+                num_robots=ENSEMBLE_NUM_ROBOTS,
+                max_steps=MAX_STEPS,
+                wall_prob=WALL_PROBABILITY,
+                door_prob=DOOR_PROBABILITY,
+                block_prob=BLOCK_PROBABILITY,
+                rock_prob=ROCK_PROBABILITY,
+                unsteady_prob=UNSTEADY_GROUND_PROBABILITY,
+                door_key_color=DOOR_KEY_COLOR
+            )
+            # Ensemble mode: create new env each episode
+            world_model_factory = EnsembleWorldModelFactory(env_creator, episodes_per_env=1)
+        else:
+            world_model_factory = None
     else:
         env = Phase2DemoEnv(max_steps=MAX_STEPS)
         goal_sampler = goal_sampler_factory(env)
+        
+        # Create world model factory for async training (trivial mode)
+        if use_async:
+            # Trivial mode: use cached (same env for all episodes)
+            world_model_factory = CachedWorldModelFactory(_create_trivial_env)
+        else:
+            world_model_factory = None
     env.reset()
     
     # Identify agents
@@ -701,15 +813,8 @@ def main(
     )
     
     # goal_sampler was already created above (ensemble uses SmallGoalSampler, trivial uses factory)
-    
-    # Wrapper to adapt goal sampler to trainer's expected interface
-    def goal_sampler_fn(state, human_idx):
-        goal, _ = goal_sampler.sample(state, human_idx)
-        return goal
-    
-    # Wrapper to adapt human policy to trainer's expected interface
-    def human_policy_fn(state, human_idx, goal):
-        return human_policy.sample(state, human_idx, goal)
+    # Both goal_sampler and human_policy are passed directly to the trainer
+    # (no wrappers needed - trainer expects .sample() methods on these objects)
     
     print()
     
@@ -746,6 +851,10 @@ def main(
         warmup_u_r_steps=warmup_u_r_steps,
         warmup_q_r_steps=warmup_q_r_steps,
         beta_r_rampup_steps=beta_r_rampup_steps,
+        # Async training mode (actor-learner architecture)
+        async_training=use_async,
+        num_actors=1,  # 1 actor is usually fast enough
+        async_min_buffer_size=100 if quick_mode else 500,  # Smaller for quick mode
     )
     
     # If using policy directly (no training), skip to rollouts
@@ -799,8 +908,8 @@ def main(
                     world_model=env,
                     human_agent_indices=human_indices,
                     robot_agent_indices=robot_indices,
-                    human_policy_prior=human_policy_fn,
-                    goal_sampler=goal_sampler_fn,
+                    human_policy_prior=human_policy,
+                    goal_sampler=goal_sampler,
                     config=config,
                     hidden_dim=hidden_dim,
                     goal_feature_dim=goal_feature_dim,
@@ -811,6 +920,7 @@ def main(
                     tensorboard_dir=tensorboard_dir,
                     profiler=prof,
                     restore_networks_path=restore_networks_path,
+                    world_model_factory=world_model_factory,
                 )
             
             # Print profiler summary
@@ -837,8 +947,8 @@ def main(
                 world_model=env,
                 human_agent_indices=human_indices,
                 robot_agent_indices=robot_indices,
-                human_policy_prior=human_policy_fn,
-                goal_sampler=goal_sampler_fn,
+                human_policy_prior=human_policy,
+                goal_sampler=goal_sampler,
                 config=config,
                 hidden_dim=hidden_dim,
                 goal_feature_dim=goal_feature_dim,
@@ -848,6 +958,7 @@ def main(
                 debug=debug,
                 tensorboard_dir=tensorboard_dir,
                 restore_networks_path=restore_networks_path,
+                world_model_factory=world_model_factory,
             )
         
         elapsed = time.time() - t0
@@ -862,15 +973,18 @@ def main(
             loss_str = ", ".join(f"{k}={v:.4f}" for k, v in losses.items() if v > 0)
             print(f"  Episode {episode_num}: {loss_str}")
     
-    # Save networks/policy after training if requested (only if trainer is available)
+    # Save networks/policy after training (default paths unless overridden)
+    # Always save by default to enable testing save/restore functionality
     if trainer is not None:
-        if save_networks_path:
-            print(f"\nSaving all networks to: {save_networks_path}")
-            trainer.save_all_networks(save_networks_path)
+        # Determine save paths (use defaults if not specified)
+        networks_save_path = save_networks_path if save_networks_path else default_networks_path
+        policy_save_path = save_policy_path if save_policy_path else default_policy_path
         
-        if save_policy_path:
-            print(f"\nSaving policy to: {save_policy_path}")
-            trainer.save_policy(save_policy_path)
+        print(f"\nSaving all networks to: {networks_save_path}")
+        trainer.save_all_networks(networks_save_path)
+        
+        print(f"Saving policy to: {policy_save_path}")
+        trainer.save_policy(policy_save_path)
     
     # Generate rollout movie using env's built-in video recording
     # Override num_rollouts if specified
@@ -879,11 +993,16 @@ def main(
     
     print(f"\nGenerating {num_rollouts} rollouts with learned policy...")
     
-    # Create policy from trained Q network for rollouts (or use loaded policy in use_policy mode)
+    # Always load policy from disk for rollouts to test save/restore functionality
+    # This verifies that the saved policy works correctly
     if use_policy_path:
-        policy = MultiGridRobotPolicy(path=use_policy_path, device=device)
+        rollout_policy_path = use_policy_path
     else:
-        policy = MultiGridRobotPolicy(q_network=robot_q_network, beta_r=config.beta_r, device=device)
+        # Use the policy we just saved (or the default path)
+        rollout_policy_path = save_policy_path if save_policy_path else default_policy_path
+    
+    print(f"Loading policy from disk for rollouts: {rollout_policy_path}")
+    policy = MultiGridRobotPolicy(path=rollout_policy_path, device=device)
     
     # Start video recording
     env.start_video_recording()
@@ -935,6 +1054,8 @@ if __name__ == "__main__":
                         help='Enable verbose debug output')
     parser.add_argument('--profile', '-p', action='store_true',
                         help='Profile training with torch.profiler (outputs trace.json)')
+    parser.add_argument('--async', '-a', dest='use_async', action='store_true',
+                        help='Use async actor-learner training (tests async mode on CPU)')
     
     # Save/restore options
     parser.add_argument('--save_networks', type=str, default=None, metavar='PATH',
@@ -958,6 +1079,7 @@ if __name__ == "__main__":
         debug=args.debug,
         profile=args.profile,
         use_ensemble=args.ensemble,
+        use_async=args.use_async,
         save_networks_path=args.save_networks,
         save_policy_path=args.save_policy,
         restore_networks_path=args.restore_networks,

@@ -75,6 +75,28 @@ class HumanPolicyPrior(ABC):
         """
         self.world_model = world_model
         self.human_agent_indices = human_agent_indices
+    
+    def set_world_model(self, world_model: 'WorldModel') -> None:
+        """
+        Set or update the world model reference.
+        
+        This is used for async training where the world_model cannot be pickled
+        and must be recreated in child processes.
+        
+        Args:
+            world_model: The world model (environment) to use.
+        """
+        self.world_model = world_model
+    
+    def __getstate__(self):
+        """Exclude world_model from pickling (it contains thread locks)."""
+        state = self.__dict__.copy()
+        state['world_model'] = None
+        return state
+    
+    def __setstate__(self, state):
+        """Restore state after unpickling (world_model will be set later)."""
+        self.__dict__.update(state)
 
     @abstractmethod
     def __call__(
@@ -479,6 +501,28 @@ class HeuristicPotentialPolicy(HumanPolicyPrior):
         self.path_calculator = path_calculator
         self.beta = beta
         self.num_actions = num_actions
+    
+    def set_world_model(self, world_model: 'WorldModel') -> None:
+        """
+        Set or update the world model reference.
+        
+        For HeuristicPotentialPolicy, this also recreates the path_calculator
+        to reflect the new environment's wall layout.
+        
+        Args:
+            world_model: The world model (environment) to use.
+        """
+        super().set_world_model(world_model)
+        
+        # Recreate path calculator for new environment
+        # Import here to avoid circular dependency
+        from empo.nn_based.multigrid import PathDistanceCalculator
+        
+        self.path_calculator = PathDistanceCalculator(
+            grid_height=world_model.height,
+            grid_width=world_model.width,
+            world_model=world_model
+        )
     
     def _get_goal_tuple(self, possible_goal: 'PossibleGoal') -> tuple:
         """

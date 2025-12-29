@@ -8,6 +8,7 @@ of the EMPO framework (equations 4-9).
 import random
 import copy
 import multiprocessing as mp
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from queue import Empty
@@ -68,8 +69,8 @@ class BasePhase2Trainer(ABC):
         config: Phase2Config with hyperparameters.
         human_agent_indices: List of human agent indices.
         robot_agent_indices: List of robot agent indices.
-        human_policy_prior: Callable that returns human action given state and goal.
-        goal_sampler: Callable that samples a goal for a human.
+        human_policy_prior: HumanPolicyPrior instance with .sample(state, human_idx, goal) method.
+        goal_sampler: PossibleGoalSampler instance with .sample(state, human_idx) -> (goal, weight) method.
         device: Torch device for computation.
         verbose: Enable progress output (tqdm progress bar).
         debug: Enable verbose debug output (very detailed, for debugging).
@@ -139,6 +140,30 @@ class BasePhase2Trainer(ABC):
         
         if self.debug:
             print("[DEBUG] BasePhase2Trainer.__init__: Initialization complete.")
+    
+    def __getstate__(self):
+        """Exclude unpicklable objects for async training (multiprocessing).
+        
+        Excludes:
+        - TensorBoard writer (contains thread locks)
+        - Profiler (contains thread locks)
+        - Replay buffer (not needed in actor processes)
+        """
+        state = self.__dict__.copy()
+        # Don't pickle TensorBoard writer - contains thread locks
+        state['writer'] = None
+        # Don't pickle profiler - may contain locks
+        state['profiler'] = None
+        # Don't pickle replay buffer - not needed in actor processes
+        state['replay_buffer'] = None
+        return state
+    
+    def __setstate__(self, state):
+        """Restore state after unpickling for async training."""
+        self.__dict__.update(state)
+        # Recreate empty replay buffer if needed
+        if self.replay_buffer is None:
+            self.replay_buffer = Phase2ReplayBuffer(capacity=self.config.buffer_size)
     
     def _init_target_networks(self):
         """Initialize target networks as copies of main networks."""
@@ -357,14 +382,15 @@ class BasePhase2Trainer(ABC):
         actions = []
         for h in self.human_agent_indices:
             goal = goals.get(h)
-            action = self.human_policy_prior(state, h, goal)
+            action = self.human_policy_prior.sample(state, h, goal)
             actions.append(action)
         return actions
     
     def collect_transition(
         self,
         state: Any,
-        goals: Dict[int, Any]
+        goals: Dict[int, Any],
+        goal_weights: Dict[int, float]
     ) -> Tuple[Phase2Transition, Any]:
         """
         Collect one transition from the environment.
@@ -372,6 +398,7 @@ class BasePhase2Trainer(ABC):
         Args:
             state: Current state.
             goals: Current goal assignments.
+            goal_weights: Weights for each goal (from goal sampler).
         
         Returns:
             Tuple of (transition, next_state).
@@ -411,6 +438,7 @@ class BasePhase2Trainer(ABC):
             state=state,
             robot_action=robot_action,
             goals=goals.copy(),
+            goal_weights=goal_weights.copy(),
             human_actions=human_actions,
             next_state=next_state,
             transition_probs_by_action=transition_probs_by_action
@@ -656,6 +684,7 @@ class BasePhase2Trainer(ABC):
             for transition in x_h_batch:
                 s = transition.state
                 goals = transition.goals
+                goal_weights = transition.goal_weights
                 
                 # Determine which human-goal pairs to use for X_h loss
                 if self.config.x_h_sample_humans is None:
@@ -668,6 +697,7 @@ class BasePhase2Trainer(ABC):
                 
                 for h_x in humans_for_x_h:
                     g_h_x = goals[h_x]
+                    w_h_x = goal_weights[h_x]
                     x_h_pred = self.networks.x_h.encode_and_forward(
                         s, None, h_x, self.device
                     )
@@ -678,7 +708,7 @@ class BasePhase2Trainer(ABC):
                             s, None, h_x, g_h_x, self.device
                         )
                     
-                    target_x_h = self.networks.x_h.compute_target(v_h_e_for_x.squeeze())
+                    target_x_h = self.networks.x_h.compute_target(v_h_e_for_x.squeeze(), w_h_x)
                     losses['x_h'] = losses['x_h'] + (x_h_pred.squeeze() - target_x_h) ** 2
                     x_h_count += 1
         
@@ -821,16 +851,31 @@ class BasePhase2Trainer(ABC):
     
     class _ActorState:
         """Mutable state for actor (environment interaction)."""
-        def __init__(self, state, goals, env_step_count: int = 0):
+        def __init__(self, state, goals, goal_weights, env_step_count: int = 0):
             self.state = state
             self.goals = goals
+            self.goal_weights = goal_weights
             self.env_step_count = env_step_count  # Steps since last env reset
+    
+    def _sample_goals(self, state) -> Tuple[Dict[int, Any], Dict[int, float]]:
+        """Sample goals for all humans using the goal sampler.
+        
+        Returns:
+            Tuple of (goals dict, goal_weights dict).
+        """
+        goals = {}
+        goal_weights = {}
+        for h in self.human_agent_indices:
+            goal, weight = self.goal_sampler.sample(state, h)
+            goals[h] = goal
+            goal_weights[h] = weight
+        return goals, goal_weights
     
     def _init_actor_state(self) -> "_ActorState":
         """Initialize actor state with fresh environment."""
         state = self.reset_environment()
-        goals = {h: self.goal_sampler(state, h) for h in self.human_agent_indices}
-        return BasePhase2Trainer._ActorState(state, goals, 0)
+        goals, goal_weights = self._sample_goals(state)
+        return BasePhase2Trainer._ActorState(state, goals, goal_weights, 0)
     
     def _actor_step(self, actor_state: "_ActorState") -> Optional[Phase2Transition]:
         """
@@ -847,13 +892,15 @@ class BasePhase2Trainer(ABC):
             The collected transition, or None if collection failed.
         """
         # Collect one transition
-        transition, next_state = self.collect_transition(actor_state.state, actor_state.goals)
+        transition, next_state = self.collect_transition(
+            actor_state.state, actor_state.goals, actor_state.goal_weights
+        )
         
         # Check if transition failed (environment ended or error)
         if transition is None:
             # Reset environment and return None
             actor_state.state = self.reset_environment()
-            actor_state.goals = {h: self.goal_sampler(actor_state.state, h) for h in self.human_agent_indices}
+            actor_state.goals, actor_state.goal_weights = self._sample_goals(actor_state.state)
             actor_state.env_step_count = 0
             return None
         
@@ -863,12 +910,12 @@ class BasePhase2Trainer(ABC):
         
         # Resample goals with some probability
         if random.random() < self.config.goal_resample_prob:
-            actor_state.goals = {h: self.goal_sampler(actor_state.state, h) for h in self.human_agent_indices}
+            actor_state.goals, actor_state.goal_weights = self._sample_goals(actor_state.state)
         
         # Reset environment periodically
         if actor_state.env_step_count >= self.config.steps_per_episode:
             actor_state.state = self.reset_environment()
-            actor_state.goals = {h: self.goal_sampler(actor_state.state, h) for h in self.human_agent_indices}
+            actor_state.goals, actor_state.goal_weights = self._sample_goals(actor_state.state)
             actor_state.env_step_count = 0
         
         return transition
@@ -1122,6 +1169,7 @@ class BasePhase2Trainer(ABC):
                     transition.state,
                     transition.robot_action,
                     transition.goals,
+                    transition.goal_weights,
                     transition.human_actions,
                     transition.next_state,
                     transition.transition_probs_by_action
@@ -1206,6 +1254,9 @@ class BasePhase2Trainer(ABC):
         # Actors read this to get correct exploration parameters
         shared_training_steps = ctx.Value('i', self.training_step_count)
         
+        # Shared counter for environment steps (actors increment, learner reads for logging)
+        shared_env_steps = ctx.Value('i', self.total_env_steps)
+
         # Manager for sharing policy weights
         manager = ctx.Manager()
         policy_lock = manager.Lock()
@@ -1224,6 +1275,7 @@ class BasePhase2Trainer(ABC):
                     transition_queue,
                     stop_event,
                     shared_training_steps,
+                    shared_env_steps,
                     shared_policy,
                     policy_lock,
                 ),
@@ -1240,6 +1292,7 @@ class BasePhase2Trainer(ABC):
             transition_queue=transition_queue,
             stop_event=stop_event,
             shared_training_steps=shared_training_steps,
+            shared_env_steps=shared_env_steps,
             shared_policy=shared_policy,
             policy_lock=policy_lock,
             num_training_steps=num_training_steps,
@@ -1280,6 +1333,7 @@ class BasePhase2Trainer(ABC):
         transition_queue: mp.Queue,
         stop_event: mp.Event,
         shared_training_steps: mp.Value,
+        shared_env_steps: mp.Value,
         shared_policy: Dict,
         policy_lock,
     ) -> None:
@@ -1289,12 +1343,17 @@ class BasePhase2Trainer(ABC):
         This is needed because we can't pickle the full trainer object.
         Subclasses should override _create_actor_env() to provide the environment.
         """
+        # Limit PyTorch threads to avoid CPU oversubscription
+        # Each actor only needs 1 thread since it does lightweight inference
+        torch.set_num_threads(1)
+        
         try:
             self._actor_loop_async(
                 actor_id=actor_id,
                 transition_queue=transition_queue,
                 stop_event=stop_event,
                 shared_training_steps=shared_training_steps,
+                shared_env_steps=shared_env_steps,
                 shared_policy=shared_policy,
                 policy_lock=policy_lock,
             )
@@ -1309,6 +1368,7 @@ class BasePhase2Trainer(ABC):
         transition_queue: mp.Queue,
         stop_event: mp.Event,
         shared_training_steps: mp.Value,
+        shared_env_steps: mp.Value,
         shared_policy: Dict,
         policy_lock,
     ) -> None:
@@ -1325,6 +1385,16 @@ class BasePhase2Trainer(ABC):
         actor_state = self._init_actor_state()
         
         while not stop_event.is_set():
+            # Throttle if actors are too far ahead of learner
+            if self.config.max_env_steps_per_training_step is not None:
+                while not stop_event.is_set():
+                    training_steps = shared_training_steps.value
+                    env_steps = shared_env_steps.value
+                    max_env = training_steps * self.config.max_env_steps_per_training_step
+                    if env_steps < max_env or training_steps == 0:
+                        break
+                    time.sleep(0.01)  # Wait 10ms before checking again
+            
             # Sync policy and training_step_count periodically
             steps_since_sync += 1
             if steps_since_sync >= self.config.actor_sync_freq or local_policy_version < 0:
@@ -1347,22 +1417,27 @@ class BasePhase2Trainer(ABC):
                     'state': transition.state,
                     'robot_action': transition.robot_action,
                     'goals': transition.goals,
+                    'goal_weights': transition.goal_weights,
                     'human_actions': transition.human_actions,
                     'next_state': transition.next_state,
                     'transition_probs_by_action': transition.transition_probs_by_action,
                 }
                 
                 try:
-                    transition_queue.put_nowait(trans_dict)
-                except:
-                    # Queue full, skip this transition
+                    transition_queue.put(trans_dict, timeout=1.0)
+                    # Increment shared env steps counter (for TensorBoard logging)
+                    with shared_env_steps.get_lock():
+                        shared_env_steps.value += 1
+                except Exception as e:
+                    # Queue full or serialization error - skip transition
                     pass
-    
+
     def _learner_loop(
         self,
         transition_queue: mp.Queue,
         stop_event: mp.Event,
         shared_training_steps: mp.Value,
+        shared_env_steps: mp.Value,
         shared_policy: Dict,
         policy_lock,
         num_training_steps: int,
@@ -1372,6 +1447,9 @@ class BasePhase2Trainer(ABC):
         
         Uses shared _learner_step() logic for training, but consumes
         transitions from queue instead of collecting them directly.
+        
+        Args:
+            shared_env_steps: Shared counter of env steps produced by actors (for logging).
         """
         history = []
         policy_updates = 0
@@ -1398,13 +1476,13 @@ class BasePhase2Trainer(ABC):
         if self.verbose:
             print(f"[Learner] Waiting for {self.config.async_min_buffer_size} transitions...")
         
-        while self.buffer.size() < self.config.async_min_buffer_size:
+        while len(self.replay_buffer) < self.config.async_min_buffer_size:
             self._consume_transitions(transition_queue, max_items=100)
             if stop_event.is_set():
                 break
         
         if self.verbose:
-            print(f"[Learner] Buffer ready with {self.buffer.size()} transitions. Starting training.")
+            print(f"[Learner] Buffer ready with {len(self.replay_buffer)} transitions. Starting training.")
         
         # Main training loop
         while self.training_step_count < num_training_steps:
@@ -1412,7 +1490,10 @@ class BasePhase2Trainer(ABC):
             self._consume_transitions(transition_queue, max_items=50)
             
             # Do training step if buffer has enough samples
-            if self.buffer.size() >= self.config.batch_size:
+            if len(self.replay_buffer) >= self.config.batch_size:
+                # Update total_env_steps from shared counter before logging
+                self.total_env_steps = shared_env_steps.value
+                
                 # Use shared learner logic
                 losses = self._learner_step(learner_state, pbar)
                 
@@ -1469,6 +1550,7 @@ class BasePhase2Trainer(ABC):
                     state=trans_dict['state'],
                     robot_action=trans_dict['robot_action'],
                     goals=trans_dict['goals'],
+                    goal_weights=trans_dict['goal_weights'],
                     human_actions=trans_dict['human_actions'],
                     next_state=trans_dict['next_state'],
                     transition_probs_by_action=trans_dict.get('transition_probs_by_action')

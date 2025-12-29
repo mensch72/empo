@@ -232,8 +232,8 @@ class Phase2Config:
     
     # Number of parallel actor processes for data collection.
     # Each actor has its own environment copy and runs with a frozen policy.
-    # More actors = more diverse data, but diminishing returns after ~4-8.
-    num_actors: int = 4
+    # More actors = more diverse data, but often 1 actor is fast enough.
+    num_actors: int = 1
     
     # Steps between syncing frozen policy from learner to actors.
     # Lower = more on-policy but more sync overhead.
@@ -243,6 +243,11 @@ class Phase2Config:
     # Minimum transitions in buffer before training starts (for async mode).
     # Ensures actors have collected enough initial data.
     async_min_buffer_size: int = 1000
+    
+    # Maximum ratio of env steps to training steps before actors pause.
+    # Prevents actors from getting too far ahead of the learner.
+    # Set to None to disable throttling.
+    max_env_steps_per_training_step: Optional[float] = 10.0
     
     # Queue size for actor-to-learner transition queue.
     # Should be large enough to buffer actor output during learner training.

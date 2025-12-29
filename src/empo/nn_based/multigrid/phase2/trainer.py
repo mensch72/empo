@@ -48,12 +48,14 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         config: Phase2Config.
         human_agent_indices: List of human agent indices.
         robot_agent_indices: List of robot agent indices.
-        human_policy_prior: Callable returning human action given state, index, goal.
-        goal_sampler: Callable returning a goal for a human.
+        human_policy_prior: HumanPolicyPrior instance with .sample(state, human_idx, goal) method.
+        goal_sampler: PossibleGoalSampler instance with .sample(state, human_idx) -> (goal, weight) method.
         device: Torch device.
         verbose: Enable progress output (tqdm progress bar).
         debug: Enable verbose debug output.
         tensorboard_dir: Directory for TensorBoard logs (optional).
+        world_model_factory: Optional factory for creating world models. Required for
+            async training where the environment cannot be pickled.
     """
     
     def __init__(
@@ -70,8 +72,10 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         debug: bool = False,
         tensorboard_dir: Optional[str] = None,
         profiler: Optional[Any] = None,
+        world_model_factory: Optional[Any] = None,
     ):
         self.env = env
+        self.world_model_factory = world_model_factory
         super().__init__(
             networks=networks,
             config=config,
@@ -89,6 +93,46 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         # Caching is now handled internally by the shared encoders.
         # The shared state/goal/agent encoders cache raw tensor extraction
         # (but not NN output, to preserve gradient flow).
+    
+    def __getstate__(self):
+        """Exclude env from pickling (for async training).
+        
+        Calls parent __getstate__ then also excludes env.
+        """
+        # Get parent state (excludes writer, profiler, replay_buffer)
+        state = super().__getstate__()
+        # Also exclude env - it contains thread locks
+        state['env'] = None
+        return state
+    
+    def __setstate__(self, state):
+        """Restore state after unpickling; env will be recreated from factory.
+        
+        Calls parent __setstate__ then allows env to be lazily created.
+        """
+        super().__setstate__(state)
+        # Note: env stays None until _ensure_world_model() is called
+    
+    def _ensure_world_model(self):
+        """
+        Ensure world model is available, creating from factory if needed.
+        
+        Called by reset_environment() when env is None (in async actor processes).
+        After creating the env, updates goal_sampler and human_policy_prior.
+        """
+        if self.env is None:
+            if self.world_model_factory is None:
+                raise RuntimeError(
+                    "No world_model_factory provided. For async training, "
+                    "you must pass a world_model_factory to the trainer."
+                )
+            # Create env from factory
+            self.env = self.world_model_factory.create()
+            # Update goal_sampler and human_policy_prior with new env
+            if hasattr(self.goal_sampler, 'set_world_model'):
+                self.goal_sampler.set_world_model(self.env)
+            if hasattr(self.human_policy_prior, 'set_world_model'):
+                self.human_policy_prior.set_world_model(self.env)
     
     def clear_caches(self):
         """
@@ -218,14 +262,19 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         return self.env.get_state()
     
     def reset_environment(self) -> Any:
-        """Reset environment and return initial state."""
+        """Reset environment and return initial state.
+        
+        For async training, creates env from factory if not yet created.
+        """
+        self._ensure_world_model()
         self.env.reset()
         return self.env.get_state()
     
     def collect_transition(
         self,
         state: Any,
-        goals: Dict[int, Any]
+        goals: Dict[int, Any],
+        goal_weights: Dict[int, float]
     ) -> Tuple[Phase2Transition, Any]:
         """
         Collect one transition, including pre-computed compact features.
@@ -242,12 +291,13 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         Args:
             state: Current state.
             goals: Current goal assignments.
+            goal_weights: Weights for each goal (from goal sampler).
         
         Returns:
             Tuple of (transition, next_state).
         """
         # Get base transition using parent implementation
-        transition, next_state = super().collect_transition(state, goals)
+        transition, next_state = super().collect_transition(state, goals, goal_weights)
         
         # Compute compact features for both state and next_state
         state_encoder = self.networks.q_r.state_encoder
@@ -616,6 +666,7 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         # ========================================================================
         x_h_transition_indices = []
         x_h_goals = []
+        x_h_goal_weights = []
         x_h_human_indices = []
         x_h_states_for_identity = []
         
@@ -635,6 +686,7 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
             for h_x in humans_for_x_h:
                 x_h_transition_indices.append(i)
                 x_h_goals.append(t.goals[h_x])
+                x_h_goal_weights.append(t.goal_weights[h_x])
                 x_h_human_indices.append(h_x)
                 x_h_states_for_identity.append(t.state)
         
@@ -941,7 +993,9 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
                 # Hard clamp V_h^e for inference (soft clamp is only for training V_h^e)
                 v_h_e_for_x = self.networks.v_h_e_target.apply_hard_clamp(v_h_e_for_x)
             
-            target_x_h = self.networks.x_h.compute_target(v_h_e_for_x.squeeze())
+            # Compute target X_h with goal weights: w_h * V_h^e(s, g_h)^ζ
+            x_h_weights_tensor = torch.tensor(x_h_goal_weights, device=self.device, dtype=torch.float32)
+            target_x_h = self.networks.x_h.compute_target(v_h_e_for_x.squeeze(), x_h_weights_tensor)
             loss_x_h = ((x_h_pred.squeeze() - target_x_h) ** 2).mean()
             
             # Track X_h prediction stats
@@ -1449,6 +1503,7 @@ def train_multigrid_phase2(
     tensorboard_dir: Optional[str] = None,
     profiler: Optional[Any] = None,
     restore_networks_path: Optional[str] = None,
+    world_model_factory: Optional[Any] = None,
 ) -> Tuple[MultiGridRobotQNetwork, Phase2Networks, List[Dict[str, float]], "MultiGridPhase2Trainer"]:
     """
     Train Phase 2 robot policy for a multigrid environment.
@@ -1460,8 +1515,8 @@ def train_multigrid_phase2(
         world_model: MultiGridEnv instance.
         human_agent_indices: List of human agent indices.
         robot_agent_indices: List of robot agent indices.
-        human_policy_prior: Callable(state, human_idx, goal) -> action.
-        goal_sampler: Callable(state, human_idx) -> goal.
+        human_policy_prior: HumanPolicyPrior instance with .sample(state, human_idx, goal) method.
+        goal_sampler: PossibleGoalSampler instance with .sample(state, human_idx) -> (goal, weight) method.
         config: Phase2Config (uses defaults if None).
         num_training_steps: Override config.num_training_steps if provided.
         hidden_dim: Hidden dimension for networks.
@@ -1474,6 +1529,8 @@ def train_multigrid_phase2(
         profiler: Torch profiler instance (optional).
         restore_networks_path: Path to checkpoint for restoring networks.
                                Skips warmup/rampup stages since they were already done.
+        world_model_factory: Optional factory for creating world models. Required for
+            async training where the environment cannot be pickled.
     
     Returns:
         Tuple of (robot_q_network, all_networks, training_history, trainer).
@@ -1530,6 +1587,7 @@ def train_multigrid_phase2(
         debug=debug,
         tensorboard_dir=tensorboard_dir,
         profiler=profiler,
+        world_model_factory=world_model_factory,
     )
     
     # Restore networks if checkpoint provided (skips warmup/rampup since already done)

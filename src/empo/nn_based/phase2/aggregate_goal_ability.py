@@ -128,23 +128,25 @@ class BaseAggregateGoalAbilityNetwork(nn.Module, ABC):
             self.feasible_range[1]
         )
     
-    def compute_target(self, v_h_e: torch.Tensor) -> torch.Tensor:
+    def compute_target(
+        self,
+        v_h_e: torch.Tensor,
+        goal_weight: "float | torch.Tensor" = 1.0
+    ) -> torch.Tensor:
         """
-        Compute target X_h from V_h^e values (Monte Carlo).
+        Compute target X_h from V_h^e value and goal weight.
         
-        For a sampled goal g_h:
-            target_x_h = V_h^e(s, g_h)^ζ
-        
-        This is an unbiased estimate of E[V_h^e^ζ] when goals are sampled uniformly.
+        For a sampled goal g_h with weight w_h:
+            target_x_h = w_h * V_h^e(s, g_h)^ζ
         
         Args:
-            v_h_e: V_h^e(s, g_h) value for sampled goal, shape (batch,).
+            v_h_e: V_h^e(s, g_h) value for sampled goal, shape (batch,) or scalar.
+            goal_weight: Weight for this goal sample, scalar or tensor matching v_h_e shape.
         
         Returns:
-            Target X_h values, shape (batch,).
+            Target X_h values, shape (batch,) or scalar.
         """
-        # V_h^e^ζ
-        return v_h_e ** self.zeta
+        return goal_weight * (v_h_e ** self.zeta)
     
     def compute_from_v_h_e_samples(
         self,

@@ -135,12 +135,13 @@ def test_phase2_replay_buffer():
     state = create_mock_state()
     robot_action = (0, 1)  # Two robots
     goals = {0: MockGoal((5, 5)), 1: MockGoal((3, 3))}  # Two humans with goals
+    goal_weights = {0: 1.0, 1: 1.0}  # Equal weights for both humans
     human_actions = [2, 3]
     next_state = create_mock_state()
     
     # Add transitions
     for i in range(50):
-        buffer.push(state, robot_action, goals, human_actions, next_state)
+        buffer.push(state, robot_action, goals, goal_weights, human_actions, next_state)
     
     assert len(buffer) == 50
     print(f"  ✓ Buffer length: {len(buffer)}")
@@ -160,7 +161,7 @@ def test_phase2_replay_buffer():
     # Test capacity overflow
     buffer2 = Phase2ReplayBuffer(capacity=10)
     for i in range(20):
-        buffer2.push(state, (i % 4, i % 4), goals, human_actions, next_state)
+        buffer2.push(state, (i % 4, i % 4), goals, goal_weights, human_actions, next_state)
     assert len(buffer2) == 10
     print("  ✓ Capacity overflow handled correctly")
     
