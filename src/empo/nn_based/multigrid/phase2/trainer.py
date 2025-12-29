@@ -16,6 +16,7 @@ from gym_multigrid.multigrid import MultiGridEnv
 from empo.nn_based.phase2.config import Phase2Config
 from empo.nn_based.phase2.trainer import BasePhase2Trainer, Phase2Networks
 from empo.nn_based.phase2.replay_buffer import Phase2Transition
+from empo.nn_based.phase2.robot_value_network import compute_v_r_from_components
 from empo.nn_based.multigrid import MultiGridStateEncoder
 from empo.nn_based.multigrid.goal_encoder import MultiGridGoalEncoder
 from empo.nn_based.multigrid.agent_encoder import AgentIdentityEncoder
@@ -203,6 +204,8 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         """
         Sample robot action using policy with epsilon-greedy exploration.
         
+        Uses q_r_target (frozen copy) for stable action sampling, consistent
+        with async mode where actors use a periodically-synced copy.
         Uses cached state encoding for efficiency.
         During warm-up, uses effective beta_r = 0 (uniform random policy).
         
@@ -217,8 +220,8 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         
         with torch.no_grad():
             grid, glob, agent, interactive = self._tensorize_state_cached(state)
-            q_values = self.networks.q_r.forward(grid, glob, agent, interactive)
-            return self.networks.q_r.sample_action(q_values, epsilon, beta_r=effective_beta_r)
+            q_values = self.networks.q_r_target.forward(grid, glob, agent, interactive)
+            return self.networks.q_r_target.sample_action(q_values, epsilon, beta_r=effective_beta_r)
     
     def check_goal_achieved(self, state: Any, human_idx: int, goal: Any) -> bool:
         """Check if human's goal is achieved."""
@@ -261,6 +264,69 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         self.env.step(actions)
         return self.env.get_state()
     
+    def _compute_u_r_for_encoded_state(
+        self,
+        s_encoded: Tuple[torch.Tensor, ...],
+        states: List[Any],
+        use_target: bool = True
+    ) -> torch.Tensor:
+        """
+        Compute U_r for pre-encoded state(s), handling u_r_use_network flag.
+        
+        When u_r_use_network=True, uses the U_r network.
+        When u_r_use_network=False, computes directly from X_h values:
+            y = E_h[X_h^{-ξ}], U_r = -y^η
+        
+        Args:
+            s_encoded: Pre-encoded state tensors (grid, global, agent, interactive).
+            states: Original state objects (needed for agent identity encoding).
+            use_target: If True, use target networks (x_h_target/u_r_target).
+        
+        Returns:
+            U_r values tensor of shape (batch_size,) or (1,) for single state.
+        """
+        if self.config.u_r_use_network:
+            # Use U_r network
+            if use_target:
+                _, u_r = self.networks.u_r_target.forward(*s_encoded)
+            else:
+                _, u_r = self.networks.u_r.forward(*s_encoded)
+            return u_r.squeeze()
+        else:
+            # Compute directly from X_h values
+            # For each state, compute X_h for all humans, then aggregate
+            batch_size = len(states)
+            u_r_values = []
+            
+            x_h_net = self.networks.x_h_target if use_target else self.networks.x_h
+            
+            for batch_idx, state in enumerate(states):
+                x_h_list = []
+                for h_idx in self.human_agent_indices:
+                    # Get agent identity encoding for this human
+                    agent_idx_tensor, agent_grid, agent_features = self._batch_tensorize_agent_identities(
+                        [h_idx], [state]
+                    )
+                    # Extract single-state encoded tensors
+                    s_single = tuple(t[batch_idx:batch_idx+1] for t in s_encoded)
+                    # Get X_h value
+                    x_h = x_h_net.forward(
+                        s_single[0], s_single[1], s_single[2], s_single[3],
+                        agent_idx_tensor, agent_grid, agent_features
+                    )
+                    # Clamp to prevent explosion when X_h near 0
+                    x_h_clamped = torch.clamp(x_h.squeeze(), min=1e-3, max=1.0)
+                    x_h_list.append(x_h_clamped)
+                
+                # Compute U_r: y = E_h[X_h^{-ξ}], U_r = -y^η
+                x_h_tensor = torch.stack(x_h_list)
+                x_h_powered = x_h_tensor ** (-self.config.xi)
+                y = x_h_powered.mean()
+                u_r = -(y ** self.config.eta)
+                u_r_values.append(u_r)
+            
+            return torch.stack(u_r_values) if batch_size > 1 else u_r_values[0].unsqueeze(0)
+
     def reset_environment(self) -> Any:
         """Reset environment and return initial state.
         
@@ -428,14 +494,15 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
                 # Uniform policy - no need to evaluate Q_r
                 robot_policy = torch.ones(num_actions, device=self.device) / num_actions
             else:
-                # Need Q_r to compute policy weights
+                # Need Q_r to compute policy weights - USE TARGET NETWORK
+                # (this is for computing target values, so must use frozen target)
                 s_encoded = self._batch_tensorize_states([state])
                 own_s_encoded = self._batch_tensorize_states_with_encoder(
-                    [state], self.networks.q_r.own_state_encoder
+                    [state], self.networks.q_r_target.own_state_encoder
                 )
                 with torch.no_grad():
-                    q_r_current = self.networks.q_r.forward(*s_encoded, *own_s_encoded)
-                    robot_policy = self.networks.q_r.get_policy(q_r_current, beta_r=effective_beta_r)
+                    q_r_current = self.networks.q_r_target.forward(*s_encoded, *own_s_encoded)
+                    robot_policy = self.networks.q_r_target.get_policy(q_r_current, beta_r=effective_beta_r)
                     robot_policy = robot_policy.squeeze()  # Shape: (num_actions,)
             
             # Accumulators for V_h^e: one per human
@@ -496,13 +563,16 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
                             if self.config.v_r_use_network:
                                 v_r_next = self.networks.v_r_target.forward(*s_prime_encoded)
                             else:
-                                _, u_r_next = self.networks.u_r_target.forward(*s_prime_encoded)
-                                own_s_prime = self._batch_tensorize_states_with_encoder(
-                                    [next_state], self.networks.q_r.own_state_encoder
+                                # Correctly compute U_r from X_h when u_r_use_network=False
+                                u_r_next = self._compute_u_r_for_encoded_state(
+                                    s_prime_encoded, [next_state], use_target=True
                                 )
-                                q_r_next = self.networks.q_r.forward(*s_prime_encoded, *own_s_prime)
-                                pi_r_next = self.networks.q_r.get_policy(q_r_next, beta_r=effective_beta_r)
-                                v_r_next = self.networks.v_r.compute_from_components(
+                                own_s_prime = self._batch_tensorize_states_with_encoder(
+                                    [next_state], self.networks.q_r_target.own_state_encoder
+                                )
+                                q_r_next = self.networks.q_r_target.forward(*s_prime_encoded, *own_s_prime)
+                                pi_r_next = self.networks.q_r_target.get_policy(q_r_next, beta_r=effective_beta_r)
+                                v_r_next = compute_v_r_from_components(
                                     u_r_next, q_r_next, pi_r_next
                                 )
                             action_expected_v_r += prob * v_r_next.item()
@@ -826,16 +896,19 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
                     if self.config.v_r_use_network:
                         v_r_next = self.networks.v_r_target.forward(*s_prime_encoded)
                     else:
-                        # Use frozen u_r_target for stable V_r computation
-                        _, u_r_next = self.networks.u_r_target.forward(*s_prime_encoded)
-                        # Q_r needs both encoders for proper inference
-                        own_s_prime_encoded = self._batch_tensorize_states_with_encoder(
-                            [t.next_state for t in batch],
-                            self.networks.q_r.own_state_encoder
+                        # Correctly compute U_r from X_h when u_r_use_network=False
+                        next_states = [t.next_state for t in batch]
+                        u_r_next = self._compute_u_r_for_encoded_state(
+                            s_prime_encoded, next_states, use_target=True
                         )
-                        q_r_next = self.networks.q_r.forward(*s_prime_encoded, *own_s_prime_encoded)
-                        pi_r_next = self.networks.q_r.get_policy(q_r_next, beta_r=effective_beta_r)
-                        v_r_next = self.networks.v_r.compute_from_components(
+                        # Q_r needs both encoders for proper inference - use TARGET network
+                        own_s_prime_encoded = self._batch_tensorize_states_with_encoder(
+                            next_states,
+                            self.networks.q_r_target.own_state_encoder
+                        )
+                        q_r_next = self.networks.q_r_target.forward(*s_prime_encoded, *own_s_prime_encoded)
+                        pi_r_next = self.networks.q_r_target.get_policy(q_r_next, beta_r=effective_beta_r)
+                        v_r_next = compute_v_r_from_components(
                             u_r_next, q_r_next, pi_r_next
                         )
                 target_q_r = self.config.gamma_r * v_r_next.squeeze()
@@ -1019,18 +1092,24 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
             v_r_pred = self.networks.v_r.forward(*s_encoded_detached)
             
             with torch.no_grad():
-                # Use frozen u_r_target for stable V_r target computation
-                _, u_r = self.networks.u_r_target.forward(*s_encoded_detached)
-                # Q_r needs both encoders for proper inference
+                # Compute U_r: either from target network or direct computation
+                if self.config.u_r_use_network:
+                    _, u_r = self.networks.u_r_target.forward(*s_encoded_detached)
+                else:
+                    # Direct computation from X_h target values
+                    u_r = self._compute_u_r_for_encoded_state(
+                        s_encoded_detached, [t.state for t in batch], use_target=True
+                    )
+                # Q_r needs both encoders for proper inference - use TARGET network
                 own_s_for_v = self._batch_tensorize_states_with_encoder(
                     [t.state for t in batch],
-                    self.networks.q_r.own_state_encoder
+                    self.networks.q_r_target.own_state_encoder
                 )
-                q_r_for_v = self.networks.q_r.forward(*s_encoded_detached, *own_s_for_v)
+                q_r_for_v = self.networks.q_r_target.forward(*s_encoded_detached, *own_s_for_v)
                 # Use effective beta_r for policy (0 during warm-up for independence)
-                pi_r = self.networks.q_r.get_policy(q_r_for_v, beta_r=effective_beta_r)
+                pi_r = self.networks.q_r_target.get_policy(q_r_for_v, beta_r=effective_beta_r)
             
-            target_v_r = self.networks.v_r.compute_from_components(
+            target_v_r = compute_v_r_from_components(
                 u_r.squeeze(), q_r_for_v, pi_r
             )
             losses['v_r'] = ((v_r_pred.squeeze() - target_v_r) ** 2).mean()
@@ -1455,27 +1534,33 @@ def create_phase2_networks(
         own_agent_encoder=x_h_own_agent_encoder,  # OWN (trained with X_h)
     ).to(device)
     
-    u_r = MultiGridIntrinsicRewardNetwork(
-        grid_height=grid_height,
-        grid_width=grid_width,
-        num_agents_per_color=num_agents_per_color,
-        state_feature_dim=hidden_dim,
-        hidden_dim=hidden_dim,
-        xi=config.xi,
-        eta=config.eta,
-        dropout=config.u_r_dropout,
-        state_encoder=shared_state_encoder,  # SHARED
-    ).to(device)
+    # Only create U_r network if u_r_use_network=True
+    u_r = None
+    if config.u_r_use_network:
+        u_r = MultiGridIntrinsicRewardNetwork(
+            grid_height=grid_height,
+            grid_width=grid_width,
+            num_agents_per_color=num_agents_per_color,
+            state_feature_dim=hidden_dim,
+            hidden_dim=hidden_dim,
+            xi=config.xi,
+            eta=config.eta,
+            dropout=config.u_r_dropout,
+            state_encoder=shared_state_encoder,  # SHARED
+        ).to(device)
     
-    v_r = MultiGridRobotValueNetwork(
-        grid_height=grid_height,
-        grid_width=grid_width,
-        num_agents_per_color=num_agents_per_color,
-        state_feature_dim=hidden_dim,
-        hidden_dim=hidden_dim,
-        dropout=config.v_r_dropout,
-        state_encoder=shared_state_encoder,  # SHARED
-    ).to(device)
+    # Only create V_r network if v_r_use_network=True
+    v_r = None
+    if config.v_r_use_network:
+        v_r = MultiGridRobotValueNetwork(
+            grid_height=grid_height,
+            grid_width=grid_width,
+            num_agents_per_color=num_agents_per_color,
+            state_feature_dim=hidden_dim,
+            hidden_dim=hidden_dim,
+            dropout=config.v_r_dropout,
+            state_encoder=shared_state_encoder,  # SHARED
+        ).to(device)
     
     return Phase2Networks(
         q_r=q_r,

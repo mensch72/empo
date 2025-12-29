@@ -45,6 +45,7 @@ class Phase2Config:
         lr_v_h_e: Learning rate for V_h^e network.
         lr_x_h: Learning rate for X_h network.
         lr_u_r: Learning rate for U_r network.
+        q_r_target_update_interval: Training steps between Q_r target network updates.
         v_r_target_update_interval: Training steps between V_r target network updates.
         v_h_e_target_update_interval: Training steps between V_h^e target network updates.
         x_h_target_update_interval: Training steps between X_h target network updates.
@@ -116,6 +117,7 @@ class Phase2Config:
     lr_u_r_use_1_over_t: bool = False  # DEPRECATED: Whether to use legacy 1/t decay for U_r
     
     # Target network updates
+    q_r_target_update_interval: int = 100
     v_r_target_update_interval: int = 100
     v_h_e_target_update_interval: int = 100
     x_h_target_update_interval: int = 100

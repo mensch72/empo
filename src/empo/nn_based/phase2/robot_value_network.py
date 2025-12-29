@@ -15,6 +15,34 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional, Tuple
 
 
+def compute_v_r_from_components(
+    u_r: torch.Tensor,
+    q_r: torch.Tensor,
+    pi_r: torch.Tensor
+) -> torch.Tensor:
+    """
+    Compute V_r directly from U_r, Q_r, and π_r (equation 9).
+    
+    V_r(s) = U_r(s) + Σ_{a_r} π_r(s, a_r) * Q_r(s, a_r)
+    
+    This is a standalone function that can be used without the V_r network,
+    which is useful when v_r_use_network=False.
+    
+    Args:
+        u_r: Intrinsic reward U_r(s), shape (batch,) or scalar.
+        q_r: Q-values Q_r(s, a_r), shape (batch, num_actions) or (num_actions,).
+        pi_r: Policy probabilities π_r(s), shape (batch, num_actions) or (num_actions,).
+    
+    Returns:
+        V_r values, shape (batch,) or scalar.
+    """
+    # Expected Q under policy
+    expected_q = (pi_r * q_r).sum(dim=-1)
+    
+    # V_r = U_r + E[Q_r]
+    return u_r + expected_q
+
+
 class BaseRobotValueNetwork(nn.Module, ABC):
     """
     Base class for V_r networks in Phase 2.

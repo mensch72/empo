@@ -77,7 +77,8 @@ def test_shared_state_encoder():
     
     # Create mock environment
     world_model = MockWorldModel(width=6, height=6, num_agents=2)
-    config = Phase2Config()
+    # Enable u_r_use_network and v_r_use_network so U_r and V_r networks are created for testing
+    config = Phase2Config(u_r_use_network=True, v_r_use_network=True)
     
     # Create networks with shared encoders
     networks = create_phase2_networks(

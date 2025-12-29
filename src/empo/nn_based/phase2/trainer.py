@@ -5,9 +5,11 @@ This module provides the training loop and loss computation for Phase 2
 of the EMPO framework (equations 4-9).
 """
 
+import os
 import random
 import copy
 import multiprocessing as mp
+import tempfile
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -25,7 +27,7 @@ from .robot_q_network import BaseRobotQNetwork
 from .human_goal_ability import BaseHumanGoalAchievementNetwork
 from .aggregate_goal_ability import BaseAggregateGoalAbilityNetwork
 from .intrinsic_reward_network import BaseIntrinsicRewardNetwork
-from .robot_value_network import BaseRobotValueNetwork
+from .robot_value_network import BaseRobotValueNetwork, compute_v_r_from_components
 
 # Try to import tensorboard (optional)
 try:
@@ -41,10 +43,12 @@ class Phase2Networks:
     q_r: BaseRobotQNetwork
     v_h_e: BaseHumanGoalAchievementNetwork
     x_h: BaseAggregateGoalAbilityNetwork
-    u_r: BaseIntrinsicRewardNetwork
-    v_r: BaseRobotValueNetwork
+    # U_r and V_r are optional - only created when use_network=True
+    u_r: Optional[BaseIntrinsicRewardNetwork] = None
+    v_r: Optional[BaseRobotValueNetwork] = None
     
     # Target networks (frozen copies for stable training)
+    q_r_target: Optional[BaseRobotQNetwork] = None
     v_r_target: Optional[BaseRobotValueNetwork] = None
     v_h_e_target: Optional[BaseHumanGoalAchievementNetwork] = None
     x_h_target: Optional[BaseAggregateGoalAbilityNetwork] = None
@@ -167,26 +171,38 @@ class BasePhase2Trainer(ABC):
     
     def _init_target_networks(self):
         """Initialize target networks as copies of main networks."""
-        self.networks.v_r_target = copy.deepcopy(self.networks.v_r)
+        self.networks.q_r_target = copy.deepcopy(self.networks.q_r)
         self.networks.v_h_e_target = copy.deepcopy(self.networks.v_h_e)
         self.networks.x_h_target = copy.deepcopy(self.networks.x_h)
-        self.networks.u_r_target = copy.deepcopy(self.networks.u_r)
+        
+        # Only create U_r/V_r targets if the networks exist
+        if self.networks.u_r is not None:
+            self.networks.u_r_target = copy.deepcopy(self.networks.u_r)
+        if self.networks.v_r is not None:
+            self.networks.v_r_target = copy.deepcopy(self.networks.v_r)
         
         # Freeze target networks (no gradients)
-        for param in self.networks.v_r_target.parameters():
+        for param in self.networks.q_r_target.parameters():
             param.requires_grad = False
         for param in self.networks.v_h_e_target.parameters():
             param.requires_grad = False
         for param in self.networks.x_h_target.parameters():
             param.requires_grad = False
-        for param in self.networks.u_r_target.parameters():
-            param.requires_grad = False
+        if self.networks.u_r_target is not None:
+            for param in self.networks.u_r_target.parameters():
+                param.requires_grad = False
+        if self.networks.v_r_target is not None:
+            for param in self.networks.v_r_target.parameters():
+                param.requires_grad = False
         
         # Set target networks to eval mode (disables dropout during inference)
-        self.networks.v_r_target.eval()
+        self.networks.q_r_target.eval()
         self.networks.v_h_e_target.eval()
         self.networks.x_h_target.eval()
-        self.networks.u_r_target.eval()
+        if self.networks.u_r_target is not None:
+            self.networks.u_r_target.eval()
+        if self.networks.v_r_target is not None:
+            self.networks.v_r_target.eval()
     
     def _init_optimizers(self) -> Dict[str, optim.Optimizer]:
         """Initialize optimizers for each network with weight decay."""
@@ -268,18 +284,31 @@ class BasePhase2Trainer(ABC):
         return norms
     
     def update_target_networks(self):
-        """Update target networks (hard copy)."""
-        self.networks.v_r_target.load_state_dict(self.networks.v_r.state_dict())
-        self.networks.v_h_e_target.load_state_dict(self.networks.v_h_e.state_dict())
-        self.networks.x_h_target.load_state_dict(self.networks.x_h.state_dict())
-        if self.config.u_r_use_network:
-            self.networks.u_r_target.load_state_dict(self.networks.u_r.state_dict())
+        """Update target networks (hard copy) at their individual intervals."""
+        step = self.training_step_count
         
-        # Ensure target networks stay in eval mode (disables dropout)
-        self.networks.v_r_target.eval()
-        self.networks.v_h_e_target.eval()
-        self.networks.x_h_target.eval()
-        self.networks.u_r_target.eval()
+        # Update each target network at its own interval
+        if step % self.config.q_r_target_update_interval == 0:
+            self.networks.q_r_target.load_state_dict(self.networks.q_r.state_dict())
+            self.networks.q_r_target.eval()
+        
+        if step % self.config.v_h_e_target_update_interval == 0:
+            self.networks.v_h_e_target.load_state_dict(self.networks.v_h_e.state_dict())
+            self.networks.v_h_e_target.eval()
+        
+        if step % self.config.x_h_target_update_interval == 0:
+            self.networks.x_h_target.load_state_dict(self.networks.x_h.state_dict())
+            self.networks.x_h_target.eval()
+        
+        if self.config.u_r_use_network and self.networks.u_r_target is not None:
+            if step % self.config.u_r_target_update_interval == 0:
+                self.networks.u_r_target.load_state_dict(self.networks.u_r.state_dict())
+                self.networks.u_r_target.eval()
+        
+        if self.config.v_r_use_network and self.networks.v_r_target is not None:
+            if step % self.config.v_r_target_update_interval == 0:
+                self.networks.v_r_target.load_state_dict(self.networks.v_r.state_dict())
+                self.networks.v_r_target.eval()
     
     # NOTE: tensorize_state commented out - never called anywhere in codebase
     # @abstractmethod
@@ -344,6 +373,9 @@ class BasePhase2Trainer(ABC):
         """
         Sample robot action using policy with epsilon-greedy exploration.
         
+        Uses q_r_target (frozen copy) for stable action sampling, consistent
+        with async mode where actors use a periodically-synced copy.
+        
         During warm-up, uses effective beta_r = 0 (uniform random policy).
         After warm-up, beta_r ramps up to nominal value.
         
@@ -357,10 +389,10 @@ class BasePhase2Trainer(ABC):
         effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
         
         with torch.no_grad():
-            q_values = self.networks.q_r.encode_and_forward(
+            q_values = self.networks.q_r_target.encode_and_forward(
                 state, None, self.device
             )
-            return self.networks.q_r.sample_action(
+            return self.networks.q_r_target.sample_action(
                 q_values, epsilon, beta_r=effective_beta_r
             )
     
@@ -533,6 +565,42 @@ class BasePhase2Trainer(ABC):
             u_r = -(y ** self.config.eta)
             return u_r.unsqueeze(0)  # Return with batch dim
     
+    def _compute_u_r_for_state_target(self, state: Any) -> torch.Tensor:
+        """
+        Compute U_r for a state using TARGET networks, for stable target computation.
+        
+        U_r(s) = -(E_h[X_h(s)^{-ξ}])^η
+        
+        When u_r_use_network=True, uses the U_r TARGET network.
+        When u_r_use_network=False, computes directly from X_h TARGET values.
+        
+        Args:
+            state: Environment state.
+            
+        Returns:
+            U_r value as a tensor.
+        """
+        if self.config.u_r_use_network:
+            # Use U_r TARGET network
+            _, u_r = self.networks.u_r_target.encode_and_forward(state, None, self.device)
+            return u_r
+        else:
+            # Compute directly from X_h TARGET values
+            x_h_values = []
+            for h in self.human_agent_indices:
+                x_h = self.networks.x_h_target.encode_and_forward(state, None, h, self.device)
+                # Clamp X_h to (0, 1] to prevent explosion when X_h is near 0
+                x_h_clamped = torch.clamp(x_h.squeeze(), min=1e-3, max=1.0)
+                x_h_values.append(x_h_clamped)
+            
+            # Stack and compute U_r using the formula:
+            # y = E_h[X_h^{-ξ}], U_r = -y^η
+            x_h_tensor = torch.stack(x_h_values)  # (num_humans,)
+            x_h_powered = x_h_tensor ** (-self.config.xi)
+            y = x_h_powered.mean()
+            u_r = -(y ** self.config.eta)
+            return u_r.unsqueeze(0)  # Return with batch dim
+    
     def compute_losses(
         self,
         batch: List[Phase2Transition],
@@ -655,10 +723,11 @@ class BasePhase2Trainer(ABC):
                         )
                     else:
                         # Compute V_r directly: V_r(s') = U_r(s') + π_r(s') · Q_r(s')
-                        u_r_next = self._compute_u_r_for_state(s_prime)
-                        q_r_next = self.networks.q_r.encode_and_forward(s_prime, None, self.device)
-                        pi_r_next = self.networks.q_r.get_policy(q_r_next, beta_r=effective_beta_r)
-                        v_r_next = self.networks.v_r.compute_from_components(
+                        # Use TARGET networks for stable targets
+                        u_r_next = self._compute_u_r_for_state_target(s_prime)
+                        q_r_next = self.networks.q_r_target.encode_and_forward(s_prime, None, self.device)
+                        pi_r_next = self.networks.q_r_target.get_policy(q_r_next, beta_r=effective_beta_r)
+                        v_r_next = compute_v_r_from_components(
                             u_r_next.squeeze(), q_r_next.squeeze(), pi_r_next.squeeze()
                         )
                 
@@ -670,11 +739,12 @@ class BasePhase2Trainer(ABC):
                 v_r_pred = self.networks.v_r.encode_and_forward(s, None, self.device)
                 
                 with torch.no_grad():
-                    u_r = self._compute_u_r_for_state(s)
-                    q_r_for_v = self.networks.q_r.encode_and_forward(s, None, self.device)
-                    pi_r = self.networks.q_r.get_policy(q_r_for_v, beta_r=effective_beta_r)
+                    # Use TARGET networks for stable V_r targets
+                    u_r = self._compute_u_r_for_state_target(s)
+                    q_r_for_v = self.networks.q_r_target.encode_and_forward(s, None, self.device)
+                    pi_r = self.networks.q_r_target.get_policy(q_r_for_v, beta_r=effective_beta_r)
                 
-                target_v_r = self.networks.v_r.compute_from_components(
+                target_v_r = compute_v_r_from_components(
                     u_r.squeeze(), q_r_for_v.squeeze(), pi_r.squeeze()
                 )
                 losses['v_r'] = losses['v_r'] + (v_r_pred.squeeze() - target_v_r) ** 2
@@ -820,9 +890,8 @@ class BasePhase2Trainer(ABC):
             grad_norms[name] = self._compute_single_grad_norm(name)
             self.optimizers[name].step()
         
-        # Update target networks periodically (based on learning steps)
-        if self.training_step_count % self.config.v_r_target_update_interval == 0:
-            self.update_target_networks()
+        # Update target networks (each at its own interval)
+        self.update_target_networks()
         
         return loss_values, grad_norms, prediction_stats
     
@@ -1133,8 +1202,10 @@ class BasePhase2Trainer(ABC):
         self.networks.q_r.train()
         self.networks.v_h_e.train()
         self.networks.x_h.train()
-        self.networks.u_r.train()
-        self.networks.v_r.train()
+        if self.networks.u_r is not None:
+            self.networks.u_r.train()
+        if self.networks.v_r is not None:
+            self.networks.v_r.train()
         
         # Log initial stage
         if self.verbose:
@@ -1193,8 +1264,10 @@ class BasePhase2Trainer(ABC):
         self.networks.q_r.eval()
         self.networks.v_h_e.eval()
         self.networks.x_h.eval()
-        self.networks.u_r.eval()
-        self.networks.v_r.eval()
+        if self.networks.u_r is not None:
+            self.networks.u_r.eval()
+        if self.networks.v_r is not None:
+            self.networks.v_r.eval()
         
         # Close TensorBoard writer
         if self.writer is not None:
@@ -1461,8 +1534,10 @@ class BasePhase2Trainer(ABC):
         self.networks.q_r.train()
         self.networks.v_h_e.train()
         self.networks.x_h.train()
-        self.networks.u_r.train()
-        self.networks.v_r.train()
+        if self.networks.u_r is not None:
+            self.networks.u_r.train()
+        if self.networks.v_r is not None:
+            self.networks.v_r.train()
         
         if self.verbose:
             active = self.config.get_active_networks(self.training_step_count)
@@ -1520,8 +1595,10 @@ class BasePhase2Trainer(ABC):
         self.networks.q_r.eval()
         self.networks.v_h_e.eval()
         self.networks.x_h.eval()
-        self.networks.u_r.eval()
-        self.networks.v_r.eval()
+        if self.networks.u_r is not None:
+            self.networks.u_r.eval()
+        if self.networks.v_r is not None:
+            self.networks.v_r.eval()
         
         # Close TensorBoard writer
         if self.writer is not None:
@@ -1562,3 +1639,146 @@ class BasePhase2Trainer(ABC):
                 break
         
         return consumed
+    
+    # ==================== Save/Load Methods ====================
+    
+    def save_all_networks(self, path: str) -> None:
+        """
+        Save all networks to a file.
+        
+        Saves all trained networks (Q_r, V_h^e, X_h, U_r, V_r) along with their
+        target networks. This allows resuming training or using the full model.
+        
+        Args:
+            path: Path to save the checkpoint file.
+        """
+        checkpoint = {
+            'q_r': self.networks.q_r.state_dict(),
+            'v_h_e': self.networks.v_h_e.state_dict(),
+            'x_h': self.networks.x_h.state_dict(),
+            'total_env_steps': self.total_env_steps,
+            'training_step_count': self.training_step_count,
+            'config': {
+                'gamma_r': self.config.gamma_r,
+                'gamma_h': self.config.gamma_h,
+                'beta_r': self.config.beta_r,
+                'zeta': self.config.zeta,
+                'xi': self.config.xi,
+                'eta': self.config.eta,
+                'u_r_use_network': self.config.u_r_use_network,
+                'v_r_use_network': self.config.v_r_use_network,
+            }
+        }
+        
+        # Save U_r/V_r networks only if they exist
+        if self.networks.u_r is not None:
+            checkpoint['u_r'] = self.networks.u_r.state_dict()
+        if self.networks.v_r is not None:
+            checkpoint['v_r'] = self.networks.v_r.state_dict()
+        
+        # Save target networks if they exist
+        if self.networks.v_r_target is not None:
+            checkpoint['v_r_target'] = self.networks.v_r_target.state_dict()
+        if self.networks.v_h_e_target is not None:
+            checkpoint['v_h_e_target'] = self.networks.v_h_e_target.state_dict()
+        if self.networks.x_h_target is not None:
+            checkpoint['x_h_target'] = self.networks.x_h_target.state_dict()
+        if self.networks.u_r_target is not None:
+            checkpoint['u_r_target'] = self.networks.u_r_target.state_dict()
+        if self.networks.q_r_target is not None:
+            checkpoint['q_r_target'] = self.networks.q_r_target.state_dict()
+        
+        # Create directory if it doesn't exist
+        dir_path = os.path.dirname(path)
+        if dir_path:
+            os.makedirs(dir_path, exist_ok=True)
+        
+        # Try to save, fall back to tmp file on permission errors
+        try:
+            torch.save(checkpoint, path)
+        except (IOError, OSError, RuntimeError) as e:
+            # Fall back to tmp file to prevent data loss
+            basename = os.path.basename(path)
+            tmp_path = os.path.join(tempfile.gettempdir(), f'empo_fallback_{basename}')
+            print(f"WARNING: Cannot save to {path}: {e}")
+            print(f"Saving to fallback location: {tmp_path}")
+            torch.save(checkpoint, tmp_path)
+    
+    def load_all_networks(self, path: str, strict: bool = True) -> None:
+        """
+        Load all networks from a file.
+        
+        Restores all trained networks and target networks from a checkpoint.
+        
+        Args:
+            path: Path to the checkpoint file.
+            strict: If True, requires all keys to match exactly.
+        """
+        # Note: weights_only=False is required for loading checkpoints with
+        # complex nested structures. The checkpoint is trusted since it was
+        # created by save_all_networks().
+        checkpoint = torch.load(path, weights_only=False)
+        
+        self.networks.q_r.load_state_dict(checkpoint['q_r'], strict=strict)
+        self.networks.v_h_e.load_state_dict(checkpoint['v_h_e'], strict=strict)
+        self.networks.x_h.load_state_dict(checkpoint['x_h'], strict=strict)
+        
+        # Load U_r/V_r only if they exist in checkpoint AND network exists
+        if 'u_r' in checkpoint and self.networks.u_r is not None:
+            self.networks.u_r.load_state_dict(checkpoint['u_r'], strict=strict)
+        if 'v_r' in checkpoint and self.networks.v_r is not None:
+            self.networks.v_r.load_state_dict(checkpoint['v_r'], strict=strict)
+        
+        if 'total_env_steps' in checkpoint:
+            self.total_env_steps = checkpoint['total_env_steps']
+        if 'training_step_count' in checkpoint:
+            self.training_step_count = checkpoint['training_step_count']
+        
+        # Load target networks if they exist
+        if 'v_r_target' in checkpoint and self.networks.v_r_target is not None:
+            self.networks.v_r_target.load_state_dict(checkpoint['v_r_target'], strict=strict)
+        if 'v_h_e_target' in checkpoint and self.networks.v_h_e_target is not None:
+            self.networks.v_h_e_target.load_state_dict(checkpoint['v_h_e_target'], strict=strict)
+        if 'x_h_target' in checkpoint and self.networks.x_h_target is not None:
+            self.networks.x_h_target.load_state_dict(checkpoint['x_h_target'], strict=strict)
+        if 'u_r_target' in checkpoint and self.networks.u_r_target is not None:
+            self.networks.u_r_target.load_state_dict(checkpoint['u_r_target'], strict=strict)
+        if 'q_r_target' in checkpoint and self.networks.q_r_target is not None:
+            self.networks.q_r_target.load_state_dict(checkpoint['q_r_target'], strict=strict)
+    
+    def save_policy(self, path: str) -> None:
+        """
+        Save only the robot policy network (Q_r) for deployment/rollouts.
+        
+        This saves a checkpoint containing:
+        - Q_r network state dict (weights)
+        - Q_r network config (for reconstruction)
+        - beta_r parameter
+        
+        The policy can be loaded with MultiGridRobotPolicy.from_checkpoint(path).
+        
+        Args:
+            path: Path to save the policy file.
+        """
+        checkpoint = {
+            'q_r': self.networks.q_r.state_dict(),
+            'beta_r': self.config.beta_r,
+            # Network config for reconstruction
+            'q_r_config': self.networks.q_r.get_config(),
+        }
+        
+        # Create directory if it doesn't exist
+        dir_path = os.path.dirname(path)
+        if dir_path:
+            os.makedirs(dir_path, exist_ok=True)
+        
+        # Try to save, fall back to tmp file on permission errors
+        try:
+            torch.save(checkpoint, path)
+        except (IOError, OSError, RuntimeError) as e:
+            # Fall back to tmp file to prevent data loss
+            basename = os.path.basename(path)
+            tmp_path = os.path.join(tempfile.gettempdir(), f'empo_fallback_{basename}')
+            print(f"WARNING: Cannot save to {path}: {e}")
+            print(f"Saving to fallback location: {tmp_path}")
+            torch.save(checkpoint, tmp_path)

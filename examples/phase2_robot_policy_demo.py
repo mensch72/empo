@@ -504,8 +504,10 @@ def run_policy_rollout(
     # This ensures consistent value predictions for the same state
     robot_q_network.eval()
     if networks is not None:
-        networks.u_r.eval()
-        networks.v_r.eval()
+        if networks.u_r is not None:
+            networks.u_r.eval()
+        if networks.v_r is not None:
+            networks.v_r.eval()
         networks.v_h_e.eval()
         networks.x_h.eval()
     
@@ -543,7 +545,7 @@ def run_policy_rollout(
             v_r_val = 0.0
             
             # Check if we have a U_r network with encoder, otherwise compute from X_h
-            if hasattr(networks.u_r, 'state_encoder') and networks.u_r.state_encoder is not None:
+            if networks.u_r is not None and hasattr(networks.u_r, 'state_encoder') and networks.u_r.state_encoder is not None:
                 state_encoder = networks.u_r.state_encoder
                 # Use encode_state method (returns tuple of tensors with batch dim already)
                 s_encoded = state_encoder.tensorize_state(state, env, device)
@@ -641,6 +643,7 @@ def run_policy_rollout(
 
 def main(
     quick_mode: bool = False,
+    lightningfast_mode: bool = False,
     debug: bool = False,
     profile: bool = False,
     use_ensemble: bool = False,
@@ -694,8 +697,23 @@ def main(
         goal_feature_dim = 64
         agent_embedding_dim = 16
     
-    # Override with quick_mode settings
-    if quick_mode:
+    # Override with quick_mode or lightningfast_mode settings
+    if lightningfast_mode:
+        # Lightning fast: 1/10th of quick mode, just for syntax/import checking
+        num_training_steps = 100
+        num_rollouts = 2
+        batch_size = 8
+        x_h_batch_size = 16
+        hidden_dim = 32
+        goal_feature_dim = 16
+        agent_embedding_dim = 4
+        warmup_v_h_e_steps = 10
+        warmup_x_h_steps = 10
+        warmup_u_r_steps = 0
+        warmup_q_r_steps = 10
+        beta_r_rampup_steps = 20
+        print("[LIGHTNINGFAST MODE] Running with minimal steps for syntax checking")
+    elif quick_mode:
         num_training_steps = 1000
         num_rollouts = 10
         # Use smaller batches and network for faster iteration in quick mode
@@ -729,7 +747,7 @@ def main(
     if profile:
         print("[PROFILE MODE] Will profile training with torch.profiler")
         # Reduce training steps for profiling to get meaningful trace without waiting too long
-        if not quick_mode:
+        if not quick_mode and not lightningfast_mode:
             num_training_steps = min(num_training_steps, 2500)  # 50 episodes * 50 steps/episode
             print(f"  Reduced to {num_training_steps} training steps for profiling")
     
@@ -743,6 +761,17 @@ def main(
     # Default save paths for networks and policy
     default_networks_path = os.path.join(output_dir, 'all_networks.pt')
     default_policy_path = os.path.join(output_dir, 'policy.pt')
+    
+    # Check write permissions BEFORE expensive training
+    test_file = os.path.join(output_dir, '.write_test')
+    try:
+        with open(test_file, 'w') as f:
+            f.write('test')
+        os.remove(test_file)
+        print(f"Write check passed: {output_dir}")
+    except (IOError, OSError) as e:
+        print(f"WARNING: Cannot write to {output_dir}: {e}")
+        print("Training will proceed but results may need to be saved to /tmp")
     
     # Create environment
     print("Creating environment...")
@@ -854,7 +883,7 @@ def main(
         # Async training mode (actor-learner architecture)
         async_training=use_async,
         num_actors=1,  # 1 actor is usually fast enough
-        async_min_buffer_size=100 if quick_mode else 500,  # Smaller for quick mode
+        async_min_buffer_size=50 if lightningfast_mode else (100 if quick_mode else 500),  # Smaller for quick/lightningfast mode
     )
     
     # If using policy directly (no training), skip to rollouts
@@ -1048,6 +1077,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Phase 2 Robot Policy Learning Demo')
     parser.add_argument('--quick', '-q', action='store_true',
                         help='Run in quick test mode with fewer episodes')
+    parser.add_argument('--lightningfast', '-l', action='store_true',
+                        help='Run in lightning fast mode (1/10th of quick mode, for syntax checking)')
     parser.add_argument('--ensemble', '-e', action='store_true',
                         help='Use random ensemble environment (7x7 grids, 2 humans, 2 robots)')
     parser.add_argument('--debug', '-d', action='store_true',
@@ -1076,6 +1107,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     main(
         quick_mode=args.quick,
+        lightningfast_mode=args.lightningfast,
         debug=args.debug,
         profile=args.profile,
         use_ensemble=args.ensemble,

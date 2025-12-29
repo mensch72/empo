@@ -89,19 +89,27 @@ class BaseHumanGoalAchievementNetwork(nn.Module, ABC):
         """Return configuration dict for save/load."""
         pass
     
-    def apply_soft_clamp(self, values: torch.Tensor) -> torch.Tensor:
+    def apply_clamp(self, values: torch.Tensor) -> torch.Tensor:
         """
-        Apply soft clamping during training.
+        Apply clamping based on training mode.
         
-        SoftClamp preserves gradients while bounding values. Use during training.
+        During training (self.training=True): Uses soft clamp which preserves
+        gradients while bounding values.
+        
+        During eval (self.training=False): Uses hard clamp to ensure values
+        are strictly within [0, 1]. This is important for target networks
+        which are always in eval mode.
         
         Args:
             values: Raw network output.
         
         Returns:
-            Soft-clamped values in feasible_range.
+            Clamped values in feasible_range.
         """
-        return self.soft_clamp(values)
+        if self.training:
+            return self.soft_clamp(values)
+        else:
+            return self.apply_hard_clamp(values)
     
     def apply_hard_clamp(self, values: torch.Tensor) -> torch.Tensor:
         """
