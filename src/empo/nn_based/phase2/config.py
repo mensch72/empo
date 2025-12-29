@@ -116,6 +116,7 @@ class Phase2Config:
     lr_u_r_use_1_over_t: bool = False  # DEPRECATED: Whether to use legacy 1/t decay for U_r
     
     # Target network updates
+    q_r_target_update_interval: int = 100
     v_r_target_update_interval: int = 100
     v_h_e_target_update_interval: int = 100
     x_h_target_update_interval: int = 100

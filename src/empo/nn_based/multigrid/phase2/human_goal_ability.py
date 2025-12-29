@@ -293,4 +293,5 @@ class MultiGridHumanGoalAchievementNetwork(BaseHumanGoalAchievementNetwork):
             'agent_embedding_dim': self.agent_embedding_dim,
             'state_encoder_config': self.state_encoder.get_config(),
             'goal_encoder_config': self.goal_encoder.get_config(),
+            'agent_encoder_config': self.agent_encoder.get_config(),
         }
