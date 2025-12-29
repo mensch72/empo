@@ -55,8 +55,6 @@ Each target network is updated independently (via full copy from its correspondi
 - `u_r_target`: Every `u_r_target_update_interval` training steps (default: 100)
 - `v_r_target`: Every `v_r_target_update_interval` training steps (default: 100)
 
-**Note on Q_r**: Q_r does **not** have its own target network. The Q_r update target is computed as `γ_r * V_r(s')` where V_r(s') uses the frozen `v_r_target` network (or is computed from `u_r_target` and the main `q_r` depending on configuration). This follows standard DQN-style bootstrapping where Q targets come from the next-state value function.
-
 These intervals are called the **target update intervals** or **target sync intervals**. Each update happens when `training_step_count % <network>_target_update_interval == 0`, meaning they're tied to **training steps** (gradient updates), not environment steps or episodes. This makes sense in async mode where training steps and environment steps are decoupled, ensuring consistent target network update frequency regardless of data collection speed.
 
 ### Batch Size
