@@ -291,32 +291,30 @@ class BasePhase2Trainer(ABC):
         - v_h_e_target_update_interval
         - x_h_target_update_interval
         - u_r_target_update_interval
+        
+        Note: Target networks remain in eval mode (set during initialization) and 
+        never switch to training mode, so .eval() calls after updates are unnecessary.
         """
         # Update Q_r target if interval reached
         if self.training_step_count % self.config.q_r_target_update_interval == 0:
             self.networks.q_r_target.load_state_dict(self.networks.q_r.state_dict())
-            self.networks.q_r_target.eval()
         
         # Update V_r target if interval reached
         if self.training_step_count % self.config.v_r_target_update_interval == 0:
             self.networks.v_r_target.load_state_dict(self.networks.v_r.state_dict())
-            self.networks.v_r_target.eval()
         
         # Update V_h^e target if interval reached
         if self.training_step_count % self.config.v_h_e_target_update_interval == 0:
             self.networks.v_h_e_target.load_state_dict(self.networks.v_h_e.state_dict())
-            self.networks.v_h_e_target.eval()
         
         # Update X_h target if interval reached
         if self.training_step_count % self.config.x_h_target_update_interval == 0:
             self.networks.x_h_target.load_state_dict(self.networks.x_h.state_dict())
-            self.networks.x_h_target.eval()
         
         # Update U_r target if interval reached and network mode is enabled
         if self.config.u_r_use_network:
             if self.training_step_count % self.config.u_r_target_update_interval == 0:
                 self.networks.u_r_target.load_state_dict(self.networks.u_r.state_dict())
-                self.networks.u_r_target.eval()
     
     # NOTE: tensorize_state commented out - never called anywhere in codebase
     # @abstractmethod
@@ -862,7 +860,16 @@ class BasePhase2Trainer(ABC):
             self.optimizers[name].step()
         
         # Update target networks periodically (each network checks its own interval)
-        self.update_target_networks()
+        # Only call if at least one network's interval has been reached to avoid unnecessary checks
+        min_interval = min(
+            self.config.q_r_target_update_interval,
+            self.config.v_r_target_update_interval,
+            self.config.v_h_e_target_update_interval,
+            self.config.x_h_target_update_interval,
+            self.config.u_r_target_update_interval
+        )
+        if self.training_step_count % min_interval == 0:
+            self.update_target_networks()
         
         return loss_values, grad_norms, prediction_stats
     
