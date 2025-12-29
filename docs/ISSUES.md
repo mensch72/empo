@@ -88,36 +88,36 @@ This suggests the current implementation only uses "system-2" (deliberate/planni
 
 The following issues were identified during an extensive review of the Phase 2 robot policy training pipeline (`examples/phase2_robot_policy_demo.py` and related modules) on 2024-12-27.
 
-### P2-BUG-001: Async training uses undefined `self.buffer` instead of `self.replay_buffer`
+### ~~P2-BUG-001: Async training uses undefined `self.buffer` instead of `self.replay_buffer`~~ [FIXED on main]
 **Priority:** High  
-**Location:** `src/empo/nn_based/phase2/trainer.py:1367, 1393, 1414, 1419`  
+**Location:** `src/empo/nn_based/phase2/trainer.py:1401, 1407, 1415`  
 **Description:**  
-In the async training path (`_learner_loop`), the code references `self.buffer.size()` and `self.buffer`, but the attribute is defined as `self.replay_buffer`. This would cause an `AttributeError` if async training is enabled.
+~~In the async training path (`_learner_loop`), the code references `self.buffer.size()` and `self.buffer`, but the attribute is defined as `self.replay_buffer`. This would cause an `AttributeError` if async training is enabled.~~
 
-**Current behavior:**
+**Status:** **FIXED** in commit e73084b on main branch (2024-12-29)
+
+**Fix applied:**
 ```python
-while self.buffer.size() < self.config.async_min_buffer_size:  # BUG: should be replay_buffer
+# Changed from:
+while self.buffer.size() < self.config.async_min_buffer_size:
+
+# To:
+while len(self.replay_buffer) < self.config.async_min_buffer_size:
 ```
 
-**Suggested fix:**
-```python
-while self.replay_buffer.size() < self.config.async_min_buffer_size:
-```
-
-**Note:** This also affects lines 1393, 1414, and 1419 in the same file.
+All three occurrences (lines 1449, 1455, 1463 on main) have been corrected.
 
 ---
 
-### P2-BUG-002: Phase2ReplayBuffer lacks `size()` method referenced in async training
+### ~~P2-BUG-002: Phase2ReplayBuffer lacks `size()` method referenced in async training~~ [FIXED on main]
 **Priority:** High  
 **Location:** `src/empo/nn_based/phase2/replay_buffer.py`  
 **Description:**  
-The `Phase2ReplayBuffer` class only has `__len__()` method, but the async training code in `trainer.py` calls `.size()` which doesn't exist on this class.
+~~The `Phase2ReplayBuffer` class only has `__len__()` method, but the async training code in `trainer.py` calls `.size()` which doesn't exist on this class.~~
 
-**Current behavior:**
-`Phase2ReplayBuffer` implements `__len__()` but not `size()`.
+**Status:** **FIXED** in commit e73084b on main branch (2024-12-29)
 
-**Suggested fix:** Add `size()` method or use `len(self.replay_buffer)` consistently.
+**Fix applied:** Code now uses `len(self.replay_buffer)` consistently throughout. No `size()` method was added; instead, the calling code was changed to use the built-in `len()` function.
 
 ---
 
@@ -283,13 +283,17 @@ Fixed by:
 **Description:**  
 The config defines separate target update intervals for each network (`v_r_target_update_interval`, `v_h_e_target_update_interval`, `x_h_target_update_interval`, `u_r_target_update_interval`), but the training code only checks `v_r_target_update_interval` and updates ALL target networks at the same time.
 
-**Current behavior:**
-```python
-# Line 794 in trainer.py
-if self.training_step_count % self.config.v_r_target_update_interval == 0:
-    self.update_target_networks()  # Updates ALL networks
+**Status on main:** Previously fixed in commit d206235 (Dec 28, 2024), but appears to have been **reverted in subsequent refactoring commits** (349a32d, 67b2312, etc. on Dec 29, 2024).
 
-# update_target_networks() updates all: v_r, v_h_e, x_h, u_r targets
+**Current behavior on main:**
+```python
+# Line ~794 in trainer.py (as of Dec 29, 2024)
+def update_target_networks(self):
+    """Update target networks (hard copy)."""
+    self.networks.v_r_target.load_state_dict(self.networks.v_r.state_dict())
+    self.networks.v_h_e_target.load_state_dict(self.networks.v_h_e.state_dict())
+    self.networks.x_h_target.load_state_dict(self.networks.x_h.state_dict())
+    # ... all updated together
 ```
 
 **Config defines:**
@@ -300,10 +304,7 @@ x_h_target_update_interval: int = 100    # IGNORED
 u_r_target_update_interval: int = 100    # IGNORED
 ```
 
-**Suggested fix:**
-Either:
-1. Remove the unused config parameters and document that all targets update together, OR
-2. Implement separate update logic for each target network:
+**Suggested fix (was implemented in d206235):**
 ```python
 # Option 2: Respect per-network intervals
 if self.training_step_count % self.config.v_r_target_update_interval == 0:
@@ -395,9 +396,9 @@ All documented bugs have been verified using direct code inspection and a verifi
 
 ---
 
-### Status Check of Issues from 2024-12-27 (Performed 2024-12-29)
+### Status Check of Issues from 2024-12-27 (Updated 2024-12-29 after main branch commits)
 
-**FIXED Issues (9):**
+**FIXED on main branch (11 issues):**
 - ✓ P2-DISC-001: compact_features tuple size corrected
 - ✓ P2-DISC-002: U_r loss conditional on u_r_use_network AND u_r_active
 - ✓ P2-DOC-001: X_h description in WARMUP_DESIGN.md corrected
@@ -407,12 +408,19 @@ All documented bugs have been verified using direct code inspection and a verifi
 - ✓ P2-ORPHAN-001: forward_with_preencoded_state methods removed
 - ✓ P2-CONF-001: Deprecation warnings added for legacy LR decay flags
 - ✓ P2-ARCH-001: _detach_encoded_states helper method added
+- ✓ **P2-BUG-001**: Fixed in commit e73084b - changed `self.buffer.size()` to `len(self.replay_buffer)`
+- ✓ **P2-BUG-002**: Fixed in commit e73084b - code now uses `len()` consistently instead of `.size()` method
 
-**STILL EXIST - CRITICAL (2):**
-- ✗ **P2-BUG-001**: self.buffer instead of self.replay_buffer (lines 1401, 1407, 1415) - **HIGH PRIORITY**
-- ✗ **P2-BUG-002**: Phase2ReplayBuffer lacks size() method - **HIGH PRIORITY**
-
-**STILL EXIST - Other (2):**
+**STILL EXIST on main (3 issues):**
+- ✗ **P2-BUG-003**: `effective_beta_r` undefined in edge case - **MEDIUM PRIORITY**
+  - Still defined inside `if q_r_active:` block (line ~648)
+  - Still used in `if self.config.v_r_use_network:` block (line ~675)
+  - Would cause NameError if v_r_use_network=True during early warmup
+  
+- ✗ **P2-BUG-004**: Target network updates ignore per-network intervals - **LOW PRIORITY** 
+  - Note: This was fixed in commit d206235 (Dec 28) but appears to have been reverted in subsequent refactoring commits (349a32d, 67b2312, etc.)
+  - Config still defines separate intervals but they are not used
+  
 - ✗ **P2-ORPHAN-003**: get_config() missing own_state_encoder_config parameter (Informational)
 - ✗ **P2-ARCH-002**: Q_r target network not maintained (Medium priority)
 
@@ -424,6 +432,11 @@ All documented bugs have been verified using direct code inspection and a verifi
 - P2-PERF-001: Marked as INVALID (transition probabilities are cached correctly)
 - P2-EXPECT-001: Performance expectations (informational)
 - P2-EXPECT-002: "Ensemble" clarification (informational)
+
+**Summary of main branch changes:**
+- Commits e73084b, 3a39986, 90d49cc (Dec 29): Fixed async training bugs (P2-BUG-001, P2-BUG-002)
+- Commit d206235 (Dec 28): Fixed separate target intervals (P2-BUG-004) - but later reverted
+- Commits 349a32d, 67b2312, d5a7f09, 958af68, 9ea5a22 (Dec 29): Refactoring that appears to have reverted some fixes
 
 ---
 
