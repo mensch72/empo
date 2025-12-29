@@ -128,12 +128,13 @@ To provide stable training targets and avoid chasing moving targets, the followi
 
 | Target Network | Purpose |
 |----------------|---------|
+| `q_r_target` | Stable Q_r for policy computation in V_r and V_h^e targets |
 | `v_r_target` | Stable V_r for Q_r target computation (when `v_r_use_network=True`) |
 | `v_h_e_target` | Stable V_h^e for TD targets and X_h computation |
 | `x_h_target` | Stable X_h for U_r target computation |
 | `u_r_target` | Stable U_r for V_r computation (both network and direct modes) |
 
-Target networks are updated periodically via hard copy (controlled by `v_r_target_update_freq` and `v_h_target_update_freq`).
+Target networks are updated periodically via hard copy. Each network has its own update interval (controlled by `q_r_target_update_interval`, `v_r_target_update_interval`, `v_h_e_target_update_interval`, `x_h_target_update_interval`, and `u_r_target_update_interval`).
 
 ### V_r Computation
 
@@ -145,9 +146,9 @@ V_r(s) = U_r(s) + π_r(s) · Q_r(s)
 
 For computing Q_r targets, we need V_r(s'). To ensure stability, this uses:
 - **`u_r_target`** (frozen) for U_r(s')
-- **`q_r`** (active) for Q_r(s') and π_r(s')
+- **`q_r_target`** (frozen) for Q_r(s') and π_r(s')
 
-This prevents the Q_r target from depending on a rapidly-changing U_r, while still using the current policy for action weighting.
+This prevents the Q_r target from depending on rapidly-changing U_r or Q_r networks, providing more stable training especially during beta_r ramp-up.
 
 ## Configuration Parameters
 
