@@ -121,6 +121,42 @@ The `Phase2ReplayBuffer` class only has `__len__()` method, but the async traini
 
 ---
 
+### P2-BUG-003: Undefined `effective_beta_r` when V_r network mode is enabled during warmup
+**Priority:** Medium  
+**Location:** `src/empo/nn_based/phase2/trainer.py:641-652`  
+**Description:**  
+The variable `effective_beta_r` is defined inside the `if q_r_active:` block (line 620) but is used in the subsequent `if self.config.v_r_use_network:` block (line 647). This would cause a `NameError` if V_r network mode is enabled (`v_r_use_network=True`) during a warmup stage where Q_r is not yet active.
+
+**Current behavior:**
+```python
+# Line 614-620: effective_beta_r defined inside q_r_active block
+if q_r_active:
+    # ...
+    effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
+    # ...
+
+# Line 641-647: effective_beta_r used in v_r_use_network block
+if self.config.v_r_use_network:
+    # ...
+    pi_r = self.networks.q_r.get_policy(q_r_for_v, beta_r=effective_beta_r)  # ERROR if q_r_active is False
+```
+
+**When it fails:**
+- `v_r_use_network=True` (non-default, but valid configuration)
+- During warmup stages 1-3 when Q_r is not active yet (`q_r_active=False`)
+
+**Suggested fix:**
+Define `effective_beta_r` outside both conditional blocks, before the loop over transitions:
+```python
+# Before the batch loop (around line 545)
+effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
+
+for transition in batch:
+    # ... rest of the code uses effective_beta_r as needed
+```
+
+---
+
 ### ~~P2-DISC-001: Discrepancy between compact_features tuple size in docstring vs usage~~ [FIXED]
 **Priority:** Medium  
 **Location:** `src/empo/nn_based/phase2/replay_buffer.py:75-76`  
@@ -238,6 +274,44 @@ Fixed by:
 1. Adding `_detach_encoded_states()` helper method with clear documentation explaining which networks should use detached vs undetached outputs
 2. Using the helper consistently for both `s_encoded_detached` and `x_h_s_all_encoded_detached`
 3. Pre-computing detached versions of X_h state tensors instead of calling `.detach()` inline
+
+---
+
+### P2-BUG-004: Target network update ignores per-network intervals
+**Priority:** Low  
+**Location:** `src/empo/nn_based/phase2/trainer.py:794`, `src/empo/nn_based/phase2/config.py:119-122`  
+**Description:**  
+The config defines separate target update intervals for each network (`v_r_target_update_interval`, `v_h_e_target_update_interval`, `x_h_target_update_interval`, `u_r_target_update_interval`), but the training code only checks `v_r_target_update_interval` and updates ALL target networks at the same time.
+
+**Current behavior:**
+```python
+# Line 794 in trainer.py
+if self.training_step_count % self.config.v_r_target_update_interval == 0:
+    self.update_target_networks()  # Updates ALL networks
+
+# update_target_networks() updates all: v_r, v_h_e, x_h, u_r targets
+```
+
+**Config defines:**
+```python
+v_r_target_update_interval: int = 100
+v_h_e_target_update_interval: int = 100  # IGNORED
+x_h_target_update_interval: int = 100    # IGNORED
+u_r_target_update_interval: int = 100    # IGNORED
+```
+
+**Suggested fix:**
+Either:
+1. Remove the unused config parameters and document that all targets update together, OR
+2. Implement separate update logic for each target network:
+```python
+# Option 2: Respect per-network intervals
+if self.training_step_count % self.config.v_r_target_update_interval == 0:
+    self.networks.v_r_target.load_state_dict(self.networks.v_r.state_dict())
+if self.training_step_count % self.config.v_h_e_target_update_interval == 0:
+    self.networks.v_h_e_target.load_state_dict(self.networks.v_h_e.state_dict())
+# ... etc for x_h and u_r
+```
 
 ---
 
