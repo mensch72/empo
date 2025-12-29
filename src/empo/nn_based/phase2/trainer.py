@@ -5,12 +5,17 @@ This module provides the training loop and loss computation for Phase 2
 of the EMPO framework (equations 4-9).
 """
 
+import glob
+import os
 import random
 import copy
 import multiprocessing as mp
+import shutil
 import time
+import zipfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from datetime import datetime
 from queue import Empty
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -106,6 +111,8 @@ class BasePhase2Trainer(ABC):
         # Initialize TensorBoard writer if requested
         self.writer = None
         if tensorboard_dir is not None and HAS_TENSORBOARD:
+            # Archive old TensorBoard data to prevent mixing with new run
+            self._archive_tensorboard_data(tensorboard_dir)
             self.writer = SummaryWriter(log_dir=tensorboard_dir)
         
         if self.debug:
@@ -174,6 +181,45 @@ class BasePhase2Trainer(ABC):
         # Recreate empty replay buffer if needed
         if self.replay_buffer is None:
             self.replay_buffer = Phase2ReplayBuffer(capacity=self.config.buffer_size)
+    
+    def _archive_tensorboard_data(self, tensorboard_dir: str) -> None:
+        """Archive existing TensorBoard event files to a zip before starting a new run.
+        
+        This prevents old data from mixing with new runs in TensorBoard visualization.
+        Old files are moved to a timestamped zip archive in the same directory.
+        
+        Args:
+            tensorboard_dir: Path to the TensorBoard log directory.
+        """
+        if not os.path.exists(tensorboard_dir):
+            return
+        
+        # Find all event files
+        event_files = glob.glob(os.path.join(tensorboard_dir, 'events.out.tfevents.*'))
+        if not event_files:
+            return
+        
+        # Create archive filename with timestamp
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        archive_name = f'archived_runs_{timestamp}.zip'
+        archive_path = os.path.join(tensorboard_dir, archive_name)
+        
+        # Create zip archive
+        try:
+            with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for event_file in event_files:
+                    # Add file to archive with just the filename (not full path)
+                    zf.write(event_file, os.path.basename(event_file))
+            
+            # Remove original files after successful archiving
+            for event_file in event_files:
+                os.remove(event_file)
+            
+            if self.verbose:
+                print(f"[TensorBoard] Archived {len(event_files)} old event files to {archive_name}")
+        except Exception as e:
+            # Don't fail training if archiving fails, just warn
+            print(f"[TensorBoard] Warning: Failed to archive old data: {e}")
     
     def _init_target_networks(self):
         """Initialize target networks as copies of main networks.

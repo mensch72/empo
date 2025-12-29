@@ -163,12 +163,6 @@ Frozen target networks prevent the moving target problem where the TD target cha
 ### Periodic full-copy target network updates
 Target networks are updated by copying the full state dict every N steps, following the DQN approach rather than continuous blending.
 
-### Using V_h^e target network (not main) in X_h target computation
-Using the target network for V_h^e when computing X_h targets creates more stable gradient flow since X_h depends on V_h^e which is also being updated.
-
-### Using X_h target network (not main) in U_r target computation
-Using the target network for X_h when computing U_r targets prevents feedback loops where U_r changes affect X_h which affects U_r in the same update.
-
 ## Regularization
 
 ### High dropout rates (0.5 default) in hidden layers
