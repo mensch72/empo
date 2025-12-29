@@ -296,4 +296,6 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
             'feasible_range': self.feasible_range,
             'dropout': self.dropout_rate,
             'state_encoder_config': self.state_encoder.get_config(),
+            'agent_encoder_config': self.agent_encoder.get_config(),
+            'own_agent_encoder_config': self.own_agent_encoder.get_config(),
         }
