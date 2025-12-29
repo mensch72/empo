@@ -395,6 +395,38 @@ All documented bugs have been verified using direct code inspection and a verifi
 
 ---
 
+### Status Check of Issues from 2024-12-27 (Performed 2024-12-29)
+
+**FIXED Issues (9):**
+- ✓ P2-DISC-001: compact_features tuple size corrected
+- ✓ P2-DISC-002: U_r loss conditional on u_r_use_network AND u_r_active
+- ✓ P2-DOC-001: X_h description in WARMUP_DESIGN.md corrected
+- ✓ P2-DOC-002: warmup_v_r_steps reference removed from config
+- ✓ P2-DOC-003: Empty code block in WARMUP_DESIGN.md removed
+- ✓ P2-PERF-002: tensorize_goals_batch method removed
+- ✓ P2-ORPHAN-001: forward_with_preencoded_state methods removed
+- ✓ P2-CONF-001: Deprecation warnings added for legacy LR decay flags
+- ✓ P2-ARCH-001: _detach_encoded_states helper method added
+
+**STILL EXIST - CRITICAL (2):**
+- ✗ **P2-BUG-001**: self.buffer instead of self.replay_buffer (lines 1401, 1407, 1415) - **HIGH PRIORITY**
+- ✗ **P2-BUG-002**: Phase2ReplayBuffer lacks size() method - **HIGH PRIORITY**
+
+**STILL EXIST - Other (2):**
+- ✗ **P2-ORPHAN-003**: get_config() missing own_state_encoder_config parameter (Informational)
+- ✗ **P2-ARCH-002**: Q_r target network not maintained (Medium priority)
+
+**BY DESIGN (1):**
+- ⚠ **P2-CONF-002**: auto_grad_clip scaling may produce extreme values (Low priority, potential issue)
+
+**INFORMATIONAL (remains as-is):**
+- P2-ORPHAN-002: tensorize_state method exists but unused (required by base class)
+- P2-PERF-001: Marked as INVALID (transition probabilities are cached correctly)
+- P2-EXPECT-001: Performance expectations (informational)
+- P2-EXPECT-002: "Ensemble" clarification (informational)
+
+---
+
 ## Notes
 
 This list was generated during documentation review on 2024-11-30. Some items may have been addressed in subsequent updates. Please verify each issue before creating GitHub issues.
