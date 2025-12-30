@@ -4,6 +4,12 @@
 **Author:** GitHub Copilot  
 **Date:** 2025-12-30
 
+## 0. mensch72's comments after reading this plan
+
+We must make sure that we need to change *as little code outside the network classes as possible*, including the optimizers. So maybe a pragmatic approach is to recreate the optimizer periodically at a configurable interval, in particular at warmup stage boundaries.
+
+Also, we must reuse the existing code for `use_encoders==False` that make the encoders act as identity functions, rather than adding additional code that basically does the same.
+
 ## 1. Overview
 
 This document outlines a design for optionally converting individual networks and their private encoders into **lookup tables** (dictionaries) with one parameter per unique input. This approach enables tabular policy representations without requiring advance knowledge of the complete state/input space.

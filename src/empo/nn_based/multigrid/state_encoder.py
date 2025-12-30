@@ -118,7 +118,8 @@ class MultiGridStateEncoder(BaseStateEncoder):
         max_pause_switches: int = 4,
         max_disabling_switches: int = 4,
         max_control_buttons: int = 4,
-        include_step_count: bool = True
+        include_step_count: bool = True,
+        use_encoders: bool = True
     ):
         super().__init__(feature_dim)
         self.grid_height = grid_height
@@ -130,6 +131,7 @@ class MultiGridStateEncoder(BaseStateEncoder):
         self.max_disabling_switches = max_disabling_switches
         self.max_control_buttons = max_control_buttons
         self.include_step_count = include_step_count
+        self.use_encoders = use_encoders
         
         # Grid channel structure
         # Use all standard colors for agent channels to support any color combination
@@ -138,6 +140,25 @@ class MultiGridStateEncoder(BaseStateEncoder):
         self.num_other_channels = 3  # overlappable, immobile, mobile
         self.agent_channels_start = self.num_object_channels + self.num_other_channels
         self.num_grid_channels = self.agent_channels_start + NUM_STANDARD_COLORS
+        
+        # Compute input sizes for agent and interactive features
+        self.color_order = sorted(num_agents_per_color.keys())
+        total_agents = sum(num_agents_per_color.values())
+        agent_input_size = AGENT_FEATURE_SIZE * total_agents
+        interactive_input_size = (
+            max_kill_buttons * KILLBUTTON_FEATURE_SIZE +
+            max_pause_switches * PAUSESWITCH_FEATURE_SIZE +
+            max_disabling_switches * DISABLINGSWITCH_FEATURE_SIZE +
+            max_control_buttons * CONTROLBUTTON_FEATURE_SIZE
+        )
+        
+        # Store input sizes
+        self._agent_input_size = agent_input_size
+        self._interactive_input_size = interactive_input_size
+        self._global_features_size = NUM_GLOBAL_WORLD_FEATURES
+        
+        # Note: When use_encoders=False, the caller (trainer) should pass the correct
+        # identity-mode feature_dim. We no longer override it here.
         
         # Scale intermediate dimensions based on feature_dim
         # For small feature_dim (e.g., 16), use proportionally smaller networks
@@ -168,9 +189,6 @@ class MultiGridStateEncoder(BaseStateEncoder):
         
         # Agent encoder (MLP)
         # Encodes all agents organized by color (no separate query agent features)
-        self.color_order = sorted(num_agents_per_color.keys())
-        total_agents = sum(num_agents_per_color.values())
-        agent_input_size = AGENT_FEATURE_SIZE * total_agents  # per-color lists only
         self.agent_fc = nn.Sequential(
             nn.Linear(agent_input_size, agent_feature_dim * 2),
             nn.ReLU(),
@@ -179,12 +197,6 @@ class MultiGridStateEncoder(BaseStateEncoder):
         )
         
         # Interactive object encoder (MLP)
-        interactive_input_size = (
-            max_kill_buttons * KILLBUTTON_FEATURE_SIZE +
-            max_pause_switches * PAUSESWITCH_FEATURE_SIZE +
-            max_disabling_switches * DISABLINGSWITCH_FEATURE_SIZE +
-            max_control_buttons * CONTROLBUTTON_FEATURE_SIZE
-        )
         self.interactive_fc = nn.Sequential(
             nn.Linear(interactive_input_size, interactive_feature_dim),
             nn.ReLU(),
@@ -203,9 +215,6 @@ class MultiGridStateEncoder(BaseStateEncoder):
         self._grid_feature_dim = grid_feature_dim
         self._agent_feature_dim = agent_feature_dim
         self._interactive_feature_dim = interactive_feature_dim
-        self._agent_input_size = agent_input_size
-        self._interactive_input_size = interactive_input_size
-        self._global_features_size = NUM_GLOBAL_WORLD_FEATURES
         
         # Internal cache for raw tensor extraction (before NN forward)
         # Keys are state_id (int), values are raw tensor tuples
@@ -245,8 +254,16 @@ class MultiGridStateEncoder(BaseStateEncoder):
         
         Returns:
             Feature tensor (batch, feature_dim)
+        
+        If use_encoders=False, bypasses neural network and returns flattened
+        concatenation of inputs (true identity mode for debugging).
         """
         batch_size = grid_tensor.shape[0]
+        
+        if not self.use_encoders:
+            # Identity mode: flatten and concatenate all inputs unchanged
+            flat_grid = grid_tensor.view(batch_size, -1)
+            return torch.cat([flat_grid, global_features, agent_features, interactive_features], dim=1)
         
         # Grid encoding
         conv_out = self.grid_conv(grid_tensor)
@@ -968,4 +985,5 @@ class MultiGridStateEncoder(BaseStateEncoder):
             'max_disabling_switches': self.max_disabling_switches,
             'max_control_buttons': self.max_control_buttons,
             'include_step_count': self.include_step_count,
+            'use_encoders': self.use_encoders,
         }

@@ -75,9 +75,11 @@ class MultiGridRobotValueNetwork(BaseRobotValueNetwork):
             )
         
         # V_r value head with optional dropout
+        # Use actual encoder feature_dim (may differ from state_feature_dim when use_encoders=False)
+        actual_state_dim = self.state_encoder.feature_dim
         if dropout > 0.0:
             self.value_head = nn.Sequential(
-                nn.Linear(state_feature_dim, hidden_dim),
+                nn.Linear(actual_state_dim, hidden_dim),
                 nn.ReLU(),
                 nn.Dropout(dropout),
                 nn.Linear(hidden_dim, hidden_dim),
@@ -87,7 +89,7 @@ class MultiGridRobotValueNetwork(BaseRobotValueNetwork):
             )
         else:
             self.value_head = nn.Sequential(
-                nn.Linear(state_feature_dim, hidden_dim),
+                nn.Linear(actual_state_dim, hidden_dim),
                 nn.ReLU(),
                 nn.Linear(hidden_dim, hidden_dim),
                 nn.ReLU(),

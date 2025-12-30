@@ -148,11 +148,12 @@ def configure_environment(use_ensemble: bool, use_small: bool = False):
             (1, (1,1)),  # medium difficulty
             (1, (3,1)),  # hardest since robot must move back to (1,1) after pushing rock twice
             (1, (2,2)),  # already reached
+            (1, (1,2)),  # impossible goal (in wall)
         ]
         
         goal_sampler_factory = lambda env: TabularGoalSampler([
             ReachCellGoal(env, human_idx, pos) for human_idx, pos in DEFINED_GOALS
-        ], probabilities=[0.5, 0.2, 0.2, 0.1])
+        ], probabilities=[0.4, 0.2, 0.2, 0.1, 0.1])
 
         TEST_MAPS = [
             (GRID_MAP, "Worst V_r: human locked behind rock"),
@@ -779,6 +780,7 @@ def main(
     use_ensemble: bool = False,
     use_small: bool = False,
     use_async: bool = False,
+    use_encoders: bool = True,
     save_networks_path: str = None,
     save_policy_path: str = None,
     restore_networks_path: str = None,
@@ -1027,6 +1029,7 @@ def main(
         async_min_buffer_size=50 if lightningfast_mode else (100 if quick_mode else 500),  # Smaller for quick/lightningfast mode
         # State encoding options
         include_step_count=False,  # Don't include step count in state encoding
+        use_encoders=use_encoders,
     )
     
     # If using policy directly (no training), skip to rollouts
@@ -1277,6 +1280,8 @@ if __name__ == "__main__":
                         help='Profile training with torch.profiler (outputs trace.json)')
     parser.add_argument('--async', '-a', dest='use_async', action='store_true',
                         help='Use async actor-learner training (tests async mode on CPU)')
+    parser.add_argument('--no-encoders', action='store_true',
+                        help='Disable neural encoders (use identity function for debugging)')
     
     # Save/restore options
     parser.add_argument('--save_networks', type=str, default=None, metavar='PATH',
@@ -1303,6 +1308,7 @@ if __name__ == "__main__":
         use_ensemble=args.ensemble,
         use_small=args.small,
         use_async=args.use_async,
+        use_encoders=not args.no_encoders,
         save_networks_path=args.save_networks,
         save_policy_path=args.save_policy,
         restore_networks_path=args.restore_networks,

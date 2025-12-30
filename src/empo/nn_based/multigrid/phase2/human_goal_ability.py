@@ -109,8 +109,8 @@ class MultiGridHumanGoalAchievementNetwork(BaseHumanGoalAchievementNetwork):
             )
         
         # Value head: combines state + goal + agent identity features
-        # agent_encoder.output_dim = embedding_dim + position_feature_dim + agent_feature_dim
-        combined_dim = state_feature_dim + goal_feature_dim + self.agent_encoder.output_dim
+        # Use actual encoder feature_dim (may differ from passed parameter when use_encoders=False)
+        combined_dim = self.state_encoder.feature_dim + self.goal_encoder.feature_dim + self.agent_encoder.output_dim
         if dropout > 0.0:
             self.value_head = nn.Sequential(
                 nn.Linear(combined_dim, hidden_dim),

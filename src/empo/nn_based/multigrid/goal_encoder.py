@@ -29,17 +29,23 @@ class MultiGridGoalEncoder(BaseGoalEncoder):
         grid_height: Height of the grid.
         grid_width: Width of the grid.
         feature_dim: Output feature dimension.
+        use_encoders: If False, forward() returns identity (padded input).
     """
     
     def __init__(
         self,
         grid_height: int,
         grid_width: int,
-        feature_dim: int = 32
+        feature_dim: int = 32,
+        use_encoders: bool = True
     ):
+        # Note: When use_encoders=False, the caller (trainer) should pass the correct
+        # identity-mode feature_dim (which is 4). We no longer override it here.
+        
         super().__init__(feature_dim)
         self.grid_height = grid_height
         self.grid_width = grid_width
+        self.use_encoders = use_encoders
         
         # Input: bounding box (x1, y1, x2, y2) with inclusive coordinates
         # Point goals are (x, y, x, y)
@@ -76,7 +82,12 @@ class MultiGridGoalEncoder(BaseGoalEncoder):
         
         Returns:
             Feature tensor (batch, feature_dim)
+        
+        If use_encoders=False, returns input unchanged (true identity for debugging).
         """
+        if not self.use_encoders:
+            # Identity mode: return input unchanged
+            return goal_coords
         return self.fc(goal_coords)
     
     def tensorize_goal(
@@ -427,5 +438,6 @@ class MultiGridGoalEncoder(BaseGoalEncoder):
             'grid_height': self.grid_height,
             'grid_width': self.grid_width,
             'feature_dim': self.feature_dim,
+            'use_encoders': self.use_encoders,
         }
     

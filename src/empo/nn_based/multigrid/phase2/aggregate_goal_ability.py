@@ -111,8 +111,8 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         # X_h value head with optional dropout
         # Note: X_h depends on both state and human identity
         # Uses BOTH shared agent encoder (frozen) and own agent encoder (trained)
-        # agent_encoder.output_dim = embedding_dim + position_feature_dim + agent_feature_dim
-        combined_dim = state_feature_dim + self.agent_encoder.output_dim + self.own_agent_encoder.output_dim
+        # Use actual encoder feature_dim (may differ from passed parameter when use_encoders=False)
+        combined_dim = self.state_encoder.feature_dim + self.agent_encoder.output_dim + self.own_agent_encoder.output_dim
         if dropout > 0.0:
             self.value_head = nn.Sequential(
                 nn.Linear(combined_dim, hidden_dim),

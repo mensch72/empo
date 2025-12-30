@@ -58,6 +58,10 @@ class Phase2Config:
         goal_resample_prob: Probability of resampling goals each step.
         hidden_dim: Hidden layer dimension for networks.
         state_feature_dim: State encoder output dimension.
+        goal_feature_dim: Goal encoder output dimension.
+        agent_embedding_dim: Agent identity encoder: index embedding dimension.
+        agent_position_feature_dim: Agent identity encoder: position encoding output dimension.
+        agent_feature_dim: Agent identity encoder: agent feature encoding output dimension.
     """
     
     # Discount factors
@@ -193,6 +197,11 @@ class Phase2Config:
     profile_batching: bool = False
     profile_batching_interval: int = 100  # Print stats every N training steps
     
+    # Debugging: if False, encoder networks' forward functions become identity functions
+    # (flatten+pad/truncate to match output dimension). Tensorizers remain unchanged.
+    # This is useful for debugging to isolate whether problems come from encoders.
+    use_encoders: bool = True
+    
     def __post_init__(self):
         """Compute cumulative warmup thresholds and apply network flags."""
         # Warn about deprecated legacy LR decay flags
@@ -258,6 +267,10 @@ class Phase2Config:
     # Network architecture
     hidden_dim: int = 256
     state_feature_dim: int = 256
+    goal_feature_dim: int = 64              # Goal encoder output dimension
+    agent_embedding_dim: int = 16           # Agent identity encoder: index embedding dimension
+    agent_position_feature_dim: int = 32    # Agent identity encoder: position encoding output dimension
+    agent_feature_dim: int = 32             # Agent identity encoder: agent feature encoding output dimension
     
     def get_epsilon(self, step: int) -> float:
         """Get epsilon value for given training step."""

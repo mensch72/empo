@@ -109,7 +109,8 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
         
         # Q-value head for joint actions with optional dropout
         # Uses BOTH shared state encoder (frozen) and own state encoder (trained)
-        combined_state_dim = state_feature_dim * 2  # Two encoders
+        # Use actual encoder feature_dim (may differ from state_feature_dim when use_encoders=False)
+        combined_state_dim = self.state_encoder.feature_dim + self.own_state_encoder.feature_dim
         if dropout > 0.0:
             self.q_head = nn.Sequential(
                 nn.Linear(combined_state_dim, hidden_dim),

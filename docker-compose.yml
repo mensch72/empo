@@ -13,6 +13,9 @@ services:
     pull_policy: build
     container_name: empo-dev
     
+    # Increase shared memory for multiprocessing spawn with large objects
+    shm_size: '2gb'
+    
     volumes:
       - .:/workspace
       - pip-cache:/home/appuser/.cache/pip
