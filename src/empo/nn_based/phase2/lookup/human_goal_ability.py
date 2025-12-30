@@ -98,9 +98,7 @@ class LookupTableHumanGoalAbilityNetwork(BaseHumanGoalAchievementNetwork):
         """
         if len(states) != len(goals):
             raise ValueError(f"states and goals must have same length, got {len(states)} and {len(goals)}")
-        
-        batch_size = len(states)
-        
+                
         # Collect parameters for all (state, goal, map_hash) triples
         params = []
         for state, goal in zip(states, goals):

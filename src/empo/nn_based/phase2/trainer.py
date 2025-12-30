@@ -33,7 +33,7 @@ from .human_goal_ability import BaseHumanGoalAchievementNetwork
 from .aggregate_goal_ability import BaseAggregateGoalAbilityNetwork
 from .intrinsic_reward_network import BaseIntrinsicRewardNetwork
 from .robot_value_network import BaseRobotValueNetwork, compute_v_r_from_components
-from .lookup import is_lookup_table_network, get_all_lookup_tables, get_total_table_size
+from .lookup import get_all_lookup_tables, get_total_table_size
 
 # Try to import tensorboard (optional)
 try:

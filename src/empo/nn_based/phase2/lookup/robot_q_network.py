@@ -128,7 +128,6 @@ class LookupTableRobotQNetwork(BaseRobotQNetwork):
         Returns:
             Q_r values of shape (batch_size, num_action_combinations), all negative.
         """
-        batch_size = len(states)
         
         # Collect parameters for all states
         params = []

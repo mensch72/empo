@@ -298,7 +298,6 @@ class SimpleLookupTableTrainer:
             self.robot_indices[0]: robot_action[0],
             self.human_indices[0]: human_actions[0],
         }
-        result = self.env.step(joint_action)
         next_state = self.env.get_state()
         
         return state, next_state, goals, robot_action

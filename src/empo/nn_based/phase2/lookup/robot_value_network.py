@@ -88,7 +88,6 @@ class LookupTableRobotValueNetwork(BaseRobotValueNetwork):
         Returns:
             V_r values of shape (batch_size,), all negative.
         """
-        batch_size = len(states)
         
         # Collect parameters for all states
         params = []

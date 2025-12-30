@@ -93,7 +93,7 @@ if __name__ == '__main__':
     # Create human policy
     path_calc = PathDistanceCalculator(env)
     human_policy = HeuristicPotentialPolicy(
-        env, [1], path_calc, beta_h=10.0
+        env, [1], path_calc, beta=10.0
     )
     
     # Factory for creating env in workers

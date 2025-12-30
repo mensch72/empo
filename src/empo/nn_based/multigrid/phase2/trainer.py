@@ -26,14 +26,7 @@ from .intrinsic_reward_network import MultiGridIntrinsicRewardNetwork
 from .robot_value_network import MultiGridRobotValueNetwork
 
 # Lookup table network imports
-from empo.nn_based.phase2.lookup import (
-    LookupTableRobotQNetwork,
-    LookupTableRobotValueNetwork,
-    LookupTableHumanGoalAbilityNetwork,
-    LookupTableAggregateGoalAbilityNetwork,
-    LookupTableIntrinsicRewardNetwork,
-    is_lookup_table_network,
-)
+from empo.nn_based.phase2.lookup import is_lookup_table_network
 
 
 class MultiGridPhase2Trainer(BasePhase2Trainer):

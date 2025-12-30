@@ -98,8 +98,6 @@ class LookupTableAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         if len(states) != len(human_indices):
             raise ValueError(f"states and human_indices must have same length")
         
-        batch_size = len(states)
-        
         # Collect parameters for all (state, human_idx, map_hash) triples
         params = []
         for state, human_idx in zip(states, human_indices):

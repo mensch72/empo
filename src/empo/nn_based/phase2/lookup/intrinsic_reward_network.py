@@ -100,7 +100,6 @@ class LookupTableIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
             - y: shape (batch_size,), y > 1
             - U_r: shape (batch_size,), U_r < 0
         """
-        batch_size = len(states)
         
         # Collect parameters for all states
         params = []
