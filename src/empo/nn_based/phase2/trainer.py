@@ -1749,7 +1749,7 @@ class BasePhase2Trainer(ABC):
     
     # ==================== Save/Load Methods ====================
     
-    def save_all_networks(self, path: str) -> None:
+    def save_all_networks(self, path: str) -> str:
         """
         Save all networks to a file.
         
@@ -1758,6 +1758,10 @@ class BasePhase2Trainer(ABC):
         
         Args:
             path: Path to save the checkpoint file.
+        
+        Returns:
+            The actual path where the file was saved (may differ from input
+            if a fallback location was used due to permission errors).
         """
         checkpoint = {
             'q_r': self.networks.q_r.state_dict(),
@@ -1803,6 +1807,7 @@ class BasePhase2Trainer(ABC):
         # Try to save, fall back to tmp file on permission errors
         try:
             torch.save(checkpoint, path)
+            return path
         except (IOError, OSError, RuntimeError) as e:
             # Fall back to tmp file to prevent data loss
             basename = os.path.basename(path)
@@ -1810,6 +1815,7 @@ class BasePhase2Trainer(ABC):
             print(f"WARNING: Cannot save to {path}: {e}")
             print(f"Saving to fallback location: {tmp_path}")
             torch.save(checkpoint, tmp_path)
+            return tmp_path
     
     def load_all_networks(self, path: str, strict: bool = True) -> None:
         """
@@ -1853,7 +1859,7 @@ class BasePhase2Trainer(ABC):
         if 'q_r_target' in checkpoint and self.networks.q_r_target is not None:
             self.networks.q_r_target.load_state_dict(checkpoint['q_r_target'], strict=strict)
     
-    def save_policy(self, path: str) -> None:
+    def save_policy(self, path: str) -> str:
         """
         Save only the robot policy network (Q_r) for deployment/rollouts.
         
@@ -1866,6 +1872,10 @@ class BasePhase2Trainer(ABC):
         
         Args:
             path: Path to save the policy file.
+        
+        Returns:
+            The actual path where the file was saved (may differ from input
+            if a fallback location was used due to permission errors).
         """
         checkpoint = {
             'q_r': self.networks.q_r.state_dict(),
@@ -1882,6 +1892,7 @@ class BasePhase2Trainer(ABC):
         # Try to save, fall back to tmp file on permission errors
         try:
             torch.save(checkpoint, path)
+            return path
         except (IOError, OSError, RuntimeError) as e:
             # Fall back to tmp file to prevent data loss
             basename = os.path.basename(path)
@@ -1889,6 +1900,7 @@ class BasePhase2Trainer(ABC):
             print(f"WARNING: Cannot save to {path}: {e}")
             print(f"Saving to fallback location: {tmp_path}")
             torch.save(checkpoint, tmp_path)
+            return tmp_path
 
     # ==================== Convenience Evaluation Methods ====================
     

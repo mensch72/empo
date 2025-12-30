@@ -2,6 +2,8 @@
 
 This document describes how to optionally replace the monolithic Q_r network with a dueling architecture (V_r + A_r) adapted to the EMPO framework.
 
+With comments by mensch72 noted as JH:
+
 ## Background
 
 ### Standard Dueling DQN
@@ -198,6 +200,8 @@ class IndependentDuelingRobotQNetwork(BaseRobotQNetwork):
 3. **Proven architecture**: Well-established in RL literature
 4. **Compatible with existing warm-up**: No changes to staged training
 
+JH: yes, do this!
+
 ## Configuration
 
 Add configuration option to `Phase2Config`:
@@ -284,6 +288,7 @@ With `ensure_negative()` applied after combining V + A:
 - Consider applying separate constraints to V and A streams:
   - V stream: `ensure_negative()` (V should be average Q, which is negative)
   - A stream: unconstrained (can be positive or negative, averages to 0)
+JH: see below, use a single clamping operation at the very end.
 
 ### Action-Conditional Advantage
 
@@ -306,12 +311,15 @@ For multi-robot scenarios with joint action space A^K, consider:
 
 2. Should advantage centering happen before or after `ensure_negative()`?
    - Before: Preserves standard dueling formulation
-   - After: Ensures all Q-values are properly bounded
+   - After: Ensures all Q-values are properly bounded. 
+JH: is this true? if ensure_negative() is the last operation, all Q-values are properly bounded I believe. I propose this alternative: instead of softplus, use clamping, which has a unit gradient within the feasible range! then use that as the last operation before output, and everything should be fine. for this, we need a one-sided softclamp version that only clamps the upper feasibility bound (in this case 0).
 
 3. Can we share the V stream with the existing V_r network?
    - Would reduce parameters but create training dependencies
    - May require alternating optimization
+JH: don't do this.
 
 4. Is there benefit to having both dueling Q_r AND a separate V_r network?
    - Redundancy may help with target stability
    - Or may cause inconsistencies between the two V estimates
+JH: we have disabled V_r network anyway and should keep it this way.

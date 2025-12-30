@@ -1150,16 +1150,21 @@ def main(
     
     # Save networks/policy after training (default paths unless overridden)
     # Always save by default to enable testing save/restore functionality
+    actual_policy_path = None
     if trainer is not None:
         # Determine save paths (use defaults if not specified)
         networks_save_path = save_networks_path if save_networks_path else default_networks_path
         policy_save_path = save_policy_path if save_policy_path else default_policy_path
         
         print(f"\nSaving all networks to: {networks_save_path}")
-        trainer.save_all_networks(networks_save_path)
+        actual_networks_path = trainer.save_all_networks(networks_save_path)
+        if actual_networks_path != networks_save_path:
+            print(f"  (actually saved to: {actual_networks_path})")
         
         print(f"Saving policy to: {policy_save_path}")
-        trainer.save_policy(policy_save_path)
+        actual_policy_path = trainer.save_policy(policy_save_path)
+        if actual_policy_path != policy_save_path:
+            print(f"  (actually saved to: {actual_policy_path})")
     
     # Generate rollout movie using env's built-in video recording
     # Override num_rollouts if specified
@@ -1172,8 +1177,11 @@ def main(
     # This verifies that the saved policy works correctly
     if use_policy_path:
         rollout_policy_path = use_policy_path
+    elif actual_policy_path is not None:
+        # Use the actual path where policy was saved (may be fallback location)
+        rollout_policy_path = actual_policy_path
     else:
-        # Use the policy we just saved (or the default path)
+        # Use the default path
         rollout_policy_path = save_policy_path if save_policy_path else default_policy_path
     
     print(f"Loading policy from disk for rollouts: {rollout_policy_path}")

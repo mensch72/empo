@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 
 from ...phase2.robot_policy import RobotPolicy
+from ..state_encoder import MultiGridStateEncoder
 from .robot_q_network import MultiGridRobotQNetwork
 
 
@@ -83,8 +84,41 @@ class MultiGridRobotPolicy(RobotPolicy):
             
             # Get state encoder config - it has 'feature_dim', not 'state_feature_dim'
             state_enc_config = config['state_encoder_config']
+            own_state_enc_config = config.get('own_state_encoder_config', state_enc_config)
             
-            # Reconstruct Q network from config
+            # Check if networks were trained with use_encoders=False (identity mode)
+            use_encoders = state_enc_config.get('use_encoders', True)
+            
+            # Create state encoders with correct use_encoders flag
+            # This ensures identity mode produces correct feature_dim
+            state_encoder = MultiGridStateEncoder(
+                grid_height=config['grid_height'],
+                grid_width=config['grid_width'],
+                num_agents_per_color=state_enc_config['num_agents_per_color'],
+                num_agent_colors=state_enc_config.get('num_agent_colors', 7),
+                feature_dim=state_enc_config.get('feature_dim', config['hidden_dim']),
+                max_kill_buttons=state_enc_config.get('max_kill_buttons', 4),
+                max_pause_switches=state_enc_config.get('max_pause_switches', 4),
+                max_disabling_switches=state_enc_config.get('max_disabling_switches', 4),
+                max_control_buttons=state_enc_config.get('max_control_buttons', 4),
+                use_encoders=use_encoders,
+            )
+            
+            own_use_encoders = own_state_enc_config.get('use_encoders', True)
+            own_state_encoder = MultiGridStateEncoder(
+                grid_height=config['grid_height'],
+                grid_width=config['grid_width'],
+                num_agents_per_color=own_state_enc_config['num_agents_per_color'],
+                num_agent_colors=own_state_enc_config.get('num_agent_colors', 7),
+                feature_dim=own_state_enc_config.get('feature_dim', config['hidden_dim']),
+                max_kill_buttons=own_state_enc_config.get('max_kill_buttons', 4),
+                max_pause_switches=own_state_enc_config.get('max_pause_switches', 4),
+                max_disabling_switches=own_state_enc_config.get('max_disabling_switches', 4),
+                max_control_buttons=own_state_enc_config.get('max_control_buttons', 4),
+                use_encoders=own_use_encoders,
+            )
+            
+            # Reconstruct Q network from config with pre-built state encoders
             self.q_network = MultiGridRobotQNetwork(
                 grid_height=config['grid_height'],
                 grid_width=config['grid_width'],
@@ -94,17 +128,35 @@ class MultiGridRobotPolicy(RobotPolicy):
                 beta_r=self.beta_r,
                 feasible_range=config.get('feasible_range'),
                 dropout=config.get('dropout', 0.0),
-                # State encoder config - note: key is 'feature_dim' not 'state_feature_dim'
+                # Pass pre-built state encoders instead of individual params
                 num_agents_per_color=state_enc_config['num_agents_per_color'],
                 num_agent_colors=state_enc_config.get('num_agent_colors', 7),
                 state_feature_dim=state_enc_config.get('feature_dim', config['hidden_dim']),
-                max_kill_buttons=state_enc_config.get('max_kill_buttons', 4),
-                max_pause_switches=state_enc_config.get('max_pause_switches', 4),
-                max_disabling_switches=state_enc_config.get('max_disabling_switches', 4),
-                max_control_buttons=state_enc_config.get('max_control_buttons', 4),
+                state_encoder=state_encoder,
+                own_state_encoder=own_state_encoder,
             )
             
-            # Load weights
+            # Load weights with validation
+            checkpoint_keys = set(checkpoint['q_r'].keys())
+            model_keys = set(self.q_network.state_dict().keys())
+            
+            if checkpoint_keys != model_keys:
+                missing_in_checkpoint = model_keys - checkpoint_keys
+                extra_in_checkpoint = checkpoint_keys - model_keys
+                
+                # Check if this is an encoder mismatch
+                encoder_keys_missing = any('encoder' in k for k in missing_in_checkpoint)
+                
+                if encoder_keys_missing:
+                    raise ValueError(
+                        f"State dict mismatch - likely encoder configuration issue.\n"
+                        f"Config says use_encoders={use_encoders}, own_use_encoders={own_use_encoders}\n"
+                        f"Missing in checkpoint: {sorted(missing_in_checkpoint)[:5]}{'...' if len(missing_in_checkpoint) > 5 else ''}\n"
+                        f"Extra in checkpoint: {sorted(extra_in_checkpoint)[:5]}{'...' if len(extra_in_checkpoint) > 5 else ''}\n"
+                        f"This may happen if the checkpoint was saved with different use_encoders settings.\n"
+                        f"Try deleting old checkpoint files and re-training."
+                    )
+            
             self.q_network.load_state_dict(checkpoint['q_r'])
         else:
             self.q_network = q_network
