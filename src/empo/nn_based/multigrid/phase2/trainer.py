@@ -110,9 +110,8 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         profiler: Optional[Any] = None,
         world_model_factory: Optional[Any] = None,
     ):
-        self.env = env
-        self.world_model_factory = world_model_factory
         super().__init__(
+            env=env,
             networks=networks,
             config=config,
             human_agent_indices=human_agent_indices,
@@ -124,61 +123,12 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
             debug=debug,
             tensorboard_dir=tensorboard_dir,
             profiler=profiler,
+            world_model_factory=world_model_factory,
         )
         
         # Caching is now handled internally by the shared encoders.
         # The shared state/goal/agent encoders cache raw tensor extraction
         # (but not NN output, to preserve gradient flow).
-    
-    def __getstate__(self):
-        """Exclude env from pickling (for async training).
-        
-        Calls parent __getstate__ then also excludes env.
-        """
-        # Get parent state (excludes writer, profiler, replay_buffer)
-        state = super().__getstate__()
-        # Also exclude env - it contains thread locks
-        state['env'] = None
-        return state
-    
-    def __setstate__(self, state):
-        """Restore state after unpickling; env will be recreated from factory.
-        
-        Calls parent __setstate__ then allows env to be lazily created.
-        """
-        super().__setstate__(state)
-        # Note: env stays None until _ensure_world_model() is called
-    
-    def _ensure_world_model(self):
-        """
-        Ensure world model is available, creating from factory if needed.
-        
-        Called by reset_environment() when env is None (in async actor processes).
-        After creating the env, updates goal_sampler and human_policy_prior.
-        """
-        if self.env is None:
-            if self.world_model_factory is None:
-                raise RuntimeError(
-                    "No world_model_factory provided. For async training, "
-                    "you must pass a world_model_factory to the trainer."
-                )
-            self._create_env_from_factory()
-    
-    def _create_env_from_factory(self):
-        """
-        Create environment from factory and update dependent components.
-        
-        Called by _ensure_world_model() for initial creation, and by
-        reset_environment() for ensemble mode (new env each episode).
-        """
-        # Create env from factory
-        self.env = self.world_model_factory.create()
-        # Update goal_sampler and human_policy_prior with new env
-        if hasattr(self.goal_sampler, 'set_world_model'):
-            self.goal_sampler.set_world_model(self.env)
-        if hasattr(self.human_policy_prior, 'set_world_model'):
-            self.human_policy_prior.set_world_model(self.env)
-    
 
     def clear_caches(self):
         """
@@ -223,66 +173,6 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         self.networks.v_h_e.goal_encoder.reset_cache_stats()
         self.networks.v_h_e.agent_encoder.reset_cache_stats()
 
-    def check_goal_achieved(self, state: Any, human_idx: int, goal: Any) -> bool:
-        """Check if human's goal is achieved."""
-        step_count, agent_states, mobile_objects, mutable_objects = state
-        agent_state = agent_states[human_idx]
-        agent_x, agent_y = int(agent_state[0]), int(agent_state[1])
-        
-        # Goals should have a target_pos attribute
-        if hasattr(goal, 'target_pos'):
-            goal_pos = goal.target_pos
-            return agent_x == goal_pos[0] and agent_y == goal_pos[1]
-        elif hasattr(goal, 'is_achieved'):
-            return goal.is_achieved(state)
-        else:
-            return False
-
-    def step_environment(
-        self,
-        state: Any,
-        robot_action: Tuple[int, ...],
-        human_actions: List[int]
-    ) -> Any:
-        """Execute actions and return next state."""
-        # Build action list for all agents
-        actions = []
-        human_idx = 0
-        robot_idx = 0
-        
-        for agent_idx in range(len(self.env.agents)):
-            if agent_idx in self.human_agent_indices:
-                actions.append(human_actions[human_idx])
-                human_idx += 1
-            elif agent_idx in self.robot_agent_indices:
-                actions.append(robot_action[robot_idx])
-                robot_idx += 1
-            else:
-                actions.append(0)  # Idle for unknown agents
-        
-        # Step environment
-        self.env.step(actions)
-        return self.env.get_state()
-    
-    def reset_environment(self) -> Any:
-        """Reset environment and return initial state.
-        
-        Always uses the world_model_factory if available. The factory determines
-        whether to create a new environment or reuse an existing one:
-        - CachedWorldModelFactory: returns same env (reset by env.reset() below)
-        - EnsembleWorldModelFactory: returns new env each episode
-        """
-        if self.world_model_factory is not None:
-            self._create_env_from_factory()
-        elif self.env is None:
-            raise RuntimeError(
-                "No world_model_factory provided and env is None. "
-                "For async training, you must pass a world_model_factory."
-            )
-        
-        self.env.reset()
-        return self.env.get_state()
-    
 
 def create_phase2_networks(
     env: MultiGridEnv,

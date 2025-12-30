@@ -68,13 +68,13 @@ class BasePhase2Trainer(ABC):
     Implements the training loop for learning the robot policy to maximize
     aggregate human power as defined in equations (4)-(9).
     
-    Subclasses must implement environment-specific methods for:
-    - State encoding
-    - Goal sampling
-    - Action execution
-    - Goal achievement checking
+    Provides generic implementations for environment interaction using the
+    standard WorldModel API (get_state, set_state, step, reset) and the
+    PossibleGoal API (is_achieved). Subclasses may override these methods
+    for environment-specific optimizations.
     
     Args:
+        env: Environment instance (WorldModel).
         networks: Phase2Networks container with all networks.
         config: Phase2Config with hyperparameters.
         human_agent_indices: List of human agent indices.
@@ -85,10 +85,17 @@ class BasePhase2Trainer(ABC):
         verbose: Enable progress output (tqdm progress bar).
         debug: Enable verbose debug output (very detailed, for debugging).
         tensorboard_dir: Directory for TensorBoard logs (optional).
+        world_model_factory: Optional factory for creating world models. Required for
+            async training where the environment cannot be pickled.
+        world_model_factory: Optional factory for creating world models. Required for
+            async training where the environment cannot be pickled. In ensemble mode,
+            agent indices are automatically updated by calling the env's
+            get_human_agent_indices() and get_robot_agent_indices() methods.
     """
     
     def __init__(
         self,
+        env: Any,
         networks: Phase2Networks,
         config: Phase2Config,
         human_agent_indices: List[int],
@@ -100,17 +107,23 @@ class BasePhase2Trainer(ABC):
         debug: bool = False,
         tensorboard_dir: Optional[str] = None,
         profiler: Optional[Any] = None,
+        world_model_factory: Optional[Any] = None,
     ):
+        self.env = env
+        self.world_model_factory = world_model_factory
         self.networks = networks
         self.config = config
-        self.human_agent_indices = human_agent_indices
-        self.robot_agent_indices = robot_agent_indices
+        self.human_agent_indices = list(human_agent_indices)
+        self.robot_agent_indices = list(robot_agent_indices)
         self.human_policy_prior = human_policy_prior
         self.goal_sampler = goal_sampler
         self.device = device
         self.verbose = verbose
         self.debug = debug
         self.profiler = profiler
+        
+        # Compute the total number of agents from the indices
+        self._update_num_agents()
         
         # Initialize TensorBoard writer if requested
         self.writer = None
@@ -192,6 +205,7 @@ class BasePhase2Trainer(ABC):
         - TensorBoard writer (contains thread locks)
         - Profiler (contains thread locks)
         - Replay buffer (not needed in actor processes)
+        - Environment (may contain thread locks; recreated from factory)
         """
         state = self.__dict__.copy()
         # Don't pickle TensorBoard writer - contains thread locks
@@ -200,6 +214,8 @@ class BasePhase2Trainer(ABC):
         state['profiler'] = None
         # Don't pickle replay buffer - not needed in actor processes
         state['replay_buffer'] = None
+        # Don't pickle env - it may contain thread locks
+        state['env'] = None
         return state
     
     def __setstate__(self, state):
@@ -208,6 +224,7 @@ class BasePhase2Trainer(ABC):
         # Recreate empty replay buffer if needed
         if self.replay_buffer is None:
             self.replay_buffer = Phase2ReplayBuffer(capacity=self.config.buffer_size)
+        # Note: env stays None until _ensure_world_model() is called
     
     def _archive_tensorboard_data(self, tensorboard_dir: str) -> None:
         """Archive existing TensorBoard event files to a zip before starting a new run.
@@ -448,22 +465,68 @@ class BasePhase2Trainer(ABC):
     #     """
     #     pass
     
-    @abstractmethod
+    def _update_num_agents(self):
+        """Update num_agents from current human_agent_indices and robot_agent_indices."""
+        all_indices = self.human_agent_indices + self.robot_agent_indices
+        self.num_agents = max(all_indices) + 1 if all_indices else 0
+    
+    def _ensure_world_model(self):
+        """
+        Ensure world model is available, creating from factory if needed.
+        
+        Called by reset_environment() when env is None (in async actor processes).
+        After creating the env, updates goal_sampler and human_policy_prior.
+        """
+        if self.env is None:
+            if self.world_model_factory is None:
+                raise RuntimeError(
+                    "No world_model_factory provided. For async training, "
+                    "you must pass a world_model_factory to the trainer."
+                )
+            self._create_env_from_factory()
+    
+    def _create_env_from_factory(self):
+        """
+        Create environment from factory and update dependent components.
+        
+        Called by _ensure_world_model() for initial creation, and by
+        reset_environment() for ensemble mode (new env each episode).
+        
+        Automatically updates human_agent_indices and robot_agent_indices
+        by calling the env's get_human_agent_indices() and get_robot_agent_indices()
+        methods (important for ensemble mode where agent positions/indices can vary).
+        """
+        # Create env from factory
+        self.env = self.world_model_factory.create()
+        
+        # Update agent indices from the new environment using WorldModel API
+        if hasattr(self.env, 'get_human_agent_indices') and hasattr(self.env, 'get_robot_agent_indices'):
+            self.human_agent_indices = self.env.get_human_agent_indices()
+            self.robot_agent_indices = self.env.get_robot_agent_indices()
+            self._update_num_agents()
+        
+        # Update goal_sampler and human_policy_prior with new env
+        if hasattr(self.goal_sampler, 'set_world_model'):
+            self.goal_sampler.set_world_model(self.env)
+        if hasattr(self.human_policy_prior, 'set_world_model'):
+            self.human_policy_prior.set_world_model(self.env)
+    
     def check_goal_achieved(self, state: Any, human_idx: int, goal: Any) -> bool:
         """
         Check if a human's goal is achieved in the given state.
         
+        Uses the standard PossibleGoal API: goal.is_achieved(state).
+        
         Args:
             state: Current environment state.
-            human_idx: Index of the human agent.
-            goal: The goal to check.
+            human_idx: Index of the human agent (unused, goals check state directly).
+            goal: The goal to check (must have is_achieved method).
         
         Returns:
             True if goal is achieved, False otherwise.
         """
-        pass
+        return goal.is_achieved(state)
     
-    @abstractmethod
     def step_environment(
         self,
         state: Any,
@@ -473,6 +536,9 @@ class BasePhase2Trainer(ABC):
         """
         Execute actions in the environment.
         
+        Builds a full action list for all agents based on human_agent_indices
+        and robot_agent_indices, then steps the environment.
+        
         Args:
             state: Current state.
             robot_action: Tuple of robot actions.
@@ -481,17 +547,40 @@ class BasePhase2Trainer(ABC):
         Returns:
             Next state.
         """
-        pass
+        # Build action list for all agents
+        actions = [0] * self.num_agents  # Default to idle for any gaps
+        
+        for i, human_idx in enumerate(self.human_agent_indices):
+            actions[human_idx] = human_actions[i]
+        
+        for i, robot_idx in enumerate(self.robot_agent_indices):
+            actions[robot_idx] = robot_action[i]
+        
+        # Step environment and get new state (standard WorldModel API)
+        self.env.step(actions)
+        return self.env.get_state()
     
-    @abstractmethod
     def reset_environment(self) -> Any:
         """
         Reset the environment to initial state.
         
+        If a world_model_factory is provided, uses it to create/reset the environment.
+        This supports both cached mode (same env reused) and ensemble mode (new env
+        each episode).
+        
         Returns:
             Initial state.
         """
-        pass
+        if self.world_model_factory is not None:
+            self._create_env_from_factory()
+        elif self.env is None:
+            raise RuntimeError(
+                "No world_model_factory provided and env is None. "
+                "For async training, you must pass a world_model_factory."
+            )
+        
+        self.env.reset()
+        return self.env.get_state()
     
     def sample_robot_action(self, state: Any) -> Tuple[int, ...]:
         """
@@ -630,18 +719,13 @@ class BasePhase2Trainer(ABC):
             robot_action = self.networks.q_r.action_index_to_tuple(action_idx)
             
             # Build full action vector using ACTUAL human actions
-            actions = []
-            human_idx_iter = 0
-            robot_idx = 0
-            for agent_idx in range(len(self.env.agents)):
-                if agent_idx in self.human_agent_indices:
-                    actions.append(human_actions[human_idx_iter])
-                    human_idx_iter += 1
-                elif agent_idx in self.robot_agent_indices:
-                    actions.append(robot_action[robot_idx])
-                    robot_idx += 1
-                else:
-                    actions.append(0)
+            actions = [0] * self.num_agents  # Default to idle for any gaps
+            
+            for i, human_idx in enumerate(self.human_agent_indices):
+                actions[human_idx] = human_actions[i]
+            
+            for i, robot_idx in enumerate(self.robot_agent_indices):
+                actions[robot_idx] = robot_action[i]
             
             # Get transition probabilities
             trans_probs = self.env.transition_probabilities(state, actions)

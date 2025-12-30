@@ -4079,6 +4079,28 @@ class MultiGridEnv(WorldModel):
             tuple(mutable_objects),
         )
     
+    def get_human_agent_indices(self):
+        """
+        Get the indices of human agents in the environment.
+        
+        In MultiGrid, human agents are identified by the color 'yellow'.
+        
+        Returns:
+            List of indices for human agents.
+        """
+        return [i for i, agent in enumerate(self.agents) if agent.color == 'yellow']
+    
+    def get_robot_agent_indices(self):
+        """
+        Get the indices of robot agents in the environment.
+        
+        In MultiGrid, robot agents are identified by the color 'grey'.
+        
+        Returns:
+            List of indices for robot agents.
+        """
+        return [i for i, agent in enumerate(self.agents) if agent.color == 'grey']
+    
     def set_state(self, state):
         """
         Set the environment to a compact state.
