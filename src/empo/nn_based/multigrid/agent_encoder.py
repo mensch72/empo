@@ -77,38 +77,44 @@ class AgentIdentityEncoder(nn.Module):
         self.position_feature_dim = position_feature_dim
         self.agent_feature_dim = agent_feature_dim
         
-        # Learnable embedding for each agent index
-        self.index_embedding = nn.Embedding(num_agents, embedding_dim)
-        
-        # Small CNN to process the query agent position channel
-        # This converts the grid-shaped position marker into a feature vector
-        self.position_conv = nn.Sequential(
-            nn.Conv2d(1, 8, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(8, 8, kernel_size=3, padding=1),
-            nn.ReLU(),
-        )
-        position_conv_out = 8 * grid_height * grid_width
-        self.position_fc = nn.Sequential(
-            nn.Linear(position_conv_out, position_feature_dim),
-            nn.ReLU(),
-        )
-        
-        # MLP to process query agent features
-        self.agent_feature_fc = nn.Sequential(
-            nn.Linear(AGENT_FEATURE_SIZE, agent_feature_dim),
-            nn.ReLU(),
-        )
-        
-        # Total output dimension
-        # If use_encoders=False, use identity_output_dim if provided, else compute it
         if not use_encoders:
+            # Identity mode: no NN layers needed
+            # Compute output dim: agent_idx (1) + grid (H*W) + agent_features (AGENT_FEATURE_SIZE)
             if identity_output_dim is not None:
                 self.output_dim = identity_output_dim
             else:
-                # Compute: agent_idx (1) + grid (H*W) + agent_features (AGENT_FEATURE_SIZE)
                 self.output_dim = 1 + grid_height * grid_width + AGENT_FEATURE_SIZE
+            # Create dummy layers for state_dict compatibility
+            self.index_embedding = nn.Identity()
+            self.position_conv = nn.Identity()
+            self.position_fc = nn.Identity()
+            self.agent_feature_fc = nn.Identity()
         else:
+            # Normal mode: create all NN layers
+            # Learnable embedding for each agent index
+            self.index_embedding = nn.Embedding(num_agents, embedding_dim)
+            
+            # Small CNN to process the query agent position channel
+            # This converts the grid-shaped position marker into a feature vector
+            self.position_conv = nn.Sequential(
+                nn.Conv2d(1, 8, kernel_size=3, padding=1),
+                nn.ReLU(),
+                nn.Conv2d(8, 8, kernel_size=3, padding=1),
+                nn.ReLU(),
+            )
+            position_conv_out = 8 * grid_height * grid_width
+            self.position_fc = nn.Sequential(
+                nn.Linear(position_conv_out, position_feature_dim),
+                nn.ReLU(),
+            )
+            
+            # MLP to process query agent features
+            self.agent_feature_fc = nn.Sequential(
+                nn.Linear(AGENT_FEATURE_SIZE, agent_feature_dim),
+                nn.ReLU(),
+            )
+            
+            # Total output dimension
             self.output_dim = embedding_dim + position_feature_dim + agent_feature_dim
         
         # Internal cache for raw tensor extraction (before NN forward)

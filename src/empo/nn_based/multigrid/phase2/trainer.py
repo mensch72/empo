@@ -1425,83 +1425,6 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         )
 
 
-def compute_identity_mode_dims(
-    env: MultiGridEnv,
-    max_agents: int = 10,
-    max_kill_buttons: int = 4,
-    max_pause_switches: int = 4,
-    max_disabling_switches: int = 4,
-    max_control_buttons: int = 4,
-) -> Dict[str, int]:
-    """
-    Compute the feature dimensions for identity mode (use_encoders=False).
-    
-    In identity mode, encoder forward() functions return flattened input tensors,
-    so we need to compute the correct dimensions based on environment structure.
-    
-    Args:
-        env: MultiGridEnv instance.
-        max_agents: Max number of agents for identity encoding.
-        max_kill_buttons: Max kill buttons (for state encoder).
-        max_pause_switches: Max pause switches (for state encoder).
-        max_disabling_switches: Max disabling switches (for state encoder).
-        max_control_buttons: Max control buttons (for state encoder).
-    
-    Returns:
-        Dict with keys: 'state_feature_dim', 'hidden_dim', 'goal_feature_dim', 
-        'agent_output_dim' (the computed identity-mode dimensions).
-    """
-    from ..constants import (
-        NUM_STANDARD_COLORS, NUM_GLOBAL_WORLD_FEATURES, AGENT_FEATURE_SIZE,
-        KILLBUTTON_FEATURE_SIZE, PAUSESWITCH_FEATURE_SIZE,
-        DISABLINGSWITCH_FEATURE_SIZE, CONTROLBUTTON_FEATURE_SIZE,
-        NUM_OBJECT_TYPE_CHANNELS,
-    )
-    
-    grid_height = env.height
-    grid_width = env.width
-    
-    # Count agents per color
-    num_agents_per_color = {}
-    for agent in env.agents:
-        color = agent.color
-        num_agents_per_color[color] = num_agents_per_color.get(color, 0) + 1
-    total_agents = sum(num_agents_per_color.values())
-    
-    # State encoder identity dim: grid channels + global features + agent features + interactive features
-    # Grid channels: object types + other channels (overlappable, immobile, mobile) + agent color channels
-    num_other_channels = 3    # overlappable, immobile, mobile
-    num_grid_channels = NUM_OBJECT_TYPE_CHANNELS + num_other_channels + NUM_STANDARD_COLORS
-    
-    agent_input_size = AGENT_FEATURE_SIZE * total_agents
-    interactive_input_size = (
-        max_kill_buttons * KILLBUTTON_FEATURE_SIZE +
-        max_pause_switches * PAUSESWITCH_FEATURE_SIZE +
-        max_disabling_switches * DISABLINGSWITCH_FEATURE_SIZE +
-        max_control_buttons * CONTROLBUTTON_FEATURE_SIZE
-    )
-    
-    state_identity_dim = (
-        num_grid_channels * grid_height * grid_width +
-        NUM_GLOBAL_WORLD_FEATURES +
-        agent_input_size +
-        interactive_input_size
-    )
-    
-    # Goal encoder identity dim: just 4 floats (bounding box x1, y1, x2, y2)
-    goal_identity_dim = 4
-    
-    # Agent encoder identity dim: agent_idx (1) + grid (H*W) + agent_features (AGENT_FEATURE_SIZE)
-    agent_identity_dim = 1 + grid_height * grid_width + AGENT_FEATURE_SIZE
-    
-    return {
-        'state_feature_dim': state_identity_dim,
-        'hidden_dim': state_identity_dim,  # hidden_dim is typically same as state_feature_dim
-        'goal_feature_dim': goal_identity_dim,
-        'agent_output_dim': agent_identity_dim,
-    }
-
-
 def create_phase2_networks(
     env: MultiGridEnv,
     config: Phase2Config,
@@ -1542,25 +1465,11 @@ def create_phase2_networks(
     Returns:
         Phase2Networks container with all networks using shared encoders.
     """
-    # If use_encoders=False, compute and apply identity-mode dimensions to config
-    # This must happen BEFORE spawning so config has correct dims when pickled
-    if not config.use_encoders:
-        identity_dims = compute_identity_mode_dims(env, max_agents)
-        # Update config with identity-mode dimensions
-        config.hidden_dim = identity_dims['state_feature_dim']
-        config.state_feature_dim = identity_dims['state_feature_dim']
-        config.goal_feature_dim = identity_dims['goal_feature_dim']
-        # For agent encoder, we need to store the output_dim somewhere
-        # We'll use agent_embedding_dim + agent_position_feature_dim + agent_feature_dim = output_dim
-        # But in identity mode, these individual dims don't matter, only the total output_dim
-        # Store it in a way that the encoder can compute the correct output_dim
-        config._agent_identity_output_dim = identity_dims['agent_output_dim']
-        
-        # IMPORTANT: Force use of identity-mode dimensions, overriding any passed values
-        hidden_dim = config.hidden_dim
-        goal_feature_dim = config.goal_feature_dim
+    # In identity mode (use_encoders=False), encoders now compute their own
+    # output dimensions internally. We don't need to set them here.
+    # The hidden_dim for downstream MLP heads stays at default (small).
     
-    # Use config values as defaults (only if not already set by identity mode above)
+    # Use config values as defaults
     if hidden_dim is None:
         hidden_dim = config.hidden_dim
     if goal_feature_dim is None:
@@ -1600,9 +1509,7 @@ def create_phase2_networks(
         use_encoders=config.use_encoders,
     ).to(device)
     
-    # Get identity output dim for agent encoder if in identity mode
-    agent_identity_output_dim = getattr(config, '_agent_identity_output_dim', None)
-    
+    # Agent encoder (identity mode computes its own output dim internally)
     shared_agent_encoder = AgentIdentityEncoder(
         num_agents=max_agents,
         embedding_dim=agent_embedding_dim,
@@ -1611,7 +1518,6 @@ def create_phase2_networks(
         grid_height=grid_height,
         grid_width=grid_width,
         use_encoders=config.use_encoders,
-        identity_output_dim=agent_identity_output_dim,
     ).to(device)
     
     # Create OWN encoders for Q_r and X_h (trained with their respective losses)
@@ -1634,7 +1540,6 @@ def create_phase2_networks(
         grid_height=grid_height,
         grid_width=grid_width,
         use_encoders=config.use_encoders,
-        identity_output_dim=agent_identity_output_dim,
     ).to(device)
     
     # Create networks with SHARED encoders and OWN encoders where applicable

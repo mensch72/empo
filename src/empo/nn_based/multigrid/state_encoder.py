@@ -157,64 +157,83 @@ class MultiGridStateEncoder(BaseStateEncoder):
         self._interactive_input_size = interactive_input_size
         self._global_features_size = NUM_GLOBAL_WORLD_FEATURES
         
-        # Note: When use_encoders=False, the caller (trainer) should pass the correct
-        # identity-mode feature_dim. We no longer override it here.
-        
-        # Scale intermediate dimensions based on feature_dim
-        # For small feature_dim (e.g., 16), use proportionally smaller networks
-        conv_channels = max(8, feature_dim // 4)  # e.g., 16->4->8, 64->16, 256->64
-        grid_feature_dim = max(16, feature_dim // 2)  # e.g., 16->8->16, 64->32, 256->128
-        agent_feature_dim = max(8, feature_dim // 4)  # e.g., 16->4->8, 64->16, 256->64
-        interactive_feature_dim = max(4, feature_dim // 8)  # e.g., 16->2->4, 64->8, 256->32
-        
-        # Grid encoder (CNN) - reduced architecture for speed
-        # 2 conv layers with pooling instead of 3 conv layers without pooling
-        self.grid_conv = nn.Sequential(
-            nn.Conv2d(self.num_grid_channels, conv_channels, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2, 2),  # Halves spatial dimensions -> 4x fewer values to process
-            nn.Conv2d(conv_channels, conv_channels, kernel_size=3, padding=1),
-            nn.ReLU(),
-        )
-        # Compute actual output size with a dummy forward pass
-        with torch.no_grad():
-            dummy_input = torch.zeros(1, self.num_grid_channels, grid_height, grid_width)
-            dummy_output = self.grid_conv(dummy_input)
-            grid_conv_out_size = dummy_output.numel()
-        
-        self.grid_fc = nn.Sequential(
-            nn.Linear(grid_conv_out_size + NUM_GLOBAL_WORLD_FEATURES, grid_feature_dim),
-            nn.ReLU(),
-        )
-        
-        # Agent encoder (MLP)
-        # Encodes all agents organized by color (no separate query agent features)
-        self.agent_fc = nn.Sequential(
-            nn.Linear(agent_input_size, agent_feature_dim * 2),
-            nn.ReLU(),
-            nn.Linear(agent_feature_dim * 2, agent_feature_dim),
-            nn.ReLU(),
-        )
-        
-        # Interactive object encoder (MLP)
-        self.interactive_fc = nn.Sequential(
-            nn.Linear(interactive_input_size, interactive_feature_dim),
-            nn.ReLU(),
-        )
-        
-        # Combined feature dimension
-        combined_dim = grid_feature_dim + agent_feature_dim + interactive_feature_dim
-        
-        # Final projection to feature_dim
-        self.output_fc = nn.Sequential(
-            nn.Linear(combined_dim, feature_dim),
-            nn.ReLU(),
-        )
-        
-        # Store sub-feature dimensions for get_config
-        self._grid_feature_dim = grid_feature_dim
-        self._agent_feature_dim = agent_feature_dim
-        self._interactive_feature_dim = interactive_feature_dim
+        # When use_encoders=False, compute identity output dim and skip creating NN layers
+        if not use_encoders:
+            # Identity mode: output is flattened concatenation of all inputs
+            identity_dim = (
+                self.num_grid_channels * grid_height * grid_width +
+                NUM_GLOBAL_WORLD_FEATURES +
+                agent_input_size +
+                interactive_input_size
+            )
+            # Override feature_dim to match actual identity output
+            self.feature_dim = identity_dim
+            # Create dummy attributes so state_dict works (empty modules)
+            self.grid_conv = nn.Identity()
+            self.grid_fc = nn.Identity()
+            self.agent_fc = nn.Identity()
+            self.interactive_fc = nn.Identity()
+            self.output_fc = nn.Identity()
+            self._grid_feature_dim = 0
+            self._agent_feature_dim = 0
+            self._interactive_feature_dim = 0
+        else:
+            # Normal mode: create full NN layers
+            # Scale intermediate dimensions based on feature_dim
+            # For small feature_dim (e.g., 16), use proportionally smaller networks
+            conv_channels = max(8, feature_dim // 4)  # e.g., 16->4->8, 64->16, 256->64
+            grid_feature_dim = max(16, feature_dim // 2)  # e.g., 16->8->16, 64->32, 256->128
+            agent_feature_dim = max(8, feature_dim // 4)  # e.g., 16->4->8, 64->16, 256->64
+            interactive_feature_dim = max(4, feature_dim // 8)  # e.g., 16->2->4, 64->8, 256->32
+            
+            # Grid encoder (CNN) - reduced architecture for speed
+            # 2 conv layers with pooling instead of 3 conv layers without pooling
+            self.grid_conv = nn.Sequential(
+                nn.Conv2d(self.num_grid_channels, conv_channels, kernel_size=3, padding=1),
+                nn.ReLU(),
+                nn.MaxPool2d(2, 2),  # Halves spatial dimensions -> 4x fewer values to process
+                nn.Conv2d(conv_channels, conv_channels, kernel_size=3, padding=1),
+                nn.ReLU(),
+            )
+            # Compute actual output size with a dummy forward pass
+            with torch.no_grad():
+                dummy_input = torch.zeros(1, self.num_grid_channels, grid_height, grid_width)
+                dummy_output = self.grid_conv(dummy_input)
+                grid_conv_out_size = dummy_output.numel()
+            
+            self.grid_fc = nn.Sequential(
+                nn.Linear(grid_conv_out_size + NUM_GLOBAL_WORLD_FEATURES, grid_feature_dim),
+                nn.ReLU(),
+            )
+            
+            # Agent encoder (MLP)
+            # Encodes all agents organized by color (no separate query agent features)
+            self.agent_fc = nn.Sequential(
+                nn.Linear(agent_input_size, agent_feature_dim * 2),
+                nn.ReLU(),
+                nn.Linear(agent_feature_dim * 2, agent_feature_dim),
+                nn.ReLU(),
+            )
+            
+            # Interactive object encoder (MLP)
+            self.interactive_fc = nn.Sequential(
+                nn.Linear(interactive_input_size, interactive_feature_dim),
+                nn.ReLU(),
+            )
+            
+            # Combined feature dimension
+            combined_dim = grid_feature_dim + agent_feature_dim + interactive_feature_dim
+            
+            # Final projection to feature_dim
+            self.output_fc = nn.Sequential(
+                nn.Linear(combined_dim, feature_dim),
+                nn.ReLU(),
+            )
+            
+            # Store sub-feature dimensions for get_config
+            self._grid_feature_dim = grid_feature_dim
+            self._agent_feature_dim = agent_feature_dim
+            self._interactive_feature_dim = interactive_feature_dim
         
         # Internal cache for raw tensor extraction (before NN forward)
         # Keys are state_id (int), values are raw tensor tuples

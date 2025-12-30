@@ -39,20 +39,23 @@ class MultiGridGoalEncoder(BaseGoalEncoder):
         feature_dim: int = 32,
         use_encoders: bool = True
     ):
-        # Note: When use_encoders=False, the caller (trainer) should pass the correct
-        # identity-mode feature_dim (which is 4). We no longer override it here.
-        
         super().__init__(feature_dim)
         self.grid_height = grid_height
         self.grid_width = grid_width
         self.use_encoders = use_encoders
         
-        # Input: bounding box (x1, y1, x2, y2) with inclusive coordinates
-        # Point goals are (x, y, x, y)
-        self.fc = nn.Sequential(
-            nn.Linear(4, feature_dim),
-            nn.ReLU(),
-        )
+        if not use_encoders:
+            # Identity mode: output is just the 4 input coordinates
+            self.feature_dim = 4
+            self.fc = nn.Identity()  # Dummy for state_dict compatibility
+        else:
+            # Normal mode: create MLP
+            # Input: bounding box (x1, y1, x2, y2) with inclusive coordinates
+            # Point goals are (x, y, x, y)
+            self.fc = nn.Sequential(
+                nn.Linear(4, feature_dim),
+                nn.ReLU(),
+            )
         
         # Internal cache for goal coordinate extraction (before NN forward)
         # Keys are (x1, y1, x2, y2) bounding box coordinates
