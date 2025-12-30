@@ -19,6 +19,12 @@ class MultiGridRobotValueNetwork(BaseRobotValueNetwork):
     Estimates V_r(s) = U_r(s) + E_{a_r ~ π_r}[Q_r(s, a_r)] - the robot's
     value function representing expected long-term aggregate human power.
     
+    .. warning:: ASYNC TRAINING / PICKLE COMPATIBILITY
+    
+        This class (via its encoders) is pickled and sent to spawned actor
+        processes during async training. See warnings in MultiGridStateEncoder
+        for details on maintaining pickle compatibility.
+    
     Args:
         grid_height: Height of the grid.
         grid_width: Width of the grid.

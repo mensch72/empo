@@ -43,6 +43,33 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
     2. Efficient caching without redundant computation
     3. Proper gradient flow (caches raw tensors, not NN outputs)
     
+    .. warning:: ASYNC TRAINING / PICKLE COMPATIBILITY
+    
+        The **entire trainer object** is pickled and sent to spawned actor processes
+        during async training (via bound method ``_actor_process_entry``). This means
+        all attributes must be picklable.
+        
+        To avoid breaking async functionality:
+        
+        1. **Pickle size matters.** Large pickles (>64MB) can exceed Docker's default
+           shared memory and cause SIGBUS errors. When use_encoders=False, we avoid
+           creating unused NN layers to keep pickle size small (~10MB vs ~130MB).
+        
+        2. **All attributes must be picklable.** Avoid:
+           - Open file handles, database connections
+           - Lambda functions or local functions as attributes
+           - Thread locks (use multiprocessing locks from context instead)
+           - Non-picklable third-party objects
+        
+        3. **The env attribute may not be picklable.** Use ``world_model_factory``
+           to create fresh environment instances in worker processes.
+        
+        4. **Caches are NOT preserved.** The encoder caches (_raw_cache) will be
+           empty in worker processes. This is expected and fine.
+        
+        5. **Test with async mode after changes:** Always verify changes work with
+           ``--async`` flag in the phase2 demo, both inside and outside Docker.
+    
     Args:
         env: MultiGridEnv instance.
         networks: Phase2Networks container.

@@ -23,6 +23,12 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
     - Total joint actions = A^K
     - Joint action a_r = (a_{r_1}, ..., a_{r_K}) is a tuple
     
+    .. warning:: ASYNC TRAINING / PICKLE COMPATIBILITY
+    
+        This class (via its encoders) is pickled and sent to spawned actor
+        processes during async training. See warnings in MultiGridStateEncoder
+        for details on maintaining pickle compatibility.
+    
     Args:
         grid_height: Height of the grid.
         grid_width: Width of the grid.

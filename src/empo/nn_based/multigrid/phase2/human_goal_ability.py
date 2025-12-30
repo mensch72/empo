@@ -21,6 +21,12 @@ class MultiGridHumanGoalAchievementNetwork(BaseHumanGoalAchievementNetwork):
     Estimates V_h^e(s, g_h) - the probability that human h achieves goal g_h
     under the current robot policy π_r.
     
+    .. warning:: ASYNC TRAINING / PICKLE COMPATIBILITY
+    
+        This class (via its encoders) is pickled and sent to spawned actor
+        processes during async training. See warnings in MultiGridStateEncoder
+        for details on maintaining pickle compatibility.
+    
     Args:
         grid_height: Height of the grid.
         grid_width: Width of the grid.

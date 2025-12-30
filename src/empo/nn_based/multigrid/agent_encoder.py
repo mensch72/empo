@@ -47,6 +47,20 @@ class AgentIdentityEncoder(nn.Module):
     3. The query agent's features (even though redundant with color-grouped
        features, this makes it easier for the network to learn)
     
+    .. warning:: ASYNC TRAINING / PICKLE COMPATIBILITY
+    
+        This class is pickled and sent to spawned actor processes during async
+        training. To avoid breaking async functionality:
+        
+        1. **Do NOT create large unused nn.Module layers.** When use_encoders=False,
+           we skip creating Embedding/CNN/MLP layers and use nn.Identity() placeholders.
+        
+        2. **All attributes must be picklable.** Avoid lambdas, local functions,
+           or non-picklable objects as instance attributes.
+        
+        3. **Test with async mode after changes:** Always verify changes work with
+           ``--async`` flag in the phase2 demo.
+    
     Args:
         num_agents: Maximum number of agents.
         embedding_dim: Dimension of the agent index embedding.

@@ -21,6 +21,12 @@ class MultiGridIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
     
     Network predicts log(y-1) where y = E_h[X_h^{-ξ}], then computes U_r = -y^η.
     
+    .. warning:: ASYNC TRAINING / PICKLE COMPATIBILITY
+    
+        This class (via its encoders) is pickled and sent to spawned actor
+        processes during async training. See warnings in MultiGridStateEncoder
+        for details on maintaining pickle compatibility.
+    
     Args:
         grid_height: Height of the grid.
         grid_width: Width of the grid.

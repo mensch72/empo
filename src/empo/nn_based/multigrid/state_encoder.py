@@ -95,6 +95,26 @@ class MultiGridStateEncoder(BaseStateEncoder):
     3. MLP for interactive objects (buttons/switches)
     4. Global world features
     
+    .. warning:: ASYNC TRAINING / PICKLE COMPATIBILITY
+    
+        This class is pickled and sent to spawned actor processes during async
+        training. To avoid breaking async functionality:
+        
+        1. **Do NOT create large unused nn.Module layers.** When use_encoders=False,
+           we skip creating CNN/MLP layers entirely and use nn.Identity() placeholders.
+           Creating unused layers bloats pickle size (130MB vs 10MB) and can exceed
+           Docker's default 64MB shared memory, causing SIGBUS errors.
+        
+        2. **All attributes must be picklable.** Avoid lambdas, local functions,
+           open file handles, or non-picklable objects as instance attributes.
+        
+        3. **Cache contents are NOT preserved across pickle.** The _raw_cache dict
+           will be empty in worker processes (this is fine, it's just a performance
+           optimization).
+        
+        4. **Test with async mode after changes:** Always verify changes work with
+           ``--async`` flag in the phase2 demo.
+    
     Args:
         grid_height: Height of the grid.
         grid_width: Width of the grid.

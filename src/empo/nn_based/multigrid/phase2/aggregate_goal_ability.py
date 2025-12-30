@@ -20,6 +20,12 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
     Estimates X_h(s) = E_{g_h}[V_h^e(s, g_h)^ζ] - the aggregate ability
     of human h to achieve various goals.
     
+    .. warning:: ASYNC TRAINING / PICKLE COMPATIBILITY
+    
+        This class (via its encoders) is pickled and sent to spawned actor
+        processes during async training. See warnings in MultiGridStateEncoder
+        for details on maintaining pickle compatibility.
+    
     Args:
         grid_height: Height of the grid.
         grid_width: Width of the grid.

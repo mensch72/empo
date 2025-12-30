@@ -25,6 +25,20 @@ class MultiGridGoalEncoder(BaseGoalEncoder):
     All goals are represented as bounding boxes (x1, y1, x2, y2) with inclusive
     coordinates. Point goals are represented as (x, y, x, y).
     
+    .. warning:: ASYNC TRAINING / PICKLE COMPATIBILITY
+    
+        This class is pickled and sent to spawned actor processes during async
+        training. To avoid breaking async functionality:
+        
+        1. **Do NOT create large unused nn.Module layers.** When use_encoders=False,
+           we use nn.Identity() placeholder instead of creating MLP layers.
+        
+        2. **All attributes must be picklable.** Avoid lambdas, local functions,
+           or non-picklable objects as instance attributes.
+        
+        3. **Test with async mode after changes:** Always verify changes work with
+           ``--async`` flag in the phase2 demo.
+    
     Args:
         grid_height: Height of the grid.
         grid_width: Width of the grid.
