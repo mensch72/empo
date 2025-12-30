@@ -104,6 +104,7 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         
         # Own agent encoder for X_h-specific features (trained with X_h loss)
         # This allows X_h to learn additional agent features beyond those learned by V_h^e
+        # Note: own_agent_encoder shares cache with agent_encoder to avoid redundant tensorization
         if own_agent_encoder is not None:
             self.own_agent_encoder = own_agent_encoder
         else:
@@ -111,7 +112,8 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
                 num_agents=max_agents,
                 embedding_dim=agent_embedding_dim,
                 grid_height=grid_height,
-                grid_width=grid_width
+                grid_width=grid_width,
+                share_cache_with=self.agent_encoder
             )
         
         # X_h value head with optional dropout

@@ -125,6 +125,9 @@ class MultiGridStateEncoder(BaseStateEncoder):
         max_pause_switches: Max PauseSwitches to encode.
         max_disabling_switches: Max DisablingSwitches to encode.
         max_control_buttons: Max ControlButtons to encode.
+        share_cache_with: Optional encoder instance to share raw tensor cache with.
+            If provided, this encoder will use the other encoder's cache instead
+            of creating its own. Useful for "own" encoders to reuse shared encoder caches.
     """
     
     def __init__(
@@ -139,7 +142,8 @@ class MultiGridStateEncoder(BaseStateEncoder):
         max_disabling_switches: int = 4,
         max_control_buttons: int = 4,
         include_step_count: bool = True,
-        use_encoders: bool = True
+        use_encoders: bool = True,
+        share_cache_with: Optional['MultiGridStateEncoder'] = None
     ):
         super().__init__(feature_dim)
         self.grid_height = grid_height
@@ -258,7 +262,13 @@ class MultiGridStateEncoder(BaseStateEncoder):
         # Internal cache for raw tensor extraction (before NN forward)
         # Keys are state_id (int), values are raw tensor tuples
         # Cache is query-agent agnostic since state encoding doesn't depend on query agent
-        self._raw_cache: Dict[Tuple, Tuple[torch.Tensor, ...]] = {}
+        # If share_cache_with is provided, reuse that encoder's cache
+        if share_cache_with is not None:
+            self._raw_cache = share_cache_with._raw_cache
+            self._shared_cache = True
+        else:
+            self._raw_cache: Dict[Tuple, Tuple[torch.Tensor, ...]] = {}
+            self._shared_cache = False
         self._cache_hits = 0
         self._cache_misses = 0
     

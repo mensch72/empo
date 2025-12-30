@@ -98,6 +98,7 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
         
         # Own state encoder for Q_r-specific features (trained with Q_r loss)
         # This allows Q_r to learn additional state features beyond those learned by V_h^e
+        # Note: own_state_encoder shares cache with state_encoder to avoid redundant tensorization
         if own_state_encoder is not None:
             self.own_state_encoder = own_state_encoder
         else:
@@ -110,7 +111,8 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
                 max_kill_buttons=max_kill_buttons,
                 max_pause_switches=max_pause_switches,
                 max_disabling_switches=max_disabling_switches,
-                max_control_buttons=max_control_buttons
+                max_control_buttons=max_control_buttons,
+                share_cache_with=self.state_encoder
             )
         
         # Q-value head for joint actions with optional dropout

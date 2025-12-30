@@ -116,6 +116,7 @@ class MultiGridRobotPolicy(RobotPolicy):
                 max_disabling_switches=own_state_enc_config.get('max_disabling_switches', 4),
                 max_control_buttons=own_state_enc_config.get('max_control_buttons', 4),
                 use_encoders=own_use_encoders,
+                share_cache_with=state_encoder,
             )
             
             # Reconstruct Q network from config with pre-built state encoders

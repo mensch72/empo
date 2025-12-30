@@ -44,6 +44,9 @@ class MultiGridGoalEncoder(BaseGoalEncoder):
         grid_width: Width of the grid.
         feature_dim: Output feature dimension.
         use_encoders: If False, forward() returns identity (padded input).
+        share_cache_with: Optional encoder instance to share raw tensor cache with.
+            If provided, this encoder will use the other encoder's cache instead
+            of creating its own. Useful for "own" encoders to reuse shared encoder caches.
     """
     
     def __init__(
@@ -51,7 +54,8 @@ class MultiGridGoalEncoder(BaseGoalEncoder):
         grid_height: int,
         grid_width: int,
         feature_dim: int = 32,
-        use_encoders: bool = True
+        use_encoders: bool = True,
+        share_cache_with: Optional['MultiGridGoalEncoder'] = None
     ):
         super().__init__(feature_dim)
         self.grid_height = grid_height
@@ -73,7 +77,13 @@ class MultiGridGoalEncoder(BaseGoalEncoder):
         
         # Internal cache for goal coordinate extraction (before NN forward)
         # Keys are (x1, y1, x2, y2) bounding box coordinates
-        self._raw_cache: Dict[Tuple[int, int, int, int], torch.Tensor] = {}
+        # If share_cache_with is provided, reuse that encoder's cache
+        if share_cache_with is not None:
+            self._raw_cache = share_cache_with._raw_cache
+            self._shared_cache = True
+        else:
+            self._raw_cache: Dict[Tuple[int, int, int, int], torch.Tensor] = {}
+            self._shared_cache = False
         self._cache_hits = 0
         self._cache_misses = 0
     

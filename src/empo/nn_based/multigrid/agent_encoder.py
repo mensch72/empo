@@ -69,6 +69,9 @@ class AgentIdentityEncoder(nn.Module):
         grid_height: Height of the grid (for position channel).
         grid_width: Width of the grid (for position channel).
         use_encoders: If False, forward() returns identity (flattened+padded input).
+        share_cache_with: Optional encoder instance to share raw tensor cache with.
+            If provided, this encoder will use the other encoder's cache instead
+            of creating its own. Useful for "own" encoders to reuse shared encoder caches.
     """
     
     def __init__(
@@ -80,7 +83,8 @@ class AgentIdentityEncoder(nn.Module):
         grid_height: int = 10,
         grid_width: int = 10,
         use_encoders: bool = True,
-        identity_output_dim: Optional[int] = None
+        identity_output_dim: Optional[int] = None,
+        share_cache_with: Optional['AgentIdentityEncoder'] = None
     ):
         super().__init__()
         self.num_agents = num_agents
@@ -133,7 +137,13 @@ class AgentIdentityEncoder(nn.Module):
         
         # Internal cache for raw tensor extraction (before NN forward)
         # Keys are (state_tuple, agent_idx), values are (idx_tensor, grid, features)
-        self._raw_cache: Dict[Tuple[Tuple, int], Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+        # If share_cache_with is provided, reuse that encoder's cache
+        if share_cache_with is not None:
+            self._raw_cache = share_cache_with._raw_cache
+            self._shared_cache = True
+        else:
+            self._raw_cache: Dict[Tuple[Tuple, int], Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+            self._shared_cache = False
         self._cache_hits = 0
         self._cache_misses = 0
     

@@ -381,6 +381,7 @@ def create_phase2_networks(
     
     # Create OWN encoders for Q_r and X_h (trained with their respective losses)
     # These allow Q_r and X_h to learn additional features beyond those learned by V_h^e
+    # Note: own encoders share cache with shared encoders to avoid redundant tensorization
     q_r_own_state_encoder = MultiGridStateEncoder(
         grid_height=grid_height,
         grid_width=grid_width,
@@ -389,6 +390,7 @@ def create_phase2_networks(
         feature_dim=hidden_dim,
         include_step_count=config.include_step_count,
         use_encoders=config.use_encoders,
+        share_cache_with=shared_state_encoder,
     ).to(device)
     
     x_h_own_agent_encoder = AgentIdentityEncoder(
@@ -399,6 +401,7 @@ def create_phase2_networks(
         grid_height=grid_height,
         grid_width=grid_width,
         use_encoders=config.use_encoders,
+        share_cache_with=shared_agent_encoder,
     ).to(device)
     
     # Create networks with SHARED encoders and OWN encoders where applicable
