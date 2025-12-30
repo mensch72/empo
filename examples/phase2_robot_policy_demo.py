@@ -303,8 +303,8 @@ class _EnsembleEnvCreator:
             for x in range(env.width):
                 cell = env.grid.get(x, y)
                 grid_str += f"{type(cell).__name__ if cell else 'None'},"
-        grid_hash = hash(grid_str)
-        print(f"[DEBUG _EnsembleEnvCreator] Created new env, grid hash: {grid_hash:016x}")
+        #grid_hash = hash(grid_str)
+        #print(f"[DEBUG _EnsembleEnvCreator] Created new env, grid hash: {grid_hash:016x}")
         return env
 
 

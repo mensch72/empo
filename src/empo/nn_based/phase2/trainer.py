@@ -117,6 +117,34 @@ class BasePhase2Trainer(ABC):
             # Archive old TensorBoard data to prevent mixing with new run
             self._archive_tensorboard_data(tensorboard_dir)
             self.writer = SummaryWriter(log_dir=tensorboard_dir)
+            # Add static remarks to TensorBoard
+            self.writer.add_text(
+                'Loss/caution',
+                "Losses are NOT expected to drop to zero as they are MSE losses "
+                "that are lower bounded by the variance of the stochastic variable they track!",
+                global_step=0
+            )
+            self.writer.add_text('GradNorm/remark', "Gradients are clipped.", global_step=0)
+            if config.async_training:
+                max_steps = config.max_env_steps_per_training_step
+                if max_steps is not None:
+                    self.writer.add_text(
+                        'Progress/remark',
+                        f"Async mode: at most {max_steps} env steps per training step. Buffer cleared before and after beta_r ramp-up.",
+                        global_step=0
+                    )
+                else:
+                    self.writer.add_text(
+                        'Progress/remark',
+                        "Async mode: unlimited env steps per training step. Buffer cleared before and after beta_r ramp-up.",
+                        global_step=0
+                    )
+            else:
+                self.writer.add_text(
+                    'Progress/remark',
+                    "Sync mode: one env step per training step. Buffer cleared before and after beta_r ramp-up.",
+                    global_step=0
+                )
         
         if self.debug:
             print("[DEBUG] BasePhase2Trainer.__init__: Initializing target networks...")
