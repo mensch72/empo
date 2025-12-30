@@ -729,199 +729,336 @@ class BasePhase2Trainer(ABC):
         self,
         batch: List[Phase2Transition],
         x_h_batch: Optional[List[Phase2Transition]] = None
-    ) -> Dict[str, torch.Tensor]:
+    ) -> Tuple[Dict[str, torch.Tensor], Dict[str, Dict[str, float]]]:
         """
-        Compute losses for all networks.
+        Compute losses for all networks using batched forward passes.
+        
+        Uses forward_batch methods on all networks for efficient batched
+        computation. Works for both neural networks and lookup tables.
         
         Args:
             batch: List of transitions for most networks.
             x_h_batch: Optional larger batch for X_h (defaults to batch).
         
         Returns:
-            Dict mapping loss names to loss tensors.
+            Tuple of (losses dict, prediction_stats dict).
         """
         if x_h_batch is None:
             x_h_batch = batch
         
-        # Check which networks are active - determines what we need to compute
+        n = len(batch)
+        
+        # Check which networks are active in current warmup stage
         active_networks = self.config.get_active_networks(self.training_step_count)
+        v_h_e_active = 'v_h_e' in active_networks
         x_h_active = 'x_h' in active_networks
         u_r_active = 'u_r' in active_networks
         q_r_active = 'q_r' in active_networks
+        v_r_active = 'v_r' in active_networks
+        
+        # Track prediction statistics
+        prediction_stats = {}
+        
+        # Get effective beta_r (needed for V_r target computation)
+        effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
+        
+        # ===================================================================
+        # Stage 1: Collect data from transitions for batched processing
+        # ===================================================================
+        
+        # Extract states and next_states
+        states = [t.state for t in batch]
+        next_states = [t.next_state for t in batch]
+        
+        # Collect V_h^e data: (state_idx, state, next_state, human_idx, goal)
+        v_h_e_indices = []  # which transition this came from
+        v_h_e_states = []
+        v_h_e_next_states = []
+        v_h_e_human_indices = []
+        v_h_e_goals = []
+        v_h_e_achieved = []
+        
+        for i, t in enumerate(batch):
+            for h, g_h in t.goals.items():
+                v_h_e_indices.append(i)
+                v_h_e_states.append(t.state)
+                v_h_e_next_states.append(t.next_state)
+                v_h_e_human_indices.append(h)
+                v_h_e_goals.append(g_h)
+                v_h_e_achieved.append(self.check_goal_achieved(t.next_state, h, g_h))
+        
+        # Collect X_h data
+        x_h_states = []
+        x_h_human_indices = []
+        x_h_goals = []
+        x_h_goal_weights = []
+        
+        if x_h_active:
+            for t in x_h_batch:
+                if self.config.x_h_sample_humans is None:
+                    humans_for_x_h = list(t.goals.keys())
+                else:
+                    n_sample = min(self.config.x_h_sample_humans, len(t.goals))
+                    humans_for_x_h = random.sample(list(t.goals.keys()), n_sample)
+                
+                for h_x in humans_for_x_h:
+                    x_h_states.append(t.state)
+                    x_h_human_indices.append(h_x)
+                    x_h_goals.append(t.goals[h_x])
+                    x_h_goal_weights.append(t.goal_weights[h_x])
+        
+        # Collect U_r data - flatten all (state, human) pairs for batched X_h computation
+        u_r_flat_states = []      # states repeated for each human
+        u_r_flat_humans = []      # human indices
+        u_r_humans_per_state = [] # how many humans sampled for each state
+        
+        if self.config.u_r_use_network and u_r_active:
+            for t in batch:
+                if self.config.u_r_sample_humans is None:
+                    humans_for_u_r = list(self.human_agent_indices)
+                else:
+                    n_sample = min(self.config.u_r_sample_humans, len(self.human_agent_indices))
+                    humans_for_u_r = random.sample(list(self.human_agent_indices), n_sample)
+                
+                u_r_humans_per_state.append(len(humans_for_u_r))
+                for h in humans_for_u_r:
+                    u_r_flat_states.append(t.state)
+                    u_r_flat_humans.append(h)
+        
+        # ===================================================================
+        # Stage 2: Batched forward passes
+        # ===================================================================
         
         losses = {
             'v_h_e': torch.tensor(0.0, device=self.device),
             'x_h': torch.tensor(0.0, device=self.device),
             'q_r': torch.tensor(0.0, device=self.device),
         }
-        # Only include U_r loss if using network mode
         if self.config.u_r_use_network:
             losses['u_r'] = torch.tensor(0.0, device=self.device)
-        # Only include V_r loss if using network mode
         if self.config.v_r_use_network:
             losses['v_r'] = torch.tensor(0.0, device=self.device)
         
-        # Track counts for normalization
-        x_h_count = 0
+        # ----- V_h^e loss (batched) -----
+        if v_h_e_states:
+            # Forward pass for current states
+            v_h_e_pred = self.networks.v_h_e.forward_batch(
+                v_h_e_states, v_h_e_goals, v_h_e_human_indices,
+                self.env, self.device
+            )
+            
+            # Target: check goal achieved + V_h^e(s', g_h) from target network
+            goal_achieved_t = torch.tensor(
+                [1.0 if a else 0.0 for a in v_h_e_achieved],
+                device=self.device
+            )
+            
+            with torch.no_grad():
+                v_h_e_next = self.networks.v_h_e_target.forward_batch(
+                    v_h_e_next_states, v_h_e_goals, v_h_e_human_indices,
+                    self.env, self.device
+                )
+            
+            # TD target: achieved + (1 - achieved) * gamma_h * V_h^e_next
+            target_v_h_e = self.networks.v_h_e.compute_td_target(
+                goal_achieved_t, v_h_e_next.squeeze()
+            )
+            
+            losses['v_h_e'] = ((v_h_e_pred.squeeze() - target_v_h_e) ** 2).mean()
+            
+            with torch.no_grad():
+                prediction_stats['v_h_e'] = {
+                    'mean': v_h_e_pred.mean().item(),
+                    'std': v_h_e_pred.std().item() if v_h_e_pred.numel() > 1 else 0.0,
+                    'target_mean': target_v_h_e.mean().item()
+                }
         
-        for transition in batch:
-            # Unpack transition
-            s = transition.state
-            a_r = transition.robot_action
-            goals = transition.goals
-            s_prime = transition.next_state
+        # ----- X_h loss (batched, potentially larger batch) -----
+        if x_h_active and x_h_states:
+            # Forward pass
+            x_h_pred = self.networks.x_h.forward_batch(
+                x_h_states, x_h_human_indices,
+                self.env, self.device
+            )
             
-            # ===== V_h^e loss (for each human and their goal) =====
-            for h, g_h in goals.items():
-                # Get V_h^e prediction
-                v_h_e_pred = self.networks.v_h_e.encode_and_forward(
-                    s, None, h, g_h, self.device
+            # Target from V_h^e target network
+            with torch.no_grad():
+                v_h_e_for_x = self.networks.v_h_e_target.forward_batch(
+                    x_h_states, x_h_goals, x_h_human_indices,
+                    self.env, self.device
                 )
-                
-                # Check if goal achieved
-                goal_achieved = self.check_goal_achieved(s_prime, h, g_h)
-                goal_achieved_t = torch.tensor(
-                    1.0 if goal_achieved else 0.0, 
-                    device=self.device
-                )
-                
-                # Get target V_h^e(s', g_h)
-                with torch.no_grad():
-                    v_h_e_next = self.networks.v_h_e_target.encode_and_forward(
-                        s_prime, None, h, g_h, self.device
-                    )
-                
-                # TD target: U_h(s') + γ_h * V_h^e(s', g_h) if not achieved
-                target = self.networks.v_h_e.compute_td_target(
-                    goal_achieved_t, v_h_e_next.squeeze()
-                )
-                
-                losses['v_h_e'] = losses['v_h_e'] + (v_h_e_pred.squeeze() - target) ** 2
+                # Hard clamp for inference
+                v_h_e_for_x = self.networks.v_h_e_target.apply_hard_clamp(v_h_e_for_x)
             
-            # ===== U_r loss (only if using network mode AND U_r is active) =====
-            if self.config.u_r_use_network and u_r_active:
-                # Determine which humans to sample for U_r loss
-                if self.config.u_r_sample_humans is None:
-                    # Use all humans
-                    humans_for_u_r = self.human_agent_indices
-                else:
-                    # Sample a fixed number of humans
-                    n_sample = min(self.config.u_r_sample_humans, len(self.human_agent_indices))
-                    humans_for_u_r = random.sample(self.human_agent_indices, n_sample)
-                
-                y_pred, _ = self.networks.u_r.encode_and_forward(s, None, self.device)
-                
-                # Accumulate X_h^{-ξ} over sampled humans using X_h target network for stability
-                x_h_sum = torch.tensor(0.0, device=self.device)
-                for h_u in humans_for_u_r:
-                    with torch.no_grad():
-                        x_h_for_h = self.networks.x_h_target.encode_and_forward(
-                            s, None, h_u, self.device
-                        )
-                    # Clamp X_h to (0, 1] to prevent X_h^{-ξ} explosion when X_h is near 0
-                    x_h_clamped = torch.clamp(x_h_for_h.squeeze(), min=1e-3, max=1.0)
-                    # Accumulate X_h^{-ξ}
-                    x_h_sum = x_h_sum + x_h_clamped ** (-self.config.xi)
-                
-                # Average to get E[X_h^{-ξ}] = y (the target)
-                x_h_avg = x_h_sum / len(humans_for_u_r)
-                
-                # target_y = E[X_h^{-ξ}] directly (y is defined as E[X_h^{-ξ}])
-                target_y = x_h_avg
-                losses['u_r'] = losses['u_r'] + (y_pred.squeeze() - target_y) ** 2
+            # Compute targets: w_h * V_h^e(s, g_h)^zeta
+            x_h_weights_tensor = torch.tensor(x_h_goal_weights, device=self.device, dtype=torch.float32)
+            target_x_h = self.networks.x_h.compute_target(v_h_e_for_x.squeeze(), x_h_weights_tensor)
             
-            # ===== Q_r loss (only when Q_r is active) =====
-            if q_r_active:
-                q_r_all = self.networks.q_r.encode_and_forward(s, None, self.device)
-                a_r_index = self.networks.q_r.action_tuple_to_index(a_r)
-                q_r_pred = q_r_all.squeeze()[a_r_index]
-                
-                # Use effective beta_r for policy (0 during warm-up for independence)
-                effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
-                
-                with torch.no_grad():
-                    if self.config.v_r_use_network:
-                        # Use V_r target network
-                        v_r_next = self.networks.v_r_target.encode_and_forward(
-                            s_prime, None, self.device
-                        )
-                    else:
-                        # Compute V_r directly: V_r(s') = U_r(s') + π_r(s') · Q_r(s')
-                        # Use TARGET networks for stable targets
-                        u_r_next = self._compute_u_r_for_state_target(s_prime)
-                        q_r_next = self.networks.q_r_target.encode_and_forward(s_prime, None, self.device)
-                        pi_r_next = self.networks.q_r_target.get_policy(q_r_next, beta_r=effective_beta_r)
-                        v_r_next = compute_v_r_from_components(
-                            u_r_next.squeeze(), q_r_next.squeeze(), pi_r_next.squeeze()
-                        )
-                
-                target_q_r = self.config.gamma_r * v_r_next.squeeze()
-                losses['q_r'] = losses['q_r'] + (q_r_pred - target_q_r) ** 2
+            losses['x_h'] = ((x_h_pred.squeeze() - target_x_h) ** 2).mean()
             
-            # ===== V_r loss (only if using network mode) =====
-            if self.config.v_r_use_network:
-                v_r_pred = self.networks.v_r.encode_and_forward(s, None, self.device)
-                
-                with torch.no_grad():
-                    # Use TARGET networks for stable V_r targets
-                    u_r = self._compute_u_r_for_state_target(s)
-                    q_r_for_v = self.networks.q_r_target.encode_and_forward(s, None, self.device)
-                    pi_r = self.networks.q_r_target.get_policy(q_r_for_v, beta_r=effective_beta_r)
-                
-                target_v_r = compute_v_r_from_components(
-                    u_r.squeeze(), q_r_for_v.squeeze(), pi_r.squeeze()
-                )
-                losses['v_r'] = losses['v_r'] + (v_r_pred.squeeze() - target_v_r) ** 2
+            with torch.no_grad():
+                prediction_stats['x_h'] = {
+                    'mean': x_h_pred.mean().item(),
+                    'std': x_h_pred.std().item() if x_h_pred.numel() > 1 else 0.0,
+                    'target_mean': target_x_h.mean().item()
+                }
         
-        # ===== X_h loss (computed on potentially larger batch, only when X_h is active) =====
-        if x_h_active:
-            for transition in x_h_batch:
-                s = transition.state
-                goals = transition.goals
-                goal_weights = transition.goal_weights
+        # ----- U_r loss (fully batched, only if using network mode) -----
+        if self.config.u_r_use_network and u_r_active and u_r_flat_states:
+            # Forward pass on unique states for U_r predictions
+            y_pred, _ = self.networks.u_r.forward_batch(
+                states, self.env, self.device
+            )
+            
+            # Single batched X_h computation for all (state, human) pairs
+            with torch.no_grad():
+                x_h_all = self.networks.x_h_target.forward_batch(
+                    u_r_flat_states, u_r_flat_humans,
+                    self.env, self.device
+                ).squeeze()
                 
-                # Determine which human-goal pairs to use for X_h loss
-                if self.config.x_h_sample_humans is None:
-                    # Use all humans' goals from the transition
-                    humans_for_x_h = list(goals.keys())
-                else:
-                    # Sample a fixed number of humans
-                    n_sample = min(self.config.x_h_sample_humans, len(goals))
-                    humans_for_x_h = random.sample(list(goals.keys()), n_sample)
+                # Clamp X_h values and compute X_h^{-xi}
+                x_h_clamped = torch.clamp(x_h_all, min=1e-3, max=1.0)
+                x_h_power = x_h_clamped ** (-self.config.xi)
                 
-                for h_x in humans_for_x_h:
-                    g_h_x = goals[h_x]
-                    w_h_x = goal_weights[h_x]
-                    x_h_pred = self.networks.x_h.encode_and_forward(
-                        s, None, h_x, self.device
-                    )
-                    
-                    with torch.no_grad():
-                        # Use target network for more stable X_h targets
-                        v_h_e_for_x = self.networks.v_h_e_target.encode_and_forward(
-                            s, None, h_x, g_h_x, self.device
-                        )
-                    
-                    target_x_h = self.networks.x_h.compute_target(v_h_e_for_x.squeeze(), w_h_x)
-                    losses['x_h'] = losses['x_h'] + (x_h_pred.squeeze() - target_x_h) ** 2
-                    x_h_count += 1
+                # Aggregate by state using scatter_add: sum X_h^{-xi} for each state
+                # Build state indices: [0,0,0, 1,1,1, 2,2,2, ...] based on humans_per_state
+                state_indices = []
+                for state_idx, n_humans in enumerate(u_r_humans_per_state):
+                    state_indices.extend([state_idx] * n_humans)
+                state_indices_t = torch.tensor(state_indices, device=self.device)
+                
+                n_states = len(batch)
+                x_h_sums = torch.zeros(n_states, device=self.device)
+                x_h_sums.scatter_add_(0, state_indices_t, x_h_power)
+                
+                # Average: y = E[X_h^{-xi}]
+                humans_per_state_t = torch.tensor(u_r_humans_per_state, device=self.device, dtype=torch.float32)
+                u_r_targets_tensor = x_h_sums / humans_per_state_t
+            
+            losses['u_r'] = ((y_pred.squeeze() - u_r_targets_tensor) ** 2).mean()
+            
+            with torch.no_grad():
+                # U_r = -y^eta
+                target_u_r = -(u_r_targets_tensor ** self.config.eta)
+                prediction_stats['u_r'] = {
+                    'mean': y_pred.mean().item(),
+                    'std': y_pred.std().item() if y_pred.numel() > 1 else 0.0,
+                    'target_mean': target_u_r.mean().item()
+                }
         
-        # Average losses over their respective batch sizes
-        n = len(batch)
-        loss_keys_to_avg = ['v_h_e']
+        # ----- Q_r loss (batched) -----
         if q_r_active:
-            loss_keys_to_avg.append('q_r')
-        if self.config.u_r_use_network and u_r_active:
-            loss_keys_to_avg.append('u_r')
-        if self.config.v_r_use_network:
-            loss_keys_to_avg.append('v_r')
-        for k in loss_keys_to_avg:
-            losses[k] = losses[k] / n
-        # X_h uses its own count (may be from larger batch)
-        if x_h_active and x_h_count > 0:
-            losses['x_h'] = losses['x_h'] / x_h_count
+            q_r_all = self.networks.q_r.forward_batch(states, self.env, self.device)
+            
+            # Gather Q-values for taken actions
+            robot_actions = [t.robot_action for t in batch]
+            action_indices = torch.tensor(
+                [self.networks.q_r.action_tuple_to_index(a) for a in robot_actions],
+                device=self.device
+            )
+            q_r_pred = q_r_all.gather(1, action_indices.unsqueeze(1)).squeeze(1)
+            
+            # Compute targets
+            with torch.no_grad():
+                if self.config.v_r_use_network:
+                    v_r_next = self.networks.v_r_target.forward_batch(
+                        next_states, self.env, self.device
+                    )
+                else:
+                    # Compute V_r from components
+                    u_r_next = self._compute_u_r_batch_target(next_states)
+                    q_r_next = self.networks.q_r_target.forward_batch(
+                        next_states, self.env, self.device
+                    )
+                    pi_r_next = self.networks.q_r_target.get_policy(q_r_next, beta_r=effective_beta_r)
+                    v_r_next = compute_v_r_from_components(
+                        u_r_next.squeeze(), q_r_next, pi_r_next
+                    )
+            
+            target_q_r = self.config.gamma_r * v_r_next.squeeze()
+            losses['q_r'] = ((q_r_pred - target_q_r) ** 2).mean()
+            
+            with torch.no_grad():
+                prediction_stats['q_r'] = {
+                    'mean': q_r_pred.mean().item(),
+                    'std': q_r_pred.std().item() if q_r_pred.numel() > 1 else 0.0,
+                    'target_mean': target_q_r.mean().item()
+                }
         
-        return losses, {}
+        # ----- V_r loss (batched, only if using network mode) -----
+        if self.config.v_r_use_network and v_r_active:
+            v_r_pred = self.networks.v_r.forward_batch(states, self.env, self.device)
+            
+            with torch.no_grad():
+                u_r_for_v = self._compute_u_r_batch_target(states)
+                q_r_for_v = self.networks.q_r_target.forward_batch(
+                    states, self.env, self.device
+                )
+                pi_r = self.networks.q_r_target.get_policy(q_r_for_v, beta_r=effective_beta_r)
+            
+            target_v_r = compute_v_r_from_components(
+                u_r_for_v.squeeze(), q_r_for_v, pi_r
+            )
+            losses['v_r'] = ((v_r_pred.squeeze() - target_v_r) ** 2).mean()
+            
+            with torch.no_grad():
+                prediction_stats['v_r'] = {
+                    'mean': v_r_pred.mean().item(),
+                    'std': v_r_pred.std().item() if v_r_pred.numel() > 1 else 0.0,
+                    'target_mean': target_v_r.mean().item()
+                }
+        
+        # Clear caches after each compute_losses call (for neural network encoders)
+        if hasattr(self, 'clear_caches'):
+            self.clear_caches()
+        
+        return losses, prediction_stats
+    
+    def _compute_u_r_batch_target(self, states: List[Any]) -> torch.Tensor:
+        """
+        Compute U_r for a batch of states using target networks (fully batched).
+        
+        If u_r_use_network, uses U_r target network.
+        Otherwise, computes from X_h target values.
+        
+        Args:
+            states: List of states.
+        
+        Returns:
+            U_r values tensor of shape (batch_size,).
+        """
+        if self.config.u_r_use_network:
+            _, u_r = self.networks.u_r_target.forward_batch(states, self.env, self.device)
+            return u_r
+        else:
+            # Compute from X_h: U_r = -E[X_h^{-xi}]^eta
+            # Flatten all (state, human) pairs for single batched computation
+            n_states = len(states)
+            n_humans = len(self.human_agent_indices)
+            
+            flat_states = []
+            flat_humans = []
+            for state in states:
+                for h in self.human_agent_indices:
+                    flat_states.append(state)
+                    flat_humans.append(h)
+            
+            # Single batched forward pass for all (state, human) pairs
+            x_h_all = self.networks.x_h_target.forward_batch(
+                flat_states, flat_humans, self.env, self.device
+            ).squeeze()
+            
+            # Reshape to (n_states, n_humans) and compute mean over humans
+            x_h_reshaped = x_h_all.view(n_states, n_humans)
+            x_h_clamped = torch.clamp(x_h_reshaped, min=1e-3, max=1.0)
+            
+            # y = E[X_h^{-xi}] = mean over humans
+            y = (x_h_clamped ** (-self.config.xi)).mean(dim=1)
+            
+            # U_r = -y^eta
+            u_r = -(y ** self.config.eta)
+            return u_r
     
     def training_step(self) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, Dict[str, float]]]:
         """
