@@ -11,6 +11,9 @@ Phase 2 computes:
 - X_h(s): Aggregate goal achievement ability (eq. 7)
 - U_r(s): Intrinsic robot reward (eq. 8)
 - V_r(s): Robot state value (eq. 9)
+
+Submodules:
+- lookup: Lookup table (tabular) implementations for small state spaces
 """
 
 from .config import Phase2Config
@@ -28,6 +31,15 @@ from .world_model_factory import (
     EnsembleWorldModelFactory
 )
 
+# Lookup table implementations
+from .lookup import (
+    LookupTableRobotQNetwork,
+    LookupTableRobotValueNetwork,
+    LookupTableHumanGoalAbilityNetwork,
+    LookupTableAggregateGoalAbilityNetwork,
+    LookupTableIntrinsicRewardNetwork,
+)
+
 __all__ = [
     'Phase2Config',
     'BaseRobotQNetwork',
@@ -43,4 +55,10 @@ __all__ = [
     'WorldModelFactory',
     'CachedWorldModelFactory',
     'EnsembleWorldModelFactory',
+    # Lookup table implementations
+    'LookupTableRobotQNetwork',
+    'LookupTableRobotValueNetwork',
+    'LookupTableHumanGoalAbilityNetwork',
+    'LookupTableAggregateGoalAbilityNetwork',
+    'LookupTableIntrinsicRewardNetwork',
 ]
