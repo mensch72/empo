@@ -1,7 +1,9 @@
 """
 Lookup Table Robot Value Network for Phase 2.
 
-Implements V_r(s) as a dictionary-based lookup table with one entry per unique state.
+Implements V_r(s) as a dictionary-based lookup table with one entry per unique
+(state, map_hash) pair. The map_hash distinguishes states from different map
+configurations in ensemble mode.
 """
 
 import torch
@@ -10,14 +12,18 @@ import torch.nn.functional as F
 from typing import Any, Dict, Hashable, List, Optional, Tuple
 
 from ..robot_value_network import BaseRobotValueNetwork
+from .robot_q_network import _get_map_hash
 
 
 class LookupTableRobotValueNetwork(BaseRobotValueNetwork):
     """
     Lookup table implementation of robot value network (V_r) for Phase 2.
     
-    Stores V_r values in a dictionary keyed by state hash. Each entry is a
+    Stores V_r values in a dictionary keyed by (state, map_hash) hash. Each entry is a
     torch.nn.Parameter to enable gradient tracking and optimizer compatibility.
+    
+    The map_hash distinguishes states from different map configurations in ensemble mode,
+    where different worlds may have the same mutable state but different wall layouts.
     
     V_r(s) < 0 always (since U_r < 0 and Q_r < 0), ensured via ensure_negative().
     
@@ -50,7 +56,7 @@ class LookupTableRobotValueNetwork(BaseRobotValueNetwork):
         Get entry for key, creating with default value if not present.
         
         Args:
-            key: Hash key for the state.
+            key: Hash key for the (state, map_hash) pair.
             device: Target device for the parameter.
         
         Returns:
@@ -68,6 +74,7 @@ class LookupTableRobotValueNetwork(BaseRobotValueNetwork):
     def _batch_forward(
         self,
         states: List[Hashable],
+        map_hash: int = 0,
         device: str = 'cpu'
     ) -> torch.Tensor:
         """
@@ -75,6 +82,7 @@ class LookupTableRobotValueNetwork(BaseRobotValueNetwork):
         
         Args:
             states: List of hashable states.
+            map_hash: Hash of the initial map configuration (for ensemble mode).
             device: Target device.
         
         Returns:
@@ -85,7 +93,8 @@ class LookupTableRobotValueNetwork(BaseRobotValueNetwork):
         # Collect parameters for all states
         params = []
         for state in states:
-            key = hash(state)
+            # Use (state, map_hash) as the cache key to distinguish states from different maps
+            key = hash((state, map_hash))
             param = self._get_or_create_entry(key, device)
             params.append(param.squeeze())
         
@@ -106,13 +115,14 @@ class LookupTableRobotValueNetwork(BaseRobotValueNetwork):
         
         Args:
             state: Environment state (must be hashable).
-            world_model: Environment/world model (not used for lookup tables).
+            world_model: Environment/world model (used to get initial map hash).
             device: Torch device.
         
         Returns:
             V_r value of shape (1,), negative.
         """
-        key = hash(state)
+        map_hash = _get_map_hash(world_model)
+        key = hash((state, map_hash))
         param = self._get_or_create_entry(key, device)
         raw_output = param.view(1)
         return self.ensure_negative(raw_output)
@@ -120,6 +130,7 @@ class LookupTableRobotValueNetwork(BaseRobotValueNetwork):
     def forward_from_states(
         self,
         states: List[Hashable],
+        map_hash: int = 0,
         device: str = 'cpu'
     ) -> torch.Tensor:
         """
@@ -127,12 +138,13 @@ class LookupTableRobotValueNetwork(BaseRobotValueNetwork):
         
         Args:
             states: List of hashable states.
+            map_hash: Hash of the initial map configuration (for ensemble mode).
             device: Target device.
         
         Returns:
             V_r values of shape (batch_size,).
         """
-        return self._batch_forward(states, device)
+        return self._batch_forward(states, map_hash, device)
     
     def forward_batch(
         self,
@@ -144,17 +156,18 @@ class LookupTableRobotValueNetwork(BaseRobotValueNetwork):
         Batch forward pass from raw states (unified interface).
         
         This matches the neural network's forward_batch signature.
-        The world_model parameter is ignored (lookup tables don't need tensorization).
+        Uses world_model to get the initial map hash for ensemble mode.
         
         Args:
             states: List of hashable states.
-            world_model: Environment (ignored for lookup tables).
+            world_model: Environment (used to get initial map hash).
             device: Target device.
         
         Returns:
             V_r values of shape (batch_size,), negative.
         """
-        return self._batch_forward(states, device)
+        map_hash = _get_map_hash(world_model)
+        return self._batch_forward(states, map_hash, device)
     
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for save/load."""

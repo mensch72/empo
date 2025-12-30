@@ -1,7 +1,9 @@
 """
 Lookup Table Robot Q-Network for Phase 2.
 
-Implements Q_r(s, a_r) as a dictionary-based lookup table with one entry per unique state.
+Implements Q_r(s, a_r) as a dictionary-based lookup table with one entry per unique
+(state, map_hash) pair. The map_hash distinguishes states from different map
+configurations in ensemble mode.
 """
 
 import torch
@@ -11,12 +13,33 @@ from typing import Any, Dict, Hashable, List, Optional, Tuple
 from ..robot_q_network import BaseRobotQNetwork
 
 
+def _get_map_hash(world_model: Any) -> int:
+    """
+    Safely get the initial map hash from a world model.
+    
+    Returns 0 if the world model doesn't support get_initial_map_hash(),
+    which maintains backward compatibility with non-MultiGrid environments.
+    
+    Args:
+        world_model: The world model (environment).
+        
+    Returns:
+        The map hash, or 0 if not available.
+    """
+    if hasattr(world_model, 'get_initial_map_hash'):
+        return world_model.get_initial_map_hash()
+    return 0
+
+
 class LookupTableRobotQNetwork(BaseRobotQNetwork):
     """
     Lookup table implementation of robot Q-network for Phase 2.
     
-    Stores Q_r values in a dictionary keyed by state hash. Each entry is a
+    Stores Q_r values in a dictionary keyed by (state, map_hash) hash. Each entry is a
     torch.nn.Parameter to enable gradient tracking and optimizer compatibility.
+    
+    The map_hash distinguishes states from different map configurations in ensemble mode,
+    where different worlds may have the same mutable state but different wall layouts.
     
     Q_r(s, a_r) < 0 always (since V_r < 0), ensured via -softplus output transformation.
     
@@ -65,7 +88,7 @@ class LookupTableRobotQNetwork(BaseRobotQNetwork):
         Get entry for key, creating with default value if not present.
         
         Args:
-            key: Hash key for the state.
+            key: Hash key for the (state, map_hash) pair.
             device: Target device for the parameter.
         
         Returns:
@@ -91,6 +114,7 @@ class LookupTableRobotQNetwork(BaseRobotQNetwork):
     def _batch_forward(
         self,
         states: List[Hashable],
+        map_hash: int = 0,
         device: str = 'cpu'
     ) -> torch.Tensor:
         """
@@ -98,6 +122,7 @@ class LookupTableRobotQNetwork(BaseRobotQNetwork):
         
         Args:
             states: List of hashable states.
+            map_hash: Hash of the initial map configuration (for ensemble mode).
             device: Target device.
         
         Returns:
@@ -108,7 +133,8 @@ class LookupTableRobotQNetwork(BaseRobotQNetwork):
         # Collect parameters for all states
         params = []
         for state in states:
-            key = hash(state)
+            # Use (state, map_hash) as the cache key to distinguish states from different maps
+            key = hash((state, map_hash))
             param = self._get_or_create_entry(key, device)
             params.append(param)
         
@@ -129,13 +155,14 @@ class LookupTableRobotQNetwork(BaseRobotQNetwork):
         
         Args:
             state: Environment state (must be hashable).
-            world_model: Environment/world model (not used for lookup tables).
+            world_model: Environment/world model (used to get initial map hash).
             device: Torch device.
         
         Returns:
             Q_r values of shape (1, num_action_combinations), all negative.
         """
-        key = hash(state)
+        map_hash = _get_map_hash(world_model)
+        key = hash((state, map_hash))
         param = self._get_or_create_entry(key, device)
         raw_output = param.unsqueeze(0)
         return self.ensure_negative(raw_output)
@@ -143,22 +170,24 @@ class LookupTableRobotQNetwork(BaseRobotQNetwork):
     def forward_from_states(
         self,
         states: List[Hashable],
+        map_hash: int = 0,
         device: str = 'cpu'
     ) -> torch.Tensor:
         """
         Forward pass from raw states (explicit interface).
         
-        This is an alias for forward() that matches the naming convention
+        This is an alias for _batch_forward() that matches the naming convention
         expected by the trainer for lookup table compatibility.
         
         Args:
             states: List of hashable states.
+            map_hash: Hash of the initial map configuration (for ensemble mode).
             device: Target device.
         
         Returns:
             Q_r values of shape (batch_size, num_action_combinations).
         """
-        return self._batch_forward(states, device)
+        return self._batch_forward(states, map_hash, device)
     
     def forward_batch(
         self,
@@ -170,17 +199,18 @@ class LookupTableRobotQNetwork(BaseRobotQNetwork):
         Batch forward pass from raw states (unified interface).
         
         This matches the neural network's forward_batch signature.
-        The world_model parameter is ignored (lookup tables don't need tensorization).
+        Uses world_model to get the initial map hash for ensemble mode.
         
         Args:
             states: List of hashable states.
-            world_model: Environment (ignored for lookup tables).
+            world_model: Environment (used to get initial map hash).
             device: Target device.
         
         Returns:
             Q_r values of shape (batch_size, num_action_combinations).
         """
-        return self._batch_forward(states, device)
+        map_hash = _get_map_hash(world_model)
+        return self._batch_forward(states, map_hash, device)
     
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for save/load."""

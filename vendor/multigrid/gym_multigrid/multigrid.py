@@ -2415,6 +2415,10 @@ class MultiGridEnv(WorldModel):
         # Build cache of mobile objects (blocks, rocks) and mutable objects (doors, boxes, magic walls)
         # This avoids full grid scans in get_state()
         self._build_object_cache()
+        
+        # Compute and cache the initial map hash (immutable grid structure)
+        # This is computed once per reset and used to distinguish states from different maps
+        self._initial_map_hash = self._compute_initial_map_hash()
 
         # Return first observation
         if self.partial_obs:
@@ -2455,6 +2459,79 @@ class MultiGridEnv(WorldModel):
         
         # Sort mobile objects by initial position for deterministic ordering
         self._mobile_objects.sort(key=lambda x: x[0])
+    
+    def _compute_initial_map_hash(self) -> int:
+        """
+        Compute a hash of the initial/immutable grid structure.
+        
+        This captures the positions and types of immutable objects (walls, goals, lava, etc.)
+        that don't change during an episode. This hash is used to distinguish states
+        from different map configurations in ensemble mode, where different worlds
+        may have the same mutable state but different wall layouts.
+        
+        The hash includes:
+        - Grid dimensions (width, height)
+        - Positions and types of immutable objects (walls, goals, lava, keys, unsteady ground)
+        - Initial agent positions and colors (agents from different maps would conflict otherwise)
+        
+        Note: Mobile objects (blocks, rocks) and mutable objects (doors, boxes, magic walls)
+        are NOT included since they can change during episodes and are tracked in get_state().
+        
+        Returns:
+            int: A hash value representing the immutable grid structure.
+        """
+        # Start with grid dimensions
+        immutable_data = [self.grid.width, self.grid.height]
+        
+        # Collect immutable objects from the grid
+        # Types that don't change position and don't have mutable state
+        IMMUTABLE_TYPES = {'wall', 'goal', 'lava', 'key', 'ball', 'unsteadyground'}
+        
+        for j in range(self.grid.height):
+            for i in range(self.grid.width):
+                cell = self.grid.get(i, j)
+                if cell is not None and cell.type in IMMUTABLE_TYPES:
+                    # Store (x, y, type, color) - color is important for distinguishing e.g. different colored goals
+                    color = getattr(cell, 'color', None)
+                    immutable_data.append((i, j, cell.type, color))
+                
+                # Also check terrain grid for unsteady ground
+                terrain_cell = self.terrain_grid.get(i, j)
+                if terrain_cell is not None and terrain_cell.type in IMMUTABLE_TYPES:
+                    color = getattr(terrain_cell, 'color', None)
+                    immutable_data.append((i, j, terrain_cell.type, color, 'terrain'))
+        
+        # Include initial agent positions and colors
+        # This distinguishes maps with agents at different starting positions
+        for agent_idx, agent in enumerate(self.agents):
+            if agent.pos is not None:
+                immutable_data.append(('agent', agent_idx, int(agent.pos[0]), int(agent.pos[1]), agent.color))
+        
+        return hash(tuple(immutable_data))
+    
+    def get_initial_map_hash(self) -> int:
+        """
+        Get the hash of the initial/immutable grid structure.
+        
+        This hash uniquely identifies the map layout (walls, goals, etc.) and is used
+        to distinguish states from different map configurations in ensemble mode.
+        Without this, lookup tables would conflate states from different worlds
+        that happen to have the same mutable state.
+        
+        The hash is computed once during reset() and cached for efficiency.
+        
+        Returns:
+            int: A hash value representing the immutable grid structure.
+            
+        Raises:
+            AttributeError: If called before reset() has been called.
+        """
+        if not hasattr(self, '_initial_map_hash'):
+            raise AttributeError(
+                "get_initial_map_hash() called before reset(). "
+                "The initial map hash is computed during reset()."
+            )
+        return self._initial_map_hash
 
     def seed(self, seed=1337):
         # Seed the random number generator

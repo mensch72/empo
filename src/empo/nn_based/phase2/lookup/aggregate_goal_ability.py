@@ -2,7 +2,8 @@
 Lookup Table Aggregate Goal Ability Network for Phase 2.
 
 Implements X_h(s) as a dictionary-based lookup table with one entry
-per unique (state, human_idx) pair.
+per unique (state, human_idx, map_hash) triple. The map_hash distinguishes
+states from different map configurations in ensemble mode.
 """
 
 import torch
@@ -10,14 +11,18 @@ import torch.nn as nn
 from typing import Any, Dict, Hashable, List, Optional, Tuple
 
 from ..aggregate_goal_ability import BaseAggregateGoalAbilityNetwork
+from .robot_q_network import _get_map_hash
 
 
 class LookupTableAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
     """
     Lookup table implementation of X_h (aggregate goal ability) for Phase 2.
     
-    Stores X_h values in a dictionary keyed by (state, human_idx) hash. Each entry
-    is a torch.nn.Parameter to enable gradient tracking and optimizer compatibility.
+    Stores X_h values in a dictionary keyed by (state, human_idx, map_hash) hash. Each
+    entry is a torch.nn.Parameter to enable gradient tracking and optimizer compatibility.
+    
+    The map_hash distinguishes states from different map configurations in ensemble mode,
+    where different worlds may have the same mutable state but different wall layouts.
     
     X_h(s) = E_{g_h}[V_h^e(s, g_h)^ζ] ∈ (0, 1]
     
@@ -59,11 +64,11 @@ class LookupTableAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         Get entry for key, creating with default value if not present.
         
         Args:
-            key: Hash key for the (state, human_idx) pair.
+            key: Hash key for the (state, human_idx, map_hash) triple.
             device: Target device for the parameter.
         
         Returns:
-            Parameter containing X_h value for this (state, human).
+            Parameter containing X_h value for this (state, human, map_hash).
         """
         if key not in self.table:
             self.table[key] = nn.Parameter(
@@ -75,6 +80,7 @@ class LookupTableAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         self,
         states: List[Hashable],
         human_indices: List[int],
+        map_hash: int = 0,
         device: str = 'cpu'
     ) -> torch.Tensor:
         """
@@ -83,6 +89,7 @@ class LookupTableAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         Args:
             states: List of hashable states.
             human_indices: List of human agent indices (one per state).
+            map_hash: Hash of the initial map configuration (for ensemble mode).
             device: Target device.
         
         Returns:
@@ -93,10 +100,11 @@ class LookupTableAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         
         batch_size = len(states)
         
-        # Collect parameters for all (state, human_idx) pairs
+        # Collect parameters for all (state, human_idx, map_hash) triples
         params = []
         for state, human_idx in zip(states, human_indices):
-            key = hash((state, human_idx))
+            # Use (state, human_idx, map_hash) as the cache key to distinguish states from different maps
+            key = hash((state, human_idx, map_hash))
             param = self._get_or_create_entry(key, device)
             params.append(param.squeeze())
         
@@ -118,14 +126,15 @@ class LookupTableAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         
         Args:
             state: Environment state (must be hashable).
-            world_model: Environment/world model (not used for lookup tables).
+            world_model: Environment/world model (used to get initial map hash).
             human_agent_idx: Index of the human agent.
             device: Torch device.
         
         Returns:
             X_h value of shape (1,), in (0, 1].
         """
-        key = hash((state, human_agent_idx))
+        map_hash = _get_map_hash(world_model)
+        key = hash((state, human_agent_idx, map_hash))
         param = self._get_or_create_entry(key, device)
         raw_output = param.view(1)
         return self.apply_clamp(raw_output)
@@ -134,6 +143,7 @@ class LookupTableAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         self,
         states: List[Hashable],
         human_indices: List[int],
+        map_hash: int = 0,
         device: str = 'cpu'
     ) -> torch.Tensor:
         """
@@ -142,12 +152,13 @@ class LookupTableAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         Args:
             states: List of hashable states.
             human_indices: List of human agent indices.
+            map_hash: Hash of the initial map configuration (for ensemble mode).
             device: Target device.
         
         Returns:
             X_h values of shape (batch_size,).
         """
-        return self._batch_forward(states, human_indices, device)
+        return self._batch_forward(states, human_indices, map_hash, device)
     
     def forward_batch(
         self,
@@ -160,18 +171,19 @@ class LookupTableAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         Batch forward pass from raw states and human indices (unified interface).
         
         This matches the neural network's forward_batch signature.
-        The world_model parameter is ignored (lookup tables don't need tensorization).
+        Uses world_model to get the initial map hash for ensemble mode.
         
         Args:
             states: List of hashable states.
             human_indices: List of human agent indices.
-            world_model: Environment (ignored for lookup tables).
+            world_model: Environment (used to get initial map hash).
             device: Target device.
         
         Returns:
             X_h values of shape (batch_size,), in (0, 1].
         """
-        return self._batch_forward(states, human_indices, device)
+        map_hash = _get_map_hash(world_model)
+        return self._batch_forward(states, human_indices, map_hash, device)
     
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for save/load."""

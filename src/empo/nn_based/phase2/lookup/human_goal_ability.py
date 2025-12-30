@@ -2,7 +2,8 @@
 Lookup Table Human Goal Achievement Network for Phase 2.
 
 Implements V_h^e(s, g_h) as a dictionary-based lookup table with one entry
-per unique (state, goal) pair.
+per unique (state, goal, map_hash) triple. The map_hash distinguishes states
+from different map configurations in ensemble mode.
 """
 
 import torch
@@ -10,14 +11,18 @@ import torch.nn as nn
 from typing import Any, Dict, Hashable, List, Optional, Tuple
 
 from ..human_goal_ability import BaseHumanGoalAchievementNetwork
+from .robot_q_network import _get_map_hash
 
 
 class LookupTableHumanGoalAbilityNetwork(BaseHumanGoalAchievementNetwork):
     """
     Lookup table implementation of V_h^e (human goal achievement ability) for Phase 2.
     
-    Stores V_h^e values in a dictionary keyed by (state, goal) hash. Each entry is a
-    torch.nn.Parameter to enable gradient tracking and optimizer compatibility.
+    Stores V_h^e values in a dictionary keyed by (state, goal, map_hash) hash. Each entry
+    is a torch.nn.Parameter to enable gradient tracking and optimizer compatibility.
+    
+    The map_hash distinguishes states from different map configurations in ensemble mode,
+    where different worlds may have the same mutable state but different wall layouts.
     
     V_h^e(s, g_h) ∈ [0, 1] represents the probability that human h achieves goal g_h
     under the current robot policy.
@@ -57,11 +62,11 @@ class LookupTableHumanGoalAbilityNetwork(BaseHumanGoalAchievementNetwork):
         Get entry for key, creating with default value if not present.
         
         Args:
-            key: Hash key for the (state, goal) pair.
+            key: Hash key for the (state, goal, map_hash) triple.
             device: Target device for the parameter.
         
         Returns:
-            Parameter containing V_h^e value for this (state, goal).
+            Parameter containing V_h^e value for this (state, goal, map_hash).
         """
         if key not in self.table:
             # Store raw value that will become default_v_h_e after clamping
@@ -75,6 +80,7 @@ class LookupTableHumanGoalAbilityNetwork(BaseHumanGoalAchievementNetwork):
         states: List[Hashable],
         goals: List[Hashable],
         human_indices: Optional[List[int]] = None,
+        map_hash: int = 0,
         device: str = 'cpu'
     ) -> torch.Tensor:
         """
@@ -84,6 +90,7 @@ class LookupTableHumanGoalAbilityNetwork(BaseHumanGoalAchievementNetwork):
             states: List of hashable states.
             goals: List of hashable goals (one per state).
             human_indices: Optional list of human indices (not used for lookup).
+            map_hash: Hash of the initial map configuration (for ensemble mode).
             device: Target device.
         
         Returns:
@@ -94,10 +101,11 @@ class LookupTableHumanGoalAbilityNetwork(BaseHumanGoalAchievementNetwork):
         
         batch_size = len(states)
         
-        # Collect parameters for all (state, goal) pairs
+        # Collect parameters for all (state, goal, map_hash) triples
         params = []
         for state, goal in zip(states, goals):
-            key = hash((state, goal))
+            # Use (state, goal, map_hash) as the cache key to distinguish states from different maps
+            key = hash((state, goal, map_hash))
             param = self._get_or_create_entry(key, device)
             params.append(param.squeeze())
         
@@ -120,7 +128,7 @@ class LookupTableHumanGoalAbilityNetwork(BaseHumanGoalAchievementNetwork):
         
         Args:
             state: Environment state (must be hashable).
-            world_model: Environment/world model (not used for lookup tables).
+            world_model: Environment/world model (used to get initial map hash).
             human_agent_idx: Index of the human agent (not used for lookup).
             goal: The goal g_h (must be hashable).
             device: Torch device.
@@ -128,7 +136,8 @@ class LookupTableHumanGoalAbilityNetwork(BaseHumanGoalAchievementNetwork):
         Returns:
             V_h^e value of shape (1,), in [0, 1].
         """
-        key = hash((state, goal))
+        map_hash = _get_map_hash(world_model)
+        key = hash((state, goal, map_hash))
         param = self._get_or_create_entry(key, device)
         raw_output = param.view(1)
         return self.apply_clamp(raw_output)
@@ -138,6 +147,7 @@ class LookupTableHumanGoalAbilityNetwork(BaseHumanGoalAchievementNetwork):
         states: List[Hashable],
         goals: List[Hashable],
         human_indices: Optional[List[int]] = None,
+        map_hash: int = 0,
         device: str = 'cpu'
     ) -> torch.Tensor:
         """
@@ -147,12 +157,13 @@ class LookupTableHumanGoalAbilityNetwork(BaseHumanGoalAchievementNetwork):
             states: List of hashable states.
             goals: List of hashable goals.
             human_indices: Optional list of human indices.
+            map_hash: Hash of the initial map configuration (for ensemble mode).
             device: Target device.
         
         Returns:
             V_h^e values of shape (batch_size,).
         """
-        return self._batch_forward(states, goals, human_indices, device)
+        return self._batch_forward(states, goals, human_indices, map_hash, device)
     
     def forward_batch(
         self,
@@ -166,19 +177,20 @@ class LookupTableHumanGoalAbilityNetwork(BaseHumanGoalAchievementNetwork):
         Batch forward pass from raw states, goals, and human indices (unified interface).
         
         This matches the neural network's forward_batch signature.
-        The world_model parameter is ignored (lookup tables don't need tensorization).
+        Uses world_model to get the initial map hash for ensemble mode.
         
         Args:
             states: List of hashable states.
             goals: List of hashable goals (one per state).
             human_indices: List of human agent indices.
-            world_model: Environment (ignored for lookup tables).
+            world_model: Environment (used to get initial map hash).
             device: Target device.
         
         Returns:
             V_h^e values of shape (batch_size,), in [0, 1].
         """
-        return self._batch_forward(states, goals, human_indices, device)
+        map_hash = _get_map_hash(world_model)
+        return self._batch_forward(states, goals, human_indices, map_hash, device)
     
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for save/load."""

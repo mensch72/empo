@@ -1,7 +1,9 @@
 """
 Lookup Table Intrinsic Reward Network for Phase 2.
 
-Implements U_r(s) as a dictionary-based lookup table with one entry per unique state.
+Implements U_r(s) as a dictionary-based lookup table with one entry per unique
+(state, map_hash) pair. The map_hash distinguishes states from different map
+configurations in ensemble mode.
 """
 
 import torch
@@ -9,17 +11,21 @@ import torch.nn as nn
 from typing import Any, Dict, Hashable, List, Optional, Tuple
 
 from ..intrinsic_reward_network import BaseIntrinsicRewardNetwork
+from .robot_q_network import _get_map_hash
 
 
 class LookupTableIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
     """
     Lookup table implementation of U_r (intrinsic reward) for Phase 2.
     
-    Stores the intermediate value y in a dictionary keyed by state hash,
+    Stores the intermediate value y in a dictionary keyed by (state, map_hash) hash,
     where y = E_h[X_h(s)^{-ξ}] and U_r = -y^η.
     
     Each entry is a torch.nn.Parameter to enable gradient tracking and
     optimizer compatibility.
+    
+    The map_hash distinguishes states from different map configurations in ensemble mode,
+    where different worlds may have the same mutable state but different wall layouts.
     
     Note: In practice, U_r is often computed directly from X_h values rather
     than learned separately (see u_r_use_network config option).
@@ -61,7 +67,7 @@ class LookupTableIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
         Get entry for key, creating with default value if not present.
         
         Args:
-            key: Hash key for the state.
+            key: Hash key for the (state, map_hash) pair.
             device: Target device for the parameter.
         
         Returns:
@@ -78,6 +84,7 @@ class LookupTableIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
     def _batch_forward(
         self,
         states: List[Hashable],
+        map_hash: int = 0,
         device: str = 'cpu'
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -85,6 +92,7 @@ class LookupTableIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
         
         Args:
             states: List of hashable states.
+            map_hash: Hash of the initial map configuration (for ensemble mode).
             device: Target device.
         
         Returns:
@@ -97,7 +105,8 @@ class LookupTableIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
         # Collect parameters for all states
         params = []
         for state in states:
-            key = hash(state)
+            # Use (state, map_hash) as the cache key to distinguish states from different maps
+            key = hash((state, map_hash))
             param = self._get_or_create_entry(key, device)
             params.append(param.squeeze())
         
@@ -121,13 +130,14 @@ class LookupTableIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
         
         Args:
             state: Environment state (must be hashable).
-            world_model: Environment/world model (not used for lookup tables).
+            world_model: Environment/world model (used to get initial map hash).
             device: Torch device.
         
         Returns:
             Tuple of (y, U_r) tensors, each shape (1,).
         """
-        key = hash(state)
+        map_hash = _get_map_hash(world_model)
+        key = hash((state, map_hash))
         param = self._get_or_create_entry(key, device)
         log_y_minus_1 = param.view(1)
         
@@ -139,6 +149,7 @@ class LookupTableIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
     def forward_from_states(
         self,
         states: List[Hashable],
+        map_hash: int = 0,
         device: str = 'cpu'
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
@@ -146,12 +157,13 @@ class LookupTableIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
         
         Args:
             states: List of hashable states.
+            map_hash: Hash of the initial map configuration (for ensemble mode).
             device: Target device.
         
         Returns:
             Tuple of (y, U_r) tensors.
         """
-        return self._batch_forward(states, device)
+        return self._batch_forward(states, map_hash, device)
     
     def forward_batch(
         self,
@@ -163,17 +175,18 @@ class LookupTableIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
         Batch forward pass from raw states (unified interface).
         
         This matches the neural network's forward_batch signature.
-        The world_model parameter is ignored (lookup tables don't need tensorization).
+        Uses world_model to get the initial map hash for ensemble mode.
         
         Args:
             states: List of hashable states.
-            world_model: Environment (ignored for lookup tables).
+            world_model: Environment (used to get initial map hash).
             device: Target device.
         
         Returns:
             Tuple of (y, U_r) tensors.
         """
-        return self._batch_forward(states, device)
+        map_hash = _get_map_hash(world_model)
+        return self._batch_forward(states, map_hash, device)
     
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for save/load."""

@@ -126,7 +126,8 @@ class TestLookupTableRobotQNetwork:
         loss.backward()
         
         # Check that the accessed parameter has gradients
-        state_key = hash(simple_states[0])
+        # Note: When world_model is None, map_hash is 0
+        state_key = hash((simple_states[0], 0))
         assert state_key in network.table
         assert network.table[state_key].grad is not None
     
@@ -191,7 +192,8 @@ class TestLookupTableRobotQNetwork:
         _ = network1.forward_batch(simple_states, None, device='cpu')
         
         # Modify one entry
-        key = hash(simple_states[0])
+        # Note: When world_model is None, map_hash is 0
+        key = hash((simple_states[0], 0))
         network1.table[key].data.fill_(5.0)  # Raw value before ensure_negative
         
         # Save
@@ -580,7 +582,8 @@ class TestLookupTableIntegration:
         loss.backward()
         
         # Get parameter before update
-        key = hash(simple_states[0])
+        # Note: When world_model is None, map_hash is 0
+        key = hash((simple_states[0], 0))
         old_value = network.table[key].data.clone()
         
         optimizer.step()
