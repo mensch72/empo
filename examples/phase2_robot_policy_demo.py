@@ -215,32 +215,40 @@ def configure_environment(use_ensemble: bool, use_small: bool = False):
 # ============================================================================
 # World Model Factory Functions (for async training)
 # ============================================================================
-# These are module-level functions/classes that can be pickled for multiprocessing.
+# These are module-level classes that can be pickled for multiprocessing.
+# Note: Simple functions that reference global variables will NOT work because
+# globals are not shared across processes. Use classes that capture config.
 
-def _create_trivial_env():
-    """Create the trivial demo environment."""
-    # Create environment using MultiGridEnv directly (not Phase2DemoEnv which uses globals)
-    env = MultiGridEnv(
-        map=GRID_MAP,
-        max_steps=10,  # Fixed for trivial
-        partial_obs=False,
-        objects_set=World,
-        actions_set=SmallActions
-    )
-    return env
-
-
-def _create_small_env():
-    """Create the small demo environment."""
-    # Create environment using MultiGridEnv directly (not Phase2DemoEnv which uses globals)
-    env = MultiGridEnv(
-        map=GRID_MAP,
-        max_steps=10,  # Fixed for trivial
-        partial_obs=False,
-        objects_set=World,
-        actions_set=SmallActions
-    )
-    return env
+class _SimpleEnvCreator:
+    """
+    Picklable callable class for creating simple MultiGridEnv instances.
+    
+    Stores configuration as instance attributes, making it picklable for multiprocessing.
+    Global variables (like GRID_MAP) must be captured at creation time since they
+    won't be available in worker processes.
+    """
+    
+    def __init__(self, grid_map: str, max_steps: int = 10):
+        """
+        Initialize with the grid map and max steps.
+        
+        Args:
+            grid_map: The map string for the environment.
+            max_steps: Maximum steps per episode.
+        """
+        self.grid_map = grid_map
+        self.max_steps = max_steps
+    
+    def __call__(self):
+        """Create a new MultiGridEnv with stored configuration."""
+        env = MultiGridEnv(
+            map=self.grid_map,
+            max_steps=self.max_steps,
+            partial_obs=False,
+            objects_set=World,
+            actions_set=SmallActions
+        )
+        return env
 
 class _EnsembleEnvCreator:
     """
@@ -935,10 +943,9 @@ def main(
         # Create world model factory for async training (trivial/small mode)
         if use_async:
             # Trivial/small mode: use cached (same env for all episodes)
-            if env_type == "small":
-                world_model_factory = CachedWorldModelFactory(_create_small_env)
-            else:
-                world_model_factory = CachedWorldModelFactory(_create_trivial_env)
+            # Use _SimpleEnvCreator to capture GRID_MAP value for worker processes
+            env_creator = _SimpleEnvCreator(GRID_MAP, max_steps=MAX_STEPS)
+            world_model_factory = CachedWorldModelFactory(env_creator)
         else:
             world_model_factory = None
     env.reset()

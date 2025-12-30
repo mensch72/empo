@@ -58,6 +58,14 @@ When modifying `vendor/multigrid/gym_multigrid/multigrid.py` (object types, agen
 - `src/empo/nn_based/neural_policy_prior.py` (OBJECT_TYPE_TO_CHANNEL)
 - `docs/ENCODER_ARCHITECTURE.md`
 
+## Terminology (Follow Precisely)
+
+Precise terminology prevents confusion in this codebase:
+- **"phase"**: Use ONLY for "Phase 1" (human policy prior) vs "Phase 2" (robot policy). Never for training phases/stages.
+- **"training_step"** vs **"env_step"**: Never use bare "step". Use `training_step` for gradient updates, `env_step` for environment transitions.
+- **"world_model"** preferred over "env": Emphasizes prediction of `transition_probabilities()`, not just simulation.
+- **"compute/approximate"** not "learn/optimize": Policies are solutions to equations, not optimized objectives.
+
 ## Development Workflow
 
 ### Setup (Docker recommended)
@@ -67,34 +75,25 @@ make shell       # Enter container
 make test        # Run tests
 ```
 
-### Python Path Setup (if running outside Docker)
-```python
-import sys, os
-sys.path.insert(0, os.path.join(os.getcwd(), 'src'))
-sys.path.insert(0, os.path.join(os.getcwd(), 'vendor', 'multigrid'))
-```
-
-### Running Examples
+### Running Examples (IMPORTANT)
+Always use `PYTHONPATH` to avoid import errors:
 ```bash
-make shell
+# Outside Docker container:
+PYTHONPATH=src:vendor/multigrid:vendor/ai_transport python examples/human_policy_prior_example.py
+
+# Inside Docker container (make shell):
 python examples/human_policy_prior_example.py
-python examples/phase2_robot_policy_demo.py
 ```
 
 ### Tests
 ```bash
-make test                           # All tests
-python -m pytest tests/test_phase2.py  # Specific test
+make test                           # All tests (inside container)
+PYTHONPATH=src:vendor/multigrid:vendor/ai_transport python -m pytest tests/test_phase2.py  # Outside container
 ```
 
 ## Phase 2 Network Warm-up
 
-Phase 2 training uses staged warm-up to break mutual dependencies (see `Phase2Config`):
-1. `V_h^e` only (human goal achievement under robot policy)
-2. `V_h^e` + `X_h` (aggregate goal ability)
-3. `V_h^e` + `X_h` + `U_r` (intrinsic reward)
-4. `V_h^e` + `X_h` + `U_r` + `Q_r` (robot Q-values)
-5. All networks including `V_r`
+Phase 2 training uses staged warm-up to break mutual dependencies—see [docs/WARMUP_DESIGN.md](docs/WARMUP_DESIGN.md) for rationale.
 
 During warm-up: `beta_r=0` (uniform random robot). After warm-up: `beta_r` ramps to nominal.
 
@@ -105,6 +104,11 @@ During warm-up: `beta_r=0` (uniform random robot). After warm-up: `beta_r` ramps
 - **Goals are hypothetical**—robot considers ALL possible goals, not "actual" human goals
 - **Parallel DAG computation** uses worker processes with pickled environments—ensure serializability
 - **Shared encoders** in Phase 2 networks cache raw tensors (not NN outputs) for gradient flow
+
+## Important Workflow Notes
+
+- **NEVER delete code unrelated to the current task.** This has caused problems requiring recovery from git history. When editing files, preserve all unrelated functions, classes, and imports.
+- **Remind the user to make intermediate commits** after completing each logical unit of work. This makes it easier to revert mistakes and track progress.
 
 ## Key Files for Understanding
 
