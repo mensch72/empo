@@ -279,7 +279,7 @@ def test_multigrid_human_goal_achievement_network():
     
     # Test soft clamp preserves gradients
     raw = torch.tensor([0.5], requires_grad=True)
-    clamped = v_h_e_network.apply_soft_clamp(raw)
+    clamped = v_h_e_network.apply_clamp(raw)
     clamped.backward()
     assert raw.grad is not None
     print("  ✓ Soft clamp preserves gradients")
@@ -560,7 +560,7 @@ def test_soft_clamp_in_phase2():
     test_values = torch.tensor([0.3, 0.5, 0.7], requires_grad=True)
     
     # For V_h^e
-    clamped_v = v_h_e.apply_soft_clamp(test_values)
+    clamped_v = v_h_e.apply_clamp(test_values)
     loss_v = clamped_v.sum()
     loss_v.backward()
     assert test_values.grad is not None
@@ -570,7 +570,7 @@ def test_soft_clamp_in_phase2():
     print("  ✓ V_h^e SoftClamp preserves gradients in [0, 1]")
     
     test_values2 = torch.tensor([0.3, 0.5, 0.7], requires_grad=True)
-    clamped_x = x_h.apply_soft_clamp(test_values2)
+    clamped_x = x_h.apply_clamp(test_values2)
     loss_x = clamped_x.sum()
     loss_x.backward()
     assert torch.allclose(test_values2.grad, torch.ones(3), atol=0.01)
@@ -578,7 +578,7 @@ def test_soft_clamp_in_phase2():
     
     # Test that values outside range are bounded but gradients still flow
     test_outside = torch.tensor([-0.5, 1.5], requires_grad=True)
-    clamped_out = v_h_e.apply_soft_clamp(test_outside)
+    clamped_out = v_h_e.apply_clamp(test_outside)
     
     # Values should be bounded more than original
     assert clamped_out[0] > -0.5, "Below-range should be bounded"

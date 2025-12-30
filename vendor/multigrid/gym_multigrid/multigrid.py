@@ -2094,7 +2094,7 @@ class MultiGridEnv(WorldModel):
             actions_set=Actions,
             objects_set = World,
             map=None,
-            orientations=None,
+            orientations=0,
             can_push_rocks='e',
             config_file=None,
             stumble_probability=0.5,
@@ -2116,7 +2116,10 @@ class MultiGridEnv(WorldModel):
             actions_set: Set of available actions (default: Actions)
             objects_set: Set of available objects (default: World)
             map: ASCII map string defining the grid layout
-            orientations: List of orientation codes ('n', 's', 'e', 'w') for agents
+            orientations: Agent orientations - can be:
+                - A single int (0-3) or code ('n','s','e','w') applied to all agents
+                - A list of ints or codes, one per agent
+                Default is 0 (east/right) for all agents.
             can_push_rocks: Color codes of agents that can push rocks (default: 'e' for grey)
             config_file: Path to JSON or YAML config file containing all init parameters.
                         If provided, loads map and other parameters from the file.
@@ -2146,7 +2149,7 @@ class MultiGridEnv(WorldModel):
                 agent_view_size = config['agent_view_size']
             if see_through_walls is False and 'see_through_walls' in config:  # default: False
                 see_through_walls = config['see_through_walls']
-            if orientations is None and 'orientations' in config:
+            if orientations == 0 and 'orientations' in config:  # default: 0
                 orientations = config['orientations']
             if can_push_rocks == 'e' and 'can_push_rocks' in config:  # default: 'e'
                 can_push_rocks = config['can_push_rocks']
@@ -2223,16 +2226,24 @@ class MultiGridEnv(WorldModel):
                     )
                     agents.append(Agent(objects_set, color_idx, can_push_rocks=agent_can_push_rocks))
             
-            # Handle orientations: if None, generate random orientations
-            if orientations is None:
-                self._agent_orientations = [self.np_random.integers(0, 4) for _ in range(len(map_agents))]
-            else:
-                # Parse orientation codes to direction indices
-                self._agent_orientations = []
-                for orient in orientations:
-                    if orient not in self.ORIENTATION_TO_DIR:
-                        raise ValueError(f"Invalid orientation '{orient}'. Must be one of: w, n, e, s")
+            # Handle orientations: convert single value to list, then parse
+            num_agents = len(map_agents)
+            # Normalize orientations to a list
+            if isinstance(orientations, (int, str)):
+                # Single value: apply to all agents
+                orientations = [orientations] * num_agents
+            
+            # Parse orientation codes/ints to direction indices
+            self._agent_orientations = []
+            for orient in orientations:
+                if isinstance(orient, int):
+                    if not (0 <= orient <= 3):
+                        raise ValueError(f"Invalid orientation {orient}. Must be 0-3.")
+                    self._agent_orientations.append(orient)
+                elif orient in self.ORIENTATION_TO_DIR:
                     self._agent_orientations.append(self.ORIENTATION_TO_DIR[orient])
+                else:
+                    raise ValueError(f"Invalid orientation '{orient}'. Must be 0-3 or one of: w, n, e, s")
         else:
             self._agent_orientations = None
         
@@ -3387,7 +3398,8 @@ class MultiGridEnv(WorldModel):
 
         return img
 
-    def render(self, mode='human', close=False, highlight=False, tile_size=TILE_PIXELS, annotation_text=None):
+    def render(self, mode='human', close=False, highlight=False, tile_size=TILE_PIXELS, annotation_text=None,
+               annotation_panel_width=200, annotation_font_size=11, goal_overlays=None):
         """
         Render the whole-grid human view.
         
@@ -3398,6 +3410,10 @@ class MultiGridEnv(WorldModel):
             tile_size: Pixel size of each grid cell
             annotation_text: Optional text to display in a panel to the right of the grid.
                             Can be a string (rendered as-is) or a list of strings (one per line).
+            annotation_panel_width: Width of the annotation panel in pixels (default 200).
+            annotation_font_size: Font size for annotation text (default 11).
+            goal_overlays: Optional dict mapping agent indices to their goals.
+                          Each goal will be rendered as a dashed rectangle with a line to the agent.
         """
 
         if close:
@@ -3457,9 +3473,16 @@ class MultiGridEnv(WorldModel):
         # Draw dashed lines from control buttons to controlled agents
         self._draw_control_button_connections(img, tile_size)
         
+        # Draw goal overlays if provided
+        if goal_overlays is not None:
+            for agent_idx, goal in goal_overlays.items():
+                self.draw_goal_overlay(img, goal, agent_idx=agent_idx, tile_size=tile_size)
+        
         # Add annotation panel if text provided
         if annotation_text is not None:
-            img = self._add_annotation_panel(img, annotation_text)
+            img = self._add_annotation_panel(img, annotation_text, 
+                                             panel_width=annotation_panel_width,
+                                             font_size=annotation_font_size)
 
         if mode == 'human':
             self.window.show_img(img)
@@ -3546,6 +3569,108 @@ class MultiGridEnv(WorldModel):
                             img[py+oy, px+ox] = color
             x += x_inc
             y += y_inc
+
+    def draw_goal_overlay(self, img, goal, agent_idx=None, tile_size=TILE_PIXELS,
+                          color=(0, 102, 255), line_thickness=2, dash_len=6, gap_len=4,
+                          inset_frac=0.08):
+        """
+        Draw a dashed rectangle around a goal region and optionally a line to the agent.
+        
+        Args:
+            img: RGB numpy array (H, W, 3) to draw on (modified in place).
+            goal: Goal object with target_rect, target_pos, or (x1, y1, x2, y2) tuple.
+            agent_idx: If provided, draw a dashed line from this agent to the goal.
+            tile_size: Size of each grid cell in pixels.
+            color: RGB tuple for the goal visualization (default: blue).
+            line_thickness: Thickness of the dashed lines.
+            dash_len: Length of dashes in pixels.
+            gap_len: Length of gaps between dashes in pixels.
+            inset_frac: Fraction of cell to inset rectangle from cell edges (0.08 = 8%).
+        """
+        # Extract bounding box from goal
+        x1, y1, x2, y2 = self._get_goal_bounding_box(goal)
+        
+        # Calculate pixel coordinates with inset
+        left = int(x1 * tile_size + tile_size * inset_frac)
+        top = int(y1 * tile_size + tile_size * inset_frac)
+        right = int((x2 + 1) * tile_size - tile_size * inset_frac)
+        bottom = int((y2 + 1) * tile_size - tile_size * inset_frac)
+        
+        # Draw dashed rectangle (4 sides)
+        self._draw_dashed_line(img, left, top, right, top, color, dash_len, gap_len, line_thickness)  # Top
+        self._draw_dashed_line(img, right, top, right, bottom, color, dash_len, gap_len, line_thickness)  # Right
+        self._draw_dashed_line(img, right, bottom, left, bottom, color, dash_len, gap_len, line_thickness)  # Bottom
+        self._draw_dashed_line(img, left, bottom, left, top, color, dash_len, gap_len, line_thickness)  # Left
+        
+        # Draw line from agent to closest point on goal if agent_idx provided
+        if agent_idx is not None and agent_idx < len(self.agents):
+            agent = self.agents[agent_idx]
+            if agent.pos is not None:
+                agent_px = int((agent.pos[0] + 0.5) * tile_size)
+                agent_py = int((agent.pos[1] + 0.5) * tile_size)
+                
+                # Find closest point on rectangle boundary
+                closest_x, closest_y = self._closest_point_on_rect(
+                    left, top, right, bottom, agent_px, agent_py
+                )
+                
+                self._draw_dashed_line(img, agent_px, agent_py, closest_x, closest_y,
+                                       color, dash_len, gap_len, max(1, line_thickness - 1))
+    
+    def _get_goal_bounding_box(self, goal):
+        """Extract bounding box (x1, y1, x2, y2) from various goal representations."""
+        if hasattr(goal, 'target_rect'):
+            x1, y1, x2, y2 = goal.target_rect
+        elif hasattr(goal, 'target_pos'):
+            x, y = goal.target_pos
+            x1, y1, x2, y2 = int(x), int(y), int(x), int(y)
+        elif hasattr(goal, 'position'):
+            x, y = goal.position
+            x1, y1, x2, y2 = int(x), int(y), int(x), int(y)
+        elif isinstance(goal, (tuple, list)):
+            if len(goal) == 4:
+                x1, y1, x2, y2 = int(goal[0]), int(goal[1]), int(goal[2]), int(goal[3])
+            elif len(goal) >= 2:
+                x1, y1 = int(goal[0]), int(goal[1])
+                x2, y2 = x1, y1
+            else:
+                x1, y1, x2, y2 = 0, 0, 0, 0
+        else:
+            x1, y1, x2, y2 = 0, 0, 0, 0
+        
+        # Normalize order
+        if x1 > x2:
+            x1, x2 = x2, x1
+        if y1 > y2:
+            y1, y2 = y2, y1
+        
+        return (x1, y1, x2, y2)
+    
+    def _closest_point_on_rect(self, left, top, right, bottom, px, py):
+        """Find the closest point on rectangle boundary to a given point."""
+        # If point is inside the rectangle, find closest edge
+        if left <= px <= right and top <= py <= bottom:
+            d_left = px - left
+            d_right = right - px
+            d_top = py - top
+            d_bottom = bottom - py
+            
+            min_d = min(d_left, d_right, d_top, d_bottom)
+            
+            if min_d == d_left:
+                return (left, py)
+            elif min_d == d_right:
+                return (right, py)
+            elif min_d == d_top:
+                return (px, top)
+            else:
+                return (px, bottom)
+        
+        # Clamp point to rectangle boundary
+        cx = max(left, min(px, right))
+        cy = max(top, min(py, bottom))
+        
+        return (cx, cy)
 
     def _add_annotation_panel(self, img, annotation_text, panel_width=200, font_size=11, bg_color=(255, 255, 255)):
         """

@@ -21,6 +21,21 @@ from .feature_extraction import extract_agent_features
 from .constants import AGENT_FEATURE_SIZE
 
 
+def _make_hashable(obj):
+    """
+    Recursively convert lists to tuples to make state hashable for caching.
+    
+    The state tuple contains lists (agent_states, mobile_objects, mutable_objects)
+    which are not hashable. This function converts them to tuples.
+    """
+    if isinstance(obj, list):
+        return tuple(_make_hashable(item) for item in obj)
+    elif isinstance(obj, tuple):
+        return tuple(_make_hashable(item) for item in obj)
+    else:
+        return obj
+
+
 class AgentIdentityEncoder(nn.Module):
     """
     Encodes agent identity for agent-specific networks.
@@ -81,8 +96,8 @@ class AgentIdentityEncoder(nn.Module):
         self.output_dim = embedding_dim + self.position_feature_dim + self.agent_feature_dim
         
         # Internal cache for raw tensor extraction (before NN forward)
-        # Keys are (state_id, agent_idx), values are (idx_tensor, grid, features)
-        self._raw_cache: Dict[Tuple[int, int], Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+        # Keys are (state_tuple, agent_idx), values are (idx_tensor, grid, features)
+        self._raw_cache: Dict[Tuple[Tuple, int], Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
         self._cache_hits = 0
         self._cache_misses = 0
     
@@ -154,8 +169,9 @@ class AgentIdentityEncoder(nn.Module):
             Tuple of (agent_index_tensor, query_agent_grid, query_agent_features)
             ready for batching or direct forward pass.
         """
-        # Check cache first
-        cache_key = (id(state), agent_idx)
+        # Check cache using content-based key (state tuple + agent index)
+        # State contains lists, so convert to hashable form (tuples)
+        cache_key = (_make_hashable(state), agent_idx)
         if cache_key in self._raw_cache:
             self._cache_hits += 1
             # Clone to avoid in-place operation conflicts during gradient computation
@@ -230,3 +246,12 @@ class AgentIdentityEncoder(nn.Module):
             torch.cat(grid_list, dim=0),
             torch.cat(features_list, dim=0)
         )
+
+    def get_config(self) -> Dict[str, Any]:
+        """Return configuration for save/load."""
+        return {
+            'num_agents': self.num_agents,
+            'embedding_dim': self.embedding_dim,
+            'grid_height': self.grid_height,
+            'grid_width': self.grid_width,
+        }

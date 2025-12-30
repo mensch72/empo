@@ -121,34 +121,18 @@ All three occurrences (lines 1449, 1455, 1463 on main) have been corrected.
 
 ---
 
-### P2-BUG-003: Undefined `effective_beta_r` when V_r network mode is enabled during warmup
+### ~~P2-BUG-003: Undefined `effective_beta_r` when V_r network mode is enabled during warmup~~ [FIXED]
 **Priority:** Medium  
 **Location:** `src/empo/nn_based/phase2/trainer.py:641-652`  
 **Description:**  
-The variable `effective_beta_r` is defined inside the `if q_r_active:` block (line 620) but is used in the subsequent `if self.config.v_r_use_network:` block (line 647). This would cause a `NameError` if V_r network mode is enabled (`v_r_use_network=True`) during a warmup stage where Q_r is not yet active.
+~~The variable `effective_beta_r` is defined inside the `if q_r_active:` block (line 620) but is used in the subsequent `if self.config.v_r_use_network:` block (line 647). This would cause a `NameError` if V_r network mode is enabled (`v_r_use_network=True`) during a warmup stage where Q_r is not yet active.~~
 
-**Current behavior:**
+**Status:** **FIXED** in commit 636677e (2024-12-29)
+
+**Fix applied:**
 ```python
-# Line 614-620: effective_beta_r defined inside q_r_active block
-if q_r_active:
-    # ...
-    effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
-    # ...
-
-# Line 641-647: effective_beta_r used in v_r_use_network block
-if self.config.v_r_use_network:
-    # ...
-    pi_r = self.networks.q_r.get_policy(q_r_for_v, beta_r=effective_beta_r)  # ERROR if q_r_active is False
-```
-
-**When it fails:**
-- `v_r_use_network=True` (non-default, but valid configuration)
-- During warmup stages 1-3 when Q_r is not active yet (`q_r_active=False`)
-
-**Suggested fix:**
-Define `effective_beta_r` outside both conditional blocks, before the loop over transitions:
-```python
-# Before the batch loop (around line 545)
+# Moved effective_beta_r definition outside both conditional blocks
+# Before the batch loop (line ~575)
 effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
 
 for transition in batch:
@@ -235,11 +219,19 @@ This is correct design, not a performance issue.
 
 ---
 
-### P2-ORPHAN-003: Unused `get_config()` method in base network classes
+### ~~P2-ORPHAN-003: Unused `get_config()` method in base network classes~~ [FIXED]
 **Priority:** Informational  
 **Location:** Multiple base network classes  
 **Description:**  
-The `get_config()` abstract method is defined in base classes but its implementations in multigrid networks return configurations that don't include all parameters needed for reconstruction. For example, `MultiGridRobotQNetwork.get_config()` includes `state_encoder_config` but not `own_state_encoder_config`. This could cause issues with model serialization/loading.
+~~The `get_config()` abstract method is defined in base classes but its implementations in multigrid networks return configurations that don't include all parameters needed for reconstruction. For example, `MultiGridRobotQNetwork.get_config()` includes `state_encoder_config` but not `own_state_encoder_config`. This could cause issues with model serialization/loading.~~
+
+**Status:** **FIXED** (2024-12-29)
+
+**Fix applied:**
+Updated `get_config()` methods in all network classes to include complete configurations:
+- `MultiGridRobotQNetwork`: Added `own_state_encoder_config`
+- `MultiGridAggregateGoalAbilityNetwork`: Added `agent_encoder_config` and `own_agent_encoder_config`
+- `MultiGridHumanGoalAchievementNetwork`: Added `agent_encoder_config`
 
 ---
 
@@ -277,52 +269,48 @@ Fixed by:
 
 ---
 
-### P2-BUG-004: Target network update ignores per-network intervals
+### ~~P2-BUG-004: Target network update ignores per-network intervals~~ [FIXED]
 **Priority:** Low  
 **Location:** `src/empo/nn_based/phase2/trainer.py:794`, `src/empo/nn_based/phase2/config.py:119-122`  
 **Description:**  
-The config defines separate target update intervals for each network (`v_r_target_update_interval`, `v_h_e_target_update_interval`, `x_h_target_update_interval`, `u_r_target_update_interval`), but the training code only checks `v_r_target_update_interval` and updates ALL target networks at the same time.
+~~The config defines separate target update intervals for each network (`v_r_target_update_interval`, `v_h_e_target_update_interval`, `x_h_target_update_interval`, `u_r_target_update_interval`), but the training code only checks `v_r_target_update_interval` and updates ALL target networks at the same time.~~
 
-**Status on main:** Previously fixed in commit d206235 (Dec 28, 2024), but appears to have been **reverted in subsequent refactoring commits** (349a32d, 67b2312, etc. on Dec 29, 2024).
+**Status:** **FIXED** in commit 636677e (2024-12-29)
 
-**Current behavior on main:**
+**Fix applied:**
+Modified `update_target_networks()` to respect individual intervals for each network:
 ```python
-# Line ~794 in trainer.py (as of Dec 29, 2024)
 def update_target_networks(self):
-    """Update target networks (hard copy)."""
-    self.networks.v_r_target.load_state_dict(self.networks.v_r.state_dict())
-    self.networks.v_h_e_target.load_state_dict(self.networks.v_h_e.state_dict())
-    self.networks.x_h_target.load_state_dict(self.networks.x_h.state_dict())
-    # ... all updated together
+    # Update Q_r target if interval reached
+    if self.training_step_count % self.config.q_r_target_update_interval == 0:
+        self.networks.q_r_target.load_state_dict(self.networks.q_r.state_dict())
+    # Similar checks for v_r, v_h_e, x_h, u_r
 ```
 
-**Config defines:**
-```python
-v_r_target_update_interval: int = 100
-v_h_e_target_update_interval: int = 100  # IGNORED
-x_h_target_update_interval: int = 100    # IGNORED
-u_r_target_update_interval: int = 100    # IGNORED
-```
-
-**Suggested fix (was implemented in d206235):**
-```python
-# Option 2: Respect per-network intervals
-if self.training_step_count % self.config.v_r_target_update_interval == 0:
-    self.networks.v_r_target.load_state_dict(self.networks.v_r.state_dict())
-if self.training_step_count % self.config.v_h_e_target_update_interval == 0:
-    self.networks.v_h_e_target.load_state_dict(self.networks.v_h_e.state_dict())
-# ... etc for x_h and u_r
-```
+The method is now called every training step, and each target network checks its own interval internally.
 
 ---
 
-### P2-ARCH-002: Target network for Q_r not maintained
+### ~~P2-ARCH-002: Target network for Q_r not maintained~~ [FIXED]
 **Priority:** Medium  
 **Location:** `src/empo/nn_based/phase2/trainer.py:142-163`  
 **Description:**  
-The `_init_target_networks()` method creates target networks for V_r, V_h^e, X_h, and U_r, but not for Q_r. However, Q_r is used to compute the robot policy π_r for V_r computation and V_h^e model-based targets. Using the live Q_r network instead of a target network could introduce instability.
+~~The `_init_target_networks()` method creates target networks for V_r, V_h^e, X_h, and U_r, but not for Q_r. However, Q_r is used to compute the robot policy π_r for V_r computation and V_h^e model-based targets. Using the live Q_r network instead of a target network could introduce instability.~~
 
-This is especially relevant during beta_r ramp-up when the policy changes rapidly.
+~~This is especially relevant during beta_r ramp-up when the policy changes rapidly.~~
+
+**Status:** **FIXED** in commit 636677e (2024-12-29)
+
+**Fix applied:**
+1. Added `q_r_target` to `Phase2Networks` dataclass
+2. Added `q_r_target_update_interval` parameter to config (default=100)
+3. Initialize Q_r target network in `_init_target_networks()`
+4. Update Q_r target network in `update_target_networks()` with its own interval
+5. Use Q_r target network in loss computations for stable TD targets:
+   - Q_r loss: Uses `q_r_target` for computing next-state Q-values and policy
+   - V_r loss: Uses `q_r_target` for computing current-state policy
+
+This provides stability during beta_r ramp-up when the policy changes rapidly.
 
 ---
 
@@ -411,18 +399,23 @@ All documented bugs have been verified using direct code inspection and a verifi
 - ✓ **P2-BUG-001**: Fixed in commit e73084b - changed `self.buffer.size()` to `len(self.replay_buffer)`
 - ✓ **P2-BUG-002**: Fixed in commit e73084b - code now uses `len()` consistently instead of `.size()` method
 
-**STILL EXIST on main (3 issues):**
-- ✗ **P2-BUG-003**: `effective_beta_r` undefined in edge case - **MEDIUM PRIORITY**
-  - Still defined inside `if q_r_active:` block (line ~648)
-  - Still used in `if self.config.v_r_use_network:` block (line ~675)
-  - Would cause NameError if v_r_use_network=True during early warmup
+**STILL EXIST on main (0 issues):**
+- All previously open issues have been fixed!
+
+**FIXED in this PR (4 issues):**
+- ✓ **P2-BUG-003**: `effective_beta_r` undefined in edge case - **FIXED** (commit 636677e)
+  - Moved definition outside conditional blocks to ensure availability for both Q_r and V_r losses
   
-- ✗ **P2-BUG-004**: Target network updates ignore per-network intervals - **LOW PRIORITY** 
-  - Note: This was fixed in commit d206235 (Dec 28) but appears to have been reverted in subsequent refactoring commits (349a32d, 67b2312, etc.)
-  - Config still defines separate intervals but they are not used
+- ✓ **P2-BUG-004**: Target network updates ignore per-network intervals - **FIXED** (commit 636677e)
+  - Modified `update_target_networks()` to respect individual intervals for each network
   
-- ✗ **P2-ORPHAN-003**: get_config() missing own_state_encoder_config parameter (Informational)
-- ✗ **P2-ARCH-002**: Q_r target network not maintained (Medium priority)
+- ✓ **P2-ORPHAN-003**: get_config() missing encoder config parameters - **FIXED**
+  - Updated all network classes to include complete encoder configurations
+  
+- ✓ **P2-ARCH-002**: Q_r target network not maintained - **FIXED** (commit 636677e)
+  - Added Q_r target network and corresponding parameter
+  - Initialize and update Q_r target network with its own interval
+  - Use Q_r target network in loss computations for stability
 
 **BY DESIGN (1):**
 - ⚠ **P2-CONF-002**: auto_grad_clip scaling may produce extreme values (Low priority, potential issue)
@@ -435,8 +428,9 @@ All documented bugs have been verified using direct code inspection and a verifi
 
 **Summary of main branch changes:**
 - Commits e73084b, 3a39986, 90d49cc (Dec 29): Fixed async training bugs (P2-BUG-001, P2-BUG-002)
-- Commit d206235 (Dec 28): Fixed separate target intervals (P2-BUG-004) - but later reverted
+- Commit d206235 (Dec 28): Fixed separate target intervals (P2-BUG-004) - but was later reverted
 - Commits 349a32d, 67b2312, d5a7f09, 958af68, 9ea5a22 (Dec 29): Refactoring that appears to have reverted some fixes
+- **Commit 636677e (Dec 29)**: Fixed P2-BUG-003, P2-BUG-004, P2-ORPHAN-003, P2-ARCH-002
 
 ---
 

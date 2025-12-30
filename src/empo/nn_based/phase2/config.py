@@ -45,6 +45,7 @@ class Phase2Config:
         lr_v_h_e: Learning rate for V_h^e network.
         lr_x_h: Learning rate for X_h network.
         lr_u_r: Learning rate for U_r network.
+        q_r_target_update_interval: Training steps between Q_r target network updates.
         v_r_target_update_interval: Training steps between V_r target network updates.
         v_h_e_target_update_interval: Training steps between V_h^e target network updates.
         x_h_target_update_interval: Training steps between X_h target network updates.
@@ -116,6 +117,7 @@ class Phase2Config:
     lr_u_r_use_1_over_t: bool = False  # DEPRECATED: Whether to use legacy 1/t decay for U_r
     
     # Target network updates
+    q_r_target_update_interval: int = 100
     v_r_target_update_interval: int = 100
     v_h_e_target_update_interval: int = 100
     x_h_target_update_interval: int = 100
@@ -143,19 +145,19 @@ class Phase2Config:
     # Regularization options for all networks (weight decay, gradient clipping, dropout)
     # These help with training stability, especially for high-variance learning.
     # Weight decay (L2 regularization) for each network's optimizer
-    q_r_weight_decay: float = 1e-3 #1e-4
-    v_r_weight_decay: float = 1e-3 #1e-4
-    v_h_e_weight_decay: float = 1e-3 #1e-4
-    x_h_weight_decay: float = 1e-3 #1e-4
-    u_r_weight_decay: float = 1e-3 #1e-4
+    q_r_weight_decay: float = 1e-4
+    v_r_weight_decay: float = 1e-4
+    v_h_e_weight_decay: float = 1e-4
+    x_h_weight_decay: float = 1e-4
+    u_r_weight_decay: float = 1e-4
     
     # Max gradient norm for each network (0 or None to disable clipping)
     # If auto_grad_clip is True, these values are scaled by the learning rate.
-    q_r_grad_clip: Optional[float] = 1.0
-    v_r_grad_clip: Optional[float] = 1.0
-    v_h_e_grad_clip: Optional[float] = 1.0
-    x_h_grad_clip: Optional[float] = 1.0
-    u_r_grad_clip: Optional[float] = 1.0
+    q_r_grad_clip: Optional[float] = 10.0
+    v_r_grad_clip: Optional[float] = 10.0
+    v_h_e_grad_clip: Optional[float] = 10.0
+    x_h_grad_clip: Optional[float] = 10.0
+    u_r_grad_clip: Optional[float] = 10.0
     
     # Automatic gradient clipping: if True, the effective grad clip is scaled by
     # learning rate to keep step sizes bounded regardless of LR magnitude.

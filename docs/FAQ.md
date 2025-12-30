@@ -50,10 +50,10 @@ Stages are determined by `training_step_count` (cumulative training steps/gradie
 
 ### Target Network Update Intervals
 Each target network is updated independently (via full copy from its corresponding main network) at its own interval measured in **training steps** (gradient updates):
-- `v_r_target`: Every `v_r_target_update_interval` training steps (default: 100)
 - `v_h_e_target`: Every `v_h_e_target_update_interval` training steps (default: 100)
 - `x_h_target`: Every `x_h_target_update_interval` training steps (default: 100)
 - `u_r_target`: Every `u_r_target_update_interval` training steps (default: 100)
+- `v_r_target`: Every `v_r_target_update_interval` training steps (default: 100)
 
 These intervals are called the **target update intervals** or **target sync intervals**. Each update happens when `training_step_count % <network>_target_update_interval == 0`, meaning they're tied to **training steps** (gradient updates), not environment steps or episodes. This makes sense in async mode where training steps and environment steps are decoupled, ensuring consistent target network update frequency regardless of data collection speed.
 
@@ -146,6 +146,8 @@ Since V_r = U_r + π_r · Q_r is a deterministic weighted average, computing it 
 - Used ONLY for computing training targets (the right side of the loss equation)
 - Always in eval mode (disables dropout) for consistent target computation
 
+**Terminology note**: A **target network** (e.g., `v_h_e_target`) is a frozen copy of a main network used to compute stable values. An **update target** (e.g., `target_v_h_e`, `target_x_h`, `target_q_r`) is the scalar value computed from the target networks that the main network tries to match during training. In code: `loss = (prediction - target_value) ** 2` where `prediction` comes from the main network and `target_value` (the update target) is computed using the target networks.
+
 **Example from V_h^e training:**
 - Main network `v_h_e` predicts V_h^e(s, g_h) — this prediction is trained
 - Target network `v_h_e_target` provides V_h^e(s', g_h) for the TD target — this is frozen
@@ -153,17 +155,11 @@ Since V_r = U_r + π_r · Q_r is a deterministic weighted average, computing it 
 
 This separation prevents the "moving target problem" where updating the network changes the targets it's trying to match, causing training instability. Similarly, in async training mode, actor processes use a frozen copy of the policy (periodically synced from the learner) to generate training data, ensuring data collection doesn't change mid-episode as the learner updates the policy.
 
-### Using target networks for V_r, V_h^e, X_h, and U_r
-Frozen target networks prevent the moving target problem where the TD target changes as the network being trained updates, improving training stability. Each of the four target networks (`v_r_target`, `v_h_e_target`, `x_h_target`, `u_r_target`) can be updated at its own interval, allowing flexibility in how frequently each is synchronized.
+### Using target networks for all value networks (Q_r, V_h^e, X_h, U_r, V_r)
+Frozen target networks prevent the moving target problem where the TD target changes as the network being trained updates, improving training stability. Each target network (`q_r_target`, `v_h_e_target`, `x_h_target`, `u_r_target`, `v_r_target`) can be updated at its own interval via the corresponding `*_target_update_interval` config parameter. The Q_r target network is particularly important during beta_r ramp-up when the policy changes rapidly, as it stabilizes both the V_r targets (computed via π_r · Q_r) and the next-state Q-values.
 
 ### Periodic full-copy target network updates
 Target networks are updated by copying the full state dict every N steps, following the DQN approach rather than continuous blending.
-
-### Using V_h^e target network (not main) in X_h target computation
-Using the target network for V_h^e when computing X_h targets creates more stable gradient flow since X_h depends on V_h^e which is also being updated.
-
-### Using X_h target network (not main) in U_r target computation
-Using the target network for X_h when computing U_r targets prevents feedback loops where U_r changes affect X_h which affects U_r in the same update.
 
 ## Regularization
 

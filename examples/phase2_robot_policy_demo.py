@@ -7,6 +7,7 @@ that maximizes aggregate human power. Based on equations (4)-(9) from the paper.
 
 Environment options (set env_type variable):
 - "trivial": Small 4x6 grid with 1 human, 1 robot (quick testing)
+- "small": 6x6 grid with 1 human, 1 robot, more space to maneuver
 - "ensemble": Random 7x7 grids with 2 humans, 2 robots, walls, and objects
 
 The demo trains:
@@ -21,6 +22,7 @@ Usage:
     # Basic usage
     python phase2_robot_policy_demo.py           # Full run (trivial env)
     python phase2_robot_policy_demo.py --quick   # Quick test (100 episodes)
+    python phase2_robot_policy_demo.py --small   # Use small 6x6 environment
     python phase2_robot_policy_demo.py --ensemble # Use random ensemble environment
     python phase2_robot_policy_demo.py --async   # Use async actor-learner training
     
@@ -57,7 +59,7 @@ from gym_multigrid.multigrid import (
     MultiGridEnv, Grid, Agent, Wall, World, SmallActions,
     Key, Ball, Box, Door, Lava, Block, Goal
 )
-from empo.multigrid import MultiGridGoalSampler, ReachCellGoal, ReachRectangleGoal
+from empo.multigrid import MultiGridGoalSampler, ReachCellGoal, ReachRectangleGoal, render_test_map_values
 from empo.possible_goal import DeterministicGoalSampler, TabularGoalSampler, PossibleGoalSampler
 from empo.human_policy_prior import HeuristicPotentialPolicy
 from empo.nn_based.multigrid import PathDistanceCalculator
@@ -71,9 +73,9 @@ from empo.nn_based.multigrid.phase2.robot_policy import MultiGridRobotPolicy
 # Environment Definition
 # ============================================================================
 
-final_beta_r = 100.0  # Final beta_r for robot policy concentration
+final_beta_r = 1000.0  # Final beta_r for robot policy concentration
 
-# Default environment type (can be overridden via --ensemble flag)
+# Default environment type (can be overridden via --ensemble or --small flags)
 # These will be set properly in main() based on command line args
 env_type = "trivial"
 
@@ -83,6 +85,8 @@ MAX_STEPS = 10
 NUM_ROLLOUTS = 10
 MOVIE_FPS = 2
 goal_sampler_factory = None
+TEST_MAPS = None  # Only set for trivial env
+DEFINED_GOALS = None  # Goals to evaluate V_h^e for (trivial env only)
 
 # Ensemble-specific config (only used when env_type == "ensemble")
 ENSEMBLE_GRID_SIZE = 7
@@ -96,9 +100,9 @@ UNSTEADY_GROUND_PROBABILITY = 0.08
 DOOR_KEY_COLOR = 'r'
 
 
-def configure_environment(use_ensemble: bool):
+def configure_environment(use_ensemble: bool, use_small: bool = False):
     """Configure global environment variables based on mode."""
-    global env_type, GRID_MAP, MAX_STEPS, NUM_ROLLOUTS, MOVIE_FPS, goal_sampler_factory
+    global env_type, GRID_MAP, MAX_STEPS, NUM_ROLLOUTS, MOVIE_FPS, goal_sampler_factory, TEST_MAPS, DEFINED_GOALS
     
     if use_ensemble:
         env_type = "ensemble"
@@ -107,6 +111,25 @@ def configure_environment(use_ensemble: bool):
         NUM_ROLLOUTS = 20
         MOVIE_FPS = 3
         goal_sampler_factory = None  # Will use SmallGoalSampler
+    elif use_small:
+        env_type = "small"
+        GRID_MAP = """
+        We We We We We We
+        We .. .. .. Ae We
+        We .. .. .. .. We 
+        We .. Ro .. .. We
+        We We Ay We We We
+        We We We We We We
+        """
+        MAX_STEPS = 15
+        NUM_ROLLOUTS = 10
+        MOVIE_FPS = 2
+        goal_sampler_factory = lambda env: TabularGoalSampler([
+            ReachCellGoal(env, 1, (2,1)),
+            ReachCellGoal(env, 1, (2,2)),
+            ReachCellGoal(env, 1, (3,2)),
+            ReachCellGoal(env, 1, (4,2)),
+        ], probabilities=[0.4, 0.3, 0.2, 0.1])
     else:
         env_type = "trivial"
         GRID_MAP = """
@@ -118,37 +141,114 @@ def configure_environment(use_ensemble: bool):
         MAX_STEPS = 10
         NUM_ROLLOUTS = 10
         MOVIE_FPS = 2
+        
+        # Define goals for V_h^e evaluation
+        DEFINED_GOALS = [
+            (1, (2,1)),  # easy once robot has pushed rock twice or once and moved back 
+            (1, (1,1)),  # medium difficulty
+            (1, (3,1)),  # hardest since robot must move back to (1,1) after pushing rock twice
+            (1, (2,2)),  # already reached
+        ]
+        
         goal_sampler_factory = lambda env: TabularGoalSampler([
-            ReachCellGoal(env, 1, (2,1)),
-            ReachCellGoal(env, 1, (2,2))
-        ], probabilities=[0.9, 0.1])
+            ReachCellGoal(env, human_idx, pos) for human_idx, pos in DEFINED_GOALS
+        ], probabilities=[0.5, 0.2, 0.2, 0.1])
 
+        TEST_MAPS = [
+            (GRID_MAP, "Worst V_r: human locked behind rock"),
+            ("""
+            We We We We We We
+            We .. Ae Ro .. We
+            We We Ay We We We
+            We We We We We We
+            """, "Slightly better: robot closer to freeing human"),
+            ("""
+            We We We We We We
+            We Ae .. Ro .. We
+            We We Ay We We We
+            We We We We We We
+            """, "Better: robot freed human, can reach 2 goals"),
+            ("""
+            We We We We We We
+            We Ae Ay Ro .. We
+            We We .. We We We
+            We We We We We We
+            """, "Better: human on higher-prob goal, can reach 2"),
+            ("""
+            We We We We We We
+            We Ae .. .. Ro We
+            We We Ay We We We
+            We We We We We We
+            """, "Higher V_r: human can reach 3 goals"),
+            ("""
+            We We We We We We
+            We .. .. Ae Ro We
+            We We Ay We We We
+            We We We We We We
+            """, "Same V_r: human can reach 3 other equal-prob goals"),
+            ("""
+            We We We We We We
+            We Ay .. Ae Ro We
+            We We .. We We We
+            We We We We We We
+            """, "Higher V_r: human on higher-prob goal, can reach 3"),
+            ("""
+            We We We We We We
+            We Ae .. Ay Ro We
+            We We .. We We We
+            We We We We We We
+            """, "Same V_r: symmetric situation"),
+            ("""
+            We We We We We We
+            We .. Ay Ae Ro We
+            We We .. We We We
+            We We We We We We
+            """, "Highest V_r: human on highest-prob goal"),
+            ("""
+            We We We We We We
+            We Ae Ay .. Ro We
+            We We .. We We We
+            We We We We We We
+            """, "Same V_r: symmetric situation"),
+            ]
 
 # ============================================================================
 # World Model Factory Functions (for async training)
 # ============================================================================
-# These are module-level functions/classes that can be pickled for multiprocessing.
+# These are module-level classes that can be pickled for multiprocessing.
+# Note: Simple functions that reference global variables will NOT work because
+# globals are not shared across processes. Use classes that capture config.
 
-def _create_trivial_env():
-    """Create the trivial demo environment."""
-    # Hardcoded grid map (same as configure_environment sets)
-    grid_map = """
-    We We We We We We
-    We Ae Ro .. .. We
-    We We Ay We We We
-    We We We We We We
+class _SimpleEnvCreator:
+    """
+    Picklable callable class for creating simple MultiGridEnv instances.
+    
+    Stores configuration as instance attributes, making it picklable for multiprocessing.
+    Global variables (like GRID_MAP) must be captured at creation time since they
+    won't be available in worker processes.
     """
     
-    # Create environment using MultiGridEnv directly (not Phase2DemoEnv which uses globals)
-    env = MultiGridEnv(
-        map=grid_map,
-        max_steps=10,  # Fixed for trivial
-        partial_obs=False,
-        objects_set=World,
-        actions_set=SmallActions
-    )
-    return env
-
+    def __init__(self, grid_map: str, max_steps: int = 10):
+        """
+        Initialize with the grid map and max steps.
+        
+        Args:
+            grid_map: The map string for the environment.
+            max_steps: Maximum steps per episode.
+        """
+        self.grid_map = grid_map
+        self.max_steps = max_steps
+    
+    def __call__(self):
+        """Create a new MultiGridEnv with stored configuration."""
+        env = MultiGridEnv(
+            map=self.grid_map,
+            max_steps=self.max_steps,
+            partial_obs=False,
+            objects_set=World,
+            actions_set=SmallActions
+        )
+        return env
 
 class _EnsembleEnvCreator:
     """
@@ -183,7 +283,7 @@ class _EnsembleEnvCreator:
     
     def __call__(self):
         """Create a new RandomMultigridEnv with stored configuration."""
-        return RandomMultigridEnv(
+        env = RandomMultigridEnv(
             grid_size=self.grid_size,
             num_humans=self.num_humans,
             num_robots=self.num_robots,
@@ -196,6 +296,16 @@ class _EnsembleEnvCreator:
             unsteady_prob=self.unsteady_prob,
             door_key_color=self.door_key_color
         )
+        # Debug: output hash of grid to verify environments are actually changing
+        # Build a simple string representation of grid contents for hashing
+        grid_str = ""
+        for y in range(env.height):
+            for x in range(env.width):
+                cell = env.grid.get(x, y)
+                grid_str += f"{type(cell).__name__ if cell else 'None'},"
+        grid_hash = hash(grid_str)
+        print(f"[DEBUG _EnsembleEnvCreator] Created new env, grid hash: {grid_hash:016x}")
+        return env
 
 
 # ============================================================================
@@ -455,29 +565,39 @@ class Phase2DemoEnv(MultiGridEnv):
         self.num_robots = sum(1 for a in self.agents if a.color == 'grey')
 
 
-def create_ensemble_env(seed: int = None) -> RandomMultigridEnv:
-    """Create a random ensemble environment with the configured parameters."""
-    return RandomMultigridEnv(
-        grid_size=ENSEMBLE_GRID_SIZE,
-        num_humans=ENSEMBLE_NUM_HUMANS,
-        num_robots=ENSEMBLE_NUM_ROBOTS,
-        max_steps=MAX_STEPS,
-        seed=seed,
-        wall_prob=WALL_PROBABILITY,
-        door_prob=DOOR_PROBABILITY,
-        block_prob=BLOCK_PROBABILITY,
-        rock_prob=ROCK_PROBABILITY,
-        unsteady_prob=UNSTEADY_GROUND_PROBABILITY,
-        door_key_color=DOOR_KEY_COLOR
-    )
-
-
 # ============================================================================
 # Rollout and Movie Generation
 # ============================================================================
 
-# Action names for SmallActions
-ACTION_NAMES = ['still', 'left', 'right', 'forward']
+# Action names for SmallActions (single agent)
+SINGLE_ACTION_NAMES = ['still', 'left', 'right', 'forward']
+
+# Rendering configuration for annotations
+RENDER_TILE_SIZE = 96  # Increased for higher resolution and longer text visibility
+ANNOTATION_PANEL_WIDTH = 380  # Wider panel to fit longer descriptions
+ANNOTATION_FONT_SIZE = 12  # Larger font for better readability
+
+
+def get_joint_action_names(num_robots: int, num_single_actions: int = 4) -> list:
+    """
+    Generate joint action names for multiple robots.
+    
+    For 2 robots with 4 actions each, generates names like:
+    'still, still', 'still, left', 'still, right', 'still, forward',
+    'left, still', 'left, left', ...
+    
+    Args:
+        num_robots: Number of robots.
+        num_single_actions: Number of single-agent actions (default 4 for SmallActions).
+    
+    Returns:
+        List of joint action name strings.
+    """
+    import itertools
+    single_names = SINGLE_ACTION_NAMES[:num_single_actions]
+    # Generate all combinations as tuples, then join with comma
+    combinations = list(itertools.product(single_names, repeat=num_robots))
+    return [', '.join(combo) for combo in combinations]
 
 
 def run_policy_rollout(
@@ -500,12 +620,17 @@ def run_policy_rollout(
     Returns:
         Number of steps taken.
     """
+    # Generate joint action names based on number of robots
+    num_robots = len(robot_indices)
+    joint_action_names = get_joint_action_names(num_robots)
     # Set all networks to eval mode to disable dropout during inference
     # This ensures consistent value predictions for the same state
     robot_q_network.eval()
     if networks is not None:
-        networks.u_r.eval()
-        networks.v_r.eval()
+        if networks.u_r is not None:
+            networks.u_r.eval()
+        if networks.v_r is not None:
+            networks.v_r.eval()
         networks.v_h_e.eval()
         networks.x_h.eval()
     
@@ -543,7 +668,7 @@ def run_policy_rollout(
             v_r_val = 0.0
             
             # Check if we have a U_r network with encoder, otherwise compute from X_h
-            if hasattr(networks.u_r, 'state_encoder') and networks.u_r.state_encoder is not None:
+            if networks.u_r is not None and hasattr(networks.u_r, 'state_encoder') and networks.u_r.state_encoder is not None:
                 state_encoder = networks.u_r.state_encoder
                 # Use encode_state method (returns tuple of tensors with batch dim already)
                 s_encoded = state_encoder.tensorize_state(state, env, device)
@@ -572,18 +697,21 @@ def run_policy_rollout(
             lines.append("")
             lines.append("Q_r values:")
             
+            # Determine max action name width for alignment
+            max_name_len = max(len(name) for name in joint_action_names) if joint_action_names else 7
+            
             for action_idx in range(len(q_np)):
-                action_name = ACTION_NAMES[action_idx] if action_idx < len(ACTION_NAMES) else f"a{action_idx}"
+                action_name = joint_action_names[action_idx] if action_idx < len(joint_action_names) else f"a{action_idx}"
                 marker = ">" if selected_action is not None and action_idx == selected_action else " "
-                lines.append(f"{marker}{action_name:>7}: {q_np[action_idx]:.3f}")
+                lines.append(f"{marker}{action_name:>{max_name_len}}: {q_np[action_idx]:.3f}")
             
             lines.append("")
             lines.append("π_r probs:")
             
             for action_idx in range(len(pi_np)):
-                action_name = ACTION_NAMES[action_idx] if action_idx < len(ACTION_NAMES) else f"a{action_idx}"
+                action_name = joint_action_names[action_idx] if action_idx < len(joint_action_names) else f"a{action_idx}"
                 marker = ">" if selected_action is not None and action_idx == selected_action else " "
-                lines.append(f"{marker}{action_name:>7}: {pi_np[action_idx]:.3f}")
+                lines.append(f"{marker}{action_name:>{max_name_len}}: {pi_np[action_idx]:.3f}")
         
         return lines
     
@@ -597,7 +725,9 @@ def run_policy_rollout(
     
     # Render initial frame with annotations (showing what action would be taken)
     annotation = compute_annotation_text(state, get_greedy_action(state))
-    env.render(mode='rgb_array', highlight=False, annotation_text=annotation)
+    env.render(mode='rgb_array', highlight=False, tile_size=RENDER_TILE_SIZE,
+               annotation_text=annotation, annotation_panel_width=ANNOTATION_PANEL_WIDTH,
+               annotation_font_size=ANNOTATION_FONT_SIZE, goal_overlays=human_goals)
     
     for step in range(env.max_steps):
         state = env.get_state()
@@ -628,7 +758,9 @@ def run_policy_rollout(
         # Render frame showing current state with what action WOULD be taken from it
         new_state = env.get_state()
         annotation = compute_annotation_text(new_state, get_greedy_action(new_state))
-        env.render(mode='rgb_array', highlight=False, annotation_text=annotation)
+        env.render(mode='rgb_array', highlight=False, tile_size=RENDER_TILE_SIZE,
+                   annotation_text=annotation, annotation_panel_width=ANNOTATION_PANEL_WIDTH,
+                   annotation_font_size=ANNOTATION_FONT_SIZE, goal_overlays=human_goals)
         
         if done:
             break
@@ -641,9 +773,11 @@ def run_policy_rollout(
 
 def main(
     quick_mode: bool = False,
+    lightningfast_mode: bool = False,
     debug: bool = False,
     profile: bool = False,
     use_ensemble: bool = False,
+    use_small: bool = False,
     use_async: bool = False,
     save_networks_path: str = None,
     save_policy_path: str = None,
@@ -654,7 +788,7 @@ def main(
 ):
     """Run Phase 2 demo."""
     # Configure environment based on command line option
-    configure_environment(use_ensemble)
+    configure_environment(use_ensemble, use_small)
     
     print("=" * 70)
     print("Phase 2 Robot Policy Learning Demo")
@@ -674,6 +808,16 @@ def main(
         goal_feature_dim = 8
         agent_embedding_dim = 4
         print("[TRIVIAL ENV] Using minimal network sizes for simple task")
+    elif env_type == "small":
+        num_training_steps = 20000
+        num_rollouts = NUM_ROLLOUTS
+        batch_size = 16
+        x_h_batch_size = 32
+        # Small networks for small task
+        hidden_dim = 32
+        goal_feature_dim = 16
+        agent_embedding_dim = 8
+        print("[SMALL ENV] Using small network sizes for 6x6 grid")
     elif env_type == "ensemble":
         # Ensemble needs more training due to varied layouts
         num_training_steps = 50000
@@ -694,8 +838,23 @@ def main(
         goal_feature_dim = 64
         agent_embedding_dim = 16
     
-    # Override with quick_mode settings
-    if quick_mode:
+    # Override with quick_mode or lightningfast_mode settings
+    if lightningfast_mode:
+        # Lightning fast: 1/10th of quick mode, just for syntax/import checking
+        num_training_steps = 100
+        num_rollouts = 2
+        batch_size = 8
+        x_h_batch_size = 16
+        hidden_dim = 32
+        goal_feature_dim = 16
+        agent_embedding_dim = 4
+        warmup_v_h_e_steps = 10
+        warmup_x_h_steps = 10
+        warmup_u_r_steps = 0
+        warmup_q_r_steps = 10
+        beta_r_rampup_steps = 20
+        print("[LIGHTNINGFAST MODE] Running with minimal steps for syntax checking")
+    elif quick_mode:
         num_training_steps = 1000
         num_rollouts = 10
         # Use smaller batches and network for faster iteration in quick mode
@@ -729,7 +888,7 @@ def main(
     if profile:
         print("[PROFILE MODE] Will profile training with torch.profiler")
         # Reduce training steps for profiling to get meaningful trace without waiting too long
-        if not quick_mode:
+        if not quick_mode and not lightningfast_mode:
             num_training_steps = min(num_training_steps, 2500)  # 50 episodes * 50 steps/episode
             print(f"  Reduced to {num_training_steps} training steps for profiling")
     
@@ -744,38 +903,49 @@ def main(
     default_networks_path = os.path.join(output_dir, 'all_networks.pt')
     default_policy_path = os.path.join(output_dir, 'policy.pt')
     
+    # Check write permissions BEFORE expensive training
+    test_file = os.path.join(output_dir, '.write_test')
+    try:
+        with open(test_file, 'w') as f:
+            f.write('test')
+        os.remove(test_file)
+        print(f"Write check passed: {output_dir}")
+    except (IOError, OSError) as e:
+        print(f"WARNING: Cannot write to {output_dir}: {e}")
+        print("Training will proceed but results may need to be saved to /tmp")
+    
     # Create environment
     print("Creating environment...")
     if env_type == "ensemble":
-        env = create_ensemble_env(seed=42)  # Use fixed seed for reproducibility
+        # Create world model factory for ensemble mode (used for training AND rollouts)
+        # This ensures each episode uses a fresh random environment
+        env_creator = _EnsembleEnvCreator(
+            grid_size=ENSEMBLE_GRID_SIZE,
+            num_humans=ENSEMBLE_NUM_HUMANS,
+            num_robots=ENSEMBLE_NUM_ROBOTS,
+            max_steps=MAX_STEPS,
+            wall_prob=WALL_PROBABILITY,
+            door_prob=DOOR_PROBABILITY,
+            block_prob=BLOCK_PROBABILITY,
+            rock_prob=ROCK_PROBABILITY,
+            unsteady_prob=UNSTEADY_GROUND_PROBABILITY,
+            door_key_color=DOOR_KEY_COLOR
+        )
+        # Create initial env using the factory
+        env = env_creator()
         goal_sampler = SmallGoalSampler(env, seed=123)
-        
-        # Create world model factory for async training (ensemble mode)
-        if use_async:
-            env_creator = _EnsembleEnvCreator(
-                grid_size=ENSEMBLE_GRID_SIZE,
-                num_humans=ENSEMBLE_NUM_HUMANS,
-                num_robots=ENSEMBLE_NUM_ROBOTS,
-                max_steps=MAX_STEPS,
-                wall_prob=WALL_PROBABILITY,
-                door_prob=DOOR_PROBABILITY,
-                block_prob=BLOCK_PROBABILITY,
-                rock_prob=ROCK_PROBABILITY,
-                unsteady_prob=UNSTEADY_GROUND_PROBABILITY,
-                door_key_color=DOOR_KEY_COLOR
-            )
-            # Ensemble mode: create new env each episode
-            world_model_factory = EnsembleWorldModelFactory(env_creator, episodes_per_env=1)
-        else:
-            world_model_factory = None
+        # Ensemble mode: create new env each episode
+        world_model_factory = EnsembleWorldModelFactory(env_creator, episodes_per_env=1)
     else:
         env = Phase2DemoEnv(max_steps=MAX_STEPS)
         goal_sampler = goal_sampler_factory(env)
         
-        # Create world model factory for async training (trivial mode)
+        # Create world model factory for async training (trivial/small mode)
         if use_async:
-            # Trivial mode: use cached (same env for all episodes)
-            world_model_factory = CachedWorldModelFactory(_create_trivial_env)
+            # Trivial/small mode: use cached (same env for all episodes)
+            # Use _SimpleEnvCreator to capture GRID_MAP value for worker processes
+            env_creator = _SimpleEnvCreator(GRID_MAP, max_steps=MAX_STEPS)
+            world_model_factory = CachedWorldModelFactory(env_creator)
         else:
             world_model_factory = None
     env.reset()
@@ -809,7 +979,7 @@ def main(
         world_model=env,
         human_agent_indices=human_indices,
         path_calculator=path_calc,
-        beta=10.0  # Quite deterministic
+        beta=1000.0  # Quite deterministic
     )
     
     # goal_sampler was already created above (ensemble uses SmallGoalSampler, trivial uses factory)
@@ -823,8 +993,8 @@ def main(
     # which provides more samples per update. We also use a larger batch specifically
     # for X_h since it has inherently higher variance (expectation over many goals).
     config = Phase2Config(
-        gamma_r=0.95, # relatively impatient
-        gamma_h=0.95, # relatively impatient
+        gamma_r=0.99, # relatively impatient
+        gamma_h=0.99, # relatively impatient
         zeta=2.0,      # Risk aversion
         xi=1.0,        # Inter-human inequality aversion
         eta=1.1,       # Intertemporal inequality aversion
@@ -854,7 +1024,9 @@ def main(
         # Async training mode (actor-learner architecture)
         async_training=use_async,
         num_actors=1,  # 1 actor is usually fast enough
-        async_min_buffer_size=100 if quick_mode else 500,  # Smaller for quick mode
+        async_min_buffer_size=50 if lightningfast_mode else (100 if quick_mode else 500),  # Smaller for quick/lightningfast mode
+        # State encoding options
+        include_step_count=False,  # Don't include step count in state encoding
     )
     
     # If using policy directly (no training), skip to rollouts
@@ -1007,7 +1179,19 @@ def main(
     # Start video recording
     env.start_video_recording()
     
+    # Track frames across environments for ensemble mode
+    all_video_frames = []
+    
     for rollout_idx in range(num_rollouts):
+        # In ensemble mode, create a new random environment for each rollout
+        if env_type == "ensemble":
+            env = env_creator()  # Uses same factory as training
+            goal_sampler.set_world_model(env)  # Update goal sampler's world model
+            human_policy.set_world_model(env)  # Update human policy (also recreates path_calc)
+            # Re-identify agents (positions may differ but indices should be consistent)
+            human_indices = [i for i, a in enumerate(env.agents) if a.color == 'yellow']
+            robot_indices = [i for i, a in enumerate(env.agents) if a.color == 'grey']
+            env.start_video_recording()  # Start recording for this env
         env.reset()
         policy.reset(env)  # Set world model for episode
         steps = run_policy_rollout(
@@ -1021,8 +1205,12 @@ def main(
             networks=networks,
             config=config
         )
+        # Collect frames from this rollout
+        if env_type == "ensemble":
+            all_video_frames.extend(env._video_frames)
         if (rollout_idx + 1) % 10 == 0:
-            print(f"  Completed {rollout_idx + 1}/{num_rollouts} rollouts ({len(env._video_frames)} total frames)")
+            total_frames = len(all_video_frames) if env_type == "ensemble" else len(env._video_frames)
+            print(f"  Completed {rollout_idx + 1}/{num_rollouts} rollouts ({total_frames} total frames)")
     
     # Save movie using env's save_video method (uses imageio[ffmpeg])
     # Use custom path if specified
@@ -1032,8 +1220,37 @@ def main(
         movie_path = os.path.join(output_dir, 'phase2_robot_policy_demo.mp4')
     if os.path.exists(movie_path):
         os.remove(movie_path)
+    # In ensemble mode, we collected frames from multiple envs
+    if env_type == "ensemble" and all_video_frames:
+        env._video_frames = all_video_frames
     env.save_video(movie_path, fps=MOVIE_FPS)
     
+    # Generate test map values video (trivial env only)
+    if env_type == "trivial" and TEST_MAPS is not None and trainer is not None:
+        print(f"\nGenerating test map values video ({len(TEST_MAPS)} maps)...")
+        
+        # Render frames for all test maps (goals created fresh for each map)
+        test_map_frames = render_test_map_values(
+            test_maps=TEST_MAPS,
+            goal_specs=DEFINED_GOALS,  # List of (human_idx, target_pos) tuples
+            trainer=trainer,
+            human_indices=human_indices,
+            robot_indices=robot_indices,
+            tile_size=RENDER_TILE_SIZE,
+            annotation_panel_width=ANNOTATION_PANEL_WIDTH,
+            annotation_font_size=ANNOTATION_FONT_SIZE,
+        )
+        
+        # Save test map values video
+        test_map_video_path = os.path.join(output_dir, 'test_map_values.mp4')
+        if os.path.exists(test_map_video_path):
+            os.remove(test_map_video_path)
+        
+        # Use env's video save mechanism
+        env._video_frames = test_map_frames
+        env._recording = True
+        env.save_video(test_map_video_path, fps=1)  # 1 fps for test maps
+        print(f"  Test map values video saved to: {test_map_video_path}")
     print()
     print("=" * 70)
     print("Demo completed!")
@@ -1048,8 +1265,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Phase 2 Robot Policy Learning Demo')
     parser.add_argument('--quick', '-q', action='store_true',
                         help='Run in quick test mode with fewer episodes')
+    parser.add_argument('--lightningfast', '-l', action='store_true',
+                        help='Run in lightning fast mode (1/10th of quick mode, for syntax checking)')
     parser.add_argument('--ensemble', '-e', action='store_true',
                         help='Use random ensemble environment (7x7 grids, 2 humans, 2 robots)')
+    parser.add_argument('--small', '-s', action='store_true',
+                        help='Use small environment (6x6 grid, 1 human, 1 robot, more space)')
     parser.add_argument('--debug', '-d', action='store_true',
                         help='Enable verbose debug output')
     parser.add_argument('--profile', '-p', action='store_true',
@@ -1076,9 +1297,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
     main(
         quick_mode=args.quick,
+        lightningfast_mode=args.lightningfast,
         debug=args.debug,
         profile=args.profile,
         use_ensemble=args.ensemble,
+        use_small=args.small,
         use_async=args.use_async,
         save_networks_path=args.save_networks,
         save_policy_path=args.save_policy,

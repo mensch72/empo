@@ -49,8 +49,8 @@ class MultiGridGoalEncoder(BaseGoalEncoder):
         )
         
         # Internal cache for goal coordinate extraction (before NN forward)
-        # Keys are goal object ids, values are coordinate tensors
-        self._raw_cache: Dict[int, torch.Tensor] = {}
+        # Keys are (x1, y1, x2, y2) bounding box coordinates
+        self._raw_cache: Dict[Tuple[int, int, int, int], torch.Tensor] = {}
         self._cache_hits = 0
         self._cache_misses = 0
     
@@ -103,16 +103,8 @@ class MultiGridGoalEncoder(BaseGoalEncoder):
         Returns:
             Tensor (1, 4) with bounding box (x1, y1, x2, y2)
         """
-        # Check cache first
-        cache_key = id(goal)
-        if cache_key in self._raw_cache:
-            self._cache_hits += 1
-            # Clone to avoid in-place operation conflicts during gradient computation
-            return self._raw_cache[cache_key].clone()
-        
-        self._cache_misses += 1
-        
         # Extract goal coordinates as bounding box (x1, y1, x2, y2)
+        # Do this first so we can use coordinates as cache key
         if hasattr(goal, 'target_rect'):
             # Rectangle goal: (x1, y1, x2, y2)
             x1, y1, x2, y2 = goal.target_rect
@@ -144,6 +136,19 @@ class MultiGridGoalEncoder(BaseGoalEncoder):
                 x1, y1, x2, y2 = 0.0, 0.0, 0.0, 0.0
         else:
             x1, y1, x2, y2 = 0.0, 0.0, 0.0, 0.0
+        
+        # Check cache using content-based key (bounding box coordinates)
+        # This avoids id() reuse issues when goal objects are garbage collected
+        cache_key = (int(x1), int(y1), int(x2), int(y2))
+        if cache_key in self._raw_cache:
+            self._cache_hits += 1
+            # Clone and move to requested device
+            cached = self._raw_cache[cache_key]
+            if cached.device != torch.device(device):
+                return cached.clone().to(device)
+            return cached.clone()
+        
+        self._cache_misses += 1
         
         coords = torch.tensor(
             [[float(x1), float(y1), float(x2), float(y2)]], 

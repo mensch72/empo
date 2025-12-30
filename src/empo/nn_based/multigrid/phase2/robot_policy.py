@@ -81,6 +81,9 @@ class MultiGridRobotPolicy(RobotPolicy):
             config = checkpoint['q_r_config']
             self.beta_r = checkpoint.get('beta_r', beta_r)
             
+            # Get state encoder config - it has 'feature_dim', not 'state_feature_dim'
+            state_enc_config = config['state_encoder_config']
+            
             # Reconstruct Q network from config
             self.q_network = MultiGridRobotQNetwork(
                 grid_height=config['grid_height'],
@@ -91,14 +94,14 @@ class MultiGridRobotPolicy(RobotPolicy):
                 beta_r=self.beta_r,
                 feasible_range=config.get('feasible_range'),
                 dropout=config.get('dropout', 0.0),
-                # State encoder config
-                num_agents_per_color=config['state_encoder_config']['num_agents_per_color'],
-                num_agent_colors=config['state_encoder_config'].get('num_agent_colors', 7),
-                state_feature_dim=config['state_encoder_config'].get('state_feature_dim', 256),
-                max_kill_buttons=config['state_encoder_config'].get('max_kill_buttons', 4),
-                max_pause_switches=config['state_encoder_config'].get('max_pause_switches', 4),
-                max_disabling_switches=config['state_encoder_config'].get('max_disabling_switches', 4),
-                max_control_buttons=config['state_encoder_config'].get('max_control_buttons', 4),
+                # State encoder config - note: key is 'feature_dim' not 'state_feature_dim'
+                num_agents_per_color=state_enc_config['num_agents_per_color'],
+                num_agent_colors=state_enc_config.get('num_agent_colors', 7),
+                state_feature_dim=state_enc_config.get('feature_dim', config['hidden_dim']),
+                max_kill_buttons=state_enc_config.get('max_kill_buttons', 4),
+                max_pause_switches=state_enc_config.get('max_pause_switches', 4),
+                max_disabling_switches=state_enc_config.get('max_disabling_switches', 4),
+                max_control_buttons=state_enc_config.get('max_control_buttons', 4),
             )
             
             # Load weights

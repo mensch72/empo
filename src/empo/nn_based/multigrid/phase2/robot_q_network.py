@@ -257,4 +257,5 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
             'feasible_range': self.feasible_range,
             'dropout': self.dropout_rate,
             'state_encoder_config': self.state_encoder.get_config(),
+            'own_state_encoder_config': self.own_state_encoder.get_config(),
         }

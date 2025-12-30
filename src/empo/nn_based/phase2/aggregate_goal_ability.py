@@ -94,20 +94,27 @@ class BaseAggregateGoalAbilityNetwork(nn.Module, ABC):
         """Return configuration dict for save/load."""
         pass
     
-    def apply_soft_clamp(self, raw_values: torch.Tensor) -> torch.Tensor:
+    def apply_clamp(self, raw_values: torch.Tensor) -> torch.Tensor:
         """
-        Apply soft clamping during training.
+        Apply clamping based on training mode.
         
-        SoftClamp is linear in [a, b] and exponential outside, preserving
-        gradients while bounding values. Use this during training.
+        During training (self.training=True): Uses soft clamp which is linear
+        in [a, b] and exponential outside, preserving gradients.
+        
+        During eval (self.training=False): Uses hard clamp to ensure values
+        are strictly within bounds. This is important for target networks
+        which are always in eval mode.
         
         Args:
             raw_values: Unbounded network output.
         
         Returns:
-            Soft-clamped values.
+            Clamped values.
         """
-        return self.soft_clamp(raw_values)
+        if self.training:
+            return self.soft_clamp(raw_values)
+        else:
+            return self.apply_hard_clamp(raw_values)
     
     def apply_hard_clamp(self, values: torch.Tensor) -> torch.Tensor:
         """

@@ -187,7 +187,7 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         raw_value = self.value_head(combined).squeeze(-1)
         
         # Apply soft clamp to keep in (0, 1]
-        return self.apply_soft_clamp(raw_value)
+        return self.apply_clamp(raw_value)
     
     def encode_and_forward(
         self,
@@ -296,4 +296,6 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
             'feasible_range': self.feasible_range,
             'dropout': self.dropout_rate,
             'state_encoder_config': self.state_encoder.get_config(),
+            'agent_encoder_config': self.agent_encoder.get_config(),
+            'own_agent_encoder_config': self.own_agent_encoder.get_config(),
         }

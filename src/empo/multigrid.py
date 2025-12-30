@@ -675,3 +675,257 @@ class RandomPolicy:
     
     def __repr__(self) -> str:
         return f"RandomPolicy(action_probs={self._probs.tolist()})"
+
+
+# ============================================================================
+# Test Map Value Visualization
+# ============================================================================
+
+def render_test_map_values(
+    test_maps: list,
+    goal_specs: list,
+    trainer,
+    human_indices: list,
+    robot_indices: list,
+    tile_size: int = 64,
+    annotation_panel_width: int = 280,
+    annotation_font_size: int = 10,
+) -> list:
+    """
+    Render frames showing predicted values for each test map state.
+    
+    For each test map:
+    1. Creates a new MultiGridEnv with that map
+    2. Renders the state with V_h^e values overlaid on goal cells
+    3. Shows X_h, U_r, V_r, and Q_r values in annotation panel
+    
+    This is useful for visualizing what the trained networks predict
+    for specific states without running any episodes.
+    
+    Args:
+        test_maps: List of map strings OR list of (map_string, description) tuples.
+                   If tuples, the description is shown at the top of the frame.
+        goal_specs: List of goal specifications. Each spec is a tuple:
+                   - Point goal: (human_idx, (x, y)) → ReachCellGoal
+                   - Rectangle goal: (human_idx, ((x1, y1), (x2, y2))) → ReachRectangleGoal
+                   Goals are created fresh for each test map's environment.
+        trainer: Phase 2 trainer with convenience methods (get_v_h_e, etc.).
+        human_indices: List of human agent indices.
+        robot_indices: List of robot agent indices.
+        tile_size: Pixel size of each grid cell.
+        annotation_panel_width: Width of the annotation panel in pixels.
+        annotation_font_size: Font size for annotation text.
+    
+    Returns:
+        List of RGB image arrays (numpy), one per test map.
+    
+    Example:
+        >>> frames = render_test_map_values(
+        ...     test_maps=TEST_MAPS,
+        ...     goal_specs=[
+        ...         (1, (2, 1)),                    # Point goal at (2,1)
+        ...         (1, ((1, 1), (3, 2))),          # Rectangle goal from (1,1) to (3,2)
+        ...     ],
+        ...     trainer=trainer,
+        ...     human_indices=[1],
+        ...     robot_indices=[0],
+        ... )
+        >>> # Save as video
+        >>> env.start_video_recording()
+        >>> env._video_frames = frames
+        >>> env.save_video('test_map_values.mp4', fps=1)
+    """
+    import torch
+    from gym_multigrid.multigrid import MultiGridEnv, World, SmallActions
+    
+    frames = []
+    
+    # Action names for annotation
+    single_action_names = ['still', 'left', 'right', 'forward']
+    num_robots = len(robot_indices)
+    
+    # Generate joint action names
+    import itertools
+    combinations = list(itertools.product(single_action_names, repeat=num_robots))
+    joint_action_names = [', '.join(combo) for combo in combinations]
+    
+    for map_idx, test_map_entry in enumerate(test_maps):
+        # Handle both plain map strings and (map, description) tuples
+        if isinstance(test_map_entry, tuple):
+            test_map, description = test_map_entry
+        else:
+            test_map = test_map_entry
+            description = None
+        
+        # Create new environment with this test map
+        env = MultiGridEnv(
+            map=test_map,
+            max_steps=10,
+            partial_obs=False,
+            objects_set=World,
+            actions_set=SmallActions
+        )
+        env.reset()
+        state = env.get_state()
+        
+        # Create fresh goals for this environment
+        goals = []
+        for human_idx, target_spec in goal_specs:
+            # Detect if this is a rectangle spec ((x1,y1), (x2,y2)) or point spec (x, y)
+            if (isinstance(target_spec, (tuple, list)) and len(target_spec) == 2 and
+                isinstance(target_spec[0], (tuple, list)) and isinstance(target_spec[1], (tuple, list))):
+                # Rectangle goal: ((x1, y1), (x2, y2))
+                (x1, y1), (x2, y2) = target_spec
+                goal = ReachRectangleGoal(env, human_idx, (x1, y1, x2, y2))
+            else:
+                # Point goal: (x, y)
+                goal = ReachCellGoal(env, human_idx, target_spec)
+            goals.append(goal)
+        
+        # Use trainer convenience methods to get values
+        q_np = trainer.get_q_r(state, env)
+        pi_np = trainer.get_pi_r(state, env)
+        
+        x_h_vals = []
+        for h in human_indices:
+            x_h = trainer.get_x_h(state, env, h)
+            x_h_vals.append(x_h)
+        
+        u_r_val = trainer.get_u_r(state, env)
+        v_r_val = trainer.get_v_r(state, env)
+        
+        # Compute V_h^e for each goal
+        v_h_e_values = {}
+        for goal in goals:
+            h = goal.human_agent_index
+            v_h_e_val = trainer.get_v_h_e(state, env, h, goal)
+            # Store by goal's target position for overlay
+            if hasattr(goal, 'target_rect'):
+                key = goal.target_rect
+            elif hasattr(goal, 'target_pos'):
+                key = goal.target_pos
+            else:
+                key = str(goal)
+            v_h_e_values[key] = v_h_e_val
+        
+        # Build annotation text
+        lines = []
+        lines.append(f"Test Map {map_idx + 1}/{len(test_maps)}")
+        if description:
+            lines.append(f"  {description}")
+        lines.append("")
+        lines.append(f"U_r: {u_r_val:.4f}")
+        lines.append(f"V_r: {v_r_val:.4f}")
+        lines.append("")
+        for i, h in enumerate(human_indices):
+            lines.append(f"X_h[{h}]: {x_h_vals[i]:.4f}")
+        lines.append("")
+        lines.append("Q_r values:")
+        
+        max_name_len = max(len(name) for name in joint_action_names) if joint_action_names else 7
+        for action_idx in range(len(q_np)):
+            action_name = joint_action_names[action_idx] if action_idx < len(joint_action_names) else f"a{action_idx}"
+            lines.append(f" {action_name:>{max_name_len}}: {q_np[action_idx]:.3f}")
+        
+        lines.append("")
+        lines.append("π_r probs:")
+        for action_idx in range(len(pi_np)):
+            action_name = joint_action_names[action_idx] if action_idx < len(joint_action_names) else f"a{action_idx}"
+            lines.append(f" {action_name:>{max_name_len}}: {pi_np[action_idx]:.3f}")
+        
+        # Render base frame with annotation
+        img = env.render(
+            mode='rgb_array',
+            highlight=False,
+            tile_size=tile_size,
+            annotation_text=lines,
+            annotation_panel_width=annotation_panel_width,
+            annotation_font_size=annotation_font_size
+        )
+        
+        # Overlay V_h^e values on goal cells
+        img = _overlay_v_h_e_on_goals(img, v_h_e_values, goals, tile_size)
+        
+        frames.append(img)
+    
+    return frames
+
+
+def _overlay_v_h_e_on_goals(
+    img: np.ndarray,
+    v_h_e_values: dict,
+    goals: list,
+    tile_size: int,
+) -> np.ndarray:
+    """
+    Overlay V_h^e values as text on goal cells in the image.
+    
+    Args:
+        img: RGB image array (H, W, 3).
+        v_h_e_values: Dict mapping goal key (target_pos or target_rect) to V_h^e value.
+        goals: List of goal objects.
+        tile_size: Pixel size of each grid cell.
+    
+    Returns:
+        Modified image with V_h^e values overlaid.
+    """
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ImportError:
+        return img  # PIL not available, return unchanged
+    
+    # Convert to PIL Image
+    pil_img = Image.fromarray(img)
+    draw = ImageDraw.Draw(pil_img)
+    
+    # Try to get a font
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", size=max(10, tile_size // 5))
+    except (OSError, IOError):
+        try:
+            font = ImageFont.truetype("arial.ttf", size=max(10, tile_size // 5))
+        except (OSError, IOError):
+            font = ImageFont.load_default()
+    
+    for goal in goals:
+        # Get goal position
+        if hasattr(goal, 'target_rect'):
+            x1, y1, x2, y2 = goal.target_rect
+            key = goal.target_rect
+            # Center of rectangle
+            cx = (x1 + x2 + 1) / 2
+            cy = (y1 + y2 + 1) / 2
+        elif hasattr(goal, 'target_pos'):
+            x, y = goal.target_pos
+            key = goal.target_pos
+            cx = x + 0.5
+            cy = y + 0.5
+        else:
+            continue
+        
+        if key not in v_h_e_values:
+            continue
+        
+        v_h_e_val = v_h_e_values[key]
+        
+        # Convert to pixel coordinates
+        px = int(cx * tile_size)
+        py = int(cy * tile_size)
+        
+        # Draw text with background for visibility
+        text = f"{v_h_e_val:.2f}"
+        
+        # Get text bounding box
+        bbox = draw.textbbox((px, py), text, font=font, anchor="mm")
+        
+        # Draw semi-transparent background
+        padding = 2
+        draw.rectangle(
+            [bbox[0] - padding, bbox[1] - padding, bbox[2] + padding, bbox[3] + padding],
+            fill=(255, 255, 200, 200)
+        )
+        
+        # Draw text
+        draw.text((px, py), text, fill=(0, 0, 128), font=font, anchor="mm")
+    
+    return np.array(pil_img)

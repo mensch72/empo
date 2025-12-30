@@ -36,14 +36,30 @@ def test_requirements_exist():
 
 
 def test_dockerfile_exists():
-    """Test that Dockerfile exists."""
+    """Test that Dockerfile exists.
+    
+    Skip this test when running inside Docker container since
+    Docker files are excluded via .dockerignore.
+    """
     dockerfile = PROJECT_ROOT / "Dockerfile"
+    if not dockerfile.exists() and Path("/.dockerenv").exists():
+        # Running inside Docker - skip gracefully
+        import pytest
+        pytest.skip("Dockerfile not copied into Docker container (per .dockerignore)")
     assert dockerfile.exists(), f"Dockerfile not found at {dockerfile}"
 
 
 def test_docker_compose_exists():
-    """Test that docker-compose.yml exists."""
+    """Test that docker-compose.yml exists.
+    
+    Skip this test when running inside Docker container since
+    Docker files are excluded via .dockerignore.
+    """
     compose_file = PROJECT_ROOT / "docker-compose.yml"
+    if not compose_file.exists() and Path("/.dockerenv").exists():
+        # Running inside Docker - skip gracefully
+        import pytest
+        pytest.skip("docker-compose.yml not copied into Docker container (per .dockerignore)")
     assert compose_file.exists(), f"docker-compose.yml not found at {compose_file}"
 
 
