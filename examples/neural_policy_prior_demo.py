@@ -255,7 +255,7 @@ def compute_value_for_goals(
                 continue
             
             goal = SimpleGoal(goal_pos)
-            q_values = q_network.encode_and_forward(
+            q_values = q_network.forward(
                 state, world_model, human_idx, goal, device
             )
             

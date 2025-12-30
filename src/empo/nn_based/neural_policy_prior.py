@@ -86,7 +86,7 @@ class BaseNeuralHumanPolicyPrior(HumanPolicyPrior, ABC):
         goal: PossibleGoal
     ) -> torch.Tensor:
         """Compute policy for a specific goal."""
-        q_values = self.q_network.encode_and_forward(
+        q_values = self.q_network.forward(
             state, self.world_model, agent_idx, goal, self.device
         )
         return self.q_network.get_policy(q_values).squeeze(0)

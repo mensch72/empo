@@ -65,13 +65,13 @@ class LookupTableRobotValueNetwork(BaseRobotValueNetwork):
             )
         return self.table[key]
     
-    def forward(
+    def _batch_forward(
         self,
         states: List[Hashable],
         device: str = 'cpu'
     ) -> torch.Tensor:
         """
-        Batch forward pass from raw states.
+        Internal: Batch forward pass from raw states.
         
         Args:
             states: List of hashable states.
@@ -95,7 +95,7 @@ class LookupTableRobotValueNetwork(BaseRobotValueNetwork):
         # Ensure V_r < 0
         return self.ensure_negative(raw_output)
     
-    def encode_and_forward(
+    def forward(
         self,
         state: Hashable,
         world_model: Any,
@@ -132,7 +132,7 @@ class LookupTableRobotValueNetwork(BaseRobotValueNetwork):
         Returns:
             V_r values of shape (batch_size,).
         """
-        return self.forward(states, device)
+        return self._batch_forward(states, device)
     
     def forward_batch(
         self,
@@ -154,7 +154,7 @@ class LookupTableRobotValueNetwork(BaseRobotValueNetwork):
         Returns:
             V_r values of shape (batch_size,), negative.
         """
-        return self.forward(states, device)
+        return self._batch_forward(states, device)
     
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for save/load."""

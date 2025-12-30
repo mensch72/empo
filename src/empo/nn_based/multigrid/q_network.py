@@ -92,7 +92,7 @@ class MultiGridQNetwork(BaseQNetwork):
             nn.Linear(hidden_dim, num_actions),
         )
     
-    def forward(
+    def _network_forward(
         self,
         grid_tensor: torch.Tensor,
         global_features: torch.Tensor,
@@ -101,7 +101,7 @@ class MultiGridQNetwork(BaseQNetwork):
         goal_coords: torch.Tensor
     ) -> torch.Tensor:
         """
-        Compute Q-values.
+        Internal: Compute Q-values from pre-encoded tensors.
         
         Args:
             grid_tensor: (batch, channels, H, W)
@@ -124,7 +124,7 @@ class MultiGridQNetwork(BaseQNetwork):
         # Apply soft clamping during training if feasible_range is set
         return self.apply_soft_clamp(q_values)
     
-    def encode_and_forward(
+    def forward(
         self,
         state: Tuple,
         world_model: Any,
@@ -150,7 +150,7 @@ class MultiGridQNetwork(BaseQNetwork):
             self.state_encoder.tensorize_state(state, world_model, device)
         goal_coords = self.goal_encoder.tensorize_goal(goal, device)
         
-        return self.forward(
+        return self._network_forward(
             grid_tensor, global_features, agent_features,
             interactive_features, goal_coords
         )

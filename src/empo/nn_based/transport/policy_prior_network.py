@@ -67,7 +67,7 @@ class TransportPolicyPriorNetwork(BasePolicyPriorNetwork):
         all_policies = []
         for g in range(num_goals):
             goal_tensor = goal_tensors[g:g+1]  # (1, goal_input_dim)
-            q_values = self.q_network.forward(graph_data, goal_tensor)
+            q_values = self.q_network._network_forward(graph_data, goal_tensor)
             policy = self.q_network.get_policy(q_values)  # (1, num_actions)
             all_policies.append(policy)
         

@@ -136,7 +136,7 @@ class MultiGridHumanGoalAchievementNetwork(BaseHumanGoalAchievementNetwork):
                 nn.Linear(hidden_dim, 1),
             )
     
-    def forward(
+    def _network_forward(
         self,
         grid_tensor: torch.Tensor,
         global_features: torch.Tensor,
@@ -148,7 +148,7 @@ class MultiGridHumanGoalAchievementNetwork(BaseHumanGoalAchievementNetwork):
         query_agent_features: torch.Tensor
     ) -> torch.Tensor:
         """
-        Compute V_h^e(s, g_h).
+        Internal: Compute V_h^e(s, g_h) from pre-encoded tensors.
         
         Args:
             grid_tensor: (batch, num_grid_channels, H, W)
@@ -182,7 +182,7 @@ class MultiGridHumanGoalAchievementNetwork(BaseHumanGoalAchievementNetwork):
         # Apply soft clamp to keep in [0, 1]
         return self.apply_clamp(raw_value)
     
-    def encode_and_forward(
+    def forward(
         self,
         state: Any,
         world_model: Any,
@@ -218,7 +218,7 @@ class MultiGridHumanGoalAchievementNetwork(BaseHumanGoalAchievementNetwork):
             human_agent_idx, state, world_model, device
         )
         
-        return self.forward(
+        return self._network_forward(
             grid_tensor, global_features, agent_features,
             interactive_features, goal_features,
             query_idx, query_grid, query_features
@@ -251,7 +251,7 @@ class MultiGridHumanGoalAchievementNetwork(BaseHumanGoalAchievementNetwork):
         Returns:
             V_h^e values tensor (batch,).
         """
-        return self.forward(
+        return self._network_forward(
             grid_tensor, global_features, agent_features,
             interactive_features, goal_features,
             query_agent_indices, query_agent_grid, query_agent_features
@@ -279,7 +279,7 @@ class MultiGridHumanGoalAchievementNetwork(BaseHumanGoalAchievementNetwork):
             V_h^e tensor with strict [0, 1] bounds.
         """
         with torch.no_grad():
-            v_h_e = self.encode_and_forward(
+            v_h_e = self.forward(
                 state, world_model, human_agent_idx, goal, device
             )
             return self.apply_hard_clamp(v_h_e)
@@ -342,7 +342,7 @@ class MultiGridHumanGoalAchievementNetwork(BaseHumanGoalAchievementNetwork):
         query_agent_grid = torch.cat(grid_list, dim=0)
         query_agent_features = torch.cat(feat_list, dim=0)
         
-        return self.forward(
+        return self._network_forward(
             grid_tensor, global_features, agent_features, interactive_features,
             goal_features,
             query_agent_indices, query_agent_grid, query_agent_features

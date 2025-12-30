@@ -194,7 +194,7 @@ def test_multigrid_robot_q_network():
     # Test forward pass
     world_model = MockWorldModel()
     state = create_mock_state()
-    q_values = q_network.encode_and_forward(state, world_model, device='cpu')
+    q_values = q_network.forward(state, world_model, device='cpu')
     
     assert q_values.shape == (1, 16)
     assert (q_values < 0).all(), "Q_r must be negative"
@@ -253,7 +253,7 @@ def test_multigrid_human_goal_achievement_network():
     goal = MockGoal((5, 5))
     
     # Test forward pass
-    v_h_e = v_h_e_network.encode_and_forward(
+    v_h_e = v_h_e_network.forward(
         state, world_model, human_agent_idx=0, goal=goal, device='cpu'
     )
     
@@ -308,7 +308,7 @@ def test_multigrid_aggregate_goal_ability_network():
     state = create_mock_state()
     
     # Test forward pass
-    x_h = x_h_network.encode_and_forward(
+    x_h = x_h_network.forward(
         state, world_model, human_agent_idx=0, device='cpu'
     )
     
@@ -365,7 +365,7 @@ def test_multigrid_intrinsic_reward_network():
     state = create_mock_state()
     
     # Test forward pass
-    y, u_r = u_r_network.encode_and_forward(
+    y, u_r = u_r_network.forward(
         state, world_model, device='cpu'
     )
     
@@ -450,7 +450,7 @@ def test_multigrid_robot_value_network():
     state = create_mock_state()
     
     # Test forward pass
-    v_r = v_r_network.encode_and_forward(
+    v_r = v_r_network.forward(
         state, world_model, device='cpu'
     )
     

@@ -656,7 +656,7 @@ def run_policy_rollout(
         
         with torch.no_grad():
             # Get Q_r values
-            q_values = robot_q_network.encode_and_forward(state, env, device)
+            q_values = robot_q_network.forward(state, env, device)
             q_np = q_values.squeeze().cpu().numpy()
             
             # Compute policy probabilities
@@ -681,7 +681,7 @@ def run_policy_rollout(
                 # Compute U_r directly from X_h values
                 x_h_vals = []
                 for h in human_indices:
-                    x_h = networks.x_h.encode_and_forward(state, env, h, device)
+                    x_h = networks.x_h.forward(state, env, h, device)
                     x_h_clamped = torch.clamp(x_h.squeeze(), min=1e-3, max=1.0)
                     x_h_vals.append(x_h_clamped)
                 if x_h_vals:
@@ -720,7 +720,7 @@ def run_policy_rollout(
     def get_greedy_action(state):
         """Get the greedy action for annotation (what robot would do from this state)."""
         with torch.no_grad():
-            q_values = robot_q_network.encode_and_forward(state, env, device)
+            q_values = robot_q_network.forward(state, env, device)
             beta_r = config.beta_r if config else 10.0
             robot_action = robot_q_network.sample_action(q_values, epsilon=0.0, beta_r=beta_r)
             return robot_action[0] if len(robot_action) > 0 else None
@@ -743,7 +743,7 @@ def run_policy_rollout(
         
         # Robots use learned Q-network
         with torch.no_grad():
-            q_values = robot_q_network.encode_and_forward(state, env, device)
+            q_values = robot_q_network.forward(state, env, device)
             # Use greedy action (epsilon=0) with final beta_r for concentrated policy
             beta_r = config.beta_r if config else 10.0
             robot_action = robot_q_network.sample_action(q_values, epsilon=0.0, beta_r=beta_r)

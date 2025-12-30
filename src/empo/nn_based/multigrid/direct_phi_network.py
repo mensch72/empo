@@ -107,7 +107,7 @@ class DirectPhiNetwork(nn.Module):
             nn.Linear(hidden_dim, num_actions),
         )
     
-    def forward(
+    def _network_forward(
         self,
         grid_tensor: torch.Tensor,
         global_features: torch.Tensor,
@@ -115,7 +115,7 @@ class DirectPhiNetwork(nn.Module):
         interactive_features: torch.Tensor
     ) -> torch.Tensor:
         """
-        Compute marginal policy prior.
+        Internal: Compute marginal policy prior from pre-encoded tensors.
         
         Args:
             grid_tensor: (batch, channels, H, W)
@@ -158,7 +158,7 @@ class DirectPhiNetwork(nn.Module):
         )
         return self.policy_head(state_features)
     
-    def encode_and_forward(
+    def forward(
         self,
         state: Tuple,
         world_model: Any,
@@ -181,7 +181,7 @@ class DirectPhiNetwork(nn.Module):
         grid_tensor, global_features, agent_features, interactive_features = \
             self.state_encoder.tensorize_state(state, world_model, device)
         
-        return self.forward(
+        return self._network_forward(
             grid_tensor, global_features, agent_features, interactive_features
         )
     

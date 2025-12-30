@@ -102,7 +102,7 @@ class Trainer:
         
         self.q_network.eval()
         with torch.no_grad():
-            q_values = self.q_network.encode_and_forward(
+            q_values = self.q_network.forward(
                 state, world_model, agent_idx, goal, self.device
             )
             probs = self.q_network.get_policy(q_values).squeeze(0)
@@ -173,14 +173,14 @@ class Trainer:
                     reward = 0.0
             
             # Current Q-value
-            q_values = self.q_network.encode_and_forward(
+            q_values = self.q_network.forward(
                 state, None, agent_idx, goal, self.device
             )
             current_q = q_values[0, action]
             
             # Target Q-value (soft)
             with torch.no_grad():
-                next_q = self.target_network.encode_and_forward(
+                next_q = self.target_network.forward(
                     next_state, None, agent_idx, goal, self.device
                 )
                 next_v = self.q_network.get_value(next_q)

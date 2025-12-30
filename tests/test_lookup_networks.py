@@ -82,7 +82,7 @@ class TestLookupTableRobotQNetwork:
         )
         
         # Forward pass should create entries
-        output = network.forward(simple_states, device='cpu')
+        output = network.forward_batch(simple_states, None, device='cpu')
         
         assert output.shape == (4, 3)  # batch_size=4, num_actions=3
         # Should have 3 unique entries (state 1 and 4 are duplicates)
@@ -96,7 +96,7 @@ class TestLookupTableRobotQNetwork:
             default_q_r=-1.0
         )
         
-        output = network.forward(simple_states, device='cpu')
+        output = network.forward_batch(simple_states, None, device='cpu')
         
         assert (output < 0).all(), "Q_r values must be negative"
     
@@ -108,7 +108,7 @@ class TestLookupTableRobotQNetwork:
             default_q_r=-1.0
         )
         
-        output = network.forward(simple_states, device='cpu')
+        output = network.forward_batch(simple_states, None, device='cpu')
         
         # States 0 and 3 are identical, should have same output
         assert torch.allclose(output[0], output[3])
@@ -121,7 +121,7 @@ class TestLookupTableRobotQNetwork:
             default_q_r=-1.0
         )
         
-        output = network.forward(simple_states[:1], device='cpu')
+        output = network.forward_batch(simple_states, None, device='cpu')
         loss = output.mean()
         loss.backward()
         
@@ -130,14 +130,14 @@ class TestLookupTableRobotQNetwork:
         assert state_key in network.table
         assert network.table[state_key].grad is not None
     
-    def test_encode_and_forward(self, simple_states):
+    def test_forward_single_state(self, simple_states):
         """Test encode_and_forward for single state."""
         network = LookupTableRobotQNetwork(
             num_actions=4,
             num_robots=2
         )
         
-        output = network.encode_and_forward(
+        output = network.forward(
             state=simple_states[0],
             world_model=None,  # Not used for lookup tables
             device='cpu'
@@ -154,7 +154,7 @@ class TestLookupTableRobotQNetwork:
             beta_r=5.0
         )
         
-        output = network.forward(simple_states[:1], device='cpu')
+        output = network.forward_batch(simple_states, None, device='cpu')
         policy = network.get_policy(output)
         
         # Policy should sum to 1
@@ -188,7 +188,7 @@ class TestLookupTableRobotQNetwork:
         )
         
         # Create some entries
-        _ = network1.forward(simple_states, device='cpu')
+        _ = network1.forward_batch(simple_states, None, device='cpu')
         
         # Modify one entry
         key = hash(simple_states[0])
@@ -232,16 +232,16 @@ class TestLookupTableRobotValueNetwork:
         """Test forward pass output shape."""
         network = LookupTableRobotValueNetwork()
         
-        output = network.forward(simple_states, device='cpu')
+        output = network.forward_batch(simple_states, None, device='cpu')
         
         assert output.shape == (4,)
         assert (output < 0).all(), "V_r values must be negative"
     
-    def test_encode_and_forward(self, simple_states):
+    def test_forward_single_state(self, simple_states):
         """Test single-state forward pass."""
         network = LookupTableRobotValueNetwork()
         
-        output = network.encode_and_forward(
+        output = network.forward(
             state=simple_states[0],
             world_model=None,
             device='cpu'
@@ -273,7 +273,7 @@ class TestLookupTableHumanGoalAbilityNetwork:
         """Test forward pass output shape."""
         network = LookupTableHumanGoalAbilityNetwork()
         
-        output = network.forward(simple_states, simple_goals, device='cpu')
+        output = network.forward_batch(simple_states, simple_goals, None, None, device='cpu')
         
         assert output.shape == (4,)
     
@@ -283,7 +283,7 @@ class TestLookupTableHumanGoalAbilityNetwork:
             feasible_range=(0.0, 1.0)
         )
         
-        output = network.forward(simple_states, simple_goals, device='cpu')
+        output = network.forward_batch(simple_states, simple_goals, None, None, device='cpu')
         
         assert (output >= 0).all()
         assert (output <= 1).all()
@@ -294,17 +294,18 @@ class TestLookupTableHumanGoalAbilityNetwork:
         
         states = [simple_states[0], simple_states[0]]
         goals = [('goal', 'A'), ('goal', 'B')]
+        human_indices = [0, 0]
         
-        output = network.forward(states, goals, device='cpu')
+        output = network.forward_batch(states, goals, human_indices, None, device='cpu')
         
         # Same state but different goals should create 2 entries
         assert len(network.table) == 2
     
-    def test_encode_and_forward(self, simple_states, simple_goals):
+    def test_forward_single_state(self, simple_states, simple_goals):
         """Test single-state forward pass."""
         network = LookupTableHumanGoalAbilityNetwork()
         
-        output = network.encode_and_forward(
+        output = network.forward(
             state=simple_states[0],
             world_model=None,
             human_agent_idx=0,
@@ -339,7 +340,7 @@ class TestLookupTableAggregateGoalAbilityNetwork:
         network = LookupTableAggregateGoalAbilityNetwork()
         
         human_indices = [0, 1, 0, 1]  # Mix of human indices
-        output = network.forward(simple_states, human_indices, device='cpu')
+        output = network.forward_batch(simple_states, human_indices, None, device='cpu')
         
         assert output.shape == (4,)
     
@@ -348,7 +349,7 @@ class TestLookupTableAggregateGoalAbilityNetwork:
         network = LookupTableAggregateGoalAbilityNetwork()
         
         human_indices = [0, 1, 2, 3]
-        output = network.forward(simple_states, human_indices, device='cpu')
+        output = network.forward_batch(simple_states, human_indices, None, device='cpu')
         
         assert (output >= 0).all()
         assert (output <= 1).all()
@@ -361,16 +362,16 @@ class TestLookupTableAggregateGoalAbilityNetwork:
         states = [simple_states[0], simple_states[0]]
         human_indices = [0, 1]
         
-        output = network.forward(states, human_indices, device='cpu')
+        output = network.forward_batch(states, human_indices, None, device='cpu')
         
         # Should create 2 entries (same state but different human indices)
         assert len(network.table) == 2
     
-    def test_encode_and_forward(self, simple_states):
+    def test_forward_single_state(self, simple_states):
         """Test single-state forward pass."""
         network = LookupTableAggregateGoalAbilityNetwork()
         
-        output = network.encode_and_forward(
+        output = network.forward(
             state=simple_states[0],
             world_model=None,
             human_agent_idx=0,
@@ -410,7 +411,7 @@ class TestLookupTableIntrinsicRewardNetwork:
         """Test forward pass returns (y, U_r) tuple."""
         network = LookupTableIntrinsicRewardNetwork()
         
-        y, u_r = network.forward(simple_states, device='cpu')
+        y, u_r = network.forward_batch(simple_states, None, device='cpu')
         
         assert y.shape == (4,)
         assert u_r.shape == (4,)
@@ -419,7 +420,7 @@ class TestLookupTableIntrinsicRewardNetwork:
         """Test that y > 1 always."""
         network = LookupTableIntrinsicRewardNetwork()
         
-        y, _ = network.forward(simple_states, device='cpu')
+        y, _ = network.forward_batch(simple_states, None, device='cpu')
         
         assert (y > 1).all(), "y must be > 1"
     
@@ -427,7 +428,7 @@ class TestLookupTableIntrinsicRewardNetwork:
         """Test that U_r < 0 always."""
         network = LookupTableIntrinsicRewardNetwork()
         
-        _, u_r = network.forward(simple_states, device='cpu')
+        _, u_r = network.forward_batch(simple_states, None, device='cpu')
         
         assert (u_r < 0).all(), "U_r must be negative"
     
@@ -435,16 +436,16 @@ class TestLookupTableIntrinsicRewardNetwork:
         """Test that U_r = -y^η."""
         network = LookupTableIntrinsicRewardNetwork(eta=1.5)
         
-        y, u_r = network.forward(simple_states, device='cpu')
+        y, u_r = network.forward_batch(simple_states, None, device='cpu')
         
         expected_u_r = -(y ** 1.5)
         assert torch.allclose(u_r, expected_u_r)
     
-    def test_encode_and_forward(self, simple_states):
+    def test_forward_single_state(self, simple_states):
         """Test single-state forward pass."""
         network = LookupTableIntrinsicRewardNetwork()
         
-        y, u_r = network.encode_and_forward(
+        y, u_r = network.forward(
             state=simple_states[0],
             world_model=None,
             device='cpu'
@@ -569,7 +570,7 @@ class TestLookupTableIntegration:
         )
         
         # Create entries
-        output = network.forward(simple_states[:1], device='cpu')
+        output = network.forward_batch(simple_states, None, device='cpu')
         
         # Create optimizer with current parameters
         optimizer = torch.optim.SGD(network.parameters(), lr=0.1)
@@ -599,7 +600,7 @@ class TestLookupTableIntegration:
         )
         
         # Create some entries on CPU
-        _ = network.forward(simple_states, device='cpu')
+        _ = network.forward_batch(simple_states, None, device='cpu')
         
         # Move to GPU
         network = network.to('cuda')
@@ -697,11 +698,11 @@ class TestLookupTableUtilities:
         assert get_total_table_size(networks) == 0
         
         # Add some entries to q_r (3 unique states)
-        _ = q_r.forward(simple_states[:3], device='cpu')
+        _ = q_r.forward_batch(simple_states[:3], None, device='cpu')
         assert get_total_table_size(networks) == 3
         
         # Add entries to v_h_e (2 unique state-goal pairs)
-        _ = v_h_e.forward(simple_states[:2], goals=[('g', 1), ('g', 2)], device='cpu')
+        _ = v_h_e.forward_batch(simple_states[:2], [('g', 1), ('g', 2)], [0, 0], None, device='cpu')
         assert get_total_table_size(networks) == 5
 
 

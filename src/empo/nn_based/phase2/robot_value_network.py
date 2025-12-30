@@ -66,17 +66,7 @@ class BaseRobotValueNetwork(nn.Module, ABC):
         self.gamma_r = gamma_r
     
     @abstractmethod
-    def forward(self, *args, **kwargs) -> torch.Tensor:
-        """
-        Compute V_r values.
-        
-        Returns:
-            Tensor of shape (batch,) with V_r < 0.
-        """
-        pass
-    
-    @abstractmethod
-    def encode_and_forward(
+    def forward(
         self,
         state: Any,
         world_model: Any,

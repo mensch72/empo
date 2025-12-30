@@ -284,7 +284,7 @@ class SimpleLookupTableTrainer:
         
         # Sample robot action
         with torch.no_grad():
-            q_values = self.networks.q_r.encode_and_forward(state, None, self.device)
+            q_values = self.networks.q_r.forward(state, None, self.device)
             robot_action = self.networks.q_r.sample_action(q_values, epsilon=0.3, beta_r=self.config.beta_r)
         
         # Sample human actions using policy prior
@@ -316,13 +316,13 @@ class SimpleLookupTableTrainer:
         
         # Train V_h^e
         for h, goal in goals.items():
-            v_h_e_pred = self.networks.v_h_e.encode_and_forward(state, None, h, goal, self.device)
+            v_h_e_pred = self.networks.v_h_e.forward(state, None, h, goal, self.device)
             
             # Check if goal achieved
             goal_achieved = float(goal.is_achieved(next_state))
             
             with torch.no_grad():
-                v_h_e_next = self.networks.v_h_e.encode_and_forward(next_state, None, h, goal, self.device)
+                v_h_e_next = self.networks.v_h_e.forward(next_state, None, h, goal, self.device)
             
             # TD target
             target = goal_achieved + (1 - goal_achieved) * self.config.gamma_h * v_h_e_next
@@ -336,12 +336,12 @@ class SimpleLookupTableTrainer:
             losses['v_h_e'] = loss.item()
         
         # Train Q_r (simplified)
-        q_r_pred = self.networks.q_r.encode_and_forward(state, None, self.device)
+        q_r_pred = self.networks.q_r.forward(state, None, self.device)
         action_idx = self.networks.q_r.action_tuple_to_index(robot_action)
         q_r_action = q_r_pred.squeeze()[action_idx]
         
         with torch.no_grad():
-            q_r_next = self.networks.q_r.encode_and_forward(next_state, None, self.device)
+            q_r_next = self.networks.q_r.forward(next_state, None, self.device)
             v_r_next = q_r_next.max()  # Simplified V_r computation
         
         target_q = self.config.gamma_r * v_r_next

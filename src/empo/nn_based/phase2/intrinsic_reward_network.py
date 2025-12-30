@@ -57,19 +57,8 @@ class BaseIntrinsicRewardNetwork(nn.Module, ABC):
             raise ValueError(f"eta must be >= 1.0, got {eta}")
     
     @abstractmethod
-    def forward(self, *args, **kwargs) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Compute y and U_r values.
-        
-        Returns:
-            Tuple of (y, U_r) where:
-            - y: intermediate value, shape (batch,), y > 1
-            - U_r: intrinsic reward, shape (batch,), U_r < 0
-        """
-        pass
-    
-    @abstractmethod
-    def encode_and_forward(
+
+    def forward(
         self,
         state: Any,
         world_model: Any,

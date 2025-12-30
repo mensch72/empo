@@ -206,7 +206,7 @@ def test_cross_grid_save_load():
     loaded.q_network.eval()
     
     with torch.no_grad():
-        q_values = loaded.q_network.encode_and_forward(state, small_world, 0, goal)
+        q_values = loaded.q_network.forward(state, small_world, 0, goal)
     
     assert q_values.shape == (1, 4), "Q-values should have correct shape"
     print("  ✓ Loaded policy produces valid Q-values on small grid")
@@ -309,8 +309,8 @@ def test_equal_grid_still_works():
     loaded.q_network.eval()
     
     with torch.no_grad():
-        original_q = q_network.encode_and_forward(state, world_model, 0, goal)
-        loaded_q = loaded.q_network.encode_and_forward(state, world_model, 0, goal)
+        original_q = q_network.forward(state, world_model, 0, goal)
+        loaded_q = loaded.q_network.forward(state, world_model, 0, goal)
     
     assert torch.allclose(original_q, loaded_q, atol=1e-5)
     print("  ✓ Equal dimensions still work correctly")

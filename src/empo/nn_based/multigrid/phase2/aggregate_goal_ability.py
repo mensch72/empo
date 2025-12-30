@@ -138,7 +138,7 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
                 nn.Linear(hidden_dim, 1),
             )
     
-    def forward(
+    def _network_forward(
         self,
         grid_tensor: torch.Tensor,
         global_features: torch.Tensor,
@@ -152,7 +152,7 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         own_query_agent_features: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
-        Compute X_h(s).
+        Internal: Compute X_h(s) from pre-encoded tensors.
         
         Args:
             grid_tensor: (batch, num_grid_channels, H, W)
@@ -195,7 +195,7 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         # Apply soft clamp to keep in (0, 1]
         return self.apply_clamp(raw_value)
     
-    def encode_and_forward(
+    def forward(
         self,
         state: Any,
         world_model: Any,
@@ -230,7 +230,7 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
             human_agent_idx, state, world_model, device
         )
         
-        return self.forward(
+        return self._network_forward(
             grid_tensor, global_features, agent_features, interactive_features,
             query_idx, query_grid, query_features,
             own_idx, own_grid, own_features
@@ -261,7 +261,7 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         Returns:
             X_h values tensor (batch,).
         """
-        return self.forward(
+        return self._network_forward(
             grid_tensor, global_features, agent_features, interactive_features,
             query_agent_indices, query_agent_grid, query_agent_features
         )
@@ -286,7 +286,7 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
             X_h tensor with strict (0, 1] bounds.
         """
         with torch.no_grad():
-            x_h = self.encode_and_forward(state, world_model, human_agent_idx, device)
+            x_h = self.forward(state, world_model, human_agent_idx, device)
             return self.apply_hard_clamp(x_h)
     
     def forward_batch(
@@ -352,7 +352,7 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         own_grid = torch.cat(own_grid_list, dim=0)
         own_features = torch.cat(own_feat_list, dim=0)
         
-        return self.forward(
+        return self._network_forward(
             grid_tensor, global_features, agent_features, interactive_features,
             query_agent_indices, query_agent_grid, query_agent_features,
             own_idx, own_grid, own_features

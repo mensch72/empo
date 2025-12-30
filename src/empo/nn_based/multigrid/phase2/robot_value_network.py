@@ -102,7 +102,7 @@ class MultiGridRobotValueNetwork(BaseRobotValueNetwork):
                 nn.Linear(hidden_dim, 1),
             )
     
-    def forward(
+    def _network_forward(
         self,
         grid_tensor: torch.Tensor,
         global_features: torch.Tensor,
@@ -110,7 +110,7 @@ class MultiGridRobotValueNetwork(BaseRobotValueNetwork):
         interactive_features: torch.Tensor
     ) -> torch.Tensor:
         """
-        Compute V_r(s).
+        Internal: Compute V_r(s) from pre-encoded tensors.
         
         Args:
             grid_tensor: (batch, num_grid_channels, H, W)
@@ -132,7 +132,7 @@ class MultiGridRobotValueNetwork(BaseRobotValueNetwork):
         # Ensure V_r < 0
         return self.ensure_negative(raw_value)
     
-    def encode_and_forward(
+    def forward(
         self,
         state: Any,
         world_model: Any,
@@ -153,7 +153,7 @@ class MultiGridRobotValueNetwork(BaseRobotValueNetwork):
         grid_tensor, global_features, agent_features, interactive_features = \
             self.state_encoder.tensorize_state(state, world_model, device)
         
-        return self.forward(
+        return self._network_forward(
             grid_tensor, global_features, agent_features, interactive_features
         )
     
@@ -176,7 +176,7 @@ class MultiGridRobotValueNetwork(BaseRobotValueNetwork):
         Returns:
             V_r values tensor (batch,) with V_r < 0.
         """
-        return self.forward(
+        return self._network_forward(
             grid_tensor, global_features, agent_features, interactive_features
         )
     
@@ -198,7 +198,7 @@ class MultiGridRobotValueNetwork(BaseRobotValueNetwork):
             V_r tensor of shape (1,).
         """
         with torch.no_grad():
-            return self.encode_and_forward(state, world_model, device)
+            return self.forward(state, world_model, device)
     
     def forward_batch(
         self,
@@ -234,7 +234,7 @@ class MultiGridRobotValueNetwork(BaseRobotValueNetwork):
         agent_features = torch.cat(agent_list, dim=0)
         interactive_features = torch.cat(inter_list, dim=0)
         
-        return self.forward(
+        return self._network_forward(
             grid_tensor, global_features, agent_features, interactive_features
         )
     

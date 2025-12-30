@@ -75,13 +75,13 @@ class LookupTableIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
             )
         return self.table[key]
     
-    def forward(
+    def _batch_forward(
         self,
         states: List[Hashable],
         device: str = 'cpu'
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Batch forward pass from raw states.
+        Internal: Batch forward pass from raw states.
         
         Args:
             states: List of hashable states.
@@ -110,7 +110,7 @@ class LookupTableIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
         
         return y, u_r
     
-    def encode_and_forward(
+    def forward(
         self,
         state: Hashable,
         world_model: Any,
@@ -151,7 +151,7 @@ class LookupTableIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
         Returns:
             Tuple of (y, U_r) tensors.
         """
-        return self.forward(states, device)
+        return self._batch_forward(states, device)
     
     def forward_batch(
         self,
@@ -173,7 +173,7 @@ class LookupTableIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
         Returns:
             Tuple of (y, U_r) tensors.
         """
-        return self.forward(states, device)
+        return self._batch_forward(states, device)
     
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for save/load."""

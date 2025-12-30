@@ -767,9 +767,9 @@ def test_transport_q_network_forward():
     # Create a simple goal tensor
     goal_tensor = goal_encoder.tensorize_goal(0, device='cpu', env=env)
     
-    # Forward pass
+    # Forward pass using the internal tensor-based method
     with torch.no_grad():
-        q_values = q_network(graph_data, goal_tensor)
+        q_values = q_network._network_forward(graph_data, goal_tensor)
     
     assert q_values.shape == (1, NUM_TRANSPORT_ACTIONS)
 

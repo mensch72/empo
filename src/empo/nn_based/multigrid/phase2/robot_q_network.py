@@ -136,7 +136,7 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
                 nn.Linear(hidden_dim, self.num_action_combinations),
             )
     
-    def forward(
+    def _network_forward(
         self,
         grid_tensor: torch.Tensor,
         global_features: torch.Tensor,
@@ -148,7 +148,7 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
         own_interactive_features: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
-        Compute Q_r(s, a_r) for all joint robot actions.
+        Internal: Compute Q_r(s, a_r) from pre-encoded tensors.
         
         Args:
             grid_tensor: (batch, num_grid_channels, H, W) for shared encoder
@@ -187,7 +187,7 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
         
         return q_values
     
-    def encode_and_forward(
+    def forward(
         self,
         state: Any,
         world_model: Any,
@@ -215,7 +215,7 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
         own_grid, own_glob, own_agent, own_inter = \
             self.own_state_encoder.tensorize_state(state, world_model, device)
         
-        return self.forward(
+        return self._network_forward(
             grid_tensor, global_features, agent_features, interactive_features,
             own_grid, own_glob, own_agent, own_inter
         )
@@ -247,7 +247,7 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
         Returns:
             Q-values tensor (batch, num_action_combinations) with Q_r < 0.
         """
-        return self.forward(
+        return self._network_forward(
             grid_tensor, global_features, agent_features, interactive_features,
             own_grid_tensor, own_global_features, own_agent_features, own_interactive_features
         )
@@ -302,7 +302,7 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
         own_agent_features = torch.cat(own_agent_list, dim=0)
         own_interactive_features = torch.cat(own_inter_list, dim=0)
         
-        return self.forward(
+        return self._network_forward(
             grid_tensor, global_features, agent_features, interactive_features,
             own_grid_tensor, own_global_features, own_agent_features, own_interactive_features
         )

@@ -513,7 +513,7 @@ class BasePhase2Trainer(ABC):
         effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
         
         with torch.no_grad():
-            q_values = self.networks.q_r_target.encode_and_forward(
+            q_values = self.networks.q_r_target.forward(
                 state, None, self.device
             )
             return self.networks.q_r_target.sample_action(
@@ -670,13 +670,13 @@ class BasePhase2Trainer(ABC):
         """
         if self.config.u_r_use_network:
             # Use U_r network (or target network depending on context)
-            _, u_r = self.networks.u_r.encode_and_forward(state, None, self.device)
+            _, u_r = self.networks.u_r.forward(state, None, self.device)
             return u_r
         else:
             # Compute directly from X_h values
             x_h_values = []
             for h in self.human_agent_indices:
-                x_h = self.networks.x_h.encode_and_forward(state, None, h, self.device)
+                x_h = self.networks.x_h.forward(state, None, h, self.device)
                 # Clamp X_h to (0, 1] to prevent explosion when X_h is near 0
                 x_h_clamped = torch.clamp(x_h.squeeze(), min=1e-3, max=1.0)
                 x_h_values.append(x_h_clamped)
@@ -706,13 +706,13 @@ class BasePhase2Trainer(ABC):
         """
         if self.config.u_r_use_network:
             # Use U_r TARGET network
-            _, u_r = self.networks.u_r_target.encode_and_forward(state, None, self.device)
+            _, u_r = self.networks.u_r_target.forward(state, None, self.device)
             return u_r
         else:
             # Compute directly from X_h TARGET values
             x_h_values = []
             for h in self.human_agent_indices:
-                x_h = self.networks.x_h_target.encode_and_forward(state, None, h, self.device)
+                x_h = self.networks.x_h_target.forward(state, None, h, self.device)
                 # Clamp X_h to (0, 1] to prevent explosion when X_h is near 0
                 x_h_clamped = torch.clamp(x_h.squeeze(), min=1e-3, max=1.0)
                 x_h_values.append(x_h_clamped)
@@ -2121,7 +2121,7 @@ class BasePhase2Trainer(ABC):
         """
         self.networks.v_h_e.eval()
         with torch.no_grad():
-            v_h_e = self.networks.v_h_e.encode_and_forward(
+            v_h_e = self.networks.v_h_e.forward(
                 state, world_model, human_agent_idx, goal, self.device
             )
             return v_h_e.squeeze().item()
@@ -2145,7 +2145,7 @@ class BasePhase2Trainer(ABC):
         """
         self.networks.x_h.eval()
         with torch.no_grad():
-            x_h = self.networks.x_h.encode_and_forward(
+            x_h = self.networks.x_h.forward(
                 state, world_model, human_agent_idx, self.device
             )
             x_h_clamped = torch.clamp(x_h.squeeze(), min=1e-3, max=1.0)
@@ -2168,7 +2168,7 @@ class BasePhase2Trainer(ABC):
         """
         self.networks.q_r.eval()
         with torch.no_grad():
-            q_values = self.networks.q_r.encode_and_forward(state, world_model, self.device)
+            q_values = self.networks.q_r.forward(state, world_model, self.device)
             return q_values.squeeze().cpu().numpy()
     
     def get_pi_r(
@@ -2193,7 +2193,7 @@ class BasePhase2Trainer(ABC):
         
         self.networks.q_r.eval()
         with torch.no_grad():
-            q_values = self.networks.q_r.encode_and_forward(state, world_model, self.device)
+            q_values = self.networks.q_r.forward(state, world_model, self.device)
             pi_r = self.networks.q_r.get_policy(q_values, beta_r=beta_r)
             return pi_r.squeeze().cpu().numpy()
     
@@ -2219,7 +2219,7 @@ class BasePhase2Trainer(ABC):
         with torch.no_grad():
             if self.config.u_r_use_network and self.networks.u_r is not None:
                 self.networks.u_r.eval()
-                _, u_r = self.networks.u_r.encode_and_forward(state, world_model, self.device)
+                _, u_r = self.networks.u_r.forward(state, world_model, self.device)
                 return u_r.item()
             else:
                 # Compute directly from X_h values
@@ -2259,7 +2259,7 @@ class BasePhase2Trainer(ABC):
             u_r = self.get_u_r(state, world_model)
             
             self.networks.q_r.eval()
-            q_values = self.networks.q_r.encode_and_forward(state, world_model, self.device)
+            q_values = self.networks.q_r.forward(state, world_model, self.device)
             pi_r = self.networks.q_r.get_policy(q_values, beta_r=beta_r)
             expected_q = (pi_r * q_values).sum().item()
             

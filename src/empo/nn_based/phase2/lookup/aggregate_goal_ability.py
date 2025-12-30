@@ -71,14 +71,14 @@ class LookupTableAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
             )
         return self.table[key]
     
-    def forward(
+    def _batch_forward(
         self,
         states: List[Hashable],
         human_indices: List[int],
         device: str = 'cpu'
     ) -> torch.Tensor:
         """
-        Batch forward pass from raw states and human indices.
+        Internal: Batch forward pass from raw states and human indices.
         
         Args:
             states: List of hashable states.
@@ -106,7 +106,7 @@ class LookupTableAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         # Apply clamping to (0, 1]
         return self.apply_clamp(raw_output)
     
-    def encode_and_forward(
+    def forward(
         self,
         state: Hashable,
         world_model: Any,
@@ -147,7 +147,7 @@ class LookupTableAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         Returns:
             X_h values of shape (batch_size,).
         """
-        return self.forward(states, human_indices, device)
+        return self._batch_forward(states, human_indices, device)
     
     def forward_batch(
         self,
@@ -171,7 +171,7 @@ class LookupTableAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         Returns:
             X_h values of shape (batch_size,), in (0, 1].
         """
-        return self.forward(states, human_indices, device)
+        return self._batch_forward(states, human_indices, device)
     
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for save/load."""

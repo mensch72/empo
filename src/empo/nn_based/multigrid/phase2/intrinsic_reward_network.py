@@ -107,7 +107,7 @@ class MultiGridIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
                 nn.Linear(hidden_dim, 1),
             )
     
-    def forward(
+    def _network_forward(
         self,
         grid_tensor: torch.Tensor,
         global_features: torch.Tensor,
@@ -115,7 +115,7 @@ class MultiGridIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
         interactive_features: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Compute y and U_r(s).
+        Internal: Compute y and U_r(s) from pre-encoded tensors.
         
         Args:
             grid_tensor: (batch, num_grid_channels, H, W)
@@ -144,7 +144,7 @@ class MultiGridIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
         
         return y, u_r
     
-    def encode_and_forward(
+    def forward(
         self,
         state: Any,
         world_model: Any,
@@ -165,7 +165,7 @@ class MultiGridIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
         grid_tensor, global_features, agent_features, interactive_features = \
             self.state_encoder.tensorize_state(state, world_model, device)
         
-        return self.forward(
+        return self._network_forward(
             grid_tensor, global_features, agent_features, interactive_features
         )
     
@@ -190,7 +190,7 @@ class MultiGridIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
             - y: intermediate value (batch,), y > 1
             - U_r: intrinsic reward (batch,), U_r < 0
         """
-        return self.forward(
+        return self._network_forward(
             grid_tensor, global_features, agent_features, interactive_features
         )
     
@@ -212,7 +212,7 @@ class MultiGridIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
             Tuple (y, U_r), each of shape (1,).
         """
         with torch.no_grad():
-            return self.encode_and_forward(state, world_model, device)
+            return self.forward(state, world_model, device)
     
     def forward_batch(
         self,
@@ -250,7 +250,7 @@ class MultiGridIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
         agent_features = torch.cat(agent_list, dim=0)
         interactive_features = torch.cat(inter_list, dim=0)
         
-        return self.forward(
+        return self._network_forward(
             grid_tensor, global_features, agent_features, interactive_features
         )
     
