@@ -33,6 +33,7 @@ from .human_goal_ability import BaseHumanGoalAchievementNetwork
 from .aggregate_goal_ability import BaseAggregateGoalAbilityNetwork
 from .intrinsic_reward_network import BaseIntrinsicRewardNetwork
 from .robot_value_network import BaseRobotValueNetwork, compute_v_r_from_components
+from .lookup import is_lookup_table_network, get_all_lookup_tables, get_total_table_size
 
 # Try to import tensorboard (optional)
 try:
@@ -316,6 +317,37 @@ class BasePhase2Trainer(ABC):
                 weight_decay=self.config.v_r_weight_decay
             )
         return optimizers
+    
+    def _maybe_recreate_optimizers(self):
+        """
+        Recreate optimizers if needed for lookup table networks.
+        
+        Lookup tables create new parameters dynamically as new states are encountered.
+        The optimizer needs to be recreated periodically to include these new parameters.
+        This is controlled by config.lookup_optimizer_recreate_interval.
+        
+        For networks that have grown since the last optimizer creation, we preserve
+        the learning rate and weight decay but reset momentum/adaptive state.
+        """
+        if not self.config.should_recreate_optimizer(self.training_step_count):
+            return
+        
+        if self.debug:
+            total_entries = get_total_table_size(self.networks)
+            print(f"[DEBUG] Recreating optimizers (step {self.training_step_count}, "
+                  f"{total_entries} total lookup table entries)")
+        
+        # Simply recreate all optimizers - this resets momentum but ensures
+        # all parameters are tracked. For lookup tables with many new entries,
+        # this is cleaner than trying to add parameters incrementally.
+        self.optimizers = self._init_optimizers()
+        
+        if self.verbose:
+            # Log lookup table sizes
+            lookup_tables = get_all_lookup_tables(self.networks)
+            if lookup_tables:
+                sizes = {name: len(net.table) for name, net in lookup_tables.items()}
+                print(f"[Lookup] Recreated optimizers. Table sizes: {sizes}")
     
     def _compute_param_norms(self) -> Dict[str, float]:
         """Compute L2 norms of network parameters for monitoring."""
@@ -971,6 +1003,9 @@ class BasePhase2Trainer(ABC):
         # Update target networks (each at its own interval)
         self.update_target_networks()
         
+        # Recreate optimizers if needed (for lookup table parameter growth)
+        self._maybe_recreate_optimizers()
+        
         return loss_values, grad_norms, prediction_stats
     
     def _compute_single_grad_norm(self, network_name: str) -> float:
@@ -1199,6 +1234,16 @@ class BasePhase2Trainer(ABC):
                 # Reset stats after logging so we get per-step rates
                 if hasattr(self, 'reset_cache_stats'):
                     self.reset_cache_stats()
+            
+            # Log lookup table sizes (if any lookup tables are in use)
+            lookup_tables = get_all_lookup_tables(self.networks)
+            if lookup_tables:
+                total_entries = 0
+                for name, net in lookup_tables.items():
+                    size = len(net.table)
+                    total_entries += size
+                    self.writer.add_scalar(f'LookupTable/{name}_size', size, self.training_step_count)
+                self.writer.add_scalar('LookupTable/total_entries', total_entries, self.training_step_count)
         
         # Check for warm-up stage transitions
         current_stage = self.config.get_warmup_stage(self.training_step_count)

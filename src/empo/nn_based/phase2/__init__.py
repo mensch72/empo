@@ -38,6 +38,19 @@ from .lookup import (
     LookupTableHumanGoalAbilityNetwork,
     LookupTableAggregateGoalAbilityNetwork,
     LookupTableIntrinsicRewardNetwork,
+    is_lookup_table_network,
+    get_all_lookup_tables,
+    get_total_table_size,
+)
+
+# Network factory functions
+from .network_factory import (
+    create_robot_q_network,
+    create_robot_value_network,
+    create_human_goal_ability_network,
+    create_aggregate_goal_ability_network,
+    create_intrinsic_reward_network,
+    create_all_phase2_lookup_networks,
 )
 
 __all__ = [
@@ -61,4 +74,15 @@ __all__ = [
     'LookupTableHumanGoalAbilityNetwork',
     'LookupTableAggregateGoalAbilityNetwork',
     'LookupTableIntrinsicRewardNetwork',
+    # Lookup table utilities
+    'is_lookup_table_network',
+    'get_all_lookup_tables',
+    'get_total_table_size',
+    # Network factory functions
+    'create_robot_q_network',
+    'create_robot_value_network',
+    'create_human_goal_ability_network',
+    'create_aggregate_goal_ability_network',
+    'create_intrinsic_reward_network',
+    'create_all_phase2_lookup_networks',
 ]

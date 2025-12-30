@@ -607,3 +607,218 @@ class TestLookupTableIntegration:
         # All entries should be on GPU
         for key, param in network.table.items():
             assert param.device.type == 'cuda'
+
+
+class TestLookupTableUtilities:
+    """Tests for lookup table utility functions."""
+    
+    def test_is_lookup_table_network_with_lookup_tables(self):
+        """Test is_lookup_table_network returns True for lookup tables."""
+        from empo.nn_based.phase2.lookup import is_lookup_table_network
+        
+        q_r = LookupTableRobotQNetwork(num_actions=2, num_robots=1)
+        v_r = LookupTableRobotValueNetwork()
+        v_h_e = LookupTableHumanGoalAbilityNetwork()
+        x_h = LookupTableAggregateGoalAbilityNetwork()
+        u_r = LookupTableIntrinsicRewardNetwork()
+        
+        assert is_lookup_table_network(q_r) is True
+        assert is_lookup_table_network(v_r) is True
+        assert is_lookup_table_network(v_h_e) is True
+        assert is_lookup_table_network(x_h) is True
+        assert is_lookup_table_network(u_r) is True
+    
+    def test_is_lookup_table_network_with_other_objects(self):
+        """Test is_lookup_table_network returns False for other objects."""
+        from empo.nn_based.phase2.lookup import is_lookup_table_network
+        
+        assert is_lookup_table_network(nn.Linear(10, 10)) is False
+        assert is_lookup_table_network(None) is False
+        assert is_lookup_table_network("not a network") is False
+    
+    def test_get_all_lookup_tables_all_lookup(self):
+        """Test get_all_lookup_tables with all lookup table networks."""
+        from empo.nn_based.phase2.lookup import get_all_lookup_tables
+        from empo.nn_based.phase2.trainer import Phase2Networks
+        
+        networks = Phase2Networks(
+            q_r=LookupTableRobotQNetwork(num_actions=2, num_robots=1),
+            v_h_e=LookupTableHumanGoalAbilityNetwork(),
+            x_h=LookupTableAggregateGoalAbilityNetwork(),
+            u_r=LookupTableIntrinsicRewardNetwork(),
+            v_r=LookupTableRobotValueNetwork(),
+        )
+        
+        lookup_tables = get_all_lookup_tables(networks)
+        
+        assert 'q_r' in lookup_tables
+        assert 'v_h_e' in lookup_tables
+        assert 'x_h' in lookup_tables
+        assert 'u_r' in lookup_tables
+        assert 'v_r' in lookup_tables
+        assert len(lookup_tables) == 5
+    
+    def test_get_all_lookup_tables_mixed(self):
+        """Test get_all_lookup_tables with mixed network types."""
+        from empo.nn_based.phase2.lookup import get_all_lookup_tables
+        from empo.nn_based.phase2.trainer import Phase2Networks
+        
+        # Create a mock neural network (not a lookup table)
+        class MockQNetwork(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.linear = nn.Linear(10, 2)
+        
+        networks = Phase2Networks(
+            q_r=MockQNetwork(),  # Not a lookup table
+            v_h_e=LookupTableHumanGoalAbilityNetwork(),
+            x_h=LookupTableAggregateGoalAbilityNetwork(),
+        )
+        
+        lookup_tables = get_all_lookup_tables(networks)
+        
+        assert 'q_r' not in lookup_tables
+        assert 'v_h_e' in lookup_tables
+        assert 'x_h' in lookup_tables
+        assert len(lookup_tables) == 2
+    
+    def test_get_total_table_size(self, simple_states):
+        """Test get_total_table_size counts entries correctly."""
+        from empo.nn_based.phase2.lookup import get_total_table_size
+        from empo.nn_based.phase2.trainer import Phase2Networks
+        
+        q_r = LookupTableRobotQNetwork(num_actions=2, num_robots=1)
+        v_h_e = LookupTableHumanGoalAbilityNetwork()
+        x_h = LookupTableAggregateGoalAbilityNetwork()
+        
+        networks = Phase2Networks(q_r=q_r, v_h_e=v_h_e, x_h=x_h)
+        
+        # Initially empty
+        assert get_total_table_size(networks) == 0
+        
+        # Add some entries to q_r (3 unique states)
+        _ = q_r.forward(simple_states[:3], device='cpu')
+        assert get_total_table_size(networks) == 3
+        
+        # Add entries to v_h_e (2 unique state-goal pairs)
+        _ = v_h_e.forward(simple_states[:2], goals=[('g', 1), ('g', 2)], device='cpu')
+        assert get_total_table_size(networks) == 5
+
+
+class TestNetworkFactory:
+    """Tests for network factory functions."""
+    
+    def test_create_all_phase2_lookup_networks(self):
+        """Test creating all lookup networks at once."""
+        from empo.nn_based.phase2.network_factory import create_all_phase2_lookup_networks
+        
+        config = Phase2Config(
+            use_lookup_tables=True,
+            use_lookup_q_r=True,
+            use_lookup_v_h_e=True,
+            use_lookup_x_h=True,
+            use_lookup_u_r=True,
+            use_lookup_v_r=True,
+            u_r_use_network=True,
+            v_r_use_network=True,
+        )
+        
+        q_r, v_h_e, x_h, u_r, v_r = create_all_phase2_lookup_networks(
+            config, num_actions=4, num_robots=1
+        )
+        
+        assert isinstance(q_r, LookupTableRobotQNetwork)
+        assert isinstance(v_h_e, LookupTableHumanGoalAbilityNetwork)
+        assert isinstance(x_h, LookupTableAggregateGoalAbilityNetwork)
+        assert isinstance(u_r, LookupTableIntrinsicRewardNetwork)
+        assert isinstance(v_r, LookupTableRobotValueNetwork)
+    
+    def test_create_all_lookup_without_optional_networks(self):
+        """Test creating lookup networks with u_r and v_r disabled."""
+        from empo.nn_based.phase2.network_factory import create_all_phase2_lookup_networks
+        
+        config = Phase2Config(
+            use_lookup_tables=True,
+            u_r_use_network=False,  # U_r computed from X_h
+            v_r_use_network=False,  # V_r computed from U_r and Q_r
+        )
+        
+        q_r, v_h_e, x_h, u_r, v_r = create_all_phase2_lookup_networks(
+            config, num_actions=4, num_robots=1
+        )
+        
+        assert isinstance(q_r, LookupTableRobotQNetwork)
+        assert isinstance(v_h_e, LookupTableHumanGoalAbilityNetwork)
+        assert isinstance(x_h, LookupTableAggregateGoalAbilityNetwork)
+        assert u_r is None
+        assert v_r is None
+    
+    def test_create_all_lookup_requires_flag(self):
+        """Test that factory raises error if use_lookup_tables is False."""
+        from empo.nn_based.phase2.network_factory import create_all_phase2_lookup_networks
+        
+        config = Phase2Config(use_lookup_tables=False)
+        
+        with pytest.raises(ValueError, match="use_lookup_tables must be True"):
+            create_all_phase2_lookup_networks(config, num_actions=4, num_robots=1)
+    
+    def test_create_robot_q_network_lookup(self):
+        """Test create_robot_q_network with lookup tables."""
+        from empo.nn_based.phase2.network_factory import create_robot_q_network
+        
+        config = Phase2Config(use_lookup_tables=True, use_lookup_q_r=True)
+        
+        network = create_robot_q_network(config, num_actions=4, num_robots=1)
+        
+        assert isinstance(network, LookupTableRobotQNetwork)
+        assert network.num_actions == 4
+        assert network.num_robots == 1
+    
+    def test_create_robot_q_network_neural_requires_factory(self):
+        """Test that neural Q_r requires a factory function."""
+        from empo.nn_based.phase2.network_factory import create_robot_q_network
+        
+        config = Phase2Config(use_lookup_tables=False)
+        
+        with pytest.raises(ValueError, match="neural_network_factory required"):
+            create_robot_q_network(config, num_actions=4, num_robots=1)
+    
+    def test_create_human_goal_ability_network_lookup(self):
+        """Test create_human_goal_ability_network with lookup tables."""
+        from empo.nn_based.phase2.network_factory import create_human_goal_ability_network
+        
+        config = Phase2Config(use_lookup_tables=True, use_lookup_v_h_e=True)
+        
+        network = create_human_goal_ability_network(config)
+        
+        assert isinstance(network, LookupTableHumanGoalAbilityNetwork)
+    
+    def test_create_aggregate_goal_ability_network_lookup(self):
+        """Test create_aggregate_goal_ability_network with lookup tables."""
+        from empo.nn_based.phase2.network_factory import create_aggregate_goal_ability_network
+        
+        config = Phase2Config(use_lookup_tables=True, use_lookup_x_h=True)
+        
+        network = create_aggregate_goal_ability_network(config)
+        
+        assert isinstance(network, LookupTableAggregateGoalAbilityNetwork)
+    
+    def test_create_intrinsic_reward_network_when_disabled(self):
+        """Test that U_r factory returns None when u_r_use_network=False."""
+        from empo.nn_based.phase2.network_factory import create_intrinsic_reward_network
+        
+        config = Phase2Config(u_r_use_network=False)
+        
+        network = create_intrinsic_reward_network(config)
+        
+        assert network is None
+    
+    def test_create_robot_value_network_when_disabled(self):
+        """Test that V_r factory returns None when v_r_use_network=False."""
+        from empo.nn_based.phase2.network_factory import create_robot_value_network
+        
+        config = Phase2Config(v_r_use_network=False)
+        
+        network = create_robot_value_network(config)
+        
+        assert network is None

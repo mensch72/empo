@@ -1278,15 +1278,19 @@ print(f"V_h^e table size: {len(networks.v_he.table)} (state, goal) pairs")
 ### Phase 4: Trainer Integration
 
 - [ ] Modify Phase 1 `Trainer` to support lookup tables
-- [ ] Modify Phase 2 `Trainer` to support lookup tables
+- [x] Modify Phase 2 `Trainer` to support lookup tables
+  - [x] Import lookup table utilities (`is_lookup_table_network`, `get_all_lookup_tables`, `get_total_table_size`)
+  - [x] Add `_maybe_recreate_optimizers()` method
+  - [x] Add TensorBoard logging for lookup table sizes
 - [ ] Update replay buffer if needed (already has raw states)
 - [ ] Integration tests for training
 
 ### Phase 5: Utilities and Documentation
 
-- [ ] Factory functions for network creation
+- [x] Utility functions (`is_lookup_table_network`, `get_all_lookup_tables`, `get_total_table_size`)
+- [x] Factory functions for network creation (`network_factory.py`)
 - [ ] Save/load functionality
-- [ ] Example scripts (Phase 1 and Phase 2)
+- [x] Example script: `examples/lookup_table_phase2_demo.py`
 - [ ] Performance benchmarking
 - [ ] API documentation
 
