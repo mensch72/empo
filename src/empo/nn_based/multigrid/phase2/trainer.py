@@ -321,19 +321,23 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
                     x_h_goals.append(t.goals[h_x])
                     x_h_goal_weights.append(t.goal_weights[h_x])
         
-        # Collect U_r data (which humans to sample for each state)
-        u_r_states = []
-        u_r_human_indices_per_state = []  # list of lists
+        # Collect U_r data - flatten all (state, human) pairs for batched X_h computation
+        u_r_flat_states = []      # states repeated for each human
+        u_r_flat_humans = []      # human indices
+        u_r_humans_per_state = [] # how many humans sampled for each state
         
         if self.config.u_r_use_network and u_r_active:
             for t in batch:
                 if self.config.u_r_sample_humans is None:
-                    humans_for_u_r = self.human_agent_indices
+                    humans_for_u_r = list(self.human_agent_indices)
                 else:
                     n_sample = min(self.config.u_r_sample_humans, len(self.human_agent_indices))
-                    humans_for_u_r = random.sample(self.human_agent_indices, n_sample)
-                u_r_states.append(t.state)
-                u_r_human_indices_per_state.append(humans_for_u_r)
+                    humans_for_u_r = random.sample(list(self.human_agent_indices), n_sample)
+                
+                u_r_humans_per_state.append(len(humans_for_u_r))
+                for h in humans_for_u_r:
+                    u_r_flat_states.append(t.state)
+                    u_r_flat_humans.append(h)
         
         # ===================================================================
         # Stage 2: Batched forward passes
@@ -413,27 +417,39 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
                     'target_mean': target_x_h.mean().item()
                 }
         
-        # ----- U_r loss (batched, only if using network mode) -----
-        if self.config.u_r_use_network and u_r_active and u_r_states:
+        # ----- U_r loss (fully batched, only if using network mode) -----
+        if self.config.u_r_use_network and u_r_active and u_r_flat_states:
+            # Forward pass on unique states for U_r predictions
             y_pred, _ = self.networks.u_r.forward_batch(
-                u_r_states, self.env, self.device
+                states, self.env, self.device
             )
             
-            # For each state, compute target y = E[X_h^{-xi}] over sampled humans
-            u_r_targets = []
+            # Single batched X_h computation for all (state, human) pairs
             with torch.no_grad():
-                for i, (state, humans) in enumerate(zip(u_r_states, u_r_human_indices_per_state)):
-                    # Get X_h for all sampled humans at this state
-                    x_h_for_u = self.networks.x_h_target.forward_batch(
-                        [state] * len(humans), humans,
-                        self.env, self.device
-                    )
-                    x_h_clamped = torch.clamp(x_h_for_u.squeeze(), min=1e-3, max=1.0)
-                    x_h_sum = (x_h_clamped ** (-self.config.xi)).sum()
-                    target_y = x_h_sum / len(humans)
-                    u_r_targets.append(target_y)
+                x_h_all = self.networks.x_h_target.forward_batch(
+                    u_r_flat_states, u_r_flat_humans,
+                    self.env, self.device
+                ).squeeze()
+                
+                # Clamp X_h values and compute X_h^{-xi}
+                x_h_clamped = torch.clamp(x_h_all, min=1e-3, max=1.0)
+                x_h_power = x_h_clamped ** (-self.config.xi)
+                
+                # Aggregate by state using scatter_add: sum X_h^{-xi} for each state
+                # Build state indices: [0,0,0, 1,1,1, 2,2,2, ...] based on humans_per_state
+                state_indices = []
+                for state_idx, n_humans in enumerate(u_r_humans_per_state):
+                    state_indices.extend([state_idx] * n_humans)
+                state_indices_t = torch.tensor(state_indices, device=self.device)
+                
+                n_states = len(batch)
+                x_h_sums = torch.zeros(n_states, device=self.device)
+                x_h_sums.scatter_add_(0, state_indices_t, x_h_power)
+                
+                # Average: y = E[X_h^{-xi}]
+                humans_per_state_t = torch.tensor(u_r_humans_per_state, device=self.device, dtype=torch.float32)
+                u_r_targets_tensor = x_h_sums / humans_per_state_t
             
-            u_r_targets_tensor = torch.stack(u_r_targets)
             losses['u_r'] = ((y_pred.squeeze() - u_r_targets_tensor) ** 2).mean()
             
             with torch.no_grad():
@@ -514,7 +530,7 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
     
     def _compute_u_r_batch_target(self, states: List[Any]) -> torch.Tensor:
         """
-        Compute U_r for a batch of states using target networks.
+        Compute U_r for a batch of states using target networks (fully batched).
         
         If u_r_use_network, uses U_r target network.
         Otherwise, computes from X_h target values.
@@ -530,22 +546,32 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
             return u_r
         else:
             # Compute from X_h: U_r = -E[X_h^{-xi}]^eta
-            u_r_list = []
-            for state in states:
-                x_h_values = []
-                for h in self.human_agent_indices:
-                    x_h = self.networks.x_h_target.forward_batch(
-                        [state], [h], self.env, self.device
-                    )
-                    x_h_values.append(x_h.squeeze())
-                
-                x_h_tensor = torch.stack(x_h_values)
-                x_h_clamped = torch.clamp(x_h_tensor, min=1e-3, max=1.0)
-                y = (x_h_clamped ** (-self.config.xi)).mean()
-                u_r = -(y ** self.config.eta)
-                u_r_list.append(u_r)
+            # Flatten all (state, human) pairs for single batched computation
+            n_states = len(states)
+            n_humans = len(self.human_agent_indices)
             
-            return torch.stack(u_r_list)
+            flat_states = []
+            flat_humans = []
+            for state in states:
+                for h in self.human_agent_indices:
+                    flat_states.append(state)
+                    flat_humans.append(h)
+            
+            # Single batched forward pass for all (state, human) pairs
+            x_h_all = self.networks.x_h_target.forward_batch(
+                flat_states, flat_humans, self.env, self.device
+            ).squeeze()
+            
+            # Reshape to (n_states, n_humans) and compute mean over humans
+            x_h_reshaped = x_h_all.view(n_states, n_humans)
+            x_h_clamped = torch.clamp(x_h_reshaped, min=1e-3, max=1.0)
+            
+            # y = E[X_h^{-xi}] = mean over humans
+            y = (x_h_clamped ** (-self.config.xi)).mean(dim=1)
+            
+            # U_r = -y^eta
+            u_r = -(y ** self.config.eta)
+            return u_r
     
     def step_environment(
         self,
