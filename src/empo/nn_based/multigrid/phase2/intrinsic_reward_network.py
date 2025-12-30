@@ -6,7 +6,7 @@ Implements U_r(s) from equation (8) for multigrid environments.
 
 import torch
 import torch.nn as nn
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from ...phase2.intrinsic_reward_network import BaseIntrinsicRewardNetwork
 from ..state_encoder import MultiGridStateEncoder
@@ -213,6 +213,46 @@ class MultiGridIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
         """
         with torch.no_grad():
             return self.encode_and_forward(state, world_model, device)
+    
+    def forward_batch(
+        self,
+        states: List[Any],
+        world_model: Any,
+        device: str = 'cpu'
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Batch forward pass from raw states.
+        
+        Batch-tensorizes all states and computes y and U_r in a single forward pass.
+        This is the primary interface for batched training.
+        
+        Args:
+            states: List of raw environment states.
+            world_model: Environment with grid (for tensorization).
+            device: Torch device.
+        
+        Returns:
+            Tuple (y, U_r) where:
+            - y: intermediate value (batch,), y > 1
+            - U_r: intrinsic reward (batch,), U_r < 0
+        """
+        # Batch tensorize states
+        grid_list, glob_list, agent_list, inter_list = [], [], [], []
+        for state in states:
+            grid, glob, agent, inter = self.state_encoder.tensorize_state(state, world_model, device)
+            grid_list.append(grid)
+            glob_list.append(glob)
+            agent_list.append(agent)
+            inter_list.append(inter)
+        
+        grid_tensor = torch.cat(grid_list, dim=0)
+        global_features = torch.cat(glob_list, dim=0)
+        agent_features = torch.cat(agent_list, dim=0)
+        interactive_features = torch.cat(inter_list, dim=0)
+        
+        return self.forward(
+            grid_tensor, global_features, agent_features, interactive_features
+        )
     
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for save/load."""

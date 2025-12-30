@@ -134,6 +134,28 @@ class LookupTableRobotValueNetwork(BaseRobotValueNetwork):
         """
         return self.forward(states, device)
     
+    def forward_batch(
+        self,
+        states: List[Hashable],
+        world_model: Any,
+        device: str = 'cpu'
+    ) -> torch.Tensor:
+        """
+        Batch forward pass from raw states (unified interface).
+        
+        This matches the neural network's forward_batch signature.
+        The world_model parameter is ignored (lookup tables don't need tensorization).
+        
+        Args:
+            states: List of hashable states.
+            world_model: Environment (ignored for lookup tables).
+            device: Target device.
+        
+        Returns:
+            V_r values of shape (batch_size,), negative.
+        """
+        return self.forward(states, device)
+    
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for save/load."""
         return {

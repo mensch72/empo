@@ -154,6 +154,32 @@ class LookupTableHumanGoalAbilityNetwork(BaseHumanGoalAchievementNetwork):
         """
         return self.forward(states, goals, human_indices, device)
     
+    def forward_batch(
+        self,
+        states: List[Hashable],
+        goals: List[Hashable],
+        human_indices: List[int],
+        world_model: Any,
+        device: str = 'cpu'
+    ) -> torch.Tensor:
+        """
+        Batch forward pass from raw states, goals, and human indices (unified interface).
+        
+        This matches the neural network's forward_batch signature.
+        The world_model parameter is ignored (lookup tables don't need tensorization).
+        
+        Args:
+            states: List of hashable states.
+            goals: List of hashable goals (one per state).
+            human_indices: List of human agent indices.
+            world_model: Environment (ignored for lookup tables).
+            device: Target device.
+        
+        Returns:
+            V_h^e values of shape (batch_size,), in [0, 1].
+        """
+        return self.forward(states, goals, human_indices, device)
+    
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for save/load."""
         return {

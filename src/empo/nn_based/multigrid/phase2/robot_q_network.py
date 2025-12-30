@@ -252,6 +252,61 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
             own_grid_tensor, own_global_features, own_agent_features, own_interactive_features
         )
     
+    def forward_batch(
+        self,
+        states: List[Any],
+        world_model: Any,
+        device: str = 'cpu'
+    ) -> torch.Tensor:
+        """
+        Batch forward pass from raw states.
+        
+        Batch-tensorizes all states and computes Q-values in a single forward pass.
+        This is the primary interface for batched training.
+        
+        Args:
+            states: List of raw environment states.
+            world_model: Environment with grid (for tensorization).
+            device: Torch device.
+        
+        Returns:
+            Q-values tensor (batch, num_action_combinations) with Q_r < 0.
+        """
+        # Batch tensorize with shared encoder
+        grid_list, glob_list, agent_list, inter_list = [], [], [], []
+        own_grid_list, own_glob_list, own_agent_list, own_inter_list = [], [], [], []
+        
+        for state in states:
+            # Shared encoder tensorization
+            grid, glob, agent, inter = self.state_encoder.tensorize_state(state, world_model, device)
+            grid_list.append(grid)
+            glob_list.append(glob)
+            agent_list.append(agent)
+            inter_list.append(inter)
+            
+            # Own encoder tensorization
+            own_grid, own_glob, own_agent, own_inter = self.own_state_encoder.tensorize_state(state, world_model, device)
+            own_grid_list.append(own_grid)
+            own_glob_list.append(own_glob)
+            own_agent_list.append(own_agent)
+            own_inter_list.append(own_inter)
+        
+        # Stack into batch tensors
+        grid_tensor = torch.cat(grid_list, dim=0)
+        global_features = torch.cat(glob_list, dim=0)
+        agent_features = torch.cat(agent_list, dim=0)
+        interactive_features = torch.cat(inter_list, dim=0)
+        
+        own_grid_tensor = torch.cat(own_grid_list, dim=0)
+        own_global_features = torch.cat(own_glob_list, dim=0)
+        own_agent_features = torch.cat(own_agent_list, dim=0)
+        own_interactive_features = torch.cat(own_inter_list, dim=0)
+        
+        return self.forward(
+            grid_tensor, global_features, agent_features, interactive_features,
+            own_grid_tensor, own_global_features, own_agent_features, own_interactive_features
+        )
+    
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for save/load."""
         return {
