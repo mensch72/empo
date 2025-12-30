@@ -27,16 +27,27 @@ class LookupTableHumanGoalAbilityNetwork(BaseHumanGoalAchievementNetwork):
         default_v_h_e: Initial V_h^e value for unseen (state, goal) pairs.
             Should be in [0, 1]. 0.5 is neutral, higher is optimistic.
         feasible_range: Output bounds for V_h^e (default [0, 1]).
+        state_encoder: Optional state encoder (for API compatibility with neural networks).
+        goal_encoder: Optional goal encoder (for API compatibility with neural networks).
+        agent_encoder: Optional agent encoder (for API compatibility with neural networks).
     """
     
     def __init__(
         self,
         gamma_h: float = 0.99,
         default_v_h_e: float = 0.5,
-        feasible_range: Tuple[float, float] = (0.0, 1.0)
+        feasible_range: Tuple[float, float] = (0.0, 1.0),
+        state_encoder: Optional[nn.Module] = None,
+        goal_encoder: Optional[nn.Module] = None,
+        agent_encoder: Optional[nn.Module] = None,
     ):
         super().__init__(gamma_h=gamma_h, feasible_range=feasible_range)
         self.default_v_h_e = default_v_h_e
+        
+        # Store encoders for API compatibility (not used for computation)
+        self.state_encoder = state_encoder
+        self.goal_encoder = goal_encoder
+        self.agent_encoder = agent_encoder
         
         # Main lookup table: hash((state, goal)) -> Parameter(V_h^e value)
         self.table: Dict[int, nn.Parameter] = {}

@@ -32,13 +32,15 @@ class LookupTableIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
         xi: Inter-human inequality aversion parameter (ξ >= 1).
         eta: Intertemporal inequality aversion parameter (η >= 1).
         default_y: Initial y value for unseen states (must be >= 1).
+        state_encoder: Optional state encoder (for API compatibility with neural networks).
     """
     
     def __init__(
         self,
         xi: float = 1.0,
         eta: float = 1.1,
-        default_y: float = 2.0
+        default_y: float = 2.0,
+        state_encoder: Optional[nn.Module] = None,
     ):
         super().__init__(xi=xi, eta=eta)
         
@@ -46,6 +48,9 @@ class LookupTableIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
             raise ValueError(f"default_y must be >= 1.0, got {default_y}")
         
         self.default_y = default_y
+        
+        # Store encoder for API compatibility (not used for computation)
+        self.state_encoder = state_encoder
         
         # Main lookup table: hash(state) -> Parameter(log(y-1))
         # We store log(y-1) so that y = 1 + exp(log(y-1)) > 1 always

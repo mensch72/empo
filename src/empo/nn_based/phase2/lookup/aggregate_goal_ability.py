@@ -29,16 +29,27 @@ class LookupTableAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         default_x_h: Initial X_h value for unseen (state, human) pairs.
             Should be in (0, 1]. 0.5 is neutral.
         feasible_range: Output bounds for X_h (default (0, 1]).
+        state_encoder: Optional state encoder (for API compatibility with neural networks).
+        agent_encoder: Optional agent encoder (for API compatibility with neural networks).
+        own_agent_encoder: Optional own agent encoder (for API compatibility).
     """
     
     def __init__(
         self,
         zeta: float = 2.0,
         default_x_h: float = 0.5,
-        feasible_range: Tuple[float, float] = (0.0, 1.0)
+        feasible_range: Tuple[float, float] = (0.0, 1.0),
+        state_encoder: Optional[nn.Module] = None,
+        agent_encoder: Optional[nn.Module] = None,
+        own_agent_encoder: Optional[nn.Module] = None,
     ):
         super().__init__(zeta=zeta, feasible_range=feasible_range)
         self.default_x_h = default_x_h
+        
+        # Store encoders for API compatibility (not used for computation)
+        self.state_encoder = state_encoder
+        self.agent_encoder = agent_encoder
+        self.own_agent_encoder = own_agent_encoder
         
         # Main lookup table: hash((state, human_idx)) -> Parameter(X_h value)
         self.table: Dict[int, nn.Parameter] = {}

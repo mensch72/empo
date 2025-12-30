@@ -284,35 +284,49 @@ class BasePhase2Trainer(ABC):
             self.networks.v_r_target.eval()
     
     def _init_optimizers(self) -> Dict[str, optim.Optimizer]:
-        """Initialize optimizers for each network with weight decay."""
+        """Initialize optimizers for each network with weight decay.
+        
+        For lookup table networks that may have empty parameter lists,
+        creates a placeholder parameter to satisfy the optimizer constructor.
+        """
+        def make_optimizer(network, lr, weight_decay):
+            """Create optimizer, handling empty parameter case for lookup tables."""
+            params = list(network.parameters())
+            if len(params) == 0:
+                # Lookup tables start empty - create placeholder parameter
+                # This will be replaced when optimizer is recreated after tables grow
+                placeholder = nn.Parameter(torch.zeros(1, requires_grad=True))
+                return optim.Adam([placeholder], lr=lr, weight_decay=weight_decay)
+            return optim.Adam(params, lr=lr, weight_decay=weight_decay)
+        
         optimizers = {
-            'q_r': optim.Adam(
-                self.networks.q_r.parameters(), 
+            'q_r': make_optimizer(
+                self.networks.q_r,
                 lr=self.config.lr_q_r,
                 weight_decay=self.config.q_r_weight_decay
             ),
-            'v_h_e': optim.Adam(
-                self.networks.v_h_e.parameters(), 
+            'v_h_e': make_optimizer(
+                self.networks.v_h_e,
                 lr=self.config.lr_v_h_e,
                 weight_decay=self.config.v_h_e_weight_decay
             ),
-            'x_h': optim.Adam(
-                self.networks.x_h.parameters(), 
+            'x_h': make_optimizer(
+                self.networks.x_h,
                 lr=self.config.lr_x_h,
                 weight_decay=self.config.x_h_weight_decay
             ),
         }
         # Only create U_r optimizer if using network (not direct computation)
         if self.config.u_r_use_network:
-            optimizers['u_r'] = optim.Adam(
-                self.networks.u_r.parameters(), 
+            optimizers['u_r'] = make_optimizer(
+                self.networks.u_r,
                 lr=self.config.lr_u_r,
                 weight_decay=self.config.u_r_weight_decay
             )
         # Only create V_r optimizer if using network (not direct computation)
         if self.config.v_r_use_network:
-            optimizers['v_r'] = optim.Adam(
-                self.networks.v_r.parameters(), 
+            optimizers['v_r'] = make_optimizer(
+                self.networks.v_r,
                 lr=self.config.lr_v_r,
                 weight_decay=self.config.v_r_weight_decay
             )

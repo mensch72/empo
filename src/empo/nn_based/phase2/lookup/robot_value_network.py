@@ -27,15 +27,20 @@ class LookupTableRobotValueNetwork(BaseRobotValueNetwork):
     Args:
         gamma_r: Robot discount factor.
         default_v_r: Initial V-value for unseen states (should be negative).
+        state_encoder: Optional state encoder (for API compatibility with neural networks).
     """
     
     def __init__(
         self,
         gamma_r: float = 0.99,
-        default_v_r: float = -1.0
+        default_v_r: float = -1.0,
+        state_encoder: Optional[nn.Module] = None,
     ):
         super().__init__(gamma_r=gamma_r)
         self.default_v_r = default_v_r
+        
+        # Store encoder for API compatibility (not used for computation)
+        self.state_encoder = state_encoder
         
         # Main lookup table: hash(state) -> Parameter(V_r value)
         self.table: Dict[int, nn.Parameter] = {}

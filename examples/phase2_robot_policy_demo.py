@@ -25,6 +25,7 @@ Usage:
     python phase2_robot_policy_demo.py --small   # Use small 6x6 environment
     python phase2_robot_policy_demo.py --ensemble # Use random ensemble environment
     python phase2_robot_policy_demo.py --async   # Use async actor-learner training
+    python phase2_robot_policy_demo.py --tabular # Use lookup tables instead of neural networks
     
     # Save/restore for continued training (networks/policy saved by default)
     python phase2_robot_policy_demo.py --save_networks model.pt  # Custom path for networks
@@ -781,6 +782,7 @@ def main(
     use_small: bool = False,
     use_async: bool = False,
     use_encoders: bool = True,
+    use_tabular: bool = False,
     save_networks_path: str = None,
     save_policy_path: str = None,
     restore_networks_path: str = None,
@@ -885,6 +887,11 @@ def main(
     # Print async mode status
     if use_async:
         print("[ASYNC MODE] Using actor-learner architecture for parallel training")
+    
+    # Print tabular mode status
+    if use_tabular:
+        print("[TABULAR MODE] Using lookup tables instead of neural networks")
+        print("  Suitable for small state spaces only (exact tabular learning)")
     
     # Override with profile settings
     if profile:
@@ -1030,6 +1037,8 @@ def main(
         # State encoding options
         include_step_count=False,  # Don't include step count in state encoding
         use_encoders=use_encoders,
+        # Tabular learning mode (lookup tables instead of neural networks)
+        use_lookup_tables=use_tabular,
     )
     
     # If using policy directly (no training), skip to rollouts
@@ -1290,6 +1299,8 @@ if __name__ == "__main__":
                         help='Use async actor-learner training (tests async mode on CPU)')
     parser.add_argument('--no-encoders', action='store_true',
                         help='Disable neural encoders (use identity function for debugging)')
+    parser.add_argument('--tabular', '-t', action='store_true',
+                        help='Use lookup tables instead of neural networks (exact tabular learning)')
     
     # Save/restore options
     parser.add_argument('--save_networks', type=str, default=None, metavar='PATH',
@@ -1317,6 +1328,7 @@ if __name__ == "__main__":
         use_small=args.small,
         use_async=args.use_async,
         use_encoders=not args.no_encoders,
+        use_tabular=args.tabular,
         save_networks_path=args.save_networks,
         save_policy_path=args.save_policy,
         restore_networks_path=args.restore_networks,

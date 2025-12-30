@@ -26,6 +26,9 @@ class LookupTableRobotQNetwork(BaseRobotQNetwork):
         beta_r: Power-law policy exponent (nominal value).
         default_q_r: Initial Q-value for unseen states (should be negative).
         feasible_range: Optional (min, max) bounds for Q-values.
+        state_encoder: Optional state encoder (for API compatibility with neural networks).
+            Typically an identity encoder with use_encoders=False.
+        own_state_encoder: Optional own state encoder (for API compatibility).
     """
     
     def __init__(
@@ -34,7 +37,9 @@ class LookupTableRobotQNetwork(BaseRobotQNetwork):
         num_robots: int,
         beta_r: float = 10.0,
         default_q_r: float = -1.0,
-        feasible_range: Optional[Tuple[float, float]] = None
+        feasible_range: Optional[Tuple[float, float]] = None,
+        state_encoder: Optional[nn.Module] = None,
+        own_state_encoder: Optional[nn.Module] = None,
     ):
         super().__init__(
             num_actions=num_actions,
@@ -43,6 +48,10 @@ class LookupTableRobotQNetwork(BaseRobotQNetwork):
             feasible_range=feasible_range
         )
         self.default_q_r = default_q_r
+        
+        # Store encoders for API compatibility (not used for computation)
+        self.state_encoder = state_encoder
+        self.own_state_encoder = own_state_encoder
         
         # Main lookup table: hash(state) -> Parameter(Q-values)
         # Using a regular dict, entries are created lazily on first access
