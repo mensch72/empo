@@ -14,6 +14,7 @@ This document provides extensive documentation of the batching, vectorizing, ten
 8. [V_h^e Batched Computation](#v_he-batched-computation) (Stage 5)
 9. [Common Pitfalls](#common-pitfalls)
 10. [Performance Comparison](#performance-comparison)
+11. [Alternative Modes: Disabling Encoders and Lookup Tables](#alternative-modes-disabling-encoders-and-lookup-tables)
 
 ---
 
@@ -95,14 +96,16 @@ The grid tensor (39 channels × 7 × 7 = 1911 floats = 7644 bytes per state) is 
 
 ### Bit Layout (int32 per cell)
 
+See `constants.py` for the exact bit masks and shifts used:
+
 | Bits | Field | Values |
 |------|-------|--------|
-| 0-4 | object_type | 0-29 = standard types, 30 = door, 31 = key |
+| 0-4 | object_type | 0-28 = standard types (see `OBJECT_TYPE_TO_CHANNEL`), 30 = door, 31 = key |
 | 5-7 | object_color | 0-6 = color index (for doors/keys) |
 | 8-9 | object_state | 0-3 = door state (none/open/closed/locked) |
 | 10-12 | agent_color | 0-6 = agent color, 7 = no agent |
-| 13-15 | magic_wall_state | 0 = none, 1-5 = active with side, 6 = inactive |
-| 16-17 | other_category | 0 = none, 1-3 = overlappable/immobile/mobile |
+| 13-15 | magic_wall_state | 0 = none, 1-4 = active with side, 5 = inactive |
+| 16-17 | other_category | 0 = none, 1 = overlappable, 2 = immobile, 3 = mobile |
 
 ### Storage Savings
 
@@ -183,16 +186,14 @@ Per state stored in replay buffer:
 
 ### Implementation
 
-See `MultiGridStateEncoder` for the split tensorization methods:
-- `tensorize_state_compact()` - Returns (global, agent, interactive) tensors
+See `MultiGridStateEncoder` in `src/empo/nn_based/multigrid/state_encoder.py` for the split tensorization methods:
+- `tensorize_state_compact()` - Returns (global, agent, interactive) tensors without grid
 - `compress_grid()` - Returns (H, W) int32 tensor with all grid info
 - `decompress_grid_to_tensor()` - Unpacks single grid to (1, C, H, W) tensor
 - `decompress_grid_batch_to_tensor()` - Fully vectorized batch decompression
-- `tensorize_state_from_compact()` - Combines pre-computed features with grid
+- `tensorize_state_from_compact()` - Combines pre-computed features with grid tensor
 
-See `MultiGridPhase2Trainer` for usage:
-- `collect_transition()` - Overrides parent to compute compact features + compressed grid
-- `_batch_tensorize_from_compact()` - Decompresses grids in batch, no world_model access
+See Phase 2 trainer for usage of compact features with compressed grids in replay buffer storage.
 
 ---
 
@@ -872,3 +873,75 @@ pip install line_profiler
 # Add @profile decorator to methods of interest, then:
 kernprof -l -v examples/phase2_robot_policy_demo.py --quick
 ```
+---
+
+## Alternative Modes: Disabling Encoders and Lookup Tables
+
+The batched computation infrastructure supports two alternative modes that bypass or simplify the neural network encoding:
+
+### Disabling Encoders (`use_encoders=False`)
+
+For debugging or when working with very simple environments, you can disable the neural network encoding entirely:
+
+```python
+config = Phase2Config(
+    use_encoders=False,  # Encoders return identity (flattened input)
+)
+```
+
+**What this does:**
+- State encoders (`MultiGridStateEncoder`, `AgentIdentityEncoder`) switch to identity mode
+- `forward()` returns flattened concatenation of raw tensorized inputs instead of learned features
+- Tensorization still happens (raw state → tensors) because MLP heads still need tensor inputs
+- Output dimension changes to match raw input size (grid + global + agent + interactive features)
+
+**Note:** If you want to skip tensorization entirely, use **lookup table networks** instead (see below). The `use_encoders=False` mode is specifically for debugging encoder networks while keeping the rest of the neural architecture.
+
+**Use cases:**
+- Debugging: isolate whether problems come from encoders vs. other components
+- Baseline comparisons: pure tabular representation for small state spaces
+- Async training pickle size: identity encoders are much smaller (~10MB vs ~130MB)
+
+**Important:** When `use_encoders=False`, the encoder modules become `nn.Identity()` placeholders. This dramatically reduces pickle size for async training, which is important for Docker's shared memory limits.
+
+### Lookup Table Networks (Tabular Mode)
+
+For small state spaces or when interpretability is important, you can use dictionary-based lookup tables instead of neural networks:
+
+```python
+config = Phase2Config(
+    use_lookup_tables=True,    # Enable lookup table mode
+    use_lookup_q_r=True,       # Q_r as lookup table
+    use_lookup_v_h_e=True,     # V_h^e as lookup table
+    use_lookup_x_h=True,       # X_h as lookup table
+    # Default values for unseen states
+    lookup_default_q_r=-1.0,
+    lookup_default_v_h_e=0.5,
+    lookup_default_x_h=0.5,
+)
+```
+
+**What this does:**
+- Replaces neural network value functions with dictionary-based tables
+- Each unique state gets its own entry (created lazily on first access)
+- Values stored as `torch.nn.Parameter` for gradient tracking and optimizer compatibility
+- **Completely bypasses tensorization** - states are hashed directly as Python objects
+- No function approximation error—exact value storage
+
+**When to use:**
+- State space < 100K unique states
+- Debugging and interpretability (inspect exact values)
+- Baseline comparisons with neural approaches
+- Environments where generalization to unseen states isn't needed
+
+**Memory considerations:**
+- Each Q_r entry: `num_action_combinations` floats (e.g., 16 for 2 robots × 4 actions)
+- Each V_h^e entry: 1 float per (state, goal) pair
+- Total size grows linearly with visited states
+
+**API compatibility:**
+- Lookup table networks have the same API as neural versions (`forward()`, `encode_and_forward()`)
+- They accept optional `state_encoder` arguments for API compatibility but don't use them
+- Can be mixed: some networks neural, others lookup tables
+
+See `src/empo/nn_based/phase2/lookup/` for the lookup table implementations and `examples/lookup_table_phase2_demo.py` for usage examples.
