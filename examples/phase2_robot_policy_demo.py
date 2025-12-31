@@ -145,9 +145,9 @@ def configure_environment(use_ensemble: bool, use_small: bool = False):
         
         # Define goals for V_h^e evaluation
         DEFINED_GOALS = [
-#            (1, (2,1)),  # easy once robot has pushed rock twice or once and moved back 
-#            (1, (1,1)),  # medium difficulty
-#            (1, (3,1)),  # hardest since robot must move back to (1,1) after pushing rock twice
+            (1, (2,1)),  # easy once robot has pushed rock twice or once and moved back 
+            (1, (1,1)),  # medium difficulty
+            (1, (3,1)),  # hardest since robot must move back to (1,1) after pushing rock twice
             (1, (2,2)),  # already reached
             (1, (1,2)),  # impossible goal (in wall)
         ]

@@ -25,6 +25,7 @@ from .robot_value_network import LookupTableRobotValueNetwork
 from .human_goal_ability import LookupTableHumanGoalAbilityNetwork
 from .aggregate_goal_ability import LookupTableAggregateGoalAbilityNetwork
 from .intrinsic_reward_network import LookupTableIntrinsicRewardNetwork
+from .null_encoders import NullStateEncoder, NullGoalEncoder, NullAgentEncoder
 
 
 def is_lookup_table_network(network) -> bool:
@@ -96,6 +97,9 @@ __all__ = [
     'LookupTableHumanGoalAbilityNetwork',
     'LookupTableAggregateGoalAbilityNetwork',
     'LookupTableIntrinsicRewardNetwork',
+    'NullStateEncoder',
+    'NullGoalEncoder',
+    'NullAgentEncoder',
     'is_lookup_table_network',
     'get_all_lookup_tables',
     'get_total_table_size',
