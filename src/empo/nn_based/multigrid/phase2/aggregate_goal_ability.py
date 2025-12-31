@@ -6,7 +6,7 @@ Implements X_h(s) from equation (7) for multigrid environments.
 
 import torch
 import torch.nn as nn
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from ...phase2.aggregate_goal_ability import BaseAggregateGoalAbilityNetwork
 from ..state_encoder import MultiGridStateEncoder
@@ -19,6 +19,12 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
     
     Estimates X_h(s) = E_{g_h}[V_h^e(s, g_h)^ζ] - the aggregate ability
     of human h to achieve various goals.
+    
+    .. warning:: ASYNC TRAINING / PICKLE COMPATIBILITY
+    
+        This class (via its encoders) is pickled and sent to spawned actor
+        processes during async training. See warnings in MultiGridStateEncoder
+        for details on maintaining pickle compatibility.
     
     Args:
         grid_height: Height of the grid.
@@ -98,6 +104,7 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         
         # Own agent encoder for X_h-specific features (trained with X_h loss)
         # This allows X_h to learn additional agent features beyond those learned by V_h^e
+        # Note: own_agent_encoder shares cache with agent_encoder to avoid redundant tensorization
         if own_agent_encoder is not None:
             self.own_agent_encoder = own_agent_encoder
         else:
@@ -105,14 +112,15 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
                 num_agents=max_agents,
                 embedding_dim=agent_embedding_dim,
                 grid_height=grid_height,
-                grid_width=grid_width
+                grid_width=grid_width,
+                share_cache_with=self.agent_encoder
             )
         
         # X_h value head with optional dropout
         # Note: X_h depends on both state and human identity
         # Uses BOTH shared agent encoder (frozen) and own agent encoder (trained)
-        # agent_encoder.output_dim = embedding_dim + position_feature_dim + agent_feature_dim
-        combined_dim = state_feature_dim + self.agent_encoder.output_dim + self.own_agent_encoder.output_dim
+        # Use actual encoder feature_dim (may differ from passed parameter when use_encoders=False)
+        combined_dim = self.state_encoder.feature_dim + self.agent_encoder.output_dim + self.own_agent_encoder.output_dim
         if dropout > 0.0:
             self.value_head = nn.Sequential(
                 nn.Linear(combined_dim, hidden_dim),
@@ -132,7 +140,7 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
                 nn.Linear(hidden_dim, 1),
             )
     
-    def forward(
+    def _network_forward(
         self,
         grid_tensor: torch.Tensor,
         global_features: torch.Tensor,
@@ -146,7 +154,7 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         own_query_agent_features: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
-        Compute X_h(s).
+        Internal: Compute X_h(s) from pre-encoded tensors.
         
         Args:
             grid_tensor: (batch, num_grid_channels, H, W)
@@ -189,7 +197,7 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         # Apply soft clamp to keep in (0, 1]
         return self.apply_clamp(raw_value)
     
-    def encode_and_forward(
+    def forward(
         self,
         state: Any,
         world_model: Any,
@@ -224,7 +232,7 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
             human_agent_idx, state, world_model, device
         )
         
-        return self.forward(
+        return self._network_forward(
             grid_tensor, global_features, agent_features, interactive_features,
             query_idx, query_grid, query_features,
             own_idx, own_grid, own_features
@@ -255,7 +263,7 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         Returns:
             X_h values tensor (batch,).
         """
-        return self.forward(
+        return self._network_forward(
             grid_tensor, global_features, agent_features, interactive_features,
             query_agent_indices, query_agent_grid, query_agent_features
         )
@@ -280,8 +288,77 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
             X_h tensor with strict (0, 1] bounds.
         """
         with torch.no_grad():
-            x_h = self.encode_and_forward(state, world_model, human_agent_idx, device)
+            x_h = self.forward(state, world_model, human_agent_idx, device)
             return self.apply_hard_clamp(x_h)
+    
+    def forward_batch(
+        self,
+        states: List[Any],
+        human_indices: List[int],
+        world_model: Any,
+        device: str = 'cpu'
+    ) -> torch.Tensor:
+        """
+        Batch forward pass from raw states and human indices.
+        
+        Batch-tensorizes all inputs and computes X_h in a single forward pass.
+        This is the primary interface for batched training.
+        
+        Args:
+            states: List of raw environment states.
+            human_indices: List of human agent indices (one per state).
+            world_model: Environment with grid (for tensorization).
+            device: Torch device.
+        
+        Returns:
+            X_h values tensor (batch,) in (0, 1].
+        """
+        if len(states) != len(human_indices):
+            raise ValueError("states and human_indices must have same length")
+        
+        # Batch tensorize states
+        grid_list, glob_list, agent_list, inter_list = [], [], [], []
+        for state in states:
+            grid, glob, agent, inter = self.state_encoder.tensorize_state(state, world_model, device)
+            grid_list.append(grid)
+            glob_list.append(glob)
+            agent_list.append(agent)
+            inter_list.append(inter)
+        
+        grid_tensor = torch.cat(grid_list, dim=0)
+        global_features = torch.cat(glob_list, dim=0)
+        agent_features = torch.cat(agent_list, dim=0)
+        interactive_features = torch.cat(inter_list, dim=0)
+        
+        # Batch tensorize agent identities (shared encoder)
+        idx_list, grid_list, feat_list = [], [], []
+        for h_idx, state in zip(human_indices, states):
+            idx, grid, feat = self.agent_encoder.encode_single(h_idx, state, world_model, device)
+            idx_list.append(idx)
+            grid_list.append(grid)
+            feat_list.append(feat)
+        
+        query_agent_indices = torch.cat(idx_list, dim=0)
+        query_agent_grid = torch.cat(grid_list, dim=0)
+        query_agent_features = torch.cat(feat_list, dim=0)
+        
+        # Batch tensorize agent identities (own encoder)
+        own_idx_list, own_grid_list, own_feat_list = [], [], []
+        for h_idx, state in zip(human_indices, states):
+            idx, grid, feat = self.own_agent_encoder.encode_single(h_idx, state, world_model, device)
+            own_idx_list.append(idx)
+            own_grid_list.append(grid)
+            own_feat_list.append(feat)
+        
+        own_idx = torch.cat(own_idx_list, dim=0)
+        own_grid = torch.cat(own_grid_list, dim=0)
+        own_features = torch.cat(own_feat_list, dim=0)
+        
+        return self._network_forward(
+            grid_tensor, global_features, agent_features, interactive_features,
+            query_agent_indices, query_agent_grid, query_agent_features,
+            own_idx, own_grid, own_features
+        )
     
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for save/load."""

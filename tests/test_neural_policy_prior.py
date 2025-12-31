@@ -263,7 +263,7 @@ def test_multigrid_q_network():
     state = create_mock_state()
     goal = SimpleReachGoal(world_model, (5, 5))
     
-    q_values = q_network.encode_and_forward(state, world_model, 0, goal)
+    q_values = q_network.forward(state, world_model, 0, goal)
     
     assert q_values.shape == (1, 4), f"Expected (1, 4), got {q_values.shape}"
     print(f"  ✓ Q-values shape: {q_values.shape}")
@@ -401,8 +401,8 @@ def test_save_load():
     loaded.q_network.eval()
     
     with torch.no_grad():
-        original_q = q_network.encode_and_forward(state, world_model, 0, goal)
-        loaded_q = loaded.q_network.encode_and_forward(state, world_model, 0, goal)
+        original_q = q_network.forward(state, world_model, 0, goal)
+        loaded_q = loaded.q_network.forward(state, world_model, 0, goal)
     
     assert torch.allclose(original_q, loaded_q, atol=1e-5)
     print("  ✓ Loaded model produces same Q-values")

@@ -47,57 +47,103 @@ class AgentIdentityEncoder(nn.Module):
     3. The query agent's features (even though redundant with color-grouped
        features, this makes it easier for the network to learn)
     
+    .. warning:: ASYNC TRAINING / PICKLE COMPATIBILITY
+    
+        This class is pickled and sent to spawned actor processes during async
+        training. To avoid breaking async functionality:
+        
+        1. **Do NOT create large unused nn.Module layers.** When use_encoders=False,
+           we skip creating Embedding/CNN/MLP layers and use nn.Identity() placeholders.
+        
+        2. **All attributes must be picklable.** Avoid lambdas, local functions,
+           or non-picklable objects as instance attributes.
+        
+        3. **Test with async mode after changes:** Always verify changes work with
+           ``--async`` flag in the phase2 demo.
+    
     Args:
         num_agents: Maximum number of agents.
         embedding_dim: Dimension of the agent index embedding.
+        position_feature_dim: Output dimension for position encoding.
+        agent_feature_dim: Output dimension for agent feature encoding.
         grid_height: Height of the grid (for position channel).
         grid_width: Width of the grid (for position channel).
+        use_encoders: If False, forward() returns identity (flattened+padded input).
+        share_cache_with: Optional encoder instance to share raw tensor cache with.
+            If provided, this encoder will use the other encoder's cache instead
+            of creating its own. Useful for "own" encoders to reuse shared encoder caches.
     """
     
     def __init__(
         self,
         num_agents: int,
         embedding_dim: int = 16,
+        position_feature_dim: int = 32,
+        agent_feature_dim: int = 32,
         grid_height: int = 10,
-        grid_width: int = 10
+        grid_width: int = 10,
+        use_encoders: bool = True,
+        identity_output_dim: Optional[int] = None,
+        share_cache_with: Optional['AgentIdentityEncoder'] = None
     ):
         super().__init__()
         self.num_agents = num_agents
         self.embedding_dim = embedding_dim
         self.grid_height = grid_height
         self.grid_width = grid_width
+        self.use_encoders = use_encoders
+        self.position_feature_dim = position_feature_dim
+        self.agent_feature_dim = agent_feature_dim
         
-        # Learnable embedding for each agent index
-        self.index_embedding = nn.Embedding(num_agents, embedding_dim)
-        
-        # Small CNN to process the query agent position channel
-        # This converts the grid-shaped position marker into a feature vector
-        self.position_conv = nn.Sequential(
-            nn.Conv2d(1, 8, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(8, 8, kernel_size=3, padding=1),
-            nn.ReLU(),
-        )
-        position_conv_out = 8 * grid_height * grid_width
-        self.position_fc = nn.Sequential(
-            nn.Linear(position_conv_out, 32),
-            nn.ReLU(),
-        )
-        self.position_feature_dim = 32
-        
-        # MLP to process query agent features
-        self.agent_feature_fc = nn.Sequential(
-            nn.Linear(AGENT_FEATURE_SIZE, 32),
-            nn.ReLU(),
-        )
-        self.agent_feature_dim = 32
-        
-        # Total output dimension
-        self.output_dim = embedding_dim + self.position_feature_dim + self.agent_feature_dim
+        if not use_encoders:
+            # Identity mode: no NN layers needed
+            # Compute output dim: agent_idx (1) + grid (H*W) + agent_features (AGENT_FEATURE_SIZE)
+            if identity_output_dim is not None:
+                self.output_dim = identity_output_dim
+            else:
+                self.output_dim = 1 + grid_height * grid_width + AGENT_FEATURE_SIZE
+            # Create dummy layers for state_dict compatibility
+            self.index_embedding = nn.Identity()
+            self.position_conv = nn.Identity()
+            self.position_fc = nn.Identity()
+            self.agent_feature_fc = nn.Identity()
+        else:
+            # Normal mode: create all NN layers
+            # Learnable embedding for each agent index
+            self.index_embedding = nn.Embedding(num_agents, embedding_dim)
+            
+            # Small CNN to process the query agent position channel
+            # This converts the grid-shaped position marker into a feature vector
+            self.position_conv = nn.Sequential(
+                nn.Conv2d(1, 8, kernel_size=3, padding=1),
+                nn.ReLU(),
+                nn.Conv2d(8, 8, kernel_size=3, padding=1),
+                nn.ReLU(),
+            )
+            position_conv_out = 8 * grid_height * grid_width
+            self.position_fc = nn.Sequential(
+                nn.Linear(position_conv_out, position_feature_dim),
+                nn.ReLU(),
+            )
+            
+            # MLP to process query agent features
+            self.agent_feature_fc = nn.Sequential(
+                nn.Linear(AGENT_FEATURE_SIZE, agent_feature_dim),
+                nn.ReLU(),
+            )
+            
+            # Total output dimension
+            self.output_dim = embedding_dim + position_feature_dim + agent_feature_dim
         
         # Internal cache for raw tensor extraction (before NN forward)
         # Keys are (state_tuple, agent_idx), values are (idx_tensor, grid, features)
-        self._raw_cache: Dict[Tuple[Tuple, int], Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+        # If share_cache_with is provided, reuse that encoder's cache
+        if share_cache_with is not None:
+            self._raw_cache = share_cache_with._raw_cache
+            self._shared_cache = True
+        else:
+            self._raw_cache: Dict[Tuple[Tuple, int], Tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+            self._shared_cache = False
         self._cache_hits = 0
         self._cache_misses = 0
     
@@ -130,7 +176,19 @@ class AgentIdentityEncoder(nn.Module):
         
         Returns:
             Agent identity features of shape (batch, output_dim).
+        
+        If use_encoders=False, bypasses neural network and returns flattened+padded
+        input tensors directly (identity mode for debugging).
         """
+        batch_size = agent_indices.shape[0]
+        
+        if not self.use_encoders:
+            # Identity mode: flatten all inputs and concatenate unchanged
+            # Convert agent_indices to float for concatenation
+            idx_float = agent_indices.float().unsqueeze(1)  # (batch, 1)
+            grid_flat = query_agent_grid.view(batch_size, -1)  # (batch, H*W)
+            return torch.cat([idx_float, grid_flat, query_agent_features], dim=1)
+        
         # Agent index embedding
         idx_emb = self.index_embedding(agent_indices)  # (batch, embedding_dim)
         
@@ -252,6 +310,9 @@ class AgentIdentityEncoder(nn.Module):
         return {
             'num_agents': self.num_agents,
             'embedding_dim': self.embedding_dim,
+            'position_feature_dim': self.position_feature_dim,
+            'agent_feature_dim': self.agent_feature_dim,
             'grid_height': self.grid_height,
             'grid_width': self.grid_width,
+            'use_encoders': self.use_encoders,
         }

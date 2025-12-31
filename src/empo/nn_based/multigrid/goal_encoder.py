@@ -25,32 +25,65 @@ class MultiGridGoalEncoder(BaseGoalEncoder):
     All goals are represented as bounding boxes (x1, y1, x2, y2) with inclusive
     coordinates. Point goals are represented as (x, y, x, y).
     
+    .. warning:: ASYNC TRAINING / PICKLE COMPATIBILITY
+    
+        This class is pickled and sent to spawned actor processes during async
+        training. To avoid breaking async functionality:
+        
+        1. **Do NOT create large unused nn.Module layers.** When use_encoders=False,
+           we use nn.Identity() placeholder instead of creating MLP layers.
+        
+        2. **All attributes must be picklable.** Avoid lambdas, local functions,
+           or non-picklable objects as instance attributes.
+        
+        3. **Test with async mode after changes:** Always verify changes work with
+           ``--async`` flag in the phase2 demo.
+    
     Args:
         grid_height: Height of the grid.
         grid_width: Width of the grid.
         feature_dim: Output feature dimension.
+        use_encoders: If False, forward() returns identity (padded input).
+        share_cache_with: Optional encoder instance to share raw tensor cache with.
+            If provided, this encoder will use the other encoder's cache instead
+            of creating its own. Useful for "own" encoders to reuse shared encoder caches.
     """
     
     def __init__(
         self,
         grid_height: int,
         grid_width: int,
-        feature_dim: int = 32
+        feature_dim: int = 32,
+        use_encoders: bool = True,
+        share_cache_with: Optional['MultiGridGoalEncoder'] = None
     ):
         super().__init__(feature_dim)
         self.grid_height = grid_height
         self.grid_width = grid_width
+        self.use_encoders = use_encoders
         
-        # Input: bounding box (x1, y1, x2, y2) with inclusive coordinates
-        # Point goals are (x, y, x, y)
-        self.fc = nn.Sequential(
-            nn.Linear(4, feature_dim),
-            nn.ReLU(),
-        )
+        if not use_encoders:
+            # Identity mode: output is just the 4 input coordinates
+            self.feature_dim = 4
+            self.fc = nn.Identity()  # Dummy for state_dict compatibility
+        else:
+            # Normal mode: create MLP
+            # Input: bounding box (x1, y1, x2, y2) with inclusive coordinates
+            # Point goals are (x, y, x, y)
+            self.fc = nn.Sequential(
+                nn.Linear(4, feature_dim),
+                nn.ReLU(),
+            )
         
         # Internal cache for goal coordinate extraction (before NN forward)
         # Keys are (x1, y1, x2, y2) bounding box coordinates
-        self._raw_cache: Dict[Tuple[int, int, int, int], torch.Tensor] = {}
+        # If share_cache_with is provided, reuse that encoder's cache
+        if share_cache_with is not None:
+            self._raw_cache = share_cache_with._raw_cache
+            self._shared_cache = True
+        else:
+            self._raw_cache: Dict[Tuple[int, int, int, int], torch.Tensor] = {}
+            self._shared_cache = False
         self._cache_hits = 0
         self._cache_misses = 0
     
@@ -76,7 +109,12 @@ class MultiGridGoalEncoder(BaseGoalEncoder):
         
         Returns:
             Feature tensor (batch, feature_dim)
+        
+        If use_encoders=False, returns input unchanged (true identity for debugging).
         """
+        if not self.use_encoders:
+            # Identity mode: return input unchanged
+            return goal_coords
         return self.fc(goal_coords)
     
     def tensorize_goal(
@@ -427,5 +465,6 @@ class MultiGridGoalEncoder(BaseGoalEncoder):
             'grid_height': self.grid_height,
             'grid_width': self.grid_width,
             'feature_dim': self.feature_dim,
+            'use_encoders': self.use_encoders,
         }
     

@@ -75,7 +75,7 @@ class MultiGridNeuralHumanPolicyPrior(BaseNeuralHumanPolicyPrior):
         # Use direct phi network if available (fast path)
         if self.direct_phi_network is not None:
             with torch.no_grad():
-                probs = self.direct_phi_network.encode_and_forward(
+                probs = self.direct_phi_network.forward(
                     state, self.world_model, agent_idx, self.device
                 )
                 return probs.squeeze(0)
@@ -819,7 +819,7 @@ def _train_phi_network_step(
                     if goal is None:
                         continue
                     
-                    q_values = q_network.encode_and_forward(
+                    q_values = q_network.forward(
                         state, world_model, agent_idx, goal, device
                     )
                     policy = q_network.get_policy(q_values).squeeze(0)
@@ -837,7 +837,7 @@ def _train_phi_network_step(
             target_marginal = marginal_probs / valid_samples
         
         # Get phi network's prediction
-        phi_probs = phi_network.encode_and_forward(
+        phi_probs = phi_network.forward(
             state, world_model, agent_idx, device
         ).squeeze(0)
         

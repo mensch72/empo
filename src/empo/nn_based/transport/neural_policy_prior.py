@@ -176,7 +176,7 @@ class TransportNeuralHumanPolicyPrior(BaseNeuralHumanPolicyPrior):
         with torch.no_grad():
             if goal is not None:
                 # Goal-conditioned Q-values
-                q_values = self.q_network.encode_and_forward(
+                q_values = self.q_network.forward(
                     state, self.world_model, agent_idx, goal, self.device
                 )
             else:
@@ -649,7 +649,7 @@ def train_transport_neural_policy_prior(
                 # Exploit: use Q-network
                 q_network.eval()
                 with torch.no_grad():
-                    q_values = q_network.encode_and_forward(
+                    q_values = q_network.forward(
                         None, env, agent_idx, goal, device
                     )
                     # Apply action mask
@@ -712,7 +712,7 @@ def train_transport_neural_policy_prior(
                     # This is simplified online learning that uses current state
                     # In practice, for graph-based envs with state snapshots,
                     # we'd need to serialize/deserialize the full state
-                    q_values = q_network.encode_and_forward(
+                    q_values = q_network.forward(
                         None, env, agent_idx, goal, device
                     )
                     current_q = q_values[0, action]
@@ -728,7 +728,7 @@ def train_transport_neural_policy_prior(
                     else:
                         # Non-terminal: target = 0 + γ * V(s')
                         with torch.no_grad():
-                            next_q = target_network.encode_and_forward(
+                            next_q = target_network.forward(
                                 None, env, agent_idx, goal, device
                             )
                             next_v = q_network.get_value(next_q)

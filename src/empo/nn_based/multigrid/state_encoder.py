@@ -95,6 +95,26 @@ class MultiGridStateEncoder(BaseStateEncoder):
     3. MLP for interactive objects (buttons/switches)
     4. Global world features
     
+    .. warning:: ASYNC TRAINING / PICKLE COMPATIBILITY
+    
+        This class is pickled and sent to spawned actor processes during async
+        training. To avoid breaking async functionality:
+        
+        1. **Do NOT create large unused nn.Module layers.** When use_encoders=False,
+           we skip creating CNN/MLP layers entirely and use nn.Identity() placeholders.
+           Creating unused layers bloats pickle size (130MB vs 10MB) and can exceed
+           Docker's default 64MB shared memory, causing SIGBUS errors.
+        
+        2. **All attributes must be picklable.** Avoid lambdas, local functions,
+           open file handles, or non-picklable objects as instance attributes.
+        
+        3. **Cache contents are NOT preserved across pickle.** The _raw_cache dict
+           will be empty in worker processes (this is fine, it's just a performance
+           optimization).
+        
+        4. **Test with async mode after changes:** Always verify changes work with
+           ``--async`` flag in the phase2 demo.
+    
     Args:
         grid_height: Height of the grid.
         grid_width: Width of the grid.
@@ -105,6 +125,9 @@ class MultiGridStateEncoder(BaseStateEncoder):
         max_pause_switches: Max PauseSwitches to encode.
         max_disabling_switches: Max DisablingSwitches to encode.
         max_control_buttons: Max ControlButtons to encode.
+        share_cache_with: Optional encoder instance to share raw tensor cache with.
+            If provided, this encoder will use the other encoder's cache instead
+            of creating its own. Useful for "own" encoders to reuse shared encoder caches.
     """
     
     def __init__(
@@ -118,7 +141,9 @@ class MultiGridStateEncoder(BaseStateEncoder):
         max_pause_switches: int = 4,
         max_disabling_switches: int = 4,
         max_control_buttons: int = 4,
-        include_step_count: bool = True
+        include_step_count: bool = True,
+        use_encoders: bool = True,
+        share_cache_with: Optional['MultiGridStateEncoder'] = None
     ):
         super().__init__(feature_dim)
         self.grid_height = grid_height
@@ -130,6 +155,7 @@ class MultiGridStateEncoder(BaseStateEncoder):
         self.max_disabling_switches = max_disabling_switches
         self.max_control_buttons = max_control_buttons
         self.include_step_count = include_step_count
+        self.use_encoders = use_encoders
         
         # Grid channel structure
         # Use all standard colors for agent channels to support any color combination
@@ -139,78 +165,110 @@ class MultiGridStateEncoder(BaseStateEncoder):
         self.agent_channels_start = self.num_object_channels + self.num_other_channels
         self.num_grid_channels = self.agent_channels_start + NUM_STANDARD_COLORS
         
-        # Scale intermediate dimensions based on feature_dim
-        # For small feature_dim (e.g., 16), use proportionally smaller networks
-        conv_channels = max(8, feature_dim // 4)  # e.g., 16->4->8, 64->16, 256->64
-        grid_feature_dim = max(16, feature_dim // 2)  # e.g., 16->8->16, 64->32, 256->128
-        agent_feature_dim = max(8, feature_dim // 4)  # e.g., 16->4->8, 64->16, 256->64
-        interactive_feature_dim = max(4, feature_dim // 8)  # e.g., 16->2->4, 64->8, 256->32
-        
-        # Grid encoder (CNN) - reduced architecture for speed
-        # 2 conv layers with pooling instead of 3 conv layers without pooling
-        self.grid_conv = nn.Sequential(
-            nn.Conv2d(self.num_grid_channels, conv_channels, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.MaxPool2d(2, 2),  # Halves spatial dimensions -> 4x fewer values to process
-            nn.Conv2d(conv_channels, conv_channels, kernel_size=3, padding=1),
-            nn.ReLU(),
-        )
-        # Compute actual output size with a dummy forward pass
-        with torch.no_grad():
-            dummy_input = torch.zeros(1, self.num_grid_channels, grid_height, grid_width)
-            dummy_output = self.grid_conv(dummy_input)
-            grid_conv_out_size = dummy_output.numel()
-        
-        self.grid_fc = nn.Sequential(
-            nn.Linear(grid_conv_out_size + NUM_GLOBAL_WORLD_FEATURES, grid_feature_dim),
-            nn.ReLU(),
-        )
-        
-        # Agent encoder (MLP)
-        # Encodes all agents organized by color (no separate query agent features)
+        # Compute input sizes for agent and interactive features
         self.color_order = sorted(num_agents_per_color.keys())
         total_agents = sum(num_agents_per_color.values())
-        agent_input_size = AGENT_FEATURE_SIZE * total_agents  # per-color lists only
-        self.agent_fc = nn.Sequential(
-            nn.Linear(agent_input_size, agent_feature_dim * 2),
-            nn.ReLU(),
-            nn.Linear(agent_feature_dim * 2, agent_feature_dim),
-            nn.ReLU(),
-        )
-        
-        # Interactive object encoder (MLP)
+        agent_input_size = AGENT_FEATURE_SIZE * total_agents
         interactive_input_size = (
             max_kill_buttons * KILLBUTTON_FEATURE_SIZE +
             max_pause_switches * PAUSESWITCH_FEATURE_SIZE +
             max_disabling_switches * DISABLINGSWITCH_FEATURE_SIZE +
             max_control_buttons * CONTROLBUTTON_FEATURE_SIZE
         )
-        self.interactive_fc = nn.Sequential(
-            nn.Linear(interactive_input_size, interactive_feature_dim),
-            nn.ReLU(),
-        )
         
-        # Combined feature dimension
-        combined_dim = grid_feature_dim + agent_feature_dim + interactive_feature_dim
-        
-        # Final projection to feature_dim
-        self.output_fc = nn.Sequential(
-            nn.Linear(combined_dim, feature_dim),
-            nn.ReLU(),
-        )
-        
-        # Store sub-feature dimensions for get_config
-        self._grid_feature_dim = grid_feature_dim
-        self._agent_feature_dim = agent_feature_dim
-        self._interactive_feature_dim = interactive_feature_dim
+        # Store input sizes
         self._agent_input_size = agent_input_size
         self._interactive_input_size = interactive_input_size
         self._global_features_size = NUM_GLOBAL_WORLD_FEATURES
         
+        # When use_encoders=False, compute identity output dim and skip creating NN layers
+        if not use_encoders:
+            # Identity mode: output is flattened concatenation of all inputs
+            identity_dim = (
+                self.num_grid_channels * grid_height * grid_width +
+                NUM_GLOBAL_WORLD_FEATURES +
+                agent_input_size +
+                interactive_input_size
+            )
+            # Override feature_dim to match actual identity output
+            self.feature_dim = identity_dim
+            # Create dummy attributes so state_dict works (empty modules)
+            self.grid_conv = nn.Identity()
+            self.grid_fc = nn.Identity()
+            self.agent_fc = nn.Identity()
+            self.interactive_fc = nn.Identity()
+            self.output_fc = nn.Identity()
+            self._grid_feature_dim = 0
+            self._agent_feature_dim = 0
+            self._interactive_feature_dim = 0
+        else:
+            # Normal mode: create full NN layers
+            # Scale intermediate dimensions based on feature_dim
+            # For small feature_dim (e.g., 16), use proportionally smaller networks
+            conv_channels = max(8, feature_dim // 4)  # e.g., 16->4->8, 64->16, 256->64
+            grid_feature_dim = max(16, feature_dim // 2)  # e.g., 16->8->16, 64->32, 256->128
+            agent_feature_dim = max(8, feature_dim // 4)  # e.g., 16->4->8, 64->16, 256->64
+            interactive_feature_dim = max(4, feature_dim // 8)  # e.g., 16->2->4, 64->8, 256->32
+            
+            # Grid encoder (CNN) - reduced architecture for speed
+            # 2 conv layers with pooling instead of 3 conv layers without pooling
+            self.grid_conv = nn.Sequential(
+                nn.Conv2d(self.num_grid_channels, conv_channels, kernel_size=3, padding=1),
+                nn.ReLU(),
+                nn.MaxPool2d(2, 2),  # Halves spatial dimensions -> 4x fewer values to process
+                nn.Conv2d(conv_channels, conv_channels, kernel_size=3, padding=1),
+                nn.ReLU(),
+            )
+            # Compute actual output size with a dummy forward pass
+            with torch.no_grad():
+                dummy_input = torch.zeros(1, self.num_grid_channels, grid_height, grid_width)
+                dummy_output = self.grid_conv(dummy_input)
+                grid_conv_out_size = dummy_output.numel()
+            
+            self.grid_fc = nn.Sequential(
+                nn.Linear(grid_conv_out_size + NUM_GLOBAL_WORLD_FEATURES, grid_feature_dim),
+                nn.ReLU(),
+            )
+            
+            # Agent encoder (MLP)
+            # Encodes all agents organized by color (no separate query agent features)
+            self.agent_fc = nn.Sequential(
+                nn.Linear(agent_input_size, agent_feature_dim * 2),
+                nn.ReLU(),
+                nn.Linear(agent_feature_dim * 2, agent_feature_dim),
+                nn.ReLU(),
+            )
+            
+            # Interactive object encoder (MLP)
+            self.interactive_fc = nn.Sequential(
+                nn.Linear(interactive_input_size, interactive_feature_dim),
+                nn.ReLU(),
+            )
+            
+            # Combined feature dimension
+            combined_dim = grid_feature_dim + agent_feature_dim + interactive_feature_dim
+            
+            # Final projection to feature_dim
+            self.output_fc = nn.Sequential(
+                nn.Linear(combined_dim, feature_dim),
+                nn.ReLU(),
+            )
+            
+            # Store sub-feature dimensions for get_config
+            self._grid_feature_dim = grid_feature_dim
+            self._agent_feature_dim = agent_feature_dim
+            self._interactive_feature_dim = interactive_feature_dim
+        
         # Internal cache for raw tensor extraction (before NN forward)
         # Keys are state_id (int), values are raw tensor tuples
         # Cache is query-agent agnostic since state encoding doesn't depend on query agent
-        self._raw_cache: Dict[Tuple, Tuple[torch.Tensor, ...]] = {}
+        # If share_cache_with is provided, reuse that encoder's cache
+        if share_cache_with is not None:
+            self._raw_cache = share_cache_with._raw_cache
+            self._shared_cache = True
+        else:
+            self._raw_cache: Dict[Tuple, Tuple[torch.Tensor, ...]] = {}
+            self._shared_cache = False
         self._cache_hits = 0
         self._cache_misses = 0
     
@@ -245,8 +303,16 @@ class MultiGridStateEncoder(BaseStateEncoder):
         
         Returns:
             Feature tensor (batch, feature_dim)
+        
+        If use_encoders=False, bypasses neural network and returns flattened
+        concatenation of inputs (true identity mode for debugging).
         """
         batch_size = grid_tensor.shape[0]
+        
+        if not self.use_encoders:
+            # Identity mode: flatten and concatenate all inputs unchanged
+            flat_grid = grid_tensor.view(batch_size, -1)
+            return torch.cat([flat_grid, global_features, agent_features, interactive_features], dim=1)
         
         # Grid encoding
         conv_out = self.grid_conv(grid_tensor)
@@ -968,4 +1034,5 @@ class MultiGridStateEncoder(BaseStateEncoder):
             'max_disabling_switches': self.max_disabling_switches,
             'max_control_buttons': self.max_control_buttons,
             'include_step_count': self.include_step_count,
+            'use_encoders': self.use_encoders,
         }

@@ -199,6 +199,48 @@ class WorldModel(gym.Env):
         
         return init_state
     
+    def get_human_agent_indices(self) -> List[int]:
+        """
+        Get the indices of human agents in the environment.
+        
+        Returns a list of agent indices that represent human agents.
+        The indices correspond to positions in the action list passed to step().
+        
+        Subclasses should override this to identify human agents based on
+        environment-specific criteria (e.g., color, type, name).
+        
+        Returns:
+            List of indices for human agents.
+        
+        Raises:
+            NotImplementedError: If the subclass doesn't implement this method.
+        """
+        raise NotImplementedError(
+            "Subclasses must implement get_human_agent_indices() to identify human agents. "
+            "This is required for Phase 2 training."
+        )
+    
+    def get_robot_agent_indices(self) -> List[int]:
+        """
+        Get the indices of robot agents in the environment.
+        
+        Returns a list of agent indices that represent robot agents.
+        The indices correspond to positions in the action list passed to step().
+        
+        Subclasses should override this to identify robot agents based on
+        environment-specific criteria (e.g., color, type, name).
+        
+        Returns:
+            List of indices for robot agents.
+        
+        Raises:
+            NotImplementedError: If the subclass doesn't implement this method.
+        """
+        raise NotImplementedError(
+            "Subclasses must implement get_robot_agent_indices() to identify robot agents. "
+            "This is required for Phase 2 training."
+        )
+    
     def is_terminal(self, state: Optional[Any] = None) -> bool:
         """
         Check if a state is terminal (no valid transitions exist).

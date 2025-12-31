@@ -194,7 +194,7 @@ def test_multigrid_robot_q_network():
     # Test forward pass
     world_model = MockWorldModel()
     state = create_mock_state()
-    q_values = q_network.encode_and_forward(state, world_model, device='cpu')
+    q_values = q_network.forward(state, world_model, device='cpu')
     
     assert q_values.shape == (1, 16)
     assert (q_values < 0).all(), "Q_r must be negative"
@@ -253,7 +253,7 @@ def test_multigrid_human_goal_achievement_network():
     goal = MockGoal((5, 5))
     
     # Test forward pass
-    v_h_e = v_h_e_network.encode_and_forward(
+    v_h_e = v_h_e_network.forward(
         state, world_model, human_agent_idx=0, goal=goal, device='cpu'
     )
     
@@ -276,6 +276,26 @@ def test_multigrid_human_goal_achievement_network():
     expected = 0.99 * 0.5
     assert torch.isclose(target2, torch.tensor(expected), atol=1e-5)
     print(f"  ✓ TD target when goal not achieved: {target2.item():.4f}")
+    
+    # Case 3: Goal not achieved AND terminal (episode ended without goal)
+    terminal_flag = torch.tensor([1.0])
+    target3 = v_h_e_network.compute_td_target(goal_not_achieved, next_v, terminal=terminal_flag)
+    assert target3.item() == 0.0, "When terminal and goal not achieved, target should be 0"
+    print(f"  ✓ TD target when terminal: {target3.item()}")
+    
+    # Case 4: Goal achieved AND terminal (terminal flag should be ignored)
+    target4 = v_h_e_network.compute_td_target(goal_achieved, next_v, terminal=terminal_flag)
+    assert target4.item() == 1.0, "When goal achieved, target should be 1 regardless of terminal"
+    print(f"  ✓ TD target when goal achieved + terminal: {target4.item()}")
+    
+    # Case 5: Batched computation with mixed terminal flags
+    goal_batch = torch.tensor([0.0, 0.0, 1.0, 0.0])
+    next_v_batch = torch.tensor([0.5, 0.5, 0.5, 0.5])
+    terminal_batch = torch.tensor([0.0, 1.0, 1.0, 0.0])
+    target5 = v_h_e_network.compute_td_target(goal_batch, next_v_batch, terminal=terminal_batch)
+    expected_batch = torch.tensor([0.99 * 0.5, 0.0, 1.0, 0.99 * 0.5])
+    assert torch.allclose(target5, expected_batch, atol=1e-5)
+    print(f"  ✓ Batched TD target with mixed terminal flags: {target5.tolist()}")
     
     # Test soft clamp preserves gradients
     raw = torch.tensor([0.5], requires_grad=True)
@@ -308,7 +328,7 @@ def test_multigrid_aggregate_goal_ability_network():
     state = create_mock_state()
     
     # Test forward pass
-    x_h = x_h_network.encode_and_forward(
+    x_h = x_h_network.forward(
         state, world_model, human_agent_idx=0, device='cpu'
     )
     
@@ -365,7 +385,7 @@ def test_multigrid_intrinsic_reward_network():
     state = create_mock_state()
     
     # Test forward pass
-    y, u_r = u_r_network.encode_and_forward(
+    y, u_r = u_r_network.forward(
         state, world_model, device='cpu'
     )
     
@@ -450,7 +470,7 @@ def test_multigrid_robot_value_network():
     state = create_mock_state()
     
     # Test forward pass
-    v_r = v_r_network.encode_and_forward(
+    v_r = v_r_network.forward(
         state, world_model, device='cpu'
     )
     

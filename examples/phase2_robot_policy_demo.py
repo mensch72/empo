@@ -25,6 +25,7 @@ Usage:
     python phase2_robot_policy_demo.py --small   # Use small 6x6 environment
     python phase2_robot_policy_demo.py --ensemble # Use random ensemble environment
     python phase2_robot_policy_demo.py --async   # Use async actor-learner training
+    python phase2_robot_policy_demo.py --tabular # Use lookup tables instead of neural networks
     
     # Save/restore for continued training (networks/policy saved by default)
     python phase2_robot_policy_demo.py --save_networks model.pt  # Custom path for networks
@@ -144,15 +145,18 @@ def configure_environment(use_ensemble: bool, use_small: bool = False):
         
         # Define goals for V_h^e evaluation
         DEFINED_GOALS = [
-            (1, (2,1)),  # easy once robot has pushed rock twice or once and moved back 
-            (1, (1,1)),  # medium difficulty
-            (1, (3,1)),  # hardest since robot must move back to (1,1) after pushing rock twice
+#            (1, (2,1)),  # easy once robot has pushed rock twice or once and moved back 
+#            (1, (1,1)),  # medium difficulty
+#            (1, (3,1)),  # hardest since robot must move back to (1,1) after pushing rock twice
             (1, (2,2)),  # already reached
+            (1, (1,2)),  # impossible goal (in wall)
         ]
         
         goal_sampler_factory = lambda env: TabularGoalSampler([
             ReachCellGoal(env, human_idx, pos) for human_idx, pos in DEFINED_GOALS
-        ], probabilities=[0.5, 0.2, 0.2, 0.1])
+        ], 
+#        probabilities=[0.4, 0.2, 0.2, 0.1, 0.1]
+        )
 
         TEST_MAPS = [
             (GRID_MAP, "Worst V_r: human locked behind rock"),
@@ -303,8 +307,8 @@ class _EnsembleEnvCreator:
             for x in range(env.width):
                 cell = env.grid.get(x, y)
                 grid_str += f"{type(cell).__name__ if cell else 'None'},"
-        grid_hash = hash(grid_str)
-        print(f"[DEBUG _EnsembleEnvCreator] Created new env, grid hash: {grid_hash:016x}")
+        #grid_hash = hash(grid_str)
+        #print(f"[DEBUG _EnsembleEnvCreator] Created new env, grid hash: {grid_hash:016x}")
         return env
 
 
@@ -654,7 +658,7 @@ def run_policy_rollout(
         
         with torch.no_grad():
             # Get Q_r values
-            q_values = robot_q_network.encode_and_forward(state, env, device)
+            q_values = robot_q_network.forward(state, env, device)
             q_np = q_values.squeeze().cpu().numpy()
             
             # Compute policy probabilities
@@ -679,7 +683,7 @@ def run_policy_rollout(
                 # Compute U_r directly from X_h values
                 x_h_vals = []
                 for h in human_indices:
-                    x_h = networks.x_h.encode_and_forward(state, env, h, device)
+                    x_h = networks.x_h.forward(state, env, h, device)
                     x_h_clamped = torch.clamp(x_h.squeeze(), min=1e-3, max=1.0)
                     x_h_vals.append(x_h_clamped)
                 if x_h_vals:
@@ -718,7 +722,7 @@ def run_policy_rollout(
     def get_greedy_action(state):
         """Get the greedy action for annotation (what robot would do from this state)."""
         with torch.no_grad():
-            q_values = robot_q_network.encode_and_forward(state, env, device)
+            q_values = robot_q_network.forward(state, env, device)
             beta_r = config.beta_r if config else 10.0
             robot_action = robot_q_network.sample_action(q_values, epsilon=0.0, beta_r=beta_r)
             return robot_action[0] if len(robot_action) > 0 else None
@@ -741,7 +745,7 @@ def run_policy_rollout(
         
         # Robots use learned Q-network
         with torch.no_grad():
-            q_values = robot_q_network.encode_and_forward(state, env, device)
+            q_values = robot_q_network.forward(state, env, device)
             # Use greedy action (epsilon=0) with final beta_r for concentrated policy
             beta_r = config.beta_r if config else 10.0
             robot_action = robot_q_network.sample_action(q_values, epsilon=0.0, beta_r=beta_r)
@@ -779,6 +783,8 @@ def main(
     use_ensemble: bool = False,
     use_small: bool = False,
     use_async: bool = False,
+    use_encoders: bool = True,
+    use_tabular: bool = False,
     save_networks_path: str = None,
     save_policy_path: str = None,
     restore_networks_path: str = None,
@@ -883,6 +889,11 @@ def main(
     # Print async mode status
     if use_async:
         print("[ASYNC MODE] Using actor-learner architecture for parallel training")
+    
+    # Print tabular mode status
+    if use_tabular:
+        print("[TABULAR MODE] Using lookup tables instead of neural networks")
+        print("  Suitable for small state spaces only (exact tabular learning)")
     
     # Override with profile settings
     if profile:
@@ -1027,6 +1038,14 @@ def main(
         async_min_buffer_size=50 if lightningfast_mode else (100 if quick_mode else 500),  # Smaller for quick/lightningfast mode
         # State encoding options
         include_step_count=False,  # Don't include step count in state encoding
+        use_encoders=use_encoders,
+        # Tabular learning mode (lookup tables instead of neural networks)
+        use_lookup_tables=use_tabular,
+        q_r_weight_decay=0,
+        v_r_weight_decay=0,
+        v_h_e_weight_decay=0,
+        x_h_weight_decay=0,
+        u_r_weight_decay=0,
     )
     
     # If using policy directly (no training), skip to rollouts
@@ -1147,16 +1166,21 @@ def main(
     
     # Save networks/policy after training (default paths unless overridden)
     # Always save by default to enable testing save/restore functionality
+    actual_policy_path = None
     if trainer is not None:
         # Determine save paths (use defaults if not specified)
         networks_save_path = save_networks_path if save_networks_path else default_networks_path
         policy_save_path = save_policy_path if save_policy_path else default_policy_path
         
         print(f"\nSaving all networks to: {networks_save_path}")
-        trainer.save_all_networks(networks_save_path)
+        actual_networks_path = trainer.save_all_networks(networks_save_path)
+        if actual_networks_path != networks_save_path:
+            print(f"  (actually saved to: {actual_networks_path})")
         
         print(f"Saving policy to: {policy_save_path}")
-        trainer.save_policy(policy_save_path)
+        actual_policy_path = trainer.save_policy(policy_save_path)
+        if actual_policy_path != policy_save_path:
+            print(f"  (actually saved to: {actual_policy_path})")
     
     # Generate rollout movie using env's built-in video recording
     # Override num_rollouts if specified
@@ -1169,8 +1193,11 @@ def main(
     # This verifies that the saved policy works correctly
     if use_policy_path:
         rollout_policy_path = use_policy_path
+    elif actual_policy_path is not None:
+        # Use the actual path where policy was saved (may be fallback location)
+        rollout_policy_path = actual_policy_path
     else:
-        # Use the policy we just saved (or the default path)
+        # Use the default path
         rollout_policy_path = save_policy_path if save_policy_path else default_policy_path
     
     print(f"Loading policy from disk for rollouts: {rollout_policy_path}")
@@ -1277,6 +1304,10 @@ if __name__ == "__main__":
                         help='Profile training with torch.profiler (outputs trace.json)')
     parser.add_argument('--async', '-a', dest='use_async', action='store_true',
                         help='Use async actor-learner training (tests async mode on CPU)')
+    parser.add_argument('--no-encoders', action='store_true',
+                        help='Disable neural encoders (use identity function for debugging)')
+    parser.add_argument('--tabular', '-t', action='store_true',
+                        help='Use lookup tables instead of neural networks (exact tabular learning)')
     
     # Save/restore options
     parser.add_argument('--save_networks', type=str, default=None, metavar='PATH',
@@ -1303,6 +1334,8 @@ if __name__ == "__main__":
         use_ensemble=args.ensemble,
         use_small=args.small,
         use_async=args.use_async,
+        use_encoders=not args.no_encoders,
+        use_tabular=args.tabular,
         save_networks_path=args.save_networks,
         save_policy_path=args.save_policy,
         restore_networks_path=args.restore_networks,

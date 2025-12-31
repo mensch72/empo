@@ -182,7 +182,7 @@ def compute_value_for_nodes(q_network, env, agent_idx, goal_node, device='cpu'):
                 continue
             
             # Get Q-values
-            q_values = q_network.encode_and_forward(
+            q_values = q_network.forward(
                 None, env, agent_idx, goal, device
             )
             

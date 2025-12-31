@@ -6,7 +6,7 @@ Implements V_r(s) from equation (9) for multigrid environments.
 
 import torch
 import torch.nn as nn
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from ...phase2.robot_value_network import BaseRobotValueNetwork
 from ..state_encoder import MultiGridStateEncoder
@@ -18,6 +18,12 @@ class MultiGridRobotValueNetwork(BaseRobotValueNetwork):
     
     Estimates V_r(s) = U_r(s) + E_{a_r ~ π_r}[Q_r(s, a_r)] - the robot's
     value function representing expected long-term aggregate human power.
+    
+    .. warning:: ASYNC TRAINING / PICKLE COMPATIBILITY
+    
+        This class (via its encoders) is pickled and sent to spawned actor
+        processes during async training. See warnings in MultiGridStateEncoder
+        for details on maintaining pickle compatibility.
     
     Args:
         grid_height: Height of the grid.
@@ -75,9 +81,11 @@ class MultiGridRobotValueNetwork(BaseRobotValueNetwork):
             )
         
         # V_r value head with optional dropout
+        # Use actual encoder feature_dim (may differ from state_feature_dim when use_encoders=False)
+        actual_state_dim = self.state_encoder.feature_dim
         if dropout > 0.0:
             self.value_head = nn.Sequential(
-                nn.Linear(state_feature_dim, hidden_dim),
+                nn.Linear(actual_state_dim, hidden_dim),
                 nn.ReLU(),
                 nn.Dropout(dropout),
                 nn.Linear(hidden_dim, hidden_dim),
@@ -87,14 +95,14 @@ class MultiGridRobotValueNetwork(BaseRobotValueNetwork):
             )
         else:
             self.value_head = nn.Sequential(
-                nn.Linear(state_feature_dim, hidden_dim),
+                nn.Linear(actual_state_dim, hidden_dim),
                 nn.ReLU(),
                 nn.Linear(hidden_dim, hidden_dim),
                 nn.ReLU(),
                 nn.Linear(hidden_dim, 1),
             )
     
-    def forward(
+    def _network_forward(
         self,
         grid_tensor: torch.Tensor,
         global_features: torch.Tensor,
@@ -102,7 +110,7 @@ class MultiGridRobotValueNetwork(BaseRobotValueNetwork):
         interactive_features: torch.Tensor
     ) -> torch.Tensor:
         """
-        Compute V_r(s).
+        Internal: Compute V_r(s) from pre-encoded tensors.
         
         Args:
             grid_tensor: (batch, num_grid_channels, H, W)
@@ -124,7 +132,7 @@ class MultiGridRobotValueNetwork(BaseRobotValueNetwork):
         # Ensure V_r < 0
         return self.ensure_negative(raw_value)
     
-    def encode_and_forward(
+    def forward(
         self,
         state: Any,
         world_model: Any,
@@ -145,7 +153,7 @@ class MultiGridRobotValueNetwork(BaseRobotValueNetwork):
         grid_tensor, global_features, agent_features, interactive_features = \
             self.state_encoder.tensorize_state(state, world_model, device)
         
-        return self.forward(
+        return self._network_forward(
             grid_tensor, global_features, agent_features, interactive_features
         )
     
@@ -168,7 +176,7 @@ class MultiGridRobotValueNetwork(BaseRobotValueNetwork):
         Returns:
             V_r values tensor (batch,) with V_r < 0.
         """
-        return self.forward(
+        return self._network_forward(
             grid_tensor, global_features, agent_features, interactive_features
         )
     
@@ -190,7 +198,45 @@ class MultiGridRobotValueNetwork(BaseRobotValueNetwork):
             V_r tensor of shape (1,).
         """
         with torch.no_grad():
-            return self.encode_and_forward(state, world_model, device)
+            return self.forward(state, world_model, device)
+    
+    def forward_batch(
+        self,
+        states: List[Any],
+        world_model: Any,
+        device: str = 'cpu'
+    ) -> torch.Tensor:
+        """
+        Batch forward pass from raw states.
+        
+        Batch-tensorizes all states and computes V_r in a single forward pass.
+        This is the primary interface for batched training.
+        
+        Args:
+            states: List of raw environment states.
+            world_model: Environment with grid (for tensorization).
+            device: Torch device.
+        
+        Returns:
+            V_r values tensor (batch,) with V_r < 0.
+        """
+        # Batch tensorize states
+        grid_list, glob_list, agent_list, inter_list = [], [], [], []
+        for state in states:
+            grid, glob, agent, inter = self.state_encoder.tensorize_state(state, world_model, device)
+            grid_list.append(grid)
+            glob_list.append(glob)
+            agent_list.append(agent)
+            inter_list.append(inter)
+        
+        grid_tensor = torch.cat(grid_list, dim=0)
+        global_features = torch.cat(glob_list, dim=0)
+        agent_features = torch.cat(agent_list, dim=0)
+        interactive_features = torch.cat(inter_list, dim=0)
+        
+        return self._network_forward(
+            grid_tensor, global_features, agent_features, interactive_features
+        )
     
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for save/load."""

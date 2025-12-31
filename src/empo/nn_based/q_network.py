@@ -43,12 +43,7 @@ class BaseQNetwork(nn.Module, ABC):
             self.soft_clamp = SoftClamp(a=feasible_range[0], b=feasible_range[1])
     
     @abstractmethod
-    def forward(self, *args, **kwargs) -> torch.Tensor:
-        """Compute Q-values for all actions. Returns (batch, num_actions)."""
-        pass
-    
-    @abstractmethod
-    def encode_and_forward(
+    def forward(
         self,
         state: Any,
         world_model: Any,

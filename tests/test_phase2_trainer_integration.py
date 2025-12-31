@@ -81,8 +81,11 @@ class MockVhNetwork(BaseHumanGoalAchievementNetwork):
     def get_config(self):
         return {}
     
-    def compute_td_target(self, goal_achieved, v_next):
-        return goal_achieved + (1 - goal_achieved) * self.gamma_h * v_next
+    def compute_td_target(self, goal_achieved, v_next, terminal=None):
+        continuation = (1 - goal_achieved) * self.gamma_h * v_next
+        if terminal is not None:
+            continuation = continuation * (1.0 - terminal)
+        return goal_achieved + continuation
 
 
 class MockXhNetwork(BaseAggregateGoalAbilityNetwork):
@@ -432,6 +435,71 @@ class TestDirectComputationModes:
         )
         
         assert config.warmup_u_r_steps == 0
+
+
+# =============================================================================
+# AGENT INDEX TESTS (WorldModel API)
+# =============================================================================
+
+class MockAgent:
+    """Mock agent with only the color attribute needed for testing."""
+    def __init__(self, color):
+        self.color = color
+
+
+class TestAgentIndices:
+    """Test that WorldModel API correctly identifies agent indices."""
+    
+    def test_multigrid_agent_indices_match_colors(self):
+        """Verify MultiGridEnv returns indices matching actual agent colors."""
+        from gym_multigrid.multigrid import MultiGridEnv, Grid
+        
+        # Create environment with known agent configuration
+        env = MultiGridEnv.__new__(MultiGridEnv)
+        env.agents = [
+            MockAgent(color='yellow'),  # human - index 0
+            MockAgent(color='grey'),    # robot - index 1
+            MockAgent(color='yellow'),  # human - index 2
+            MockAgent(color='red'),     # neither - index 3
+        ]
+        env.grid = Grid(5, 5)
+        
+        # Test get_human_agent_indices
+        human_indices = env.get_human_agent_indices()
+        assert set(human_indices) == {0, 2}, f"Expected {{0, 2}}, got {human_indices}"
+        
+        # Test get_robot_agent_indices
+        robot_indices = env.get_robot_agent_indices()
+        assert set(robot_indices) == {1}, f"Expected {{1}}, got {robot_indices}"
+        
+        # Verify indices match actual agent colors
+        for idx in human_indices:
+            assert env.agents[idx].color == 'yellow', f"Agent {idx} should be yellow"
+        for idx in robot_indices:
+            assert env.agents[idx].color == 'grey', f"Agent {idx} should be grey"
+    
+    def test_multigrid_empty_agent_lists(self):
+        """Test environment with no humans or no robots."""
+        from gym_multigrid.multigrid import MultiGridEnv, Grid
+        
+        # All robots, no humans
+        env = MultiGridEnv.__new__(MultiGridEnv)
+        env.agents = [
+            MockAgent(color='grey'),
+            MockAgent(color='grey'),
+        ]
+        env.grid = Grid(5, 5)
+        
+        assert env.get_human_agent_indices() == []
+        assert set(env.get_robot_agent_indices()) == {0, 1}
+        
+        # All humans, no robots
+        env.agents = [
+            MockAgent(color='yellow'),
+        ]
+        
+        assert set(env.get_human_agent_indices()) == {0}
+        assert env.get_robot_agent_indices() == []
 
 
 # =============================================================================

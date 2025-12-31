@@ -213,7 +213,7 @@ def main():
     
     prior_small.q_network.eval()
     with torch.no_grad():
-        q_values = prior_small.q_network.encode_and_forward(
+        q_values = prior_small.q_network.forward(
             state, small_world, 0, goal, device='cpu'
         )
         policy = prior_small.q_network.get_policy(q_values)

@@ -6,7 +6,7 @@ Implements U_r(s) from equation (8) for multigrid environments.
 
 import torch
 import torch.nn as nn
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from ...phase2.intrinsic_reward_network import BaseIntrinsicRewardNetwork
 from ..state_encoder import MultiGridStateEncoder
@@ -20,6 +20,12 @@ class MultiGridIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
     based on aggregate human power.
     
     Network predicts log(y-1) where y = E_h[X_h^{-ξ}], then computes U_r = -y^η.
+    
+    .. warning:: ASYNC TRAINING / PICKLE COMPATIBILITY
+    
+        This class (via its encoders) is pickled and sent to spawned actor
+        processes during async training. See warnings in MultiGridStateEncoder
+        for details on maintaining pickle compatibility.
     
     Args:
         grid_height: Height of the grid.
@@ -80,9 +86,11 @@ class MultiGridIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
         
         # Network predicts log(y-1) for numerical stability with optional dropout
         # y = 1 + exp(log(y-1)) ensures y > 1
+        # Use actual encoder feature_dim (may differ from state_feature_dim when use_encoders=False)
+        actual_state_dim = self.state_encoder.feature_dim
         if dropout > 0.0:
             self.y_head = nn.Sequential(
-                nn.Linear(state_feature_dim, hidden_dim),
+                nn.Linear(actual_state_dim, hidden_dim),
                 nn.ReLU(),
                 nn.Dropout(dropout),
                 nn.Linear(hidden_dim, hidden_dim),
@@ -92,14 +100,14 @@ class MultiGridIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
             )
         else:
             self.y_head = nn.Sequential(
-                nn.Linear(state_feature_dim, hidden_dim),
+                nn.Linear(actual_state_dim, hidden_dim),
                 nn.ReLU(),
                 nn.Linear(hidden_dim, hidden_dim),
                 nn.ReLU(),
                 nn.Linear(hidden_dim, 1),
             )
     
-    def forward(
+    def _network_forward(
         self,
         grid_tensor: torch.Tensor,
         global_features: torch.Tensor,
@@ -107,7 +115,7 @@ class MultiGridIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
         interactive_features: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Compute y and U_r(s).
+        Internal: Compute y and U_r(s) from pre-encoded tensors.
         
         Args:
             grid_tensor: (batch, num_grid_channels, H, W)
@@ -136,7 +144,7 @@ class MultiGridIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
         
         return y, u_r
     
-    def encode_and_forward(
+    def forward(
         self,
         state: Any,
         world_model: Any,
@@ -157,7 +165,7 @@ class MultiGridIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
         grid_tensor, global_features, agent_features, interactive_features = \
             self.state_encoder.tensorize_state(state, world_model, device)
         
-        return self.forward(
+        return self._network_forward(
             grid_tensor, global_features, agent_features, interactive_features
         )
     
@@ -182,7 +190,7 @@ class MultiGridIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
             - y: intermediate value (batch,), y > 1
             - U_r: intrinsic reward (batch,), U_r < 0
         """
-        return self.forward(
+        return self._network_forward(
             grid_tensor, global_features, agent_features, interactive_features
         )
     
@@ -204,7 +212,47 @@ class MultiGridIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
             Tuple (y, U_r), each of shape (1,).
         """
         with torch.no_grad():
-            return self.encode_and_forward(state, world_model, device)
+            return self.forward(state, world_model, device)
+    
+    def forward_batch(
+        self,
+        states: List[Any],
+        world_model: Any,
+        device: str = 'cpu'
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Batch forward pass from raw states.
+        
+        Batch-tensorizes all states and computes y and U_r in a single forward pass.
+        This is the primary interface for batched training.
+        
+        Args:
+            states: List of raw environment states.
+            world_model: Environment with grid (for tensorization).
+            device: Torch device.
+        
+        Returns:
+            Tuple (y, U_r) where:
+            - y: intermediate value (batch,), y > 1
+            - U_r: intrinsic reward (batch,), U_r < 0
+        """
+        # Batch tensorize states
+        grid_list, glob_list, agent_list, inter_list = [], [], [], []
+        for state in states:
+            grid, glob, agent, inter = self.state_encoder.tensorize_state(state, world_model, device)
+            grid_list.append(grid)
+            glob_list.append(glob)
+            agent_list.append(agent)
+            inter_list.append(inter)
+        
+        grid_tensor = torch.cat(grid_list, dim=0)
+        global_features = torch.cat(glob_list, dim=0)
+        agent_features = torch.cat(agent_list, dim=0)
+        interactive_features = torch.cat(inter_list, dim=0)
+        
+        return self._network_forward(
+            grid_tensor, global_features, agent_features, interactive_features
+        )
     
     def get_config(self) -> Dict[str, Any]:
         """Return configuration for save/load."""

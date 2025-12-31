@@ -11,6 +11,9 @@ Phase 2 computes:
 - X_h(s): Aggregate goal achievement ability (eq. 7)
 - U_r(s): Intrinsic robot reward (eq. 8)
 - V_r(s): Robot state value (eq. 9)
+
+Submodules:
+- lookup: Lookup table (tabular) implementations for small state spaces
 """
 
 from .config import Phase2Config
@@ -28,6 +31,28 @@ from .world_model_factory import (
     EnsembleWorldModelFactory
 )
 
+# Lookup table implementations
+from .lookup import (
+    LookupTableRobotQNetwork,
+    LookupTableRobotValueNetwork,
+    LookupTableHumanGoalAbilityNetwork,
+    LookupTableAggregateGoalAbilityNetwork,
+    LookupTableIntrinsicRewardNetwork,
+    is_lookup_table_network,
+    get_all_lookup_tables,
+    get_total_table_size,
+)
+
+# Network factory functions
+from .network_factory import (
+    create_robot_q_network,
+    create_robot_value_network,
+    create_human_goal_ability_network,
+    create_aggregate_goal_ability_network,
+    create_intrinsic_reward_network,
+    create_all_phase2_lookup_networks,
+)
+
 __all__ = [
     'Phase2Config',
     'BaseRobotQNetwork',
@@ -43,4 +68,21 @@ __all__ = [
     'WorldModelFactory',
     'CachedWorldModelFactory',
     'EnsembleWorldModelFactory',
+    # Lookup table implementations
+    'LookupTableRobotQNetwork',
+    'LookupTableRobotValueNetwork',
+    'LookupTableHumanGoalAbilityNetwork',
+    'LookupTableAggregateGoalAbilityNetwork',
+    'LookupTableIntrinsicRewardNetwork',
+    # Lookup table utilities
+    'is_lookup_table_network',
+    'get_all_lookup_tables',
+    'get_total_table_size',
+    # Network factory functions
+    'create_robot_q_network',
+    'create_robot_value_network',
+    'create_human_goal_ability_network',
+    'create_aggregate_goal_ability_network',
+    'create_intrinsic_reward_network',
+    'create_all_phase2_lookup_networks',
 ]

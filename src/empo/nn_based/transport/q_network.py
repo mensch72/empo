@@ -108,14 +108,14 @@ class TransportQNetwork(BaseQNetwork):
             nn.Linear(hidden_dim, num_actions),
         )
     
-    def forward(
+    def _network_forward(
         self,
         graph_data: Dict[str, torch.Tensor],
         goal_tensor: torch.Tensor,
         action_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Compute Q-values for all actions (implements BaseQNetwork interface).
+        Internal: Compute Q-values from pre-encoded tensors.
         
         Args:
             graph_data: Dictionary from observation_to_graph_data()
@@ -154,7 +154,7 @@ class TransportQNetwork(BaseQNetwork):
         
         return q_values
     
-    def encode_and_forward(
+    def forward(
         self,
         state: Any,
         world_model: Any,
@@ -163,7 +163,7 @@ class TransportQNetwork(BaseQNetwork):
         device: str = 'cpu'
     ) -> torch.Tensor:
         """
-        Encode state and compute Q-values (implements BaseQNetwork interface).
+        Encode state and compute Q-values.
         
         Args:
             state: Ignored (transport env doesn't have separate state)
@@ -180,7 +180,7 @@ class TransportQNetwork(BaseQNetwork):
         graph_data = observation_to_graph_data(world_model, query_agent_idx, device)
         goal_tensor = self.goal_encoder.tensorize_goal(goal, device, env=world_model)
         
-        return self.forward(graph_data, goal_tensor)
+        return self._network_forward(graph_data, goal_tensor)
     
     def get_q_value(
         self,
@@ -189,7 +189,7 @@ class TransportQNetwork(BaseQNetwork):
         action: int
     ) -> torch.Tensor:
         """Get Q-value for a specific action."""
-        q_values = self.forward(graph_data, goal_tensor)
+        q_values = self._network_forward(graph_data, goal_tensor)
         return q_values[:, action]
     
     def select_action(
@@ -223,7 +223,7 @@ class TransportQNetwork(BaseQNetwork):
         
         # Greedy action
         with torch.no_grad():
-            q_values = self.forward(
+            q_values = self._network_forward(
                 graph_data, goal_tensor,
                 action_mask.unsqueeze(0) if action_mask is not None else None
             )

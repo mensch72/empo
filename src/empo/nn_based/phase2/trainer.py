@@ -33,6 +33,7 @@ from .human_goal_ability import BaseHumanGoalAchievementNetwork
 from .aggregate_goal_ability import BaseAggregateGoalAbilityNetwork
 from .intrinsic_reward_network import BaseIntrinsicRewardNetwork
 from .robot_value_network import BaseRobotValueNetwork, compute_v_r_from_components
+from .lookup import get_all_lookup_tables, get_total_table_size
 
 # Try to import tensorboard (optional)
 try:
@@ -67,13 +68,13 @@ class BasePhase2Trainer(ABC):
     Implements the training loop for learning the robot policy to maximize
     aggregate human power as defined in equations (4)-(9).
     
-    Subclasses must implement environment-specific methods for:
-    - State encoding
-    - Goal sampling
-    - Action execution
-    - Goal achievement checking
+    Provides generic implementations for environment interaction using the
+    standard WorldModel API (get_state, set_state, step, reset) and the
+    PossibleGoal API (is_achieved). Subclasses may override these methods
+    for environment-specific optimizations.
     
     Args:
+        env: Environment instance (WorldModel).
         networks: Phase2Networks container with all networks.
         config: Phase2Config with hyperparameters.
         human_agent_indices: List of human agent indices.
@@ -84,10 +85,17 @@ class BasePhase2Trainer(ABC):
         verbose: Enable progress output (tqdm progress bar).
         debug: Enable verbose debug output (very detailed, for debugging).
         tensorboard_dir: Directory for TensorBoard logs (optional).
+        world_model_factory: Optional factory for creating world models. Required for
+            async training where the environment cannot be pickled.
+        world_model_factory: Optional factory for creating world models. Required for
+            async training where the environment cannot be pickled. In ensemble mode,
+            agent indices are automatically updated by calling the env's
+            get_human_agent_indices() and get_robot_agent_indices() methods.
     """
     
     def __init__(
         self,
+        env: Any,
         networks: Phase2Networks,
         config: Phase2Config,
         human_agent_indices: List[int],
@@ -99,11 +107,14 @@ class BasePhase2Trainer(ABC):
         debug: bool = False,
         tensorboard_dir: Optional[str] = None,
         profiler: Optional[Any] = None,
+        world_model_factory: Optional[Any] = None,
     ):
+        self.env = env
+        self.world_model_factory = world_model_factory
         self.networks = networks
         self.config = config
-        self.human_agent_indices = human_agent_indices
-        self.robot_agent_indices = robot_agent_indices
+        self.human_agent_indices = list(human_agent_indices)
+        self.robot_agent_indices = list(robot_agent_indices)
         self.human_policy_prior = human_policy_prior
         self.goal_sampler = goal_sampler
         self.device = device
@@ -111,12 +122,43 @@ class BasePhase2Trainer(ABC):
         self.debug = debug
         self.profiler = profiler
         
+        # Compute the total number of agents from the indices
+        self._update_num_agents()
+        
         # Initialize TensorBoard writer if requested
         self.writer = None
         if tensorboard_dir is not None and HAS_TENSORBOARD:
             # Archive old TensorBoard data to prevent mixing with new run
             self._archive_tensorboard_data(tensorboard_dir)
             self.writer = SummaryWriter(log_dir=tensorboard_dir)
+            # Add static remarks to TensorBoard
+            self.writer.add_text(
+                'Loss/caution',
+                "Losses are NOT expected to drop to zero as they are MSE losses "
+                "that are lower bounded by the variance of the stochastic variable they track!",
+                global_step=0
+            )
+            self.writer.add_text('GradNorm/remark', "Gradients are clipped.", global_step=0)
+            if config.async_training:
+                max_steps = config.max_env_steps_per_training_step
+                if max_steps is not None:
+                    self.writer.add_text(
+                        'Progress/remark',
+                        f"Async mode: at most {max_steps} env steps per training step. Buffer cleared before and after beta_r ramp-up.",
+                        global_step=0
+                    )
+                else:
+                    self.writer.add_text(
+                        'Progress/remark',
+                        "Async mode: unlimited env steps per training step. Buffer cleared before and after beta_r ramp-up.",
+                        global_step=0
+                    )
+            else:
+                self.writer.add_text(
+                    'Progress/remark',
+                    "Sync mode: one env step per training step. Buffer cleared before and after beta_r ramp-up.",
+                    global_step=0
+                )
         
         if self.debug:
             print("[DEBUG] BasePhase2Trainer.__init__: Initializing target networks...")
@@ -163,6 +205,7 @@ class BasePhase2Trainer(ABC):
         - TensorBoard writer (contains thread locks)
         - Profiler (contains thread locks)
         - Replay buffer (not needed in actor processes)
+        - Environment (may contain thread locks; recreated from factory)
         """
         state = self.__dict__.copy()
         # Don't pickle TensorBoard writer - contains thread locks
@@ -171,6 +214,8 @@ class BasePhase2Trainer(ABC):
         state['profiler'] = None
         # Don't pickle replay buffer - not needed in actor processes
         state['replay_buffer'] = None
+        # Don't pickle env - it may contain thread locks
+        state['env'] = None
         return state
     
     def __setstate__(self, state):
@@ -179,6 +224,7 @@ class BasePhase2Trainer(ABC):
         # Recreate empty replay buffer if needed
         if self.replay_buffer is None:
             self.replay_buffer = Phase2ReplayBuffer(capacity=self.config.buffer_size)
+        # Note: env stays None until _ensure_world_model() is called
     
     def _archive_tensorboard_data(self, tensorboard_dir: str) -> None:
         """Archive existing TensorBoard event files to a zip before starting a new run.
@@ -255,39 +301,100 @@ class BasePhase2Trainer(ABC):
             self.networks.v_r_target.eval()
     
     def _init_optimizers(self) -> Dict[str, optim.Optimizer]:
-        """Initialize optimizers for each network with weight decay."""
+        """Initialize optimizers for each network with weight decay.
+        
+        For lookup table networks that may have empty parameter lists,
+        creates a placeholder parameter to satisfy the optimizer constructor.
+        """
+        def make_optimizer(network, lr, weight_decay):
+            """Create optimizer, handling empty parameter case for lookup tables."""
+            params = list(network.parameters())
+            if len(params) == 0:
+                # Lookup tables start empty - create placeholder parameter
+                # This will be replaced when optimizer is recreated after tables grow
+                placeholder = nn.Parameter(torch.zeros(1, requires_grad=True))
+                return optim.Adam([placeholder], lr=lr, weight_decay=weight_decay)
+            return optim.Adam(params, lr=lr, weight_decay=weight_decay)
+        
         optimizers = {
-            'q_r': optim.Adam(
-                self.networks.q_r.parameters(), 
+            'q_r': make_optimizer(
+                self.networks.q_r,
                 lr=self.config.lr_q_r,
                 weight_decay=self.config.q_r_weight_decay
             ),
-            'v_h_e': optim.Adam(
-                self.networks.v_h_e.parameters(), 
+            'v_h_e': make_optimizer(
+                self.networks.v_h_e,
                 lr=self.config.lr_v_h_e,
                 weight_decay=self.config.v_h_e_weight_decay
             ),
-            'x_h': optim.Adam(
-                self.networks.x_h.parameters(), 
+            'x_h': make_optimizer(
+                self.networks.x_h,
                 lr=self.config.lr_x_h,
                 weight_decay=self.config.x_h_weight_decay
             ),
         }
         # Only create U_r optimizer if using network (not direct computation)
         if self.config.u_r_use_network:
-            optimizers['u_r'] = optim.Adam(
-                self.networks.u_r.parameters(), 
+            optimizers['u_r'] = make_optimizer(
+                self.networks.u_r,
                 lr=self.config.lr_u_r,
                 weight_decay=self.config.u_r_weight_decay
             )
         # Only create V_r optimizer if using network (not direct computation)
         if self.config.v_r_use_network:
-            optimizers['v_r'] = optim.Adam(
-                self.networks.v_r.parameters(), 
+            optimizers['v_r'] = make_optimizer(
+                self.networks.v_r,
                 lr=self.config.lr_v_r,
                 weight_decay=self.config.v_r_weight_decay
             )
         return optimizers
+    
+    def _add_new_lookup_params_to_optimizers(self):
+        """
+        Add new lookup table parameters to optimizers incrementally.
+        
+        Lookup tables create new parameters dynamically as new states are encountered.
+        This method adds any newly created parameters to existing optimizers without
+        recreating them, preserving momentum/adaptive state for existing parameters.
+        
+        This is very cheap (~0.002ms) so it's called every training step.
+        """
+        # Collect new parameters from all lookup table networks
+        # Each network tracks new params since last call to get_new_params()
+        new_params_by_optimizer = {
+            'q_r': [],
+            'v_h_e': [],
+            'x_h': [],
+        }
+        
+        # Check each network for new params
+        if hasattr(self.networks.q_r, 'get_new_params'):
+            new_params_by_optimizer['q_r'].extend(self.networks.q_r.get_new_params())
+        if hasattr(self.networks.v_h_e, 'get_new_params'):
+            new_params_by_optimizer['v_h_e'].extend(self.networks.v_h_e.get_new_params())
+        if hasattr(self.networks.x_h, 'get_new_params'):
+            new_params_by_optimizer['x_h'].extend(self.networks.x_h.get_new_params())
+        if self.config.u_r_use_network and hasattr(self.networks.u_r, 'get_new_params'):
+            # U_r shares optimizer with x_h
+            new_params_by_optimizer['x_h'].extend(self.networks.u_r.get_new_params())
+        if self.config.v_r_use_network and hasattr(self.networks.v_r, 'get_new_params'):
+            # V_r shares optimizer with q_r
+            new_params_by_optimizer['q_r'].extend(self.networks.v_r.get_new_params())
+        
+        # Add new parameters incrementally to each optimizer
+        total_new = 0
+        for name, new_params in new_params_by_optimizer.items():
+            if new_params and name in self.optimizers:
+                optimizer = self.optimizers[name]
+                # Direct append to first param group is 300x faster than add_param_group
+                for param in new_params:
+                    optimizer.param_groups[0]['params'].append(param)
+                total_new += len(new_params)
+        
+        if self.debug and total_new > 0:
+            total_entries = get_total_table_size(self.networks)
+            print(f"[DEBUG] Added {total_new} new params to optimizers "
+                  f"(step {self.training_step_count}, {total_entries} total entries)")
     
     def _compute_param_norms(self) -> Dict[str, float]:
         """Compute L2 norms of network parameters for monitoring."""
@@ -374,22 +481,68 @@ class BasePhase2Trainer(ABC):
     #     """
     #     pass
     
-    @abstractmethod
+    def _update_num_agents(self):
+        """Update num_agents from current human_agent_indices and robot_agent_indices."""
+        all_indices = self.human_agent_indices + self.robot_agent_indices
+        self.num_agents = max(all_indices) + 1 if all_indices else 0
+    
+    def _ensure_world_model(self):
+        """
+        Ensure world model is available, creating from factory if needed.
+        
+        Called by reset_environment() when env is None (in async actor processes).
+        After creating the env, updates goal_sampler and human_policy_prior.
+        """
+        if self.env is None:
+            if self.world_model_factory is None:
+                raise RuntimeError(
+                    "No world_model_factory provided. For async training, "
+                    "you must pass a world_model_factory to the trainer."
+                )
+            self._create_env_from_factory()
+    
+    def _create_env_from_factory(self):
+        """
+        Create environment from factory and update dependent components.
+        
+        Called by _ensure_world_model() for initial creation, and by
+        reset_environment() for ensemble mode (new env each episode).
+        
+        Automatically updates human_agent_indices and robot_agent_indices
+        by calling the env's get_human_agent_indices() and get_robot_agent_indices()
+        methods (important for ensemble mode where agent positions/indices can vary).
+        """
+        # Create env from factory
+        self.env = self.world_model_factory.create()
+        
+        # Update agent indices from the new environment using WorldModel API
+        if hasattr(self.env, 'get_human_agent_indices') and hasattr(self.env, 'get_robot_agent_indices'):
+            self.human_agent_indices = self.env.get_human_agent_indices()
+            self.robot_agent_indices = self.env.get_robot_agent_indices()
+            self._update_num_agents()
+        
+        # Update goal_sampler and human_policy_prior with new env
+        if hasattr(self.goal_sampler, 'set_world_model'):
+            self.goal_sampler.set_world_model(self.env)
+        if hasattr(self.human_policy_prior, 'set_world_model'):
+            self.human_policy_prior.set_world_model(self.env)
+    
     def check_goal_achieved(self, state: Any, human_idx: int, goal: Any) -> bool:
         """
         Check if a human's goal is achieved in the given state.
         
+        Uses the standard PossibleGoal API: goal.is_achieved(state).
+        
         Args:
             state: Current environment state.
-            human_idx: Index of the human agent.
-            goal: The goal to check.
+            human_idx: Index of the human agent (unused, goals check state directly).
+            goal: The goal to check (must have is_achieved method).
         
         Returns:
             True if goal is achieved, False otherwise.
         """
-        pass
+        return goal.is_achieved(state)
     
-    @abstractmethod
     def step_environment(
         self,
         state: Any,
@@ -399,6 +552,9 @@ class BasePhase2Trainer(ABC):
         """
         Execute actions in the environment.
         
+        Builds a full action list for all agents based on human_agent_indices
+        and robot_agent_indices, then steps the environment.
+        
         Args:
             state: Current state.
             robot_action: Tuple of robot actions.
@@ -407,17 +563,40 @@ class BasePhase2Trainer(ABC):
         Returns:
             Next state.
         """
-        pass
+        # Build action list for all agents
+        actions = [0] * self.num_agents  # Default to idle for any gaps
+        
+        for i, human_idx in enumerate(self.human_agent_indices):
+            actions[human_idx] = human_actions[i]
+        
+        for i, robot_idx in enumerate(self.robot_agent_indices):
+            actions[robot_idx] = robot_action[i]
+        
+        # Step environment and get new state (standard WorldModel API)
+        self.env.step(actions)
+        return self.env.get_state()
     
-    @abstractmethod
     def reset_environment(self) -> Any:
         """
         Reset the environment to initial state.
         
+        If a world_model_factory is provided, uses it to create/reset the environment.
+        This supports both cached mode (same env reused) and ensemble mode (new env
+        each episode).
+        
         Returns:
             Initial state.
         """
-        pass
+        if self.world_model_factory is not None:
+            self._create_env_from_factory()
+        elif self.env is None:
+            raise RuntimeError(
+                "No world_model_factory provided and env is None. "
+                "For async training, you must pass a world_model_factory."
+            )
+        
+        self.env.reset()
+        return self.env.get_state()
     
     def sample_robot_action(self, state: Any) -> Tuple[int, ...]:
         """
@@ -439,7 +618,7 @@ class BasePhase2Trainer(ABC):
         effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
         
         with torch.no_grad():
-            q_values = self.networks.q_r_target.encode_and_forward(
+            q_values = self.networks.q_r_target.forward(
                 state, None, self.device
             )
             return self.networks.q_r_target.sample_action(
@@ -472,7 +651,8 @@ class BasePhase2Trainer(ABC):
         self,
         state: Any,
         goals: Dict[int, Any],
-        goal_weights: Dict[int, float]
+        goal_weights: Dict[int, float],
+        terminal: bool = False
     ) -> Tuple[Phase2Transition, Any]:
         """
         Collect one transition from the environment.
@@ -481,6 +661,9 @@ class BasePhase2Trainer(ABC):
             state: Current state.
             goals: Current goal assignments.
             goal_weights: Weights for each goal (from goal sampler).
+            terminal: Whether this transition ends the episode (after this step,
+                the environment will be reset). When True, the V_h^e TD target
+                should not bootstrap from next_state.
         
         Returns:
             Tuple of (transition, next_state).
@@ -523,7 +706,8 @@ class BasePhase2Trainer(ABC):
             goal_weights=goal_weights.copy(),
             human_actions=human_actions,
             next_state=next_state,
-            transition_probs_by_action=transition_probs_by_action
+            transition_probs_by_action=transition_probs_by_action,
+            terminal=terminal
         )
         
         if self.debug:
@@ -556,18 +740,13 @@ class BasePhase2Trainer(ABC):
             robot_action = self.networks.q_r.action_index_to_tuple(action_idx)
             
             # Build full action vector using ACTUAL human actions
-            actions = []
-            human_idx_iter = 0
-            robot_idx = 0
-            for agent_idx in range(len(self.env.agents)):
-                if agent_idx in self.human_agent_indices:
-                    actions.append(human_actions[human_idx_iter])
-                    human_idx_iter += 1
-                elif agent_idx in self.robot_agent_indices:
-                    actions.append(robot_action[robot_idx])
-                    robot_idx += 1
-                else:
-                    actions.append(0)
+            actions = [0] * self.num_agents  # Default to idle for any gaps
+            
+            for i, human_idx in enumerate(self.human_agent_indices):
+                actions[human_idx] = human_actions[i]
+            
+            for i, robot_idx in enumerate(self.robot_agent_indices):
+                actions[robot_idx] = robot_action[i]
             
             # Get transition probabilities
             trans_probs = self.env.transition_probabilities(state, actions)
@@ -596,13 +775,13 @@ class BasePhase2Trainer(ABC):
         """
         if self.config.u_r_use_network:
             # Use U_r network (or target network depending on context)
-            _, u_r = self.networks.u_r.encode_and_forward(state, None, self.device)
+            _, u_r = self.networks.u_r.forward(state, None, self.device)
             return u_r
         else:
             # Compute directly from X_h values
             x_h_values = []
             for h in self.human_agent_indices:
-                x_h = self.networks.x_h.encode_and_forward(state, None, h, self.device)
+                x_h = self.networks.x_h.forward(state, None, h, self.device)
                 # Clamp X_h to (0, 1] to prevent explosion when X_h is near 0
                 x_h_clamped = torch.clamp(x_h.squeeze(), min=1e-3, max=1.0)
                 x_h_values.append(x_h_clamped)
@@ -632,13 +811,13 @@ class BasePhase2Trainer(ABC):
         """
         if self.config.u_r_use_network:
             # Use U_r TARGET network
-            _, u_r = self.networks.u_r_target.encode_and_forward(state, None, self.device)
+            _, u_r = self.networks.u_r_target.forward(state, None, self.device)
             return u_r
         else:
             # Compute directly from X_h TARGET values
             x_h_values = []
             for h in self.human_agent_indices:
-                x_h = self.networks.x_h_target.encode_and_forward(state, None, h, self.device)
+                x_h = self.networks.x_h_target.forward(state, None, h, self.device)
                 # Clamp X_h to (0, 1] to prevent explosion when X_h is near 0
                 x_h_clamped = torch.clamp(x_h.squeeze(), min=1e-3, max=1.0)
                 x_h_values.append(x_h_clamped)
@@ -655,199 +834,379 @@ class BasePhase2Trainer(ABC):
         self,
         batch: List[Phase2Transition],
         x_h_batch: Optional[List[Phase2Transition]] = None
-    ) -> Dict[str, torch.Tensor]:
+    ) -> Tuple[Dict[str, torch.Tensor], Dict[str, Dict[str, float]]]:
         """
-        Compute losses for all networks.
+        Compute losses for all networks using batched forward passes.
+        
+        Uses forward_batch methods on all networks for efficient batched
+        computation. Works for both neural networks and lookup tables.
         
         Args:
             batch: List of transitions for most networks.
             x_h_batch: Optional larger batch for X_h (defaults to batch).
         
         Returns:
-            Dict mapping loss names to loss tensors.
+            Tuple of (losses dict, prediction_stats dict).
         """
         if x_h_batch is None:
             x_h_batch = batch
         
-        # Check which networks are active - determines what we need to compute
+        n = len(batch)
+        
+        # Check which networks are active in current warmup stage
         active_networks = self.config.get_active_networks(self.training_step_count)
+        v_h_e_active = 'v_h_e' in active_networks
         x_h_active = 'x_h' in active_networks
         u_r_active = 'u_r' in active_networks
         q_r_active = 'q_r' in active_networks
+        v_r_active = 'v_r' in active_networks
+        
+        # Track prediction statistics
+        prediction_stats = {}
+        
+        # Get effective beta_r (needed for V_r target computation)
+        effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
+        
+        # ===================================================================
+        # Stage 1: Collect data from transitions for batched processing
+        # ===================================================================
+        
+        # Extract states and next_states
+        states = [t.state for t in batch]
+        next_states = [t.next_state for t in batch]
+        
+        # Collect V_h^e data: (state_idx, state, next_state, human_idx, goal, terminal)
+        v_h_e_indices = []  # which transition this came from
+        v_h_e_states = []
+        v_h_e_next_states = []
+        v_h_e_human_indices = []
+        v_h_e_goals = []
+        v_h_e_achieved = []
+        v_h_e_terminal = []  # whether transition is terminal (episode ended)
+        
+        for i, t in enumerate(batch):
+            for h, g_h in t.goals.items():
+                v_h_e_indices.append(i)
+                v_h_e_states.append(t.state)
+                v_h_e_next_states.append(t.next_state)
+                v_h_e_human_indices.append(h)
+                v_h_e_goals.append(g_h)
+                achieved = self.check_goal_achieved(t.next_state, h, g_h)
+                v_h_e_achieved.append(achieved)
+                v_h_e_terminal.append(t.terminal)
+                
+                # Debug logging for goal achievement
+                if self.debug and achieved:
+                    step_count, agent_states, _, _ = t.next_state
+                    agent_pos = (int(agent_states[h][0]), int(agent_states[h][1]))
+                    goal_target = getattr(g_h, 'target_pos', 'unknown')
+                    print(f"[DEBUG] Goal achieved! human={h}, target={goal_target}, "
+                          f"agent_pos={agent_pos}, terminal={t.terminal}, goal_hash={hash(g_h)}")
+        
+        # Collect X_h data
+        x_h_states = []
+        x_h_human_indices = []
+        x_h_goals = []
+        x_h_goal_weights = []
+        
+        if x_h_active:
+            for t in x_h_batch:
+                if self.config.x_h_sample_humans is None:
+                    humans_for_x_h = list(t.goals.keys())
+                else:
+                    n_sample = min(self.config.x_h_sample_humans, len(t.goals))
+                    humans_for_x_h = random.sample(list(t.goals.keys()), n_sample)
+                
+                for h_x in humans_for_x_h:
+                    x_h_states.append(t.state)
+                    x_h_human_indices.append(h_x)
+                    x_h_goals.append(t.goals[h_x])
+                    x_h_goal_weights.append(t.goal_weights[h_x])
+        
+        # Collect U_r data - flatten all (state, human) pairs for batched X_h computation
+        u_r_flat_states = []      # states repeated for each human
+        u_r_flat_humans = []      # human indices
+        u_r_humans_per_state = [] # how many humans sampled for each state
+        
+        if self.config.u_r_use_network and u_r_active:
+            for t in batch:
+                if self.config.u_r_sample_humans is None:
+                    humans_for_u_r = list(self.human_agent_indices)
+                else:
+                    n_sample = min(self.config.u_r_sample_humans, len(self.human_agent_indices))
+                    humans_for_u_r = random.sample(list(self.human_agent_indices), n_sample)
+                
+                u_r_humans_per_state.append(len(humans_for_u_r))
+                for h in humans_for_u_r:
+                    u_r_flat_states.append(t.state)
+                    u_r_flat_humans.append(h)
+        
+        # ===================================================================
+        # Stage 2: Batched forward passes
+        # ===================================================================
         
         losses = {
             'v_h_e': torch.tensor(0.0, device=self.device),
             'x_h': torch.tensor(0.0, device=self.device),
             'q_r': torch.tensor(0.0, device=self.device),
         }
-        # Only include U_r loss if using network mode
         if self.config.u_r_use_network:
             losses['u_r'] = torch.tensor(0.0, device=self.device)
-        # Only include V_r loss if using network mode
         if self.config.v_r_use_network:
             losses['v_r'] = torch.tensor(0.0, device=self.device)
         
-        # Track counts for normalization
-        x_h_count = 0
+        # ----- V_h^e loss (batched) -----
+        if v_h_e_states:
+            # Forward pass for current states
+            v_h_e_pred = self.networks.v_h_e.forward_batch(
+                v_h_e_states, v_h_e_goals, v_h_e_human_indices,
+                self.env, self.device
+            )
+            
+            # Target: check goal achieved + V_h^e(s', g_h) from target network
+            goal_achieved_t = torch.tensor(
+                [1.0 if a else 0.0 for a in v_h_e_achieved],
+                device=self.device
+            )
+            
+            # Terminal mask: when True, continuation value is 0
+            terminal_t = torch.tensor(
+                [1.0 if t else 0.0 for t in v_h_e_terminal],
+                device=self.device
+            )
+            
+            with torch.no_grad():
+                v_h_e_next = self.networks.v_h_e_target.forward_batch(
+                    v_h_e_next_states, v_h_e_goals, v_h_e_human_indices,
+                    self.env, self.device
+                )
+            
+            # TD target: achieved + (1 - achieved) * (1 - terminal) * gamma_h * V_h^e_next
+            target_v_h_e = self.networks.v_h_e.compute_td_target(
+                goal_achieved_t, v_h_e_next.squeeze(), terminal=terminal_t
+            )
+            
+            # Debug logging for TD targets
+            if self.debug and self.training_step_count % 100 == 0:
+                n_achieved = goal_achieved_t.sum().item()
+                n_terminal = terminal_t.sum().item()
+                n_total = len(goal_achieved_t)
+                # Find unique goals and their target values
+                goal_targets = {}
+                for idx, g in enumerate(v_h_e_goals):
+                    goal_key = getattr(g, 'target_pos', hash(g))
+                    if goal_key not in goal_targets:
+                        goal_targets[goal_key] = {'targets': [], 'achieved': [], 'terminal': [], 'next_v': []}
+                    goal_targets[goal_key]['targets'].append(target_v_h_e[idx].item())
+                    goal_targets[goal_key]['achieved'].append(goal_achieved_t[idx].item())
+                    goal_targets[goal_key]['terminal'].append(terminal_t[idx].item())
+                    goal_targets[goal_key]['next_v'].append(v_h_e_next[idx].item())
+                print(f"[DEBUG V_h^e] step={self.training_step_count}, achieved={n_achieved}/{n_total}, "
+                      f"terminal={n_terminal}/{n_total}, target_mean={target_v_h_e.mean().item():.4f}")
+                for goal_key, data in sorted(goal_targets.items()):
+                    n = len(data['targets'])
+                    mean_target = sum(data['targets']) / n
+                    mean_next_v = sum(data['next_v']) / n
+                    n_ach = sum(data['achieved'])
+                    n_term = sum(data['terminal'])
+                    print(f"[DEBUG V_h^e]   Goal {goal_key}: n={n}, achieved={n_ach}, terminal={n_term}, "
+                          f"mean_target={mean_target:.4f}, mean_next_v={mean_next_v:.4f}")
+            
+            losses['v_h_e'] = ((v_h_e_pred.squeeze() - target_v_h_e) ** 2).mean()
+            
+            with torch.no_grad():
+                prediction_stats['v_h_e'] = {
+                    'mean': v_h_e_pred.mean().item(),
+                    'std': v_h_e_pred.std().item() if v_h_e_pred.numel() > 1 else 0.0,
+                    'target_mean': target_v_h_e.mean().item()
+                }
         
-        for transition in batch:
-            # Unpack transition
-            s = transition.state
-            a_r = transition.robot_action
-            goals = transition.goals
-            s_prime = transition.next_state
+        # ----- X_h loss (batched, potentially larger batch) -----
+        if x_h_active and x_h_states:
+            # Forward pass
+            x_h_pred = self.networks.x_h.forward_batch(
+                x_h_states, x_h_human_indices,
+                self.env, self.device
+            )
             
-            # ===== V_h^e loss (for each human and their goal) =====
-            for h, g_h in goals.items():
-                # Get V_h^e prediction
-                v_h_e_pred = self.networks.v_h_e.encode_and_forward(
-                    s, None, h, g_h, self.device
+            # Target from V_h^e target network
+            with torch.no_grad():
+                v_h_e_for_x = self.networks.v_h_e_target.forward_batch(
+                    x_h_states, x_h_goals, x_h_human_indices,
+                    self.env, self.device
                 )
-                
-                # Check if goal achieved
-                goal_achieved = self.check_goal_achieved(s_prime, h, g_h)
-                goal_achieved_t = torch.tensor(
-                    1.0 if goal_achieved else 0.0, 
-                    device=self.device
-                )
-                
-                # Get target V_h^e(s', g_h)
-                with torch.no_grad():
-                    v_h_e_next = self.networks.v_h_e_target.encode_and_forward(
-                        s_prime, None, h, g_h, self.device
-                    )
-                
-                # TD target: U_h(s') + γ_h * V_h^e(s', g_h) if not achieved
-                target = self.networks.v_h_e.compute_td_target(
-                    goal_achieved_t, v_h_e_next.squeeze()
-                )
-                
-                losses['v_h_e'] = losses['v_h_e'] + (v_h_e_pred.squeeze() - target) ** 2
+                # Hard clamp for inference
+                v_h_e_for_x = self.networks.v_h_e_target.apply_hard_clamp(v_h_e_for_x)
             
-            # ===== U_r loss (only if using network mode AND U_r is active) =====
-            if self.config.u_r_use_network and u_r_active:
-                # Determine which humans to sample for U_r loss
-                if self.config.u_r_sample_humans is None:
-                    # Use all humans
-                    humans_for_u_r = self.human_agent_indices
-                else:
-                    # Sample a fixed number of humans
-                    n_sample = min(self.config.u_r_sample_humans, len(self.human_agent_indices))
-                    humans_for_u_r = random.sample(self.human_agent_indices, n_sample)
-                
-                y_pred, _ = self.networks.u_r.encode_and_forward(s, None, self.device)
-                
-                # Accumulate X_h^{-ξ} over sampled humans using X_h target network for stability
-                x_h_sum = torch.tensor(0.0, device=self.device)
-                for h_u in humans_for_u_r:
-                    with torch.no_grad():
-                        x_h_for_h = self.networks.x_h_target.encode_and_forward(
-                            s, None, h_u, self.device
-                        )
-                    # Clamp X_h to (0, 1] to prevent X_h^{-ξ} explosion when X_h is near 0
-                    x_h_clamped = torch.clamp(x_h_for_h.squeeze(), min=1e-3, max=1.0)
-                    # Accumulate X_h^{-ξ}
-                    x_h_sum = x_h_sum + x_h_clamped ** (-self.config.xi)
-                
-                # Average to get E[X_h^{-ξ}] = y (the target)
-                x_h_avg = x_h_sum / len(humans_for_u_r)
-                
-                # target_y = E[X_h^{-ξ}] directly (y is defined as E[X_h^{-ξ}])
-                target_y = x_h_avg
-                losses['u_r'] = losses['u_r'] + (y_pred.squeeze() - target_y) ** 2
+            # Compute targets: w_h * V_h^e(s, g_h)^zeta
+            x_h_weights_tensor = torch.tensor(x_h_goal_weights, device=self.device, dtype=torch.float32)
+            target_x_h = self.networks.x_h.compute_target(v_h_e_for_x.squeeze(), x_h_weights_tensor)
             
-            # ===== Q_r loss (only when Q_r is active) =====
-            if q_r_active:
-                q_r_all = self.networks.q_r.encode_and_forward(s, None, self.device)
-                a_r_index = self.networks.q_r.action_tuple_to_index(a_r)
-                q_r_pred = q_r_all.squeeze()[a_r_index]
-                
-                # Use effective beta_r for policy (0 during warm-up for independence)
-                effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
-                
-                with torch.no_grad():
-                    if self.config.v_r_use_network:
-                        # Use V_r target network
-                        v_r_next = self.networks.v_r_target.encode_and_forward(
-                            s_prime, None, self.device
-                        )
-                    else:
-                        # Compute V_r directly: V_r(s') = U_r(s') + π_r(s') · Q_r(s')
-                        # Use TARGET networks for stable targets
-                        u_r_next = self._compute_u_r_for_state_target(s_prime)
-                        q_r_next = self.networks.q_r_target.encode_and_forward(s_prime, None, self.device)
-                        pi_r_next = self.networks.q_r_target.get_policy(q_r_next, beta_r=effective_beta_r)
-                        v_r_next = compute_v_r_from_components(
-                            u_r_next.squeeze(), q_r_next.squeeze(), pi_r_next.squeeze()
-                        )
-                
-                target_q_r = self.config.gamma_r * v_r_next.squeeze()
-                losses['q_r'] = losses['q_r'] + (q_r_pred - target_q_r) ** 2
+            losses['x_h'] = ((x_h_pred.squeeze() - target_x_h) ** 2).mean()
             
-            # ===== V_r loss (only if using network mode) =====
-            if self.config.v_r_use_network:
-                v_r_pred = self.networks.v_r.encode_and_forward(s, None, self.device)
-                
-                with torch.no_grad():
-                    # Use TARGET networks for stable V_r targets
-                    u_r = self._compute_u_r_for_state_target(s)
-                    q_r_for_v = self.networks.q_r_target.encode_and_forward(s, None, self.device)
-                    pi_r = self.networks.q_r_target.get_policy(q_r_for_v, beta_r=effective_beta_r)
-                
-                target_v_r = compute_v_r_from_components(
-                    u_r.squeeze(), q_r_for_v.squeeze(), pi_r.squeeze()
-                )
-                losses['v_r'] = losses['v_r'] + (v_r_pred.squeeze() - target_v_r) ** 2
+            with torch.no_grad():
+                prediction_stats['x_h'] = {
+                    'mean': x_h_pred.mean().item(),
+                    'std': x_h_pred.std().item() if x_h_pred.numel() > 1 else 0.0,
+                    'target_mean': target_x_h.mean().item()
+                }
         
-        # ===== X_h loss (computed on potentially larger batch, only when X_h is active) =====
-        if x_h_active:
-            for transition in x_h_batch:
-                s = transition.state
-                goals = transition.goals
-                goal_weights = transition.goal_weights
+        # ----- U_r loss (fully batched, only if using network mode) -----
+        if self.config.u_r_use_network and u_r_active and u_r_flat_states:
+            # Forward pass on unique states for U_r predictions
+            y_pred, _ = self.networks.u_r.forward_batch(
+                states, self.env, self.device
+            )
+            
+            # Single batched X_h computation for all (state, human) pairs
+            with torch.no_grad():
+                x_h_all = self.networks.x_h_target.forward_batch(
+                    u_r_flat_states, u_r_flat_humans,
+                    self.env, self.device
+                ).squeeze()
                 
-                # Determine which human-goal pairs to use for X_h loss
-                if self.config.x_h_sample_humans is None:
-                    # Use all humans' goals from the transition
-                    humans_for_x_h = list(goals.keys())
-                else:
-                    # Sample a fixed number of humans
-                    n_sample = min(self.config.x_h_sample_humans, len(goals))
-                    humans_for_x_h = random.sample(list(goals.keys()), n_sample)
+                # Clamp X_h values and compute X_h^{-xi}
+                x_h_clamped = torch.clamp(x_h_all, min=1e-3, max=1.0)
+                x_h_power = x_h_clamped ** (-self.config.xi)
                 
-                for h_x in humans_for_x_h:
-                    g_h_x = goals[h_x]
-                    w_h_x = goal_weights[h_x]
-                    x_h_pred = self.networks.x_h.encode_and_forward(
-                        s, None, h_x, self.device
-                    )
-                    
-                    with torch.no_grad():
-                        # Use target network for more stable X_h targets
-                        v_h_e_for_x = self.networks.v_h_e_target.encode_and_forward(
-                            s, None, h_x, g_h_x, self.device
-                        )
-                    
-                    target_x_h = self.networks.x_h.compute_target(v_h_e_for_x.squeeze(), w_h_x)
-                    losses['x_h'] = losses['x_h'] + (x_h_pred.squeeze() - target_x_h) ** 2
-                    x_h_count += 1
+                # Aggregate by state using scatter_add: sum X_h^{-xi} for each state
+                # Build state indices: [0,0,0, 1,1,1, 2,2,2, ...] based on humans_per_state
+                state_indices = []
+                for state_idx, n_humans in enumerate(u_r_humans_per_state):
+                    state_indices.extend([state_idx] * n_humans)
+                state_indices_t = torch.tensor(state_indices, device=self.device)
+                
+                n_states = len(batch)
+                x_h_sums = torch.zeros(n_states, device=self.device)
+                x_h_sums.scatter_add_(0, state_indices_t, x_h_power)
+                
+                # Average: y = E[X_h^{-xi}]
+                humans_per_state_t = torch.tensor(u_r_humans_per_state, device=self.device, dtype=torch.float32)
+                u_r_targets_tensor = x_h_sums / humans_per_state_t
+            
+            losses['u_r'] = ((y_pred.squeeze() - u_r_targets_tensor) ** 2).mean()
+            
+            with torch.no_grad():
+                # U_r = -y^eta
+                target_u_r = -(u_r_targets_tensor ** self.config.eta)
+                prediction_stats['u_r'] = {
+                    'mean': y_pred.mean().item(),
+                    'std': y_pred.std().item() if y_pred.numel() > 1 else 0.0,
+                    'target_mean': target_u_r.mean().item()
+                }
         
-        # Average losses over their respective batch sizes
-        n = len(batch)
-        loss_keys_to_avg = ['v_h_e']
+        # ----- Q_r loss (batched) -----
         if q_r_active:
-            loss_keys_to_avg.append('q_r')
-        if self.config.u_r_use_network and u_r_active:
-            loss_keys_to_avg.append('u_r')
-        if self.config.v_r_use_network:
-            loss_keys_to_avg.append('v_r')
-        for k in loss_keys_to_avg:
-            losses[k] = losses[k] / n
-        # X_h uses its own count (may be from larger batch)
-        if x_h_active and x_h_count > 0:
-            losses['x_h'] = losses['x_h'] / x_h_count
+            q_r_all = self.networks.q_r.forward_batch(states, self.env, self.device)
+            
+            # Gather Q-values for taken actions
+            robot_actions = [t.robot_action for t in batch]
+            action_indices = torch.tensor(
+                [self.networks.q_r.action_tuple_to_index(a) for a in robot_actions],
+                device=self.device
+            )
+            q_r_pred = q_r_all.gather(1, action_indices.unsqueeze(1)).squeeze(1)
+            
+            # Compute targets
+            with torch.no_grad():
+                if self.config.v_r_use_network:
+                    v_r_next = self.networks.v_r_target.forward_batch(
+                        next_states, self.env, self.device
+                    )
+                else:
+                    # Compute V_r from components
+                    u_r_next = self._compute_u_r_batch_target(next_states)
+                    q_r_next = self.networks.q_r_target.forward_batch(
+                        next_states, self.env, self.device
+                    )
+                    pi_r_next = self.networks.q_r_target.get_policy(q_r_next, beta_r=effective_beta_r)
+                    v_r_next = compute_v_r_from_components(
+                        u_r_next.squeeze(), q_r_next, pi_r_next
+                    )
+            
+            target_q_r = self.config.gamma_r * v_r_next.squeeze()
+            losses['q_r'] = ((q_r_pred - target_q_r) ** 2).mean()
+            
+            with torch.no_grad():
+                prediction_stats['q_r'] = {
+                    'mean': q_r_pred.mean().item(),
+                    'std': q_r_pred.std().item() if q_r_pred.numel() > 1 else 0.0,
+                    'target_mean': target_q_r.mean().item()
+                }
         
-        return losses, {}
+        # ----- V_r loss (batched, only if using network mode) -----
+        if self.config.v_r_use_network and v_r_active:
+            v_r_pred = self.networks.v_r.forward_batch(states, self.env, self.device)
+            
+            with torch.no_grad():
+                u_r_for_v = self._compute_u_r_batch_target(states)
+                q_r_for_v = self.networks.q_r_target.forward_batch(
+                    states, self.env, self.device
+                )
+                pi_r = self.networks.q_r_target.get_policy(q_r_for_v, beta_r=effective_beta_r)
+            
+            target_v_r = compute_v_r_from_components(
+                u_r_for_v.squeeze(), q_r_for_v, pi_r
+            )
+            losses['v_r'] = ((v_r_pred.squeeze() - target_v_r) ** 2).mean()
+            
+            with torch.no_grad():
+                prediction_stats['v_r'] = {
+                    'mean': v_r_pred.mean().item(),
+                    'std': v_r_pred.std().item() if v_r_pred.numel() > 1 else 0.0,
+                    'target_mean': target_v_r.mean().item()
+                }
+        
+        # Clear caches after each compute_losses call (for neural network encoders)
+        if hasattr(self, 'clear_caches'):
+            self.clear_caches()
+        
+        return losses, prediction_stats
+    
+    def _compute_u_r_batch_target(self, states: List[Any]) -> torch.Tensor:
+        """
+        Compute U_r for a batch of states using target networks (fully batched).
+        
+        If u_r_use_network, uses U_r target network.
+        Otherwise, computes from X_h target values.
+        
+        Args:
+            states: List of states.
+        
+        Returns:
+            U_r values tensor of shape (batch_size,).
+        """
+        if self.config.u_r_use_network:
+            _, u_r = self.networks.u_r_target.forward_batch(states, self.env, self.device)
+            return u_r
+        else:
+            # Compute from X_h: U_r = -E[X_h^{-xi}]^eta
+            # Flatten all (state, human) pairs for single batched computation
+            n_states = len(states)
+            n_humans = len(self.human_agent_indices)
+            
+            flat_states = []
+            flat_humans = []
+            for state in states:
+                for h in self.human_agent_indices:
+                    flat_states.append(state)
+                    flat_humans.append(h)
+            
+            # Single batched forward pass for all (state, human) pairs
+            x_h_all = self.networks.x_h_target.forward_batch(
+                flat_states, flat_humans, self.env, self.device
+            ).squeeze()
+            
+            # Reshape to (n_states, n_humans) and compute mean over humans
+            x_h_reshaped = x_h_all.view(n_states, n_humans)
+            x_h_clamped = torch.clamp(x_h_reshaped, min=1e-3, max=1.0)
+            
+            # y = E[X_h^{-xi}] = mean over humans
+            y = (x_h_clamped ** (-self.config.xi)).mean(dim=1)
+            
+            # U_r = -y^eta
+            u_r = -(y ** self.config.eta)
+            return u_r
     
     def training_step(self) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, Dict[str, float]]]:
         """
@@ -943,6 +1302,9 @@ class BasePhase2Trainer(ABC):
         # Update target networks (each at its own interval)
         self.update_target_networks()
         
+        # Add any new lookup table parameters to optimizers
+        self._add_new_lookup_params_to_optimizers()
+        
         return loss_values, grad_norms, prediction_stats
     
     def _compute_single_grad_norm(self, network_name: str) -> float:
@@ -1010,9 +1372,18 @@ class BasePhase2Trainer(ABC):
         Returns:
             The collected transition, or None if collection failed.
         """
+        # Check if this will be the last step of the episode BEFORE collecting
+        # This is needed so the transition can be marked as terminal
+        is_terminal = (actor_state.env_step_count + 1) >= self.config.steps_per_episode
+        
+        if self.debug and is_terminal:
+            print(f"[DEBUG] Terminal transition! env_step={actor_state.env_step_count}, "
+                  f"steps_per_episode={self.config.steps_per_episode}")
+        
         # Collect one transition
         transition, next_state = self.collect_transition(
-            actor_state.state, actor_state.goals, actor_state.goal_weights
+            actor_state.state, actor_state.goals, actor_state.goal_weights,
+            terminal=is_terminal
         )
         
         # Check if transition failed (environment ended or error)
@@ -1027,8 +1398,22 @@ class BasePhase2Trainer(ABC):
         actor_state.state = next_state
         actor_state.env_step_count += 1
         
-        # Resample goals with some probability
-        if random.random() < self.config.goal_resample_prob:
+        # Check if any goal was achieved - if so, resample that goal
+        # This prevents the agent from repeatedly seeing achieved=1 for the same goal
+        goals_to_resample = []
+        for h, g in actor_state.goals.items():
+            if self.check_goal_achieved(next_state, h, g):
+                goals_to_resample.append(h)
+        
+        if goals_to_resample:
+            # Resample only the achieved goals
+            new_goals, new_weights = self._sample_goals(next_state)
+            for h in goals_to_resample:
+                if h in new_goals:
+                    actor_state.goals[h] = new_goals[h]
+                    actor_state.goal_weights[h] = new_weights[h]
+        # Also resample goals with some probability (exploration)
+        elif random.random() < self.config.goal_resample_prob:
             actor_state.goals, actor_state.goal_weights = self._sample_goals(actor_state.state)
         
         # Reset environment periodically
@@ -1171,6 +1556,16 @@ class BasePhase2Trainer(ABC):
                 # Reset stats after logging so we get per-step rates
                 if hasattr(self, 'reset_cache_stats'):
                     self.reset_cache_stats()
+            
+            # Log lookup table sizes (if any lookup tables are in use)
+            lookup_tables = get_all_lookup_tables(self.networks)
+            if lookup_tables:
+                total_entries = 0
+                for name, net in lookup_tables.items():
+                    size = len(net.table)
+                    total_entries += size
+                    self.writer.add_scalar(f'LookupTable/{name}_size', size, self.training_step_count)
+                self.writer.add_scalar('LookupTable/total_entries', total_entries, self.training_step_count)
         
         # Check for warm-up stage transitions
         current_stage = self.config.get_warmup_stage(self.training_step_count)
@@ -1319,7 +1714,8 @@ class BasePhase2Trainer(ABC):
                     transition.goal_weights,
                     transition.human_actions,
                     transition.next_state,
-                    transition.transition_probs_by_action
+                    transition.transition_probs_by_action,
+                    terminal=transition.terminal
                 )
                 self.total_env_steps += 1
             
@@ -1461,11 +1857,14 @@ class BasePhase2Trainer(ABC):
     
     def _serialize_policy_state(self) -> bytes:
         """Serialize policy state dict to bytes for sharing."""
-        import pickle
         import io
         state = self._get_policy_state_dict()
-        # Move to CPU for sharing
-        cpu_state = {k: {kk: vv.cpu() for kk, vv in v.items()} for k, v in state.items()}
+        # Move tensors to CPU for sharing, leave other types as-is
+        def to_cpu(v):
+            if isinstance(v, torch.Tensor):
+                return v.cpu()
+            return v
+        cpu_state = {k: {kk: to_cpu(vv) for kk, vv in v.items()} for k, v in state.items()}
         buffer = io.BytesIO()
         torch.save(cpu_state, buffer)
         return buffer.getvalue()
@@ -1570,6 +1969,7 @@ class BasePhase2Trainer(ABC):
                     'human_actions': transition.human_actions,
                     'next_state': transition.next_state,
                     'transition_probs_by_action': transition.transition_probs_by_action,
+                    'terminal': transition.terminal,
                 }
                 
                 try:
@@ -1709,7 +2109,8 @@ class BasePhase2Trainer(ABC):
                     goal_weights=trans_dict['goal_weights'],
                     human_actions=trans_dict['human_actions'],
                     next_state=trans_dict['next_state'],
-                    transition_probs_by_action=trans_dict.get('transition_probs_by_action')
+                    transition_probs_by_action=trans_dict.get('transition_probs_by_action'),
+                    terminal=trans_dict.get('terminal', False)
                 )
                 consumed += 1
             except Empty:
@@ -1721,7 +2122,7 @@ class BasePhase2Trainer(ABC):
     
     # ==================== Save/Load Methods ====================
     
-    def save_all_networks(self, path: str) -> None:
+    def save_all_networks(self, path: str) -> str:
         """
         Save all networks to a file.
         
@@ -1730,6 +2131,10 @@ class BasePhase2Trainer(ABC):
         
         Args:
             path: Path to save the checkpoint file.
+        
+        Returns:
+            The actual path where the file was saved (may differ from input
+            if a fallback location was used due to permission errors).
         """
         checkpoint = {
             'q_r': self.networks.q_r.state_dict(),
@@ -1775,6 +2180,7 @@ class BasePhase2Trainer(ABC):
         # Try to save, fall back to tmp file on permission errors
         try:
             torch.save(checkpoint, path)
+            return path
         except (IOError, OSError, RuntimeError) as e:
             # Fall back to tmp file to prevent data loss
             basename = os.path.basename(path)
@@ -1782,6 +2188,7 @@ class BasePhase2Trainer(ABC):
             print(f"WARNING: Cannot save to {path}: {e}")
             print(f"Saving to fallback location: {tmp_path}")
             torch.save(checkpoint, tmp_path)
+            return tmp_path
     
     def load_all_networks(self, path: str, strict: bool = True) -> None:
         """
@@ -1825,7 +2232,7 @@ class BasePhase2Trainer(ABC):
         if 'q_r_target' in checkpoint and self.networks.q_r_target is not None:
             self.networks.q_r_target.load_state_dict(checkpoint['q_r_target'], strict=strict)
     
-    def save_policy(self, path: str) -> None:
+    def save_policy(self, path: str) -> str:
         """
         Save only the robot policy network (Q_r) for deployment/rollouts.
         
@@ -1838,6 +2245,10 @@ class BasePhase2Trainer(ABC):
         
         Args:
             path: Path to save the policy file.
+        
+        Returns:
+            The actual path where the file was saved (may differ from input
+            if a fallback location was used due to permission errors).
         """
         checkpoint = {
             'q_r': self.networks.q_r.state_dict(),
@@ -1854,6 +2265,7 @@ class BasePhase2Trainer(ABC):
         # Try to save, fall back to tmp file on permission errors
         try:
             torch.save(checkpoint, path)
+            return path
         except (IOError, OSError, RuntimeError) as e:
             # Fall back to tmp file to prevent data loss
             basename = os.path.basename(path)
@@ -1861,6 +2273,7 @@ class BasePhase2Trainer(ABC):
             print(f"WARNING: Cannot save to {path}: {e}")
             print(f"Saving to fallback location: {tmp_path}")
             torch.save(checkpoint, tmp_path)
+            return tmp_path
 
     # ==================== Convenience Evaluation Methods ====================
     
@@ -1885,7 +2298,7 @@ class BasePhase2Trainer(ABC):
         """
         self.networks.v_h_e.eval()
         with torch.no_grad():
-            v_h_e = self.networks.v_h_e.encode_and_forward(
+            v_h_e = self.networks.v_h_e.forward(
                 state, world_model, human_agent_idx, goal, self.device
             )
             return v_h_e.squeeze().item()
@@ -1909,7 +2322,7 @@ class BasePhase2Trainer(ABC):
         """
         self.networks.x_h.eval()
         with torch.no_grad():
-            x_h = self.networks.x_h.encode_and_forward(
+            x_h = self.networks.x_h.forward(
                 state, world_model, human_agent_idx, self.device
             )
             x_h_clamped = torch.clamp(x_h.squeeze(), min=1e-3, max=1.0)
@@ -1932,7 +2345,7 @@ class BasePhase2Trainer(ABC):
         """
         self.networks.q_r.eval()
         with torch.no_grad():
-            q_values = self.networks.q_r.encode_and_forward(state, world_model, self.device)
+            q_values = self.networks.q_r.forward(state, world_model, self.device)
             return q_values.squeeze().cpu().numpy()
     
     def get_pi_r(
@@ -1957,7 +2370,7 @@ class BasePhase2Trainer(ABC):
         
         self.networks.q_r.eval()
         with torch.no_grad():
-            q_values = self.networks.q_r.encode_and_forward(state, world_model, self.device)
+            q_values = self.networks.q_r.forward(state, world_model, self.device)
             pi_r = self.networks.q_r.get_policy(q_values, beta_r=beta_r)
             return pi_r.squeeze().cpu().numpy()
     
@@ -1983,7 +2396,7 @@ class BasePhase2Trainer(ABC):
         with torch.no_grad():
             if self.config.u_r_use_network and self.networks.u_r is not None:
                 self.networks.u_r.eval()
-                _, u_r = self.networks.u_r.encode_and_forward(state, world_model, self.device)
+                _, u_r = self.networks.u_r.forward(state, world_model, self.device)
                 return u_r.item()
             else:
                 # Compute directly from X_h values
@@ -2023,7 +2436,7 @@ class BasePhase2Trainer(ABC):
             u_r = self.get_u_r(state, world_model)
             
             self.networks.q_r.eval()
-            q_values = self.networks.q_r.encode_and_forward(state, world_model, self.device)
+            q_values = self.networks.q_r.forward(state, world_model, self.device)
             pi_r = self.networks.q_r.get_policy(q_values, beta_r=beta_r)
             expected_q = (pi_r * q_values).sum().item()
             

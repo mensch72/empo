@@ -23,6 +23,12 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
     - Total joint actions = A^K
     - Joint action a_r = (a_{r_1}, ..., a_{r_K}) is a tuple
     
+    .. warning:: ASYNC TRAINING / PICKLE COMPATIBILITY
+    
+        This class (via its encoders) is pickled and sent to spawned actor
+        processes during async training. See warnings in MultiGridStateEncoder
+        for details on maintaining pickle compatibility.
+    
     Args:
         grid_height: Height of the grid.
         grid_width: Width of the grid.
@@ -92,6 +98,7 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
         
         # Own state encoder for Q_r-specific features (trained with Q_r loss)
         # This allows Q_r to learn additional state features beyond those learned by V_h^e
+        # Note: own_state_encoder shares cache with state_encoder to avoid redundant tensorization
         if own_state_encoder is not None:
             self.own_state_encoder = own_state_encoder
         else:
@@ -104,12 +111,14 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
                 max_kill_buttons=max_kill_buttons,
                 max_pause_switches=max_pause_switches,
                 max_disabling_switches=max_disabling_switches,
-                max_control_buttons=max_control_buttons
+                max_control_buttons=max_control_buttons,
+                share_cache_with=self.state_encoder
             )
         
         # Q-value head for joint actions with optional dropout
         # Uses BOTH shared state encoder (frozen) and own state encoder (trained)
-        combined_state_dim = state_feature_dim * 2  # Two encoders
+        # Use actual encoder feature_dim (may differ from state_feature_dim when use_encoders=False)
+        combined_state_dim = self.state_encoder.feature_dim + self.own_state_encoder.feature_dim
         if dropout > 0.0:
             self.q_head = nn.Sequential(
                 nn.Linear(combined_state_dim, hidden_dim),
@@ -129,7 +138,7 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
                 nn.Linear(hidden_dim, self.num_action_combinations),
             )
     
-    def forward(
+    def _network_forward(
         self,
         grid_tensor: torch.Tensor,
         global_features: torch.Tensor,
@@ -141,7 +150,7 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
         own_interactive_features: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
-        Compute Q_r(s, a_r) for all joint robot actions.
+        Internal: Compute Q_r(s, a_r) from pre-encoded tensors.
         
         Args:
             grid_tensor: (batch, num_grid_channels, H, W) for shared encoder
@@ -180,7 +189,7 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
         
         return q_values
     
-    def encode_and_forward(
+    def forward(
         self,
         state: Any,
         world_model: Any,
@@ -208,7 +217,7 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
         own_grid, own_glob, own_agent, own_inter = \
             self.own_state_encoder.tensorize_state(state, world_model, device)
         
-        return self.forward(
+        return self._network_forward(
             grid_tensor, global_features, agent_features, interactive_features,
             own_grid, own_glob, own_agent, own_inter
         )
@@ -240,7 +249,62 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
         Returns:
             Q-values tensor (batch, num_action_combinations) with Q_r < 0.
         """
-        return self.forward(
+        return self._network_forward(
+            grid_tensor, global_features, agent_features, interactive_features,
+            own_grid_tensor, own_global_features, own_agent_features, own_interactive_features
+        )
+    
+    def forward_batch(
+        self,
+        states: List[Any],
+        world_model: Any,
+        device: str = 'cpu'
+    ) -> torch.Tensor:
+        """
+        Batch forward pass from raw states.
+        
+        Batch-tensorizes all states and computes Q-values in a single forward pass.
+        This is the primary interface for batched training.
+        
+        Args:
+            states: List of raw environment states.
+            world_model: Environment with grid (for tensorization).
+            device: Torch device.
+        
+        Returns:
+            Q-values tensor (batch, num_action_combinations) with Q_r < 0.
+        """
+        # Batch tensorize with shared encoder
+        grid_list, glob_list, agent_list, inter_list = [], [], [], []
+        own_grid_list, own_glob_list, own_agent_list, own_inter_list = [], [], [], []
+        
+        for state in states:
+            # Shared encoder tensorization
+            grid, glob, agent, inter = self.state_encoder.tensorize_state(state, world_model, device)
+            grid_list.append(grid)
+            glob_list.append(glob)
+            agent_list.append(agent)
+            inter_list.append(inter)
+            
+            # Own encoder tensorization
+            own_grid, own_glob, own_agent, own_inter = self.own_state_encoder.tensorize_state(state, world_model, device)
+            own_grid_list.append(own_grid)
+            own_glob_list.append(own_glob)
+            own_agent_list.append(own_agent)
+            own_inter_list.append(own_inter)
+        
+        # Stack into batch tensors
+        grid_tensor = torch.cat(grid_list, dim=0)
+        global_features = torch.cat(glob_list, dim=0)
+        agent_features = torch.cat(agent_list, dim=0)
+        interactive_features = torch.cat(inter_list, dim=0)
+        
+        own_grid_tensor = torch.cat(own_grid_list, dim=0)
+        own_global_features = torch.cat(own_glob_list, dim=0)
+        own_agent_features = torch.cat(own_agent_list, dim=0)
+        own_interactive_features = torch.cat(own_inter_list, dim=0)
+        
+        return self._network_forward(
             grid_tensor, global_features, agent_features, interactive_features,
             own_grid_tensor, own_global_features, own_agent_features, own_interactive_features
         )

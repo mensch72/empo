@@ -190,14 +190,15 @@ This separation enables:
 
 ### Grid Channels
 
+The state encoder is **agent-agnostic** - it encodes the full world state without any agent-specific perspective.
+
 ```
-Total Channels = num_object_types + 3 + num_colors + 1
-                 ---------------   -   -----------   -
-                       |           |       |         |
-                       |           |       |         +-- Query agent channel
-                       |           |       +-- Per-color agent channels
-                       |           +-- "Other objects" channels (3 types)
-                       +-- Object type channels (29 total)
+Total Channels = num_object_type_channels + 3 + num_colors
+                 -----------------------   -   -----------
+                       |                   |       |
+                       |                   |       +-- Per-color agent channels (7 standard colors)
+                       |                   +-- "Other objects" channels (3: overlappable, immobile, mobile)
+                       +-- Object type channels (29 total, see OBJECT_TYPE_TO_CHANNEL)
 ```
 
 ### Object Type Channels (29 channels)
@@ -222,7 +223,7 @@ For off-policy learning, the full grid tensor (39 channels × H × W = 7644 byte
 
 | Bits | Field | Description |
 |------|-------|-------------|
-| 0-4 | object_type | 0-29 standard types, 30=door, 31=key |
+| 0-4 | object_type | 0-28 standard types (see `OBJECT_TYPE_TO_CHANNEL`), 30=door, 31=key |
 | 5-7 | object_color | 0-6 color index (for doors/keys) |
 | 8-9 | object_state | 0-3 door state (none/open/closed/locked) |
 | 10-12 | agent_color | 0-6 agent color, 7=no agent |
@@ -237,6 +238,8 @@ See [BATCHED_COMPUTATION.md](BATCHED_COMPUTATION.md#compressed-grid-format) for 
 
 ### Agent Features (13 per agent, all raw)
 
+Agent features are organized by color (agent-agnostic - no "query agent" concept in state encoding):
+
 | Feature | Size | Description |
 |---------|------|-------------|
 | Position | 2 | Raw (x, y) coordinates |
@@ -245,7 +248,9 @@ See [BATCHED_COMPUTATION.md](BATCHED_COMPUTATION.md#compressed-grid-format) for 
 | Carried object | 2 | (type_index, color_index), -1 if none |
 | Status | 3 | paused (0/1), terminated (0/1), forced_action (-1 if none) |
 
-Structure: `[query_agent_features] + [per_color_agent_lists]`
+Structure: Agents are grouped by color: `[blue_agents] + [red_agents] + ...`
+
+Agent identity (for Q-functions that need to know which agent is querying) is handled separately by `AgentIdentityEncoder`.
 
 ### Interactive Object Features
 
@@ -284,3 +289,67 @@ When adding new object types or agent features to the multigrid environment, upd
 ### (unused) Box.contains
 Boxes are encoded only by grid presence. Contents of boxes are not encoded. If needed, add a list-based encoder for Box objects.
 But this project is not using boxes anyway.
+
+---
+
+## Alternative Modes
+
+### Identity Mode (`use_encoders=False`)
+
+For debugging or when working with small state spaces, encoders can be switched to **identity mode**:
+
+```python
+config = Phase2Config(
+    use_encoders=False,  # Encoders return identity (flattened input)
+)
+```
+
+**What changes:**
+- `MultiGridStateEncoder.forward()` returns flattened concatenation of inputs instead of CNN/MLP features
+- `AgentIdentityEncoder.forward()` returns flattened+padded inputs instead of MLP features
+- Tensorization (`tensorize_state()`) still happens because MLP heads need tensor inputs
+- Output dimension automatically adjusts to match raw input size
+
+**Note:** This mode still requires tensorization. To skip tensorization entirely (for small state spaces), use **lookup table networks** instead.
+
+**Why use it:**
+1. **Debugging**: Isolate whether problems come from encoder networks vs. other components
+2. **Async training**: Identity encoders are much smaller when pickled (~10MB vs ~130MB), avoiding Docker shared memory limits (SIGBUS errors)
+3. **Baseline**: Pure tabular representation for comparison
+
+**Implementation detail**: When `use_encoders=False`, the encoder creates `nn.Identity()` placeholder modules instead of CNN/MLP layers. This is critical for pickle size in async training.
+
+### Lookup Table Networks (Tabular Mode)
+
+For small state spaces, all Phase 2 networks can use dictionary-based lookup tables instead of neural networks:
+
+```python
+config = Phase2Config(
+    use_lookup_tables=True,
+    use_lookup_q_r=True,       # Q_r(s, a) as lookup table
+    use_lookup_v_h_e=True,     # V_h^e(s, g) as lookup table
+    use_lookup_x_h=True,       # X_h(s) as lookup table
+    use_lookup_u_r=True,       # U_r(s) as lookup table (if u_r_use_network=True)
+    use_lookup_v_r=True,       # V_r(s) as lookup table (if v_r_use_network=True)
+)
+```
+
+**How it works:**
+- Each unique state gets a dictionary entry (created lazily on first access)
+- States are hashed directly as Python objects - **no tensorization needed**
+- Values stored as `torch.nn.Parameter` for gradient tracking
+- Same API as neural networks (`forward()`, `encode_and_forward()`, `get_config()`)
+- No function approximation error - exact value storage
+
+**Trade-offs:**
+- ✅ No approximation error, guaranteed convergence
+- ✅ Interpretable - inspect exact values per state
+- ❌ Memory grows linearly with visited states
+- ❌ No generalization to unseen states
+
+**When to use:**
+- State space < 100K unique states
+- Debugging and interpretability
+- Baseline comparisons
+
+See `src/empo/nn_based/phase2/lookup/` for implementations and [BATCHED_COMPUTATION.md](BATCHED_COMPUTATION.md#alternative-modes-disabling-encoders-and-lookup-tables) for more details.

@@ -51,17 +51,7 @@ class BaseHumanGoalAchievementNetwork(nn.Module, ABC):
         self.soft_clamp = SoftClamp(a=feasible_range[0], b=feasible_range[1])
     
     @abstractmethod
-    def forward(self, *args, **kwargs) -> torch.Tensor:
-        """
-        Compute V_h^e values.
-        
-        Returns:
-            Tensor of shape (batch,) with values in [0, 1].
-        """
-        pass
-    
-    @abstractmethod
-    def encode_and_forward(
+    def forward(
         self,
         state: Any,
         world_model: Any,
@@ -133,7 +123,8 @@ class BaseHumanGoalAchievementNetwork(nn.Module, ABC):
     def compute_td_target(
         self,
         goal_achieved: torch.Tensor,
-        next_v_h_e: torch.Tensor
+        next_v_h_e: torch.Tensor,
+        terminal: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
         Compute TD target for V_h^e using truncated Bellman equation.
@@ -141,22 +132,35 @@ class BaseHumanGoalAchievementNetwork(nn.Module, ABC):
         From equation (6), using the truncated form (like V_h^m in Phase 1):
             - If goal achieved: target = 1 (no continuation)
             - If goal not achieved: target = γ_h * V_h^e(s', g_h)
+            - If terminal (episode ended without achieving goal): target = 0
         
         This is truncated because when U_h(s', g_h) = 1 (goal achieved),
         the episode ends for that human and we don't add future value.
         Only when reward is 0 do we add the discounted continuation.
         
+        For terminal states (episode boundary reached without goal achievement),
+        the continuation value is 0 because there is no next state to bootstrap from.
+        
         Args:
             goal_achieved: Boolean/float tensor (1.0 if achieved, 0.0 otherwise).
             next_v_h_e: V_h^e(s', g_h) from target network.
+            terminal: Optional boolean/float tensor (1.0 if terminal, 0.0 otherwise).
+                When terminal=1, the continuation term is zeroed out.
         
         Returns:
             TD target values.
         """
-        # Truncated Bellman: only add future value when reward is 0
+        # Truncated Bellman: only add future value when reward is 0 and not terminal
         # If goal achieved (reward=1): target = 1 (episode ends, no continuation)
-        # If goal not achieved (reward=0): target = γ_h * V_h^e(s')
+        # If goal not achieved (reward=0) and not terminal: target = γ_h * V_h^e(s')
+        # If goal not achieved (reward=0) and terminal: target = 0 (episode ended)
         reward = goal_achieved.float()
+        
+        # Continuation is only non-zero when: (1) goal not achieved, and (2) not terminal
         continuation = (1.0 - reward) * self.gamma_h * next_v_h_e
+        
+        # Zero out continuation for terminal transitions
+        if terminal is not None:
+            continuation = continuation * (1.0 - terminal.float())
         
         return reward + continuation

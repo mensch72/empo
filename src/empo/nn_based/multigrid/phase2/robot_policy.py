@@ -4,11 +4,13 @@ Multigrid Robot Policy for Phase 2.
 This module provides a deployable robot policy class for multigrid environments.
 """
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
 
 from ...phase2.robot_policy import RobotPolicy
+from ...phase2.lookup.robot_q_network import LookupTableRobotQNetwork
+from ..state_encoder import MultiGridStateEncoder
 from .robot_q_network import MultiGridRobotQNetwork
 
 
@@ -38,7 +40,7 @@ class MultiGridRobotPolicy(RobotPolicy):
     
     def __init__(
         self,
-        q_network: Optional[MultiGridRobotQNetwork] = None,
+        q_network: Optional[Union[MultiGridRobotQNetwork, LookupTableRobotQNetwork]] = None,
         beta_r: float = 10.0,
         device: str = 'cpu',
         path: Optional[str] = None
@@ -47,7 +49,7 @@ class MultiGridRobotPolicy(RobotPolicy):
         Initialize the multigrid robot policy.
         
         Args:
-            q_network: Optional Q_r network. If None, must provide path to load from.
+            q_network: Optional Q_r network (neural or lookup table). If None, must provide path to load from.
             beta_r: Power-law policy exponent (default if not in checkpoint).
             device: Torch device for inference.
             path: Path to policy checkpoint saved by trainer.save_policy().
@@ -62,6 +64,7 @@ class MultiGridRobotPolicy(RobotPolicy):
         """
         self.device = device
         self._world_model = None  # Set by reset()
+        self._is_lookup_table = False  # Track policy type for sample()
         
         if q_network is None:
             if path is None:
@@ -81,34 +84,99 @@ class MultiGridRobotPolicy(RobotPolicy):
             config = checkpoint['q_r_config']
             self.beta_r = checkpoint.get('beta_r', beta_r)
             
-            # Get state encoder config - it has 'feature_dim', not 'state_feature_dim'
-            state_enc_config = config['state_encoder_config']
-            
-            # Reconstruct Q network from config
-            self.q_network = MultiGridRobotQNetwork(
-                grid_height=config['grid_height'],
-                grid_width=config['grid_width'],
-                num_robot_actions=config['num_robot_actions'],
-                num_robots=config['num_robots'],
-                hidden_dim=config['hidden_dim'],
-                beta_r=self.beta_r,
-                feasible_range=config.get('feasible_range'),
-                dropout=config.get('dropout', 0.0),
-                # State encoder config - note: key is 'feature_dim' not 'state_feature_dim'
-                num_agents_per_color=state_enc_config['num_agents_per_color'],
-                num_agent_colors=state_enc_config.get('num_agent_colors', 7),
-                state_feature_dim=state_enc_config.get('feature_dim', config['hidden_dim']),
-                max_kill_buttons=state_enc_config.get('max_kill_buttons', 4),
-                max_pause_switches=state_enc_config.get('max_pause_switches', 4),
-                max_disabling_switches=state_enc_config.get('max_disabling_switches', 4),
-                max_control_buttons=state_enc_config.get('max_control_buttons', 4),
-            )
-            
-            # Load weights
-            self.q_network.load_state_dict(checkpoint['q_r'])
+            # Check if this is a lookup table policy
+            if config.get('type') == 'lookup_table':
+                self._is_lookup_table = True
+                self.q_network = LookupTableRobotQNetwork(
+                    num_actions=config['num_actions'],
+                    num_robots=config['num_robots'],
+                    beta_r=self.beta_r,
+                    default_q_r=config.get('default_q_r', -1.0),
+                    feasible_range=config.get('feasible_range'),
+                )
+                self.q_network.load_state_dict(checkpoint['q_r'])
+            else:
+                # Neural network policy - get state encoder config
+                state_enc_config = config['state_encoder_config']
+                own_state_enc_config = config.get('own_state_encoder_config', state_enc_config)
+                
+                # Check if networks were trained with use_encoders=False (identity mode)
+                use_encoders = state_enc_config.get('use_encoders', True)
+                
+                # Create state encoders with correct use_encoders flag
+                # This ensures identity mode produces correct feature_dim
+                state_encoder = MultiGridStateEncoder(
+                    grid_height=config['grid_height'],
+                    grid_width=config['grid_width'],
+                    num_agents_per_color=state_enc_config['num_agents_per_color'],
+                    num_agent_colors=state_enc_config.get('num_agent_colors', 7),
+                    feature_dim=state_enc_config.get('feature_dim', config['hidden_dim']),
+                    max_kill_buttons=state_enc_config.get('max_kill_buttons', 4),
+                    max_pause_switches=state_enc_config.get('max_pause_switches', 4),
+                    max_disabling_switches=state_enc_config.get('max_disabling_switches', 4),
+                    max_control_buttons=state_enc_config.get('max_control_buttons', 4),
+                    use_encoders=use_encoders,
+                )
+                
+                own_use_encoders = own_state_enc_config.get('use_encoders', True)
+                own_state_encoder = MultiGridStateEncoder(
+                    grid_height=config['grid_height'],
+                    grid_width=config['grid_width'],
+                    num_agents_per_color=own_state_enc_config['num_agents_per_color'],
+                    num_agent_colors=own_state_enc_config.get('num_agent_colors', 7),
+                    feature_dim=own_state_enc_config.get('feature_dim', config['hidden_dim']),
+                    max_kill_buttons=own_state_enc_config.get('max_kill_buttons', 4),
+                    max_pause_switches=own_state_enc_config.get('max_pause_switches', 4),
+                    max_disabling_switches=own_state_enc_config.get('max_disabling_switches', 4),
+                    max_control_buttons=own_state_enc_config.get('max_control_buttons', 4),
+                    use_encoders=own_use_encoders,
+                    share_cache_with=state_encoder,
+                )
+                
+                # Reconstruct Q network from config with pre-built state encoders
+                self.q_network = MultiGridRobotQNetwork(
+                    grid_height=config['grid_height'],
+                    grid_width=config['grid_width'],
+                    num_robot_actions=config['num_robot_actions'],
+                    num_robots=config['num_robots'],
+                    hidden_dim=config['hidden_dim'],
+                    beta_r=self.beta_r,
+                    feasible_range=config.get('feasible_range'),
+                    dropout=config.get('dropout', 0.0),
+                    # Pass pre-built state encoders instead of individual params
+                    num_agents_per_color=state_enc_config['num_agents_per_color'],
+                    num_agent_colors=state_enc_config.get('num_agent_colors', 7),
+                    state_feature_dim=state_enc_config.get('feature_dim', config['hidden_dim']),
+                    state_encoder=state_encoder,
+                    own_state_encoder=own_state_encoder,
+                )
+                
+                # Load weights with validation
+                checkpoint_keys = set(checkpoint['q_r'].keys())
+                model_keys = set(self.q_network.state_dict().keys())
+                
+                if checkpoint_keys != model_keys:
+                    missing_in_checkpoint = model_keys - checkpoint_keys
+                    extra_in_checkpoint = checkpoint_keys - model_keys
+                    
+                    # Check if this is an encoder mismatch
+                    encoder_keys_missing = any('encoder' in k for k in missing_in_checkpoint)
+                    
+                    if encoder_keys_missing:
+                        raise ValueError(
+                            f"State dict mismatch - likely encoder configuration issue.\n"
+                            f"Config says use_encoders={use_encoders}, own_use_encoders={own_use_encoders}\n"
+                            f"Missing in checkpoint: {sorted(missing_in_checkpoint)[:5]}{'...' if len(missing_in_checkpoint) > 5 else ''}\n"
+                            f"Extra in checkpoint: {sorted(extra_in_checkpoint)[:5]}{'...' if len(extra_in_checkpoint) > 5 else ''}\n"
+                            f"This may happen if the checkpoint was saved with different use_encoders settings.\n"
+                            f"Try deleting old checkpoint files and re-training."
+                        )
+                
+                self.q_network.load_state_dict(checkpoint['q_r'])
         else:
             self.q_network = q_network
             self.beta_r = beta_r
+            self._is_lookup_table = isinstance(q_network, LookupTableRobotQNetwork)
             
             # Load weights if path provided
             if path is not None:
@@ -152,20 +220,26 @@ class MultiGridRobotPolicy(RobotPolicy):
             )
         
         with torch.no_grad():
-            # Tensorize state using both encoders
-            shared_tensors = self.q_network.state_encoder.tensorize_state(
-                state, self._world_model, self.device
-            )
-            own_tensors = self.q_network.own_state_encoder.tensorize_state(
-                state, self._world_model, self.device
-            )
-            
-            # Combine into input format expected by Q network
-            # shared: (grid, global, agent, interactive)
-            # own: (grid, global, agent, interactive)
-            all_tensors = (*shared_tensors, *own_tensors)
-            
-            # Sample action using the power-law policy
-            actions = self.q_network.sample_action(*all_tensors)
+            if self._is_lookup_table:
+                # Lookup table uses forward() with raw state directly
+                q_values = self.q_network.forward(state, self._world_model, self.device)
+                # Sample action from power-law policy
+                actions = self.q_network.sample_action(q_values)
+            else:
+                # Neural network needs tensorized state
+                shared_tensors = self.q_network.state_encoder.tensorize_state(
+                    state, self._world_model, self.device
+                )
+                own_tensors = self.q_network.own_state_encoder.tensorize_state(
+                    state, self._world_model, self.device
+                )
+                
+                # Combine into input format expected by Q network
+                # shared: (grid, global, agent, interactive)
+                # own: (grid, global, agent, interactive)
+                all_tensors = (*shared_tensors, *own_tensors)
+                
+                # Sample action using the power-law policy
+                actions = self.q_network.sample_action(*all_tensors)
             
             return actions

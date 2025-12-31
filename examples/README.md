@@ -2,6 +2,8 @@
 
 This directory contains example scripts demonstrating empo functionality.
 
+**Currently the most important one is `phase2_robot_policy_demo.py`.**
+
 ## Running Examples
 
 Most examples can be run with:

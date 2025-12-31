@@ -26,12 +26,20 @@ class SoftClamp(nn.Module):
     Args:
         a: Lower bound of linear region (default: 0.5)
         b: Upper bound of linear region (default: 1.5)
+    
+    Note:
+        The internal range is expanded by epsilon=1e-6 on each side to ensure
+        non-zero gradients at the boundaries. This prevents gradient death when
+        values are initialized exactly at a or b (e.g., lookup tables starting at 0).
     """
     
     def __init__(self, a: float = 0.5, b: float = 1.5):
         super().__init__()
-        self.a = float(a)
-        self.b = float(b)
+        # Expand the internal range by epsilon to ensure non-zero gradients at boundaries
+        # This prevents gradient death when values are exactly at a or b
+        epsilon = 1e-6
+        self.a = float(a) - epsilon
+        self.b = float(b) + epsilon
         self.R = self.b - self.a
         
         if self.R <= 0:

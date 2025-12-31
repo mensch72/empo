@@ -54,17 +54,7 @@ class BaseRobotQNetwork(nn.Module, ABC):
         self.num_action_combinations = num_actions ** num_robots
     
     @abstractmethod
-    def forward(self, *args, **kwargs) -> torch.Tensor:
-        """
-        Compute Q_r values for all robot action combinations.
-        
-        Returns:
-            Tensor of shape (batch, num_action_combinations) with Q_r < 0.
-        """
-        pass
-    
-    @abstractmethod
-    def encode_and_forward(
+    def forward(
         self,
         state: Any,
         world_model: Any,

@@ -4,6 +4,12 @@
 **Author:** GitHub Copilot  
 **Date:** 2025-12-30
 
+## 0. mensch72's comments after reading this plan
+
+We must make sure that we need to change *as little code outside the network classes as possible*, including the optimizers. So maybe a pragmatic approach is to recreate the optimizer periodically at a configurable interval, in particular at warmup stage boundaries.
+
+Also, we must reuse the existing code for `use_encoders==False` that make the encoders act as identity functions, rather than adding additional code that basically does the same.
+
 ## 1. Overview
 
 This document outlines a design for optionally converting individual networks and their private encoders into **lookup tables** (dictionaries) with one parameter per unique input. This approach enables tabular policy representations without requiring advance knowledge of the complete state/input space.
@@ -1253,12 +1259,15 @@ print(f"V_h^e table size: {len(networks.v_he.table)} (state, goal) pairs")
 
 ### Phase 2: Phase 2 Lookup Table Networks
 
-- [ ] Implement `LookupTableRobotQNetwork`
-- [ ] Implement `LookupTableRobotValueNetwork`
-- [ ] Implement `LookupTableHumanGoalAbilityNetwork`
-- [ ] Implement `LookupTableAggregateGoalAbilityNetwork`
-- [ ] Implement `LookupTableIntrinsicRewardNetwork`
-- [ ] Unit tests for Phase 2 lookup networks
+- [x] Implement `LookupTableRobotQNetwork`
+- [x] Implement `LookupTableRobotValueNetwork`
+- [x] Implement `LookupTableHumanGoalAbilityNetwork`
+- [x] Implement `LookupTableAggregateGoalAbilityNetwork`
+- [x] Implement `LookupTableIntrinsicRewardNetwork`
+- [x] Unit tests for Phase 2 lookup networks
+- [x] Add `use_lookup_tables` config options to `Phase2Config`
+- [x] Add helper methods: `should_use_lookup_table()`, `get_lookup_default()`
+- [x] Add incremental param tracking (`get_new_params()`) for efficient optimizer updates
 
 ### Phase 3: Domain-Specific Implementations
 
@@ -1270,15 +1279,19 @@ print(f"V_h^e table size: {len(networks.v_he.table)} (state, goal) pairs")
 ### Phase 4: Trainer Integration
 
 - [ ] Modify Phase 1 `Trainer` to support lookup tables
-- [ ] Modify Phase 2 `Trainer` to support lookup tables
+- [x] Modify Phase 2 `Trainer` to support lookup tables
+  - [x] Import lookup table utilities (`is_lookup_table_network`, `get_all_lookup_tables`, `get_total_table_size`)
+  - [x] Add `_maybe_recreate_optimizers()` method
+  - [x] Add TensorBoard logging for lookup table sizes
 - [ ] Update replay buffer if needed (already has raw states)
 - [ ] Integration tests for training
 
 ### Phase 5: Utilities and Documentation
 
-- [ ] Factory functions for network creation
+- [x] Utility functions (`is_lookup_table_network`, `get_all_lookup_tables`, `get_total_table_size`)
+- [x] Factory functions for network creation (`network_factory.py`)
 - [ ] Save/load functionality
-- [ ] Example scripts (Phase 1 and Phase 2)
+- [x] Example script: `examples/lookup_table_phase2_demo.py`
 - [ ] Performance benchmarking
 - [ ] API documentation
 

@@ -1167,6 +1167,28 @@ class parallel_env(ParallelEnv):
             self.fig = None
             self.ax = None
 
+    def get_human_agent_indices(self):
+        """
+        Get the indices of human agents in the environment.
+        
+        In Transport, human agents have names starting with 'human_'.
+        
+        Returns:
+            List of indices for human agents.
+        """
+        return [self.agent_name_mapping[name] for name in self.human_agents]
+    
+    def get_robot_agent_indices(self):
+        """
+        Get the indices of robot/vehicle agents in the environment.
+        
+        In Transport, robot agents are vehicles with names starting with 'vehicle_'.
+        
+        Returns:
+            List of indices for robot/vehicle agents.
+        """
+        return [self.agent_name_mapping[name] for name in self.vehicle_agents]
+
     def reset(self, seed=None, options=None):
         """
         Reset needs to initialize the `agents` attribute and must set up the

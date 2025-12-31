@@ -58,6 +58,10 @@ class Phase2Config:
         goal_resample_prob: Probability of resampling goals each step.
         hidden_dim: Hidden layer dimension for networks.
         state_feature_dim: State encoder output dimension.
+        goal_feature_dim: Goal encoder output dimension.
+        agent_embedding_dim: Agent identity encoder: index embedding dimension.
+        agent_position_feature_dim: Agent identity encoder: position encoding output dimension.
+        agent_feature_dim: Agent identity encoder: agent feature encoding output dimension.
     """
     
     # Discount factors
@@ -193,6 +197,41 @@ class Phase2Config:
     profile_batching: bool = False
     profile_batching_interval: int = 100  # Print stats every N training steps
     
+    # Debugging: if False, encoder networks' forward functions become identity functions
+    # (flatten+pad/truncate to match output dimension). Tensorizers remain unchanged.
+    # This is useful for debugging to isolate whether problems come from encoders.
+    use_encoders: bool = True
+    
+    # =========================================================================
+    # Lookup table networks (tabular representations)
+    # =========================================================================
+    # If True, use lookup table (dictionary) implementations for some/all networks
+    # instead of neural networks. Useful for small state spaces, debugging,
+    # and interpretability. Each network can be selectively enabled.
+    # 
+    # Benefits: No function approximation error, guaranteed convergence, interpretability.
+    # Drawbacks: Memory scales with state space size, no generalization to unseen states.
+    #
+    # When use_lookup_tables=True, the following flags control which networks use tables:
+    # - use_lookup_q_r: Q_r(s, a_r) - robot Q-values
+    # - use_lookup_v_r: V_r(s) - robot value function (only if v_r_use_network=True)
+    # - use_lookup_v_h_e: V_h^e(s, g_h) - human goal achievement probability
+    # - use_lookup_x_h: X_h(s) - aggregate human goal ability
+    # - use_lookup_u_r: U_r(s) - intrinsic reward (only if u_r_use_network=True)
+    use_lookup_tables: bool = False
+    use_lookup_q_r: bool = True      # Use lookup table for Q_r
+    use_lookup_v_r: bool = True      # Use lookup table for V_r (if v_r_use_network=True)
+    use_lookup_v_h_e: bool = True    # Use lookup table for V_h^e
+    use_lookup_x_h: bool = True      # Use lookup table for X_h
+    use_lookup_u_r: bool = True      # Use lookup table for U_r (if u_r_use_network=True)
+    
+    # Default values for lookup table entries (used when state is first seen)
+    lookup_default_q_r: float = -1.0     # Q_r < 0 (negative value)
+    lookup_default_v_r: float = -1.0     # V_r < 0 (negative value)
+    lookup_default_v_h_e: float = 0.0    # V_h^e ∈ [0, 1] (probability) - 0 = pessimistic default
+    lookup_default_x_h: float = 1e-10    # X_h ∈ (0, 1] (aggregate ability)
+    lookup_default_y: float = 2.0        # y >= 1 (intermediate for U_r)
+    
     def __post_init__(self):
         """Compute cumulative warmup thresholds and apply network flags."""
         # Warn about deprecated legacy LR decay flags
@@ -215,6 +254,24 @@ class Phase2Config:
         self._warmup_x_h_end = self._warmup_v_h_e_end + self.warmup_x_h_steps
         self._warmup_u_r_end = self._warmup_x_h_end + self.warmup_u_r_steps
         self._warmup_q_r_end = self._warmup_u_r_end + self.warmup_q_r_steps
+        
+        # Validate lookup table settings
+        if self.use_lookup_tables:
+            # Warn if using lookup tables with networks that aren't enabled
+            if self.use_lookup_v_r and not self.v_r_use_network:
+                warnings.warn(
+                    "use_lookup_v_r=True but v_r_use_network=False. "
+                    "V_r lookup table will not be used since V_r is computed directly from U_r and Q_r.",
+                    UserWarning,
+                    stacklevel=2
+                )
+            if self.use_lookup_u_r and not self.u_r_use_network:
+                warnings.warn(
+                    "use_lookup_u_r=True but u_r_use_network=False. "
+                    "U_r lookup table will not be used since U_r is computed directly from X_h.",
+                    UserWarning,
+                    stacklevel=2
+                )
     
     # Model-based targets: if True (default), use transition_probabilities() to compute
     # expected V(s') over all possible successor states instead of using single samples.
@@ -258,6 +315,10 @@ class Phase2Config:
     # Network architecture
     hidden_dim: int = 256
     state_feature_dim: int = 256
+    goal_feature_dim: int = 64              # Goal encoder output dimension
+    agent_embedding_dim: int = 16           # Agent identity encoder: index embedding dimension
+    agent_position_feature_dim: int = 32    # Agent identity encoder: position encoding output dimension
+    agent_feature_dim: int = 32             # Agent identity encoder: agent feature encoding output dimension
     
     def get_epsilon(self, step: int) -> float:
         """Get epsilon value for given training step."""
@@ -572,3 +633,48 @@ class Phase2Config:
         if self.beta_r_rampup_steps > 0:
             transitions.append((self._warmup_q_r_end + self.beta_r_rampup_steps, "β_r ramp complete"))
         return transitions
+    
+    # =========================================================================
+    # Lookup table helper methods
+    # =========================================================================
+    
+    def should_use_lookup_table(self, network_name: str) -> bool:
+        """
+        Check if a specific network should use lookup table implementation.
+        
+        Args:
+            network_name: One of 'q_r', 'v_r', 'v_h_e', 'x_h', 'u_r'
+            
+        Returns:
+            True if lookup table should be used for this network.
+        """
+        if not self.use_lookup_tables:
+            return False
+        
+        lookup_flags = {
+            'q_r': self.use_lookup_q_r,
+            'v_r': self.use_lookup_v_r and self.v_r_use_network,  # Only if V_r network is used
+            'v_h_e': self.use_lookup_v_h_e,
+            'x_h': self.use_lookup_x_h,
+            'u_r': self.use_lookup_u_r and self.u_r_use_network,  # Only if U_r network is used
+        }
+        return lookup_flags.get(network_name, False)
+    
+    def get_lookup_default(self, network_name: str) -> float:
+        """
+        Get default value for lookup table entries for a network.
+        
+        Args:
+            network_name: One of 'q_r', 'v_r', 'v_h_e', 'x_h', 'u_r'
+            
+        Returns:
+            Default value for new lookup table entries.
+        """
+        defaults = {
+            'q_r': self.lookup_default_q_r,
+            'v_r': self.lookup_default_v_r,
+            'v_h_e': self.lookup_default_v_h_e,
+            'x_h': self.lookup_default_x_h,
+            'u_r': self.lookup_default_y,  # For U_r, this is default y value
+        }
+        return defaults.get(network_name, 0.0)
