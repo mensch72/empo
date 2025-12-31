@@ -445,8 +445,12 @@ class MultiGridRobotExplorationPolicy(RobotPolicy):
         if fwd_cell.can_overlap():
             return False
         
-        # Cell has an object that can't be overlapped
-        # Special case: blocks/rocks CAN potentially be pushed, but we treat
-        # them as "blocked" for exploration to encourage alternative paths
-        # In practice, pushing is often unavailable anyway
+        # Check if it's a pushable block/rock
+        if fwd_cell.type in ['block', 'rock']:
+            # Use the environment's _can_push_objects method to check if pushing is possible
+            robot_agent = self._world_model.agents[robot_idx]
+            can_push, _, _ = self._world_model._can_push_objects(robot_agent, np.array([fwd_x, fwd_y]))
+            return not can_push
+        
+        # Cell has an object that can't be overlapped and isn't pushable
         return True

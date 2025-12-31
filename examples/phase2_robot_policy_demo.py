@@ -805,10 +805,10 @@ def main(
     
     # Configuration - start with environment-based defaults
     if env_type == "trivial":
-        num_training_steps = 10000
+        num_training_steps = 1e6 # 10000
         num_rollouts = NUM_ROLLOUTS
-        batch_size = 16
-        x_h_batch_size = 32
+        batch_size = 32 # 16
+        x_h_batch_size = 64 # 32
         # Very small networks for trivial task
         hidden_dim = 16
         goal_feature_dim = 8
@@ -1011,8 +1011,8 @@ def main(
         eta=1.1,       # Intertemporal inequality aversion
         beta_r=final_beta_r,    # Robot policy concentration
         epsilon_r_start=1.0,
-        epsilon_r_end=0.1,
-        epsilon_r_decay_steps=num_training_steps // 5,  # Decay over 20% of training
+        epsilon_r_end=1.0,  # always explore during data generation!
+#        epsilon_r_decay_steps=num_training_steps // 2,  # Decay over 50% of training
         lr_q_r=1e-4,
         lr_v_r=1e-4,
         lr_v_h_e=1e-3,  # faster since V_h^e is critical and the basis for other things
