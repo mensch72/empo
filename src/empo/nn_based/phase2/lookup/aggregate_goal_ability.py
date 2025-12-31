@@ -34,6 +34,7 @@ class LookupTableAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         default_x_h: Initial X_h value for unseen (state, human) pairs.
             Should be in (0, 1]. 0.5 is neutral.
         feasible_range: Output bounds for X_h (default (0, 1]).
+        include_step_count: If False, strip step_count from state before hashing.
         state_encoder: Optional state encoder (for API compatibility with neural networks).
         agent_encoder: Optional agent encoder (for API compatibility with neural networks).
         own_agent_encoder: Optional own agent encoder (for API compatibility).
@@ -44,12 +45,14 @@ class LookupTableAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         zeta: float = 2.0,
         default_x_h: float = 0.5,
         feasible_range: Tuple[float, float] = (0.0, 1.0),
+        include_step_count: bool = True,
         state_encoder: Optional[nn.Module] = None,
         agent_encoder: Optional[nn.Module] = None,
         own_agent_encoder: Optional[nn.Module] = None,
     ):
         super().__init__(zeta=zeta, feasible_range=feasible_range)
         self.default_x_h = default_x_h
+        self.include_step_count = include_step_count
         
         # Store encoders for API compatibility (not used for computation)
         self.state_encoder = state_encoder
@@ -58,7 +61,32 @@ class LookupTableAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         
         # Main lookup table: hash((state, human_idx)) -> Parameter(X_h value)
         self.table: Dict[int, nn.Parameter] = {}
+        
+        # Track new parameters for incremental optimizer updates
+        self._new_params: List[nn.Parameter] = []
     
+    def _normalize_state(self, state: Hashable) -> Hashable:
+        """
+        Normalize state for lookup key generation.
+        
+        If include_step_count is False and state is a tuple with step_count as first
+        element (as in MultiGrid states), strip the step_count.
+        """
+        if not self.include_step_count and isinstance(state, tuple) and len(state) >= 2:
+            return state[1:]
+        return state
+
+    def get_new_params(self) -> List[nn.Parameter]:
+        """
+        Get newly created parameters and clear the tracking list.
+        
+        Returns:
+            List of parameters created since last call.
+        """
+        params = self._new_params
+        self._new_params = []
+        return params
+
     def _get_or_create_entry(self, key: int, device: str = 'cpu') -> nn.Parameter:
         """
         Get entry for key, creating with default value if not present.
@@ -71,9 +99,11 @@ class LookupTableAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
             Parameter containing X_h value for this (state, human, map_hash).
         """
         if key not in self.table:
-            self.table[key] = nn.Parameter(
+            param = nn.Parameter(
                 torch.tensor([self.default_x_h], dtype=torch.float32, device=device)
             )
+            self.table[key] = param
+            self._new_params.append(param)
         return self.table[key]
     
     def _batch_forward(
@@ -102,7 +132,8 @@ class LookupTableAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         params = []
         for state, human_idx in zip(states, human_indices):
             # Use (state, human_idx, map_hash) as the cache key to distinguish states from different maps
-            key = hash((state, human_idx, map_hash))
+            normalized_state = self._normalize_state(state)
+            key = hash((normalized_state, human_idx, map_hash))
             param = self._get_or_create_entry(key, device)
             params.append(param.squeeze())
         
@@ -132,7 +163,8 @@ class LookupTableAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
             X_h value of shape (1,), in (0, 1].
         """
         map_hash = _get_map_hash(world_model)
-        key = hash((state, human_agent_idx, map_hash))
+        normalized_state = self._normalize_state(state)
+        key = hash((normalized_state, human_agent_idx, map_hash))
         param = self._get_or_create_entry(key, device)
         raw_output = param.view(1)
         return self.apply_clamp(raw_output)

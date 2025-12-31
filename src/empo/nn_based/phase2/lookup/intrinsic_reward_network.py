@@ -38,6 +38,7 @@ class LookupTableIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
         xi: Inter-human inequality aversion parameter (ξ >= 1).
         eta: Intertemporal inequality aversion parameter (η >= 1).
         default_y: Initial y value for unseen states (must be >= 1).
+        include_step_count: If False, strip step_count from state before hashing.
         state_encoder: Optional state encoder (for API compatibility with neural networks).
     """
     
@@ -46,6 +47,7 @@ class LookupTableIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
         xi: float = 1.0,
         eta: float = 1.1,
         default_y: float = 2.0,
+        include_step_count: bool = True,
         state_encoder: Optional[nn.Module] = None,
     ):
         super().__init__(xi=xi, eta=eta)
@@ -54,6 +56,7 @@ class LookupTableIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
             raise ValueError(f"default_y must be >= 1.0, got {default_y}")
         
         self.default_y = default_y
+        self.include_step_count = include_step_count
         
         # Store encoder for API compatibility (not used for computation)
         self.state_encoder = state_encoder
@@ -61,7 +64,32 @@ class LookupTableIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
         # Main lookup table: hash(state) -> Parameter(log(y-1))
         # We store log(y-1) so that y = 1 + exp(log(y-1)) > 1 always
         self.table: Dict[int, nn.Parameter] = {}
+        
+        # Track new parameters for incremental optimizer updates
+        self._new_params: List[nn.Parameter] = []
     
+    def _normalize_state(self, state: Hashable) -> Hashable:
+        """
+        Normalize state for lookup key generation.
+        
+        If include_step_count is False and state is a tuple with step_count as first
+        element (as in MultiGrid states), strip the step_count.
+        """
+        if not self.include_step_count and isinstance(state, tuple) and len(state) >= 2:
+            return state[1:]
+        return state
+
+    def get_new_params(self) -> List[nn.Parameter]:
+        """
+        Get newly created parameters and clear the tracking list.
+        
+        Returns:
+            List of parameters created since last call.
+        """
+        params = self._new_params
+        self._new_params = []
+        return params
+
     def _get_or_create_entry(self, key: int, device: str = 'cpu') -> nn.Parameter:
         """
         Get entry for key, creating with default value if not present.
@@ -76,9 +104,11 @@ class LookupTableIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
         if key not in self.table:
             # Convert default_y to log(y-1) representation
             log_y_minus_1 = torch.log(torch.tensor(self.default_y - 1.0))
-            self.table[key] = nn.Parameter(
+            param = nn.Parameter(
                 torch.tensor([log_y_minus_1.item()], dtype=torch.float32, device=device)
             )
+            self.table[key] = param
+            self._new_params.append(param)
         return self.table[key]
     
     def _batch_forward(
@@ -105,7 +135,8 @@ class LookupTableIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
         params = []
         for state in states:
             # Use (state, map_hash) as the cache key to distinguish states from different maps
-            key = hash((state, map_hash))
+            normalized_state = self._normalize_state(state)
+            key = hash((normalized_state, map_hash))
             param = self._get_or_create_entry(key, device)
             params.append(param.squeeze())
         
@@ -136,7 +167,8 @@ class LookupTableIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
             Tuple of (y, U_r) tensors, each shape (1,).
         """
         map_hash = _get_map_hash(world_model)
-        key = hash((state, map_hash))
+        normalized_state = self._normalize_state(state)
+        key = hash((normalized_state, map_hash))
         param = self._get_or_create_entry(key, device)
         log_y_minus_1 = param.view(1)
         

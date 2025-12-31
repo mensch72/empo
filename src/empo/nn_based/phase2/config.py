@@ -228,15 +228,9 @@ class Phase2Config:
     # Default values for lookup table entries (used when state is first seen)
     lookup_default_q_r: float = -1.0     # Q_r < 0 (negative value)
     lookup_default_v_r: float = -1.0     # V_r < 0 (negative value)
-    lookup_default_v_h_e: float = 0.5    # V_h^e ∈ [0, 1] (probability)
-    lookup_default_x_h: float = 0.5      # X_h ∈ (0, 1] (aggregate ability)
+    lookup_default_v_h_e: float = 0.0    # V_h^e ∈ [0, 1] (probability) - 0 = pessimistic default
+    lookup_default_x_h: float = 1e-10    # X_h ∈ (0, 1] (aggregate ability)
     lookup_default_y: float = 2.0        # y >= 1 (intermediate for U_r)
-    
-    # Optimizer recreation interval for lookup tables.
-    # Since new table entries are created dynamically, the optimizer needs to be
-    # recreated periodically to include new parameters. Set to 0 to disable.
-    # Recommended: recreate at warmup stage boundaries.
-    lookup_optimizer_recreate_interval: int = 1000
     
     def __post_init__(self):
         """Compute cumulative warmup thresholds and apply network flags."""
@@ -684,34 +678,3 @@ class Phase2Config:
             'u_r': self.lookup_default_y,  # For U_r, this is default y value
         }
         return defaults.get(network_name, 0.0)
-    
-    def should_recreate_optimizer(self, step: int) -> bool:
-        """
-        Check if optimizer should be recreated at this step.
-        
-        For lookup tables, new parameters are created dynamically and need
-        to be registered with the optimizer. This method determines when
-        to recreate the optimizer to include new parameters.
-        
-        Args:
-            step: Current training step.
-            
-        Returns:
-            True if optimizer should be recreated.
-        """
-        if not self.use_lookup_tables:
-            return False
-        if self.lookup_optimizer_recreate_interval <= 0:
-            return False
-        
-        # Also recreate at warmup stage boundaries
-        if step in [
-            self._warmup_v_h_e_end,
-            self._warmup_x_h_end,
-            self._warmup_u_r_end,
-            self._warmup_q_r_end,
-            self._warmup_q_r_end + self.beta_r_rampup_steps,
-        ]:
-            return True
-        
-        return step > 0 and step % self.lookup_optimizer_recreate_interval == 0

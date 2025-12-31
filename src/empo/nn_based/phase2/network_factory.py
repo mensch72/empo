@@ -231,15 +231,18 @@ def create_all_phase2_lookup_networks(
         num_robots=num_robots,
         beta_r=config.beta_r,
         default_q_r=config.get_lookup_default('q_r'),
+        include_step_count=config.include_step_count,
     )
     
     v_h_e = LookupTableHumanGoalAbilityNetwork(
         gamma_h=config.gamma_h,
         default_v_h_e=config.get_lookup_default('v_h_e'),
+        include_step_count=config.include_step_count,
     )
     
     x_h = LookupTableAggregateGoalAbilityNetwork(
         default_x_h=config.get_lookup_default('x_h'),
+        include_step_count=config.include_step_count,
     )
     
     u_r = None
@@ -247,6 +250,7 @@ def create_all_phase2_lookup_networks(
         u_r = LookupTableIntrinsicRewardNetwork(
             eta=config.eta,
             default_y=config.get_lookup_default('u_r'),
+            include_step_count=config.include_step_count,
         )
     
     v_r = None
@@ -254,6 +258,7 @@ def create_all_phase2_lookup_networks(
         v_r = LookupTableRobotValueNetwork(
             gamma_r=config.gamma_r,
             default_v_r=config.get_lookup_default('v_r'),
+            include_step_count=config.include_step_count,
         )
     
     return q_r, v_h_e, x_h, u_r, v_r

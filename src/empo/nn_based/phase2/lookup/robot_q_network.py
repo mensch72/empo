@@ -49,6 +49,7 @@ class LookupTableRobotQNetwork(BaseRobotQNetwork):
         beta_r: Power-law policy exponent (nominal value).
         default_q_r: Initial Q-value for unseen states (should be negative).
         feasible_range: Optional (min, max) bounds for Q-values.
+        include_step_count: If False, strip step_count from state before hashing.
         state_encoder: Optional state encoder (for API compatibility with neural networks).
             Typically an identity encoder with use_encoders=False.
         own_state_encoder: Optional own state encoder (for API compatibility).
@@ -61,6 +62,7 @@ class LookupTableRobotQNetwork(BaseRobotQNetwork):
         beta_r: float = 10.0,
         default_q_r: float = -1.0,
         feasible_range: Optional[Tuple[float, float]] = None,
+        include_step_count: bool = True,
         state_encoder: Optional[nn.Module] = None,
         own_state_encoder: Optional[nn.Module] = None,
     ):
@@ -71,6 +73,7 @@ class LookupTableRobotQNetwork(BaseRobotQNetwork):
             feasible_range=feasible_range
         )
         self.default_q_r = default_q_r
+        self.include_step_count = include_step_count
         
         # Store encoders for API compatibility (not used for computation)
         self.state_encoder = state_encoder
@@ -80,9 +83,34 @@ class LookupTableRobotQNetwork(BaseRobotQNetwork):
         # Using a regular dict, entries are created lazily on first access
         self.table: Dict[int, nn.Parameter] = {}
         
+        # Track new parameters for incremental optimizer updates
+        self._new_params: List[nn.Parameter] = []
+        
         # Track which keys were accessed in current forward pass (for gradient flow)
         self._accessed_keys: List[int] = []
     
+    def _normalize_state(self, state: Hashable) -> Hashable:
+        """
+        Normalize state for lookup key generation.
+        
+        If include_step_count is False and state is a tuple with step_count as first
+        element (as in MultiGrid states), strip the step_count.
+        """
+        if not self.include_step_count and isinstance(state, tuple) and len(state) >= 2:
+            return state[1:]
+        return state
+
+    def get_new_params(self) -> List[nn.Parameter]:
+        """
+        Get newly created parameters and clear the tracking list.
+        
+        Returns:
+            List of parameters created since last call.
+        """
+        params = self._new_params
+        self._new_params = []
+        return params
+
     def _get_or_create_entry(self, key: int, device: str = 'cpu') -> nn.Parameter:
         """
         Get entry for key, creating with default value if not present.
@@ -101,7 +129,7 @@ class LookupTableRobotQNetwork(BaseRobotQNetwork):
             # -softplus(x) = default_q_r => softplus(x) = -default_q_r
             # For small x: softplus(x) ≈ x, so x ≈ -default_q_r
             raw_default = -self.default_q_r  # This gives us ≈ default_q_r after -softplus
-            self.table[key] = nn.Parameter(
+            param = nn.Parameter(
                 torch.full(
                     (self.num_action_combinations,),
                     raw_default,
@@ -109,6 +137,8 @@ class LookupTableRobotQNetwork(BaseRobotQNetwork):
                     device=device
                 )
             )
+            self.table[key] = param
+            self._new_params.append(param)
         return self.table[key]
     
     def _batch_forward(
@@ -133,7 +163,8 @@ class LookupTableRobotQNetwork(BaseRobotQNetwork):
         params = []
         for state in states:
             # Use (state, map_hash) as the cache key to distinguish states from different maps
-            key = hash((state, map_hash))
+            normalized_state = self._normalize_state(state)
+            key = hash((normalized_state, map_hash))
             param = self._get_or_create_entry(key, device)
             params.append(param)
         
@@ -161,7 +192,8 @@ class LookupTableRobotQNetwork(BaseRobotQNetwork):
             Q_r values of shape (1, num_action_combinations), all negative.
         """
         map_hash = _get_map_hash(world_model)
-        key = hash((state, map_hash))
+        normalized_state = self._normalize_state(state)
+        key = hash((normalized_state, map_hash))
         param = self._get_or_create_entry(key, device)
         raw_output = param.unsqueeze(0)
         return self.ensure_negative(raw_output)

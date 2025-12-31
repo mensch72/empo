@@ -32,6 +32,8 @@ class Phase2Transition:
             The compressed_grid is a (H, W) int32 tensor that encodes all grid information.
             When provided, avoids expensive tensorization during training.
         next_compact_features: Optional pre-computed compact features for next state.
+        terminal: Whether this transition ends the episode (next_state has no continuation).
+            When True, the V_h^e TD target should not bootstrap from next_state.
     """
     state: Any
     robot_action: Tuple[int, ...]
@@ -42,6 +44,7 @@ class Phase2Transition:
     transition_probs_by_action: Optional[Dict[int, List[Tuple[float, Any]]]] = None
     compact_features: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = None
     next_compact_features: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = None
+    terminal: bool = False
 
 
 class Phase2ReplayBuffer:
@@ -77,7 +80,8 @@ class Phase2ReplayBuffer:
         next_state: Any,
         transition_probs_by_action: Optional[Dict[int, List[Tuple[float, Any]]]] = None,
         compact_features: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = None,
-        next_compact_features: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = None
+        next_compact_features: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = None,
+        terminal: bool = False
     ) -> None:
         """
         Add a transition to the buffer.
@@ -92,6 +96,7 @@ class Phase2ReplayBuffer:
             transition_probs_by_action: Optional pre-computed transition probabilities.
             compact_features: Optional pre-computed (global, agent, interactive, compressed_grid) tensors for state.
             next_compact_features: Optional pre-computed (global, agent, interactive, compressed_grid) tensors for next_state.
+            terminal: Whether this transition ends the episode.
         """
         transition = Phase2Transition(
             state=state,
@@ -102,7 +107,8 @@ class Phase2ReplayBuffer:
             next_state=next_state,
             transition_probs_by_action=transition_probs_by_action,
             compact_features=compact_features,
-            next_compact_features=next_compact_features
+            next_compact_features=next_compact_features,
+            terminal=terminal
         )
         
         if len(self.buffer) < self.capacity:

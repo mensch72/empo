@@ -145,16 +145,18 @@ def configure_environment(use_ensemble: bool, use_small: bool = False):
         
         # Define goals for V_h^e evaluation
         DEFINED_GOALS = [
-            (1, (2,1)),  # easy once robot has pushed rock twice or once and moved back 
-            (1, (1,1)),  # medium difficulty
-            (1, (3,1)),  # hardest since robot must move back to (1,1) after pushing rock twice
+#            (1, (2,1)),  # easy once robot has pushed rock twice or once and moved back 
+#            (1, (1,1)),  # medium difficulty
+#            (1, (3,1)),  # hardest since robot must move back to (1,1) after pushing rock twice
             (1, (2,2)),  # already reached
             (1, (1,2)),  # impossible goal (in wall)
         ]
         
         goal_sampler_factory = lambda env: TabularGoalSampler([
             ReachCellGoal(env, human_idx, pos) for human_idx, pos in DEFINED_GOALS
-        ], probabilities=[0.4, 0.2, 0.2, 0.1, 0.1])
+        ], 
+#        probabilities=[0.4, 0.2, 0.2, 0.1, 0.1]
+        )
 
         TEST_MAPS = [
             (GRID_MAP, "Worst V_r: human locked behind rock"),
@@ -1039,6 +1041,11 @@ def main(
         use_encoders=use_encoders,
         # Tabular learning mode (lookup tables instead of neural networks)
         use_lookup_tables=use_tabular,
+        q_r_weight_decay=0,
+        v_r_weight_decay=0,
+        v_h_e_weight_decay=0,
+        x_h_weight_decay=0,
+        u_r_weight_decay=0,
     )
     
     # If using policy directly (no training), skip to rollouts

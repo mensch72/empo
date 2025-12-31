@@ -33,6 +33,7 @@ class LookupTableRobotValueNetwork(BaseRobotValueNetwork):
     Args:
         gamma_r: Robot discount factor.
         default_v_r: Initial V-value for unseen states (should be negative).
+        include_step_count: If False, strip step_count from state before hashing.
         state_encoder: Optional state encoder (for API compatibility with neural networks).
     """
     
@@ -40,17 +41,44 @@ class LookupTableRobotValueNetwork(BaseRobotValueNetwork):
         self,
         gamma_r: float = 0.99,
         default_v_r: float = -1.0,
+        include_step_count: bool = True,
         state_encoder: Optional[nn.Module] = None,
     ):
         super().__init__(gamma_r=gamma_r)
         self.default_v_r = default_v_r
+        self.include_step_count = include_step_count
         
         # Store encoder for API compatibility (not used for computation)
         self.state_encoder = state_encoder
         
         # Main lookup table: hash(state) -> Parameter(V_r value)
         self.table: Dict[int, nn.Parameter] = {}
+        
+        # Track new parameters for incremental optimizer updates
+        self._new_params: List[nn.Parameter] = []
     
+    def _normalize_state(self, state: Hashable) -> Hashable:
+        """
+        Normalize state for lookup key generation.
+        
+        If include_step_count is False and state is a tuple with step_count as first
+        element (as in MultiGrid states), strip the step_count.
+        """
+        if not self.include_step_count and isinstance(state, tuple) and len(state) >= 2:
+            return state[1:]
+        return state
+
+    def get_new_params(self) -> List[nn.Parameter]:
+        """
+        Get newly created parameters and clear the tracking list.
+        
+        Returns:
+            List of parameters created since last call.
+        """
+        params = self._new_params
+        self._new_params = []
+        return params
+
     def _get_or_create_entry(self, key: int, device: str = 'cpu') -> nn.Parameter:
         """
         Get entry for key, creating with default value if not present.
@@ -66,9 +94,11 @@ class LookupTableRobotValueNetwork(BaseRobotValueNetwork):
             # Create new entry with default value
             # Use raw value that will produce default_v_r after ensure_negative()
             raw_default = -self.default_v_r
-            self.table[key] = nn.Parameter(
+            param = nn.Parameter(
                 torch.tensor([raw_default], dtype=torch.float32, device=device)
             )
+            self.table[key] = param
+            self._new_params.append(param)
         return self.table[key]
     
     def _batch_forward(
@@ -93,7 +123,8 @@ class LookupTableRobotValueNetwork(BaseRobotValueNetwork):
         params = []
         for state in states:
             # Use (state, map_hash) as the cache key to distinguish states from different maps
-            key = hash((state, map_hash))
+            normalized_state = self._normalize_state(state)
+            key = hash((normalized_state, map_hash))
             param = self._get_or_create_entry(key, device)
             params.append(param.squeeze())
         
@@ -121,7 +152,8 @@ class LookupTableRobotValueNetwork(BaseRobotValueNetwork):
             V_r value of shape (1,), negative.
         """
         map_hash = _get_map_hash(world_model)
-        key = hash((state, map_hash))
+        normalized_state = self._normalize_state(state)
+        key = hash((normalized_state, map_hash))
         param = self._get_or_create_entry(key, device)
         raw_output = param.view(1)
         return self.ensure_negative(raw_output)

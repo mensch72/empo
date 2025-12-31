@@ -349,36 +349,52 @@ class BasePhase2Trainer(ABC):
             )
         return optimizers
     
-    def _maybe_recreate_optimizers(self):
+    def _add_new_lookup_params_to_optimizers(self):
         """
-        Recreate optimizers if needed for lookup table networks.
+        Add new lookup table parameters to optimizers incrementally.
         
         Lookup tables create new parameters dynamically as new states are encountered.
-        The optimizer needs to be recreated periodically to include these new parameters.
-        This is controlled by config.lookup_optimizer_recreate_interval.
+        This method adds any newly created parameters to existing optimizers without
+        recreating them, preserving momentum/adaptive state for existing parameters.
         
-        For networks that have grown since the last optimizer creation, we preserve
-        the learning rate and weight decay but reset momentum/adaptive state.
+        This is very cheap (~0.002ms) so it's called every training step.
         """
-        if not self.config.should_recreate_optimizer(self.training_step_count):
-            return
+        # Collect new parameters from all lookup table networks
+        # Each network tracks new params since last call to get_new_params()
+        new_params_by_optimizer = {
+            'q_r': [],
+            'v_h_e': [],
+            'x_h': [],
+        }
         
-        if self.debug:
+        # Check each network for new params
+        if hasattr(self.networks.q_r, 'get_new_params'):
+            new_params_by_optimizer['q_r'].extend(self.networks.q_r.get_new_params())
+        if hasattr(self.networks.v_h_e, 'get_new_params'):
+            new_params_by_optimizer['v_h_e'].extend(self.networks.v_h_e.get_new_params())
+        if hasattr(self.networks.x_h, 'get_new_params'):
+            new_params_by_optimizer['x_h'].extend(self.networks.x_h.get_new_params())
+        if self.config.u_r_use_network and hasattr(self.networks.u_r, 'get_new_params'):
+            # U_r shares optimizer with x_h
+            new_params_by_optimizer['x_h'].extend(self.networks.u_r.get_new_params())
+        if self.config.v_r_use_network and hasattr(self.networks.v_r, 'get_new_params'):
+            # V_r shares optimizer with q_r
+            new_params_by_optimizer['q_r'].extend(self.networks.v_r.get_new_params())
+        
+        # Add new parameters incrementally to each optimizer
+        total_new = 0
+        for name, new_params in new_params_by_optimizer.items():
+            if new_params and name in self.optimizers:
+                optimizer = self.optimizers[name]
+                # Direct append to first param group is 300x faster than add_param_group
+                for param in new_params:
+                    optimizer.param_groups[0]['params'].append(param)
+                total_new += len(new_params)
+        
+        if self.debug and total_new > 0:
             total_entries = get_total_table_size(self.networks)
-            print(f"[DEBUG] Recreating optimizers (step {self.training_step_count}, "
-                  f"{total_entries} total lookup table entries)")
-        
-        # Simply recreate all optimizers - this resets momentum but ensures
-        # all parameters are tracked. For lookup tables with many new entries,
-        # this is cleaner than trying to add parameters incrementally.
-        self.optimizers = self._init_optimizers()
-        
-        if self.verbose:
-            # Log lookup table sizes
-            lookup_tables = get_all_lookup_tables(self.networks)
-            if lookup_tables:
-                sizes = {name: len(net.table) for name, net in lookup_tables.items()}
-                print(f"[Lookup] Recreated optimizers. Table sizes: {sizes}")
+            print(f"[DEBUG] Added {total_new} new params to optimizers "
+                  f"(step {self.training_step_count}, {total_entries} total entries)")
     
     def _compute_param_norms(self) -> Dict[str, float]:
         """Compute L2 norms of network parameters for monitoring."""
@@ -635,7 +651,8 @@ class BasePhase2Trainer(ABC):
         self,
         state: Any,
         goals: Dict[int, Any],
-        goal_weights: Dict[int, float]
+        goal_weights: Dict[int, float],
+        terminal: bool = False
     ) -> Tuple[Phase2Transition, Any]:
         """
         Collect one transition from the environment.
@@ -644,6 +661,9 @@ class BasePhase2Trainer(ABC):
             state: Current state.
             goals: Current goal assignments.
             goal_weights: Weights for each goal (from goal sampler).
+            terminal: Whether this transition ends the episode (after this step,
+                the environment will be reset). When True, the V_h^e TD target
+                should not bootstrap from next_state.
         
         Returns:
             Tuple of (transition, next_state).
@@ -686,7 +706,8 @@ class BasePhase2Trainer(ABC):
             goal_weights=goal_weights.copy(),
             human_actions=human_actions,
             next_state=next_state,
-            transition_probs_by_action=transition_probs_by_action
+            transition_probs_by_action=transition_probs_by_action,
+            terminal=terminal
         )
         
         if self.debug:
@@ -854,13 +875,14 @@ class BasePhase2Trainer(ABC):
         states = [t.state for t in batch]
         next_states = [t.next_state for t in batch]
         
-        # Collect V_h^e data: (state_idx, state, next_state, human_idx, goal)
+        # Collect V_h^e data: (state_idx, state, next_state, human_idx, goal, terminal)
         v_h_e_indices = []  # which transition this came from
         v_h_e_states = []
         v_h_e_next_states = []
         v_h_e_human_indices = []
         v_h_e_goals = []
         v_h_e_achieved = []
+        v_h_e_terminal = []  # whether transition is terminal (episode ended)
         
         for i, t in enumerate(batch):
             for h, g_h in t.goals.items():
@@ -869,7 +891,17 @@ class BasePhase2Trainer(ABC):
                 v_h_e_next_states.append(t.next_state)
                 v_h_e_human_indices.append(h)
                 v_h_e_goals.append(g_h)
-                v_h_e_achieved.append(self.check_goal_achieved(t.next_state, h, g_h))
+                achieved = self.check_goal_achieved(t.next_state, h, g_h)
+                v_h_e_achieved.append(achieved)
+                v_h_e_terminal.append(t.terminal)
+                
+                # Debug logging for goal achievement
+                if self.debug and achieved:
+                    step_count, agent_states, _, _ = t.next_state
+                    agent_pos = (int(agent_states[h][0]), int(agent_states[h][1]))
+                    goal_target = getattr(g_h, 'target_pos', 'unknown')
+                    print(f"[DEBUG] Goal achieved! human={h}, target={goal_target}, "
+                          f"agent_pos={agent_pos}, terminal={t.terminal}, goal_hash={hash(g_h)}")
         
         # Collect X_h data
         x_h_states = []
@@ -937,16 +969,48 @@ class BasePhase2Trainer(ABC):
                 device=self.device
             )
             
+            # Terminal mask: when True, continuation value is 0
+            terminal_t = torch.tensor(
+                [1.0 if t else 0.0 for t in v_h_e_terminal],
+                device=self.device
+            )
+            
             with torch.no_grad():
                 v_h_e_next = self.networks.v_h_e_target.forward_batch(
                     v_h_e_next_states, v_h_e_goals, v_h_e_human_indices,
                     self.env, self.device
                 )
             
-            # TD target: achieved + (1 - achieved) * gamma_h * V_h^e_next
+            # TD target: achieved + (1 - achieved) * (1 - terminal) * gamma_h * V_h^e_next
             target_v_h_e = self.networks.v_h_e.compute_td_target(
-                goal_achieved_t, v_h_e_next.squeeze()
+                goal_achieved_t, v_h_e_next.squeeze(), terminal=terminal_t
             )
+            
+            # Debug logging for TD targets
+            if self.debug and self.training_step_count % 100 == 0:
+                n_achieved = goal_achieved_t.sum().item()
+                n_terminal = terminal_t.sum().item()
+                n_total = len(goal_achieved_t)
+                # Find unique goals and their target values
+                goal_targets = {}
+                for idx, g in enumerate(v_h_e_goals):
+                    goal_key = getattr(g, 'target_pos', hash(g))
+                    if goal_key not in goal_targets:
+                        goal_targets[goal_key] = {'targets': [], 'achieved': [], 'terminal': [], 'next_v': []}
+                    goal_targets[goal_key]['targets'].append(target_v_h_e[idx].item())
+                    goal_targets[goal_key]['achieved'].append(goal_achieved_t[idx].item())
+                    goal_targets[goal_key]['terminal'].append(terminal_t[idx].item())
+                    goal_targets[goal_key]['next_v'].append(v_h_e_next[idx].item())
+                print(f"[DEBUG V_h^e] step={self.training_step_count}, achieved={n_achieved}/{n_total}, "
+                      f"terminal={n_terminal}/{n_total}, target_mean={target_v_h_e.mean().item():.4f}")
+                for goal_key, data in sorted(goal_targets.items()):
+                    n = len(data['targets'])
+                    mean_target = sum(data['targets']) / n
+                    mean_next_v = sum(data['next_v']) / n
+                    n_ach = sum(data['achieved'])
+                    n_term = sum(data['terminal'])
+                    print(f"[DEBUG V_h^e]   Goal {goal_key}: n={n}, achieved={n_ach}, terminal={n_term}, "
+                          f"mean_target={mean_target:.4f}, mean_next_v={mean_next_v:.4f}")
             
             losses['v_h_e'] = ((v_h_e_pred.squeeze() - target_v_h_e) ** 2).mean()
             
@@ -1238,8 +1302,8 @@ class BasePhase2Trainer(ABC):
         # Update target networks (each at its own interval)
         self.update_target_networks()
         
-        # Recreate optimizers if needed (for lookup table parameter growth)
-        self._maybe_recreate_optimizers()
+        # Add any new lookup table parameters to optimizers
+        self._add_new_lookup_params_to_optimizers()
         
         return loss_values, grad_norms, prediction_stats
     
@@ -1308,9 +1372,18 @@ class BasePhase2Trainer(ABC):
         Returns:
             The collected transition, or None if collection failed.
         """
+        # Check if this will be the last step of the episode BEFORE collecting
+        # This is needed so the transition can be marked as terminal
+        is_terminal = (actor_state.env_step_count + 1) >= self.config.steps_per_episode
+        
+        if self.debug and is_terminal:
+            print(f"[DEBUG] Terminal transition! env_step={actor_state.env_step_count}, "
+                  f"steps_per_episode={self.config.steps_per_episode}")
+        
         # Collect one transition
         transition, next_state = self.collect_transition(
-            actor_state.state, actor_state.goals, actor_state.goal_weights
+            actor_state.state, actor_state.goals, actor_state.goal_weights,
+            terminal=is_terminal
         )
         
         # Check if transition failed (environment ended or error)
@@ -1325,8 +1398,22 @@ class BasePhase2Trainer(ABC):
         actor_state.state = next_state
         actor_state.env_step_count += 1
         
-        # Resample goals with some probability
-        if random.random() < self.config.goal_resample_prob:
+        # Check if any goal was achieved - if so, resample that goal
+        # This prevents the agent from repeatedly seeing achieved=1 for the same goal
+        goals_to_resample = []
+        for h, g in actor_state.goals.items():
+            if self.check_goal_achieved(next_state, h, g):
+                goals_to_resample.append(h)
+        
+        if goals_to_resample:
+            # Resample only the achieved goals
+            new_goals, new_weights = self._sample_goals(next_state)
+            for h in goals_to_resample:
+                if h in new_goals:
+                    actor_state.goals[h] = new_goals[h]
+                    actor_state.goal_weights[h] = new_weights[h]
+        # Also resample goals with some probability (exploration)
+        elif random.random() < self.config.goal_resample_prob:
             actor_state.goals, actor_state.goal_weights = self._sample_goals(actor_state.state)
         
         # Reset environment periodically
@@ -1627,7 +1714,8 @@ class BasePhase2Trainer(ABC):
                     transition.goal_weights,
                     transition.human_actions,
                     transition.next_state,
-                    transition.transition_probs_by_action
+                    transition.transition_probs_by_action,
+                    terminal=transition.terminal
                 )
                 self.total_env_steps += 1
             
@@ -1769,11 +1857,14 @@ class BasePhase2Trainer(ABC):
     
     def _serialize_policy_state(self) -> bytes:
         """Serialize policy state dict to bytes for sharing."""
-        import pickle
         import io
         state = self._get_policy_state_dict()
-        # Move to CPU for sharing
-        cpu_state = {k: {kk: vv.cpu() for kk, vv in v.items()} for k, v in state.items()}
+        # Move tensors to CPU for sharing, leave other types as-is
+        def to_cpu(v):
+            if isinstance(v, torch.Tensor):
+                return v.cpu()
+            return v
+        cpu_state = {k: {kk: to_cpu(vv) for kk, vv in v.items()} for k, v in state.items()}
         buffer = io.BytesIO()
         torch.save(cpu_state, buffer)
         return buffer.getvalue()
@@ -1878,6 +1969,7 @@ class BasePhase2Trainer(ABC):
                     'human_actions': transition.human_actions,
                     'next_state': transition.next_state,
                     'transition_probs_by_action': transition.transition_probs_by_action,
+                    'terminal': transition.terminal,
                 }
                 
                 try:
@@ -2017,7 +2109,8 @@ class BasePhase2Trainer(ABC):
                     goal_weights=trans_dict['goal_weights'],
                     human_actions=trans_dict['human_actions'],
                     next_state=trans_dict['next_state'],
-                    transition_probs_by_action=trans_dict.get('transition_probs_by_action')
+                    transition_probs_by_action=trans_dict.get('transition_probs_by_action'),
+                    terminal=trans_dict.get('terminal', False)
                 )
                 consumed += 1
             except Empty:

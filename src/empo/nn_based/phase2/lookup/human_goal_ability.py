@@ -32,6 +32,10 @@ class LookupTableHumanGoalAbilityNetwork(BaseHumanGoalAchievementNetwork):
         default_v_h_e: Initial V_h^e value for unseen (state, goal) pairs.
             Should be in [0, 1]. 0.5 is neutral, higher is optimistic.
         feasible_range: Output bounds for V_h^e (default [0, 1]).
+        include_step_count: If False, strip step_count from state before hashing.
+            This allows states that differ only in step_count to share the same
+            lookup entry, which is important for environments where step_count
+            varies but doesn't affect goal achievability.
         state_encoder: Optional state encoder (for API compatibility with neural networks).
         goal_encoder: Optional goal encoder (for API compatibility with neural networks).
         agent_encoder: Optional agent encoder (for API compatibility with neural networks).
@@ -40,14 +44,16 @@ class LookupTableHumanGoalAbilityNetwork(BaseHumanGoalAchievementNetwork):
     def __init__(
         self,
         gamma_h: float = 0.99,
-        default_v_h_e: float = 0.5,
+        default_v_h_e: float = 0.0,  # Start pessimistic - assume goal won't be achieved
         feasible_range: Tuple[float, float] = (0.0, 1.0),
+        include_step_count: bool = True,
         state_encoder: Optional[nn.Module] = None,
         goal_encoder: Optional[nn.Module] = None,
         agent_encoder: Optional[nn.Module] = None,
     ):
         super().__init__(gamma_h=gamma_h, feasible_range=feasible_range)
         self.default_v_h_e = default_v_h_e
+        self.include_step_count = include_step_count
         
         # Store encoders for API compatibility (not used for computation)
         self.state_encoder = state_encoder
@@ -56,6 +62,43 @@ class LookupTableHumanGoalAbilityNetwork(BaseHumanGoalAchievementNetwork):
         
         # Main lookup table: hash((state, goal)) -> Parameter(V_h^e value)
         self.table: Dict[int, nn.Parameter] = {}
+        
+        # Track newly created parameters for incremental optimizer updates
+        self._new_params: List[nn.Parameter] = []
+    
+    def get_new_params(self) -> List[nn.Parameter]:
+        """
+        Get and clear the list of newly created parameters.
+        
+        This allows the optimizer to incrementally add new parameters
+        without full recreation.
+        
+        Returns:
+            List of parameters created since last call.
+        """
+        new_params = self._new_params
+        self._new_params = []
+        return new_params
+    
+    def _normalize_state(self, state: Hashable) -> Hashable:
+        """
+        Normalize state for lookup key generation.
+        
+        If include_step_count is False and state is a tuple with step_count as first
+        element (as in MultiGrid states), strip the step_count to allow states that
+        differ only in step_count to share the same lookup entry.
+        
+        Args:
+            state: Raw state from environment.
+        
+        Returns:
+            Normalized state for use in lookup keys.
+        """
+        if not self.include_step_count and isinstance(state, tuple) and len(state) >= 2:
+            # MultiGrid state format: (step_count, agent_states, mobile_objects, mutable_objects)
+            # Strip step_count (first element)
+            return state[1:]
+        return state
     
     def _get_or_create_entry(self, key: int, device: str = 'cpu') -> nn.Parameter:
         """
@@ -70,9 +113,11 @@ class LookupTableHumanGoalAbilityNetwork(BaseHumanGoalAchievementNetwork):
         """
         if key not in self.table:
             # Store raw value that will become default_v_h_e after clamping
-            self.table[key] = nn.Parameter(
+            param = nn.Parameter(
                 torch.tensor([self.default_v_h_e], dtype=torch.float32, device=device)
             )
+            self.table[key] = param
+            self._new_params.append(param)
         return self.table[key]
     
     def _batch_forward(
@@ -81,7 +126,8 @@ class LookupTableHumanGoalAbilityNetwork(BaseHumanGoalAchievementNetwork):
         goals: List[Hashable],
         human_indices: Optional[List[int]] = None,
         map_hash: int = 0,
-        device: str = 'cpu'
+        device: str = 'cpu',
+        debug: bool = False
     ) -> torch.Tensor:
         """
         Internal: Batch forward pass from raw states and goals.
@@ -92,6 +138,7 @@ class LookupTableHumanGoalAbilityNetwork(BaseHumanGoalAchievementNetwork):
             human_indices: Optional list of human indices (not used for lookup).
             map_hash: Hash of the initial map configuration (for ensemble mode).
             device: Target device.
+            debug: If True, print debug info about key collisions.
         
         Returns:
             V_h^e values of shape (batch_size,), in [0, 1].
@@ -101,9 +148,20 @@ class LookupTableHumanGoalAbilityNetwork(BaseHumanGoalAchievementNetwork):
                 
         # Collect parameters for all (state, goal, map_hash) triples
         params = []
+        if debug:
+            key_to_inputs = {}  # Track which (state, goal) pairs map to each key
         for state, goal in zip(states, goals):
             # Use (state, goal, map_hash) as the cache key to distinguish states from different maps
-            key = hash((state, goal, map_hash))
+            normalized_state = self._normalize_state(state)
+            key = hash((normalized_state, goal, map_hash))
+            if debug:
+                goal_target = getattr(goal, 'target_pos', str(goal)[:30])
+                if key in key_to_inputs:
+                    prev_goal = key_to_inputs[key]
+                    if prev_goal != goal_target:
+                        print(f"[DEBUG] HASH COLLISION! key={key} maps to both {prev_goal} and {goal_target}")
+                else:
+                    key_to_inputs[key] = goal_target
             param = self._get_or_create_entry(key, device)
             params.append(param.squeeze())
         
@@ -135,7 +193,8 @@ class LookupTableHumanGoalAbilityNetwork(BaseHumanGoalAchievementNetwork):
             V_h^e value of shape (1,), in [0, 1].
         """
         map_hash = _get_map_hash(world_model)
-        key = hash((state, goal, map_hash))
+        normalized_state = self._normalize_state(state)
+        key = hash((normalized_state, goal, map_hash))
         param = self._get_or_create_entry(key, device)
         raw_output = param.view(1)
         return self.apply_clamp(raw_output)

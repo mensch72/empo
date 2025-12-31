@@ -183,7 +183,8 @@ def create_phase2_networks(
     """
     Create all Phase 2 networks for a multigrid environment.
     
-    Creates SHARED encoders that are used by all networks:
+    If config.use_lookup_tables is True, creates lookup table networks.
+    Otherwise, creates neural networks with SHARED encoders:
     - One state encoder shared by Q_r, V_h^e, X_h, U_r, V_r
     - One goal encoder shared by V_h^e
     - One agent encoder shared by V_h^e, X_h
@@ -207,6 +208,23 @@ def create_phase2_networks(
     Returns:
         Phase2Networks container with all networks using shared encoders.
     """
+    # Use lookup table networks if requested
+    if config.use_lookup_tables:
+        from empo.nn_based.phase2.network_factory import create_all_phase2_lookup_networks
+        q_r, v_h_e, x_h, u_r, v_r = create_all_phase2_lookup_networks(
+            config=config,
+            num_actions=num_actions,
+            num_robots=num_robots
+        )
+        return Phase2Networks(
+            q_r=q_r,
+            v_h_e=v_h_e,
+            x_h=x_h,
+            u_r=u_r,
+            v_r=v_r
+        )
+    
+    # Neural network mode: create shared encoders
     # In identity mode (use_encoders=False), encoders now compute their own
     # output dimensions internally. We don't need to set them here.
     # The hidden_dim for downstream MLP heads stays at default (small).

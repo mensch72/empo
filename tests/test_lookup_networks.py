@@ -523,38 +523,6 @@ class TestPhase2ConfigLookupTables:
         
         assert config.get_lookup_default('q_r') == -2.0
         assert config.get_lookup_default('v_h_e') == 0.7
-    
-    def test_should_recreate_optimizer_disabled(self):
-        """Test optimizer recreation when lookup tables disabled."""
-        config = Phase2Config(use_lookup_tables=False)
-        
-        assert config.should_recreate_optimizer(1000) is False
-    
-    def test_should_recreate_optimizer_at_interval(self):
-        """Test optimizer recreation at regular intervals."""
-        config = Phase2Config(
-            use_lookup_tables=True,
-            lookup_optimizer_recreate_interval=500,
-        )
-        
-        assert config.should_recreate_optimizer(500) is True
-        assert config.should_recreate_optimizer(1000) is True
-        assert config.should_recreate_optimizer(499) is False
-    
-    def test_should_recreate_optimizer_at_warmup_boundaries(self):
-        """Test optimizer recreation at warmup stage boundaries."""
-        config = Phase2Config(
-            use_lookup_tables=True,
-            warmup_v_h_e_steps=100,
-            warmup_x_h_steps=100,
-            warmup_u_r_steps=100,
-            warmup_q_r_steps=100,
-            lookup_optimizer_recreate_interval=10000,  # Large interval
-        )
-        
-        # Should recreate at warmup boundaries
-        assert config.should_recreate_optimizer(100) is True   # _warmup_v_h_e_end
-        assert config.should_recreate_optimizer(200) is True   # _warmup_x_h_end
 
 
 # =============================================================================
@@ -611,6 +579,69 @@ class TestLookupTableIntegration:
         # All entries should be on GPU
         for key, param in network.table.items():
             assert param.device.type == 'cuda'
+    
+    def test_incremental_param_tracking(self, simple_states):
+        """Test that get_new_params tracks newly created parameters."""
+        network = LookupTableRobotQNetwork(
+            num_actions=2,
+            num_robots=1,
+        )
+        
+        # Initially no new params
+        assert len(network._new_params) == 0
+        
+        # Create entries via forward
+        _ = network.forward_batch(simple_states[:2], None, device='cpu')
+        
+        # Should have 2 new params (2 unique states)
+        assert len(network._new_params) == 2
+        
+        # Get new params clears the list
+        new_params = network.get_new_params()
+        assert len(new_params) == 2
+        assert len(network._new_params) == 0
+        
+        # Add more states
+        _ = network.forward_batch(simple_states[2:3], None, device='cpu')
+        
+        # Should have 1 new param
+        assert len(network._new_params) == 1
+        
+        # Accessing existing state doesn't add new params
+        _ = network.forward_batch(simple_states[:1], None, device='cpu')
+        assert len(network._new_params) == 1
+    
+    def test_incremental_optimizer_updates(self, simple_states):
+        """Test that incrementally added params work with optimizer."""
+        network = LookupTableRobotQNetwork(
+            num_actions=2,
+            num_robots=1,
+        )
+        
+        # Create initial entries
+        _ = network.forward_batch(simple_states[:2], None, device='cpu')
+        
+        # Create optimizer with initial params
+        optimizer = torch.optim.Adam(network.get_new_params(), lr=0.1)
+        
+        # Add more entries
+        _ = network.forward_batch(simple_states[2:3], None, device='cpu')
+        
+        # Incrementally add new params
+        new_params = network.get_new_params()
+        for param in new_params:
+            optimizer.param_groups[0]['params'].append(param)
+        
+        # Verify all 3 params are in optimizer
+        assert len(optimizer.param_groups[0]['params']) == 3
+        
+        # Verify gradients flow to all params
+        output = network.forward_batch(simple_states[:3], None, device='cpu')
+        loss = output.sum()
+        loss.backward()
+        
+        for param in optimizer.param_groups[0]['params']:
+            assert param.grad is not None
 
 
 class TestLookupTableUtilities:

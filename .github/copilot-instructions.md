@@ -110,6 +110,8 @@ During warm-up: `beta_r=0` (uniform random robot). After warm-up: `beta_r` ramps
 - **NEVER delete code unrelated to the current task.** This has caused problems requiring recovery from git history. When editing files, preserve all unrelated functions, classes, and imports.
 - **Remind the user to make intermediate commits** after completing each logical unit of work. This makes it easier to revert mistakes and track progress.
 - Don't use `sed` or other text-replacement tools that change files directly on disk, since this will conflict with the VS code editor's in-memory state. Instead, make changes through your built-in editing capability.
+- When implementing changes, ensure that all related files are updated consistently to avoid discrepancies in functionality or documentation.
+- When adding new features or modifying existing ones, make sure to do so for all execution modes (sync and async, with and without encoders, with neural networks and with lookup tables) unless the feature is explicitly meant for specific modes only, and update the relevant documentation files to reflect these changes accurately.
 
 ## Key Files for Understanding
 

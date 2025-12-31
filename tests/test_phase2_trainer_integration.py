@@ -81,8 +81,11 @@ class MockVhNetwork(BaseHumanGoalAchievementNetwork):
     def get_config(self):
         return {}
     
-    def compute_td_target(self, goal_achieved, v_next):
-        return goal_achieved + (1 - goal_achieved) * self.gamma_h * v_next
+    def compute_td_target(self, goal_achieved, v_next, terminal=None):
+        continuation = (1 - goal_achieved) * self.gamma_h * v_next
+        if terminal is not None:
+            continuation = continuation * (1.0 - terminal)
+        return goal_achieved + continuation
 
 
 class MockXhNetwork(BaseAggregateGoalAbilityNetwork):

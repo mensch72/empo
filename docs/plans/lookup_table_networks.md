@@ -1266,7 +1266,8 @@ print(f"V_h^e table size: {len(networks.v_he.table)} (state, goal) pairs")
 - [x] Implement `LookupTableIntrinsicRewardNetwork`
 - [x] Unit tests for Phase 2 lookup networks
 - [x] Add `use_lookup_tables` config options to `Phase2Config`
-- [x] Add helper methods: `should_use_lookup_table()`, `get_lookup_default()`, `should_recreate_optimizer()`
+- [x] Add helper methods: `should_use_lookup_table()`, `get_lookup_default()`
+- [x] Add incremental param tracking (`get_new_params()`) for efficient optimizer updates
 
 ### Phase 3: Domain-Specific Implementations
 
