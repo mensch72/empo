@@ -105,11 +105,17 @@ def test_phase2_config():
     assert config.beta_r == 10.0
     print("  ✓ Default config values")
     
-    # Epsilon decay
-    assert config.get_epsilon(0) == config.epsilon_r_start
-    assert config.get_epsilon(config.epsilon_r_decay_steps) == config.epsilon_r_end
-    assert config.get_epsilon(config.epsilon_r_decay_steps // 2) < config.epsilon_r_start
-    print("  ✓ Epsilon decay works")
+    # Epsilon_r decay
+    assert config.get_epsilon_r(0) == config.epsilon_r_start
+    assert config.get_epsilon_r(config.epsilon_r_decay_steps) == config.epsilon_r_end
+    assert config.get_epsilon_r(config.epsilon_r_decay_steps // 2) < config.epsilon_r_start
+    print("  ✓ Epsilon_r decay works")
+    
+    # Epsilon_h decay
+    assert config.get_epsilon_h(0) == config.epsilon_h_start
+    assert config.get_epsilon_h(config.epsilon_h_decay_steps) == config.epsilon_h_end
+    assert config.get_epsilon_h(config.epsilon_h_decay_steps // 2) < config.epsilon_h_start
+    print("  ✓ Epsilon_h decay works")
     
     # Custom config
     custom_config = Phase2Config(

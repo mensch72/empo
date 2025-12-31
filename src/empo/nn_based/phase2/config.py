@@ -37,9 +37,12 @@ class Phase2Config:
         xi: Inter-human inequality aversion (ξ >= 1 to protect last bit of power).
         eta: Additional intertemporal inequality aversion (η >= 1, 1 = neutral).
         beta_r: Robot power-law policy exponent (< ∞ to prevent overoptimization risks).
-        epsilon_r_start: Initial exploration rate.
-        epsilon_r_end: Final exploration rate.
-        epsilon_r_decay_steps: Steps over which epsilon decays.
+        epsilon_r_start: Initial robot exploration rate.
+        epsilon_r_end: Final robot exploration rate.
+        epsilon_r_decay_steps: Steps over which robot epsilon decays.
+        epsilon_h_start: Initial human exploration rate.
+        epsilon_h_end: Final human exploration rate.
+        epsilon_h_decay_steps: Steps over which human epsilon decays.
         lr_q_r: Learning rate for Q_r network.
         lr_v_r: Learning rate for V_r network.
         lr_v_h_e: Learning rate for V_h^e network.
@@ -76,10 +79,15 @@ class Phase2Config:
     # Robot policy
     beta_r: float = 10.0  # Power-law policy exponent (nominal value after warm-up)
     
-    # Exploration (in addition to power-law policy randomization)
+    # Robot exploration (in addition to power-law policy randomization)
     epsilon_r_start: float = 1.0
     epsilon_r_end: float = 0.01
     epsilon_r_decay_steps: int = 10000
+    
+    # Human exploration (analogous to robot exploration)
+    epsilon_h_start: float = 1.0
+    epsilon_h_end: float = 0.01
+    epsilon_h_decay_steps: int = 10000
     
     # Learning rates (base rates, may be modified by schedule)
     lr_q_r: float = 1e-4
@@ -320,14 +328,23 @@ class Phase2Config:
     agent_position_feature_dim: int = 32    # Agent identity encoder: position encoding output dimension
     agent_feature_dim: int = 32             # Agent identity encoder: agent feature encoding output dimension
     
-    def get_epsilon(self, step: int) -> float:
-        """Get epsilon value for given training step."""
+    def get_epsilon_r(self, step: int) -> float:
+        """Get robot epsilon value for given training step."""
         if step >= self.epsilon_r_decay_steps:
             return self.epsilon_r_end
         
         # Linear decay
         decay_rate = (self.epsilon_r_start - self.epsilon_r_end) / self.epsilon_r_decay_steps
         return self.epsilon_r_start - decay_rate * step
+    
+    def get_epsilon_h(self, step: int) -> float:
+        """Get human epsilon value for given training step."""
+        if step >= self.epsilon_h_decay_steps:
+            return self.epsilon_h_end
+        
+        # Linear decay
+        decay_rate = (self.epsilon_h_start - self.epsilon_h_end) / self.epsilon_h_decay_steps
+        return self.epsilon_h_start - decay_rate * step
     
     def get_lr_x_h(self, update_count: int) -> float:
         """Get X_h learning rate with optional 1/t decay.

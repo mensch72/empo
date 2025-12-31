@@ -61,8 +61,8 @@ from gym_multigrid.multigrid import (
     Key, Ball, Box, Door, Lava, Block, Goal
 )
 from empo.multigrid import MultiGridGoalSampler, ReachCellGoal, ReachRectangleGoal, render_test_map_values
-from empo.possible_goal import DeterministicGoalSampler, TabularGoalSampler, PossibleGoalSampler
-from empo.human_policy_prior import HeuristicPotentialPolicy
+from empo.possible_goal import TabularGoalSampler, PossibleGoalSampler
+from empo.human_policy_prior import HeuristicPotentialPolicy, MultiGridHumanExplorationPolicy
 from empo.nn_based.multigrid import PathDistanceCalculator
 from empo.nn_based.phase2.config import Phase2Config
 from empo.nn_based.phase2.world_model_factory import CachedWorldModelFactory, EnsembleWorldModelFactory
@@ -157,6 +157,17 @@ def configure_environment(use_ensemble: bool, use_small: bool = False):
         ], 
 #        probabilities=[0.4, 0.2, 0.2, 0.1, 0.1]
         )
+
+        # the following are a small selection of interesting states for testing V_r values. overall there are
+        # 4 possible human orientations, 4 possible robot orientations,
+        # one possible human/robot position combinatiopns if the rock is at (2,1),
+        # three if it is at (3,1) since the human can't pass the robot then, 
+        # and 12 if it is at (4,1) since the human can pass the robot then,
+        # making overall (4*4)*(1 + 3 + 12) = 256 possible states.
+        # In tabular mode, the tensorboard's lookup table size for x_h and q_r
+        # should thus eventually be 256 entries each, and the v_h_r lookup table
+        # should be no. of goals times larger, so for 5 possible goals 1280 entries. 
+        # This check can be used to verify that all states are being visited during training!
 
         TEST_MAPS = [
             (GRID_MAP, "Worst V_r: human locked behind rock"),
@@ -1011,14 +1022,17 @@ def main(
         eta=1.1,       # Intertemporal inequality aversion
         beta_r=final_beta_r,    # Robot policy concentration
         epsilon_r_start=1.0,
-        epsilon_r_end=1.0,  # always explore during data generation!
-#        epsilon_r_decay_steps=num_training_steps // 2,  # Decay over 50% of training
+        epsilon_r_end=0.0,
+        epsilon_r_decay_steps=num_training_steps // 3 * 2,  # Decay over 50% of training
+        epsilon_h_start=1.0,
+        epsilon_h_end=0.0,
+        epsilon_h_decay_steps=num_training_steps // 3 * 2,  # Decay over 50% of training
         lr_q_r=1e-4,
         lr_v_r=1e-4,
         lr_v_h_e=1e-3,  # faster since V_h^e is critical and the basis for other things
         lr_x_h=1e-4,
         lr_u_r=1e-4,
-        buffer_size=10000,
+        buffer_size=100000,
         batch_size=batch_size,
         x_h_batch_size=x_h_batch_size,  # Larger batch for X_h to reduce high variance
         num_training_steps=num_training_steps,
@@ -1069,11 +1083,19 @@ def main(
             action_probs=[0.1, 0.1, 0.2, 0.6]  # still, left, right, forward
         )
         
+        # Define custom human exploration policy for epsilon-greedy exploration.
+        # Same logic as robot exploration - bias toward forward, avoid blocked moves.
+        # Note: world_model will be set by the trainer via set_world_model()
+        human_exploration_policy = MultiGridHumanExplorationPolicy(
+            action_probs=[0.1, 0.1, 0.2, 0.6]  # still, left, right, forward
+        )
+        
         # Train Phase 2
         print("Training Phase 2 robot policy...")
         print(f"  Training steps: {config.num_training_steps:,}")
         print(f"  Environment steps per episode: {config.steps_per_episode}")
         print(f"  Robot exploration policy: forward-biased (avoids blocked forward)")
+        print(f"  Human exploration policy: forward-biased (avoids blocked forward)")
         print(f"  TensorBoard: {tensorboard_dir}")
         if restore_networks_path:
             print(f"  Restoring from: {restore_networks_path}")
@@ -1121,6 +1143,7 @@ def main(
                     restore_networks_path=restore_networks_path,
                     world_model_factory=world_model_factory,
                     robot_exploration_policy=robot_exploration_policy,
+                    human_exploration_policy=human_exploration_policy,
                 )
             
             # Print profiler summary
@@ -1160,6 +1183,7 @@ def main(
                 restore_networks_path=restore_networks_path,
                 world_model_factory=world_model_factory,
                 robot_exploration_policy=robot_exploration_policy,
+                human_exploration_policy=human_exploration_policy,
             )
         
         elapsed = time.time() - t0

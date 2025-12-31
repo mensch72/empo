@@ -360,6 +360,10 @@ class MultiGridRobotExplorationPolicy(RobotPolicy):
         """
         Sample an action for a single robot.
         
+        Uses the environment's can_forward() method to check if forward movement
+        is possible, accounting for robot capabilities (can push rocks, can enter
+        magic walls).
+        
         Args:
             robot_idx: Index of the robot agent
             agent_states: Agent states from the state tuple
@@ -371,28 +375,13 @@ class MultiGridRobotExplorationPolicy(RobotPolicy):
             # No world model - can't check if forward is blocked
             return int(np.random.choice(4, p=self.action_probs))
         
-        # Get robot state
-        robot_state = agent_states[robot_idx]
-        robot_x, robot_y, robot_dir = robot_state[0], robot_state[1], robot_state[2]
+        # Get the current state from the world model to use can_forward
+        state = self._world_model.get_state()
         
-        if robot_x is None or robot_y is None or robot_dir is None:
-            # Robot not on grid - sample uniformly from non-forward actions
-            probs = self.action_probs.copy()
-            probs[3] = 0.0  # No forward
-            if probs.sum() > 0:
-                probs /= probs.sum()
-            else:
-                probs = np.array([1/3, 1/3, 1/3, 0.0])
-            return int(np.random.choice(4, p=probs))
+        # Use the environment's can_forward method which accounts for agent capabilities
+        can_move_forward = self._world_model.can_forward(state, robot_idx)
         
-        # Compute forward position
-        dx, dy = DIR_TO_VEC[robot_dir]
-        fwd_x, fwd_y = robot_x + dx, robot_y + dy
-        
-        # Check if forward is blocked
-        forward_blocked = self._is_forward_blocked(fwd_x, fwd_y, agent_states, robot_idx)
-        
-        if forward_blocked:
+        if not can_move_forward:
             # Redistribute forward probability to other actions
             probs = self.action_probs.copy()
             forward_prob = probs[3]
@@ -409,48 +398,3 @@ class MultiGridRobotExplorationPolicy(RobotPolicy):
             return int(np.random.choice(4, p=probs))
         else:
             return int(np.random.choice(4, p=self.action_probs))
-    
-    def _is_forward_blocked(self, fwd_x: int, fwd_y: int, agent_states: Tuple, robot_idx: int) -> bool:
-        """
-        Check if the forward cell is blocked for a specific robot.
-        
-        Args:
-            fwd_x, fwd_y: Forward cell coordinates
-            agent_states: Agent states from the state tuple
-            robot_idx: Index of the robot being checked
-        
-        Returns:
-            True if forward movement is blocked
-        """
-        grid = self._world_model.grid
-        
-        # Check bounds
-        if fwd_x < 0 or fwd_x >= grid.width or fwd_y < 0 or fwd_y >= grid.height:
-            return True
-        
-        # Check if another agent is in the forward cell
-        for i, agent_state in enumerate(agent_states):
-            if i == robot_idx:
-                continue
-            ax, ay = agent_state[0], agent_state[1]
-            if ax == fwd_x and ay == fwd_y:
-                return True
-        
-        # Check the cell contents
-        fwd_cell = grid.get(fwd_x, fwd_y)
-        if fwd_cell is None:
-            return False  # Empty cell - can move
-        
-        # Check if cell can be overlapped
-        if fwd_cell.can_overlap():
-            return False
-        
-        # Check if it's a pushable block/rock
-        if fwd_cell.type in ['block', 'rock']:
-            # Use the environment's _can_push_objects method to check if pushing is possible
-            robot_agent = self._world_model.agents[robot_idx]
-            can_push, _, _ = self._world_model._can_push_objects(robot_agent, np.array([fwd_x, fwd_y]))
-            return not can_push
-        
-        # Cell has an object that can't be overlapped and isn't pushable
-        return True

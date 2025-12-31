@@ -233,20 +233,20 @@ class TestLearningRateDecay:
 class TestEpsilonSchedule:
     """Test epsilon-greedy exploration schedule."""
     
-    def test_epsilon_linear_decay(self):
-        """Epsilon should decay linearly."""
+    def test_epsilon_r_linear_decay(self):
+        """Robot epsilon should decay linearly."""
         config = Phase2Config(
             epsilon_r_start=1.0,
             epsilon_r_end=0.01,
             epsilon_r_decay_steps=10000,
         )
         
-        assert config.get_epsilon(0) == 1.0
-        assert abs(config.get_epsilon(5000) - 0.505) < 0.01
-        assert config.get_epsilon(10000) == 0.01
+        assert config.get_epsilon_r(0) == 1.0
+        assert abs(config.get_epsilon_r(5000) - 0.505) < 0.01
+        assert config.get_epsilon_r(10000) == 0.01
     
-    def test_epsilon_stays_at_end_value(self):
-        """Epsilon should stay at end value after decay completes."""
+    def test_epsilon_r_stays_at_end_value(self):
+        """Robot epsilon should stay at end value after decay completes."""
         config = Phase2Config(
             epsilon_r_start=1.0,
             epsilon_r_end=0.01,
@@ -255,12 +255,31 @@ class TestEpsilonSchedule:
         
         # All steps after decay should be at end value
         for step in [10000, 15000, 100000]:
-            assert config.get_epsilon(step) == 0.01
+            assert config.get_epsilon_r(step) == 0.01
     
-    def test_epsilon_non_zero_end(self):
-        """Epsilon end value should be non-zero (prevents deterministic policy)."""
+    def test_epsilon_r_non_zero_end(self):
+        """Robot epsilon end value should be non-zero (prevents deterministic policy)."""
         config = Phase2Config()
         assert config.epsilon_r_end > 0
+    
+    def test_epsilon_h_linear_decay(self):
+        """Human epsilon should decay linearly."""
+        config = Phase2Config(
+            epsilon_h_start=1.0,
+            epsilon_h_end=0.02,
+            epsilon_h_decay_steps=5000,
+        )
+        
+        assert config.get_epsilon_h(0) == 1.0
+        assert abs(config.get_epsilon_h(2500) - 0.51) < 0.01
+        assert config.get_epsilon_h(5000) == 0.02
+    
+    def test_epsilon_h_default_matches_epsilon_r(self):
+        """Human epsilon defaults should match robot epsilon defaults."""
+        config = Phase2Config()
+        assert config.epsilon_h_start == config.epsilon_r_start
+        assert config.epsilon_h_end == config.epsilon_r_end
+        assert config.epsilon_h_decay_steps == config.epsilon_r_decay_steps
 
 
 # =============================================================================

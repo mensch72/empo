@@ -85,11 +85,14 @@ class BasePhase2Trainer(ABC):
         verbose: Enable progress output (tqdm progress bar).
         debug: Enable verbose debug output (very detailed, for debugging).
         tensorboard_dir: Directory for TensorBoard logs (optional).
-        robot_exploration_policy: Optional policy for epsilon exploration. Can be:
+        robot_exploration_policy: Optional policy for robot epsilon exploration. Can be:
             - None: Use uniform random policy for exploration (default).
             - List[float]: Fixed action probabilities (length = num_action_combinations).
             - Callable[[state, world_model], List[float]]: Function returning action probabilities.
             - RobotPolicy: A proper policy object with sample(state) method returning action tuple.
+        human_exploration_policy: Optional policy for human epsilon exploration. Can be:
+            - None: Use uniform random policy for exploration (default).
+            - HumanExplorationPolicy: A policy object with sample(state, human_idx, goal) method.
         world_model_factory: Optional factory for creating world models. Required for
             async training where the environment cannot be pickled.
         world_model_factory: Optional factory for creating world models. Required for
@@ -114,6 +117,7 @@ class BasePhase2Trainer(ABC):
         profiler: Optional[Any] = None,
         world_model_factory: Optional[Any] = None,
         robot_exploration_policy: Optional[Any] = None,
+        human_exploration_policy: Optional[Any] = None,
     ):
         self.env = env
         self.world_model_factory = world_model_factory
@@ -128,6 +132,7 @@ class BasePhase2Trainer(ABC):
         self.debug = debug
         self.profiler = profiler
         self.robot_exploration_policy = robot_exploration_policy
+        self.human_exploration_policy = human_exploration_policy
         
         # Compute the total number of agents from the indices
         self._update_num_agents()
@@ -591,12 +596,14 @@ class BasePhase2Trainer(ABC):
         This supports both cached mode (same env reused) and ensemble mode (new env
         each episode).
         
-        Also calls reset() on the robot_exploration_policy if it's a RobotPolicy.
+        Also calls reset() on the robot_exploration_policy and human_exploration_policy
+        if they are policy objects with reset methods.
         
         Returns:
             Initial state.
         """
         from .robot_policy import RobotPolicy
+        from empo.human_policy_prior import HumanPolicyPrior
         
         if self.world_model_factory is not None:
             self._create_env_from_factory()
@@ -608,9 +615,11 @@ class BasePhase2Trainer(ABC):
         
         self.env.reset()
         
-        # Reset exploration policy if it's a RobotPolicy (needs world model context)
+        # Reset exploration policies if they need world model context
         if isinstance(self.robot_exploration_policy, RobotPolicy):
             self.robot_exploration_policy.reset(self.env)
+        if isinstance(self.human_exploration_policy, HumanPolicyPrior):
+            self.human_exploration_policy.set_world_model(self.env)
         
         return self.env.get_state()
     
@@ -635,7 +644,7 @@ class BasePhase2Trainer(ABC):
         """
         from .robot_policy import RobotPolicy
         
-        epsilon = self.config.get_epsilon(self.training_step_count)
+        epsilon = self.config.get_epsilon_r(self.training_step_count)
         effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
         
         # Epsilon exploration: sample from exploration policy
@@ -683,7 +692,10 @@ class BasePhase2Trainer(ABC):
         goals: Dict[int, Any]
     ) -> List[int]:
         """
-        Sample human actions from the human policy prior.
+        Sample human actions from the human policy prior with epsilon-greedy exploration.
+        
+        With probability epsilon_h, samples from the exploration policy
+        (uniform random by default, or custom if human_exploration_policy is set).
         
         Args:
             state: Current state.
@@ -692,10 +704,31 @@ class BasePhase2Trainer(ABC):
         Returns:
             List of human actions.
         """
+        from empo.human_policy_prior import HumanPolicyPrior
+        
+        epsilon_h = self.config.get_epsilon_h(self.training_step_count)
+        
         actions = []
         for h in self.human_agent_indices:
             goal = goals.get(h)
-            action = self.human_policy_prior.sample(state, h, goal)
+            
+            # Epsilon exploration: sample from exploration policy
+            if torch.rand(1).item() < epsilon_h:
+                if self.human_exploration_policy is None:
+                    # Uniform random exploration
+                    num_actions = self.env.action_space.n
+                    action = torch.randint(0, num_actions, (1,)).item()
+                elif isinstance(self.human_exploration_policy, HumanPolicyPrior):
+                    # HumanPolicyPrior object: use its sample() method
+                    action = self.human_exploration_policy.sample(state, h, goal)
+                else:
+                    # Fallback: use uniform random
+                    num_actions = self.env.action_space.n
+                    action = torch.randint(0, num_actions, (1,)).item()
+            else:
+                # Use the human policy prior
+                action = self.human_policy_prior.sample(state, h, goal)
+            
             actions.append(action)
         return actions
     
@@ -1571,7 +1604,10 @@ class BasePhase2Trainer(ABC):
             param_norms = self._compute_param_norms()
             for key, value in param_norms.items():
                 self.writer.add_scalar(f'ParamNorm/{key}', value, self.training_step_count)
-            self.writer.add_scalar('Epsilon', self.config.get_epsilon(self.training_step_count), self.training_step_count)
+            
+            # Log exploration epsilons side by side
+            self.writer.add_scalar('Exploration/epsilon_r', self.config.get_epsilon_r(self.training_step_count), self.training_step_count)
+            self.writer.add_scalar('Exploration/epsilon_h', self.config.get_epsilon_h(self.training_step_count), self.training_step_count)
             
             # Log learning rates
             networks_to_log_lr = ['v_h_e', 'x_h', 'q_r']

@@ -15,7 +15,10 @@ from .trainer import (
     create_phase2_networks,
     train_multigrid_phase2,
 )
-from .robot_policy import MultiGridRobotPolicy
+from .robot_policy import MultiGridRobotPolicy, MultiGridRobotExplorationPolicy
+
+# Import MultiGridHumanExplorationPolicy from the consolidated location
+from empo.human_policy_prior import MultiGridHumanExplorationPolicy
 
 __all__ = [
     'MultiGridRobotQNetwork',
@@ -27,4 +30,6 @@ __all__ = [
     'create_phase2_networks',
     'train_multigrid_phase2',
     'MultiGridRobotPolicy',
+    'MultiGridRobotExplorationPolicy',
+    'MultiGridHumanExplorationPolicy',
 ]
