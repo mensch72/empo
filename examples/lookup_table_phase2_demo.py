@@ -282,10 +282,15 @@ class SimpleLookupTableTrainer:
             goal, _ = self.goal_sampler.sample(state, h)
             goals[h] = goal
         
-        # Sample robot action
+        # Sample robot action (with manual epsilon exploration since we're not using trainer)
         with torch.no_grad():
             q_values = self.networks.q_r.forward(state, None, self.device)
-            robot_action = self.networks.q_r.sample_action(q_values, epsilon=0.3, beta_r=self.config.beta_r)
+            # Apply epsilon-greedy exploration manually
+            if torch.rand(1).item() < 0.3:  # epsilon = 0.3
+                flat_idx = torch.randint(0, self.networks.q_r.num_action_combinations, (1,)).item()
+                robot_action = self.networks.q_r.action_index_to_tuple(flat_idx)
+            else:
+                robot_action = self.networks.q_r.sample_action(q_values, beta_r=self.config.beta_r)
         
         # Sample human actions using policy prior
         human_actions = []

@@ -208,27 +208,23 @@ class BaseRobotQNetwork(nn.Module, ABC):
     def sample_action(
         self,
         q_values: torch.Tensor,
-        epsilon: float = 0.0,
         beta_r: Optional[float] = None
     ) -> Tuple[int, ...]:
         """
-        Sample a joint action from the policy with epsilon-greedy exploration.
+        Sample a joint action from the policy.
+        
+        Note: Epsilon-greedy exploration is handled by the trainer, not here.
         
         Args:
             q_values: Q-values of shape (1, num_action_combinations).
-            epsilon: Exploration probability.
             beta_r: Optional override for policy concentration. If None, use self.beta_r.
                    Use beta_r=0 for uniform random policy (during warm-up).
         
         Returns:
             Tuple of actions, one per robot.
         """
-        if torch.rand(1).item() < epsilon:
-            # Random action
-            flat_idx = torch.randint(0, self.num_action_combinations, (1,)).item()
-        else:
-            # Sample from policy (with optional beta_r override)
-            policy = self.get_policy(q_values, beta_r=beta_r)
-            flat_idx = torch.multinomial(policy.squeeze(0), 1).item()
+        # Sample from policy (with optional beta_r override)
+        policy = self.get_policy(q_values, beta_r=beta_r)
+        flat_idx = torch.multinomial(policy.squeeze(0), 1).item()
         
         return self.action_index_to_tuple(flat_idx)

@@ -85,6 +85,11 @@ class BasePhase2Trainer(ABC):
         verbose: Enable progress output (tqdm progress bar).
         debug: Enable verbose debug output (very detailed, for debugging).
         tensorboard_dir: Directory for TensorBoard logs (optional).
+        robot_exploration_policy: Optional policy for epsilon exploration. Can be:
+            - None: Use uniform random policy for exploration (default).
+            - List[float]: Fixed action probabilities (length = num_action_combinations).
+            - Callable[[state, world_model], List[float]]: Function returning action probabilities.
+            - RobotPolicy: A proper policy object with sample(state) method returning action tuple.
         world_model_factory: Optional factory for creating world models. Required for
             async training where the environment cannot be pickled.
         world_model_factory: Optional factory for creating world models. Required for
@@ -108,6 +113,7 @@ class BasePhase2Trainer(ABC):
         tensorboard_dir: Optional[str] = None,
         profiler: Optional[Any] = None,
         world_model_factory: Optional[Any] = None,
+        robot_exploration_policy: Optional[Any] = None,
     ):
         self.env = env
         self.world_model_factory = world_model_factory
@@ -121,6 +127,7 @@ class BasePhase2Trainer(ABC):
         self.verbose = verbose
         self.debug = debug
         self.profiler = profiler
+        self.robot_exploration_policy = robot_exploration_policy
         
         # Compute the total number of agents from the indices
         self._update_num_agents()
@@ -584,9 +591,13 @@ class BasePhase2Trainer(ABC):
         This supports both cached mode (same env reused) and ensemble mode (new env
         each episode).
         
+        Also calls reset() on the robot_exploration_policy if it's a RobotPolicy.
+        
         Returns:
             Initial state.
         """
+        from .robot_policy import RobotPolicy
+        
         if self.world_model_factory is not None:
             self._create_env_from_factory()
         elif self.env is None:
@@ -596,6 +607,11 @@ class BasePhase2Trainer(ABC):
             )
         
         self.env.reset()
+        
+        # Reset exploration policy if it's a RobotPolicy (needs world model context)
+        if isinstance(self.robot_exploration_policy, RobotPolicy):
+            self.robot_exploration_policy.reset(self.env)
+        
         return self.env.get_state()
     
     def sample_robot_action(self, state: Any) -> Tuple[int, ...]:
@@ -608,21 +624,57 @@ class BasePhase2Trainer(ABC):
         During warm-up, uses effective beta_r = 0 (uniform random policy).
         After warm-up, beta_r ramps up to nominal value.
         
+        With probability epsilon, samples from the exploration policy
+        (uniform random by default, or custom if robot_exploration_policy is set).
+        
         Args:
             state: Current state.
         
         Returns:
             Tuple of robot actions.
         """
+        from .robot_policy import RobotPolicy
+        
         epsilon = self.config.get_epsilon(self.training_step_count)
         effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
         
+        # Epsilon exploration: sample from exploration policy
+        if torch.rand(1).item() < epsilon:
+            num_action_combinations = self.networks.q_r_target.num_action_combinations
+            
+            if self.robot_exploration_policy is None:
+                # Uniform random exploration
+                flat_idx = torch.randint(0, num_action_combinations, (1,)).item()
+                return self.networks.q_r_target.action_index_to_tuple(flat_idx)
+            elif isinstance(self.robot_exploration_policy, RobotPolicy):
+                # RobotPolicy object: use its sample() method directly
+                action = self.robot_exploration_policy.sample(state)
+                # Ensure return type is tuple
+                if isinstance(action, (list, tuple)):
+                    return tuple(action)
+                else:
+                    return (action,)
+            elif callable(self.robot_exploration_policy):
+                # Callable exploration policy: get probabilities from function
+                probs = self.robot_exploration_policy(state, self.env)
+                probs_tensor = torch.tensor(probs, dtype=torch.float32)
+                probs_tensor = probs_tensor / probs_tensor.sum()  # Normalize
+                flat_idx = torch.multinomial(probs_tensor, 1).item()
+                return self.networks.q_r_target.action_index_to_tuple(flat_idx)
+            else:
+                # List/array exploration policy: use fixed probabilities
+                probs_tensor = torch.tensor(self.robot_exploration_policy, dtype=torch.float32)
+                probs_tensor = probs_tensor / probs_tensor.sum()  # Normalize
+                flat_idx = torch.multinomial(probs_tensor, 1).item()
+                return self.networks.q_r_target.action_index_to_tuple(flat_idx)
+        
+        # Otherwise: sample from learned policy
         with torch.no_grad():
             q_values = self.networks.q_r_target.forward(
                 state, None, self.device
             )
             return self.networks.q_r_target.sample_action(
-                q_values, epsilon, beta_r=effective_beta_r
+                q_values, beta_r=effective_beta_r
             )
     
     def sample_human_actions(

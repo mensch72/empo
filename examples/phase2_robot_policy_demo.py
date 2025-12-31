@@ -67,7 +67,7 @@ from empo.nn_based.multigrid import PathDistanceCalculator
 from empo.nn_based.phase2.config import Phase2Config
 from empo.nn_based.phase2.world_model_factory import CachedWorldModelFactory, EnsembleWorldModelFactory
 from empo.nn_based.multigrid.phase2 import train_multigrid_phase2
-from empo.nn_based.multigrid.phase2.robot_policy import MultiGridRobotPolicy
+from empo.nn_based.multigrid.phase2.robot_policy import MultiGridRobotPolicy, MultiGridRobotExplorationPolicy
 
 
 # ============================================================================
@@ -724,7 +724,7 @@ def run_policy_rollout(
         with torch.no_grad():
             q_values = robot_q_network.forward(state, env, device)
             beta_r = config.beta_r if config else 10.0
-            robot_action = robot_q_network.sample_action(q_values, epsilon=0.0, beta_r=beta_r)
+            robot_action = robot_q_network.sample_action(q_values, beta_r=beta_r)
             return robot_action[0] if len(robot_action) > 0 else None
     
     # Render initial frame with annotations (showing what action would be taken)
@@ -746,9 +746,9 @@ def run_policy_rollout(
         # Robots use learned Q-network
         with torch.no_grad():
             q_values = robot_q_network.forward(state, env, device)
-            # Use greedy action (epsilon=0) with final beta_r for concentrated policy
+            # Use greedy action with final beta_r for concentrated policy
             beta_r = config.beta_r if config else 10.0
-            robot_action = robot_q_network.sample_action(q_values, epsilon=0.0, beta_r=beta_r)
+            robot_action = robot_q_network.sample_action(q_values, beta_r=beta_r)
             
             # Assign actions to robots
             for i, r in enumerate(robot_indices):
@@ -1056,16 +1056,24 @@ def main(
         print("=" * 70)
         
         policy = MultiGridRobotPolicy(path=use_policy_path, device=device)
-        robot_q_network = policy.q_network
         networks = None  # No networks for annotations
         trainer = None
         history = []
         elapsed = 0.0
     else:
+        # Define custom robot exploration policy for epsilon-greedy exploration.
+        # SmallActions: 0=still, 1=left, 2=right, 3=forward
+        # We bias exploration toward forward movement to encourage spatial exploration.
+        # Use smart policy that avoids "forward" when blocked by walls/objects.
+        robot_exploration_policy = MultiGridRobotExplorationPolicy(
+            action_probs=[0.1, 0.1, 0.2, 0.6]  # still, left, right, forward
+        )
+        
         # Train Phase 2
         print("Training Phase 2 robot policy...")
         print(f"  Training steps: {config.num_training_steps:,}")
         print(f"  Environment steps per episode: {config.steps_per_episode}")
+        print(f"  Robot exploration policy: forward-biased (avoids blocked forward)")
         print(f"  TensorBoard: {tensorboard_dir}")
         if restore_networks_path:
             print(f"  Restoring from: {restore_networks_path}")
@@ -1112,6 +1120,7 @@ def main(
                     profiler=prof,
                     restore_networks_path=restore_networks_path,
                     world_model_factory=world_model_factory,
+                    robot_exploration_policy=robot_exploration_policy,
                 )
             
             # Print profiler summary
@@ -1150,6 +1159,7 @@ def main(
                 tensorboard_dir=tensorboard_dir,
                 restore_networks_path=restore_networks_path,
                 world_model_factory=world_model_factory,
+                robot_exploration_policy=robot_exploration_policy,
             )
         
         elapsed = time.time() - t0

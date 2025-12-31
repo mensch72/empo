@@ -83,6 +83,11 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         verbose: Enable progress output (tqdm progress bar).
         debug: Enable verbose debug output.
         tensorboard_dir: Directory for TensorBoard logs (optional).
+        robot_exploration_policy: Optional policy for epsilon exploration. Can be:
+            - None: Use uniform random policy for exploration (default).
+            - List[float]: Fixed action probabilities (length = num_action_combinations).
+            - Callable[[state, world_model], List[float]]: Function returning action probabilities.
+            - RobotPolicy: A proper policy object with sample(state) method returning action tuple.
         world_model_factory: Optional factory for creating world models. Required for
             async training where the environment cannot be pickled.
     """
@@ -102,6 +107,7 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         tensorboard_dir: Optional[str] = None,
         profiler: Optional[Any] = None,
         world_model_factory: Optional[Any] = None,
+        robot_exploration_policy: Optional[Any] = None,
     ):
         super().__init__(
             env=env,
@@ -117,6 +123,7 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
             tensorboard_dir=tensorboard_dir,
             profiler=profiler,
             world_model_factory=world_model_factory,
+            robot_exploration_policy=robot_exploration_policy,
         )
         
         # Caching is now handled internally by the shared encoders.
@@ -529,6 +536,7 @@ def train_multigrid_phase2(
     profiler: Optional[Any] = None,
     restore_networks_path: Optional[str] = None,
     world_model_factory: Optional[Any] = None,
+    robot_exploration_policy: Optional[Any] = None,
 ) -> Tuple[MultiGridRobotQNetwork, Phase2Networks, List[Dict[str, float]], "MultiGridPhase2Trainer"]:
     """
     Train Phase 2 robot policy for a multigrid environment.
@@ -558,6 +566,11 @@ def train_multigrid_phase2(
                                Skips warmup/rampup stages since they were already done.
         world_model_factory: Optional factory for creating world models. Required for
             async training where the environment cannot be pickled.
+        robot_exploration_policy: Optional policy for epsilon exploration. Can be:
+            - None: Use uniform random policy for exploration (default).
+            - List[float]: Fixed action probabilities (length = num_action_combinations).
+            - Callable[[state, world_model], List[float]]: Function returning action probabilities.
+            - RobotPolicy: A proper policy object with sample(state) method returning action tuple.
     
     Returns:
         Tuple of (robot_q_network, all_networks, training_history, trainer).
@@ -629,6 +642,7 @@ def train_multigrid_phase2(
         tensorboard_dir=tensorboard_dir,
         profiler=profiler,
         world_model_factory=world_model_factory,
+        robot_exploration_policy=robot_exploration_policy,
     )
     
     # Restore networks if checkpoint provided (skips warmup/rampup since already done)

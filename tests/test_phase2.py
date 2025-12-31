@@ -217,15 +217,15 @@ def test_multigrid_robot_q_network():
     print("  ✓ Action index conversion works")
     
     # Test action sampling
-    action = q_network.sample_action(q_values, epsilon=0.0)
+    action = q_network.sample_action(q_values)
     assert len(action) == 2  # Two robots
     assert all(0 <= a < 4 for a in action)
     print(f"  ✓ Sampled action: {action}")
     
-    # Test epsilon-greedy sampling
-    action_eps = q_network.sample_action(q_values, epsilon=1.0)
-    assert len(action_eps) == 2
-    print(f"  ✓ Epsilon-greedy action: {action_eps}")
+    # Test sampling with different beta_r (deterministic with high beta_r)
+    action_det = q_network.sample_action(q_values, beta_r=1000.0)
+    assert len(action_det) == 2
+    print(f"  ✓ High beta_r action: {action_det}")
     
     # Test get_value (expected Q under policy)
     value = q_network.get_value(q_values)
