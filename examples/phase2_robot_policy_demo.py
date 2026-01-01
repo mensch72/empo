@@ -796,6 +796,7 @@ def main(
     use_async: bool = False,
     use_encoders: bool = True,
     use_tabular: bool = False,
+    use_rnd: bool = False,
     save_networks_path: str = None,
     save_policy_path: str = None,
     restore_networks_path: str = None,
@@ -1060,6 +1061,12 @@ def main(
         v_h_e_weight_decay=0,
         x_h_weight_decay=0,
         u_r_weight_decay=0,
+        # Curiosity-driven exploration (RND)
+        use_rnd=use_rnd,
+        rnd_bonus_coef_r=0.1 if use_rnd else 0.0,
+        rnd_feature_dim=64,
+        rnd_hidden_dim=128,
+        normalize_rnd=True,
     )
     
     # If using policy directly (no training), skip to rollouts
@@ -1096,6 +1103,8 @@ def main(
         print(f"  Environment steps per episode: {config.steps_per_episode}")
         print(f"  Robot exploration policy: forward-biased (avoids blocked forward)")
         print(f"  Human exploration policy: forward-biased (avoids blocked forward)")
+        if use_rnd:
+            print(f"  Curiosity (RND): ENABLED (bonus_coef={config.rnd_bonus_coef_r})")
         print(f"  TensorBoard: {tensorboard_dir}")
         if restore_networks_path:
             print(f"  Restoring from: {restore_networks_path}")
@@ -1342,6 +1351,8 @@ if __name__ == "__main__":
                         help='Disable neural encoders (use identity function for debugging)')
     parser.add_argument('--tabular', '-t', action='store_true',
                         help='Use lookup tables instead of neural networks (exact tabular learning)')
+    parser.add_argument('--rnd', action='store_true',
+                        help='Enable RND curiosity-driven exploration')
     
     # Save/restore options
     parser.add_argument('--save_networks', type=str, default=None, metavar='PATH',
@@ -1370,6 +1381,7 @@ if __name__ == "__main__":
         use_async=args.use_async,
         use_encoders=not args.no_encoders,
         use_tabular=args.tabular,
+        use_rnd=args.rnd,
         save_networks_path=args.save_networks,
         save_policy_path=args.save_policy,
         restore_networks_path=args.restore_networks,

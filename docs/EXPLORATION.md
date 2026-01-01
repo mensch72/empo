@@ -165,13 +165,125 @@ Hypothesis: as long as the exploration strategies are essentially Markov process
 
 Consider these approaches for better coverage:
 
-1. **Curiosity-driven exploration**: Implement intrinsic rewards for visiting novel states (not yet implemented in EMPO).
+1. **Curiosity-driven exploration**: Implement intrinsic rewards for visiting novel states. **Now implemented via RND** - see below.
 
 2. **Prioritized experience replay**: Give higher priority to transitions from rare states (partial support via replay buffer). While this will not affect what states are visited, it can improve approximation of quantities in rarely visited regions.
 
 3. **Ensemble environments**: Use `EnsembleWorldModelFactory` to train across multiple environment configurations simultaneously.
 
 4. **Longer episodes**: Increase `max_steps` to allow deeper exploration within episodes.
+
+## Curiosity-Driven Exploration (RND)
+
+EMPO supports **Random Network Distillation (RND)** for curiosity-driven exploration. RND provides an intrinsic motivation signal that biases action selection toward states that have been seen less frequently during training.
+
+### How RND Works
+
+RND uses two networks:
+- **Target network**: Fixed random weights (never trained)
+- **Predictor network**: Trained to match target outputs
+
+The **prediction error** serves as a novelty signal:
+- **High error** → State is novel (rarely seen)
+- **Low error** → State is familiar (frequently seen)
+
+### Configuration
+
+Enable RND in `Phase2Config`:
+
+```python
+config = Phase2Config(
+    # Enable RND
+    use_rnd=True,
+    
+    # RND network architecture
+    rnd_feature_dim=64,        # Output dimension of RND networks
+    rnd_hidden_dim=256,        # Hidden layer dimension
+    
+    # Curiosity bonus coefficients
+    rnd_bonus_coef_r=0.1,      # Robot curiosity bonus scale
+    rnd_bonus_coef_h=0.1,      # Human curiosity bonus scale (reserved)
+    
+    # Training parameters
+    lr_rnd=1e-4,               # RND predictor learning rate
+    rnd_weight_decay=1e-4,     # Weight decay for RND
+    rnd_grad_clip=10.0,        # Gradient clipping
+    
+    # Normalization (recommended for stability)
+    normalize_rnd=True,        # Normalize novelty by running mean/std
+    rnd_normalization_decay=0.99,  # EMA decay for normalization stats
+)
+```
+
+### How Curiosity Affects Action Selection
+
+When RND is enabled:
+
+1. **During epsilon exploration**: Instead of uniform random actions, robot samples actions weighted by expected novelty of successor states.
+
+2. **During policy-based selection**: Curiosity bonus is applied multiplicatively to Q-values to preserve the power-law policy constraint (Q < 0):
+   ```
+   Q_effective(s, a) = Q_r(s, a) * exp(-rnd_bonus_coef_r * expected_novelty(s'))
+   ```
+   
+   Since Q < 0 and exp(...) > 0, Q_effective remains negative.
+   High novelty → smaller scale factor → Q_effective closer to 0 (better).
+   This encourages exploration of novel states while preserving the power-law policy form.
+
+The novelty for each action is computed using `transition_probabilities()` to determine expected next states, then computing RND prediction error for those states.
+
+### TensorBoard Monitoring
+
+When RND is enabled, additional metrics are logged:
+- `Loss/rnd` - RND predictor loss (grouped with other losses)
+- `Exploration/rnd_raw_novelty_mean` - Raw novelty before normalization (watch this decrease!)
+- `Exploration/rnd_raw_novelty_std` - Std of raw novelty in batch
+- `Exploration/rnd_norm_running_mean` - Running mean used for normalization
+- `Exploration/rnd_norm_running_std` - Running std used for normalization
+
+**Interpreting the metrics:**
+- `rnd_raw_novelty_mean` should **decrease** over training as the predictor learns to recognize states
+- `Loss/rnd` should also decrease, tracking the predictor's learning progress
+- `rnd_norm_running_*` are normalization parameters that adapt to keep normalized output around mean=0, std=1
+
+### Example Usage
+
+```python
+from empo.nn_based.phase2 import Phase2Config
+from empo.nn_based.multigrid.phase2 import train_multigrid_phase2
+
+config = Phase2Config(
+    use_rnd=True,
+    rnd_bonus_coef_r=0.1,
+    normalize_rnd=True,
+    # ... other parameters
+)
+
+q_r, networks, history, trainer = train_multigrid_phase2(
+    world_model=env,
+    config=config,
+    # ... other parameters
+)
+```
+
+### Computational Overhead
+
+RND adds overhead during:
+- **Action selection**: Computing novelty for successor states requires calling `transition_probabilities()` and RND forward pass for each action
+- **Training**: One additional backward pass per training step for RND loss
+
+For small action spaces (typical in MultiGrid), this overhead is acceptable. For large action spaces, consider:
+- Using curiosity only during epsilon exploration (not on Q-values)
+- Sampling a subset of actions for novelty computation
+
+### Design Notes
+
+- RND is trained from the beginning (included in active networks from step 0)
+- The predictor uses the shared state encoder's output (detached from gradient computation)
+- Normalization prevents bonus scale drift during training
+- A small uniform component (10%) is added to curiosity-weighted exploration to ensure baseline coverage
+
+See [docs/plans/curiosity.md](plans/curiosity.md) for detailed design rationale and alternative approaches considered.
 
 ## API Reference
 

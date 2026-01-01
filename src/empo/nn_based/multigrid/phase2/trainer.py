@@ -172,6 +172,80 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         self.networks.v_h_e.goal_encoder.reset_cache_stats()
         self.networks.v_h_e.agent_encoder.reset_cache_stats()
 
+    def get_state_features_for_rnd(self, states: List[Any]) -> torch.Tensor:
+        """
+        Get state features for RND novelty computation.
+        
+        Uses the shared state encoder (detached from gradient computation)
+        to convert states to feature tensors for RND.
+        
+        Args:
+            states: List of states (tuples from WorldModel.get_state()).
+            
+        Returns:
+            Feature tensor of shape (batch_size, feature_dim).
+        """
+        # Get feature dim from RND network (handles case where hidden_dim was overridden)
+        if self.networks.rnd is not None:
+            feature_dim = self.networks.rnd.target[0].in_features
+        else:
+            feature_dim = self.config.hidden_dim
+            
+        if not states:
+            return torch.zeros(0, feature_dim, device=self.device)
+        
+        # Use the shared state encoder from V_h^e
+        # This produces features suitable for RND
+        state_encoder = self.networks.v_h_e.state_encoder
+        
+        # Check if we have a neural encoder (not a NullEncoder)
+        if hasattr(state_encoder, 'tensorize_state'):
+            # Neural encoder: use forward_batch for efficient batched encoding
+            # First, tensorize all states
+            batch_tensors = []
+            for state in states:
+                tensors = state_encoder.tensorize_state(state, self.env)
+                batch_tensors.append(tensors)
+            
+            # Stack tensors and squeeze out the extra batch dimension from tensorize_state
+            # tensorize_state returns (1, C, H, W) for grid, so stacking gives (B, 1, C, H, W)
+            # We need (B, C, H, W) for the forward pass
+            grid_tensors = torch.cat([t[0] for t in batch_tensors], dim=0).to(self.device)
+            global_features = torch.cat([t[1] for t in batch_tensors], dim=0).to(self.device)
+            agent_features = torch.cat([t[2] for t in batch_tensors], dim=0).to(self.device)
+            interactive_features = torch.cat([t[3] for t in batch_tensors], dim=0).to(self.device)
+            
+            # Forward through encoder (detached - RND trains its own networks)
+            with torch.no_grad():
+                features = state_encoder.forward(
+                    grid_tensors, global_features, agent_features, interactive_features
+                )
+            
+            return features
+        else:
+            # Lookup table mode with NullEncoder - create simple state representation
+            # Use a hash-based embedding for states
+            # This is a fallback; RND works best with neural encoders
+            
+            # Get the actual input dimension from RND network
+            # (handles case where hidden_dim was overridden in create_phase2_networks)
+            if self.networks.rnd is not None:
+                feature_dim = self.networks.rnd.target[0].in_features
+            else:
+                feature_dim = self.config.hidden_dim
+            
+            features = []
+            for state in states:
+                # Create a simple feature from state hash
+                # Use torch's ability to hash arbitrary objects
+                state_hash = hash(state) % (2**31)
+                # Create a pseudo-random but deterministic feature vector
+                torch.manual_seed(state_hash)
+                feat = torch.randn(feature_dim, device=self.device)
+                features.append(feat)
+            
+            return torch.stack(features)
+
 
 def create_phase2_networks(
     env: MultiGridEnv,
@@ -280,12 +354,27 @@ def create_phase2_networks(
                 include_step_count=config.include_step_count,
             )
         
+        # RND doesn't make sense with full lookup table mode - warn and disable
+        # RND needs learned state representations; tabular mode uses exact state hashes.
+        # For small state spaces, epsilon-greedy exploration is sufficient.
+        rnd = None
+        if config.use_rnd:
+            import warnings
+            warnings.warn(
+                "RND curiosity exploration is disabled in full tabular mode. "
+                "RND requires learned state representations, but tabular mode uses exact state hashes. "
+                "For small state spaces, epsilon-greedy exploration (already enabled) is sufficient.",
+                UserWarning,
+                stacklevel=2
+            )
+        
         return Phase2Networks(
             q_r=q_r,
             v_h_e=v_h_e,
             x_h=x_h,
             u_r=u_r,
-            v_r=v_r
+            v_r=v_r,
+            rnd=rnd,
         )
     
     # At least one network needs neural implementation
@@ -512,12 +601,34 @@ def create_phase2_networks(
                 include_step_count=config.include_step_count,
             )
     
+    # =========================================================================
+    # Create RND module for curiosity-driven exploration (optional)
+    # =========================================================================
+    rnd = None
+    if config.use_rnd:
+        from empo.nn_based.phase2.rnd import RNDModule
+        
+        # RND uses state features from the shared encoder
+        # Get input dimension from the actual state encoder to ensure consistency
+        # (This handles cases where hidden_dim passed to this function differs from
+        # what the encoder was actually created with)
+        rnd_input_dim = shared_state_encoder.feature_dim
+        
+        rnd = RNDModule(
+            input_dim=rnd_input_dim,
+            feature_dim=config.rnd_feature_dim,
+            hidden_dim=config.rnd_hidden_dim,
+            normalize=config.normalize_rnd,
+            normalization_decay=config.rnd_normalization_decay,
+        ).to(device)
+    
     return Phase2Networks(
         q_r=q_r,
         v_h_e=v_h_e,
         x_h=x_h,
         u_r=u_r,
-        v_r=v_r
+        v_r=v_r,
+        rnd=rnd,
     )
 
 
@@ -670,6 +781,8 @@ def train_multigrid_phase2(
         print(f"  Training steps per env step: {config.training_steps_per_env_step}")
         print(f"  Batch size: {config.batch_size}")
         print(f"  Buffer size: {config.buffer_size}")
+        if config.use_rnd:
+            print(f"  Curiosity (RND): enabled (bonus_coef_r={config.rnd_bonus_coef_r})")
         if tensorboard_dir:
             print(f"  TensorBoard: {tensorboard_dir}")
     

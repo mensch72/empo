@@ -162,11 +162,19 @@ $$
 $$
 
 **Exploration bonus for action selection:**
+
+Since the power-law robot policy $\pi_r(a) \propto (-Q_r)^{-\beta_r}$ requires $Q_r < 0$,
+we cannot use additive bonuses that might make $Q \geq 0$. Instead, we use multiplicative scaling:
+
 $$
-Q_\text{explore}(s, a) = Q_r(s, a) + \beta_\text{curiosity} \cdot \text{novelty}(s')
+Q_\text{effective}(s, a) = Q_r(s, a) \cdot \exp\left(-\beta_\text{curiosity} \cdot \text{novelty}(s')\right)
 $$
 
 where $s'$ is the expected next state after taking action $a$.
+
+Since $Q_r < 0$ and $\exp(\cdot) > 0$, $Q_\text{effective}$ remains negative.
+High novelty → smaller scale factor → $Q_\text{effective}$ closer to 0 (better in power-law).
+This encourages exploration of novel states while preserving the power-law policy form.
 
 ### Running Normalization
 
