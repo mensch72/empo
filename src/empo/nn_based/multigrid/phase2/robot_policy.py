@@ -8,7 +8,7 @@ Includes:
 - MultiGridRobotExplorationPolicy: Simple exploration policy for epsilon-greedy training
 """
 
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -345,18 +345,14 @@ class MultiGridRobotExplorationPolicy(RobotPolicy):
             Tuple of action indices, one per robot: (action_robot0, action_robot1, ...)
             where each action is 0=still, 1=left, 2=right, 3=forward
         """
-        # Parse state to get agent states
-        # State format: (step_count, agent_states, mobile_objects, mutable_objects)
-        step_count, agent_states, *rest = state
-        
         actions = []
         for robot_idx in self.robot_agent_indices:
-            action = self._sample_single_robot_action(robot_idx, agent_states)
+            action = self._sample_single_robot_action(robot_idx, state)
             actions.append(action)
         
         return tuple(actions)
     
-    def _sample_single_robot_action(self, robot_idx: int, agent_states: Tuple) -> int:
+    def _sample_single_robot_action(self, robot_idx: int, state: Any) -> int:
         """
         Sample an action for a single robot.
         
@@ -366,7 +362,7 @@ class MultiGridRobotExplorationPolicy(RobotPolicy):
         
         Args:
             robot_idx: Index of the robot agent
-            agent_states: Agent states from the state tuple
+            state: Full environment state tuple from get_state()
         
         Returns:
             Action index: 0=still, 1=left, 2=right, 3=forward
@@ -375,10 +371,9 @@ class MultiGridRobotExplorationPolicy(RobotPolicy):
             # No world model - can't check if forward is blocked
             return int(np.random.choice(4, p=self.action_probs))
         
-        # Get the current state from the world model to use can_forward
-        state = self._world_model.get_state()
-        
         # Use the environment's can_forward method which accounts for agent capabilities
+        # We use the full state passed by the caller to avoid inconsistencies
+        # with the world model's internal current state.
         can_move_forward = self._world_model.can_forward(state, robot_idx)
         
         if not can_move_forward:

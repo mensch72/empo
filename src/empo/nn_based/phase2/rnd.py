@@ -10,7 +10,6 @@ Reference:
     Exploration by Random Network Distillation. arXiv:1810.12894
 """
 
-from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 

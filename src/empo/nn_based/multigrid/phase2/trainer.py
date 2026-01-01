@@ -240,8 +240,9 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
                 # Use torch's ability to hash arbitrary objects
                 state_hash = hash(state) % (2**31)
                 # Create a pseudo-random but deterministic feature vector
-                torch.manual_seed(state_hash)
-                feat = torch.randn(feature_dim, device=self.device)
+                # Use a per-state Generator to avoid mutating global RNG state
+                gen = torch.Generator(device=self.device).manual_seed(state_hash)
+                feat = torch.randn(feature_dim, device=self.device, generator=gen)
                 features.append(feat)
             
             return torch.stack(features)
@@ -466,7 +467,6 @@ def create_phase2_networks(
         )
         # Get null encoders from lookup V_h^e
         shared_state_encoder = v_h_e.state_encoder
-        shared_goal_encoder = v_h_e.goal_encoder
         shared_agent_encoder = v_h_e.agent_encoder
     
     # =========================================================================

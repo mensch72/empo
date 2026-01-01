@@ -13,7 +13,7 @@ These encoders:
 
 import torch
 import torch.nn as nn
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Tuple
 
 
 class NullStateEncoder(nn.Module):
