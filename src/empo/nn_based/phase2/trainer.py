@@ -753,8 +753,11 @@ class BasePhase2Trainer(ABC):
             for _ in self.human_agent_indices
         )
         
-        # Compute expected novelty for each robot action
-        novelty_scores = []
+        # First pass: collect all successor states from all actions for batched RND
+        # Each entry: (action_idx, prob, next_state)
+        all_next_states = []
+        state_mapping = []  # (action_idx, prob) for each state in all_next_states
+        action_has_transitions = [False] * num_action_combinations
         
         for flat_idx in range(num_action_combinations):
             robot_action = self.networks.q_r_target.action_index_to_tuple(flat_idx)
@@ -766,30 +769,36 @@ class BasePhase2Trainer(ABC):
             try:
                 transitions = self.env.transition_probabilities(state, actions)
             except Exception:
-                # If transition_probabilities fails, use uniform
-                novelty_scores.append(1.0)
                 continue
             
-            # Handle None or empty transitions
             if transitions is None or len(transitions) == 0:
-                novelty_scores.append(1.0)  # Unknown = maximally novel
                 continue
             
-            # Compute expected novelty over successor states
-            expected_novelty = 0.0
-            next_states = []
-            probs = []
+            action_has_transitions[flat_idx] = True
             for prob, next_state in transitions:
-                next_states.append(next_state)
-                probs.append(prob)
+                all_next_states.append(next_state)
+                state_mapping.append((flat_idx, prob))
+        
+        # Compute novelty scores
+        if all_next_states:
+            # Single batched RND forward pass for all successor states
+            all_novelties = self.compute_novelty_for_states(all_next_states)
             
-            if next_states:
-                # Batch compute novelty for all successor states
-                novelties = self.compute_novelty_for_states(next_states)
-                for prob, novelty in zip(probs, novelties):
-                    expected_novelty += prob * max(0.0, novelty.item())  # Clamp negative novelty
-            
-            novelty_scores.append(max(expected_novelty, 1e-6))  # Avoid zero
+            # Aggregate back to per-action expected novelty
+            novelty_scores = [0.0] * num_action_combinations
+            for i, (flat_idx, prob) in enumerate(state_mapping):
+                novelty = max(0.0, all_novelties[i].item())  # Clamp negative
+                novelty_scores[flat_idx] += prob * novelty
+        else:
+            # No valid transitions for any action
+            novelty_scores = [1.0] * num_action_combinations
+        
+        # Set default for actions without transitions (maximally novel/unknown)
+        for flat_idx in range(num_action_combinations):
+            if not action_has_transitions[flat_idx]:
+                novelty_scores[flat_idx] = 1.0
+            elif novelty_scores[flat_idx] == 0.0:
+                novelty_scores[flat_idx] = 1e-6  # Avoid zero
         
         # Convert to probabilities (softmax-like with temperature)
         novelty_tensor = torch.tensor(novelty_scores, dtype=torch.float32)
@@ -837,8 +846,9 @@ class BasePhase2Trainer(ABC):
             for _ in self.human_agent_indices
         )
         
-        # Compute expected novelty for each action
-        novelties = torch.zeros(num_action_combinations, device=self.device)
+        # First pass: collect all successor states from all actions for batched RND
+        all_next_states = []
+        state_mapping = []  # (action_idx, prob) for each state in all_next_states
         
         for flat_idx in range(num_action_combinations):
             robot_action = self.networks.q_r_target.action_index_to_tuple(flat_idx)
@@ -852,17 +862,21 @@ class BasePhase2Trainer(ABC):
             if transitions is None or len(transitions) == 0:
                 continue
             
-            # Expected novelty over successor states
-            expected_novelty = 0.0
-            next_states = [ns for _, ns in transitions]
-            probs = [p for p, _ in transitions]
+            for prob, next_state in transitions:
+                all_next_states.append(next_state)
+                state_mapping.append((flat_idx, prob))
+        
+        # Compute expected novelty for each action
+        novelties = torch.zeros(num_action_combinations, device=self.device)
+        
+        if all_next_states:
+            # Single batched RND forward pass for all successor states
+            all_novelty_scores = self.compute_novelty_for_states(all_next_states)
             
-            if next_states:
-                state_novelties = self.compute_novelty_for_states(next_states)
-                for prob, novelty in zip(probs, state_novelties):
-                    expected_novelty += prob * max(0.0, novelty.item())  # Clamp negative
-            
-            novelties[flat_idx] = expected_novelty
+            # Aggregate back to per-action expected novelty
+            for i, (flat_idx, prob) in enumerate(state_mapping):
+                novelty = max(0.0, all_novelty_scores[i].item())  # Clamp negative
+                novelties[flat_idx] += prob * novelty
         
         # Multiplicative scaling: Q_eff = Q * exp(-bonus_coef * novelty)
         # High novelty → smaller scale factor → Q closer to 0 (better for power-law)
