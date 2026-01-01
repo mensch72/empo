@@ -2717,6 +2717,90 @@ class MultiGridEnv(WorldModel):
                     if agent.color == fwd_cell.target_color:
                         agent.terminated = True
     
+    def can_forward(self, state, agent_index: int) -> bool:
+        """
+        Check if an agent can, in principle, move forward from the given state.
+        
+        This checks whether the forward cell is passable for the given agent,
+        ignoring possible conflicts with other agents' actions. The check is:
+        
+        1. Forward cell is within grid bounds
+        2. Forward cell is either:
+           - Empty (None)
+           - An object that can be overlapped (unsteady ground, control buttons, etc.)
+           - A block or rock that can be pushed (considering agent's can_push_rocks)
+           - A magic wall the agent can attempt to enter (if can_enter_magic_walls and active)
+        
+        This method is useful for exploration policies to bias toward passable
+        directions without considering multi-agent conflicts.
+        
+        Args:
+            state: The environment state tuple from get_state()
+            agent_index: Index of the agent to check
+        
+        Returns:
+            bool: True if forward movement is possible in principle
+        """
+        # Parse state
+        step_count, agent_states, mobile_objects, mutable_objects = state
+        
+        # Get agent state
+        agent_state = agent_states[agent_index]
+        agent_x, agent_y, agent_dir = agent_state[0], agent_state[1], agent_state[2]
+        
+        if agent_x is None or agent_y is None or agent_dir is None:
+            return False  # Agent not on grid
+        
+        # Compute forward position
+        dir_vec = [(1, 0), (0, 1), (-1, 0), (0, -1)][agent_dir]
+        fwd_x = agent_x + dir_vec[0]
+        fwd_y = agent_y + dir_vec[1]
+        
+        # Check bounds
+        if fwd_x < 0 or fwd_x >= self.grid.width or fwd_y < 0 or fwd_y >= self.grid.height:
+            return False
+        
+        # Get the agent object to check its capabilities
+        agent = self.agents[agent_index]
+        
+        # Get the cell at forward position
+        fwd_cell = self.grid.get(fwd_x, fwd_y)
+        
+        # Empty cell - can move
+        if fwd_cell is None:
+            return True
+        
+        # Cell with overlappable object - can move
+        if fwd_cell.can_overlap():
+            return True
+        
+        # Check for pushable objects (blocks/rocks)
+        if fwd_cell.type == 'block':
+            # All agents can push blocks - check if push is possible
+            can_push, _, _ = self._can_push_objects(agent, np.array([fwd_x, fwd_y]))
+            return can_push
+        
+        if fwd_cell.type == 'rock':
+            # Only agents with can_push_rocks can push rocks
+            if not getattr(agent, 'can_push_rocks', False):
+                return False
+            can_push, _, _ = self._can_push_objects(agent, np.array([fwd_x, fwd_y]))
+            return can_push
+        
+        # Check for magic walls
+        if fwd_cell.type == 'magicwall' and fwd_cell.active:
+            # Only agents with can_enter_magic_walls can attempt entry
+            if not getattr(agent, 'can_enter_magic_walls', False):
+                return False
+            # Check if approaching from the magic side
+            approach_dir = (agent_dir + 2) % 4
+            if fwd_cell.magic_side == 4 or approach_dir == fwd_cell.magic_side:
+                return True
+            return False
+        
+        # All other objects (walls, doors, etc.) - cannot pass
+        return False
+    
     def _can_push_objects(self, agent, start_pos):
         """
         Check if agent can push blocks/rocks starting at start_pos.

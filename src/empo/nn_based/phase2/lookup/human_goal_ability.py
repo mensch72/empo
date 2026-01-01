@@ -38,7 +38,12 @@ class LookupTableHumanGoalAbilityNetwork(BaseHumanGoalAchievementNetwork):
             varies but doesn't affect goal achievability.
         state_encoder: Optional state encoder (for API compatibility with neural networks).
         goal_encoder: Optional goal encoder (for API compatibility with neural networks).
+            If None, a NullGoalEncoder is created.
         agent_encoder: Optional agent encoder (for API compatibility with neural networks).
+            If None, a NullAgentEncoder is created.
+        state_feature_dim: Output dimension for null state encoder (default: 64).
+        goal_feature_dim: Output dimension for null goal encoder (default: 32).
+        agent_feature_dim: Output dimension for null agent encoder (default: 32).
     """
     
     def __init__(
@@ -50,15 +55,21 @@ class LookupTableHumanGoalAbilityNetwork(BaseHumanGoalAchievementNetwork):
         state_encoder: Optional[nn.Module] = None,
         goal_encoder: Optional[nn.Module] = None,
         agent_encoder: Optional[nn.Module] = None,
+        state_feature_dim: int = 64,
+        goal_feature_dim: int = 32,
+        agent_feature_dim: int = 32,
     ):
         super().__init__(gamma_h=gamma_h, feasible_range=feasible_range)
         self.default_v_h_e = default_v_h_e
         self.include_step_count = include_step_count
         
-        # Store encoders for API compatibility (not used for computation)
-        self.state_encoder = state_encoder
-        self.goal_encoder = goal_encoder
-        self.agent_encoder = agent_encoder
+        # Create null encoders for API compatibility with neural networks.
+        # These output zeros, so networks using them must rely on their own encoders.
+        from .null_encoders import NullStateEncoder, NullGoalEncoder, NullAgentEncoder
+        
+        self.state_encoder = state_encoder if state_encoder is not None else NullStateEncoder(state_feature_dim)
+        self.goal_encoder = goal_encoder if goal_encoder is not None else NullGoalEncoder(goal_feature_dim)
+        self.agent_encoder = agent_encoder if agent_encoder is not None else NullAgentEncoder(agent_feature_dim)
         
         # Main lookup table: hash((state, goal)) -> Parameter(V_h^e value)
         self.table: Dict[int, nn.Parameter] = {}

@@ -83,6 +83,14 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         verbose: Enable progress output (tqdm progress bar).
         debug: Enable verbose debug output.
         tensorboard_dir: Directory for TensorBoard logs (optional).
+        robot_exploration_policy: Optional policy for robot epsilon exploration. Can be:
+            - None: Use uniform random policy for exploration (default).
+            - List[float]: Fixed action probabilities (length = num_action_combinations).
+            - Callable[[state, world_model], List[float]]: Function returning action probabilities.
+            - RobotPolicy: A proper policy object with sample(state) method returning action tuple.
+        human_exploration_policy: Optional policy for human epsilon exploration. Can be:
+            - None: Use uniform random policy for exploration (default).
+            - HumanExplorationPolicy: A policy object with sample(state, human_idx, goal) method.
         world_model_factory: Optional factory for creating world models. Required for
             async training where the environment cannot be pickled.
     """
@@ -102,6 +110,8 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         tensorboard_dir: Optional[str] = None,
         profiler: Optional[Any] = None,
         world_model_factory: Optional[Any] = None,
+        robot_exploration_policy: Optional[Any] = None,
+        human_exploration_policy: Optional[Any] = None,
     ):
         super().__init__(
             env=env,
@@ -117,6 +127,8 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
             tensorboard_dir=tensorboard_dir,
             profiler=profiler,
             world_model_factory=world_model_factory,
+            robot_exploration_policy=robot_exploration_policy,
+            human_exploration_policy=human_exploration_policy,
         )
         
         # Caching is now handled internally by the shared encoders.
@@ -128,13 +140,11 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         Clear encoder caches. Call after each training step to prevent memory growth.
         
         This clears the caches in the shared encoders that all networks use.
-        For lookup table networks, this is a no-op (they don't have encoder caches).
+        For lookup table networks with null encoders, this is a no-op.
         """
-        # Check if using lookup tables (no encoder caches)
-        if is_lookup_table_network(self.networks.q_r):
-            return
-        # All networks share the same encoders, so we only need to clear once
-        self.networks.q_r.state_encoder.clear_cache()
+        # All networks share encoders from V_h^e, so we clear through V_h^e
+        # (NullEncoders have no-op clear_cache methods)
+        self.networks.v_h_e.state_encoder.clear_cache()
         self.networks.v_h_e.goal_encoder.clear_cache()
         self.networks.v_h_e.agent_encoder.clear_cache()
     
@@ -142,15 +152,13 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         """
         Get cache hit/miss statistics from all encoders.
         
-        For lookup table networks, returns empty dict (no encoder caches).
+        For null encoders (when V_h^e is lookup table), returns (0, 0).
         
         Returns:
             Dict mapping encoder name to (hits, misses) tuple.
         """
-        if is_lookup_table_network(self.networks.q_r):
-            return {}
         return {
-            'state': self.networks.q_r.state_encoder.get_cache_stats(),
+            'state': self.networks.v_h_e.state_encoder.get_cache_stats(),
             'goal': self.networks.v_h_e.goal_encoder.get_cache_stats(),
             'agent': self.networks.v_h_e.agent_encoder.get_cache_stats(),
         }
@@ -158,13 +166,86 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
     def reset_cache_stats(self):
         """Reset cache hit/miss counters for all encoders.
         
-        For lookup table networks, this is a no-op (they don't have encoder caches).
+        For null encoders, this is a no-op.
         """
-        if is_lookup_table_network(self.networks.q_r):
-            return
-        self.networks.q_r.state_encoder.reset_cache_stats()
+        self.networks.v_h_e.state_encoder.reset_cache_stats()
         self.networks.v_h_e.goal_encoder.reset_cache_stats()
         self.networks.v_h_e.agent_encoder.reset_cache_stats()
+
+    def get_state_features_for_rnd(self, states: List[Any]) -> torch.Tensor:
+        """
+        Get state features for RND novelty computation.
+        
+        Uses the shared state encoder (detached from gradient computation)
+        to convert states to feature tensors for RND.
+        
+        Args:
+            states: List of states (tuples from WorldModel.get_state()).
+            
+        Returns:
+            Feature tensor of shape (batch_size, feature_dim).
+        """
+        # Get feature dim from RND network (handles case where hidden_dim was overridden)
+        if self.networks.rnd is not None:
+            feature_dim = self.networks.rnd.target[0].in_features
+        else:
+            feature_dim = self.config.hidden_dim
+            
+        if not states:
+            return torch.zeros(0, feature_dim, device=self.device)
+        
+        # Use the shared state encoder from V_h^e
+        # This produces features suitable for RND
+        state_encoder = self.networks.v_h_e.state_encoder
+        
+        # Check if we have a neural encoder (not a NullEncoder)
+        if hasattr(state_encoder, 'tensorize_state'):
+            # Neural encoder: use forward_batch for efficient batched encoding
+            # First, tensorize all states
+            batch_tensors = []
+            for state in states:
+                tensors = state_encoder.tensorize_state(state, self.env)
+                batch_tensors.append(tensors)
+            
+            # Stack tensors and squeeze out the extra batch dimension from tensorize_state
+            # tensorize_state returns (1, C, H, W) for grid, so stacking gives (B, 1, C, H, W)
+            # We need (B, C, H, W) for the forward pass
+            grid_tensors = torch.cat([t[0] for t in batch_tensors], dim=0).to(self.device)
+            global_features = torch.cat([t[1] for t in batch_tensors], dim=0).to(self.device)
+            agent_features = torch.cat([t[2] for t in batch_tensors], dim=0).to(self.device)
+            interactive_features = torch.cat([t[3] for t in batch_tensors], dim=0).to(self.device)
+            
+            # Forward through encoder (detached - RND trains its own networks)
+            with torch.no_grad():
+                features = state_encoder.forward(
+                    grid_tensors, global_features, agent_features, interactive_features
+                )
+            
+            return features
+        else:
+            # Lookup table mode with NullEncoder - create simple state representation
+            # Use a hash-based embedding for states
+            # This is a fallback; RND works best with neural encoders
+            
+            # Get the actual input dimension from RND network
+            # (handles case where hidden_dim was overridden in create_phase2_networks)
+            if self.networks.rnd is not None:
+                feature_dim = self.networks.rnd.target[0].in_features
+            else:
+                feature_dim = self.config.hidden_dim
+            
+            features = []
+            for state in states:
+                # Create a simple feature from state hash
+                # Use torch's ability to hash arbitrary objects
+                state_hash = hash(state) % (2**31)
+                # Create a pseudo-random but deterministic feature vector
+                # Use a per-state Generator to avoid mutating global RNG state
+                gen = torch.Generator(device=self.device).manual_seed(state_hash)
+                feat = torch.randn(feature_dim, device=self.device, generator=gen)
+                features.append(feat)
+            
+            return torch.stack(features)
 
 
 def create_phase2_networks(
@@ -183,11 +264,22 @@ def create_phase2_networks(
     """
     Create all Phase 2 networks for a multigrid environment.
     
-    If config.use_lookup_tables is True, creates lookup table networks.
-    Otherwise, creates neural networks with SHARED encoders:
-    - One state encoder shared by Q_r, V_h^e, X_h, U_r, V_r
-    - One goal encoder shared by V_h^e
-    - One agent encoder shared by V_h^e, X_h
+    Supports three modes based on config:
+    
+    1. All lookup tables (config.use_lookup_tables=True and all use_lookup_* flags True):
+       Creates all networks as lookup tables (no encoders needed).
+    
+    2. All neural networks (config.use_lookup_tables=False):
+       Creates neural networks with SHARED encoders:
+       - One state encoder shared by Q_r, V_h^e, X_h, U_r, V_r
+       - One goal encoder shared by V_h^e
+       - One agent encoder shared by V_h^e, X_h
+    
+    3. Mixed mode (config.use_lookup_tables=True with some use_lookup_* flags False):
+       Creates lookup tables for specified networks and neural networks for others.
+       Important: If V_h^e is a lookup table (no encoders), other neural networks
+       cannot share encoders from it. Instead, standalone encoders are created
+       and passed to each neural network that needs them.
     
     This ensures consistent encoding across networks and enables
     efficient caching of raw tensor extraction.
@@ -208,26 +300,90 @@ def create_phase2_networks(
     Returns:
         Phase2Networks container with all networks using shared encoders.
     """
-    # Use lookup table networks if requested
-    if config.use_lookup_tables:
-        from empo.nn_based.phase2.network_factory import create_all_phase2_lookup_networks
-        q_r, v_h_e, x_h, u_r, v_r = create_all_phase2_lookup_networks(
-            config=config,
-            num_actions=num_actions,
-            num_robots=num_robots
+    # Determine which networks need neural implementations
+    # (i.e., lookup tables are NOT enabled for them)
+    use_neural_q_r = not config.should_use_lookup_table('q_r')
+    use_neural_v_h_e = not config.should_use_lookup_table('v_h_e')
+    use_neural_x_h = not config.should_use_lookup_table('x_h')
+    use_neural_u_r = config.u_r_use_network and not config.should_use_lookup_table('u_r')
+    use_neural_v_r = config.v_r_use_network and not config.should_use_lookup_table('v_r')
+    
+    any_neural = use_neural_q_r or use_neural_v_h_e or use_neural_x_h or use_neural_u_r or use_neural_v_r
+    
+    # If no neural networks needed, use all lookup tables
+    if not any_neural:
+        from empo.nn_based.phase2.lookup import (
+            LookupTableRobotQNetwork,
+            LookupTableRobotValueNetwork,
+            LookupTableHumanGoalAbilityNetwork,
+            LookupTableAggregateGoalAbilityNetwork,
+            LookupTableIntrinsicRewardNetwork,
         )
+        
+        q_r = LookupTableRobotQNetwork(
+            num_actions=num_actions,
+            num_robots=num_robots,
+            beta_r=config.beta_r,
+            default_q_r=config.get_lookup_default('q_r'),
+            include_step_count=config.include_step_count,
+        )
+        
+        v_h_e = LookupTableHumanGoalAbilityNetwork(
+            gamma_h=config.gamma_h,
+            default_v_h_e=config.get_lookup_default('v_h_e'),
+            include_step_count=config.include_step_count,
+        )
+        
+        x_h = LookupTableAggregateGoalAbilityNetwork(
+            default_x_h=config.get_lookup_default('x_h'),
+            include_step_count=config.include_step_count,
+        )
+        
+        u_r = None
+        if config.u_r_use_network:
+            u_r = LookupTableIntrinsicRewardNetwork(
+                eta=config.eta,
+                default_y=config.get_lookup_default('u_r'),
+                include_step_count=config.include_step_count,
+            )
+        
+        v_r = None
+        if config.v_r_use_network:
+            v_r = LookupTableRobotValueNetwork(
+                gamma_r=config.gamma_r,
+                default_v_r=config.get_lookup_default('v_r'),
+                include_step_count=config.include_step_count,
+            )
+        
+        # RND doesn't make sense with full lookup table mode - warn and disable
+        # RND needs learned state representations; tabular mode uses exact state hashes.
+        # For small state spaces, epsilon-greedy exploration is sufficient.
+        rnd = None
+        if config.use_rnd:
+            import warnings
+            warnings.warn(
+                "RND curiosity exploration is disabled in full tabular mode. "
+                "RND requires learned state representations, but tabular mode uses exact state hashes. "
+                "For small state spaces, epsilon-greedy exploration (already enabled) is sufficient.",
+                UserWarning,
+                stacklevel=2
+            )
+        
         return Phase2Networks(
             q_r=q_r,
             v_h_e=v_h_e,
             x_h=x_h,
             u_r=u_r,
-            v_r=v_r
+            v_r=v_r,
+            rnd=rnd,
         )
     
-    # Neural network mode: create shared encoders
-    # In identity mode (use_encoders=False), encoders now compute their own
-    # output dimensions internally. We don't need to set them here.
-    # The hidden_dim for downstream MLP heads stays at default (small).
+    # At least one network needs neural implementation
+    # 
+    # Strategy: Create V_h^e first (neural or lookup), then get shared encoders from it.
+    # - If V_h^e is neural: it provides trained shared encoders
+    # - If V_h^e is lookup: it provides NullEncoders that output zeros
+    # Either way, other networks get encoders from v_h_e and can use them uniformly.
     
     # Use config values as defaults
     if hidden_dim is None:
@@ -251,132 +407,219 @@ def create_phase2_networks(
     grid_height = env.height
     grid_width = env.width
     
-    # Create SHARED encoders (one instance used by all networks)
-    shared_state_encoder = MultiGridStateEncoder(
-        grid_height=grid_height,
-        grid_width=grid_width,
-        num_agents_per_color=num_agents_per_color,
-        num_agent_colors=7,
-        feature_dim=hidden_dim,
-        include_step_count=config.include_step_count,
-        use_encoders=config.use_encoders,
-    ).to(device)
-    
-    shared_goal_encoder = MultiGridGoalEncoder(
-        grid_height=grid_height,
-        grid_width=grid_width,
-        feature_dim=goal_feature_dim,
-        use_encoders=config.use_encoders,
-    ).to(device)
-    
-    # Agent encoder (identity mode computes its own output dim internally)
-    shared_agent_encoder = AgentIdentityEncoder(
-        num_agents=max_agents,
-        embedding_dim=agent_embedding_dim,
-        position_feature_dim=agent_position_feature_dim,
-        agent_feature_dim=agent_feature_dim,
-        grid_height=grid_height,
-        grid_width=grid_width,
-        use_encoders=config.use_encoders,
-    ).to(device)
-    
-    # Create OWN encoders for Q_r and X_h (trained with their respective losses)
-    # These allow Q_r and X_h to learn additional features beyond those learned by V_h^e
-    # Note: own encoders share cache with shared encoders to avoid redundant tensorization
-    q_r_own_state_encoder = MultiGridStateEncoder(
-        grid_height=grid_height,
-        grid_width=grid_width,
-        num_agents_per_color=num_agents_per_color,
-        num_agent_colors=7,
-        feature_dim=hidden_dim,
-        include_step_count=config.include_step_count,
-        use_encoders=config.use_encoders,
-        share_cache_with=shared_state_encoder,
-    ).to(device)
-    
-    x_h_own_agent_encoder = AgentIdentityEncoder(
-        num_agents=max_agents,
-        embedding_dim=agent_embedding_dim,
-        position_feature_dim=agent_position_feature_dim,
-        agent_feature_dim=agent_feature_dim,
-        grid_height=grid_height,
-        grid_width=grid_width,
-        use_encoders=config.use_encoders,
-        share_cache_with=shared_agent_encoder,
-    ).to(device)
-    
-    # Create networks with SHARED encoders and OWN encoders where applicable
-    q_r = MultiGridRobotQNetwork(
-        grid_height=grid_height,
-        grid_width=grid_width,
-        num_robot_actions=num_actions,
-        num_robots=num_robots,
-        num_agents_per_color=num_agents_per_color,
-        state_feature_dim=hidden_dim,
-        hidden_dim=hidden_dim,
-        beta_r=config.beta_r,
-        dropout=config.q_r_dropout,
-        state_encoder=shared_state_encoder,       # SHARED (frozen for Q_r)
-        own_state_encoder=q_r_own_state_encoder,  # OWN (trained with Q_r)
-    ).to(device)
-    
-    v_h_e = MultiGridHumanGoalAchievementNetwork(
-        grid_height=grid_height,
-        grid_width=grid_width,
-        num_agents_per_color=num_agents_per_color,
-        state_feature_dim=hidden_dim,
-        goal_feature_dim=goal_feature_dim,
-        hidden_dim=hidden_dim,
-        gamma_h=config.gamma_h,
-        dropout=config.v_h_e_dropout,
-        max_agents=max_agents,
-        agent_embedding_dim=agent_embedding_dim,
-        state_encoder=shared_state_encoder,  # SHARED
-        goal_encoder=shared_goal_encoder,    # SHARED
-        agent_encoder=shared_agent_encoder,  # SHARED
-    ).to(device)
-    
-    x_h = MultiGridAggregateGoalAbilityNetwork(
-        grid_height=grid_height,
-        grid_width=grid_width,
-        num_agents_per_color=num_agents_per_color,
-        state_feature_dim=hidden_dim,
-        hidden_dim=hidden_dim,
-        zeta=config.zeta,
-        dropout=config.x_h_dropout,
-        max_agents=max_agents,
-        agent_embedding_dim=agent_embedding_dim,
-        state_encoder=shared_state_encoder,       # SHARED (frozen for X_h)
-        agent_encoder=shared_agent_encoder,       # SHARED (frozen for X_h)
-        own_agent_encoder=x_h_own_agent_encoder,  # OWN (trained with X_h)
-    ).to(device)
-    
-    # Only create U_r network if u_r_use_network=True
-    u_r = None
-    if config.u_r_use_network:
-        u_r = MultiGridIntrinsicRewardNetwork(
+    # =========================================================================
+    # Create V_h^e first (it provides shared encoders to other networks)
+    # =========================================================================
+    if use_neural_v_h_e:
+        # Neural V_h^e: create real encoders that will be trained
+        shared_state_encoder = MultiGridStateEncoder(
+            grid_height=grid_height,
+            grid_width=grid_width,
+            num_agents_per_color=num_agents_per_color,
+            num_agent_colors=7,
+            feature_dim=hidden_dim,
+            include_step_count=config.include_step_count,
+            use_encoders=config.use_encoders,
+        ).to(device)
+        
+        shared_goal_encoder = MultiGridGoalEncoder(
+            grid_height=grid_height,
+            grid_width=grid_width,
+            feature_dim=goal_feature_dim,
+            use_encoders=config.use_encoders,
+        ).to(device)
+        
+        shared_agent_encoder = AgentIdentityEncoder(
+            num_agents=max_agents,
+            embedding_dim=agent_embedding_dim,
+            position_feature_dim=agent_position_feature_dim,
+            agent_feature_dim=agent_feature_dim,
+            grid_height=grid_height,
+            grid_width=grid_width,
+            use_encoders=config.use_encoders,
+        ).to(device)
+        
+        v_h_e = MultiGridHumanGoalAchievementNetwork(
             grid_height=grid_height,
             grid_width=grid_width,
             num_agents_per_color=num_agents_per_color,
             state_feature_dim=hidden_dim,
+            goal_feature_dim=goal_feature_dim,
             hidden_dim=hidden_dim,
-            xi=config.xi,
-            eta=config.eta,
-            dropout=config.u_r_dropout,
-            state_encoder=shared_state_encoder,  # SHARED
+            gamma_h=config.gamma_h,
+            dropout=config.v_h_e_dropout,
+            max_agents=max_agents,
+            agent_embedding_dim=agent_embedding_dim,
+            state_encoder=shared_state_encoder,
+            goal_encoder=shared_goal_encoder,
+            agent_encoder=shared_agent_encoder,
+        ).to(device)
+    else:
+        # Lookup V_h^e: provides NullEncoders that output zeros
+        from empo.nn_based.phase2.lookup import LookupTableHumanGoalAbilityNetwork
+        v_h_e = LookupTableHumanGoalAbilityNetwork(
+            gamma_h=config.gamma_h,
+            default_v_h_e=config.get_lookup_default('v_h_e'),
+            include_step_count=config.include_step_count,
+            state_feature_dim=hidden_dim,
+            goal_feature_dim=goal_feature_dim,
+            agent_feature_dim=agent_embedding_dim + agent_position_feature_dim + agent_feature_dim,
+        )
+        # Get null encoders from lookup V_h^e
+        shared_state_encoder = v_h_e.state_encoder
+        shared_agent_encoder = v_h_e.agent_encoder
+    
+    # =========================================================================
+    # Create OWN encoders for Q_r and X_h (trained with their respective losses)
+    # =========================================================================
+    # These allow Q_r and X_h to learn additional features beyond those learned by V_h^e.
+    # When V_h^e is a lookup table (null encoders), these own encoders do ALL the encoding.
+    # Note: own encoders share cache with shared encoders to avoid redundant tensorization
+    # (but when shared encoders are null, there's nothing to share - that's fine).
+    
+    q_r_own_state_encoder = None
+    if use_neural_q_r:
+        share_cache_with = shared_state_encoder if use_neural_v_h_e else None
+        q_r_own_state_encoder = MultiGridStateEncoder(
+            grid_height=grid_height,
+            grid_width=grid_width,
+            num_agents_per_color=num_agents_per_color,
+            num_agent_colors=7,
+            feature_dim=hidden_dim,
+            include_step_count=config.include_step_count,
+            use_encoders=config.use_encoders,
+            share_cache_with=share_cache_with,
         ).to(device)
     
-    # Only create V_r network if v_r_use_network=True
-    v_r = None
-    if config.v_r_use_network:
-        v_r = MultiGridRobotValueNetwork(
+    x_h_own_agent_encoder = None
+    if use_neural_x_h:
+        share_cache_with = shared_agent_encoder if use_neural_v_h_e else None
+        x_h_own_agent_encoder = AgentIdentityEncoder(
+            num_agents=max_agents,
+            embedding_dim=agent_embedding_dim,
+            position_feature_dim=agent_position_feature_dim,
+            agent_feature_dim=agent_feature_dim,
+            grid_height=grid_height,
+            grid_width=grid_width,
+            use_encoders=config.use_encoders,
+            share_cache_with=share_cache_with,
+        ).to(device)
+    
+    # =========================================================================
+    # Create remaining networks - use shared encoders from V_h^e
+    # =========================================================================
+    
+    # Q_r network
+    if use_neural_q_r:
+        q_r = MultiGridRobotQNetwork(
+            grid_height=grid_height,
+            grid_width=grid_width,
+            num_robot_actions=num_actions,
+            num_robots=num_robots,
+            num_agents_per_color=num_agents_per_color,
+            state_feature_dim=hidden_dim,
+            hidden_dim=hidden_dim,
+            beta_r=config.beta_r,
+            dropout=config.q_r_dropout,
+            state_encoder=shared_state_encoder,       # From V_h^e (real or null)
+            own_state_encoder=q_r_own_state_encoder,  # OWN (trained with Q_r)
+        ).to(device)
+    else:
+        from empo.nn_based.phase2.lookup import LookupTableRobotQNetwork
+        q_r = LookupTableRobotQNetwork(
+            num_actions=num_actions,
+            num_robots=num_robots,
+            beta_r=config.beta_r,
+            default_q_r=config.get_lookup_default('q_r'),
+            include_step_count=config.include_step_count,
+        )
+    
+    # X_h network
+    if use_neural_x_h:
+        x_h = MultiGridAggregateGoalAbilityNetwork(
             grid_height=grid_height,
             grid_width=grid_width,
             num_agents_per_color=num_agents_per_color,
             state_feature_dim=hidden_dim,
             hidden_dim=hidden_dim,
-            dropout=config.v_r_dropout,
-            state_encoder=shared_state_encoder,  # SHARED
+            zeta=config.zeta,
+            dropout=config.x_h_dropout,
+            max_agents=max_agents,
+            agent_embedding_dim=agent_embedding_dim,
+            state_encoder=shared_state_encoder,       # From V_h^e (real or null)
+            agent_encoder=shared_agent_encoder,       # From V_h^e (real or null)
+            own_agent_encoder=x_h_own_agent_encoder,  # OWN (trained with X_h)
+        ).to(device)
+    else:
+        from empo.nn_based.phase2.lookup import LookupTableAggregateGoalAbilityNetwork
+        x_h = LookupTableAggregateGoalAbilityNetwork(
+            default_x_h=config.get_lookup_default('x_h'),
+            include_step_count=config.include_step_count,
+        )
+    
+    # U_r network (optional)
+    u_r = None
+    if config.u_r_use_network:
+        if use_neural_u_r:
+            u_r = MultiGridIntrinsicRewardNetwork(
+                grid_height=grid_height,
+                grid_width=grid_width,
+                num_agents_per_color=num_agents_per_color,
+                state_feature_dim=hidden_dim,
+                hidden_dim=hidden_dim,
+                xi=config.xi,
+                eta=config.eta,
+                dropout=config.u_r_dropout,
+                state_encoder=shared_state_encoder,  # SHARED
+            ).to(device)
+        else:
+            from empo.nn_based.phase2.lookup import LookupTableIntrinsicRewardNetwork
+            u_r = LookupTableIntrinsicRewardNetwork(
+                eta=config.eta,
+                default_y=config.get_lookup_default('u_r'),
+                include_step_count=config.include_step_count,
+            )
+    
+    # V_r network (optional)
+    v_r = None
+    if config.v_r_use_network:
+        if use_neural_v_r:
+            v_r = MultiGridRobotValueNetwork(
+                grid_height=grid_height,
+                grid_width=grid_width,
+                num_agents_per_color=num_agents_per_color,
+                state_feature_dim=hidden_dim,
+                hidden_dim=hidden_dim,
+                dropout=config.v_r_dropout,
+                state_encoder=shared_state_encoder,  # SHARED
+            ).to(device)
+        else:
+            from empo.nn_based.phase2.lookup import LookupTableRobotValueNetwork
+            v_r = LookupTableRobotValueNetwork(
+                gamma_r=config.gamma_r,
+                default_v_r=config.get_lookup_default('v_r'),
+                include_step_count=config.include_step_count,
+            )
+    
+    # =========================================================================
+    # Create RND module for curiosity-driven exploration (optional)
+    # =========================================================================
+    rnd = None
+    if config.use_rnd:
+        from empo.nn_based.phase2.rnd import RNDModule
+        
+        # RND uses state features from the shared encoder
+        # Get input dimension from the actual state encoder to ensure consistency
+        # (This handles cases where hidden_dim passed to this function differs from
+        # what the encoder was actually created with)
+        rnd_input_dim = shared_state_encoder.feature_dim
+        
+        rnd = RNDModule(
+            input_dim=rnd_input_dim,
+            feature_dim=config.rnd_feature_dim,
+            hidden_dim=config.rnd_hidden_dim,
+            normalize=config.normalize_rnd,
+            normalization_decay=config.rnd_normalization_decay,
         ).to(device)
     
     return Phase2Networks(
@@ -384,7 +627,8 @@ def create_phase2_networks(
         v_h_e=v_h_e,
         x_h=x_h,
         u_r=u_r,
-        v_r=v_r
+        v_r=v_r,
+        rnd=rnd,
     )
 
 
@@ -408,6 +652,8 @@ def train_multigrid_phase2(
     profiler: Optional[Any] = None,
     restore_networks_path: Optional[str] = None,
     world_model_factory: Optional[Any] = None,
+    robot_exploration_policy: Optional[Any] = None,
+    human_exploration_policy: Optional[Any] = None,
 ) -> Tuple[MultiGridRobotQNetwork, Phase2Networks, List[Dict[str, float]], "MultiGridPhase2Trainer"]:
     """
     Train Phase 2 robot policy for a multigrid environment.
@@ -437,6 +683,14 @@ def train_multigrid_phase2(
                                Skips warmup/rampup stages since they were already done.
         world_model_factory: Optional factory for creating world models. Required for
             async training where the environment cannot be pickled.
+        robot_exploration_policy: Optional policy for robot epsilon exploration. Can be:
+            - None: Use uniform random policy for exploration (default).
+            - List[float]: Fixed action probabilities (length = num_action_combinations).
+            - Callable[[state, world_model], List[float]]: Function returning action probabilities.
+            - RobotPolicy: A proper policy object with sample(state) method returning action tuple.
+        human_exploration_policy: Optional policy for human epsilon exploration. Can be:
+            - None: Use uniform random policy for exploration (default).
+            - HumanExplorationPolicy: A policy object with sample(state, human_idx, goal) method.
     
     Returns:
         Tuple of (robot_q_network, all_networks, training_history, trainer).
@@ -508,6 +762,8 @@ def train_multigrid_phase2(
         tensorboard_dir=tensorboard_dir,
         profiler=profiler,
         world_model_factory=world_model_factory,
+        robot_exploration_policy=robot_exploration_policy,
+        human_exploration_policy=human_exploration_policy,
     )
     
     # Restore networks if checkpoint provided (skips warmup/rampup since already done)
@@ -525,6 +781,8 @@ def train_multigrid_phase2(
         print(f"  Training steps per env step: {config.training_steps_per_env_step}")
         print(f"  Batch size: {config.batch_size}")
         print(f"  Buffer size: {config.buffer_size}")
+        if config.use_rnd:
+            print(f"  Curiosity (RND): enabled (bonus_coef_r={config.rnd_bonus_coef_r})")
         if tensorboard_dir:
             print(f"  TensorBoard: {tensorboard_dir}")
     

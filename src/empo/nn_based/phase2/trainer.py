@@ -34,6 +34,7 @@ from .aggregate_goal_ability import BaseAggregateGoalAbilityNetwork
 from .intrinsic_reward_network import BaseIntrinsicRewardNetwork
 from .robot_value_network import BaseRobotValueNetwork, compute_v_r_from_components
 from .lookup import get_all_lookup_tables, get_total_table_size
+from .rnd import RNDModule
 
 # Try to import tensorboard (optional)
 try:
@@ -52,6 +53,9 @@ class Phase2Networks:
     # U_r and V_r are optional - only created when use_network=True
     u_r: Optional[BaseIntrinsicRewardNetwork] = None
     v_r: Optional[BaseRobotValueNetwork] = None
+    
+    # RND module for curiosity-driven exploration (optional)
+    rnd: Optional[RNDModule] = None
     
     # Target networks (frozen copies for stable training)
     q_r_target: Optional[BaseRobotQNetwork] = None
@@ -85,6 +89,14 @@ class BasePhase2Trainer(ABC):
         verbose: Enable progress output (tqdm progress bar).
         debug: Enable verbose debug output (very detailed, for debugging).
         tensorboard_dir: Directory for TensorBoard logs (optional).
+        robot_exploration_policy: Optional policy for robot epsilon exploration. Can be:
+            - None: Use uniform random policy for exploration (default).
+            - List[float]: Fixed action probabilities (length = num_action_combinations).
+            - Callable[[state, world_model], List[float]]: Function returning action probabilities.
+            - RobotPolicy: A proper policy object with sample(state) method returning action tuple.
+        human_exploration_policy: Optional policy for human epsilon exploration. Can be:
+            - None: Use uniform random policy for exploration (default).
+            - HumanExplorationPolicy: A policy object with sample(state, human_idx, goal) method.
         world_model_factory: Optional factory for creating world models. Required for
             async training where the environment cannot be pickled.
         world_model_factory: Optional factory for creating world models. Required for
@@ -108,6 +120,8 @@ class BasePhase2Trainer(ABC):
         tensorboard_dir: Optional[str] = None,
         profiler: Optional[Any] = None,
         world_model_factory: Optional[Any] = None,
+        robot_exploration_policy: Optional[Any] = None,
+        human_exploration_policy: Optional[Any] = None,
     ):
         self.env = env
         self.world_model_factory = world_model_factory
@@ -121,6 +135,8 @@ class BasePhase2Trainer(ABC):
         self.verbose = verbose
         self.debug = debug
         self.profiler = profiler
+        self.robot_exploration_policy = robot_exploration_policy
+        self.human_exploration_policy = human_exploration_policy
         
         # Compute the total number of agents from the indices
         self._update_num_agents()
@@ -193,6 +209,7 @@ class BasePhase2Trainer(ABC):
             'v_h_e': 0,
             'x_h': 0,
             'u_r': 0,
+            'rnd': 0,
         }
         
         if self.debug:
@@ -346,6 +363,14 @@ class BasePhase2Trainer(ABC):
                 self.networks.v_r,
                 lr=self.config.lr_v_r,
                 weight_decay=self.config.v_r_weight_decay
+            )
+        # Create RND optimizer if using curiosity exploration
+        if self.config.use_rnd and self.networks.rnd is not None:
+            # Only train the predictor network (target is frozen)
+            optimizers['rnd'] = optim.Adam(
+                self.networks.rnd.predictor.parameters(),
+                lr=self.config.lr_rnd,
+                weight_decay=self.config.rnd_weight_decay
             )
         return optimizers
     
@@ -584,9 +609,15 @@ class BasePhase2Trainer(ABC):
         This supports both cached mode (same env reused) and ensemble mode (new env
         each episode).
         
+        Also calls reset() on the robot_exploration_policy and human_exploration_policy
+        if they are policy objects with reset methods.
+        
         Returns:
             Initial state.
         """
+        from .robot_policy import RobotPolicy
+        from empo.human_policy_prior import HumanPolicyPrior
+        
         if self.world_model_factory is not None:
             self._create_env_from_factory()
         elif self.env is None:
@@ -596,6 +627,13 @@ class BasePhase2Trainer(ABC):
             )
         
         self.env.reset()
+        
+        # Reset exploration policies if they need world model context
+        if isinstance(self.robot_exploration_policy, RobotPolicy):
+            self.robot_exploration_policy.reset(self.env)
+        if isinstance(self.human_exploration_policy, HumanPolicyPrior):
+            self.human_exploration_policy.set_world_model(self.env)
+        
         return self.env.get_state()
     
     def sample_robot_action(self, state: Any) -> Tuple[int, ...]:
@@ -608,22 +646,228 @@ class BasePhase2Trainer(ABC):
         During warm-up, uses effective beta_r = 0 (uniform random policy).
         After warm-up, beta_r ramps up to nominal value.
         
+        With probability epsilon, samples from the exploration policy
+        (uniform random by default, or custom if robot_exploration_policy is set).
+        
+        When RND is enabled, curiosity bonus can be added to exploration:
+        - During epsilon exploration: bias toward actions leading to novel states
+        - During policy-based selection: add curiosity bonus to Q-values
+        
         Args:
             state: Current state.
         
         Returns:
             Tuple of robot actions.
         """
-        epsilon = self.config.get_epsilon(self.training_step_count)
+        from .robot_policy import RobotPolicy
+        
+        epsilon = self.config.get_epsilon_r(self.training_step_count)
         effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
         
+        # Epsilon exploration: sample from exploration policy (with optional curiosity bias)
+        if torch.rand(1).item() < epsilon:
+            return self._sample_robot_exploration_action(state)
+        
+        # Otherwise: sample from learned policy (with optional curiosity bonus)
         with torch.no_grad():
             q_values = self.networks.q_r_target.forward(
                 state, None, self.device
             )
+            
+            # Add curiosity bonus to Q-values if RND is enabled
+            if self.config.use_rnd and self.networks.rnd is not None and self.config.rnd_bonus_coef_r > 0:
+                q_values = self._add_curiosity_bonus_to_q_values(state, q_values)
+            
             return self.networks.q_r_target.sample_action(
-                q_values, epsilon, beta_r=effective_beta_r
+                q_values, beta_r=effective_beta_r
             )
+    
+    def _sample_robot_exploration_action(self, state: Any) -> Tuple[int, ...]:
+        """
+        Sample robot action during epsilon exploration.
+        
+        When RND is enabled, uses curiosity-weighted sampling instead of uniform random.
+        Otherwise falls back to configured exploration policy.
+        
+        Args:
+            state: Current state.
+            
+        Returns:
+            Tuple of robot actions.
+        """
+        from .robot_policy import RobotPolicy
+        
+        num_action_combinations = self.networks.q_r_target.num_action_combinations
+        
+        # If RND is enabled, use curiosity-weighted exploration
+        if self.config.use_rnd and self.networks.rnd is not None and self.config.rnd_bonus_coef_r > 0:
+            return self._sample_curiosity_exploration_action(state)
+        
+        # Otherwise use configured exploration policy
+        if self.robot_exploration_policy is None:
+            # Uniform random exploration
+            flat_idx = torch.randint(0, num_action_combinations, (1,)).item()
+            return self.networks.q_r_target.action_index_to_tuple(flat_idx)
+        elif isinstance(self.robot_exploration_policy, RobotPolicy):
+            # RobotPolicy object: use its sample() method directly
+            action = self.robot_exploration_policy.sample(state)
+            # Ensure return type is tuple
+            if isinstance(action, (list, tuple)):
+                return tuple(action)
+            else:
+                return (action,)
+        elif callable(self.robot_exploration_policy):
+            # Callable exploration policy: get probabilities from function
+            probs = self.robot_exploration_policy(state, self.env)
+            probs_tensor = torch.tensor(probs, dtype=torch.float32)
+            probs_tensor = probs_tensor / probs_tensor.sum()  # Normalize
+            flat_idx = torch.multinomial(probs_tensor, 1).item()
+            return self.networks.q_r_target.action_index_to_tuple(flat_idx)
+        else:
+            # List/array exploration policy: use fixed probabilities
+            probs_tensor = torch.tensor(self.robot_exploration_policy, dtype=torch.float32)
+            probs_tensor = probs_tensor / probs_tensor.sum()  # Normalize
+            flat_idx = torch.multinomial(probs_tensor, 1).item()
+            return self.networks.q_r_target.action_index_to_tuple(flat_idx)
+    
+    def _sample_curiosity_exploration_action(self, state: Any) -> Tuple[int, ...]:
+        """
+        Sample robot action weighted by curiosity bonus for successor states.
+        
+        Uses transition_probabilities to compute expected novelty for each action,
+        then samples proportionally to novelty.
+        
+        Args:
+            state: Current state.
+            
+        Returns:
+            Tuple of robot actions.
+        """
+        num_action_combinations = self.networks.q_r_target.num_action_combinations
+        
+        # Get current human actions (sample from exploration or prior)
+        # For simplicity, use uniform random human actions during curiosity exploration
+        num_human_actions = self.env.action_space.n
+        human_actions = tuple(
+            torch.randint(0, num_human_actions, (1,)).item()
+            for _ in self.human_agent_indices
+        )
+        
+        # Compute expected novelty for each robot action
+        novelty_scores = []
+        
+        for flat_idx in range(num_action_combinations):
+            robot_action = self.networks.q_r_target.action_index_to_tuple(flat_idx)
+            
+            # Build full action tuple: robots first, then humans
+            actions = robot_action + human_actions
+            
+            # Get transition probabilities
+            try:
+                transitions = self.env.transition_probabilities(state, actions)
+            except Exception:
+                # If transition_probabilities fails, use uniform
+                novelty_scores.append(1.0)
+                continue
+            
+            # Handle None or empty transitions
+            if transitions is None or len(transitions) == 0:
+                novelty_scores.append(1.0)  # Unknown = maximally novel
+                continue
+            
+            # Compute expected novelty over successor states
+            expected_novelty = 0.0
+            next_states = []
+            probs = []
+            for prob, next_state in transitions:
+                next_states.append(next_state)
+                probs.append(prob)
+            
+            if next_states:
+                # Batch compute novelty for all successor states
+                novelties = self.compute_novelty_for_states(next_states)
+                for prob, novelty in zip(probs, novelties):
+                    expected_novelty += prob * max(0.0, novelty.item())  # Clamp negative novelty
+            
+            novelty_scores.append(max(expected_novelty, 1e-6))  # Avoid zero
+        
+        # Convert to probabilities (softmax-like with temperature)
+        novelty_tensor = torch.tensor(novelty_scores, dtype=torch.float32)
+        # Add small uniform component to ensure exploration
+        probs = novelty_tensor / novelty_tensor.sum()
+        probs = 0.9 * probs + 0.1 / num_action_combinations  # 10% uniform
+        probs = probs / probs.sum()
+        
+        flat_idx = torch.multinomial(probs, 1).item()
+        return self.networks.q_r_target.action_index_to_tuple(flat_idx)
+    
+    def _add_curiosity_bonus_to_q_values(
+        self,
+        state: Any,
+        q_values: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Apply curiosity bonus to Q-values for each action using multiplicative scaling.
+        
+        The bonus is based on the expected novelty of successor states.
+        
+        Since the power-law policy π_r(a) ∝ (-Q_r)^{-β_r} requires Q < 0,
+        we cannot use additive bonuses that might make Q >= 0.
+        Instead, we use multiplicative scaling:
+        
+            Q_effective = Q * exp(-bonus_coef * novelty)
+        
+        Since Q < 0 and exp(...) > 0, Q_effective remains negative.
+        High novelty → smaller exp factor → Q_effective closer to 0 (better).
+        This encourages exploration of novel states while preserving Q < 0.
+        
+        Args:
+            state: Current state.
+            q_values: Q-values tensor of shape (num_action_combinations,), all negative.
+            
+        Returns:
+            Scaled Q-values with curiosity bonus applied, still all negative.
+        """
+        num_action_combinations = self.networks.q_r_target.num_action_combinations
+        
+        # For efficiency during training, sample human actions
+        num_human_actions = self.env.action_space.n
+        human_actions = tuple(
+            torch.randint(0, num_human_actions, (1,)).item()
+            for _ in self.human_agent_indices
+        )
+        
+        # Compute expected novelty for each action
+        novelties = torch.zeros(num_action_combinations, device=self.device)
+        
+        for flat_idx in range(num_action_combinations):
+            robot_action = self.networks.q_r_target.action_index_to_tuple(flat_idx)
+            actions = robot_action + human_actions
+            
+            try:
+                transitions = self.env.transition_probabilities(state, actions)
+            except Exception:
+                continue
+            
+            if transitions is None or len(transitions) == 0:
+                continue
+            
+            # Expected novelty over successor states
+            expected_novelty = 0.0
+            next_states = [ns for _, ns in transitions]
+            probs = [p for p, _ in transitions]
+            
+            if next_states:
+                state_novelties = self.compute_novelty_for_states(next_states)
+                for prob, novelty in zip(probs, state_novelties):
+                    expected_novelty += prob * max(0.0, novelty.item())  # Clamp negative
+            
+            novelties[flat_idx] = expected_novelty
+        
+        # Multiplicative scaling: Q_eff = Q * exp(-bonus_coef * novelty)
+        # High novelty → smaller scale factor → Q closer to 0 (better for power-law)
+        scale_factors = torch.exp(-self.config.rnd_bonus_coef_r * novelties)
+        return q_values * scale_factors
     
     def sample_human_actions(
         self,
@@ -631,7 +875,10 @@ class BasePhase2Trainer(ABC):
         goals: Dict[int, Any]
     ) -> List[int]:
         """
-        Sample human actions from the human policy prior.
+        Sample human actions from the human policy prior with epsilon-greedy exploration.
+        
+        With probability epsilon_h, samples from the exploration policy
+        (uniform random by default, or custom if human_exploration_policy is set).
         
         Args:
             state: Current state.
@@ -640,10 +887,31 @@ class BasePhase2Trainer(ABC):
         Returns:
             List of human actions.
         """
+        from empo.human_policy_prior import HumanPolicyPrior
+        
+        epsilon_h = self.config.get_epsilon_h(self.training_step_count)
+        
         actions = []
         for h in self.human_agent_indices:
             goal = goals.get(h)
-            action = self.human_policy_prior.sample(state, h, goal)
+            
+            # Epsilon exploration: sample from exploration policy
+            if torch.rand(1).item() < epsilon_h:
+                if self.human_exploration_policy is None:
+                    # Uniform random exploration
+                    num_actions = self.env.action_space.n
+                    action = torch.randint(0, num_actions, (1,)).item()
+                elif isinstance(self.human_exploration_policy, HumanPolicyPrior):
+                    # HumanPolicyPrior object: use its sample() method
+                    action = self.human_exploration_policy.sample(state, h, goal)
+                else:
+                    # Fallback: use uniform random
+                    num_actions = self.env.action_space.n
+                    action = torch.randint(0, num_actions, (1,)).item()
+            else:
+                # Use the human policy prior
+                action = self.human_policy_prior.sample(state, h, goal)
+            
             actions.append(action)
         return actions
     
@@ -1157,6 +1425,24 @@ class BasePhase2Trainer(ABC):
                     'target_mean': target_v_r.mean().item()
                 }
         
+        # ----- RND loss (batched, for curiosity-driven exploration) -----
+        if self.config.use_rnd and self.networks.rnd is not None:
+            # Compute RND loss on all states in batch
+            # Need to get state features from the encoder
+            rnd_loss = self._compute_rnd_loss_batch(states)
+            losses['rnd'] = rnd_loss
+            
+            with torch.no_grad():
+                rnd_stats = self.networks.rnd.get_statistics()
+                prediction_stats['rnd'] = {
+                    'loss': rnd_loss.item(),
+                    'running_mean': rnd_stats['rnd_running_mean'],
+                    'running_std': rnd_stats['rnd_running_std'],
+                    # Raw novelty values before normalization (more informative)
+                    'batch_raw_mean': rnd_stats['rnd_batch_raw_mean'],
+                    'batch_raw_std': rnd_stats['rnd_batch_raw_std'],
+                }
+        
         # Clear caches after each compute_losses call (for neural network encoders)
         if hasattr(self, 'clear_caches'):
             self.clear_caches()
@@ -1207,6 +1493,65 @@ class BasePhase2Trainer(ABC):
             # U_r = -y^eta
             u_r = -(y ** self.config.eta)
             return u_r
+    
+    def _compute_rnd_loss_batch(self, states: List[Any]) -> torch.Tensor:
+        """
+        Compute RND loss for a batch of states.
+        
+        Uses the abstract method get_state_features_for_rnd() which must be
+        implemented by environment-specific subclasses.
+        
+        Args:
+            states: List of states.
+            
+        Returns:
+            Scalar loss tensor.
+        """
+        # Get state features for RND computation
+        features = self.get_state_features_for_rnd(states)
+        
+        # Compute RND loss
+        return self.networks.rnd.compute_loss(features)
+    
+    @abstractmethod
+    def get_state_features_for_rnd(self, states: List[Any]) -> torch.Tensor:
+        """
+        Get state features for RND novelty computation.
+        
+        Must be implemented by environment-specific subclasses to convert
+        states to feature tensors suitable for RND.
+        
+        For neural network trainers, this typically uses the shared state
+        encoder (detached) to produce features.
+        
+        For lookup table trainers, this might use a simple state hash or
+        one-hot encoding.
+        
+        Args:
+            states: List of states.
+            
+        Returns:
+            Feature tensor of shape (batch_size, feature_dim).
+        """
+        pass
+    
+    def compute_novelty_for_states(self, states: List[Any]) -> torch.Tensor:
+        """
+        Compute novelty scores for a list of states.
+        
+        This is used during action selection to compute curiosity bonuses.
+        
+        Args:
+            states: List of states.
+            
+        Returns:
+            Novelty scores tensor of shape (len(states),).
+        """
+        if not self.config.use_rnd or self.networks.rnd is None:
+            return torch.zeros(len(states), device=self.device)
+        
+        features = self.get_state_features_for_rnd(states)
+        return self.networks.rnd.compute_novelty_no_grad(features)
     
     def training_step(self) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, Dict[str, float]]]:
         """
@@ -1261,6 +1606,8 @@ class BasePhase2Trainer(ABC):
             network_map['u_r'] = self.networks.u_r
         if self.config.v_r_use_network:
             network_map['v_r'] = self.networks.v_r
+        if self.config.use_rnd and self.networks.rnd is not None:
+            network_map['rnd'] = self.networks.rnd.predictor  # Only predictor is trained
         
         # Train each network INDEPENDENTLY with its own backward pass
         # This is critical because networks use detached encoder outputs
@@ -1510,6 +1857,20 @@ class BasePhase2Trainer(ABC):
                     continue
                 self.writer.add_scalar(f'GradNorm/{key}', value, self.training_step_count)
             for key, stats in pred_stats.items():
+                # RND stats have different keys (running_mean/std instead of mean/std)
+                if key == 'rnd':
+                    # Raw novelty (before normalization) - THIS is what you want to watch
+                    # Should decrease over time as predictor learns to recognize states
+                    if 'batch_raw_mean' in stats:
+                        self.writer.add_scalar('Exploration/rnd_raw_novelty_mean', stats['batch_raw_mean'], self.training_step_count)
+                    if 'batch_raw_std' in stats:
+                        self.writer.add_scalar('Exploration/rnd_raw_novelty_std', stats['batch_raw_std'], self.training_step_count)
+                    # Running normalization stats (less useful for debugging)
+                    if 'running_mean' in stats:
+                        self.writer.add_scalar('Exploration/rnd_norm_running_mean', stats['running_mean'], self.training_step_count)
+                    if 'running_std' in stats:
+                        self.writer.add_scalar('Exploration/rnd_norm_running_std', stats['running_std'], self.training_step_count)
+                    continue
                 self.writer.add_scalar(f'Predictions/{key}_mean', stats['mean'], self.training_step_count)
                 self.writer.add_scalar(f'Predictions/{key}_std', stats['std'], self.training_step_count)
                 if 'target_mean' in stats:
@@ -1519,7 +1880,10 @@ class BasePhase2Trainer(ABC):
             param_norms = self._compute_param_norms()
             for key, value in param_norms.items():
                 self.writer.add_scalar(f'ParamNorm/{key}', value, self.training_step_count)
-            self.writer.add_scalar('Epsilon', self.config.get_epsilon(self.training_step_count), self.training_step_count)
+            
+            # Log exploration epsilons side by side
+            self.writer.add_scalar('Exploration/epsilon_r', self.config.get_epsilon_r(self.training_step_count), self.training_step_count)
+            self.writer.add_scalar('Exploration/epsilon_h', self.config.get_epsilon_h(self.training_step_count), self.training_step_count)
             
             # Log learning rates
             networks_to_log_lr = ['v_h_e', 'x_h', 'q_r']

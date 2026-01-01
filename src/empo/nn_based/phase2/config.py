@@ -37,9 +37,12 @@ class Phase2Config:
         xi: Inter-human inequality aversion (ξ >= 1 to protect last bit of power).
         eta: Additional intertemporal inequality aversion (η >= 1, 1 = neutral).
         beta_r: Robot power-law policy exponent (< ∞ to prevent overoptimization risks).
-        epsilon_r_start: Initial exploration rate.
-        epsilon_r_end: Final exploration rate.
-        epsilon_r_decay_steps: Steps over which epsilon decays.
+        epsilon_r_start: Initial robot exploration rate.
+        epsilon_r_end: Final robot exploration rate.
+        epsilon_r_decay_steps: Steps over which robot epsilon decays.
+        epsilon_h_start: Initial human exploration rate.
+        epsilon_h_end: Final human exploration rate.
+        epsilon_h_decay_steps: Steps over which human epsilon decays.
         lr_q_r: Learning rate for Q_r network.
         lr_v_r: Learning rate for V_r network.
         lr_v_h_e: Learning rate for V_h^e network.
@@ -76,10 +79,39 @@ class Phase2Config:
     # Robot policy
     beta_r: float = 10.0  # Power-law policy exponent (nominal value after warm-up)
     
-    # Exploration (in addition to power-law policy randomization)
+    # Robot exploration (in addition to power-law policy randomization)
     epsilon_r_start: float = 1.0
     epsilon_r_end: float = 0.01
     epsilon_r_decay_steps: int = 10000
+    
+    # Human exploration (analogous to robot exploration)
+    epsilon_h_start: float = 1.0
+    epsilon_h_end: float = 0.01
+    epsilon_h_decay_steps: int = 10000
+    
+    # =========================================================================
+    # Curiosity-driven exploration (RND - Random Network Distillation)
+    # =========================================================================
+    # RND provides intrinsic motivation to explore novel states by using
+    # prediction error as a novelty signal. A trainable predictor network
+    # tries to match a fixed random target network. High prediction error
+    # indicates novel states, providing an exploration bonus.
+    #
+    # When enabled, curiosity affects action selection:
+    # - During epsilon exploration: actions weighted by expected novelty
+    # - During policy selection: multiplicative scaling of Q-values:
+    #     Q_effective = Q * exp(-bonus_coef * novelty)
+    #   This preserves Q < 0 required by the power-law policy.
+    use_rnd: bool = False                    # Enable RND curiosity exploration
+    rnd_feature_dim: int = 64                # Output dimension of RND networks
+    rnd_hidden_dim: int = 256                # Hidden layer dimension for RND networks
+    rnd_bonus_coef_r: float = 0.1            # Robot curiosity bonus coefficient
+    rnd_bonus_coef_h: float = 0.1            # Human curiosity bonus coefficient
+    lr_rnd: float = 1e-4                     # Learning rate for RND predictor
+    rnd_weight_decay: float = 1e-4           # Weight decay for RND predictor
+    rnd_grad_clip: Optional[float] = 10.0    # Gradient clipping for RND
+    normalize_rnd: bool = True               # Normalize novelty by running mean/std
+    rnd_normalization_decay: float = 0.99    # EMA decay for normalization stats
     
     # Learning rates (base rates, may be modified by schedule)
     lr_q_r: float = 1e-4
@@ -320,14 +352,23 @@ class Phase2Config:
     agent_position_feature_dim: int = 32    # Agent identity encoder: position encoding output dimension
     agent_feature_dim: int = 32             # Agent identity encoder: agent feature encoding output dimension
     
-    def get_epsilon(self, step: int) -> float:
-        """Get epsilon value for given training step."""
+    def get_epsilon_r(self, step: int) -> float:
+        """Get robot epsilon value for given training step."""
         if step >= self.epsilon_r_decay_steps:
             return self.epsilon_r_end
         
         # Linear decay
         decay_rate = (self.epsilon_r_start - self.epsilon_r_end) / self.epsilon_r_decay_steps
         return self.epsilon_r_start - decay_rate * step
+    
+    def get_epsilon_h(self, step: int) -> float:
+        """Get human epsilon value for given training step."""
+        if step >= self.epsilon_h_decay_steps:
+            return self.epsilon_h_end
+        
+        # Linear decay
+        decay_rate = (self.epsilon_h_start - self.epsilon_h_end) / self.epsilon_h_decay_steps
+        return self.epsilon_h_start - decay_rate * step
     
     def get_lr_x_h(self, update_count: int) -> float:
         """Get X_h learning rate with optional 1/t decay.
@@ -429,12 +470,16 @@ class Phase2Config:
             step: Current training step.
             
         Returns:
-            Set of network names to train: subset of {'v_h_e', 'x_h', 'u_r', 'q_r', 'v_r'}
+            Set of network names to train: subset of {'v_h_e', 'x_h', 'u_r', 'q_r', 'v_r', 'rnd'}
         """
         active = set()
         
         # V_h^e is always active (it's the foundation)
         active.add('v_h_e')
+        
+        # RND is always active when enabled (aids exploration from the start)
+        if self.use_rnd:
+            active.add('rnd')
         
         # X_h starts after V_h^e warmup
         if step >= self._warmup_v_h_e_end:

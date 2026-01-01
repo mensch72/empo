@@ -1,11 +1,16 @@
 """
 Multigrid Robot Policy for Phase 2.
 
-This module provides a deployable robot policy class for multigrid environments.
+This module provides deployable robot policy classes for multigrid environments.
+
+Includes:
+- MultiGridRobotPolicy: Learned policy from trained Q network
+- MultiGridRobotExplorationPolicy: Simple exploration policy for epsilon-greedy training
 """
 
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, List, Optional, Tuple, Union
 
+import numpy as np
 import torch
 
 from ...phase2.robot_policy import RobotPolicy
@@ -243,3 +248,148 @@ class MultiGridRobotPolicy(RobotPolicy):
                 actions = self.q_network.sample_action(*all_tensors)
             
             return actions
+
+
+# Direction vectors for forward movement (matching DIR_TO_VEC in multigrid.py)
+DIR_TO_VEC = [
+    (1, 0),   # right (positive X)
+    (0, 1),   # down (positive Y)
+    (-1, 0),  # left (negative X)
+    (0, -1),  # up (negative Y)
+]
+
+
+class MultiGridRobotExplorationPolicy(RobotPolicy):
+    """
+    Simple exploration policy for epsilon-greedy robot action selection.
+    
+    This policy samples actions according to fixed probabilities, but avoids
+    attempting "forward" when a robot cannot move forward (blocked by wall,
+    object that can't be pushed, etc.).
+    
+    When forward is blocked for a robot, its probability mass is redistributed 
+    proportionally to the other actions for that robot.
+    
+    Supports multiple robots - each robot's action is sampled independently.
+    
+    Designed for use with SmallActions (0=still, 1=left, 2=right, 3=forward).
+    
+    Example usage:
+        # Prefer forward (0.6), then right (0.2), with low chance for still/left
+        exploration = MultiGridRobotExplorationPolicy(
+            action_probs=[0.1, 0.1, 0.2, 0.6]  # still, left, right, forward
+        )
+        trainer = MultiGridPhase2Trainer(
+            ...,
+            robot_exploration_policy=exploration
+        )
+    """
+    
+    def __init__(
+        self,
+        action_probs: Optional[List[float]] = None,
+        robot_agent_indices: Optional[List[int]] = None
+    ):
+        """
+        Initialize the exploration policy.
+        
+        Args:
+            action_probs: Probabilities for each action [still, left, right, forward].
+                         Default: [0.1, 0.1, 0.2, 0.6] (bias toward forward/right).
+            robot_agent_indices: List of robot agent indices. If None, will be 
+                                 detected from world model on reset().
+        """
+        if action_probs is None:
+            action_probs = [0.1, 0.1, 0.2, 0.6]  # still, left, right, forward
+        
+        if len(action_probs) != 4:
+            raise ValueError(f"action_probs must have 4 elements, got {len(action_probs)}")
+        
+        total = sum(action_probs)
+        if abs(total - 1.0) > 1e-6:
+            raise ValueError(f"action_probs must sum to 1.0, got {total}")
+        
+        self.action_probs = np.array(action_probs, dtype=np.float64)
+        self._robot_agent_indices = robot_agent_indices
+        self._world_model = None
+    
+    def reset(self, world_model: Any) -> None:
+        """
+        Reset the policy at episode start.
+        
+        Args:
+            world_model: The MultiGrid environment.
+        """
+        self._world_model = world_model
+        # Auto-detect robot indices from world model if not provided
+        if self._robot_agent_indices is None and hasattr(world_model, 'get_robot_agent_indices'):
+            self._robot_agent_indices = world_model.get_robot_agent_indices()
+    
+    @property
+    def robot_agent_indices(self) -> List[int]:
+        """Get the robot agent indices."""
+        if self._robot_agent_indices is None:
+            return [1]  # Default: single robot at index 1
+        return self._robot_agent_indices
+    
+    def sample(self, state: Any) -> Tuple[int, ...]:
+        """
+        Sample exploration actions for all robots, avoiding forward when blocked.
+        
+        Each robot's action is sampled independently.
+        
+        Args:
+            state: Environment state tuple from get_state().
+        
+        Returns:
+            Tuple of action indices, one per robot: (action_robot0, action_robot1, ...)
+            where each action is 0=still, 1=left, 2=right, 3=forward
+        """
+        actions = []
+        for robot_idx in self.robot_agent_indices:
+            action = self._sample_single_robot_action(robot_idx, state)
+            actions.append(action)
+        
+        return tuple(actions)
+    
+    def _sample_single_robot_action(self, robot_idx: int, state: Any) -> int:
+        """
+        Sample an action for a single robot.
+        
+        Uses the environment's can_forward() method to check if forward movement
+        is possible, accounting for robot capabilities (can push rocks, can enter
+        magic walls).
+        
+        Args:
+            robot_idx: Index of the robot agent
+            state: Full environment state tuple from get_state()
+        
+        Returns:
+            Action index: 0=still, 1=left, 2=right, 3=forward
+        """
+        if self._world_model is None:
+            # No world model - can't check if forward is blocked
+            return int(np.random.choice(4, p=self.action_probs))
+        
+        # Use the environment's can_forward method which accounts for agent capabilities
+        # We use the full state passed by the caller to avoid inconsistencies
+        # with the world model's internal current state.
+        can_move_forward = self._world_model.can_forward(state, robot_idx)
+        
+        if not can_move_forward:
+            # Redistribute forward probability to other actions
+            probs = self.action_probs.copy()
+            forward_prob = probs[3]
+            probs[3] = 0.0
+            
+            # Distribute proportionally to remaining actions
+            remaining = probs.sum()
+            if remaining > 0:
+                probs *= (1.0 + forward_prob / remaining)
+            else:
+                # All probabilities were zero except forward - use uniform
+                probs = np.array([1/3, 1/3, 1/3, 0.0])
+            
+            return int(np.random.choice(4, p=probs))
+        else:
+            return int(np.random.choice(4, p=self.action_probs))

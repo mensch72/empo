@@ -61,13 +61,13 @@ from gym_multigrid.multigrid import (
     Key, Ball, Box, Door, Lava, Block, Goal
 )
 from empo.multigrid import MultiGridGoalSampler, ReachCellGoal, ReachRectangleGoal, render_test_map_values
-from empo.possible_goal import DeterministicGoalSampler, TabularGoalSampler, PossibleGoalSampler
-from empo.human_policy_prior import HeuristicPotentialPolicy
+from empo.possible_goal import TabularGoalSampler, PossibleGoalSampler
+from empo.human_policy_prior import HeuristicPotentialPolicy, MultiGridHumanExplorationPolicy
 from empo.nn_based.multigrid import PathDistanceCalculator
 from empo.nn_based.phase2.config import Phase2Config
 from empo.nn_based.phase2.world_model_factory import CachedWorldModelFactory, EnsembleWorldModelFactory
 from empo.nn_based.multigrid.phase2 import train_multigrid_phase2
-from empo.nn_based.multigrid.phase2.robot_policy import MultiGridRobotPolicy
+from empo.nn_based.multigrid.phase2.robot_policy import MultiGridRobotPolicy, MultiGridRobotExplorationPolicy
 
 
 # ============================================================================
@@ -145,9 +145,9 @@ def configure_environment(use_ensemble: bool, use_small: bool = False):
         
         # Define goals for V_h^e evaluation
         DEFINED_GOALS = [
-#            (1, (2,1)),  # easy once robot has pushed rock twice or once and moved back 
-#            (1, (1,1)),  # medium difficulty
-#            (1, (3,1)),  # hardest since robot must move back to (1,1) after pushing rock twice
+            (1, (2,1)),  # easy once robot has pushed rock twice or once and moved back 
+            (1, (1,1)),  # medium difficulty
+            (1, (3,1)),  # hardest since robot must move back to (1,1) after pushing rock twice
             (1, (2,2)),  # already reached
             (1, (1,2)),  # impossible goal (in wall)
         ]
@@ -157,6 +157,17 @@ def configure_environment(use_ensemble: bool, use_small: bool = False):
         ], 
 #        probabilities=[0.4, 0.2, 0.2, 0.1, 0.1]
         )
+
+        # the following are a small selection of interesting states for testing V_r values. overall there are
+        # 4 possible human orientations, 4 possible robot orientations,
+        # one possible human/robot position combinatiopns if the rock is at (2,1),
+        # three if it is at (3,1) since the human can't pass the robot then, 
+        # and 12 if it is at (4,1) since the human can pass the robot then,
+        # making overall (4*4)*(1 + 3 + 12) = 256 possible states.
+        # In tabular mode, the tensorboard's lookup table size for x_h and q_r
+        # should thus eventually be 256 entries each, and the v_h_r lookup table
+        # should be no. of goals times larger, so for 5 possible goals 1280 entries. 
+        # This check can be used to verify that all states are being visited during training!
 
         TEST_MAPS = [
             (GRID_MAP, "Worst V_r: human locked behind rock"),
@@ -724,7 +735,7 @@ def run_policy_rollout(
         with torch.no_grad():
             q_values = robot_q_network.forward(state, env, device)
             beta_r = config.beta_r if config else 10.0
-            robot_action = robot_q_network.sample_action(q_values, epsilon=0.0, beta_r=beta_r)
+            robot_action = robot_q_network.sample_action(q_values, beta_r=beta_r)
             return robot_action[0] if len(robot_action) > 0 else None
     
     # Render initial frame with annotations (showing what action would be taken)
@@ -746,9 +757,9 @@ def run_policy_rollout(
         # Robots use learned Q-network
         with torch.no_grad():
             q_values = robot_q_network.forward(state, env, device)
-            # Use greedy action (epsilon=0) with final beta_r for concentrated policy
+            # Use greedy action with final beta_r for concentrated policy
             beta_r = config.beta_r if config else 10.0
-            robot_action = robot_q_network.sample_action(q_values, epsilon=0.0, beta_r=beta_r)
+            robot_action = robot_q_network.sample_action(q_values, beta_r=beta_r)
             
             # Assign actions to robots
             for i, r in enumerate(robot_indices):
@@ -785,6 +796,7 @@ def main(
     use_async: bool = False,
     use_encoders: bool = True,
     use_tabular: bool = False,
+    use_rnd: bool = False,
     save_networks_path: str = None,
     save_policy_path: str = None,
     restore_networks_path: str = None,
@@ -805,10 +817,10 @@ def main(
     
     # Configuration - start with environment-based defaults
     if env_type == "trivial":
-        num_training_steps = 10000
+        num_training_steps = 1e6 # 10000
         num_rollouts = NUM_ROLLOUTS
-        batch_size = 16
-        x_h_batch_size = 32
+        batch_size = 32 # 16
+        x_h_batch_size = 64 # 32
         # Very small networks for trivial task
         hidden_dim = 16
         goal_feature_dim = 8
@@ -1011,14 +1023,17 @@ def main(
         eta=1.1,       # Intertemporal inequality aversion
         beta_r=final_beta_r,    # Robot policy concentration
         epsilon_r_start=1.0,
-        epsilon_r_end=0.1,
-        epsilon_r_decay_steps=num_training_steps // 5,  # Decay over 20% of training
+        epsilon_r_end=0.0,
+        epsilon_r_decay_steps=num_training_steps // 3 * 2,  # Decay over 50% of training
+        epsilon_h_start=1.0,
+        epsilon_h_end=0.0,
+        epsilon_h_decay_steps=num_training_steps // 3 * 2,  # Decay over 50% of training
         lr_q_r=1e-4,
         lr_v_r=1e-4,
         lr_v_h_e=1e-3,  # faster since V_h^e is critical and the basis for other things
         lr_x_h=1e-4,
         lr_u_r=1e-4,
-        buffer_size=10000,
+        buffer_size=100000,
         batch_size=batch_size,
         x_h_batch_size=x_h_batch_size,  # Larger batch for X_h to reduce high variance
         num_training_steps=num_training_steps,
@@ -1046,6 +1061,12 @@ def main(
         v_h_e_weight_decay=0,
         x_h_weight_decay=0,
         u_r_weight_decay=0,
+        # Curiosity-driven exploration (RND)
+        use_rnd=use_rnd,
+        rnd_bonus_coef_r=0.1 if use_rnd else 0.0,
+        rnd_feature_dim=64,
+        rnd_hidden_dim=128,
+        normalize_rnd=True,
     )
     
     # If using policy directly (no training), skip to rollouts
@@ -1056,16 +1077,34 @@ def main(
         print("=" * 70)
         
         policy = MultiGridRobotPolicy(path=use_policy_path, device=device)
-        robot_q_network = policy.q_network
         networks = None  # No networks for annotations
         trainer = None
         history = []
         elapsed = 0.0
     else:
+        # Define custom robot exploration policy for epsilon-greedy exploration.
+        # SmallActions: 0=still, 1=left, 2=right, 3=forward
+        # We bias exploration toward forward movement to encourage spatial exploration.
+        # Use smart policy that avoids "forward" when blocked by walls/objects.
+        robot_exploration_policy = MultiGridRobotExplorationPolicy(
+            action_probs=[0.1, 0.1, 0.2, 0.6]  # still, left, right, forward
+        )
+        
+        # Define custom human exploration policy for epsilon-greedy exploration.
+        # Same logic as robot exploration - bias toward forward, avoid blocked moves.
+        # Note: world_model will be set by the trainer via set_world_model()
+        human_exploration_policy = MultiGridHumanExplorationPolicy(
+            action_probs=[0.1, 0.1, 0.2, 0.6]  # still, left, right, forward
+        )
+        
         # Train Phase 2
         print("Training Phase 2 robot policy...")
         print(f"  Training steps: {config.num_training_steps:,}")
         print(f"  Environment steps per episode: {config.steps_per_episode}")
+        print(f"  Robot exploration policy: forward-biased (avoids blocked forward)")
+        print(f"  Human exploration policy: forward-biased (avoids blocked forward)")
+        if use_rnd:
+            print(f"  Curiosity (RND): ENABLED (bonus_coef={config.rnd_bonus_coef_r})")
         print(f"  TensorBoard: {tensorboard_dir}")
         if restore_networks_path:
             print(f"  Restoring from: {restore_networks_path}")
@@ -1112,6 +1151,8 @@ def main(
                     profiler=prof,
                     restore_networks_path=restore_networks_path,
                     world_model_factory=world_model_factory,
+                    robot_exploration_policy=robot_exploration_policy,
+                    human_exploration_policy=human_exploration_policy,
                 )
             
             # Print profiler summary
@@ -1150,6 +1191,8 @@ def main(
                 tensorboard_dir=tensorboard_dir,
                 restore_networks_path=restore_networks_path,
                 world_model_factory=world_model_factory,
+                robot_exploration_policy=robot_exploration_policy,
+                human_exploration_policy=human_exploration_policy,
             )
         
         elapsed = time.time() - t0
@@ -1308,6 +1351,8 @@ if __name__ == "__main__":
                         help='Disable neural encoders (use identity function for debugging)')
     parser.add_argument('--tabular', '-t', action='store_true',
                         help='Use lookup tables instead of neural networks (exact tabular learning)')
+    parser.add_argument('--rnd', action='store_true',
+                        help='Enable RND curiosity-driven exploration')
     
     # Save/restore options
     parser.add_argument('--save_networks', type=str, default=None, metavar='PATH',
@@ -1336,6 +1381,7 @@ if __name__ == "__main__":
         use_async=args.use_async,
         use_encoders=not args.no_encoders,
         use_tabular=args.tabular,
+        use_rnd=args.rnd,
         save_networks_path=args.save_networks,
         save_policy_path=args.save_policy,
         restore_networks_path=args.restore_networks,
