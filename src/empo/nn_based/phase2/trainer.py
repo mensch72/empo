@@ -654,7 +654,11 @@ class BasePhase2Trainer(ABC):
         
         return self.env.get_state()
     
-    def sample_robot_action(self, state: Any) -> Tuple[int, ...]:
+    def sample_robot_action(
+        self,
+        state: Any,
+        transition_probs_by_action: Optional[Dict[int, List[Tuple[float, Any]]]] = None
+    ) -> Tuple[int, ...]:
         """
         Sample robot action using policy with epsilon-greedy exploration.
         
@@ -667,13 +671,14 @@ class BasePhase2Trainer(ABC):
         With probability epsilon, samples from the exploration policy
         (uniform random by default, or custom if robot_exploration_policy is set).
         
-        When RND/curiosity is enabled, it only affects the (1-epsilon) policy portion:
-        - Q-values are modified by curiosity bonus: Q_eff = Q * exp(-bonus * novelty)
-        - This preserves the power-law form while biasing toward novel states
-        - The epsilon exploration uses the supplied exploration policy unchanged
+        When RND/curiosity is enabled and transition_probs_by_action is provided,
+        curiosity bonus is applied to Q-values to bias toward novel successor states.
         
         Args:
             state: Current state.
+            transition_probs_by_action: Optional pre-computed transition probabilities
+                for all robot actions. If provided and curiosity is enabled, used to
+                compute curiosity bonus efficiently (no additional transition_probs calls).
         
         Returns:
             Tuple of robot actions.
@@ -683,7 +688,7 @@ class BasePhase2Trainer(ABC):
         epsilon = self.config.get_epsilon_r(self.training_step_count)
         effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
         
-        # Epsilon exploration: sample from exploration policy (curiosity does NOT affect this)
+        # Epsilon exploration: sample from exploration policy
         if torch.rand(1).item() < epsilon:
             return self._sample_robot_exploration_action(state)
         
@@ -693,9 +698,11 @@ class BasePhase2Trainer(ABC):
                 state, None, self.device
             )
             
-            # Add curiosity bonus to Q-values if curiosity is enabled
-            if self._curiosity_enabled_for_robot():
-                q_values = self._add_curiosity_bonus_to_q_values(state, q_values)
+            # Add curiosity bonus to Q-values if curiosity is enabled AND transition_probs provided
+            if self._curiosity_enabled_for_robot() and transition_probs_by_action is not None:
+                q_values = self._add_curiosity_bonus_to_q_values(
+                    state, q_values, transition_probs_by_action
+                )
             
             return self.networks.q_r_target.sample_action(
                 q_values, beta_r=effective_beta_r
@@ -874,10 +881,15 @@ class BasePhase2Trainer(ABC):
     def _add_curiosity_bonus_to_q_values(
         self,
         state: Any,
-        q_values: torch.Tensor
+        q_values: torch.Tensor,
+        transition_probs_by_action: Dict[int, List[Tuple[float, Any]]]
     ) -> torch.Tensor:
         """
         Apply curiosity bonus to Q-values for each action using multiplicative scaling.
+        
+        Uses PRE-COMPUTED transition_probs_by_action to avoid redundant calls to
+        transition_probabilities(). The same transition_probs are reused for the
+        replay buffer.
         
         The bonus is based on the expected novelty of successor states.
         
@@ -894,38 +906,24 @@ class BasePhase2Trainer(ABC):
         Args:
             state: Current state.
             q_values: Q-values tensor of shape (num_action_combinations,), all negative.
+            transition_probs_by_action: Pre-computed dict mapping action_idx -> [(prob, next_state), ...].
             
         Returns:
             Scaled Q-values with curiosity bonus applied, still all negative.
         """
         num_action_combinations = self.networks.q_r_target.num_action_combinations
         
-        # For efficiency during training, sample human actions
-        num_human_actions = self.env.action_space.n
-        human_actions = tuple(
-            torch.randint(0, num_human_actions, (1,)).item()
-            for _ in self.human_agent_indices
-        )
-        
-        # First pass: collect all successor states from all actions for batched RND
+        # Collect all successor states from pre-computed transition_probs
         all_next_states = []
         state_mapping = []  # (action_idx, prob) for each state in all_next_states
         
-        for flat_idx in range(num_action_combinations):
-            robot_action = self.networks.q_r_target.action_index_to_tuple(flat_idx)
-            actions = robot_action + human_actions
-            
-            try:
-                transitions = self.env.transition_probabilities(state, actions)
-            except Exception:
-                continue
-            
+        for action_idx, transitions in transition_probs_by_action.items():
             if transitions is None or len(transitions) == 0:
                 continue
             
             for prob, next_state in transitions:
                 all_next_states.append(next_state)
-                state_mapping.append((flat_idx, prob))
+                state_mapping.append((action_idx, prob))
         
         # Compute expected novelty for each action
         novelties = torch.zeros(num_action_combinations, device=self.device)
@@ -935,9 +933,9 @@ class BasePhase2Trainer(ABC):
             all_novelty_scores = self.compute_novelty_for_states(all_next_states)
             
             # Aggregate back to per-action expected novelty
-            for i, (flat_idx, prob) in enumerate(state_mapping):
+            for i, (action_idx, prob) in enumerate(state_mapping):
                 novelty = max(0.0, all_novelty_scores[i].item())  # Clamp negative
-                novelties[flat_idx] += prob * novelty
+                novelties[action_idx] += prob * novelty
         
         # Multiplicative scaling: Q_eff = Q * exp(-bonus_coef * novelty)
         # High novelty → smaller scale factor → Q closer to 0 (better for power-law)
@@ -955,6 +953,10 @@ class BasePhase2Trainer(ABC):
         
         With probability epsilon_h, samples from the exploration policy
         (uniform random by default, or custom if human_exploration_policy is set).
+        
+        TODO: Human curiosity-driven exploration is not yet implemented.
+        The transition_probs approach used for robot is not directly applicable
+        because human actions are sampled BEFORE robot action selection.
         
         Args:
             state: Current state.
@@ -990,7 +992,7 @@ class BasePhase2Trainer(ABC):
             
             actions.append(action)
         return actions
-    
+
     def collect_transition(
         self,
         state: Any,
@@ -1000,6 +1002,15 @@ class BasePhase2Trainer(ABC):
     ) -> Tuple[Phase2Transition, Any]:
         """
         Collect one transition from the environment.
+        
+        The order of operations is designed to compute transition_probabilities
+        only ONCE and reuse for both curiosity-driven action selection and
+        the replay buffer:
+        
+        1. Sample human actions first
+        2. Compute transition_probs for all robot actions (with those human actions)
+        3. Use transition_probs for robot action selection (with optional curiosity bonus)
+        4. Store transition_probs in replay buffer
         
         Args:
             state: Current state.
@@ -1013,35 +1024,38 @@ class BasePhase2Trainer(ABC):
             Tuple of (transition, next_state).
         """
         if self.debug:
-            print(f"[DEBUG] collect_transition: sampling robot action...")
+            print(f"[DEBUG] collect_transition: sampling human actions first...")
         
-        # Sample actions
-        robot_action = self.sample_robot_action(state)
-        
-        if self.debug:
-            print(f"[DEBUG] collect_transition: robot_action={robot_action}, sampling human actions...")
-        
+        # Step 1: Sample human actions FIRST (before robot, so we can compute transition_probs once)
         human_actions = self.sample_human_actions(state, goals)
         
         if self.debug:
-            print(f"[DEBUG] collect_transition: human_actions={human_actions}, stepping environment...")
+            print(f"[DEBUG] collect_transition: human_actions={human_actions}, computing transition probs...")
         
-        # Step environment to get the actual next state (needed for continuing the episode)
-        next_state = self.step_environment(state, robot_action, human_actions)
-        
-        if self.debug:
-            print(f"[DEBUG] collect_transition: environment stepped, creating transition...")
-        
-        # Pre-compute transition probabilities for all robot actions (for model-based targets)
-        # This is used for both V_h^e targets (expected value over successor states)
-        # and Q_r targets (all action Q-values updated simultaneously).
+        # Step 2: Pre-compute transition probabilities for all robot actions ONCE
+        # This is reused for both curiosity bonus and replay buffer
         transition_probs_by_action = None
         if self.config.use_model_based_targets and hasattr(self.env, 'transition_probabilities'):
             transition_probs_by_action = self._precompute_transition_probs(
                 state, human_actions
             )
         
-        # Create transition
+        if self.debug:
+            print(f"[DEBUG] collect_transition: sampling robot action (with transition_probs)...")
+        
+        # Step 3: Sample robot action, passing transition_probs for curiosity bonus
+        robot_action = self.sample_robot_action(state, transition_probs_by_action)
+        
+        if self.debug:
+            print(f"[DEBUG] collect_transition: robot_action={robot_action}, stepping environment...")
+        
+        # Step 4: Step environment to get the actual next state
+        next_state = self.step_environment(state, robot_action, human_actions)
+        
+        if self.debug:
+            print(f"[DEBUG] collect_transition: environment stepped, creating transition...")
+        
+        # Create transition - reusing the same transition_probs_by_action
         # When using model-based targets, we intentionally do NOT store next_state
         # in the transition. This ensures the trainer uses the expected value over
         # all possible successor states from transition_probs_by_action rather than
