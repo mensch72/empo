@@ -4,6 +4,22 @@ This directory contains Jupyter notebooks for interactive exploration of the EMP
 
 ## Available Notebooks
 
+### empo_kaggle_demo.ipynb (Recommended for Kaggle)
+
+A Kaggle-optimized demo with automated setup:
+
+- **Setup**: One-command setup via `scripts/kaggle_setup.py`
+- **GPU Training**: Neural network training with T4/P100 GPU
+- **Checkpoints**: Saves outputs to `/kaggle/working/` for download
+- **Environment Exploration**: MultiGrid environments and state management
+- **Policy Computation**: DAG and backward induction demos
+
+**To use on Kaggle:**
+1. Create a new Kaggle notebook
+2. Enable Internet (Settings → Internet → On)
+3. Enable GPU (Settings → Accelerator → GPU)
+4. Copy cells from the notebook or upload directly
+
 ### empo_colab_demo.ipynb
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mensch72/empo/blob/main/notebooks/empo_colab_demo.ipynb)
@@ -57,13 +73,47 @@ When creating new notebooks for this repository:
    [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mensch72/empo/blob/main/notebooks/YOUR_NOTEBOOK.ipynb)
    ```
 
-## Colab Limitations
+## Platform Limitations
 
-Some features have limitations in Google Colab:
+### Google Colab
 
 - **MPI**: Not supported - use `parallel=False` for backward induction
 - **Docker**: Not available in Colab environment
 - **Session timeout**: Free tier sessions timeout after ~12 hours
 - **Large state spaces**: May require reducing `max_steps` for memory constraints
+
+### Kaggle
+
+- **Internet required**: Must enable internet in notebook settings to clone repo
+- **MPI**: Not well supported - use `parallel=False`
+- **GPU quota**: 30 hours/week (T4 or P100)
+- **Session limit**: Max 12 hours per session
+- **Disk space**: 20GB in `/kaggle/working/`
+- **Output persistence**: Save to `/kaggle/working/` for downloadable outputs
+
+## Quick Start
+
+### Kaggle (Recommended for free GPU)
+```python
+# Cell 1: Clone and setup
+!git clone --depth 1 https://github.com/mensch72/empo.git
+%cd empo
+%run scripts/kaggle_setup.py
+```
+
+### Google Colab
+```python
+# Cell 1: Clone repo
+!git clone --depth 1 https://github.com/mensch72/empo.git
+%cd empo
+
+# Cell 2: Install dependencies
+!pip install -q -r requirements-colab.txt
+
+# Cell 3: Setup paths
+import sys, os
+sys.path.insert(0, os.path.join(os.getcwd(), 'src'))
+sys.path.insert(0, os.path.join(os.getcwd(), 'vendor', 'multigrid'))
+```
 
 See the main [README.md](../README.md) for more information.

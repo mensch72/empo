@@ -1,0 +1,30 @@
+# EMPO - Minimal requirements for Kaggle Notebooks
+# 
+# This file contains the minimum required dependencies to run EMPO on Kaggle.
+# For full functionality, see requirements.txt.
+#
+# Installation in Kaggle:
+#   !pip install -q -r requirements-kaggle.txt
+#
+# Note: PyTorch, numpy, matplotlib, scipy are pre-installed on Kaggle.
+# Kaggle also has CUDA-enabled PyTorch by default when using GPU.
+
+# Reinforcement Learning frameworks (not pre-installed on Kaggle)
+gymnasium>=0.28.0
+pettingzoo>=1.24.0
+
+# Utilities (some may be pre-installed but included for version constraints)
+cloudpickle>=3.0.0
+PyYAML>=6.0
+imageio>=2.31.0
+tqdm>=4.65.0
+
+# Optional: graphviz for DAG visualization
+# Note: On Kaggle, graphviz system package is pre-installed
+graphviz>=0.20.0
+
+# Note: The following are OPTIONAL and NOT included by default:
+# - tensorboard>=2.13.0  (pre-installed on Kaggle)
+# - wandb>=0.15.0        (uncomment if needed for experiment tracking)
+# - mpi4py>=3.1.0        (NOT recommended for Kaggle - MPI not well supported)
+# - line_profiler>=4.0.0 (uncomment if needed for profiling)
