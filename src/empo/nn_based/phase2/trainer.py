@@ -1245,7 +1245,7 @@ class BasePhase2Trainer(ABC):
         (U_r, V_r or Q_r), then aggregates results.
         
         For each state s and robot action a_r, computes:
-            Q_r(s, a_r) target = Σ_{s'} P(s'|s, a_r, a_H) * [U_r(s') + γ_r * V_r(s')]
+            Q_r(s, a_r) target = Σ_{s'} P(s'|s, a_r, a_H) * γ_r * V_r(s')
         
         where a_H is the actual human actions taken (fixed for all robot actions).
         
@@ -1313,7 +1313,7 @@ class BasePhase2Trainer(ABC):
                     unique_states, self.env, self.device
                 ).squeeze()  # (n_unique,)
             else:
-                # V_r = U_r + E_{a~π}[Q_r(s', a)]
+                # V_r = E_{a~π}[Q_r(s', a)]
                 # ONE batched Q_r_target call
                 q_r_all = self.networks.q_r_target.forward_batch(
                     unique_states, self.env, self.device
@@ -1324,19 +1324,19 @@ class BasePhase2Trainer(ABC):
                     q_r_all, beta_r=effective_beta_r
                 )  # (n_unique, num_actions)
                 
-                # V_r = U_r + E_{a~π}[Q_r]
+                # V_r = E_{a~π}[Q_r]
                 v_r_all = compute_v_r_from_components(
                     u_r_all.squeeze(), q_r_all, pi_r_all
                 )  # (n_unique,)
             
-            # Ensure 1D tensors
-            if u_r_all.dim() == 0:
-                u_r_all = u_r_all.unsqueeze(0)
+            # Ensure 1D tensor
             if v_r_all.dim() == 0:
                 v_r_all = v_r_all.unsqueeze(0)
             
-            # Q_r target = U_r(s') + γ_r * V_r(s') for each unique state
-            q_targets_all = u_r_all + self.config.gamma_r * v_r_all  # (n_unique,)
+            # Q_r target = γ_r * V_r(s') for each unique state (Equation 4)
+            # Note: U_r is NOT added here - it's already included in V_r's definition:
+            # V_r(s) = U_r(s) + E_{a~π_r}[Q_r(s,a)] (Equation 9)
+            q_targets_all = self.config.gamma_r * v_r_all  # (n_unique,)
         
         # Phase 3: Aggregate targets back to (batch_size, num_actions)
         for batch_idx in range(batch_size):
