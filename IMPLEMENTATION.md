@@ -2,9 +2,56 @@
 
 ## Overview
 
-This repository now provides a unified Docker-based development and cluster deployment environment for MARL (Multi-Agent Reinforcement Learning) projects using multigrid environments.
+This repository provides:
+1. **EMPO Framework**: Implementation of the two-phase approach for computing AI policies that softly maximize aggregate human power (see [the theoretical paper](https://arxiv.org/html/2508.00159v2))
+2. **Unified Docker Environment**: Development and cluster deployment for multi-agent environments
 
-## Key Features Implemented
+## EMPO Framework Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  Phase 1: Human Policy Prior                                         │
+│  Compute goal-conditioned Boltzmann policies via backward induction  │
+│  → See: docs/API.md, docs/PARALLELIZATION.md                         │
+├─────────────────────────────────────────────────────────────────────┤
+│  Phase 2: Robot Policy + Power Metric                                │
+│  Simultaneously compute robot policy and power metric                │
+│  → See: docs/WARMUP_DESIGN.md, docs/BATCHED_COMPUTATION.md           │
+├─────────────────────────────────────────────────────────────────────┤
+│  World Models: MultiGrid, Transport                                  │
+│  → See: docs/API.md, TRANSPORT_ENVIRONMENT.md                        │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Documentation
+
+| Document | Description |
+|----------|-------------|
+| [docs/API.md](docs/API.md) | Complete API reference |
+| [docs/WARMUP_DESIGN.md](docs/WARMUP_DESIGN.md) | Phase 2 warm-up strategy |
+| [docs/ENCODER_ARCHITECTURE.md](docs/ENCODER_ARCHITECTURE.md) | Neural encoder design |
+| [docs/BATCHED_COMPUTATION.md](docs/BATCHED_COMPUTATION.md) | Efficient batched computation |
+| [docs/EXPLORATION.md](docs/EXPLORATION.md) | Exploration and curiosity methods |
+| [docs/PARALLELIZATION.md](docs/PARALLELIZATION.md) | Parallel backward induction |
+| [docs/FAQ.md](docs/FAQ.md) | Frequently asked questions |
+
+### Source Code Structure
+
+```
+src/empo/                      # Core framework
+├── world_model.py             # WorldModel base class
+├── possible_goal.py           # Goals, generators, samplers
+├── backward_induction.py      # Phase 1 computation
+├── human_policy_prior.py      # Human policy implementations
+└── nn_based/                  # Neural network implementations
+    ├── phase2/                # Phase 2 training (trainer, config, networks)
+    └── multigrid/phase2/      # MultiGrid-specific Phase 2
+
+vendor/multigrid/              # Extended MultiGrid environment
+vendor/ai_transport/           # Transport environment
+```
+
+## Docker Infrastructure
 
 ### 1. Unified Dockerfile (`Dockerfile`)
 
@@ -53,17 +100,20 @@ empo/
 ├── docker-compose.yml            # Local development
 ├── requirements.txt              # Core dependencies
 ├── requirements-dev.txt          # Dev dependencies
-├── train.py                      # Main training script
-├── src/empo/                     # Python package
+├── src/empo/                     # Core EMPO framework
+├── vendor/multigrid/             # MultiGrid environment
+├── vendor/ai_transport/          # Transport environment
+├── examples/                     # Usage examples
+├── tests/                        # Test infrastructure
+├── docs/                         # Detailed documentation
 ├── scripts/
 │   ├── run_cluster.sh           # SLURM job script
 │   ├── setup_cluster_image.sh   # Cluster setup helper
 │   └── verify_setup.sh          # Verification script
-├── examples/simple_example.py   # Demo script
-├── tests/                        # Test infrastructure
 ├── Makefile                      # Convenience commands
 ├── README.md                     # Full documentation
-└── QUICKSTART.md                # Quick start guide
+├── QUICKSTART.md                 # Quick start guide
+└── CLUSTER.md                    # Cluster deployment guide
 ```
 
 ### 5. Cluster Deployment Support
@@ -267,6 +317,10 @@ Potential additions:
 - Jupyter Lab integration
 - VS Code Remote Container config
 
-## Conclusion
+## Related Documentation
 
-This implementation provides a complete, production-ready setup for MARL research that works seamlessly in both local development and cluster environments. The unified approach eliminates configuration drift and simplifies maintenance while supporting modern ML workflows with GPU acceleration, containerization, and reproducibility.
+- [README.md](README.md) - Project overview and theory explanation
+- [QUICKSTART.md](QUICKSTART.md) - Get running in 5 minutes
+- [CLUSTER.md](CLUSTER.md) - HPC cluster deployment
+- [CONTRIBUTING.md](CONTRIBUTING.md) - Development guidelines
+- [docs/PREBUILT_IMAGES.md](docs/PREBUILT_IMAGES.md) - Pre-built container images
