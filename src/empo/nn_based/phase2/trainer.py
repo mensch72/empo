@@ -1010,30 +1010,36 @@ class BasePhase2Trainer(ABC):
         if self.debug:
             print(f"[DEBUG] collect_transition: human_actions={human_actions}, stepping environment...")
         
-        # Step environment
+        # Step environment to get the actual next state (needed for continuing the episode)
         next_state = self.step_environment(state, robot_action, human_actions)
         
         if self.debug:
             print(f"[DEBUG] collect_transition: environment stepped, creating transition...")
         
         # Pre-compute transition probabilities for all robot actions (for model-based targets)
-        # OPTIMIZATION: Only cache when Q_r is active - during early warmup we use
-        # the cheaper V_h^e-only targets that don't need all action combinations.
+        # This is used for both V_h^e targets (expected value over successor states)
+        # and Q_r targets (all action Q-values updated simultaneously).
         transition_probs_by_action = None
-        q_r_active = 'q_r' in self.config.get_active_networks(self.training_step_count)
-        if self.config.use_model_based_targets and q_r_active and hasattr(self.env, 'transition_probabilities'):
+        if self.config.use_model_based_targets and hasattr(self.env, 'transition_probabilities'):
             transition_probs_by_action = self._precompute_transition_probs(
                 state, human_actions
             )
         
         # Create transition
+        # When using model-based targets, we intentionally do NOT store next_state
+        # in the transition. This ensures the trainer uses the expected value over
+        # all possible successor states from transition_probs_by_action rather than
+        # the single observed next_state. Any code that tries to use next_state
+        # will fail with an error, making bugs obvious.
+        stored_next_state = None if self.config.use_model_based_targets else next_state
+        
         transition = Phase2Transition(
             state=state,
             robot_action=robot_action,
             goals=goals.copy(),
             goal_weights=goal_weights.copy(),
             human_actions=human_actions,
-            next_state=next_state,
+            next_state=stored_next_state,
             transition_probs_by_action=transition_probs_by_action,
             terminal=terminal
         )
@@ -1086,6 +1092,141 @@ class BasePhase2Trainer(ABC):
         
         return result
     
+    def _compute_model_based_v_h_e_targets(
+        self,
+        batch: List[Phase2Transition],
+        v_h_e_data: List[Tuple[int, int, Any]],  # (transition_idx, human_idx, goal)
+    ) -> torch.Tensor:
+        """
+        Compute model-based V_h^e targets using expected value over transition probabilities.
+        
+        For each (human, goal) pair, computes:
+            target = Σ_{s'} P(s'|s,a) * [achieved(s',g) + (1-achieved(s',g)) * γ_h * V_h^e(s', g)]
+        
+        This uses the exact transition probabilities from the world model rather than
+        single-sample TD learning, giving lower variance and theoretically correct targets.
+        
+        Args:
+            batch: List of transitions with transition_probs_by_action populated.
+            v_h_e_data: List of (transition_idx, human_idx, goal) tuples.
+            
+        Returns:
+            Tensor of target values, one per entry in v_h_e_data.
+        """
+        targets = []
+        gamma_h = self.networks.v_h_e.gamma_h
+        
+        for trans_idx, human_idx, goal in v_h_e_data:
+            transition = batch[trans_idx]
+            
+            # Get transition probs for the taken robot action
+            robot_action_idx = self.networks.q_r.action_tuple_to_index(transition.robot_action)
+            trans_probs = transition.transition_probs_by_action.get(robot_action_idx, [])
+            
+            if not trans_probs or transition.terminal:
+                # Terminal state or no successors - target is 0
+                # (goal not achieved and episode ended)
+                targets.append(0.0)
+                continue
+            
+            # Compute expected value over all possible successor states
+            expected_target = 0.0
+            for prob, next_state in trans_probs:
+                # Check if goal is achieved in this successor state
+                achieved = self.check_goal_achieved(next_state, human_idx, goal)
+                
+                if achieved:
+                    # Goal achieved: target contribution is prob * 1.0
+                    expected_target += prob * 1.0
+                else:
+                    # Goal not achieved: target contribution is prob * gamma_h * V_h^e(s', g)
+                    with torch.no_grad():
+                        v_next = self.networks.v_h_e_target.forward(
+                            next_state, self.env, human_idx, goal, self.device
+                        )
+                        v_next = self.networks.v_h_e_target.apply_hard_clamp(v_next)
+                    expected_target += prob * gamma_h * v_next.item()
+            
+            targets.append(expected_target)
+        
+        return torch.tensor(targets, device=self.device, dtype=torch.float32)
+    
+    def _compute_model_based_q_r_targets(
+        self,
+        batch: List[Phase2Transition],
+    ) -> torch.Tensor:
+        """
+        Compute model-based Q_r targets for ALL robot actions using transition probabilities.
+        
+        For each state s and robot action a_r, computes:
+            Q_r(s, a_r) target = Σ_{s'} P(s'|s, a_r, a_H) * [U_r(s') + γ_r * V_r(s')]
+        
+        where a_H is the actual human actions taken (fixed for all robot actions).
+        
+        This returns targets for ALL action combinations, enabling us to update
+        the full Q-function in one pass (like Expected SARSA / full Bellman backup).
+        
+        Args:
+            batch: List of transitions with transition_probs_by_action populated.
+            
+        Returns:
+            Tensor of shape (batch_size, num_actions) with target Q-values.
+        """
+        batch_size = len(batch)
+        num_actions = self.networks.q_r.num_action_combinations
+        effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
+        
+        targets = torch.zeros(batch_size, num_actions, device=self.device)
+        
+        for batch_idx, transition in enumerate(batch):
+            trans_probs_by_action = transition.transition_probs_by_action
+            
+            if trans_probs_by_action is None:
+                # No transition probs available - skip (shouldn't happen if model-based is enabled)
+                continue
+            
+            for action_idx in range(num_actions):
+                trans_probs = trans_probs_by_action.get(action_idx, [])
+                
+                if not trans_probs:
+                    # Terminal state or no successors for this action
+                    targets[batch_idx, action_idx] = 0.0
+                    continue
+                
+                # Compute expected value over all possible successor states
+                expected_target = 0.0
+                for prob, next_state in trans_probs:
+                    with torch.no_grad():
+                        # Compute U_r(s')
+                        u_r_next = self._compute_u_r_for_state_target(next_state)
+                        
+                        # Compute V_r(s') - either from network or from Q_r + policy
+                        if self.config.v_r_use_network:
+                            v_r_next = self.networks.v_r_target.forward(
+                                next_state, self.env, self.device
+                            )
+                        else:
+                            # V_r = U_r + E_{a~π}[Q_r(s', a)]
+                            q_r_next = self.networks.q_r_target.forward(
+                                next_state, self.env, self.device
+                            )
+                            pi_r_next = self.networks.q_r_target.get_policy(
+                                q_r_next.unsqueeze(0), beta_r=effective_beta_r
+                            )
+                            v_r_next = compute_v_r_from_components(
+                                u_r_next.squeeze(), q_r_next.unsqueeze(0), pi_r_next
+                            )
+                        
+                        # Q_r target = U_r(s') + γ_r * V_r(s')
+                        # Note: We include U_r here for proper value propagation
+                        q_target = u_r_next.item() + self.config.gamma_r * v_r_next.item()
+                    
+                    expected_target += prob * q_target
+                
+                targets[batch_idx, action_idx] = expected_target
+        
+        return targets
+
     def _compute_u_r_for_state(self, state: Any) -> torch.Tensor:
         """
         Compute U_r for a state, either from network or directly from X_h.
@@ -1199,37 +1340,29 @@ class BasePhase2Trainer(ABC):
         # Stage 1: Collect data from transitions for batched processing
         # ===================================================================
         
-        # Extract states and next_states
+        # Extract states (next_states only needed for non-model-based mode)
         states = [t.state for t in batch]
-        next_states = [t.next_state for t in batch]
         
-        # Collect V_h^e data: (state_idx, state, next_state, human_idx, goal, terminal)
+        # Check if we're using model-based targets (transition_probs available)
+        use_model_based = (
+            self.config.use_model_based_targets and 
+            batch[0].transition_probs_by_action is not None
+        )
+        
+        # Collect V_h^e data: (transition_idx, human_idx, goal)
+        v_h_e_data = []  # For model-based: (trans_idx, human_idx, goal)
         v_h_e_indices = []  # which transition this came from
         v_h_e_states = []
-        v_h_e_next_states = []
         v_h_e_human_indices = []
         v_h_e_goals = []
-        v_h_e_achieved = []
-        v_h_e_terminal = []  # whether transition is terminal (episode ended)
         
         for i, t in enumerate(batch):
             for h, g_h in t.goals.items():
+                v_h_e_data.append((i, h, g_h))
                 v_h_e_indices.append(i)
                 v_h_e_states.append(t.state)
-                v_h_e_next_states.append(t.next_state)
                 v_h_e_human_indices.append(h)
                 v_h_e_goals.append(g_h)
-                achieved = self.check_goal_achieved(t.next_state, h, g_h)
-                v_h_e_achieved.append(achieved)
-                v_h_e_terminal.append(t.terminal)
-                
-                # Debug logging for goal achievement
-                if self.debug and achieved:
-                    step_count, agent_states, _, _ = t.next_state
-                    agent_pos = (int(agent_states[h][0]), int(agent_states[h][1]))
-                    goal_target = getattr(g_h, 'target_pos', 'unknown')
-                    print(f"[DEBUG] Goal achieved! human={h}, target={goal_target}, "
-                          f"agent_pos={agent_pos}, terminal={t.terminal}, goal_hash={hash(g_h)}")
         
         # Collect X_h data
         x_h_states = []
@@ -1283,7 +1416,7 @@ class BasePhase2Trainer(ABC):
         if self.config.v_r_use_network:
             losses['v_r'] = torch.tensor(0.0, device=self.device)
         
-        # ----- V_h^e loss (batched) -----
+        # ----- V_h^e loss -----
         if v_h_e_states:
             # Forward pass for current states
             v_h_e_pred = self.networks.v_h_e.forward_batch(
@@ -1291,54 +1424,31 @@ class BasePhase2Trainer(ABC):
                 self.env, self.device
             )
             
-            # Target: check goal achieved + V_h^e(s', g_h) from target network
-            goal_achieved_t = torch.tensor(
-                [1.0 if a else 0.0 for a in v_h_e_achieved],
-                device=self.device
-            )
-            
-            # Terminal mask: when True, continuation value is 0
-            terminal_t = torch.tensor(
-                [1.0 if t else 0.0 for t in v_h_e_terminal],
-                device=self.device
-            )
-            
+            # Compute targets using model-based expected value over transition probabilities
+            # This gives exact expected values rather than single-sample TD estimates
             with torch.no_grad():
-                v_h_e_next = self.networks.v_h_e_target.forward_batch(
-                    v_h_e_next_states, v_h_e_goals, v_h_e_human_indices,
-                    self.env, self.device
-                )
+                target_v_h_e = self._compute_model_based_v_h_e_targets(batch, v_h_e_data)
             
-            # TD target: achieved + (1 - achieved) * (1 - terminal) * gamma_h * V_h^e_next
-            target_v_h_e = self.networks.v_h_e.compute_td_target(
-                goal_achieved_t, v_h_e_next.squeeze(), terminal=terminal_t
-            )
-            
-            # Debug logging for TD targets
+            # Debug logging for targets
             if self.debug and self.training_step_count % 100 == 0:
-                n_achieved = goal_achieved_t.sum().item()
-                n_terminal = terminal_t.sum().item()
-                n_total = len(goal_achieved_t)
-                # Find unique goals and their target values
+                n_total = len(v_h_e_data)
+                print(f"[DEBUG V_h^e] step={self.training_step_count}, n_samples={n_total}, "
+                      f"target_mean={target_v_h_e.mean().item():.4f}, "
+                      f"pred_mean={v_h_e_pred.mean().item():.4f}")
+                # Log per-goal statistics
                 goal_targets = {}
-                for idx, g in enumerate(v_h_e_goals):
+                for idx, (_, _, g) in enumerate(v_h_e_data):
                     goal_key = getattr(g, 'target_pos', hash(g))
                     if goal_key not in goal_targets:
-                        goal_targets[goal_key] = {'targets': [], 'achieved': [], 'terminal': [], 'next_v': []}
+                        goal_targets[goal_key] = {'targets': [], 'preds': []}
                     goal_targets[goal_key]['targets'].append(target_v_h_e[idx].item())
-                    goal_targets[goal_key]['achieved'].append(goal_achieved_t[idx].item())
-                    goal_targets[goal_key]['terminal'].append(terminal_t[idx].item())
-                    goal_targets[goal_key]['next_v'].append(v_h_e_next[idx].item())
-                print(f"[DEBUG V_h^e] step={self.training_step_count}, achieved={n_achieved}/{n_total}, "
-                      f"terminal={n_terminal}/{n_total}, target_mean={target_v_h_e.mean().item():.4f}")
+                    goal_targets[goal_key]['preds'].append(v_h_e_pred[idx].item())
                 for goal_key, data in sorted(goal_targets.items()):
                     n = len(data['targets'])
                     mean_target = sum(data['targets']) / n
-                    mean_next_v = sum(data['next_v']) / n
-                    n_ach = sum(data['achieved'])
-                    n_term = sum(data['terminal'])
-                    print(f"[DEBUG V_h^e]   Goal {goal_key}: n={n}, achieved={n_ach}, terminal={n_term}, "
-                          f"mean_target={mean_target:.4f}, mean_next_v={mean_next_v:.4f}")
+                    mean_pred = sum(data['preds']) / n
+                    print(f"[DEBUG V_h^e]   Goal {goal_key}: n={n}, "
+                          f"mean_target={mean_target:.4f}, mean_pred={mean_pred:.4f}")
             
             losses['v_h_e'] = ((v_h_e_pred.squeeze() - target_v_h_e) ** 2).mean()
             
@@ -1423,43 +1533,35 @@ class BasePhase2Trainer(ABC):
                     'target_mean': target_u_r.mean().item()
                 }
         
-        # ----- Q_r loss (batched) -----
+        # ----- Q_r loss (model-based: update ALL actions) -----
         if q_r_active:
+            # Forward pass: get Q-values for all actions
             q_r_all = self.networks.q_r.forward_batch(states, self.env, self.device)
             
-            # Gather Q-values for taken actions
+            # Compute model-based targets for ALL robot actions
+            # This allows us to update the entire Q-function per state, not just taken action
+            with torch.no_grad():
+                target_q_r_all = self._compute_model_based_q_r_targets(batch)
+            
+            # Loss: MSE over ALL action Q-values (full Bellman backup)
+            # This is much more sample-efficient than only updating the taken action
+            losses['q_r'] = ((q_r_all - target_q_r_all) ** 2).mean()
+            
+            # Statistics: report for taken actions for comparability
             robot_actions = [t.robot_action for t in batch]
             action_indices = torch.tensor(
                 [self.networks.q_r.action_tuple_to_index(a) for a in robot_actions],
                 device=self.device
             )
-            q_r_pred = q_r_all.gather(1, action_indices.unsqueeze(1)).squeeze(1)
-            
-            # Compute targets
-            with torch.no_grad():
-                if self.config.v_r_use_network:
-                    v_r_next = self.networks.v_r_target.forward_batch(
-                        next_states, self.env, self.device
-                    )
-                else:
-                    # Compute V_r from components
-                    u_r_next = self._compute_u_r_batch_target(next_states)
-                    q_r_next = self.networks.q_r_target.forward_batch(
-                        next_states, self.env, self.device
-                    )
-                    pi_r_next = self.networks.q_r_target.get_policy(q_r_next, beta_r=effective_beta_r)
-                    v_r_next = compute_v_r_from_components(
-                        u_r_next.squeeze(), q_r_next, pi_r_next
-                    )
-            
-            target_q_r = self.config.gamma_r * v_r_next.squeeze()
-            losses['q_r'] = ((q_r_pred - target_q_r) ** 2).mean()
+            q_r_pred_taken = q_r_all.gather(1, action_indices.unsqueeze(1)).squeeze(1)
+            target_q_r_taken = target_q_r_all.gather(1, action_indices.unsqueeze(1)).squeeze(1)
             
             with torch.no_grad():
                 prediction_stats['q_r'] = {
-                    'mean': q_r_pred.mean().item(),
-                    'std': q_r_pred.std().item() if q_r_pred.numel() > 1 else 0.0,
-                    'target_mean': target_q_r.mean().item()
+                    'mean': q_r_pred_taken.mean().item(),
+                    'std': q_r_pred_taken.std().item() if q_r_pred_taken.numel() > 1 else 0.0,
+                    'target_mean': target_q_r_taken.mean().item(),
+                    'all_actions_loss': losses['q_r'].item()
                 }
         
         # ----- V_r loss (batched, only if using network mode) -----
