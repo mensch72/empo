@@ -1100,6 +1100,9 @@ class BasePhase2Trainer(ABC):
         """
         Compute model-based V_h^e targets using expected value over transition probabilities.
         
+        BATCHED IMPLEMENTATION: Collects ALL successor states across ALL (transition, goal)
+        pairs, makes ONE batched V_h^e_target forward pass, then aggregates results.
+        
         For each (human, goal) pair, computes:
             target = Σ_{s'} P(s'|s,a) * [achieved(s',g) + (1-achieved(s',g)) * γ_h * V_h^e(s', g)]
         
@@ -1113,10 +1116,29 @@ class BasePhase2Trainer(ABC):
         Returns:
             Tensor of target values, one per entry in v_h_e_data.
         """
-        targets = []
         gamma_h = self.networks.v_h_e.gamma_h
+        n_samples = len(v_h_e_data)
         
-        for trans_idx, human_idx, goal in v_h_e_data:
+        # Phase 1: Collect ALL successor states that need V_h^e evaluation
+        # For each v_h_e_data entry, we need to evaluate V_h^e at all successor states
+        # where the goal is NOT achieved (achieved successors contribute 1.0 directly)
+        
+        # Track which entries have successors vs are terminal
+        entry_is_terminal = [False] * n_samples
+        
+        # Collect successor states for batched V_h^e evaluation
+        # Each entry: (next_state, human_idx, goal)
+        all_next_states = []
+        all_human_indices = []
+        all_goals = []
+        # Map: successor_idx -> (v_h_e_data_idx, prob)
+        # Multiple successors can map to same v_h_e_data_idx
+        successor_mapping = []
+        
+        # Also track achieved contributions (prob * 1.0 for achieved goals)
+        achieved_contributions = [0.0] * n_samples
+        
+        for data_idx, (trans_idx, human_idx, goal) in enumerate(v_h_e_data):
             transition = batch[trans_idx]
             
             # Get transition probs for the taken robot action
@@ -1125,31 +1147,49 @@ class BasePhase2Trainer(ABC):
             
             if not trans_probs or transition.terminal:
                 # Terminal state or no successors - target is 0
-                # (goal not achieved and episode ended)
-                targets.append(0.0)
+                entry_is_terminal[data_idx] = True
                 continue
             
-            # Compute expected value over all possible successor states
-            expected_target = 0.0
+            # Process each successor state
             for prob, next_state in trans_probs:
-                # Check if goal is achieved in this successor state
                 achieved = self.check_goal_achieved(next_state, human_idx, goal)
                 
                 if achieved:
-                    # Goal achieved: target contribution is prob * 1.0
-                    expected_target += prob * 1.0
+                    # Goal achieved: contribute prob * 1.0 directly
+                    achieved_contributions[data_idx] += prob * 1.0
                 else:
-                    # Goal not achieved: target contribution is prob * gamma_h * V_h^e(s', g)
-                    with torch.no_grad():
-                        v_next = self.networks.v_h_e_target.forward(
-                            next_state, self.env, human_idx, goal, self.device
-                        )
-                        v_next = self.networks.v_h_e_target.apply_hard_clamp(v_next)
-                    expected_target += prob * gamma_h * v_next.item()
-            
-            targets.append(expected_target)
+                    # Goal not achieved: need V_h^e(s', g) - add to batch
+                    all_next_states.append(next_state)
+                    all_human_indices.append(human_idx)
+                    all_goals.append(goal)
+                    successor_mapping.append((data_idx, prob))
         
-        return torch.tensor(targets, device=self.device, dtype=torch.float32)
+        # Phase 2: ONE batched V_h^e_target forward pass for ALL successor states
+        if all_next_states:
+            with torch.no_grad():
+                v_h_e_all = self.networks.v_h_e_target.forward_batch(
+                    all_next_states, all_goals, all_human_indices,
+                    self.env, self.device
+                )
+                v_h_e_all = self.networks.v_h_e_target.apply_hard_clamp(v_h_e_all).squeeze()
+                # Ensure 1D even for single element
+                if v_h_e_all.dim() == 0:
+                    v_h_e_all = v_h_e_all.unsqueeze(0)
+        
+        # Phase 3: Aggregate results back to per-entry targets
+        targets = torch.zeros(n_samples, device=self.device, dtype=torch.float32)
+        
+        # Add achieved contributions
+        for data_idx, contrib in enumerate(achieved_contributions):
+            targets[data_idx] += contrib
+        
+        # Add V_h^e contributions from non-achieved successors
+        if all_next_states:
+            for succ_idx, (data_idx, prob) in enumerate(successor_mapping):
+                # Contribution: prob * gamma_h * V_h^e(s', g)
+                targets[data_idx] += prob * gamma_h * v_h_e_all[succ_idx].item()
+        
+        return targets
     
     def _compute_model_based_q_r_targets(
         self,
@@ -1157,6 +1197,10 @@ class BasePhase2Trainer(ABC):
     ) -> torch.Tensor:
         """
         Compute model-based Q_r targets for ALL robot actions using transition probabilities.
+        
+        BATCHED IMPLEMENTATION: Collects ALL unique successor states across ALL
+        (batch_idx, action_idx) pairs, makes ONE batched forward pass for each network
+        (U_r, V_r or Q_r), then aggregates results.
         
         For each state s and robot action a_r, computes:
             Q_r(s, a_r) target = Σ_{s'} P(s'|s, a_r, a_H) * [U_r(s') + γ_r * V_r(s')]
@@ -1176,52 +1220,94 @@ class BasePhase2Trainer(ABC):
         num_actions = self.networks.q_r.num_action_combinations
         effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
         
-        targets = torch.zeros(batch_size, num_actions, device=self.device)
+        # Phase 1: Collect ALL unique successor states across all (batch_idx, action_idx)
+        # We need to deduplicate states since the same successor can appear multiple times
+        
+        # Map: state_hash -> (state, index_in_unique_list)
+        state_to_idx: Dict[int, int] = {}
+        unique_states: List[Any] = []
+        
+        # For each (batch_idx, action_idx, successor_idx), store:
+        # - (unique_state_idx, prob) to later aggregate
+        # Structure: successor_info[batch_idx][action_idx] = [(unique_state_idx, prob), ...]
+        successor_info: List[List[List[Tuple[int, float]]]] = [
+            [[] for _ in range(num_actions)] for _ in range(batch_size)
+        ]
         
         for batch_idx, transition in enumerate(batch):
             trans_probs_by_action = transition.transition_probs_by_action
             
             if trans_probs_by_action is None:
-                # No transition probs available - skip (shouldn't happen if model-based is enabled)
                 continue
             
             for action_idx in range(num_actions):
                 trans_probs = trans_probs_by_action.get(action_idx, [])
                 
-                if not trans_probs:
-                    # Terminal state or no successors for this action
-                    targets[batch_idx, action_idx] = 0.0
+                for prob, next_state in trans_probs:
+                    # Get or create index for this state
+                    state_hash = hash(next_state)
+                    if state_hash not in state_to_idx:
+                        state_to_idx[state_hash] = len(unique_states)
+                        unique_states.append(next_state)
+                    
+                    unique_idx = state_to_idx[state_hash]
+                    successor_info[batch_idx][action_idx].append((unique_idx, prob))
+        
+        # Phase 2: ONE batched forward pass for U_r and Q_r/V_r on all unique states
+        targets = torch.zeros(batch_size, num_actions, device=self.device)
+        
+        if not unique_states:
+            # No successors at all - return zeros
+            return targets
+        
+        with torch.no_grad():
+            # Compute U_r for all unique successor states (ONE call)
+            u_r_all = self._compute_u_r_batch_target(unique_states)  # (n_unique,)
+            
+            # Compute V_r for all unique successor states
+            if self.config.v_r_use_network:
+                # ONE batched V_r_target call
+                v_r_all = self.networks.v_r_target.forward_batch(
+                    unique_states, self.env, self.device
+                ).squeeze()  # (n_unique,)
+            else:
+                # V_r = U_r + E_{a~π}[Q_r(s', a)]
+                # ONE batched Q_r_target call
+                q_r_all = self.networks.q_r_target.forward_batch(
+                    unique_states, self.env, self.device
+                )  # (n_unique, num_actions)
+                
+                # Compute policy and V_r from components
+                pi_r_all = self.networks.q_r_target.get_policy(
+                    q_r_all, beta_r=effective_beta_r
+                )  # (n_unique, num_actions)
+                
+                # V_r = U_r + E_{a~π}[Q_r]
+                v_r_all = compute_v_r_from_components(
+                    u_r_all.squeeze(), q_r_all, pi_r_all
+                )  # (n_unique,)
+            
+            # Ensure 1D tensors
+            if u_r_all.dim() == 0:
+                u_r_all = u_r_all.unsqueeze(0)
+            if v_r_all.dim() == 0:
+                v_r_all = v_r_all.unsqueeze(0)
+            
+            # Q_r target = U_r(s') + γ_r * V_r(s') for each unique state
+            q_targets_all = u_r_all + self.config.gamma_r * v_r_all  # (n_unique,)
+        
+        # Phase 3: Aggregate targets back to (batch_size, num_actions)
+        for batch_idx in range(batch_size):
+            for action_idx in range(num_actions):
+                successors = successor_info[batch_idx][action_idx]
+                if not successors:
+                    # No successors for this (batch, action) - target stays 0
                     continue
                 
-                # Compute expected value over all possible successor states
+                # Expected target = Σ prob * q_target
                 expected_target = 0.0
-                for prob, next_state in trans_probs:
-                    with torch.no_grad():
-                        # Compute U_r(s')
-                        u_r_next = self._compute_u_r_for_state_target(next_state)
-                        
-                        # Compute V_r(s') - either from network or from Q_r + policy
-                        if self.config.v_r_use_network:
-                            v_r_next = self.networks.v_r_target.forward(
-                                next_state, self.env, self.device
-                            )
-                        else:
-                            # V_r = U_r + E_{a~π}[Q_r(s', a)]
-                            q_r_next = self.networks.q_r_target.forward(
-                                next_state, self.env, self.device
-                            )
-                            pi_r_next = self.networks.q_r_target.get_policy(
-                                q_r_next.unsqueeze(0), beta_r=effective_beta_r
-                            )
-                            v_r_next = compute_v_r_from_components(
-                                u_r_next.squeeze(), q_r_next.unsqueeze(0), pi_r_next
-                            )
-                        
-                        # Q_r target = U_r(s') + γ_r * V_r(s')
-                        # Note: We include U_r here for proper value propagation
-                        q_target = u_r_next.item() + self.config.gamma_r * v_r_next.item()
-                    
-                    expected_target += prob * q_target
+                for unique_idx, prob in successors:
+                    expected_target += prob * q_targets_all[unique_idx].item()
                 
                 targets[batch_idx, action_idx] = expected_target
         

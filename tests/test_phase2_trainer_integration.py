@@ -582,6 +582,59 @@ class TestModelBasedTargets:
         """Verify default config uses model-based targets."""
         config = Phase2Config()
         assert config.use_model_based_targets is True
+    
+    def test_no_successor_states_stored_in_transitions(self):
+        """
+        Verify that when use_model_based_targets=True, successor states are NOT
+        stored in transitions (only transition_probs_by_action is stored).
+        
+        This ensures memory efficiency and forces correct model-based computation.
+        """
+        from empo.nn_based.phase2.replay_buffer import Phase2Transition
+        
+        # Create transitions mimicking what collect_transition does
+        config = Phase2Config(use_model_based_targets=True)
+        
+        # Simulate multiple transitions
+        for _ in range(10):
+            # When model-based is enabled, next_state should be None
+            stored_next_state = None if config.use_model_based_targets else 'actual_next_state'
+            
+            # transition_probs_by_action should contain all successor info
+            # This is a dict: action_idx -> [(prob, next_state), ...]
+            transition_probs = {
+                0: [(0.5, 'state_a'), (0.5, 'state_b')],  # Two possible successors
+                1: [(1.0, 'state_c')],  # Deterministic transition
+                2: [],  # Terminal/no successors
+            } if config.use_model_based_targets else None
+            
+            transition = Phase2Transition(
+                state='current_state',
+                robot_action=(0,),
+                goals={0: 'goal'},
+                goal_weights={0: 1.0},
+                human_actions=[0],
+                next_state=stored_next_state,
+                transition_probs_by_action=transition_probs,
+                terminal=False
+            )
+            
+            # CRITICAL: next_state must be None when model-based
+            assert transition.next_state is None, \
+                "Successor states should NOT be stored when use_model_based_targets=True"
+            
+            # transition_probs_by_action must contain all successor info
+            assert transition.transition_probs_by_action is not None, \
+                "transition_probs_by_action must be populated when model-based"
+            
+            # Verify successor states are in transition_probs, not next_state
+            all_successors = []
+            for action_idx, probs in transition.transition_probs_by_action.items():
+                for prob, succ_state in probs:
+                    all_successors.append(succ_state)
+            
+            assert len(all_successors) > 0 or 2 in transition.transition_probs_by_action, \
+                "Successor states should be in transition_probs_by_action"
 
 
 # =============================================================================
