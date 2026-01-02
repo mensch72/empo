@@ -290,10 +290,17 @@ For small action spaces (typical in MultiGrid), this overhead is acceptable. For
 ### Design Notes
 
 - RND is trained from the beginning (included in active networks from step 0)
-- The predictor uses the shared state encoder's output (detached from gradient computation)
+- **Multi-encoder architecture**: RND uses concatenated features from ALL state encoders:
+  - Shared state encoder (from V_h^e)
+  - X_h's own state encoder
+  - U_r's own state encoder (if `u_r_use_network=True`)
+  - Q_r's own state encoder
+- **Warmup coefficients**: Each encoder's features are multiplied by a coefficient that ramps 0→1 during the warmup stage when that encoder is introduced. This provides smooth transitions as new encoders come online.
+- All encoder outputs are detached (RND trains only its predictor network, not the encoders)
 - Normalization prevents bonus scale drift during training
 - A small uniform component (10%) is added to curiosity-weighted exploration to ensure baseline coverage
 
+See [docs/ENCODER_ARCHITECTURE.md](ENCODER_ARCHITECTURE.md) for details on the multi-encoder design.
 See [docs/plans/curiosity.md](plans/curiosity.md) for detailed design rationale and alternative approaches considered.
 
 ## Count-Based Curiosity (Tabular Mode)

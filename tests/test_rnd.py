@@ -465,5 +465,134 @@ class TestRNDDeterminism:
         assert torch.allclose(n1, n2)
 
 
+class TestRNDEncoderCoefficients:
+    """Tests for multi-encoder coefficient support in RND."""
+    
+    def test_encoder_dims_stored(self):
+        """Test encoder_dims parameter is stored correctly."""
+        encoder_dims = [32, 64, 128]
+        rnd = RNDModule(input_dim=224, feature_dim=64, encoder_dims=encoder_dims)
+        
+        assert rnd.encoder_dims == encoder_dims
+    
+    def test_encoder_dims_default_none(self):
+        """Test encoder_dims defaults to None for backward compatibility."""
+        rnd = RNDModule(input_dim=64, feature_dim=32)
+        
+        assert rnd.encoder_dims is None
+    
+    def test_apply_encoder_coefficients_identity(self):
+        """Test apply_encoder_coefficients with all-ones returns unchanged tensor."""
+        encoder_dims = [16, 32, 16]
+        rnd = RNDModule(input_dim=64, feature_dim=32, encoder_dims=encoder_dims)
+        
+        x = torch.randn(10, 64)
+        coefficients = [1.0, 1.0, 1.0]
+        
+        x_weighted = rnd.apply_encoder_coefficients(x, coefficients)
+        
+        assert torch.allclose(x, x_weighted)
+    
+    def test_apply_encoder_coefficients_zeros(self):
+        """Test apply_encoder_coefficients with zeros produces zeros."""
+        encoder_dims = [16, 32, 16]
+        rnd = RNDModule(input_dim=64, feature_dim=32, encoder_dims=encoder_dims)
+        
+        x = torch.randn(10, 64)
+        coefficients = [0.0, 0.0, 0.0]
+        
+        x_weighted = rnd.apply_encoder_coefficients(x, coefficients)
+        
+        assert torch.allclose(x_weighted, torch.zeros_like(x))
+    
+    def test_apply_encoder_coefficients_partial(self):
+        """Test apply_encoder_coefficients with mixed coefficients."""
+        encoder_dims = [16, 32, 16]  # Total = 64
+        rnd = RNDModule(input_dim=64, feature_dim=32, encoder_dims=encoder_dims)
+        
+        x = torch.ones(5, 64)
+        coefficients = [1.0, 0.5, 0.0]  # First full, second half, third zero
+        
+        x_weighted = rnd.apply_encoder_coefficients(x, coefficients)
+        
+        # Check each encoder segment
+        assert torch.allclose(x_weighted[:, :16], torch.ones(5, 16))  # First: coef=1.0
+        assert torch.allclose(x_weighted[:, 16:48], torch.full((5, 32), 0.5))  # Second: coef=0.5
+        assert torch.allclose(x_weighted[:, 48:64], torch.zeros(5, 16))  # Third: coef=0.0
+    
+    def test_apply_encoder_coefficients_none_passthrough(self):
+        """Test apply_encoder_coefficients with None coefficients returns unchanged."""
+        encoder_dims = [16, 32, 16]
+        rnd = RNDModule(input_dim=64, feature_dim=32, encoder_dims=encoder_dims)
+        
+        x = torch.randn(10, 64)
+        
+        x_weighted = rnd.apply_encoder_coefficients(x, None)
+        
+        assert torch.allclose(x, x_weighted)
+    
+    def test_apply_encoder_coefficients_no_encoder_dims_passthrough(self):
+        """Test apply_encoder_coefficients without encoder_dims returns unchanged."""
+        rnd = RNDModule(input_dim=64, feature_dim=32)  # No encoder_dims
+        
+        x = torch.randn(10, 64)
+        coefficients = [0.5, 0.5]  # Shouldn't be applied
+        
+        x_weighted = rnd.apply_encoder_coefficients(x, coefficients)
+        
+        assert torch.allclose(x, x_weighted)
+    
+    def test_compute_novelty_with_coefficients(self):
+        """Test compute_novelty properly applies encoder coefficients."""
+        encoder_dims = [32, 32]
+        rnd = RNDModule(input_dim=64, feature_dim=32, encoder_dims=encoder_dims, normalize=False)
+        
+        x = torch.randn(10, 64)
+        
+        # Full coefficients should give same result as no coefficients
+        novelty_full = rnd.compute_novelty(x, update_stats=False, encoder_coefficients=[1.0, 1.0])
+        novelty_default = rnd.compute_novelty(x, update_stats=False, encoder_coefficients=None)
+        
+        assert torch.allclose(novelty_full, novelty_default)
+    
+    def test_compute_loss_with_coefficients(self):
+        """Test compute_loss properly applies encoder coefficients."""
+        encoder_dims = [32, 32]
+        rnd = RNDModule(input_dim=64, feature_dim=32, encoder_dims=encoder_dims)
+        
+        x = torch.randn(10, 64)
+        
+        # Full coefficients should give same result as no coefficients
+        loss_full = rnd.compute_loss(x, encoder_coefficients=[1.0, 1.0])
+        loss_default = rnd.compute_loss(x, encoder_coefficients=None)
+        
+        assert torch.allclose(loss_full, loss_default)
+    
+    def test_zero_coefficients_reduce_novelty_variance(self):
+        """Test that zeroing encoder features reduces novelty variance."""
+        encoder_dims = [32, 32]
+        rnd = RNDModule(input_dim=64, feature_dim=32, encoder_dims=encoder_dims, normalize=False)
+        
+        # Different inputs
+        x_batch = torch.randn(100, 64)
+        
+        # With full features: should have variance
+        novelty_full = rnd.compute_novelty_no_grad(x_batch, encoder_coefficients=[1.0, 1.0])
+        var_full = novelty_full.var().item()
+        
+        # With half features zeroed: should still have variance but potentially less
+        novelty_half = rnd.compute_novelty_no_grad(x_batch, encoder_coefficients=[1.0, 0.0])
+        var_half = novelty_half.var().item()
+        
+        # With all zeros: constant output, zero variance
+        novelty_zero = rnd.compute_novelty_no_grad(x_batch, encoder_coefficients=[0.0, 0.0])
+        var_zero = novelty_zero.var().item()
+        
+        # Zero features should have near-zero variance
+        assert var_zero < 1e-6, f"Expected near-zero variance, got {var_zero}"
+        # Full features should have non-trivial variance
+        assert var_full > 1e-6, f"Expected non-trivial variance, got {var_full}"
+
+
 if __name__ == '__main__':
     pytest.main([__file__, '-v'])

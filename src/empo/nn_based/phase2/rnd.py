@@ -5,10 +5,16 @@ RND uses prediction error as a novelty signal: a trainable predictor network
 tries to match the output of a fixed random target network. High prediction
 error indicates novel/unfamiliar states, providing an exploration bonus.
 
+The module supports multi-encoder input where different state encoders are
+introduced during warmup stages. Each encoder's features are weighted by a
+coefficient that ramps from 0 to 1 during its introduction stage.
+
 Reference:
     Burda, Y., Edwards, H., Storkey, A., & Klimov, O. (2018).
     Exploration by Random Network Distillation. arXiv:1810.12894
 """
+
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
@@ -23,8 +29,14 @@ class RNDModule(nn.Module):
     - High error → state rarely seen → novel
     - Low error → state frequently seen → familiar
     
+    Supports multi-encoder input: the input can be a concatenation of features
+    from multiple encoders, each multiplied by a coefficient (0-1) that ramps
+    up during the warmup stage when that encoder is introduced.
+    
     Args:
-        input_dim: Dimension of input state features.
+        input_dim: Total dimension of input features (sum of all encoder dims).
+        encoder_dims: Optional list of individual encoder dimensions. If provided,
+                     enables per-encoder coefficient weighting. Must sum to input_dim.
         feature_dim: Dimension of RND output features.
         hidden_dim: Dimension of hidden layers.
         normalize: Whether to use running normalization for novelty scores.
@@ -34,6 +46,7 @@ class RNDModule(nn.Module):
     def __init__(
         self,
         input_dim: int,
+        encoder_dims: Optional[List[int]] = None,
         feature_dim: int = 64,
         hidden_dim: int = 256,
         normalize: bool = True,
@@ -42,9 +55,19 @@ class RNDModule(nn.Module):
         super().__init__()
         
         self.input_dim = input_dim
+        self.encoder_dims = encoder_dims
         self.feature_dim = feature_dim
         self.normalize = normalize
         self.normalization_decay = normalization_decay
+        
+        # Validate encoder_dims if provided
+        if encoder_dims is not None:
+            total = sum(encoder_dims)
+            if total != input_dim:
+                raise ValueError(
+                    f"encoder_dims must sum to input_dim. "
+                    f"Got sum={total}, input_dim={input_dim}"
+                )
         
         # Target network: FROZEN RANDOM weights
         # Simple 2-layer MLP - doesn't need to be deep since outputs are arbitrary
@@ -78,10 +101,52 @@ class RNDModule(nn.Module):
         self._last_batch_raw_mean = 0.0
         self._last_batch_raw_std = 1.0
     
+    def apply_encoder_coefficients(
+        self,
+        state_features: torch.Tensor,
+        encoder_coefficients: Optional[List[float]] = None
+    ) -> torch.Tensor:
+        """
+        Apply per-encoder coefficients to weighted features.
+        
+        Each encoder's features are multiplied by its coefficient. This allows
+        smooth introduction of new encoders during warmup stages.
+        
+        Args:
+            state_features: Concatenated features (batch_size, input_dim).
+            encoder_coefficients: List of coefficients [0, 1] for each encoder.
+                                 Must have same length as encoder_dims.
+                                 If None, all coefficients are 1.0.
+        
+        Returns:
+            Weighted features (batch_size, input_dim).
+        """
+        if encoder_coefficients is None or self.encoder_dims is None:
+            return state_features
+        
+        if len(encoder_coefficients) != len(self.encoder_dims):
+            raise ValueError(
+                f"encoder_coefficients length {len(encoder_coefficients)} != "
+                f"encoder_dims length {len(self.encoder_dims)}"
+            )
+        
+        # Build coefficient tensor matching feature dimensions
+        # Each encoder's features get multiplied by its coefficient
+        coef_expanded = []
+        for coef, dim in zip(encoder_coefficients, self.encoder_dims):
+            coef_expanded.extend([coef] * dim)
+        
+        coef_tensor = torch.tensor(
+            coef_expanded, dtype=state_features.dtype, device=state_features.device
+        )
+        
+        return state_features * coef_tensor
+    
     def compute_novelty(
         self,
         state_features: torch.Tensor,
-        update_stats: bool = True
+        update_stats: bool = True,
+        encoder_coefficients: Optional[List[float]] = None
     ) -> torch.Tensor:
         """
         Compute novelty scores for given state features.
@@ -92,15 +157,22 @@ class RNDModule(nn.Module):
         Args:
             state_features: Input features (batch_size, input_dim).
             update_stats: Whether to update running mean/std statistics.
+            encoder_coefficients: Optional per-encoder coefficients for smooth
+                                 warmup transitions. See apply_encoder_coefficients().
             
         Returns:
             Novelty scores (batch_size,). Higher = more novel.
         """
+        # Apply per-encoder coefficients for smooth warmup transitions
+        weighted_features = self.apply_encoder_coefficients(
+            state_features, encoder_coefficients
+        )
+        
         with torch.no_grad():
-            target_out = self.target(state_features)
+            target_out = self.target(weighted_features)
         
         # Predictor output (with gradients for training)
-        pred_out = self.predictor(state_features)
+        pred_out = self.predictor(weighted_features)
         
         # MSE per sample
         novelty = ((target_out - pred_out) ** 2).mean(dim=-1)
@@ -134,6 +206,7 @@ class RNDModule(nn.Module):
     def compute_novelty_no_grad(
         self,
         state_features: torch.Tensor,
+        encoder_coefficients: Optional[List[float]] = None
     ) -> torch.Tensor:
         """
         Compute novelty scores without gradients (for action selection).
@@ -142,13 +215,20 @@ class RNDModule(nn.Module):
         
         Args:
             state_features: Input features (batch_size, input_dim).
+            encoder_coefficients: Optional per-encoder coefficients for smooth
+                                 warmup transitions.
             
         Returns:
             Novelty scores (batch_size,). Higher = more novel.
         """
+        # Apply per-encoder coefficients for smooth warmup transitions
+        weighted_features = self.apply_encoder_coefficients(
+            state_features, encoder_coefficients
+        )
+        
         with torch.no_grad():
-            target_out = self.target(state_features)
-            pred_out = self.predictor(state_features)
+            target_out = self.target(weighted_features)
+            pred_out = self.predictor(weighted_features)
             
             # MSE per sample
             novelty = ((target_out - pred_out) ** 2).mean(dim=-1)
@@ -159,7 +239,11 @@ class RNDModule(nn.Module):
             
             return novelty
     
-    def compute_loss(self, state_features: torch.Tensor) -> torch.Tensor:
+    def compute_loss(
+        self,
+        state_features: torch.Tensor,
+        encoder_coefficients: Optional[List[float]] = None
+    ) -> torch.Tensor:
         """
         Compute RND loss for training the predictor.
         
@@ -168,14 +252,21 @@ class RNDModule(nn.Module):
         
         Args:
             state_features: Input features (batch_size, input_dim).
+            encoder_coefficients: Optional per-encoder coefficients for smooth
+                                 warmup transitions.
             
         Returns:
             Scalar loss tensor.
         """
-        with torch.no_grad():
-            target_out = self.target(state_features)
+        # Apply per-encoder coefficients for smooth warmup transitions
+        weighted_features = self.apply_encoder_coefficients(
+            state_features, encoder_coefficients
+        )
         
-        pred_out = self.predictor(state_features)
+        with torch.no_grad():
+            target_out = self.target(weighted_features)
+        
+        pred_out = self.predictor(weighted_features)
         
         # MSE per sample (for stats tracking)
         mse_per_sample = ((target_out.detach() - pred_out.detach()) ** 2).mean(dim=-1)

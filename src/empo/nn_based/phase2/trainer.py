@@ -57,6 +57,9 @@ class Phase2Networks:
     
     # RND module for curiosity-driven exploration (optional, for neural networks)
     rnd: Optional[RNDModule] = None
+    # Individual encoder dimensions for RND coefficient weighting during warmup
+    # Order: [shared, x_h_own, u_r_own (if used), q_r_own]
+    rnd_encoder_dims: Optional[List[int]] = None
     
     # Count-based curiosity for tabular exploration (optional, for lookup tables)
     count_curiosity: Optional[CountBasedCuriosity] = None
@@ -1570,31 +1573,42 @@ class BasePhase2Trainer(ABC):
         Returns:
             Scalar loss tensor.
         """
-        # Get state features for RND computation
-        features = self.get_state_features_for_rnd(states)
+        # Get state features for RND computation (with encoder coefficients)
+        features, encoder_coefficients = self.get_state_features_for_rnd(states)
         
-        # Compute RND loss
-        return self.networks.rnd.compute_loss(features)
+        # Compute RND loss with encoder coefficients for smooth warmup
+        return self.networks.rnd.compute_loss(features, encoder_coefficients)
     
     @abstractmethod
-    def get_state_features_for_rnd(self, states: List[Any]) -> torch.Tensor:
+    def get_state_features_for_rnd(
+        self,
+        states: List[Any],
+        encoder_coefficients: Optional[List[float]] = None
+    ) -> Tuple[torch.Tensor, List[float]]:
         """
         Get state features for RND novelty computation.
         
         Must be implemented by environment-specific subclasses to convert
         states to feature tensors suitable for RND.
         
-        For neural network trainers, this typically uses the shared state
-        encoder (detached) to produce features.
+        For neural network trainers, this typically uses all state encoders
+        (shared + own encoders, all detached) to produce concatenated features.
+        Each encoder's features can be weighted by coefficients for smooth
+        warmup transitions.
         
         For lookup table trainers, this might use a simple state hash or
         one-hot encoding.
         
         Args:
             states: List of states.
+            encoder_coefficients: Optional pre-computed coefficients for each
+                                 encoder. If None, implementation should compute
+                                 them from current training step.
             
         Returns:
-            Feature tensor of shape (batch_size, feature_dim).
+            Tuple of:
+            - Feature tensor of shape (batch_size, total_feature_dim)
+            - Encoder coefficients used
         """
         pass
     
@@ -1627,8 +1641,8 @@ class BasePhase2Trainer(ABC):
         
         # RND (for neural network mode)
         if self.config.use_rnd and self.networks.rnd is not None:
-            features = self.get_state_features_for_rnd(states)
-            return self.networks.rnd.compute_novelty_no_grad(features)
+            features, encoder_coefficients = self.get_state_features_for_rnd(states)
+            return self.networks.rnd.compute_novelty_no_grad(features, encoder_coefficients)
         
         # No curiosity enabled
         return torch.zeros(len(states), device=self.device)
