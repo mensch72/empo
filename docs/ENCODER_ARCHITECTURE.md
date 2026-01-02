@@ -116,6 +116,27 @@ Phase 2 trains five networks for the robot's empowerment-based decision making:
                          - V_r MLP head
 ```
 
+### Encoder Summary Table
+
+| Network | Mode | Shared Encoders | Own Encoders | Gradient Flow |
+|---------|------|-----------------|--------------|---------------|
+| **V_h^e** | Neural | Creates & trains state, goal, agent | None (it IS the shared source) | Trains shared encoders + own MLP |
+| **V_h^e** | Tabular | NullEncoders (output zeros) | None | Lookup table only |
+| **Q_r** | Neural | state (detached) | own_state_encoder | Trains own encoder + MLP |
+| **Q_r** | Tabular | None | None | Lookup table only |
+| **X_h** | Neural | state (detached), agent (detached) | own_state_encoder, own_agent_encoder | Trains own encoders + MLP |
+| **X_h** | Tabular | None | None | Lookup table only |
+| **U_r** | Neural | state (detached) | own_state_encoder | Trains own encoder + MLP |
+| **U_r** | Tabular | None | None | Lookup table only |
+| **V_r** | Neural | state (detached) | own_state_encoder | Trains own encoder + MLP |
+| **V_r** | Tabular | None | None | Lookup table only |
+
+**Key points:**
+- In **neural mode**, shared encoders provide frozen features (via `.detach()`), while own encoders learn network-specific features
+- In **tabular mode**, lookup tables hash the state directly without any encoders
+- **Only V_h^e** trains the shared encoders - all other networks use them in detached (frozen) mode
+- This prevents gradient conflicts between networks with different objectives
+
 ### Why This Architecture?
 
 1. **Gradient Conflict Avoidance**: Different networks have different objectives. Having V_h^e train shared encoders while others use detached outputs prevents conflicting gradient signals.

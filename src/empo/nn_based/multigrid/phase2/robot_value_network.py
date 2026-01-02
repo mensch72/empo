@@ -54,7 +54,8 @@ class MultiGridRobotValueNetwork(BaseRobotValueNetwork):
         max_pause_switches: int = 4,
         max_disabling_switches: int = 4,
         max_control_buttons: int = 4,
-        state_encoder: Optional[MultiGridStateEncoder] = None
+        state_encoder: Optional[MultiGridStateEncoder] = None,
+        own_state_encoder: Optional[MultiGridStateEncoder] = None
     ):
         super().__init__(gamma_r=gamma_r)
         
@@ -80,9 +81,28 @@ class MultiGridRobotValueNetwork(BaseRobotValueNetwork):
                 max_control_buttons=max_control_buttons
             )
         
+        # Own state encoder for V_r-specific features (trained with V_r loss)
+        # This allows V_r to learn additional state features beyond those learned by V_h^e
+        # Note: own_state_encoder shares cache with state_encoder to avoid redundant tensorization
+        if own_state_encoder is not None:
+            self.own_state_encoder = own_state_encoder
+        else:
+            self.own_state_encoder = MultiGridStateEncoder(
+                grid_height=grid_height,
+                grid_width=grid_width,
+                num_agents_per_color=num_agents_per_color,
+                num_agent_colors=num_agent_colors,
+                feature_dim=state_feature_dim,
+                max_kill_buttons=max_kill_buttons,
+                max_pause_switches=max_pause_switches,
+                max_disabling_switches=max_disabling_switches,
+                max_control_buttons=max_control_buttons,
+                share_cache_with=self.state_encoder
+            )
+        
         # V_r value head with optional dropout
-        # Use actual encoder feature_dim (may differ from state_feature_dim when use_encoders=False)
-        actual_state_dim = self.state_encoder.feature_dim
+        # Uses BOTH shared encoder (frozen/detached) AND own encoder (trained with V_r loss)
+        actual_state_dim = self.state_encoder.feature_dim + self.own_state_encoder.feature_dim
         if dropout > 0.0:
             self.value_head = nn.Sequential(
                 nn.Linear(actual_state_dim, hidden_dim),
@@ -121,10 +141,19 @@ class MultiGridRobotValueNetwork(BaseRobotValueNetwork):
         Returns:
             V_r values tensor (batch,) with V_r < 0.
         """
-        # Encode state
-        state_features = self.state_encoder(
+        # Encode state with SHARED encoder (DETACHED - no gradients flow to shared encoder)
+        # The shared state encoder is trained ONLY by V_h^e loss.
+        shared_state_features = self.state_encoder(
+            grid_tensor, global_features, agent_features, interactive_features
+        ).detach()
+        
+        # Encode state with OWN encoder (trained with V_r loss)
+        own_state_features = self.own_state_encoder(
             grid_tensor, global_features, agent_features, interactive_features
         )
+        
+        # Combine BOTH shared (detached) and own (trainable) features
+        state_features = torch.cat([shared_state_features, own_state_features], dim=-1)
         
         # Compute raw value
         raw_value = self.value_head(state_features).squeeze(-1)

@@ -165,10 +165,14 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
         Returns:
             Q-values tensor (batch, num_action_combinations) with Q_r < 0.
         """
-        # Encode state with shared encoder (frozen during Q_r training)
+        # Encode state with shared encoder (DETACHED - no gradients flow to shared encoder)
+        # This is critical: Q_r has its own_state_encoder that learns Q_r-specific features.
+        # The shared encoder is trained only through V_h^e and X_h gradients.
+        # Detaching prevents Q_r from changing the shared encoder's representation,
+        # which would destabilize V_h^e/X_h and cause RND novelty spikes.
         shared_state_features = self.state_encoder(
             grid_tensor, global_features, agent_features, interactive_features
-        )
+        ).detach()
         
         # Encode state with own encoder (trained with Q_r loss)
         # Use same inputs if own_ versions not provided

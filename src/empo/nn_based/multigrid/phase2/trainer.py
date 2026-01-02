@@ -491,9 +491,21 @@ def create_phase2_networks(
             share_cache_with=share_cache_with,
         ).to(device)
     
+    x_h_own_state_encoder = None
     x_h_own_agent_encoder = None
     if use_neural_x_h:
-        share_cache_with = shared_agent_encoder if use_neural_v_h_e else None
+        state_share_cache_with = shared_state_encoder if use_neural_v_h_e else None
+        x_h_own_state_encoder = MultiGridStateEncoder(
+            grid_height=grid_height,
+            grid_width=grid_width,
+            num_agents_per_color=num_agents_per_color,
+            num_agent_colors=7,
+            feature_dim=hidden_dim,
+            include_step_count=config.include_step_count,
+            use_encoders=config.use_encoders,
+            share_cache_with=state_share_cache_with,
+        ).to(device)
+        agent_share_cache_with = shared_agent_encoder if use_neural_v_h_e else None
         x_h_own_agent_encoder = AgentIdentityEncoder(
             num_agents=max_agents,
             embedding_dim=agent_embedding_dim,
@@ -501,6 +513,34 @@ def create_phase2_networks(
             agent_feature_dim=agent_feature_dim,
             grid_height=grid_height,
             grid_width=grid_width,
+            use_encoders=config.use_encoders,
+            share_cache_with=agent_share_cache_with,
+        ).to(device)
+    
+    u_r_own_state_encoder = None
+    if use_neural_u_r and config.u_r_use_network:
+        share_cache_with = shared_state_encoder if use_neural_v_h_e else None
+        u_r_own_state_encoder = MultiGridStateEncoder(
+            grid_height=grid_height,
+            grid_width=grid_width,
+            num_agents_per_color=num_agents_per_color,
+            num_agent_colors=7,
+            feature_dim=hidden_dim,
+            include_step_count=config.include_step_count,
+            use_encoders=config.use_encoders,
+            share_cache_with=share_cache_with,
+        ).to(device)
+    
+    v_r_own_state_encoder = None
+    if use_neural_v_r and config.v_r_use_network:
+        share_cache_with = shared_state_encoder if use_neural_v_h_e else None
+        v_r_own_state_encoder = MultiGridStateEncoder(
+            grid_height=grid_height,
+            grid_width=grid_width,
+            num_agents_per_color=num_agents_per_color,
+            num_agent_colors=7,
+            feature_dim=hidden_dim,
+            include_step_count=config.include_step_count,
             use_encoders=config.use_encoders,
             share_cache_with=share_cache_with,
         ).to(device)
@@ -546,8 +586,9 @@ def create_phase2_networks(
             dropout=config.x_h_dropout,
             max_agents=max_agents,
             agent_embedding_dim=agent_embedding_dim,
-            state_encoder=shared_state_encoder,       # From V_h^e (real or null)
-            agent_encoder=shared_agent_encoder,       # From V_h^e (real or null)
+            state_encoder=shared_state_encoder,       # From V_h^e (SHARED, used detached)
+            agent_encoder=shared_agent_encoder,       # From V_h^e (SHARED, used detached)
+            own_state_encoder=x_h_own_state_encoder,  # OWN (trained with X_h)
             own_agent_encoder=x_h_own_agent_encoder,  # OWN (trained with X_h)
         ).to(device)
     else:
@@ -570,7 +611,8 @@ def create_phase2_networks(
                 xi=config.xi,
                 eta=config.eta,
                 dropout=config.u_r_dropout,
-                state_encoder=shared_state_encoder,  # SHARED
+                state_encoder=shared_state_encoder,       # SHARED (used detached)
+                own_state_encoder=u_r_own_state_encoder,  # OWN (trained with U_r)
             ).to(device)
         else:
             from empo.nn_based.phase2.lookup import LookupTableIntrinsicRewardNetwork
@@ -591,7 +633,8 @@ def create_phase2_networks(
                 state_feature_dim=hidden_dim,
                 hidden_dim=hidden_dim,
                 dropout=config.v_r_dropout,
-                state_encoder=shared_state_encoder,  # SHARED
+                state_encoder=shared_state_encoder,       # SHARED (used detached)
+                own_state_encoder=v_r_own_state_encoder,  # OWN (trained with V_r)
             ).to(device)
         else:
             from empo.nn_based.phase2.lookup import LookupTableRobotValueNetwork
