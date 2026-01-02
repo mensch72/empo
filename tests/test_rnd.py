@@ -11,7 +11,6 @@ Tests cover:
 import pytest
 import torch
 import torch.nn as nn
-import numpy as np
 
 from empo.nn_based.phase2.rnd import RNDModule, RNDModuleWithEncoder
 
@@ -592,6 +591,8 @@ class TestRNDEncoderCoefficients:
         assert var_zero < 1e-6, f"Expected near-zero variance, got {var_zero}"
         # Full features should have non-trivial variance
         assert var_full > 1e-6, f"Expected non-trivial variance, got {var_full}"
+        # Half features should have positive variance (between zero and full)
+        assert var_half > 1e-6, f"Expected positive variance for half features, got {var_half}"
 
 
 if __name__ == '__main__':
