@@ -1,17 +1,40 @@
 # Batched Computation in Phase 2 Training
 
+> ⚠️ **IMPLEMENTATION STATUS NOTE** (January 2026)
+> 
+> This document was originally written as a **design specification** describing the ideal
+> batched computation approach. Parts of it were never fully implemented:
+> 
+> **✅ IMPLEMENTED:**
+> - Pre-computation of `transition_probs_by_action` by actor at collection time
+> - Model-based V_h^e targets using expected value over transition probabilities
+> - **Policy-weighted V_h^e targets over ALL robot actions** (weighted by π_r(a|s))
+> - Model-based Q_r targets for ALL robot actions (full Bellman backup)
+> - Batched forward passes: ONE call per network per batch
+> - State deduplication for Q_r target computation
+> - Scatter-add aggregation for U_r loss computation
+> 
+> **❌ NOT IMPLEMENTED (documentation describes design only):**
+> - Compressed grid format and `compact_features` storage
+> - `decompress_grid_batch_to_tensor` vectorized decompression
+> - Split tensorization optimization (actor pre-computing compact features)
+> - Scatter-add for Q_r/V_h^e aggregation (uses Python loops for these)
+> - Profiling instrumentation (`profile_batching`, `profile_batching_interval`)
+> 
+> Sections that describe unimplemented features are marked with **[NOT IMPLEMENTED]**.
+
 This document provides extensive documentation of the batching, vectorizing, tensorizing, stacking, and reshaping operations used in the Phase 2 EMPO trainer for efficient GPU/CPU computation.
 
 ## Table of Contents
 
 1. [Overview](#overview)
-2. [Split Tensorization Optimization](#split-tensorization-optimization)
+2. [Split Tensorization Optimization](#split-tensorization-optimization) **[NOT IMPLEMENTED]**
 3. [The Problem: Variable-Size Successor States](#the-problem-variable-size-successor-states)
 4. [Key Data Structures](#key-data-structures)
-5. [Batched Target Computation](#batched-target-computation) (Stages 1-4)
+5. [Batched Target Computation](#batched-target-computation) (Stages 1-4) — ✅ Implemented
 6. [State Encoding](#state-encoding)
-7. [Scatter-Add Aggregation](#scatter-add-aggregation)
-8. [V_h^e Batched Computation](#v_he-batched-computation) (Stage 5)
+7. [Scatter-Add Aggregation](#scatter-add-aggregation) — Partial (U_r only)
+8. [V_h^e Batched Computation](#v_he-batched-computation) (Stage 5) — ✅ Fully Implemented
 9. [Common Pitfalls](#common-pitfalls)
 10. [Performance Comparison](#performance-comparison)
 11. [Alternative Modes: Disabling Encoders and Lookup Tables](#alternative-modes-disabling-encoders-and-lookup-tables)
@@ -29,6 +52,23 @@ Phase 2 training requires computing Q_r targets for all robot actions (by a "rob
 **Naive approach:** Nested loops with individual forward passes → ~1000+ forward passes per batch  
 **Batched approach:** Collect all states, one forward pass, scatter-add aggregation → 1-2 forward passes per batch
 
+### What's Actually Implemented (as of January 2026)
+
+The current implementation achieves batching through:
+
+1. **Actor pre-computes `transition_probs_by_action`** ✅ — Stored in replay buffer
+2. **Model-based targets** ✅ — Uses expected values over successor states (not single-sample TD)
+3. **Policy-weighted V_h^e** ✅ — V_h^e targets weighted by π_r(a|s) over ALL robot actions
+4. **Batched forward passes** ✅ — ONE `forward_batch()` call per network
+5. **State deduplication for Q_r** ✅ — Unique successor states collected, then aggregated
+6. **Scatter-add for U_r** ✅ — U_r loss uses `scatter_add_` for efficient aggregation
+7. **Python loop aggregation for Q_r/V_h^e** — Results aggregated via Python loops
+
+**What's NOT implemented:**
+- Compressed grid format (successor states stored as raw tuples)
+- Scatter-add for Q_r/V_h^e aggregation (uses Python loops for these networks)
+- Profiling instrumentation
+
 ### Data Flow: Actor → Replay Buffer → Trainer
 
 The computation is split between the **actor** (data collection) and **trainer** (learning), with a **replay buffer** in between:
@@ -39,14 +79,12 @@ The computation is split between the **actor** (data collection) and **trainer**
 │  ─────────────────────────────────────────────                              │
 │  For each step:                                                             │
 │   1. Execute action in environment → get next_state                         │
-│   2. Pre-compute transition_probs_by_action for ALL robot actions           │
+│   2. Pre-compute transition_probs_by_action for ALL robot actions    ✅     │
 │      (queries world model once per action combination)                      │
-│   3. Compute compact_features for state and next_state:                     │
-│      - global_features (4 floats)                                           │
-│      - agent_features (~26 floats for 2 agents)                             │
-│      - interactive_features (~48-96 floats for buttons/switches)            │
-│      - compressed_grid (H×W int32s = 49 values for 7×7 grid)               │
-│   4. Store transition in replay buffer                                      │
+│   3. [NOT IMPLEMENTED] Compute compact_features for state:                  │
+│      - global_features, agent_features, interactive_features                │
+│      - compressed_grid (H×W int32s)                                         │
+│   4. Store transition in replay buffer (next_state=None when model-based)   │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼
@@ -54,43 +92,45 @@ The computation is split between the **actor** (data collection) and **trainer**
 │  REPLAY BUFFER                                                              │
 │  ─────────────                                                              │
 │  Stores Phase2Transition objects containing:                                │
-│   - state, next_state (raw tuples for successor computation)                │
-│   - robot_action, human_actions, goals                                      │
+│   - state (raw tuple)                                                       │
+│   - next_state = None (when use_model_based_targets=True)            ✅     │
+│   - robot_action, human_actions, goals, goal_weights                        │
 │   - transition_probs_by_action: Dict[action_idx → [(prob, successor), ...]] │
-│   - compact_features = (global, agent, interactive, compressed_grid)        │
-│   - Total storage per state: ~508 bytes (vs 7644 bytes for full tensor)     │
+│   - [NOT IMPLEMENTED] compact_features                                      │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     │
                                     ▼ sample(batch_size)
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  TRAINER (learning, Stages 1-5 below)                                       │
-│  ───────────────────────────────────                                        │
+│  TRAINER (learning)                                                         │
+│  ──────────────────                                                         │
 │  For each training step:                                                    │
-│   1. Sample batch of transitions from replay buffer                         │
-│   2. Stage 1: Collect all successor states from cached transition_probs     │
-│   3. Stage 2: Batch decompress grids (fully vectorized, no world_model!)    │
-│   4. Stage 3: Single batched forward pass through networks                  │
-│   5. Stage 4: Scatter-add aggregation for Q_r targets                       │
-│   6. Stage 5: Compute V_h^e targets with policy weighting                   │
-│   7. Compute losses and update network weights                              │
+│   1. Sample batch of transitions from replay buffer                  ✅     │
+│   2. Collect all successor states from transition_probs_by_action    ✅     │
+│   3. [NOT IMPLEMENTED] Batch decompress grids (uses full tensorization)     │
+│   4. Single batched forward pass through networks                    ✅     │
+│   5. Scatter-add aggregation for U_r                                 ✅     │
+│   6. Policy-weighted V_h^e targets over ALL robot actions            ✅     │
+│   7. Compute losses and update network weights                       ✅     │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 **Key design decisions:**
 
-- **Actor pre-computes `transition_probs_by_action`:** This avoids redundant world model queries during training. Each transition's successor states for all robot actions are computed once at collection time.
+- **Actor pre-computes `transition_probs_by_action`:** ✅ IMPLEMENTED. This avoids redundant world model queries during training. Each transition's successor states for all robot actions are computed once at collection time.
 
-- **Actor pre-computes `compact_features` including `compressed_grid`:** ALL information needed to reconstruct the full tensorized state is captured at collection time. This includes:
-  - Expensive-to-compute features (global, agent, interactive)
-  - Compressed grid that captures ALL grid objects (static + dynamic)
+- **Actor pre-computes `compact_features` including `compressed_grid`:** ❌ NOT IMPLEMENTED. The documentation below describes an optimization that was never coded. Currently, states are stored as raw tuples and tensorized at training time using the world model.
 
-- **Trainer needs NO access to world_model:** The compressed grid contains everything needed to reconstruct the full grid tensor. This enables true off-policy learning where transitions may come from different episodes with different world layouts.
+- **Trainer needs NO access to world_model:** ❌ NOT TRUE. The current implementation still requires world_model access for tensorization during training. The compressed grid format that would enable world_model-free training is not implemented.
 
-- **Fully vectorized batch decompression:** The `decompress_grid_batch_to_tensor` method unpacks an entire batch of compressed grids into full channel tensors using only PyTorch tensor operations - no Python loops over batch elements or grid cells.
+- **Fully vectorized batch decompression:** ❌ NOT IMPLEMENTED. The `decompress_grid_batch_to_tensor` method described below does not exist.
 
 ---
 
 ## Compressed Grid Format
+
+> ⚠️ **[NOT IMPLEMENTED]** This entire section describes a design that was never coded.
+> The compressed grid format, bit layout, and `decompress_grid_batch_to_tensor` method
+> do not exist in the codebase. States are currently stored as raw tuples.
 
 The grid tensor (39 channels × 7 × 7 = 1911 floats = 7644 bytes per state) is compressed into a single int32 per cell (49 int32s = 196 bytes for 7×7 grid).
 
@@ -121,6 +161,10 @@ See `constants.py` for the exact bit masks and shifts used:
 ---
 
 ## Split Tensorization Optimization
+
+> ⚠️ **[NOT IMPLEMENTED]** This entire section describes a design that was never coded.
+> The `tensorize_state_compact()`, `compress_grid()`, and `tensorize_state_from_compact()`
+> methods do not exist. States are tensorized at training time using full tensorization.
 
 State tensorization in multigrid environments involves several steps with very different computational profiles:
 
@@ -187,11 +231,11 @@ Per state stored in replay buffer:
 ### Implementation
 
 See `MultiGridStateEncoder` in `src/empo/nn_based/multigrid/state_encoder.py` for the split tensorization methods:
-- `tensorize_state_compact()` - Returns (global, agent, interactive) tensors without grid
-- `compress_grid()` - Returns (H, W) int32 tensor with all grid info
-- `decompress_grid_to_tensor()` - Unpacks single grid to (1, C, H, W) tensor
-- `decompress_grid_batch_to_tensor()` - Fully vectorized batch decompression
-- `tensorize_state_from_compact()` - Combines pre-computed features with grid tensor
+- `tensorize_state_compact()` - **[NOT IMPLEMENTED]** Returns (global, agent, interactive) tensors without grid
+- `compress_grid()` - **[NOT IMPLEMENTED]** Returns (H, W) int32 tensor with all grid info
+- `decompress_grid_to_tensor()` - **[NOT IMPLEMENTED]** Unpacks single grid to (1, C, H, W) tensor
+- `decompress_grid_batch_to_tensor()` - **[NOT IMPLEMENTED]** Fully vectorized batch decompression
+- `tensorize_state_from_compact()` - **[NOT IMPLEMENTED]** Combines pre-computed features with grid tensor
 
 See Phase 2 trainer for usage of compact features with compressed grids in replay buffer storage.
 
@@ -218,6 +262,9 @@ Batch of 32 transitions
 **Total successors:** Variable, typically 32 × 16 × ~2 ≈ 1024 states
 
 We cannot use a fixed-size tensor like `(batch, actions, max_successors)` without padding, which wastes computation. Instead, we **flatten** everything into variable-length lists and use **scatter-add** to aggregate.
+
+> **Note:** The scatter-add aggregation described in this document is **NOT IMPLEMENTED**.
+> The current implementation uses Python loops for aggregation, which is slower but correct.
 
 ---
 
@@ -253,10 +300,18 @@ All lists have the same length: `n_successors = len(all_successor_states)`
 
 ## Batched Target Computation
 
+> **IMPLEMENTATION STATUS:**
+> - Stage 1 (Collect Successor States): ✅ IMPLEMENTED
+> - Stage 2 (Batch Tensorize): ✅ IMPLEMENTED (but not using compressed grids)
+> - Stage 3 (Single Forward Pass): ✅ IMPLEMENTED
+> - Stage 4 (Scatter-Add Aggregation): ❌ NOT IMPLEMENTED (uses Python loops)
+
 > **All stages below run in the TRAINER** after sampling a batch from the replay buffer.
 > The `transition_probs_by_action` used in Stage 1 was pre-computed by the **actor** at data collection time.
 
 ### Stage 1: Collect All Successor States (Trainer)
+
+> ✅ **IMPLEMENTED** in `_compute_model_based_q_r_targets()` and `_compute_model_based_v_h_e_targets()`
 
 The trainer iterates over the sampled batch and extracts all successor states from the **pre-computed** `transition_probs_by_action` dictionaries (computed by the actor, stored in replay buffer).
 
@@ -298,9 +353,15 @@ def _compute_model_based_targets_batched(self, batch, effective_beta_r, ...):
 
 ### Stage 2: Batch Tensorize All States (Trainer)
 
+> ✅ **PARTIALLY IMPLEMENTED** — Batched tensorization works, but NOT using compressed grids.
+> The current implementation calls `forward_batch()` which internally tensorizes states.
+> The compressed grid optimization described below is NOT IMPLEMENTED.
+
 The trainer converts all raw successor states (collected in Stage 1) into tensor format for GPU computation. 
 
 **Optimized path with pre-computed compact features + compressed grid:**
+
+> ⚠️ **[NOT IMPLEMENTED]** The entire compressed grid path below does not exist.
 
 When the replay buffer contains pre-computed `compact_features` including compressed grid, the trainer can reconstruct full state tensors **without any access to world_model**. This is critical for off-policy learning where transitions may come from different episodes with different world layouts.
 
@@ -358,6 +419,8 @@ The compressed grid solves this by capturing ALL grid information at collection 
 
 **Fallback path (no compact features):**
 
+> ✅ **THIS IS WHAT'S ACTUALLY IMPLEMENTED** — Full tensorization at training time.
+
 If compact features are not available, use the full tensorization:
 
 ```python
@@ -397,6 +460,10 @@ s_prime_encoded[3] (interactive): (1024, 96)
 ---
 
 ### Stage 3: Single Forward Pass for V_r (Trainer)
+
+> ✅ **IMPLEMENTED** in `_compute_model_based_q_r_targets()` — ONE batched call to
+> `_compute_u_r_batch_target()` and ONE call to `q_r_target.forward_batch()` or
+> `v_r_target.forward_batch()`.
 
 The trainer performs a single batched forward pass through the value network for all successor states.
 
@@ -449,11 +516,51 @@ if v_r_values.dim() > 1:
 
 ### Stage 4: Scatter-Add Aggregation (Trainer)
 
+> ⚠️ **[NOT IMPLEMENTED]** The scatter-add aggregation described below does not exist.
+> The current implementation uses Python loops in `_compute_model_based_q_r_targets()`:
+> ```python
+> for batch_idx in range(batch_size):
+>     for action_idx in range(num_actions):
+>         for unique_idx, prob in successor_info[batch_idx][action_idx]:
+>             expected_target += prob * q_targets_all[unique_idx].item()
+> ```
+> This is correct but slower than the scatter-add approach.
+
 The trainer aggregates V_r values back into per-(transition, action) expected values using scatter-add.
+
+---
+
+## Scatter-Add Aggregation
+
+> **PARTIAL IMPLEMENTATION:** Scatter-add IS used for U_r loss computation (aggregating X_h values
+> by state). However, Q_r and V_h^e target aggregation uses Python loops.
+> See `compute_losses()` in `trainer.py` for the U_r scatter-add implementation.
 
 This is the key innovation for handling variable successors without padding.
 
 **Goal:** Compute `E[V_r(s')] = Σ P(s'|s,a) V_r(s')` for each (transition, action) pair.
+
+### U_r Scatter-Add (IMPLEMENTED)
+
+The U_r loss computation uses scatter-add to aggregate X_h values by state:
+
+```python
+# Aggregate by state using scatter_add: sum X_h^{-xi} for each state
+state_indices = []
+for state_idx, n_humans in enumerate(u_r_humans_per_state):
+    state_indices.extend([state_idx] * n_humans)
+state_indices_t = torch.tensor(state_indices, device=self.device)
+
+x_h_sums = torch.zeros(n_states, device=self.device)
+x_h_sums.scatter_add_(0, state_indices_t, x_h_power)
+
+# Average: y = E[X_h^{-xi}]
+u_r_targets_tensor = x_h_sums / humans_per_state_t
+```
+
+### Q_r/V_h^e Aggregation (Python Loops)
+
+Q_r and V_h^e target aggregation currently uses Python loops rather than scatter-add:
 
 ```python
 # Convert metadata to tensors
@@ -569,6 +676,11 @@ def _batch_tensorize_states(self, states: List[Any]) -> Tuple[Tensor, ...]:
 
 ## V_h^e Batched Computation
 
+> **IMPLEMENTATION STATUS:** ✅ FULLY IMPLEMENTED
+> - Batched forward pass: ✅ IMPLEMENTED (ONE call to `v_h_e_target.forward_batch()`)
+> - Policy weighting over all actions: ✅ IMPLEMENTED (weighted by π_r(a|s))
+> - Python loop aggregation: ✅ IMPLEMENTED (scatter-add not used)
+
 V_h^e (human goal achievement value) requires additional complexity because it involves:
 - Goals (variable per human)
 - Agent identity encoding
@@ -576,100 +688,104 @@ V_h^e (human goal achievement value) requires additional complexity because it i
 
 ### Stage 5: V_h^e Target Computation (Trainer)
 
+> ✅ **FULLY IMPLEMENTED** in `_compute_model_based_v_h_e_targets()`
+> 
+> The current implementation:
+> 1. Computes robot policy π_r(a|s) for each state in batch (ONE batched Q_r call)
+> 2. For each (transition, human, goal), loops over ALL robot actions weighted by π_r(a|s)
+> 3. Collects ALL successor states across ALL (transition, action, goal) combinations
+> 4. Makes ONE batched `v_h_e_target.forward_batch()` call
+> 5. Aggregates via Python loops with policy weighting
+> 
+> The V_h^e target is computed as:
+> ```
+> V_h^e(s, g) = Σ_a π_r(a|s) * Σ_{s'} P(s'|s,a) * [achieved(s',g) + (1-achieved) * γ_h * V_h^e(s',g)]
+> ```
+
 The trainer computes V_h^e targets, which additionally require goal encoding and policy weighting.
 
 ```python
-if v_h_e_goals:
-    # Compute robot policies for original states (for weighting)
-    original_states = [t.state for t in batch]
-    s_encoded = self._batch_tensorize_states(original_states)
-    # s_encoded: tuple of (n_transitions, ...) tensors
+# Phase 1: Get robot policy π_r(a|s) for each state in batch (ONE Q_r call)
+states = [t.state for t in batch]
+with torch.no_grad():
+    q_r_batch = self.networks.q_r_target.forward_batch(states, self.env, self.device)
+    robot_policies = self.networks.q_r_target.get_policy(q_r_batch, beta_r=effective_beta_r)
+    # robot_policies: (batch_size, num_actions)
+
+# Phase 2: Collect successor states weighted by π_r(a|s) * P(s'|s,a)
+for data_idx, (trans_idx, human_idx, goal) in enumerate(v_h_e_data):
+    policy = robot_policies[trans_idx]  # (num_actions,)
     
-    own_s_encoded = self._batch_tensorize_states_with_encoder(
-        original_states, self.networks.q_r.own_state_encoder
-    )
-    
-    with torch.no_grad():
-        q_r_orig = self.networks.q_r.forward(*s_encoded, *own_s_encoded)
-        # q_r_orig: (n_transitions, num_actions)
-        
-        robot_policies = self.networks.q_r.get_policy(q_r_orig, beta_r=effective_beta_r)
-        # robot_policies: (n_transitions, num_actions)
+    # Loop over ALL robot actions, weighted by policy
+    for action_idx in range(num_actions):
+        action_prob = policy[action_idx].item()
+        if action_prob < 1e-8:
+            continue
+            
+        for state_prob, next_state in trans_probs_by_action[action_idx]:
+            weight = action_prob * state_prob  # Combined weight
+            # ... accumulate achieved or collect for batched V_h^e evaluation
 ```
 
 ### Building V_h^e Successor Data
 
+The implementation collects successor states weighted by π_r(a|s) * P(s'|s,a):
+
 ```python
-# Group V_h^e entries by transition
-trans_to_v_h_e = defaultdict(list)  # trans_idx -> [(entry_idx, h_idx, goal), ...]
-for entry_idx, trans_idx in enumerate(v_h_e_indices):
-    h_idx = v_h_e_human_indices[entry_idx]
-    goal = v_h_e_goals[entry_idx]
-    trans_to_v_h_e[trans_idx].append((entry_idx, h_idx, goal))
+# Collect successor states for batched V_h^e evaluation
+all_next_states = []
+all_human_indices = []
+all_goals = []
+successor_mapping = []  # (v_h_e_data_idx, weight)
+achieved_contributions = [0.0] * n_samples  # Direct contributions from achieved goals
 
-# Build expanded lists for all (successor, human, goal) combinations
-v_h_e_succ_indices = []     # Index into all_successor_states
-v_h_e_succ_humans = []      # Human index
-v_h_e_succ_goals = []       # Goal object
-v_h_e_succ_entry_idx = []   # Which v_h_e entry this contributes to
-v_h_e_succ_action_idx = []  # Action (for policy weighting)
-v_h_e_succ_probs = []       # Transition probability
-v_h_e_succ_trans_idx = []   # Transition index
-
-for succ_idx in range(n_successors):
-    trans_idx = all_successor_trans_idx[succ_idx]
-    action_idx = all_successor_action_idx[succ_idx]
-    prob = all_successor_probs[succ_idx]
+for data_idx, (trans_idx, human_idx, goal) in enumerate(v_h_e_data):
+    policy = robot_policies[trans_idx]
     
-    # Expand for each V_h^e entry in this transition
-    for entry_idx, h_idx, goal in trans_to_v_h_e.get(trans_idx, []):
-        v_h_e_succ_indices.append(succ_idx)
-        v_h_e_succ_humans.append(h_idx)
-        v_h_e_succ_goals.append(goal)
-        v_h_e_succ_entry_idx.append(entry_idx)
-        v_h_e_succ_action_idx.append(action_idx)
-        v_h_e_succ_probs.append(prob)
-        v_h_e_succ_trans_idx.append(trans_idx)
+    for action_idx in range(num_actions):
+        action_prob = policy[action_idx].item()
+        if action_prob < 1e-8:
+            continue
+            
+        for state_prob, next_state in trans_probs_by_action[action_idx]:
+            weight = action_prob * state_prob
+            achieved = check_goal_achieved(next_state, human_idx, goal)
+            
+            if achieved:
+                achieved_contributions[data_idx] += weight  # weight * 1.0
+            else:
+                all_next_states.append(next_state)
+                all_human_indices.append(human_idx)
+                all_goals.append(goal)
+                successor_mapping.append((data_idx, weight))
 ```
 
 ### Batched V_h^e Forward Pass
 
+> ✅ **IMPLEMENTED** — ONE batched `v_h_e_target.forward_batch()` call for all successor states.
+
 ```python
-if v_h_e_succ_indices:
-    n_v_h_e_successors = len(v_h_e_succ_indices)
-    
-    # Get successor states using indices into pre-encoded states
-    succ_idx_tensor = torch.tensor(v_h_e_succ_indices, device=self.device, dtype=torch.long)
-    v_h_e_s_prime = (
-        s_prime_encoded[0][succ_idx_tensor],  # Index into batch dim
-        s_prime_encoded[1][succ_idx_tensor],
-        s_prime_encoded[2][succ_idx_tensor],
-        s_prime_encoded[3][succ_idx_tensor],
-    )
-    # v_h_e_s_prime: tuple of (n_v_h_e_successors, ...) tensors
-    
-    # Check goal achievement (vectorized where possible)
-    achieved_list = []
-    for i, (next_state, h_idx, goal) in enumerate(zip(
-        [all_successor_states[i] for i in v_h_e_succ_indices],
-        v_h_e_succ_humans,
-        v_h_e_succ_goals
-    )):
-        achieved = self.check_goal_achieved(next_state, h_idx, goal)
-        achieved_list.append(1.0 if achieved else 0.0)
-    achieved_tensor = torch.tensor(achieved_list, device=self.device)
-    # achieved_tensor: (n_v_h_e_successors,)
-    
-    # Encode goals
-    goal_features = self._batch_tensorize_goals(v_h_e_succ_goals)
-    # goal_features: (n_v_h_e_successors, goal_feature_dim)
-    
-    # Encode agent identities
-    v_h_e_idx, v_h_e_grid, v_h_e_feat = self._batch_tensorize_agent_identities(
-        v_h_e_succ_humans,
-        [all_successor_states[i] for i in v_h_e_succ_indices]
-    )
-    # v_h_e_idx: (n_v_h_e_successors,), v_h_e_grid: (n_v_h_e_successors, ...), etc.
+if all_next_states:
+    with torch.no_grad():
+        v_h_e_all = self.networks.v_h_e_target.forward_batch(
+            all_next_states, all_goals, all_human_indices,
+            self.env, self.device
+        )
+        v_h_e_all = self.networks.v_h_e_target.apply_hard_clamp(v_h_e_all).squeeze()
+```
+
+### Aggregation with Policy Weighting
+
+```python
+# Initialize targets with achieved contributions
+targets = torch.zeros(n_samples, device=self.device)
+for data_idx, contrib in enumerate(achieved_contributions):
+    targets[data_idx] += contrib
+
+# Add V_h^e contributions from non-achieved successors
+for succ_idx, (data_idx, weight) in enumerate(successor_mapping):
+    targets[data_idx] += weight * gamma_h * v_h_e_all[succ_idx].item()
+````
     
     # Single batched forward pass
     with torch.no_grad():
@@ -682,6 +798,9 @@ if v_h_e_succ_indices:
 ```
 
 ### Aggregating V_h^e with Policy Weighting
+
+> ⚠️ **[NOT IMPLEMENTED]** The policy-weighted scatter-add aggregation below is not coded.
+> The current implementation uses Python loops and does NOT weight by π_r(a|s).
 
 ```python
     # TD target: achieved + (1 - achieved) * γ * V_h^e(s')
@@ -776,6 +895,10 @@ encoded = self._batch_tensorize_states(states)  # Properly handles list → tens
 
 ## Performance Comparison
 
+> **Note:** The performance numbers below are theoretical based on the full design.
+> The actual implementation is slower due to Python loop aggregation instead of scatter-add,
+> but still much faster than fully naive per-state forward passes.
+
 ### Naive Implementation (SLOW)
 
 ```python
@@ -794,6 +917,8 @@ for trans_idx, t in enumerate(batch):
 
 ### Batched Implementation (FAST)
 
+> ✅ **PARTIALLY IMPLEMENTED** — Batched forward passes work, but aggregation uses Python loops.
+
 ```python
 # 1-2 forward passes total
 all_states = collect_all_successors(batch)           # O(batch × actions × successors)
@@ -806,6 +931,9 @@ q_r_targets = scatter_add_aggregate(v_r_all, ...)    # O(n_successors) scatter o
 
 ### Measured Speedup
 
+> **Note:** These numbers are from the original design document and may not reflect
+> actual performance of the current partial implementation.
+
 | Configuration | Naive | Batched | Speedup |
 |--------------|-------|---------|---------|
 | 7×7 grid, 2 humans, 2 robots, batch=32 | ~120s/episode | ~3.5s/episode | **~34×** |
@@ -816,17 +944,21 @@ q_r_targets = scatter_add_aggregate(v_r_all, ...)    # O(n_successors) scatter o
 
 The key techniques for efficient batched computation:
 
-1. **Flatten variable-size data** into parallel lists with metadata indices
-2. **Batch encode** all states in one pass using `torch.cat`
-3. **Single forward pass** through neural networks
-4. **Scatter-add aggregation** to handle variable successors without padding
-5. **Careful shape management** to avoid broadcasting bugs
+1. **Flatten variable-size data** into parallel lists with metadata indices ✅ IMPLEMENTED
+2. **Batch encode** all states in one pass using `torch.cat` ✅ IMPLEMENTED (via `forward_batch`)
+3. **Single forward pass** through neural networks ✅ IMPLEMENTED
+4. **Scatter-add aggregation** to handle variable successors without padding ❌ NOT IMPLEMENTED
+5. **Careful shape management** to avoid broadcasting bugs ✅ IMPLEMENTED
 
 These techniques transform O(N×M×K) forward passes into O(1) forward passes, yielding 30-50× speedups for typical Phase 2 training configurations.
 
 ---
 
 ## Profiling
+
+> ⚠️ **[NOT IMPLEMENTED]** The profiling instrumentation described below does not exist.
+> The config options `profile_batching` and `profile_batching_interval` are not implemented.
+> Use external profilers like `line_profiler` or `cProfile` instead.
 
 To identify bottlenecks in the batched computation, enable built-in profiling:
 

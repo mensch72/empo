@@ -116,6 +116,30 @@ Phase 2 trains five networks for the robot's empowerment-based decision making:
                          - V_r MLP head
 ```
 
+### Encoder Summary Table
+
+| Network | Mode | Shared Encoders | Own Encoders | Gradient Flow |
+|---------|------|-----------------|--------------|---------------|
+| **V_h^e** | Neural | Creates & trains state, goal, agent | None (it IS the shared source) | Trains shared encoders + own MLP |
+| **V_h^e** | Tabular | NullEncoders (output zeros) | None | Lookup table only |
+| **Q_r** | Neural | state (detached) | own_state_encoder | Trains own encoder + MLP |
+| **Q_r** | Tabular | None | None | Lookup table only |
+| **X_h** | Neural | state (detached), agent (detached) | own_state_encoder, own_agent_encoder | Trains own encoders + MLP |
+| **X_h** | Tabular | None | None | Lookup table only |
+| **U_r** | Neural | state (detached) | own_state_encoder | Trains own encoder + MLP |
+| **U_r** | Tabular | None | None | Lookup table only |
+| **V_r** | Neural | state (detached) | own_state_encoder | Trains own encoder + MLP |
+| **V_r** | Tabular | None | None | Lookup table only |
+| **RND** | Neural | ALL (detached) × coefficients | None | Trains predictor MLP only |
+| **RND** | Tabular | N/A (RND disabled in tabular mode) | N/A | N/A |
+
+**Key points:**
+- In **neural mode**, shared encoders provide frozen features (via `.detach()`), while own encoders learn network-specific features
+- In **tabular mode**, lookup tables hash the state directly without any encoders
+- **Only V_h^e** trains the shared encoders - all other networks use them in detached (frozen) mode
+- **RND** uses concatenated features from ALL encoders (shared + all own encoders), each weighted by warmup coefficients
+- This prevents gradient conflicts between networks with different objectives
+
 ### Why This Architecture?
 
 1. **Gradient Conflict Avoidance**: Different networks have different objectives. Having V_h^e train shared encoders while others use detached outputs prevents conflicting gradient signals.
@@ -125,6 +149,47 @@ Phase 2 trains five networks for the robot's empowerment-based decision making:
 3. **Efficient Shared Learning**: V_h^e is trained on human Q-values from Phase 1, which provides a strong learning signal for general state/goal/agent representations that benefit all networks.
 
 4. **Stability**: Detaching shared encoder outputs for most networks prevents loss scale differences from destabilizing the shared encoder training.
+
+### RND (Random Network Distillation) Encoder Architecture
+
+The RND module uses a special multi-encoder architecture to compute novelty scores for exploration:
+
+**Input Features**: RND concatenates features from ALL state encoders:
+1. Shared state encoder (from V_h^e)
+2. X_h own state encoder
+3. U_r own state encoder (if `u_r_use_network=True`)
+4. Q_r own state encoder
+
+```
+          ┌─────────────────────────────────────────────────────────────────┐
+          │                    RND Input Features                           │
+          │ [shared_features | x_h_own | u_r_own (if enabled) | q_r_own]   │
+          │                     × encoder_coefficients                      │
+          └─────────────────────────────────────────────────────────────────┘
+                                       │
+                    ┌──────────────────┼──────────────────┐
+                    │                  │                  │
+                    ▼                  ▼                  ▼
+            ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
+            │    Target    │   │  Predictor   │   │   Novelty    │
+            │  (frozen)    │   │ (trainable)  │   │    Score     │
+            └──────────────┘   └──────────────┘   └──────────────┘
+```
+
+**Warmup Coefficient Ramping**: Each encoder's features are multiplied by a coefficient that ramps from 0→1 during the warmup stage when that encoder is introduced:
+
+| Warmup Stage | Encoder | Coefficient Ramp |
+|--------------|---------|------------------|
+| Stage 0 (V_h^e) | shared_state_encoder | 0→1 |
+| Stage 1 (X_h) | x_h_own_state_encoder | 0→1 |
+| Stage 2 (U_r) | u_r_own_state_encoder | 0→1 (if enabled) |
+| Stage 3 (Q_r) | q_r_own_state_encoder | 0→1 |
+
+**Why This Design?**:
+1. **Smooth Transitions**: Coefficients ramp smoothly (0→1) as new encoders come online, avoiding abrupt changes in novelty distribution when training stages begin.
+2. **Complete State Representation**: Using ALL encoder features gives RND a richer representation than any single encoder alone.
+3. **No Gradient Conflicts**: All encoder features are detached (no gradients flow back to encoders from RND loss).
+4. **Stability**: The coefficient ramping prevents the novelty metric from spiking when new encoders start training, which previously caused issues with exploration.
 
 ---
 

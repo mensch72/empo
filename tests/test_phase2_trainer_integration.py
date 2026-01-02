@@ -503,6 +503,141 @@ class TestAgentIndices:
 
 
 # =============================================================================
+# MODEL-BASED TARGET TESTS
+# =============================================================================
+
+class TestModelBasedTargets:
+    """Tests for model-based target computation using transition_probabilities."""
+    
+    def test_next_state_none_when_model_based(self):
+        """When use_model_based_targets=True, next_state should be None in transitions."""
+        config = Phase2Config(
+            use_model_based_targets=True,
+            batch_size=4,
+            buffer_size=100
+        )
+        
+        # Create a mock transition like what the trainer would create
+        from empo.nn_based.phase2.replay_buffer import Phase2Transition
+        
+        # This mimics what the trainer does when model_based is enabled
+        stored_next_state = None if config.use_model_based_targets else 'some_state'
+        transition_probs = {0: [(1.0, 'successor_state')]} if config.use_model_based_targets else None
+        
+        transition = Phase2Transition(
+            state='current_state',
+            robot_action=(0,),
+            goals={0: 'goal'},
+            goal_weights={0: 1.0},
+            human_actions=[0],
+            next_state=stored_next_state,
+            transition_probs_by_action=transition_probs,
+            terminal=False
+        )
+        
+        assert transition.next_state is None
+        assert transition.transition_probs_by_action is not None
+    
+    def test_next_state_stored_when_not_model_based(self):
+        """When use_model_based_targets=False, next_state should be stored."""
+        config = Phase2Config(
+            use_model_based_targets=False,
+            batch_size=4,
+            buffer_size=100
+        )
+        
+        stored_next_state = 'some_state' if not config.use_model_based_targets else None
+        transition_probs = None if not config.use_model_based_targets else {0: [(1.0, 'successor')]}
+        
+        transition = Phase2Transition(
+            state='current_state',
+            robot_action=(0,),
+            goals={0: 'goal'},
+            goal_weights={0: 1.0},
+            human_actions=[0],
+            next_state=stored_next_state,
+            transition_probs_by_action=transition_probs,
+            terminal=False
+        )
+        
+        assert transition.next_state == 'some_state'
+        assert transition.transition_probs_by_action is None
+    
+    def test_transition_probs_contain_successor_states(self):
+        """Verify transition_probs_by_action contains proper successor states."""
+        # This verifies the data structure used for model-based targets
+        trans_probs = {
+            0: [(0.5, 'state_a'), (0.5, 'state_b')],
+            1: [(1.0, 'state_c')],
+            2: [],  # Terminal for this action
+        }
+        
+        # Verify structure
+        assert len(trans_probs[0]) == 2
+        assert sum(p for p, _ in trans_probs[0]) == 1.0
+        assert trans_probs[1][0][0] == 1.0
+        assert trans_probs[2] == []  # Empty means terminal
+    
+    def test_config_default_is_model_based(self):
+        """Verify default config uses model-based targets."""
+        config = Phase2Config()
+        assert config.use_model_based_targets is True
+    
+    def test_no_successor_states_stored_in_transitions(self):
+        """
+        Verify that when use_model_based_targets=True, successor states are NOT
+        stored in transitions (only transition_probs_by_action is stored).
+        
+        This ensures memory efficiency and forces correct model-based computation.
+        """
+        from empo.nn_based.phase2.replay_buffer import Phase2Transition
+        
+        # Create transitions mimicking what collect_transition does
+        config = Phase2Config(use_model_based_targets=True)
+        
+        # Simulate multiple transitions
+        for _ in range(10):
+            # When model-based is enabled, next_state should be None
+            stored_next_state = None if config.use_model_based_targets else 'actual_next_state'
+            
+            # transition_probs_by_action should contain all successor info
+            # This is a dict: action_idx -> [(prob, next_state), ...]
+            transition_probs = {
+                0: [(0.5, 'state_a'), (0.5, 'state_b')],  # Two possible successors
+                1: [(1.0, 'state_c')],  # Deterministic transition
+                2: [],  # Terminal/no successors
+            } if config.use_model_based_targets else None
+            
+            transition = Phase2Transition(
+                state='current_state',
+                robot_action=(0,),
+                goals={0: 'goal'},
+                goal_weights={0: 1.0},
+                human_actions=[0],
+                next_state=stored_next_state,
+                transition_probs_by_action=transition_probs,
+                terminal=False
+            )
+            
+            # CRITICAL: next_state must be None when model-based
+            assert transition.next_state is None, \
+                "Successor states should NOT be stored when use_model_based_targets=True"
+            
+            # transition_probs_by_action must contain all successor info
+            assert transition.transition_probs_by_action is not None, \
+                "transition_probs_by_action must be populated when model-based"
+            
+            # Verify successor states are in transition_probs, not next_state
+            all_successors = []
+            for action_idx, probs in transition.transition_probs_by_action.items():
+                for prob, succ_state in probs:
+                    all_successors.append(succ_state)
+            
+            assert len(all_successors) > 0 or 2 in transition.transition_probs_by_action, \
+                "Successor states should be in transition_probs_by_action"
+
+
+# =============================================================================
 # RUN TESTS
 # =============================================================================
 

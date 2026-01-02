@@ -165,7 +165,7 @@ Hypothesis: as long as the exploration strategies are essentially Markov process
 
 Consider these approaches for better coverage:
 
-1. **Curiosity-driven exploration**: Implement intrinsic rewards for visiting novel states. **Now implemented via RND** - see below.
+1. **Curiosity-driven exploration**: Implement intrinsic rewards for visiting novel states. **Now implemented via RND (neural networks) and Count-Based Curiosity (tabular)** - see below.
 
 2. **Prioritized experience replay**: Give higher priority to transitions from rare states (partial support via replay buffer). While this will not affect what states are visited, it can improve approximation of quantities in rarely visited regions.
 
@@ -173,7 +173,18 @@ Consider these approaches for better coverage:
 
 4. **Longer episodes**: Increase `max_steps` to allow deeper exploration within episodes.
 
-## Curiosity-Driven Exploration (RND)
+## Curiosity-Driven Exploration
+
+EMPO supports two approaches to curiosity-driven exploration:
+
+| Approach | Best For | How It Works |
+|----------|----------|--------------|
+| **RND** (Random Network Distillation) | Neural network mode | Prediction error as novelty signal |
+| **Count-Based Curiosity** | Tabular/lookup table mode | Visit counts → bonus = 1/√(n+1) |
+
+Both provide intrinsic motivation that biases action selection toward less-visited states.
+
+### RND (Random Network Distillation)
 
 EMPO supports **Random Network Distillation (RND)** for curiosity-driven exploration. RND provides an intrinsic motivation signal that biases action selection toward states that have been seen less frequently during training.
 
@@ -279,11 +290,116 @@ For small action spaces (typical in MultiGrid), this overhead is acceptable. For
 ### Design Notes
 
 - RND is trained from the beginning (included in active networks from step 0)
-- The predictor uses the shared state encoder's output (detached from gradient computation)
+- **Multi-encoder architecture**: RND uses concatenated features from ALL state encoders:
+  - Shared state encoder (from V_h^e)
+  - X_h's own state encoder
+  - U_r's own state encoder (if `u_r_use_network=True`)
+  - Q_r's own state encoder
+- **Warmup coefficients**: Each encoder's features are multiplied by a coefficient that ramps 0→1 during the warmup stage when that encoder is introduced. This provides smooth transitions as new encoders come online.
+- All encoder outputs are detached (RND trains only its predictor network, not the encoders)
 - Normalization prevents bonus scale drift during training
 - A small uniform component (10%) is added to curiosity-weighted exploration to ensure baseline coverage
 
+See [docs/ENCODER_ARCHITECTURE.md](ENCODER_ARCHITECTURE.md) for details on the multi-encoder design.
 See [docs/plans/curiosity.md](plans/curiosity.md) for detailed design rationale and alternative approaches considered.
+
+## Count-Based Curiosity (Tabular Mode)
+
+For **lookup table (tabular) mode**, EMPO provides a simpler count-based curiosity mechanism. This is more appropriate than RND when:
+- States are exactly hashable
+- The state space is enumerable
+- No generalization across "similar" states is needed
+
+### How Count-Based Curiosity Works
+
+The system maintains a dictionary mapping states to visit counts:
+
+```
+bonus(s) = scale / √(visits[s] + 1)
+```
+
+- **Novel states** (0 visits): `bonus = scale / 1 = scale`
+- **Visited states**: Bonus decreases with √visits
+- **Frequently visited**: Bonus approaches 0
+
+Alternatively, a **UCB-style** bonus is available:
+```
+bonus(s) = scale × √(log(total_visits) / (visits[s] + 1))
+```
+
+### Configuration
+
+Enable count-based curiosity in `Phase2Config`:
+
+```python
+config = Phase2Config(
+    # Enable lookup tables (required for count-based curiosity)
+    use_lookup_tables=True,
+    
+    # Enable count-based curiosity
+    use_count_based_curiosity=True,
+    
+    # Bonus parameters
+    count_curiosity_scale=1.0,           # Bonus scale factor
+    count_curiosity_use_ucb=False,       # Use UCB-style bonus instead of 1/√n
+    
+    # Curiosity bonus coefficients (how much bonus affects action selection)
+    count_curiosity_bonus_coef_r=0.1,    # Robot curiosity bonus weight
+    count_curiosity_bonus_coef_h=0.1,    # Human curiosity bonus weight
+)
+```
+
+### TensorBoard Monitoring
+
+When count-based curiosity is enabled, these metrics are logged:
+- `Exploration/count_curiosity_unique_states` - Number of unique states visited
+- `Exploration/count_curiosity_total_visits` - Total visit count
+- `Exploration/count_curiosity_mean_visits` - Mean visits per unique state
+- `Exploration/count_curiosity_max_visits` - Max visits to any single state
+- `Exploration/count_curiosity_coverage_ratio` - States with >1 visit / total unique states
+
+**Interpreting the metrics:**
+- `unique_states` should grow over training (discovering new states)
+- `mean_visits` indicates how uniformly exploration is distributed
+- `coverage_ratio` shows what fraction of discovered states have been revisited
+
+### Example Usage
+
+```python
+from empo.nn_based.phase2 import Phase2Config, CountBasedCuriosity
+
+# Create config for tabular mode with curiosity
+config = Phase2Config(
+    use_lookup_tables=True,
+    use_count_based_curiosity=True,
+    count_curiosity_scale=1.0,
+    count_curiosity_bonus_coef_r=0.1,
+)
+
+# The trainer will automatically create and use CountBasedCuriosity
+# You can also create it directly:
+curiosity = CountBasedCuriosity(scale=1.0, use_ucb=False)
+curiosity.record_visit(state)
+bonus = curiosity.get_bonus(state)
+```
+
+### Convenience Flag in Demos
+
+The `phase2_robot_policy_demo.py` provides a `--curious` flag that automatically selects the appropriate curiosity mechanism:
+
+```bash
+# Neural network mode → uses RND
+python phase2_robot_policy_demo.py --curious
+
+# Tabular mode → uses count-based curiosity  
+python phase2_robot_policy_demo.py --tabular --curious
+```
+
+Similarly, `lookup_table_phase2_demo.py` has a `--curiosity` flag:
+
+```bash
+python lookup_table_phase2_demo.py --curiosity
+```
 
 ## API Reference
 
@@ -298,6 +414,35 @@ config.get_epsilon_h(training_step: int) -> float
 
 ```python
 env.can_forward(state, agent_index: int) -> bool
+```
+
+### CountBasedCuriosity Class
+
+```python
+from empo.nn_based.phase2 import CountBasedCuriosity
+
+curiosity = CountBasedCuriosity(
+    scale: float = 1.0,        # Bonus scale factor
+    use_ucb: bool = False,     # Use UCB-style bonus
+    min_bonus: float = 0.0     # Minimum bonus value
+)
+
+# Record state visits
+curiosity.record_visit(state: Hashable)
+curiosity.record_visits(states: List[Hashable])
+
+# Get exploration bonuses
+bonus = curiosity.get_bonus(state: Hashable) -> float
+bonuses = curiosity.get_bonuses(states: List[Hashable]) -> List[float]
+
+# Get statistics
+stats = curiosity.get_statistics() -> Dict[str, float]
+# Returns: unique_states, total_visits, mean_visits, max_visits, coverage_ratio
+
+# Save/restore
+state_dict = curiosity.state_dict()
+curiosity.load_state_dict(state_dict)
+curiosity.reset()
 ```
 
 ### Exploration Policy Classes

@@ -172,80 +172,206 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         self.networks.v_h_e.goal_encoder.reset_cache_stats()
         self.networks.v_h_e.agent_encoder.reset_cache_stats()
 
-    def get_state_features_for_rnd(self, states: List[Any]) -> torch.Tensor:
+    def get_rnd_encoder_coefficients(self, step: int) -> List[float]:
         """
-        Get state features for RND novelty computation.
+        Compute warmup coefficients for each encoder used by RND.
         
-        Uses the shared state encoder (detached from gradient computation)
-        to convert states to feature tensors for RND.
+        Each encoder's coefficient ramps from 0 to 1 during the warmup stage
+        when that encoder is introduced. This provides smooth transitions
+        as new encoders come online.
+        
+        Encoder introduction order (matching rnd_encoder_dims):
+        - shared_state_encoder: Stage 0 (V_h^e warmup)
+        - x_h_own_state_encoder: Stage 1 (X_h warmup)
+        - u_r_own_state_encoder: Stage 2 (U_r warmup, if u_r_use_network)
+        - q_r_own_state_encoder: Stage 3 (Q_r warmup)
+        
+        Args:
+            step: Current training step.
+            
+        Returns:
+            List of coefficients [0, 1] for each encoder, in same order as
+            rnd_encoder_dims.
+        """
+        if self.networks.rnd_encoder_dims is None:
+            return []
+        
+        # Get warmup stage boundaries from config
+        v_h_e_end = self.config._warmup_v_h_e_end
+        x_h_end = self.config._warmup_x_h_end
+        u_r_end = self.config._warmup_u_r_end
+        q_r_end = self.config._warmup_q_r_end
+        
+        coefficients = []
+        encoder_idx = 0
+        
+        # Shared encoder (introduced at step 0, ramps during V_h^e warmup)
+        if encoder_idx < len(self.networks.rnd_encoder_dims):
+            if v_h_e_end <= 0:
+                coef = 1.0
+            elif step >= v_h_e_end:
+                coef = 1.0
+            else:
+                coef = step / v_h_e_end
+            coefficients.append(coef)
+            encoder_idx += 1
+        
+        # X_h own encoder (introduced at v_h_e_end, ramps during X_h warmup)
+        if encoder_idx < len(self.networks.rnd_encoder_dims):
+            stage_start = v_h_e_end
+            stage_end = x_h_end
+            stage_duration = stage_end - stage_start
+            if stage_duration <= 0 or step >= stage_end:
+                coef = 1.0
+            elif step < stage_start:
+                coef = 0.0
+            else:
+                coef = (step - stage_start) / stage_duration
+            coefficients.append(coef)
+            encoder_idx += 1
+        
+        # U_r own encoder (if present, introduced at x_h_end, ramps during U_r warmup)
+        if encoder_idx < len(self.networks.rnd_encoder_dims) and self.config.u_r_use_network:
+            stage_start = x_h_end
+            stage_end = u_r_end
+            stage_duration = stage_end - stage_start
+            if stage_duration <= 0 or step >= stage_end:
+                coef = 1.0
+            elif step < stage_start:
+                coef = 0.0
+            else:
+                coef = (step - stage_start) / stage_duration
+            coefficients.append(coef)
+            encoder_idx += 1
+        
+        # Q_r own encoder (introduced at u_r_end, ramps during Q_r warmup)
+        if encoder_idx < len(self.networks.rnd_encoder_dims):
+            stage_start = u_r_end  # u_r_end == x_h_end if u_r_use_network=False
+            stage_end = q_r_end
+            stage_duration = stage_end - stage_start
+            if stage_duration <= 0 or step >= stage_end:
+                coef = 1.0
+            elif step < stage_start:
+                coef = 0.0
+            else:
+                coef = (step - stage_start) / stage_duration
+            coefficients.append(coef)
+            encoder_idx += 1
+        
+        return coefficients
+
+    def get_state_features_for_rnd(
+        self,
+        states: List[Any],
+        encoder_coefficients: Optional[List[float]] = None
+    ) -> Tuple[torch.Tensor, List[float]]:
+        """
+        Get concatenated state features from all encoders for RND.
+        
+        Uses all available state encoders (shared + own encoders) to produce
+        concatenated features for RND novelty computation. Each encoder's
+        features can be weighted by coefficients for smooth warmup transitions.
         
         Args:
             states: List of states (tuples from WorldModel.get_state()).
+            encoder_coefficients: Optional pre-computed coefficients. If None,
+                                 will compute from current training_step_count.
             
         Returns:
-            Feature tensor of shape (batch_size, feature_dim).
+            Tuple of:
+            - Feature tensor of shape (batch_size, total_feature_dim)
+            - Encoder coefficients used (for passing to RND)
         """
-        # Get feature dim from RND network (handles case where hidden_dim was overridden)
+        # Compute coefficients if not provided
+        if encoder_coefficients is None:
+            encoder_coefficients = self.get_rnd_encoder_coefficients(
+                self.training_step_count
+            )
+        
+        # Get feature dim from RND network
         if self.networks.rnd is not None:
-            feature_dim = self.networks.rnd.target[0].in_features
+            feature_dim = self.networks.rnd.input_dim
         else:
             feature_dim = self.config.hidden_dim
             
         if not states:
-            return torch.zeros(0, feature_dim, device=self.device)
+            return torch.zeros(0, feature_dim, device=self.device), encoder_coefficients
         
-        # Use the shared state encoder from V_h^e
-        # This produces features suitable for RND
-        state_encoder = self.networks.v_h_e.state_encoder
+        # Collect all encoder outputs
+        all_features = []
+        
+        # Shared state encoder from V_h^e
+        shared_encoder = self.networks.v_h_e.state_encoder
         
         # Check if we have a neural encoder (not a NullEncoder)
-        if hasattr(state_encoder, 'tensorize_state'):
-            # Neural encoder: use forward_batch for efficient batched encoding
-            # First, tensorize all states
+        if hasattr(shared_encoder, 'tensorize_state'):
+            # Tensorize all states once (shared by all encoders via cache)
             batch_tensors = []
             for state in states:
-                tensors = state_encoder.tensorize_state(state, self.env)
+                tensors = shared_encoder.tensorize_state(state, self.env)
                 batch_tensors.append(tensors)
             
-            # Stack tensors and squeeze out the extra batch dimension from tensorize_state
-            # tensorize_state returns (1, C, H, W) for grid, so stacking gives (B, 1, C, H, W)
-            # We need (B, C, H, W) for the forward pass
             grid_tensors = torch.cat([t[0] for t in batch_tensors], dim=0).to(self.device)
             global_features = torch.cat([t[1] for t in batch_tensors], dim=0).to(self.device)
             agent_features = torch.cat([t[2] for t in batch_tensors], dim=0).to(self.device)
             interactive_features = torch.cat([t[3] for t in batch_tensors], dim=0).to(self.device)
             
-            # Forward through encoder (detached - RND trains its own networks)
+            # Forward through shared encoder (detached - RND trains its own networks)
             with torch.no_grad():
-                features = state_encoder.forward(
+                shared_features = shared_encoder.forward(
                     grid_tensors, global_features, agent_features, interactive_features
                 )
+            all_features.append(shared_features)
             
-            return features
+            # X_h own state encoder (if neural X_h)
+            if hasattr(self.networks.x_h, 'own_state_encoder') and self.networks.x_h.own_state_encoder is not None:
+                x_h_encoder = self.networks.x_h.own_state_encoder
+                with torch.no_grad():
+                    x_h_features = x_h_encoder.forward(
+                        grid_tensors, global_features, agent_features, interactive_features
+                    )
+                all_features.append(x_h_features)
+            
+            # U_r own state encoder (if neural U_r with network enabled)
+            if (self.config.u_r_use_network and 
+                self.networks.u_r is not None and 
+                hasattr(self.networks.u_r, 'own_state_encoder') and 
+                self.networks.u_r.own_state_encoder is not None):
+                u_r_encoder = self.networks.u_r.own_state_encoder
+                with torch.no_grad():
+                    u_r_features = u_r_encoder.forward(
+                        grid_tensors, global_features, agent_features, interactive_features
+                    )
+                all_features.append(u_r_features)
+            
+            # Q_r own state encoder (if neural Q_r)
+            if hasattr(self.networks.q_r, 'own_state_encoder') and self.networks.q_r.own_state_encoder is not None:
+                q_r_encoder = self.networks.q_r.own_state_encoder
+                with torch.no_grad():
+                    q_r_features = q_r_encoder.forward(
+                        grid_tensors, global_features, agent_features, interactive_features
+                    )
+                all_features.append(q_r_features)
+            
+            # Concatenate all features
+            concatenated = torch.cat(all_features, dim=-1)
+            return concatenated, encoder_coefficients
         else:
-            # Lookup table mode with NullEncoder - create simple state representation
-            # Use a hash-based embedding for states
-            # This is a fallback; RND works best with neural encoders
-            
-            # Get the actual input dimension from RND network
-            # (handles case where hidden_dim was overridden in create_phase2_networks)
+            # Lookup table mode with NullEncoder - RND should be disabled
+            # Fall back to hash-based features as before
             if self.networks.rnd is not None:
-                feature_dim = self.networks.rnd.target[0].in_features
+                feature_dim = self.networks.rnd.input_dim
             else:
                 feature_dim = self.config.hidden_dim
             
             features = []
             for state in states:
-                # Create a simple feature from state hash
-                # Use torch's ability to hash arbitrary objects
                 state_hash = hash(state) % (2**31)
-                # Create a pseudo-random but deterministic feature vector
-                # Use a per-state Generator to avoid mutating global RNG state
                 gen = torch.Generator(device=self.device).manual_seed(state_hash)
                 feat = torch.randn(feature_dim, device=self.device, generator=gen)
                 features.append(feat)
             
-            return torch.stack(features)
+            return torch.stack(features), encoder_coefficients
 
 
 def create_phase2_networks(
@@ -491,9 +617,21 @@ def create_phase2_networks(
             share_cache_with=share_cache_with,
         ).to(device)
     
+    x_h_own_state_encoder = None
     x_h_own_agent_encoder = None
     if use_neural_x_h:
-        share_cache_with = shared_agent_encoder if use_neural_v_h_e else None
+        state_share_cache_with = shared_state_encoder if use_neural_v_h_e else None
+        x_h_own_state_encoder = MultiGridStateEncoder(
+            grid_height=grid_height,
+            grid_width=grid_width,
+            num_agents_per_color=num_agents_per_color,
+            num_agent_colors=7,
+            feature_dim=hidden_dim,
+            include_step_count=config.include_step_count,
+            use_encoders=config.use_encoders,
+            share_cache_with=state_share_cache_with,
+        ).to(device)
+        agent_share_cache_with = shared_agent_encoder if use_neural_v_h_e else None
         x_h_own_agent_encoder = AgentIdentityEncoder(
             num_agents=max_agents,
             embedding_dim=agent_embedding_dim,
@@ -501,6 +639,34 @@ def create_phase2_networks(
             agent_feature_dim=agent_feature_dim,
             grid_height=grid_height,
             grid_width=grid_width,
+            use_encoders=config.use_encoders,
+            share_cache_with=agent_share_cache_with,
+        ).to(device)
+    
+    u_r_own_state_encoder = None
+    if use_neural_u_r and config.u_r_use_network:
+        share_cache_with = shared_state_encoder if use_neural_v_h_e else None
+        u_r_own_state_encoder = MultiGridStateEncoder(
+            grid_height=grid_height,
+            grid_width=grid_width,
+            num_agents_per_color=num_agents_per_color,
+            num_agent_colors=7,
+            feature_dim=hidden_dim,
+            include_step_count=config.include_step_count,
+            use_encoders=config.use_encoders,
+            share_cache_with=share_cache_with,
+        ).to(device)
+    
+    v_r_own_state_encoder = None
+    if use_neural_v_r and config.v_r_use_network:
+        share_cache_with = shared_state_encoder if use_neural_v_h_e else None
+        v_r_own_state_encoder = MultiGridStateEncoder(
+            grid_height=grid_height,
+            grid_width=grid_width,
+            num_agents_per_color=num_agents_per_color,
+            num_agent_colors=7,
+            feature_dim=hidden_dim,
+            include_step_count=config.include_step_count,
             use_encoders=config.use_encoders,
             share_cache_with=share_cache_with,
         ).to(device)
@@ -546,8 +712,9 @@ def create_phase2_networks(
             dropout=config.x_h_dropout,
             max_agents=max_agents,
             agent_embedding_dim=agent_embedding_dim,
-            state_encoder=shared_state_encoder,       # From V_h^e (real or null)
-            agent_encoder=shared_agent_encoder,       # From V_h^e (real or null)
+            state_encoder=shared_state_encoder,       # From V_h^e (SHARED, used detached)
+            agent_encoder=shared_agent_encoder,       # From V_h^e (SHARED, used detached)
+            own_state_encoder=x_h_own_state_encoder,  # OWN (trained with X_h)
             own_agent_encoder=x_h_own_agent_encoder,  # OWN (trained with X_h)
         ).to(device)
     else:
@@ -570,7 +737,8 @@ def create_phase2_networks(
                 xi=config.xi,
                 eta=config.eta,
                 dropout=config.u_r_dropout,
-                state_encoder=shared_state_encoder,  # SHARED
+                state_encoder=shared_state_encoder,       # SHARED (used detached)
+                own_state_encoder=u_r_own_state_encoder,  # OWN (trained with U_r)
             ).to(device)
         else:
             from empo.nn_based.phase2.lookup import LookupTableIntrinsicRewardNetwork
@@ -591,7 +759,8 @@ def create_phase2_networks(
                 state_feature_dim=hidden_dim,
                 hidden_dim=hidden_dim,
                 dropout=config.v_r_dropout,
-                state_encoder=shared_state_encoder,  # SHARED
+                state_encoder=shared_state_encoder,       # SHARED (used detached)
+                own_state_encoder=v_r_own_state_encoder,  # OWN (trained with V_r)
             ).to(device)
         else:
             from empo.nn_based.phase2.lookup import LookupTableRobotValueNetwork
@@ -604,18 +773,46 @@ def create_phase2_networks(
     # =========================================================================
     # Create RND module for curiosity-driven exploration (optional)
     # =========================================================================
+    # RND uses concatenated features from ALL state encoders (shared + own).
+    # Each encoder's features are weighted by a coefficient that ramps 0→1
+    # during the warmup stage when that encoder is introduced.
+    # 
+    # Encoder introduction order:
+    # - Stage 0 (V_h^e): shared_state_encoder
+    # - Stage 1 (X_h): x_h_own_state_encoder
+    # - Stage 2 (U_r): u_r_own_state_encoder (if u_r_use_network)
+    # - Stage 3 (Q_r): q_r_own_state_encoder
+    # 
+    # This smooth weighting avoids RND novelty spikes when new encoders are added.
     rnd = None
+    rnd_encoder_dims = None  # Track individual encoder dims for coefficient weighting
     if config.use_rnd:
         from empo.nn_based.phase2.rnd import RNDModule
         
-        # RND uses state features from the shared encoder
-        # Get input dimension from the actual state encoder to ensure consistency
-        # (This handles cases where hidden_dim passed to this function differs from
-        # what the encoder was actually created with)
-        rnd_input_dim = shared_state_encoder.feature_dim
+        # Collect all encoder dimensions in introduction order
+        # Note: Some encoders may be None if network is lookup table
+        rnd_encoder_dims = []
+        
+        # Shared state encoder (from V_h^e) - always present
+        rnd_encoder_dims.append(shared_state_encoder.feature_dim)
+        
+        # X_h own state encoder (if neural X_h)
+        if x_h_own_state_encoder is not None:
+            rnd_encoder_dims.append(x_h_own_state_encoder.feature_dim)
+        
+        # U_r own state encoder (if neural U_r with network enabled)
+        if u_r_own_state_encoder is not None:
+            rnd_encoder_dims.append(u_r_own_state_encoder.feature_dim)
+        
+        # Q_r own state encoder (if neural Q_r)
+        if q_r_own_state_encoder is not None:
+            rnd_encoder_dims.append(q_r_own_state_encoder.feature_dim)
+        
+        rnd_input_dim = sum(rnd_encoder_dims)
         
         rnd = RNDModule(
             input_dim=rnd_input_dim,
+            encoder_dims=rnd_encoder_dims,
             feature_dim=config.rnd_feature_dim,
             hidden_dim=config.rnd_hidden_dim,
             normalize=config.normalize_rnd,
@@ -629,6 +826,7 @@ def create_phase2_networks(
         u_r=u_r,
         v_r=v_r,
         rnd=rnd,
+        rnd_encoder_dims=rnd_encoder_dims,  # Store for coefficient computation
     )
 
 

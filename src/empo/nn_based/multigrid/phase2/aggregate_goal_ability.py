@@ -63,6 +63,7 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         agent_embedding_dim: int = 16,
         state_encoder: Optional[MultiGridStateEncoder] = None,
         agent_encoder: Optional[AgentIdentityEncoder] = None,
+        own_state_encoder: Optional[MultiGridStateEncoder] = None,
         own_agent_encoder: Optional[AgentIdentityEncoder] = None
     ):
         super().__init__(zeta=zeta, feasible_range=feasible_range)
@@ -102,6 +103,25 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
                 grid_width=grid_width
             )
         
+        # Own state encoder for X_h-specific features (trained with X_h loss)
+        # This allows X_h to learn additional state features beyond those learned by V_h^e
+        # Note: own_state_encoder shares cache with state_encoder to avoid redundant tensorization
+        if own_state_encoder is not None:
+            self.own_state_encoder = own_state_encoder
+        else:
+            self.own_state_encoder = MultiGridStateEncoder(
+                grid_height=grid_height,
+                grid_width=grid_width,
+                num_agents_per_color=num_agents_per_color,
+                num_agent_colors=num_agent_colors,
+                feature_dim=state_feature_dim,
+                max_kill_buttons=max_kill_buttons,
+                max_pause_switches=max_pause_switches,
+                max_disabling_switches=max_disabling_switches,
+                max_control_buttons=max_control_buttons,
+                share_cache_with=self.state_encoder
+            )
+        
         # Own agent encoder for X_h-specific features (trained with X_h loss)
         # This allows X_h to learn additional agent features beyond those learned by V_h^e
         # Note: own_agent_encoder shares cache with agent_encoder to avoid redundant tensorization
@@ -118,9 +138,10 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         
         # X_h value head with optional dropout
         # Note: X_h depends on both state and human identity
-        # Uses BOTH shared agent encoder (frozen) and own agent encoder (trained)
+        # Uses BOTH shared encoders (frozen/detached) AND own encoders (trained with X_h loss)
         # Use actual encoder feature_dim (may differ from passed parameter when use_encoders=False)
-        combined_dim = self.state_encoder.feature_dim + self.agent_encoder.output_dim + self.own_agent_encoder.output_dim
+        combined_dim = (self.state_encoder.feature_dim + self.own_state_encoder.feature_dim +
+                       self.agent_encoder.output_dim + self.own_agent_encoder.output_dim)
         if dropout > 0.0:
             self.value_head = nn.Sequential(
                 nn.Linear(combined_dim, hidden_dim),
@@ -171,15 +192,22 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         Returns:
             X_h values tensor (batch,) in (0, 1].
         """
-        # Encode state
-        state_features = self.state_encoder(
+        # Encode state with SHARED encoder (DETACHED - no gradients flow to shared encoder)
+        # The shared state encoder is trained ONLY by V_h^e loss.
+        shared_state_features = self.state_encoder(
+            grid_tensor, global_features, agent_features, interactive_features
+        ).detach()
+        
+        # Encode state with OWN encoder (trained with X_h loss)
+        own_state_features = self.own_state_encoder(
             grid_tensor, global_features, agent_features, interactive_features
         )
         
-        # Encode agent identity with shared encoder (frozen during X_h training)
+        # Encode agent identity with shared encoder (DETACHED - frozen during X_h training)
+        # The shared agent encoder is trained ONLY by V_h^e loss.
         shared_agent_embedding = self.agent_encoder(
             query_agent_indices, query_agent_grid, query_agent_features
-        )
+        ).detach()
         
         # Encode agent identity with own encoder (trained with X_h loss)
         # Use same inputs if own_ versions not provided
@@ -188,8 +216,8 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         own_feat = own_query_agent_features if own_query_agent_features is not None else query_agent_features
         own_agent_embedding = self.own_agent_encoder(own_idx, own_grid, own_feat)
         
-        # Combine state and BOTH agent identity features
-        combined = torch.cat([state_features, shared_agent_embedding, own_agent_embedding], dim=-1)
+        # Combine BOTH shared (detached) and own (trainable) features
+        combined = torch.cat([shared_state_features, own_state_features, shared_agent_embedding, own_agent_embedding], dim=-1)
         
         # Compute raw value
         raw_value = self.value_head(combined).squeeze(-1)

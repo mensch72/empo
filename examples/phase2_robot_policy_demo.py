@@ -26,6 +26,7 @@ Usage:
     python phase2_robot_policy_demo.py --ensemble # Use random ensemble environment
     python phase2_robot_policy_demo.py --async   # Use async actor-learner training
     python phase2_robot_policy_demo.py --tabular # Use lookup tables instead of neural networks
+    python phase2_robot_policy_demo.py --curious # Enable curiosity exploration (RND or count-based)
     
     # Save/restore for continued training (networks/policy saved by default)
     python phase2_robot_policy_demo.py --save_networks model.pt  # Custom path for networks
@@ -796,13 +797,14 @@ def main(
     use_async: bool = False,
     use_encoders: bool = True,
     use_tabular: bool = False,
-    use_rnd: bool = False,
+    use_curious: bool = False,
     save_networks_path: str = None,
     save_policy_path: str = None,
     restore_networks_path: str = None,
     use_policy_path: str = None,
     num_rollouts_override: int = None,
     save_video_path: str = None,
+    num_training_steps_override: int = None,
 ):
     """Run Phase 2 demo."""
     # Configure environment based on command line option
@@ -897,6 +899,11 @@ def main(
         warmup_u_r_steps = 1000  # Will be set to 0 if u_r_use_network=False
         warmup_q_r_steps = 1000
         beta_r_rampup_steps = 2000
+    
+    # Override training steps if specified via command line
+    if num_training_steps_override is not None:
+        num_training_steps = num_training_steps_override
+        print(f"[OVERRIDE] Training steps set to {num_training_steps}")
     
     # Print async mode status
     if use_async:
@@ -1061,12 +1068,19 @@ def main(
         v_h_e_weight_decay=0,
         x_h_weight_decay=0,
         u_r_weight_decay=0,
-        # Curiosity-driven exploration (RND)
-        use_rnd=use_rnd,
-        rnd_bonus_coef_r=0.1 if use_rnd else 0.0,
+        # Curiosity-driven exploration
+        # Use RND for neural networks, count-based for tabular mode
+        use_rnd=use_curious and not use_tabular,
+        rnd_bonus_coef_r=0.1 if (use_curious and not use_tabular) else 0.0,
         rnd_feature_dim=64,
         rnd_hidden_dim=128,
         normalize_rnd=True,
+        # Count-based curiosity for tabular mode
+        use_count_based_curiosity=use_curious and use_tabular,
+        count_curiosity_scale=1.0,
+        count_curiosity_use_ucb=False,
+        count_curiosity_bonus_coef_r=0.1 if (use_curious and use_tabular) else 0.0,
+        count_curiosity_bonus_coef_h=0.1 if (use_curious and use_tabular) else 0.0,
     )
     
     # If using policy directly (no training), skip to rollouts
@@ -1103,8 +1117,11 @@ def main(
         print(f"  Environment steps per episode: {config.steps_per_episode}")
         print(f"  Robot exploration policy: forward-biased (avoids blocked forward)")
         print(f"  Human exploration policy: forward-biased (avoids blocked forward)")
-        if use_rnd:
-            print(f"  Curiosity (RND): ENABLED (bonus_coef={config.rnd_bonus_coef_r})")
+        if use_curious:
+            if use_tabular:
+                print(f"  Curiosity (count-based): ENABLED (bonus_coef={config.count_curiosity_bonus_coef_r})")
+            else:
+                print(f"  Curiosity (RND): ENABLED (bonus_coef={config.rnd_bonus_coef_r})")
         print(f"  TensorBoard: {tensorboard_dir}")
         if restore_networks_path:
             print(f"  Restoring from: {restore_networks_path}")
@@ -1351,8 +1368,8 @@ if __name__ == "__main__":
                         help='Disable neural encoders (use identity function for debugging)')
     parser.add_argument('--tabular', '-t', action='store_true',
                         help='Use lookup tables instead of neural networks (exact tabular learning)')
-    parser.add_argument('--rnd', action='store_true',
-                        help='Enable RND curiosity-driven exploration')
+    parser.add_argument('--curious', '-c', '--rnd', action='store_true',
+                        help='Enable curiosity-driven exploration (RND for neural, count-based for tabular)')
     
     # Save/restore options
     parser.add_argument('--save_networks', type=str, default=None, metavar='PATH',
@@ -1363,6 +1380,10 @@ if __name__ == "__main__":
                         help='Restore networks from PATH before training (skips warmup/rampup)')
     parser.add_argument('--use_policy', type=str, default=None, metavar='PATH',
                         help='Skip training and only run rollouts using policy from PATH')
+    
+    # Training options
+    parser.add_argument('--steps', type=lambda x: int(float(x)), default=None, metavar='N',
+                        help='Number of training steps (overrides default based on env type, supports scientific notation like 1e5)')
     
     # Rollout options
     parser.add_argument('--rollouts', type=int, default=None, metavar='N',
@@ -1381,11 +1402,12 @@ if __name__ == "__main__":
         use_async=args.use_async,
         use_encoders=not args.no_encoders,
         use_tabular=args.tabular,
-        use_rnd=args.rnd,
+        use_curious=args.curious,
         save_networks_path=args.save_networks,
         save_policy_path=args.save_policy,
         restore_networks_path=args.restore_networks,
         use_policy_path=args.use_policy,
         num_rollouts_override=args.rollouts,
         save_video_path=args.save_video,
+        num_training_steps_override=args.steps,
     )

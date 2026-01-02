@@ -115,13 +115,16 @@ def create_goal_sampler(env):
 # Training Configuration
 # =============================================================================
 
-def create_lookup_config() -> Phase2Config:
+def create_lookup_config(use_curiosity: bool = False) -> Phase2Config:
     """Create Phase2Config for lookup table training.
     
     Key settings:
     - use_lookup_tables=True: Enable lookup table mode
     - All per-network lookup flags set to True
     - Shorter warmup since lookup tables converge faster
+    
+    Args:
+        use_curiosity: If True, enable count-based curiosity exploration.
     """
     return Phase2Config(
         # Enable lookup tables
@@ -143,9 +146,6 @@ def create_lookup_config() -> Phase2Config:
         lookup_default_x_h=0.5,
         lookup_default_y=2.0,  # For U_r (y > 1)
         
-        # Optimizer recreation interval (for lookup table growth)
-        lookup_optimizer_recreate_interval=100,
-        
         # Theory parameters
         gamma_r=0.99,
         gamma_h=0.99,
@@ -157,6 +157,13 @@ def create_lookup_config() -> Phase2Config:
         warmup_u_r_steps=50,     # U_r warmup
         warmup_q_r_steps=50,     # Q_r warmup
         beta_r_rampup_steps=100, # β_r ramp-up period
+        
+        # Count-based curiosity exploration (recommended for tabular mode)
+        use_count_based_curiosity=use_curiosity,
+        count_curiosity_scale=1.0,
+        count_curiosity_use_ucb=False,  # Simple 1/sqrt(n) bonus
+        count_curiosity_bonus_coef_r=0.1,
+        count_curiosity_bonus_coef_h=0.1,
         
         # Higher learning rates work well for lookup tables
         lr_q_r=0.01,
@@ -303,7 +310,8 @@ class SimpleLookupTableTrainer:
             self.robot_indices[0]: robot_action[0],
             self.human_indices[0]: human_actions[0],
         }
-        next_state = self.env.step(joint_action)
+        self.env.step(joint_action)
+        next_state = self.env.get_state()
         
         return state, next_state, goals, robot_action
     
@@ -426,6 +434,7 @@ def main():
     parser = argparse.ArgumentParser(description="Phase 2 Lookup Table Demo")
     parser.add_argument('--steps', type=int, default=500, help="Number of training steps")
     parser.add_argument('--inspect', action='store_true', help="Show learned values after training")
+    parser.add_argument('--curiosity', action='store_true', help="Enable count-based curiosity exploration")
     parser.add_argument('--seed', type=int, default=42, help="Random seed")
     args = parser.parse_args()
     
@@ -450,7 +459,9 @@ def main():
     
     # Create config for lookup tables
     print("\nConfiguring lookup table networks...")
-    config = create_lookup_config()
+    if args.curiosity:
+        print("  Count-based curiosity: ENABLED")
+    config = create_lookup_config(use_curiosity=args.curiosity)
     
     # Create lookup table networks
     networks = create_lookup_networks(config, env)
