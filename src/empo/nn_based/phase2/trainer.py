@@ -667,9 +667,10 @@ class BasePhase2Trainer(ABC):
         With probability epsilon, samples from the exploration policy
         (uniform random by default, or custom if robot_exploration_policy is set).
         
-        When RND is enabled, curiosity bonus can be added to exploration:
-        - During epsilon exploration: bias toward actions leading to novel states
-        - During policy-based selection: add curiosity bonus to Q-values
+        When RND/curiosity is enabled, it only affects the (1-epsilon) policy portion:
+        - Q-values are modified by curiosity bonus: Q_eff = Q * exp(-bonus * novelty)
+        - This preserves the power-law form while biasing toward novel states
+        - The epsilon exploration uses the supplied exploration policy unchanged
         
         Args:
             state: Current state.
@@ -682,7 +683,7 @@ class BasePhase2Trainer(ABC):
         epsilon = self.config.get_epsilon_r(self.training_step_count)
         effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
         
-        # Epsilon exploration: sample from exploration policy (with optional curiosity bias)
+        # Epsilon exploration: sample from exploration policy (curiosity does NOT affect this)
         if torch.rand(1).item() < epsilon:
             return self._sample_robot_exploration_action(state)
         
@@ -732,8 +733,9 @@ class BasePhase2Trainer(ABC):
         """
         Sample robot action during epsilon exploration.
         
-        When curiosity is enabled, uses curiosity-weighted sampling instead of uniform random.
-        Otherwise falls back to configured exploration policy.
+        Uses the configured exploration policy (or uniform random if none set).
+        This is the standard approach: curiosity only affects the (1-epsilon)
+        power-law policy portion via Q-value bonuses, not the epsilon exploration.
         
         Args:
             state: Current state.
@@ -745,11 +747,7 @@ class BasePhase2Trainer(ABC):
         
         num_action_combinations = self.networks.q_r_target.num_action_combinations
         
-        # If curiosity is enabled, use curiosity-weighted exploration
-        if self._curiosity_enabled_for_robot():
-            return self._sample_curiosity_exploration_action(state)
-        
-        # Otherwise use configured exploration policy
+        # Use configured exploration policy (curiosity does NOT affect epsilon exploration)
         if self.robot_exploration_policy is None:
             # Uniform random exploration
             flat_idx = torch.randint(0, num_action_combinations, (1,)).item()
@@ -779,6 +777,10 @@ class BasePhase2Trainer(ABC):
     def _sample_curiosity_exploration_action(self, state: Any) -> Tuple[int, ...]:
         """
         Sample robot action weighted by curiosity bonus for successor states.
+        
+        NOTE: This method is currently UNUSED. Standard RND methodology applies
+        curiosity only to the learned policy (via Q-value bonuses), not to epsilon
+        exploration. Kept for potential future experimentation.
         
         Uses transition_probabilities to compute expected novelty for each action,
         then samples proportionally to novelty.
@@ -844,13 +846,26 @@ class BasePhase2Trainer(ABC):
             if not action_has_transitions[flat_idx]:
                 novelty_scores[flat_idx] = 1.0
             elif novelty_scores[flat_idx] == 0.0:
-                novelty_scores[flat_idx] = 1e-6  # Avoid zero
+                novelty_scores[flat_idx] = 1e-8  # Avoid zero
         
-        # Convert to probabilities (softmax-like with temperature)
+        # Convert to probabilities using softmax with temperature for better differentiation.
+        # Raw novelty values can vary widely, so we normalize by the max to prevent overflow.
+        # Temperature controls exploration: low temp = greedy (pick most novel),
+        # high temp = uniform. We use moderate temp to strongly prefer novel states.
         novelty_tensor = torch.tensor(novelty_scores, dtype=torch.float32)
-        # Add small uniform component to ensure exploration
-        probs = novelty_tensor / novelty_tensor.sum()
-        probs = 0.9 * probs + 0.1 / num_action_combinations  # 10% uniform
+        # Normalize to [0, 1] range for stable softmax
+        novelty_max = novelty_tensor.max()
+        if novelty_max > 0:
+            novelty_normalized = novelty_tensor / novelty_max
+        else:
+            novelty_normalized = novelty_tensor
+        # Softmax with temperature=0.1 (low = more greedy toward high novelty)
+        temperature = 0.1
+        log_probs = novelty_normalized / temperature
+        log_probs = log_probs - log_probs.max()  # Numerical stability
+        probs = torch.softmax(log_probs, dim=0)
+        # Add small uniform component to ensure exploration (5% uniform)
+        probs = 0.95 * probs + 0.05 / num_action_combinations
         probs = probs / probs.sum()
         
         flat_idx = torch.multinomial(probs, 1).item()
@@ -1801,7 +1816,13 @@ class BasePhase2Trainer(ABC):
         # RND (for neural network mode)
         if self.config.use_rnd and self.networks.rnd is not None:
             features, encoder_coefficients = self.get_state_features_for_rnd(states)
-            return self.networks.rnd.compute_novelty_no_grad(features, encoder_coefficients)
+            # Use raw (un-normalized) novelty for action selection.
+            # Normalized novelty can be negative (states below running mean) which
+            # gets clamped to 0, making all actions equally likely and defeating
+            # the purpose of curiosity-driven exploration.
+            return self.networks.rnd.compute_novelty_no_grad(
+                features, encoder_coefficients, use_raw=True
+            )
         
         # No curiosity enabled
         return torch.zeros(len(states), device=self.device)
@@ -2186,9 +2207,10 @@ class BasePhase2Trainer(ABC):
             
             # Log histogram of visit counts for exploration analysis
             # This helps diagnose whether exploration is stuck revisiting same states
+            # Use global_step=0 to show only current histogram (avoids accumulating history)
             if self._state_visit_counts:
                 visit_counts = np.array(list(self._state_visit_counts.values()), dtype=np.float32)
-                self.writer.add_histogram('Exploration/visit_count_distribution', visit_counts, self.training_step_count)
+                self.writer.add_histogram('Exploration/visit_count_distribution', visit_counts, global_step=0)
             
             # Log learning rates
             networks_to_log_lr = ['v_h_e', 'x_h', 'q_r']

@@ -213,11 +213,11 @@ EMPO supports two approaches to curiosity-driven exploration:
 | **RND** (Random Network Distillation) | Neural network mode | Prediction error as novelty signal |
 | **Count-Based Curiosity** | Tabular/lookup table mode | Visit counts → bonus = 1/√(n+1) |
 
-Both provide intrinsic motivation that biases action selection toward less-visited states.
+Both approaches follow the **standard RND methodology**: curiosity affects only the **(1-epsilon) learned policy portion** via Q-value bonuses, not the epsilon exploration. The epsilon exploration always uses the configured exploration policy (or uniform random).
 
 ### RND (Random Network Distillation)
 
-EMPO supports **Random Network Distillation (RND)** for curiosity-driven exploration. RND provides an intrinsic motivation signal that biases action selection toward states that have been seen less frequently during training.
+EMPO supports **Random Network Distillation (RND)** for curiosity-driven exploration. RND provides an intrinsic motivation signal that biases the learned policy toward exploring states that have been seen less frequently during training.
 
 ### How RND Works
 
@@ -259,11 +259,11 @@ config = Phase2Config(
 
 ### How Curiosity Affects Action Selection
 
-When RND is enabled:
+Following the **standard RND methodology** (Burda et al. 2018), curiosity affects only the **(1-epsilon) learned policy portion**, not the epsilon exploration:
 
-1. **During epsilon exploration**: Instead of uniform random actions, robot samples actions weighted by expected novelty of successor states.
+1. **During epsilon exploration**: The configured `robot_exploration_policy` is used unchanged (or uniform random if none set). Curiosity does NOT affect this.
 
-2. **During policy-based selection**: Curiosity bonus is applied multiplicatively to Q-values to preserve the power-law policy constraint (Q < 0):
+2. **During policy-based selection (1-epsilon)**: Curiosity bonus is applied multiplicatively to Q-values to preserve the power-law policy constraint (Q < 0):
    ```
    Q_effective(s, a) = Q_r(s, a) * exp(-rnd_bonus_coef_r * expected_novelty(s'))
    ```
@@ -271,6 +271,8 @@ When RND is enabled:
    Since Q < 0 and exp(...) > 0, Q_effective remains negative.
    High novelty → smaller scale factor → Q_effective closer to 0 (better).
    This encourages exploration of novel states while preserving the power-law policy form.
+   
+   When `rnd_bonus_coef_r = 0`, we recover exactly the standard power-law policy `P(a) ∝ (-Q_r(s,a))^{-β_r}`.
 
 The novelty for each action is computed using `transition_probabilities()` to determine expected next states, then computing RND prediction error for those states.
 
@@ -329,7 +331,7 @@ For small action spaces (typical in MultiGrid), this overhead is acceptable. For
 - **Warmup coefficients**: Each encoder's features are multiplied by a coefficient that ramps 0→1 during the warmup stage when that encoder is introduced. This provides smooth transitions as new encoders come online.
 - All encoder outputs are detached (RND trains only its predictor network, not the encoders)
 - Normalization prevents bonus scale drift during training
-- A small uniform component (10%) is added to curiosity-weighted exploration to ensure baseline coverage
+- **Standard RND methodology**: Curiosity only affects the learned policy (via Q-value bonuses), not epsilon exploration. This follows the original RND paper where intrinsic reward modifies the learned value function, while epsilon-greedy exploration remains separate.
 
 See [docs/ENCODER_ARCHITECTURE.md](ENCODER_ARCHITECTURE.md) for details on the multi-encoder design.
 See [docs/plans/curiosity.md](plans/curiosity.md) for detailed design rationale and alternative approaches considered.

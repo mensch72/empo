@@ -206,7 +206,8 @@ class RNDModule(nn.Module):
     def compute_novelty_no_grad(
         self,
         state_features: torch.Tensor,
-        encoder_coefficients: Optional[List[float]] = None
+        encoder_coefficients: Optional[List[float]] = None,
+        use_raw: bool = True
     ) -> torch.Tensor:
         """
         Compute novelty scores without gradients (for action selection).
@@ -217,6 +218,9 @@ class RNDModule(nn.Module):
             state_features: Input features (batch_size, input_dim).
             encoder_coefficients: Optional per-encoder coefficients for smooth
                                  warmup transitions.
+            use_raw: If True, return raw MSE values (better for exploration).
+                    If False, return normalized values (legacy behavior).
+                    Default is True for better exploration.
             
         Returns:
             Novelty scores (batch_size,). Higher = more novel.
@@ -230,10 +234,14 @@ class RNDModule(nn.Module):
             target_out = self.target(weighted_features)
             pred_out = self.predictor(weighted_features)
             
-            # MSE per sample
+            # MSE per sample (this is the raw novelty - higher = more novel)
             novelty = ((target_out - pred_out) ** 2).mean(dim=-1)
             
-            if self.normalize:
+            # For exploration, raw novelty is better because:
+            # 1. It's always non-negative (no clamping needed)
+            # 2. It provides better signal differentiation between states
+            # 3. Normalized novelty clusters around 0, losing discrimination
+            if not use_raw and self.normalize:
                 std = torch.sqrt(self.running_var + 1e-8)
                 novelty = (novelty - self.running_mean) / std
             
