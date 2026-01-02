@@ -1098,16 +1098,18 @@ class BasePhase2Trainer(ABC):
         v_h_e_data: List[Tuple[int, int, Any]],  # (transition_idx, human_idx, goal)
     ) -> torch.Tensor:
         """
-        Compute model-based V_h^e targets using expected value over transition probabilities.
+        Compute model-based V_h^e targets using expected value over ALL robot actions.
         
-        BATCHED IMPLEMENTATION: Collects ALL successor states across ALL (transition, goal)
-        pairs, makes ONE batched V_h^e_target forward pass, then aggregates results.
+        POLICY-WEIGHTED IMPLEMENTATION: V_h^e is the expected goal-achievement under
+        the robot's CURRENT policy, so we weight each robot action by π_r(a|s):
         
-        For each (human, goal) pair, computes:
-            target = Σ_{s'} P(s'|s,a) * [achieved(s',g) + (1-achieved(s',g)) * γ_h * V_h^e(s', g)]
+            V_h^e(s, g) target = Σ_a π_r(a|s) * Σ_{s'} P(s'|s,a) * [achieved + (1-achieved) * γ_h * V_h^e(s',g)]
         
-        This uses the exact transition probabilities from the world model rather than
-        single-sample TD learning, giving lower variance and theoretically correct targets.
+        This is theoretically correct because V_h^e represents human h's expected ability
+        to achieve goal g from state s, given the robot's policy π_r.
+        
+        BATCHED IMPLEMENTATION: Collects ALL successor states across ALL (transition, action, goal)
+        combinations, makes ONE batched V_h^e_target forward pass, then aggregates results.
         
         Args:
             batch: List of transitions with transition_probs_by_action populated.
@@ -1118,53 +1120,86 @@ class BasePhase2Trainer(ABC):
         """
         gamma_h = self.networks.v_h_e.gamma_h
         n_samples = len(v_h_e_data)
+        num_actions = self.networks.q_r.num_action_combinations
+        effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
         
-        # Phase 1: Collect ALL successor states that need V_h^e evaluation
-        # For each v_h_e_data entry, we need to evaluate V_h^e at all successor states
-        # where the goal is NOT achieved (achieved successors contribute 1.0 directly)
+        # Phase 1: Get robot policy π_r(a|s) for each unique state in batch
+        # Map: batch_idx -> robot policy tensor of shape (num_actions,)
+        states = [t.state for t in batch]
         
-        # Track which entries have successors vs are terminal
+        with torch.no_grad():
+            q_r_batch = self.networks.q_r_target.forward_batch(states, self.env, self.device)
+            robot_policies = self.networks.q_r_target.get_policy(q_r_batch, beta_r=effective_beta_r)
+            # robot_policies: (batch_size, num_actions)
+        
+        # Phase 2: Collect ALL successor states that need V_h^e evaluation
+        # For each v_h_e_data entry, we loop over ALL robot actions weighted by policy
+        
+        # Track which entries are terminal
         entry_is_terminal = [False] * n_samples
         
         # Collect successor states for batched V_h^e evaluation
-        # Each entry: (next_state, human_idx, goal)
         all_next_states = []
         all_human_indices = []
         all_goals = []
-        # Map: successor_idx -> (v_h_e_data_idx, prob)
-        # Multiple successors can map to same v_h_e_data_idx
+        # Map: successor_idx -> (v_h_e_data_idx, weight)
+        # where weight = π_r(a|s) * P(s'|s,a)
         successor_mapping = []
         
-        # Also track achieved contributions (prob * 1.0 for achieved goals)
+        # Track achieved contributions: Σ_a π_r(a|s) * Σ_{s'} P(s'|s,a) * achieved(s',g)
         achieved_contributions = [0.0] * n_samples
         
         for data_idx, (trans_idx, human_idx, goal) in enumerate(v_h_e_data):
             transition = batch[trans_idx]
             
-            # Get transition probs for the taken robot action
-            robot_action_idx = self.networks.q_r.action_tuple_to_index(transition.robot_action)
-            trans_probs = transition.transition_probs_by_action.get(robot_action_idx, [])
-            
-            if not trans_probs or transition.terminal:
-                # Terminal state or no successors - target is 0
+            if transition.terminal:
                 entry_is_terminal[data_idx] = True
                 continue
             
-            # Process each successor state
-            for prob, next_state in trans_probs:
-                achieved = self.check_goal_achieved(next_state, human_idx, goal)
+            trans_probs_by_action = transition.transition_probs_by_action
+            if trans_probs_by_action is None:
+                entry_is_terminal[data_idx] = True
+                continue
+            
+            # Get robot policy for this state
+            policy = robot_policies[trans_idx]  # (num_actions,)
+            
+            # Loop over ALL robot actions, weighted by policy
+            any_successors = False
+            for action_idx in range(num_actions):
+                action_prob = policy[action_idx].item()
                 
-                if achieved:
-                    # Goal achieved: contribute prob * 1.0 directly
-                    achieved_contributions[data_idx] += prob * 1.0
-                else:
-                    # Goal not achieved: need V_h^e(s', g) - add to batch
-                    all_next_states.append(next_state)
-                    all_human_indices.append(human_idx)
-                    all_goals.append(goal)
-                    successor_mapping.append((data_idx, prob))
+                # Skip if action has negligible probability
+                if action_prob < 1e-8:
+                    continue
+                
+                trans_probs = trans_probs_by_action.get(action_idx, [])
+                if not trans_probs:
+                    continue
+                
+                any_successors = True
+                
+                # Process each successor state for this action
+                for state_prob, next_state in trans_probs:
+                    # Combined weight = π_r(a|s) * P(s'|s,a)
+                    weight = action_prob * state_prob
+                    
+                    achieved = self.check_goal_achieved(next_state, human_idx, goal)
+                    
+                    if achieved:
+                        # Goal achieved: contribute weight * 1.0 directly
+                        achieved_contributions[data_idx] += weight
+                    else:
+                        # Goal not achieved: need V_h^e(s', g) - add to batch
+                        all_next_states.append(next_state)
+                        all_human_indices.append(human_idx)
+                        all_goals.append(goal)
+                        successor_mapping.append((data_idx, weight))
+            
+            if not any_successors:
+                entry_is_terminal[data_idx] = True
         
-        # Phase 2: ONE batched V_h^e_target forward pass for ALL successor states
+        # Phase 3: ONE batched V_h^e_target forward pass for ALL successor states
         if all_next_states:
             with torch.no_grad():
                 v_h_e_all = self.networks.v_h_e_target.forward_batch(
@@ -1176,18 +1211,25 @@ class BasePhase2Trainer(ABC):
                 if v_h_e_all.dim() == 0:
                     v_h_e_all = v_h_e_all.unsqueeze(0)
         
-        # Phase 3: Aggregate results back to per-entry targets
-        targets = torch.zeros(n_samples, device=self.device, dtype=torch.float32)
+        # Phase 4: Aggregate results back to per-entry targets
+        # Start with achieved contributions (already accumulated per entry)
+        targets = torch.tensor(achieved_contributions, device=self.device, dtype=torch.float32)
         
-        # Add achieved contributions
-        for data_idx, contrib in enumerate(achieved_contributions):
-            targets[data_idx] += contrib
-        
-        # Add V_h^e contributions from non-achieved successors
+        # Add V_h^e contributions from non-achieved successors using scatter_add_
         if all_next_states:
-            for succ_idx, (data_idx, prob) in enumerate(successor_mapping):
-                # Contribution: prob * gamma_h * V_h^e(s', g)
-                targets[data_idx] += prob * gamma_h * v_h_e_all[succ_idx].item()
+            # Extract indices and weights from successor_mapping
+            data_indices = torch.tensor(
+                [m[0] for m in successor_mapping], device=self.device, dtype=torch.long
+            )
+            weights = torch.tensor(
+                [m[1] for m in successor_mapping], device=self.device, dtype=torch.float32
+            )
+            
+            # Compute weighted V_h^e contributions: weight * gamma_h * V_h^e(s', g)
+            contributions = weights * gamma_h * v_h_e_all
+            
+            # Scatter-add to aggregate contributions by data_idx
+            targets.scatter_add_(0, data_indices, contributions)
         
         return targets
     
@@ -1313,78 +1355,6 @@ class BasePhase2Trainer(ABC):
         
         return targets
 
-    def _compute_u_r_for_state(self, state: Any) -> torch.Tensor:
-        """
-        Compute U_r for a state, either from network or directly from X_h.
-        
-        U_r(s) = -(E_h[X_h(s)^{-ξ}])^η
-        
-        When u_r_use_network=True, uses the U_r network.
-        When u_r_use_network=False, computes directly from X_h values.
-        
-        Args:
-            state: Environment state.
-            
-        Returns:
-            U_r value as a tensor.
-        """
-        if self.config.u_r_use_network:
-            # Use U_r network (or target network depending on context)
-            _, u_r = self.networks.u_r.forward(state, None, self.device)
-            return u_r
-        else:
-            # Compute directly from X_h values
-            x_h_values = []
-            for h in self.human_agent_indices:
-                x_h = self.networks.x_h.forward(state, None, h, self.device)
-                # Clamp X_h to (0, 1] to prevent explosion when X_h is near 0
-                x_h_clamped = torch.clamp(x_h.squeeze(), min=1e-3, max=1.0)
-                x_h_values.append(x_h_clamped)
-            
-            # Stack and compute U_r using the formula:
-            # y = E_h[X_h^{-ξ}], U_r = -y^η
-            x_h_tensor = torch.stack(x_h_values)  # (num_humans,)
-            x_h_powered = x_h_tensor ** (-self.config.xi)
-            y = x_h_powered.mean()
-            u_r = -(y ** self.config.eta)
-            return u_r.unsqueeze(0)  # Return with batch dim
-    
-    def _compute_u_r_for_state_target(self, state: Any) -> torch.Tensor:
-        """
-        Compute U_r for a state using TARGET networks, for stable target computation.
-        
-        U_r(s) = -(E_h[X_h(s)^{-ξ}])^η
-        
-        When u_r_use_network=True, uses the U_r TARGET network.
-        When u_r_use_network=False, computes directly from X_h TARGET values.
-        
-        Args:
-            state: Environment state.
-            
-        Returns:
-            U_r value as a tensor.
-        """
-        if self.config.u_r_use_network:
-            # Use U_r TARGET network
-            _, u_r = self.networks.u_r_target.forward(state, None, self.device)
-            return u_r
-        else:
-            # Compute directly from X_h TARGET values
-            x_h_values = []
-            for h in self.human_agent_indices:
-                x_h = self.networks.x_h_target.forward(state, None, h, self.device)
-                # Clamp X_h to (0, 1] to prevent explosion when X_h is near 0
-                x_h_clamped = torch.clamp(x_h.squeeze(), min=1e-3, max=1.0)
-                x_h_values.append(x_h_clamped)
-            
-            # Stack and compute U_r using the formula:
-            # y = E_h[X_h^{-ξ}], U_r = -y^η
-            x_h_tensor = torch.stack(x_h_values)  # (num_humans,)
-            x_h_powered = x_h_tensor ** (-self.config.xi)
-            y = x_h_powered.mean()
-            u_r = -(y ** self.config.eta)
-            return u_r.unsqueeze(0)  # Return with batch dim
-    
     def compute_losses(
         self,
         batch: List[Phase2Transition],
