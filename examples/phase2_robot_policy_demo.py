@@ -804,6 +804,7 @@ def main(
     use_policy_path: str = None,
     num_rollouts_override: int = None,
     save_video_path: str = None,
+    num_training_steps_override: int = None,
 ):
     """Run Phase 2 demo."""
     # Configure environment based on command line option
@@ -898,6 +899,11 @@ def main(
         warmup_u_r_steps = 1000  # Will be set to 0 if u_r_use_network=False
         warmup_q_r_steps = 1000
         beta_r_rampup_steps = 2000
+    
+    # Override training steps if specified via command line
+    if num_training_steps_override is not None:
+        num_training_steps = num_training_steps_override
+        print(f"[OVERRIDE] Training steps set to {num_training_steps}")
     
     # Print async mode status
     if use_async:
@@ -1362,7 +1368,7 @@ if __name__ == "__main__":
                         help='Disable neural encoders (use identity function for debugging)')
     parser.add_argument('--tabular', '-t', action='store_true',
                         help='Use lookup tables instead of neural networks (exact tabular learning)')
-    parser.add_argument('--curious', '-c', action='store_true',
+    parser.add_argument('--curious', '-c', '--rnd', action='store_true',
                         help='Enable curiosity-driven exploration (RND for neural, count-based for tabular)')
     
     # Save/restore options
@@ -1374,6 +1380,10 @@ if __name__ == "__main__":
                         help='Restore networks from PATH before training (skips warmup/rampup)')
     parser.add_argument('--use_policy', type=str, default=None, metavar='PATH',
                         help='Skip training and only run rollouts using policy from PATH')
+    
+    # Training options
+    parser.add_argument('--steps', type=lambda x: int(float(x)), default=None, metavar='N',
+                        help='Number of training steps (overrides default based on env type, supports scientific notation like 1e5)')
     
     # Rollout options
     parser.add_argument('--rollouts', type=int, default=None, metavar='N',
@@ -1399,4 +1409,5 @@ if __name__ == "__main__":
         use_policy_path=args.use_policy,
         num_rollouts_override=args.rollouts,
         save_video_path=args.save_video,
+        num_training_steps_override=args.steps,
     )

@@ -151,6 +151,9 @@ class BasePhase2Trainer(ABC):
             # Archive old TensorBoard data to prevent mixing with new run
             self._archive_tensorboard_data(tensorboard_dir)
             self.writer = SummaryWriter(log_dir=tensorboard_dir)
+            if verbose:
+                import os
+                print(f"[TensorBoard] Created SummaryWriter for pid={os.getpid()} in {tensorboard_dir}")
             # Add static remarks to TensorBoard
             self.writer.add_text(
                 'Loss/caution',
@@ -216,6 +219,10 @@ class BasePhase2Trainer(ABC):
             'rnd': 0,
         }
         
+        # Track unique states seen (by hash) for exploration monitoring
+        # Works for both neural and tabular modes
+        self._unique_states_seen: set = set()
+        
         if self.debug:
             print("[DEBUG] BasePhase2Trainer.__init__: Initialization complete.")
     
@@ -227,6 +234,7 @@ class BasePhase2Trainer(ABC):
         - Profiler (contains thread locks)
         - Replay buffer (not needed in actor processes)
         - Environment (may contain thread locks; recreated from factory)
+        - Unique states set (can be large; tracked only in learner)
         """
         state = self.__dict__.copy()
         # Don't pickle TensorBoard writer - contains thread locks
@@ -237,6 +245,8 @@ class BasePhase2Trainer(ABC):
         state['replay_buffer'] = None
         # Don't pickle env - it may contain thread locks
         state['env'] = None
+        # Don't pickle unique states set - large and only needed in learner
+        state['_unique_states_seen'] = set()
         return state
     
     def __setstate__(self, state):
@@ -1604,7 +1614,15 @@ class BasePhase2Trainer(ABC):
         """
         # Count-based curiosity (for tabular mode)
         if self.config.use_count_based_curiosity and self.networks.count_curiosity is not None:
-            bonuses = self.networks.count_curiosity.get_bonuses(states)
+            # Strip step_count from states if include_step_count is False
+            if not self.config.include_step_count:
+                states_for_counts = [
+                    s[1:] if isinstance(s, tuple) and len(s) >= 2 else s 
+                    for s in states
+                ]
+            else:
+                states_for_counts = states
+            bonuses = self.networks.count_curiosity.get_bonuses(states_for_counts)
             return torch.tensor(bonuses, dtype=torch.float32, device=self.device)
         
         # RND (for neural network mode)
@@ -1617,16 +1635,37 @@ class BasePhase2Trainer(ABC):
     
     def record_state_visit(self, state: Any) -> None:
         """
-        Record a visit to a state for count-based curiosity.
+        Record a visit to a state for count-based curiosity and exploration tracking.
         
         This should be called whenever a state is visited during training.
-        Only has an effect if count-based curiosity is enabled.
+        Always updates the unique states counter.
+        Only updates count-based curiosity if that mode is enabled.
         
         Args:
             state: The state that was visited (must be hashable).
         """
+        # Always track unique states for exploration monitoring
+        # Use hash for memory efficiency (set of hashes, not full states)
+        try:
+            # Strip step_count from state if include_step_count is False
+            # State format: (step_count, agent_states, mobile_objects, mutable_objects)
+            if not self.config.include_step_count and isinstance(state, tuple) and len(state) >= 2:
+                state_for_hash = state[1:]  # Skip step_count (first element)
+            else:
+                state_for_hash = state
+            state_hash = hash(state_for_hash)
+            self._unique_states_seen.add(state_hash)
+        except TypeError:
+            # State not hashable - skip tracking
+            pass
+        
         if self.config.use_count_based_curiosity and self.networks.count_curiosity is not None:
-            self.networks.count_curiosity.record_visit(state)
+            # Use same transformed state for count-based curiosity
+            if not self.config.include_step_count and isinstance(state, tuple) and len(state) >= 2:
+                state_for_counts = state[1:]  # Skip step_count
+            else:
+                state_for_counts = state
+            self.networks.count_curiosity.record_visit(state_for_counts)
     
     def training_step(self) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, Dict[str, float]]]:
         """
@@ -1968,6 +2007,9 @@ class BasePhase2Trainer(ABC):
             # Log exploration epsilons side by side
             self.writer.add_scalar('Exploration/epsilon_r', self.config.get_epsilon_r(self.training_step_count), self.training_step_count)
             self.writer.add_scalar('Exploration/epsilon_h', self.config.get_epsilon_h(self.training_step_count), self.training_step_count)
+            
+            # Log unique states seen (works for all modes - neural, tabular, etc.)
+            self.writer.add_scalar('Exploration/unique_states_seen', len(self._unique_states_seen), self.training_step_count)
             
             # Log learning rates
             networks_to_log_lr = ['v_h_e', 'x_h', 'q_r']
@@ -2469,6 +2511,11 @@ class BasePhase2Trainer(ABC):
         if self.verbose:
             active = self.config.get_active_networks(self.training_step_count)
             print(f"[Learner] Starting in warmup stage {learner_state.prev_stage}: {learner_state.prev_stage_name} (active: {active})")
+            if self.writer is not None:
+                import os
+                print(f"[Learner] TensorBoard writer active (pid={os.getpid()})")
+            else:
+                print(f"[Learner] TensorBoard writer is None (logging disabled)")
         
         # Progress bar measured in training steps
         pbar = tqdm(total=num_training_steps, desc="Async Training", unit="steps")
