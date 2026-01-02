@@ -21,6 +21,7 @@ from .lookup import (
     LookupTableAggregateGoalAbilityNetwork,
     LookupTableIntrinsicRewardNetwork,
 )
+from .count_based_curiosity import CountBasedCuriosity
 
 
 def create_robot_q_network(
@@ -262,3 +263,22 @@ def create_all_phase2_lookup_networks(
         )
     
     return q_r, v_h_e, x_h, u_r, v_r
+
+
+def create_count_based_curiosity(config: Phase2Config) -> Optional[CountBasedCuriosity]:
+    """
+    Create a count-based curiosity module based on configuration.
+    
+    Args:
+        config: Phase2Config instance.
+    
+    Returns:
+        CountBasedCuriosity instance if enabled, else None.
+    """
+    if not config.use_count_based_curiosity:
+        return None
+    
+    return CountBasedCuriosity(
+        scale=config.count_curiosity_scale,
+        use_ucb=config.count_curiosity_use_ucb,
+    )

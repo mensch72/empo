@@ -35,6 +35,7 @@ from .intrinsic_reward_network import BaseIntrinsicRewardNetwork
 from .robot_value_network import BaseRobotValueNetwork, compute_v_r_from_components
 from .lookup import get_all_lookup_tables, get_total_table_size
 from .rnd import RNDModule
+from .count_based_curiosity import CountBasedCuriosity
 
 # Try to import tensorboard (optional)
 try:
@@ -54,8 +55,11 @@ class Phase2Networks:
     u_r: Optional[BaseIntrinsicRewardNetwork] = None
     v_r: Optional[BaseRobotValueNetwork] = None
     
-    # RND module for curiosity-driven exploration (optional)
+    # RND module for curiosity-driven exploration (optional, for neural networks)
     rnd: Optional[RNDModule] = None
+    
+    # Count-based curiosity for tabular exploration (optional, for lookup tables)
+    count_curiosity: Optional[CountBasedCuriosity] = None
     
     # Target networks (frozen copies for stable training)
     q_r_target: Optional[BaseRobotQNetwork] = None
@@ -674,19 +678,47 @@ class BasePhase2Trainer(ABC):
                 state, None, self.device
             )
             
-            # Add curiosity bonus to Q-values if RND is enabled
-            if self.config.use_rnd and self.networks.rnd is not None and self.config.rnd_bonus_coef_r > 0:
+            # Add curiosity bonus to Q-values if curiosity is enabled
+            if self._curiosity_enabled_for_robot():
                 q_values = self._add_curiosity_bonus_to_q_values(state, q_values)
             
             return self.networks.q_r_target.sample_action(
                 q_values, beta_r=effective_beta_r
             )
     
+    def _curiosity_enabled_for_robot(self) -> bool:
+        """Check if curiosity-driven exploration is enabled for the robot."""
+        if self.config.use_count_based_curiosity and self.networks.count_curiosity is not None:
+            return self.config.count_curiosity_bonus_coef_r > 0
+        if self.config.use_rnd and self.networks.rnd is not None:
+            return self.config.rnd_bonus_coef_r > 0
+        return False
+    
+    def _curiosity_enabled_for_human(self) -> bool:
+        """Check if curiosity-driven exploration is enabled for humans."""
+        if self.config.use_count_based_curiosity and self.networks.count_curiosity is not None:
+            return self.config.count_curiosity_bonus_coef_h > 0
+        if self.config.use_rnd and self.networks.rnd is not None:
+            return self.config.rnd_bonus_coef_h > 0
+        return False
+    
+    def _get_curiosity_bonus_coef_r(self) -> float:
+        """Get the robot curiosity bonus coefficient."""
+        if self.config.use_count_based_curiosity and self.networks.count_curiosity is not None:
+            return self.config.count_curiosity_bonus_coef_r
+        return self.config.rnd_bonus_coef_r
+    
+    def _get_curiosity_bonus_coef_h(self) -> float:
+        """Get the human curiosity bonus coefficient."""
+        if self.config.use_count_based_curiosity and self.networks.count_curiosity is not None:
+            return self.config.count_curiosity_bonus_coef_h
+        return self.config.rnd_bonus_coef_h
+    
     def _sample_robot_exploration_action(self, state: Any) -> Tuple[int, ...]:
         """
         Sample robot action during epsilon exploration.
         
-        When RND is enabled, uses curiosity-weighted sampling instead of uniform random.
+        When curiosity is enabled, uses curiosity-weighted sampling instead of uniform random.
         Otherwise falls back to configured exploration policy.
         
         Args:
@@ -699,8 +731,8 @@ class BasePhase2Trainer(ABC):
         
         num_action_combinations = self.networks.q_r_target.num_action_combinations
         
-        # If RND is enabled, use curiosity-weighted exploration
-        if self.config.use_rnd and self.networks.rnd is not None and self.config.rnd_bonus_coef_r > 0:
+        # If curiosity is enabled, use curiosity-weighted exploration
+        if self._curiosity_enabled_for_robot():
             return self._sample_curiosity_exploration_action(state)
         
         # Otherwise use configured exploration policy
@@ -870,7 +902,7 @@ class BasePhase2Trainer(ABC):
         novelties = torch.zeros(num_action_combinations, device=self.device)
         
         if all_next_states:
-            # Single batched RND forward pass for all successor states
+            # Single batched novelty computation for all successor states
             all_novelty_scores = self.compute_novelty_for_states(all_next_states)
             
             # Aggregate back to per-action expected novelty
@@ -880,7 +912,8 @@ class BasePhase2Trainer(ABC):
         
         # Multiplicative scaling: Q_eff = Q * exp(-bonus_coef * novelty)
         # High novelty → smaller scale factor → Q closer to 0 (better for power-law)
-        scale_factors = torch.exp(-self.config.rnd_bonus_coef_r * novelties)
+        bonus_coef = self._get_curiosity_bonus_coef_r()
+        scale_factors = torch.exp(-bonus_coef * novelties)
         return q_values * scale_factors
     
     def sample_human_actions(
@@ -1457,6 +1490,12 @@ class BasePhase2Trainer(ABC):
                     'batch_raw_std': rnd_stats['rnd_batch_raw_std'],
                 }
         
+        # ----- Count-based curiosity statistics (for tabular exploration) -----
+        if self.config.use_count_based_curiosity and self.networks.count_curiosity is not None:
+            with torch.no_grad():
+                count_stats = self.networks.count_curiosity.get_statistics()
+                prediction_stats['count_curiosity'] = count_stats
+        
         # Clear caches after each compute_losses call (for neural network encoders)
         if hasattr(self, 'clear_caches'):
             self.clear_caches()
@@ -1554,6 +1593,8 @@ class BasePhase2Trainer(ABC):
         Compute novelty scores for a list of states.
         
         This is used during action selection to compute curiosity bonuses.
+        Supports both RND (for neural networks) and count-based curiosity
+        (for lookup tables).
         
         Args:
             states: List of states.
@@ -1561,11 +1602,31 @@ class BasePhase2Trainer(ABC):
         Returns:
             Novelty scores tensor of shape (len(states),).
         """
-        if not self.config.use_rnd or self.networks.rnd is None:
-            return torch.zeros(len(states), device=self.device)
+        # Count-based curiosity (for tabular mode)
+        if self.config.use_count_based_curiosity and self.networks.count_curiosity is not None:
+            bonuses = self.networks.count_curiosity.get_bonuses(states)
+            return torch.tensor(bonuses, dtype=torch.float32, device=self.device)
         
-        features = self.get_state_features_for_rnd(states)
-        return self.networks.rnd.compute_novelty_no_grad(features)
+        # RND (for neural network mode)
+        if self.config.use_rnd and self.networks.rnd is not None:
+            features = self.get_state_features_for_rnd(states)
+            return self.networks.rnd.compute_novelty_no_grad(features)
+        
+        # No curiosity enabled
+        return torch.zeros(len(states), device=self.device)
+    
+    def record_state_visit(self, state: Any) -> None:
+        """
+        Record a visit to a state for count-based curiosity.
+        
+        This should be called whenever a state is visited during training.
+        Only has an effect if count-based curiosity is enabled.
+        
+        Args:
+            state: The state that was visited (must be hashable).
+        """
+        if self.config.use_count_based_curiosity and self.networks.count_curiosity is not None:
+            self.networks.count_curiosity.record_visit(state)
     
     def training_step(self) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, Dict[str, float]]]:
         """
@@ -1885,6 +1946,15 @@ class BasePhase2Trainer(ABC):
                     if 'running_std' in stats:
                         self.writer.add_scalar('Exploration/rnd_norm_running_std', stats['running_std'], self.training_step_count)
                     continue
+                # Count-based curiosity stats
+                if key == 'count_curiosity':
+                    if 'count_curiosity_unique_states' in stats:
+                        self.writer.add_scalar('Exploration/count_unique_states', stats['count_curiosity_unique_states'], self.training_step_count)
+                    if 'count_curiosity_total_visits' in stats:
+                        self.writer.add_scalar('Exploration/count_total_visits', stats['count_curiosity_total_visits'], self.training_step_count)
+                    if 'count_curiosity_mean_visits' in stats:
+                        self.writer.add_scalar('Exploration/count_mean_visits', stats['count_curiosity_mean_visits'], self.training_step_count)
+                    continue
                 self.writer.add_scalar(f'Predictions/{key}_mean', stats['mean'], self.training_step_count)
                 self.writer.add_scalar(f'Predictions/{key}_std', stats['std'], self.training_step_count)
                 if 'target_mean' in stats:
@@ -2096,6 +2166,9 @@ class BasePhase2Trainer(ABC):
                     terminal=transition.terminal
                 )
                 self.total_env_steps += 1
+                
+                # Record state visit for count-based curiosity
+                self.record_state_visit(transition.state)
             
             # Learner: perform training updates
             for _ in range(int(self.config.training_steps_per_env_step)):
@@ -2490,6 +2563,10 @@ class BasePhase2Trainer(ABC):
                     transition_probs_by_action=trans_dict.get('transition_probs_by_action'),
                     terminal=trans_dict.get('terminal', False)
                 )
+                
+                # Record state visit for count-based curiosity
+                self.record_state_visit(trans_dict['state'])
+                
                 consumed += 1
             except Empty:
                 break

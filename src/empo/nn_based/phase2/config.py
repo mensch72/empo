@@ -113,6 +113,30 @@ class Phase2Config:
     normalize_rnd: bool = True               # Normalize novelty by running mean/std
     rnd_normalization_decay: float = 0.99    # EMA decay for normalization stats
     
+    # =========================================================================
+    # Curiosity-driven exploration (Count-based - for tabular/lookup table mode)
+    # =========================================================================
+    # Count-based curiosity maintains state visit counts and provides exploration
+    # bonuses based on inverse visit frequency. This is simpler than RND and
+    # works well with lookup table networks where states are already hashable.
+    #
+    # Bonus formulas:
+    # - Simple (use_ucb_bonus=False): bonus = scale / sqrt(visits + 1)
+    # - UCB-style (use_ucb_bonus=True): bonus = scale * sqrt(log(total) / (visits + 1))
+    #
+    # When enabled, curiosity affects action selection similarly to RND:
+    # - During epsilon exploration: actions weighted by expected novelty
+    # - During policy selection: multiplicative scaling of Q-values
+    #
+    # Note: Only one of use_rnd or use_count_based_curiosity should be enabled.
+    # Count-based curiosity is recommended for lookup table mode (use_lookup_tables=True).
+    # RND is recommended for neural network mode.
+    use_count_based_curiosity: bool = False  # Enable count-based curiosity exploration
+    count_curiosity_scale: float = 1.0       # Scale factor for curiosity bonus
+    count_curiosity_use_ucb: bool = False    # Use UCB-style bonus vs simple 1/sqrt(n)
+    count_curiosity_bonus_coef_r: float = 0.1  # Robot curiosity bonus coefficient
+    count_curiosity_bonus_coef_h: float = 0.1  # Human curiosity bonus coefficient
+    
     # Learning rates (base rates, may be modified by schedule)
     lr_q_r: float = 1e-4
     lr_v_r: float = 1e-4
@@ -304,6 +328,27 @@ class Phase2Config:
                     UserWarning,
                     stacklevel=2
                 )
+        
+        # Validate curiosity settings
+        if self.use_rnd and self.use_count_based_curiosity:
+            warnings.warn(
+                "Both use_rnd and use_count_based_curiosity are enabled. "
+                "Only one curiosity method should be used at a time. "
+                "For lookup table mode, prefer count-based curiosity. "
+                "For neural network mode, prefer RND.",
+                UserWarning,
+                stacklevel=2
+            )
+        
+        # Recommend count-based curiosity for lookup tables
+        if self.use_lookup_tables and self.use_rnd and not self.use_count_based_curiosity:
+            warnings.warn(
+                "RND is enabled with lookup tables. Consider using count-based curiosity "
+                "(use_count_based_curiosity=True) instead, which is simpler and more "
+                "appropriate for tabular settings.",
+                UserWarning,
+                stacklevel=2
+            )
     
     # Model-based targets: if True (default), use transition_probabilities() to compute
     # expected V(s') over all possible successor states instead of using single samples.

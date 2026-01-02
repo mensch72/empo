@@ -51,7 +51,12 @@ from .network_factory import (
     create_aggregate_goal_ability_network,
     create_intrinsic_reward_network,
     create_all_phase2_lookup_networks,
+    create_count_based_curiosity,
 )
+
+# Curiosity-driven exploration
+from .rnd import RNDModule, RNDModuleWithEncoder
+from .count_based_curiosity import CountBasedCuriosity
 
 __all__ = [
     'Phase2Config',
@@ -85,4 +90,9 @@ __all__ = [
     'create_aggregate_goal_ability_network',
     'create_intrinsic_reward_network',
     'create_all_phase2_lookup_networks',
+    'create_count_based_curiosity',
+    # Curiosity-driven exploration
+    'RNDModule',
+    'RNDModuleWithEncoder',
+    'CountBasedCuriosity',
 ]
