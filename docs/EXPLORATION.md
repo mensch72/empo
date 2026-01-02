@@ -144,8 +144,39 @@ trainer = MultiGridPhase2Trainer(
 Exploration rates are logged under the `Exploration/` group:
 - `Exploration/epsilon_r` - Robot exploration rate over time
 - `Exploration/epsilon_h` - Human exploration rate over time
+- `Exploration/unique_states_seen` - Count of unique states visited
+- `Exploration/visit_count_distribution` - Histogram of visit counts per state
 
-Both appear side-by-side in TensorBoard for easy comparison.
+Both epsilon values appear side-by-side in TensorBoard for easy comparison.
+
+### Interpreting the Visit Count Histogram
+
+The `visit_count_distribution` histogram shows how many times each unique state has been visited. This is crucial for diagnosing exploration issues:
+
+| Histogram Shape | Interpretation | Action |
+|-----------------|----------------|--------|
+| Many states at count 1-5, few at higher | Healthy exploration, hitting connectivity limits | Bonus is fine |
+| Heavy tail: few states at 100+, most at 1 | Bottleneck/stuck in small region | **Increase curiosity bonus** |
+| Flat/uniform counts | Good coverage but slow expansion | May need longer training |
+| All states with similar high counts | Small reachable space, saturated | Expected for small envs |
+
+**If exploration is stuck** (heavy-tailed distribution), try increasing the curiosity bonus coefficient:
+- For count-based curiosity: `count_curiosity_bonus_coef_r` (try 2x current value)
+- For RND: `rnd_bonus_coef_r` (try 2x current value)
+
+### Theoretical Growth Rate of Unique States
+
+For random walk / Markovian exploration on a graph, the number of unique states visited grows differently depending on structure:
+
+- **1D lattice**: ~√t (recurrent, frequently revisits)
+- **2D lattice**: ~t/log(t) (marginally recurrent)  
+- **3D+ or transient**: ~t (rarely revisits)
+- **Grid worlds with obstacles**: Typically √t due to bottlenecks and constrained movement
+
+In constrained environments like MultiGrid, expect **√t growth** because:
+- Movement is local (can only reach neighbors)
+- Walls, obstacles, and bottlenecks constrain expansion
+- The "frontier" of unexplored states grows as √t (diffusion)
 
 ## Known Challenge: State Space Coverage
 

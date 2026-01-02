@@ -222,9 +222,10 @@ class BasePhase2Trainer(ABC):
             'rnd': 0,
         }
         
-        # Track unique states seen (by hash) for exploration monitoring
+        # Track state visit counts (by hash) for exploration monitoring
         # Works for both neural and tabular modes
-        self._unique_states_seen: set = set()
+        # Dict maps state_hash -> visit_count for histogram analysis
+        self._state_visit_counts: Dict[int, int] = {}
         
         if self.debug:
             print("[DEBUG] BasePhase2Trainer.__init__: Initialization complete.")
@@ -248,8 +249,8 @@ class BasePhase2Trainer(ABC):
         state['replay_buffer'] = None
         # Don't pickle env - it may contain thread locks
         state['env'] = None
-        # Don't pickle unique states set - large and only needed in learner
-        state['_unique_states_seen'] = set()
+        # Don't pickle state visit counts dict - large and only needed in learner
+        state['_state_visit_counts'] = {}
         return state
     
     def __setstate__(self, state):
@@ -1816,8 +1817,8 @@ class BasePhase2Trainer(ABC):
         Args:
             state: The state that was visited (must be hashable).
         """
-        # Always track unique states for exploration monitoring
-        # Use hash for memory efficiency (set of hashes, not full states)
+        # Always track state visit counts for exploration monitoring
+        # Use hash for memory efficiency (dict of hashes -> counts, not full states)
         try:
             # Strip step_count from state if include_step_count is False
             # State format: (step_count, agent_states, mobile_objects, mutable_objects)
@@ -1826,7 +1827,7 @@ class BasePhase2Trainer(ABC):
             else:
                 state_for_hash = state
             state_hash = hash(state_for_hash)
-            self._unique_states_seen.add(state_hash)
+            self._state_visit_counts[state_hash] = self._state_visit_counts.get(state_hash, 0) + 1
         except TypeError:
             # State not hashable - skip tracking
             pass
@@ -2181,7 +2182,13 @@ class BasePhase2Trainer(ABC):
             self.writer.add_scalar('Exploration/epsilon_h', self.config.get_epsilon_h(self.training_step_count), self.training_step_count)
             
             # Log unique states seen (works for all modes - neural, tabular, etc.)
-            self.writer.add_scalar('Exploration/unique_states_seen', len(self._unique_states_seen), self.training_step_count)
+            self.writer.add_scalar('Exploration/unique_states_seen', len(self._state_visit_counts), self.training_step_count)
+            
+            # Log histogram of visit counts for exploration analysis
+            # This helps diagnose whether exploration is stuck revisiting same states
+            if self._state_visit_counts:
+                visit_counts = np.array(list(self._state_visit_counts.values()), dtype=np.float32)
+                self.writer.add_histogram('Exploration/visit_count_distribution', visit_counts, self.training_step_count)
             
             # Log learning rates
             networks_to_log_lr = ['v_h_e', 'x_h', 'q_r']
