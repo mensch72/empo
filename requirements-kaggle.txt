@@ -9,6 +9,10 @@
 # Note: PyTorch, numpy, matplotlib, scipy are pre-installed on Kaggle.
 # Kaggle also has CUDA-enabled PyTorch by default when using GPU.
 
+# Fix protobuf/tensorboard compatibility issue on Kaggle
+# This must be installed first to avoid import errors
+protobuf>=3.20.0,<5.0.0
+
 # Reinforcement Learning frameworks (not pre-installed on Kaggle)
 gymnasium>=0.28.0
 pettingzoo>=1.24.0
@@ -24,7 +28,7 @@ tqdm>=4.65.0
 graphviz>=0.20.0
 
 # Note: The following are OPTIONAL and NOT included by default:
-# - tensorboard>=2.13.0  (pre-installed on Kaggle)
+# - tensorboard>=2.13.0  (pre-installed on Kaggle, but may need upgrade)
 # - wandb>=0.15.0        (uncomment if needed for experiment tracking)
 # - mpi4py>=3.1.0        (NOT recommended for Kaggle - MPI not well supported)
 # - line_profiler>=4.0.0 (uncomment if needed for profiling)

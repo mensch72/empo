@@ -2338,6 +2338,14 @@ class BasePhase2Trainer(ABC):
         actor_state = self._init_actor_state()
         learner_state = self._init_learner_state()
         
+        # Calculate env steps to training steps ratio
+        # training_steps_per_env_step can be:
+        #   > 1: multiple training steps per env step (e.g., 4.0 = 4 gradient updates per env step)
+        #   = 1: one training step per env step (default)
+        #   < 1: fewer training steps than env steps (e.g., 0.1 = train every 10 env steps)
+        # We use an accumulator to handle fractional ratios properly
+        training_step_accumulator = 0.0
+        
         # Set main networks to train mode (enables dropout)
         self.networks.q_r.train()
         self.networks.v_h_e.train()
@@ -2391,10 +2399,12 @@ class BasePhase2Trainer(ABC):
                 # Record state visit for count-based curiosity
                 self.record_state_visit(transition.state)
             
-            # Learner: perform training updates
-            for _ in range(int(self.config.training_steps_per_env_step)):
-                if self.training_step_count >= num_training_steps:
-                    break
+            # Learner: perform training updates based on ratio
+            # Accumulate fractional training steps and execute when we have >= 1
+            training_step_accumulator += self.config.training_steps_per_env_step
+            
+            while training_step_accumulator >= 1.0 and self.training_step_count < num_training_steps:
+                training_step_accumulator -= 1.0
                 
                 losses = self._learner_step(learner_state, pbar)
                 
@@ -2457,7 +2467,22 @@ class BasePhase2Trainer(ABC):
             
         Returns:
             List of loss dicts (logged periodically from learner).
+            
+        Raises:
+            RuntimeError: If running in a Jupyter/Kaggle notebook where multiprocessing
+                doesn't work properly.
         """
+        # Check if we're in a Jupyter notebook (multiprocessing won't work)
+        import sys
+        main_module = sys.modules.get('__main__', None)
+        if main_module is not None and not hasattr(main_module, '__spec__'):
+            # Likely running in Jupyter/IPython notebook
+            raise RuntimeError(
+                "Async training mode is not supported in Jupyter/Kaggle/Colab notebooks. "
+                "Multiprocessing requires a proper __main__ module. "
+                "Please use sync mode instead (remove --async flag or set async_training=False)."
+            )
+        
         # Use 'spawn' context for CUDA compatibility
         ctx = mp.get_context('spawn')
         

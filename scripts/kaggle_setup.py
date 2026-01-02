@@ -119,6 +119,8 @@ def verify_imports() -> dict:
         results['empo_core'] = True
     except ImportError as e:
         results['empo_core'] = str(e)
+    except Exception as e:
+        results['empo_core'] = f"Error: {type(e).__name__}: {e}"
     
     # MultiGrid
     try:
@@ -126,6 +128,8 @@ def verify_imports() -> dict:
         results['multigrid'] = True
     except ImportError as e:
         results['multigrid'] = str(e)
+    except Exception as e:
+        results['multigrid'] = f"Error: {type(e).__name__}: {e}"
     
     # Environments
     try:
@@ -133,13 +137,18 @@ def verify_imports() -> dict:
         results['envs'] = True
     except ImportError as e:
         results['envs'] = str(e)
+    except Exception as e:
+        results['envs'] = f"Error: {type(e).__name__}: {e}"
     
-    # Phase 2 (neural networks)
+    # Phase 2 (neural networks) - may fail due to tensorboard issues
     try:
         from empo.nn_based.phase2.config import Phase2Config
         results['phase2'] = True
     except ImportError as e:
         results['phase2'] = str(e)
+    except Exception as e:
+        # TensorBoard/protobuf issues are common on Kaggle
+        results['phase2'] = f"Warning: {type(e).__name__} (TensorBoard issue, try restarting kernel)"
     
     return results
 
@@ -176,6 +185,18 @@ def print_status(repo_root: str, env_info: dict, import_results: dict):
     print("=" * 60)
 
 
+def fix_protobuf_issues():
+    """
+    Fix protobuf/tensorboard compatibility issues common on Kaggle/Colab.
+    Should be called before importing tensorboard-dependent modules.
+    """
+    try:
+        # Force protobuf to use pure-python implementation to avoid C++ issues
+        os.environ.setdefault('PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION', 'python')
+    except Exception:
+        pass
+
+
 def setup(install_deps: bool = True, quiet: bool = True) -> dict:
     """
     Complete EMPO setup for Kaggle/Colab notebooks.
@@ -189,6 +210,9 @@ def setup(install_deps: bool = True, quiet: bool = True) -> dict:
     """
     repo_root = setup_empo_paths()
     
+    # Fix protobuf issues before any imports
+    fix_protobuf_issues()
+    
     # Choose requirements file based on platform
     if os.path.exists('/kaggle'):
         req_file = 'requirements-kaggle.txt'
@@ -198,6 +222,8 @@ def setup(install_deps: bool = True, quiet: bool = True) -> dict:
     if install_deps and os.path.exists(req_file):
         print(f"Installing dependencies from {req_file}...")
         install_dependencies(req_file, quiet=quiet)
+        print("✓ Dependencies installed")
+        print("  Note: If you see TensorBoard errors, restart the kernel and re-run.")
     
     env_info = detect_environment()
     import_results = verify_imports()
