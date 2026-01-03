@@ -250,13 +250,13 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         grid_tensor, global_features, agent_features, interactive_features = \
             self.state_encoder.tensorize_state(state, world_model, device)
         
-        # Encode agent identity with shared encoder
-        query_idx, query_grid, query_features = self.agent_encoder.encode_single(
+        # Tensorize agent identity with shared encoder
+        query_idx, query_grid, query_features = self.agent_encoder.tensorize_single(
             human_agent_idx, state, world_model, device
         )
         
-        # Encode agent identity with own encoder (same input, separate encoding)
-        own_idx, own_grid, own_features = self.own_agent_encoder.encode_single(
+        # Tensorize agent identity with own encoder (same input, separate encoding)
+        own_idx, own_grid, own_features = self.own_agent_encoder.tensorize_single(
             human_agent_idx, state, world_model, device
         )
         
@@ -361,7 +361,7 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         # Batch tensorize agent identities (shared encoder)
         idx_list, grid_list, feat_list = [], [], []
         for h_idx, state in zip(human_indices, states):
-            idx, grid, feat = self.agent_encoder.encode_single(h_idx, state, world_model, device)
+            idx, grid, feat = self.agent_encoder.tensorize_single(h_idx, state, world_model, device)
             idx_list.append(idx)
             grid_list.append(grid)
             feat_list.append(feat)
@@ -373,7 +373,7 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         # Batch tensorize agent identities (own encoder)
         own_idx_list, own_grid_list, own_feat_list = [], [], []
         for h_idx, state in zip(human_indices, states):
-            idx, grid, feat = self.own_agent_encoder.encode_single(h_idx, state, world_model, device)
+            idx, grid, feat = self.own_agent_encoder.tensorize_single(h_idx, state, world_model, device)
             own_idx_list.append(idx)
             own_grid_list.append(grid)
             own_feat_list.append(feat)

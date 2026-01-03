@@ -1,14 +1,37 @@
 # EMPO Notebooks
 
-This directory contains Jupyter notebooks for interactive exploration of the EMPO framework.
+This directory contains Jupyter notebooks for running EMPO on cloud platforms.
 
-## Available Notebooks
+## Quick Start: Launcher Notebooks
+
+For running example scripts with minimal setup, use the launcher notebooks:
+
+### kaggle_launcher.ipynb (Recommended)
+
+Minimal 5-cell notebook for running any example script on Kaggle:
+1. Clone repo
+2. Setup paths
+3. `%run examples/<script>.py`
+4. Copy outputs
+5. Download
+
+**Best for**: Long-running training with background execution.
+
+### colab_launcher.ipynb
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mensch72/empo/blob/main/notebooks/colab_launcher.ipynb)
+
+Minimal launcher for Google Colab - same structure as Kaggle launcher.
+
+## Tutorial Notebooks
+
+For learning the EMPO framework interactively:
 
 ### empo_colab_demo.ipynb
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mensch72/empo/blob/main/notebooks/empo_colab_demo.ipynb)
 
-A comprehensive Google Colab demo that covers:
+Comprehensive tutorial covering:
 
 - **Setup**: Installing dependencies and configuring the environment
 - **Environment Exploration**: Creating and visualizing MultiGrid environments
@@ -57,13 +80,47 @@ When creating new notebooks for this repository:
    [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mensch72/empo/blob/main/notebooks/YOUR_NOTEBOOK.ipynb)
    ```
 
-## Colab Limitations
+## Platform Limitations
 
-Some features have limitations in Google Colab:
+### Common to Both Platforms
 
-- **MPI**: Not supported - use `parallel=False` for backward induction
-- **Docker**: Not available in Colab environment
-- **Session timeout**: Free tier sessions timeout after ~12 hours
-- **Large state spaces**: May require reducing `max_steps` for memory constraints
+- **No `--async` mode**: Multiprocessing doesn't work in notebooks
+- **No MPI**: Use `parallel=False` for backward induction
+
+### Google Colab
+
+- **Session timeout**: Free tier disconnects after ~90 min idle
+- **No background execution**: Session stops when browser closes (free tier)
+- **Dynamic quota**: Heavy users may be throttled
+
+### Kaggle
+
+- **Internet required**: Must enable in Settings → Internet → On
+- **GPU quota**: 30 hours/week (T4 or P100)
+- **Session limit**: Max 12 hours per session
+- **Background execution**: ✅ "Save & Run All" continues after browser closes
+
+## Running Example Scripts
+
+Use the launcher notebooks to run any script from [examples/](../examples/):
+
+```python
+# Quick demos
+%run examples/simple_example.py
+%run examples/state_management_demo.py
+
+# With flags
+%run examples/phase2_robot_policy_demo.py --quick
+%run examples/phase2_robot_policy_demo.py --ensemble --tabular
+```
+
+See [examples/README.md](../examples/README.md) for the full list.
+
+## Running Locally
+
+```bash
+pip install jupyter
+jupyter notebook
+```
 
 See the main [README.md](../README.md) for more information.

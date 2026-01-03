@@ -72,7 +72,7 @@ U_r = E[V_r(s')] where the expectation is over next states. With X_h providing s
 
 **Goal**: Learn the robot's action-value function.
 
-Q_r(s, a) = immediate_value(s, a) + γ · U_r(s, a). With U_r already trained (or computed directly from X_h), Q_r can learn meaningful action values.
+Q_r(s, a) = γ_r × E[V_r(s')] (Equation 4). Note that U_r is NOT added here—it's already included in V_r's definition: V_r(s) = U_r(s) + E_{a~π_r}[Q_r(s,a)] (Equation 9). With U_r and V_r components available, Q_r can learn meaningful action values.
 
 **Note**: Even though Q_r is now trained, β_r remains 0, so the policy is still uniform random. This prevents the policy from affecting V_h^e, X_h, and U_r targets while Q_r is still learning.
 

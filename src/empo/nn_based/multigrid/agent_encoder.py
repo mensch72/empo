@@ -203,7 +203,7 @@ class AgentIdentityEncoder(nn.Module):
         # Combine all
         return torch.cat([idx_emb, pos_emb, feat_emb], dim=-1)
     
-    def encode_single(
+    def tensorize_single(
         self,
         agent_idx: int,
         state: Tuple,
@@ -211,7 +211,7 @@ class AgentIdentityEncoder(nn.Module):
         device: str = 'cpu'
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Extract raw tensors for a single agent identity (before NN forward).
+        Tensorize a single agent identity (before NN forward).
         
         This method extracts index, position grid, and agent features from the
         state. Results are cached by (state_id, agent_idx) to avoid redundant
@@ -261,7 +261,7 @@ class AgentIdentityEncoder(nn.Module):
         self._raw_cache[cache_key] = result
         return result
     
-    def encode_batch(
+    def tensorize_batch(
         self,
         agent_indices: list,
         states: list,
@@ -269,7 +269,7 @@ class AgentIdentityEncoder(nn.Module):
         device: str = 'cpu'
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Extract raw tensors for a batch of agent identities (before NN forward).
+        Tensorize a batch of agent identities (before NN forward).
         
         Uses caching to avoid redundant extraction.
         
@@ -294,7 +294,7 @@ class AgentIdentityEncoder(nn.Module):
             world_models = [world_models] * batch_size
         
         for agent_idx, state, world_model in zip(agent_indices, states, world_models):
-            idx, grid, features = self.encode_single(agent_idx, state, world_model, device)
+            idx, grid, features = self.tensorize_single(agent_idx, state, world_model, device)
             idx_list.append(idx)
             grid_list.append(grid)
             features_list.append(features)

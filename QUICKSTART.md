@@ -4,7 +4,7 @@ Get up and running with EMPO in under 5 minutes!
 
 ## Google Colab (Quickest Option)
 
-[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mensch72/empo/blob/main/notebooks/empo_colab_demo.ipynb)
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/mensch72/empo/blob/main/notebooks/colab_launcher.ipynb)
 
 **No installation required!** Click the badge above to run EMPO directly in your browser.
 
@@ -27,6 +27,72 @@ sys.path.insert(0, os.path.join(os.getcwd(), 'vendor', 'multigrid'))
 # You're ready!
 from empo import WorldModel, PossibleGoal
 ```
+
+## Kaggle (Best Free GPU Option)
+
+Kaggle offers **30 hours/week of free GPU** with reliable background execution.
+
+### Using the Launcher Notebook
+
+1. Go to [kaggle.com](https://kaggle.com) and create a new notebook
+2. Enable **Internet** (Settings → Internet → On)
+3. Enable **GPU** (Settings → Accelerator → GPU T4 x2)
+4. Copy these cells:
+
+```python
+# Cell 1: Clone repository
+!git clone --depth 1 https://github.com/mensch72/empo.git
+%cd empo
+```
+
+```python
+# Cell 2: Setup
+%run scripts/kaggle_setup.py
+```
+
+```python
+# Cell 3: Run any example script
+%run examples/phase2_robot_policy_demo.py --quick
+```
+
+### Background Execution
+
+For long training runs (30+ minutes):
+1. Edit cell 3 with your desired script
+2. Click **"Save Version"** → **"Save & Run All (Commit)"**
+3. Close browser - Kaggle continues running
+4. Download outputs from the **"Output"** tab when complete
+
+### Available Example Scripts
+
+```python
+# Quick demos (< 1 min)
+%run examples/simple_example.py
+%run examples/state_management_demo.py
+
+# Medium demos (1-5 min)
+%run examples/human_policy_prior_example.py --quick
+%run examples/neural_policy_prior_demo.py --quick
+
+# Phase 2 training (30-60+ min)
+%run examples/phase2_robot_policy_demo.py              # Full training
+%run examples/phase2_robot_policy_demo.py --quick      # Quick test
+%run examples/phase2_robot_policy_demo.py --ensemble   # Random environments
+%run examples/phase2_robot_policy_demo.py --tabular    # Lookup tables
+```
+
+See [examples/README.md](examples/README.md) for all available scripts and flags.
+
+### Platform Comparison
+
+| Feature | Kaggle | Colab Free |
+|---------|--------|------------|
+| GPU quota | 30 hrs/week (fixed) | ~4-8 hrs/day (dynamic) |
+| Background execution | ✅ Yes | ❌ No |
+| Session limit | 12 hours | 12 hours |
+| Idle timeout | Ignored in background | 90 min disconnect |
+
+**Note**: Neither platform supports `--async` mode (multiprocessing doesn't work in notebooks).
 
 ## Prerequisites Check (for Local Development)
 

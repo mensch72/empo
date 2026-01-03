@@ -12,6 +12,123 @@ Phase 2 training uses **epsilon-greedy exploration** for both robot and human ag
 
 Both `epsilon_r` (robot) and `epsilon_h` (human) decay over training according to configurable schedules so that finally the correct values will be learned (at least if `epsilon_r` and `epsilon_h` are decayed to zero).
 
+## Action Selection Process (As Implemented)
+
+This section describes exactly how human and robot actions are selected during `collect_transition()`.
+
+### Order of Operations
+
+Actions are sampled in a specific order to enable efficient computation:
+
+1. **Sample human actions first** (`sample_human_actions`)
+2. **Compute transition probabilities** for all robot actions (given those human actions)
+3. **Sample robot action** (`sample_robot_action`) using those transition probabilities for curiosity
+
+This order allows `transition_probabilities()` to be called only ONCE and reused for both curiosity-driven action selection and the replay buffer.
+
+### Human Action Selection (`sample_human_actions`)
+
+For each human agent `h` with assigned goal `g`:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    HUMAN ACTION SELECTION                       │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  1. Get base probabilities:                                     │
+│     ├─ With probability epsilon_h (exploration):                │
+│     │   ├─ If human_exploration_policy is None:                 │
+│     │   │     → P(a) = 1/num_actions (uniform)                  │
+│     │   └─ If human_exploration_policy is HumanPolicyPrior:     │
+│     │         → P(a) = exploration_policy(state, h, goal)       │
+│     │                                                           │
+│     └─ With probability (1 - epsilon_h) (policy-based):         │
+│           → P(a) = human_policy_prior(state, h, goal)           │
+│                                                                 │
+│  2. Apply curiosity bonus (if human_action_rnd enabled):        │
+│     ├─ Get features: (state_feat, agent_feat) for human h       │
+│     ├─ Compute novelty: novelty[a] for all actions              │
+│     ├─ Clamp: novelty = max(0, novelty)                         │
+│     ├─ Scale: scale[a] = exp(+bonus_coef_h * novelty[a])        │
+│     ├─ Modify: P_eff(a) = P(a) * scale[a]                       │
+│     └─ Renormalize: P_eff(a) = P_eff(a) / sum(P_eff)            │
+│                                                                 │
+│  3. Sample action from P_eff (or P if no curiosity)             │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Key points:**
+- **Curiosity applies to BOTH epsilon and policy branches** - this maximizes exploration benefit
+- Human curiosity is **action-dependent**: novelty(state, human, action) - encourages trying actions that haven't been taken in this (state, human) context
+- The multiplicative bonus `exp(+bonus * novelty)` increases probability of novel actions
+- Human RND requires `use_rnd=True`, `use_human_action_rnd=True`, and `rnd_bonus_coef_h > 0`
+- Features are computed in a **single batched call** for all humans, then indexed per-human
+
+### Robot Action Selection (`sample_robot_action`)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    ROBOT ACTION SELECTION                       │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Get effective beta_r (may be ramped during warm-up)            │
+│                                                                 │
+│  With probability epsilon_r (exploration):                      │
+│    1. Get base probabilities:                                   │
+│       ├─ If robot_exploration_policy is None:                   │
+│       │     → P(a) = 1/num_actions (uniform)                    │
+│       ├─ If robot_exploration_policy is RobotPolicy:            │
+│       │     → P(a) = policy(state) or sample directly           │
+│       ├─ If robot_exploration_policy is callable:               │
+│       │     → P(a) = policy(state, env)                         │
+│       └─ If robot_exploration_policy is list/array:             │
+│             → P(a) = fixed probabilities                        │
+│                                                                 │
+│    2. Apply curiosity bonus (if enabled & transition_probs):    │
+│       ├─ Compute expected novelty for each action               │
+│       ├─ Scale: scale[a] = exp(+bonus_coef_r * novelty[a])      │
+│       ├─ Modify: P_eff(a) = P(a) * scale[a]                     │
+│       └─ Renormalize                                            │
+│                                                                 │
+│    3. Sample from P_eff                                         │
+│                                                                 │
+│  With probability (1 - epsilon_r) (policy-based):               │
+│    1. Compute Q-values: Q(s,a) = q_r_target.forward(state)      │
+│                                                                 │
+│    2. Apply curiosity bonus (if enabled & transition_probs):    │
+│       ├─ Compute expected novelty for each action               │
+│       ├─ Apply bonus (multiplicative on Q):                     │
+│       │   Q_eff(a) = Q(a) * exp(-bonus_coef_r * novelty(a))     │
+│       │   (Since Q < 0, smaller scale → Q closer to 0 → better) │
+│       └─ Sample from Boltzmann policy over Q_eff                │
+│                                                                 │
+│    3. Otherwise: Sample from P(a) ∝ (-Q(a))^(-β_r)              │
+│                                                                 │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Key points:**
+- **Curiosity applies to BOTH epsilon and policy branches** - this maximizes exploration benefit
+- Robot curiosity is **state-dependent**: novelty(successor_state) - encourages visiting novel states
+- Uses `q_r_target` (frozen copy) for stable action sampling
+- In epsilon branch: multiplicative bonus `exp(+bonus * novelty)` on exploration probabilities
+- In policy branch: multiplicative bonus `exp(-bonus * novelty)` on Q-values (preserves Q < 0)
+- Robot RND requires `use_rnd=True` and `rnd_bonus_coef_r > 0`
+
+### Comparison: Human vs Robot Curiosity
+
+| Aspect | Human Curiosity | Robot Curiosity |
+|--------|-----------------|-----------------|
+| **What's novel** | (state, human, action) tuple | Successor state |
+| **Network** | `human_rnd` (HumanActionRNDModule) | `rnd` (RNDModule) |
+| **Config flag** | `use_human_action_rnd=True` | `use_rnd=True` |
+| **Bonus coef** | `rnd_bonus_coef_h` | `rnd_bonus_coef_r` |
+| **Applies to** | Both epsilon and policy branches | Both epsilon and policy branches |
+| **Epsilon formula** | `P_eff(a) = P(a) * exp(+coef * novelty[a])` | `P_eff(a) = P(a) * exp(+coef * novelty[a])` |
+| **Policy formula** | `P_eff(a) = P(a) * exp(+coef * novelty[a])` | `Q_eff(a) = Q(a) * exp(-coef * novelty)` |
+| **Effect** | Higher novelty → higher P | Higher novelty → higher P |
+
 ## Configuration Parameters
 
 In `Phase2Config`:
@@ -144,8 +261,39 @@ trainer = MultiGridPhase2Trainer(
 Exploration rates are logged under the `Exploration/` group:
 - `Exploration/epsilon_r` - Robot exploration rate over time
 - `Exploration/epsilon_h` - Human exploration rate over time
+- `Exploration/unique_states_seen` - Count of unique states visited
+- `Exploration/visit_count_distribution` - Histogram of visit counts per state
 
-Both appear side-by-side in TensorBoard for easy comparison.
+Both epsilon values appear side-by-side in TensorBoard for easy comparison.
+
+### Interpreting the Visit Count Histogram
+
+The `visit_count_distribution` histogram shows how many times each unique state has been visited. This is crucial for diagnosing exploration issues:
+
+| Histogram Shape | Interpretation | Action |
+|-----------------|----------------|--------|
+| Many states at count 1-5, few at higher | Healthy exploration, hitting connectivity limits | Bonus is fine |
+| Heavy tail: few states at 100+, most at 1 | Bottleneck/stuck in small region | **Increase curiosity bonus** |
+| Flat/uniform counts | Good coverage but slow expansion | May need longer training |
+| All states with similar high counts | Small reachable space, saturated | Expected for small envs |
+
+**If exploration is stuck** (heavy-tailed distribution), try increasing the curiosity bonus coefficient:
+- For count-based curiosity: `count_curiosity_bonus_coef_r` (try 2x current value)
+- For RND: `rnd_bonus_coef_r` (try 2x current value)
+
+### Theoretical Growth Rate of Unique States
+
+For random walk / Markovian exploration on a graph, the number of unique states visited grows differently depending on structure:
+
+- **1D lattice**: ~√t (recurrent, frequently revisits)
+- **2D lattice**: ~t/log(t) (marginally recurrent)  
+- **3D+ or transient**: ~t (rarely revisits)
+- **Grid worlds with obstacles**: Typically √t due to bottlenecks and constrained movement
+
+In constrained environments like MultiGrid, expect **√t growth** because:
+- Movement is local (can only reach neighbors)
+- Walls, obstacles, and bottlenecks constrain expansion
+- The "frontier" of unexplored states grows as √t (diffusion)
 
 ## Known Challenge: State Space Coverage
 
@@ -182,11 +330,11 @@ EMPO supports two approaches to curiosity-driven exploration:
 | **RND** (Random Network Distillation) | Neural network mode | Prediction error as novelty signal |
 | **Count-Based Curiosity** | Tabular/lookup table mode | Visit counts → bonus = 1/√(n+1) |
 
-Both provide intrinsic motivation that biases action selection toward less-visited states.
+Curiosity bonuses are applied to **both the epsilon exploration branch and the (1-epsilon) policy branch**. This maximizes the benefit of curiosity-driven exploration by biasing action selection toward novel states/actions regardless of which branch is taken.
 
 ### RND (Random Network Distillation)
 
-EMPO supports **Random Network Distillation (RND)** for curiosity-driven exploration. RND provides an intrinsic motivation signal that biases action selection toward states that have been seen less frequently during training.
+EMPO supports **Random Network Distillation (RND)** for curiosity-driven exploration. RND provides an intrinsic motivation signal that biases the learned policy toward exploring states that have been seen less frequently during training.
 
 ### How RND Works
 
@@ -211,9 +359,12 @@ config = Phase2Config(
     rnd_feature_dim=64,        # Output dimension of RND networks
     rnd_hidden_dim=256,        # Hidden layer dimension
     
-    # Curiosity bonus coefficients
+    # Robot curiosity (state-based novelty)
     rnd_bonus_coef_r=0.1,      # Robot curiosity bonus scale
-    rnd_bonus_coef_h=0.1,      # Human curiosity bonus scale (reserved)
+    
+    # Human curiosity (action-based novelty)
+    use_human_action_rnd=True, # Enable per-action novelty for humans
+    rnd_bonus_coef_h=0.1,      # Human curiosity bonus scale
     
     # Training parameters
     lr_rnd=1e-4,               # RND predictor learning rate
@@ -228,11 +379,21 @@ config = Phase2Config(
 
 ### How Curiosity Affects Action Selection
 
-When RND is enabled:
+Curiosity bonuses are applied to **both** the epsilon exploration and policy-based branches to maximize exploration.
 
-1. **During epsilon exploration**: Instead of uniform random actions, robot samples actions weighted by expected novelty of successor states.
+#### Robot Curiosity (State-Based Novelty)
 
-2. **During policy-based selection**: Curiosity bonus is applied multiplicatively to Q-values to preserve the power-law policy constraint (Q < 0):
+Robot curiosity biases toward visiting novel successor states:
+
+1. **During epsilon exploration**: Curiosity bonus is applied multiplicatively to the exploration policy probabilities:
+   ```
+   P_effective(a) = P_exploration(a) * exp(+rnd_bonus_coef_r * expected_novelty(s'))
+   ```
+   
+   Higher novelty → larger scale factor → higher probability of selecting that action.
+   This biases even random exploration toward novel states.
+
+2. **During policy-based selection (1-epsilon)**: Curiosity bonus is applied multiplicatively to Q-values to preserve the power-law policy constraint (Q < 0):
    ```
    Q_effective(s, a) = Q_r(s, a) * exp(-rnd_bonus_coef_r * expected_novelty(s'))
    ```
@@ -240,22 +401,55 @@ When RND is enabled:
    Since Q < 0 and exp(...) > 0, Q_effective remains negative.
    High novelty → smaller scale factor → Q_effective closer to 0 (better).
    This encourages exploration of novel states while preserving the power-law policy form.
+   
+   When `rnd_bonus_coef_r = 0`, we recover exactly the standard power-law policy `P(a) ∝ (-Q_r(s,a))^{-β_r}`.
 
 The novelty for each action is computed using `transition_probabilities()` to determine expected next states, then computing RND prediction error for those states.
+
+#### Human Curiosity (Action-Based Novelty)
+
+Human curiosity (when `use_human_action_rnd=True`) biases toward novel (state, human, action) combinations:
+
+1. **During epsilon exploration**: Curiosity bonus is applied to exploration policy probabilities:
+   ```
+   P_effective(a) = P_exploration(a) * exp(+rnd_bonus_coef_h * novelty(s, h, a))
+   ```
+
+2. **During policy-based selection (1-epsilon)**: Curiosity bonus is applied to prior probabilities:
+   ```
+   P_effective(a) = P_prior(a) * exp(+rnd_bonus_coef_h * novelty(s, h, a))
+   ```
+
+In both cases:
+- Higher novelty → larger scale factor → higher effective probability
+- This encourages humans to try actions they haven't taken in this (state, human) context
+- The formula renormalizes so `sum(P_effective) = 1`
+
+Human RND uses a separate `HumanActionRNDModule` that takes (state_features, agent_features) and outputs per-action novelty scores.
 
 ### TensorBoard Monitoring
 
 When RND is enabled, additional metrics are logged:
+
+**Robot RND (state-based):**
 - `Loss/rnd` - RND predictor loss (grouped with other losses)
 - `Exploration/rnd_raw_novelty_mean` - Raw novelty before normalization (watch this decrease!)
 - `Exploration/rnd_raw_novelty_std` - Std of raw novelty in batch
 - `Exploration/rnd_norm_running_mean` - Running mean used for normalization
 - `Exploration/rnd_norm_running_std` - Running std used for normalization
 
+**Human RND (action-based, when `use_human_action_rnd=True`):**
+- `Loss/human_rnd` - Human RND predictor loss
+- `Exploration/human_rnd_raw_novelty_mean` - Raw novelty across (state, human, action) tuples
+- `Exploration/human_rnd_raw_novelty_std` - Std of raw novelty
+- `Exploration/human_rnd_norm_running_mean` - Running mean for normalization
+- `Exploration/human_rnd_norm_running_std` - Running std for normalization
+
 **Interpreting the metrics:**
 - `rnd_raw_novelty_mean` should **decrease** over training as the predictor learns to recognize states
 - `Loss/rnd` should also decrease, tracking the predictor's learning progress
 - `rnd_norm_running_*` are normalization parameters that adapt to keep normalized output around mean=0, std=1
+- For human RND, similar trends should appear for `human_rnd_*` metrics
 
 ### Example Usage
 
@@ -290,15 +484,19 @@ For small action spaces (typical in MultiGrid), this overhead is acceptable. For
 ### Design Notes
 
 - RND is trained from the beginning (included in active networks from step 0)
-- **Multi-encoder architecture**: RND uses concatenated features from ALL state encoders:
+- **Multi-encoder architecture**: Robot RND uses concatenated features from ALL state encoders:
   - Shared state encoder (from V_h^e)
   - X_h's own state encoder
   - U_r's own state encoder (if `u_r_use_network=True`)
   - Q_r's own state encoder
+- **Human RND architecture**: Uses separate `HumanActionRNDModule` with:
+  - State features from V_h^e's shared state encoder
+  - Agent features from V_h^e's agent encoder
+  - Outputs per-action novelty scores: (batch_size, num_actions)
 - **Warmup coefficients**: Each encoder's features are multiplied by a coefficient that ramps 0→1 during the warmup stage when that encoder is introduced. This provides smooth transitions as new encoders come online.
 - All encoder outputs are detached (RND trains only its predictor network, not the encoders)
 - Normalization prevents bonus scale drift during training
-- A small uniform component (10%) is added to curiosity-weighted exploration to ensure baseline coverage
+- **Standard RND methodology**: Curiosity only affects the learned policy (via Q-value or prior probability bonuses), not epsilon exploration. This follows the original RND paper where intrinsic reward modifies the learned value function, while epsilon-greedy exploration remains separate.
 
 See [docs/ENCODER_ARCHITECTURE.md](ENCODER_ARCHITECTURE.md) for details on the multi-encoder design.
 See [docs/plans/curiosity.md](plans/curiosity.md) for detailed design rationale and alternative approaches considered.

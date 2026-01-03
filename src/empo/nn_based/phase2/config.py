@@ -106,12 +106,18 @@ class Phase2Config:
     rnd_feature_dim: int = 64                # Output dimension of RND networks
     rnd_hidden_dim: int = 256                # Hidden layer dimension for RND networks
     rnd_bonus_coef_r: float = 0.1            # Robot curiosity bonus coefficient
-    rnd_bonus_coef_h: float = 0.1            # Human curiosity bonus coefficient
+    rnd_bonus_coef_h: float = 0.1            # Human curiosity bonus coefficient (for human action RND)
     lr_rnd: float = 1e-4                     # Learning rate for RND predictor
     rnd_weight_decay: float = 1e-4           # Weight decay for RND predictor
     rnd_grad_clip: Optional[float] = 10.0    # Gradient clipping for RND
     normalize_rnd: bool = True               # Normalize novelty by running mean/std
     rnd_normalization_decay: float = 0.99    # EMA decay for normalization stats
+    
+    # Human Action RND: Separate RND module for human action exploration.
+    # Unlike the state-based RND for robots, this outputs per-action novelty
+    # scores for (state, human_identity, action) tuples, encouraging each human
+    # to try actions they haven't taken in similar states.
+    use_human_action_rnd: bool = False       # Enable human action RND (requires use_rnd=True)
     
     # =========================================================================
     # Curiosity-driven exploration (Count-based - for tabular/lookup table mode)
@@ -191,7 +197,18 @@ class Phase2Config:
     # Training
     num_training_steps: int = 500000  # Total training steps (gradient updates)
     steps_per_episode: int = 50
-    training_steps_per_env_step: float = 1.0  # Can be >1 (multiple training steps per env step) or <1 (train every N env steps)
+    
+    # Env-to-training step ratio (for sync mode)
+    # Can specify either:
+    #   - training_steps_per_env_step: gradient updates per env step (default 1.0)
+    #   - env_steps_per_training_step: env steps between gradient updates (alternative)
+    # If both specified, training_steps_per_env_step takes precedence.
+    # Examples:
+    #   training_steps_per_env_step=4.0 → 4 gradient updates per env step
+    #   training_steps_per_env_step=0.1 → train every 10 env steps
+    #   env_steps_per_training_step=10 → same as training_steps_per_env_step=0.1
+    training_steps_per_env_step: float = 1.0
+    env_steps_per_training_step: Optional[float] = None  # Alternative way to specify ratio
     
     # Goal resampling
     goal_resample_prob: float = 0.01
@@ -349,6 +366,14 @@ class Phase2Config:
                 UserWarning,
                 stacklevel=2
             )
+        
+        # Handle env_steps_per_training_step as an alternative way to specify the ratio
+        # If env_steps_per_training_step is set, convert to training_steps_per_env_step
+        if self.env_steps_per_training_step is not None:
+            # Only override if user explicitly set env_steps_per_training_step
+            # and training_steps_per_env_step is at default value
+            if self.training_steps_per_env_step == 1.0:
+                self.training_steps_per_env_step = 1.0 / self.env_steps_per_training_step
     
     # Model-based targets: if True (default), use transition_probabilities() to compute
     # expected V(s') over all possible successor states instead of using single samples.

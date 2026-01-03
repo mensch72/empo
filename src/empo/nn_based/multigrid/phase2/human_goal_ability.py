@@ -214,7 +214,7 @@ class MultiGridHumanGoalAchievementNetwork(BaseHumanGoalAchievementNetwork):
         goal_features = self.goal_encoder(goal_coords)
         
         # Encode agent identity (index + position grid + features)
-        query_idx, query_grid, query_features = self.agent_encoder.encode_single(
+        query_idx, query_grid, query_features = self.agent_encoder.tensorize_single(
             human_agent_idx, state, world_model, device
         )
         
@@ -333,7 +333,7 @@ class MultiGridHumanGoalAchievementNetwork(BaseHumanGoalAchievementNetwork):
         # Batch tensorize agent identities
         idx_list, grid_list, feat_list = [], [], []
         for h_idx, state in zip(human_indices, states):
-            idx, grid, feat = self.agent_encoder.encode_single(h_idx, state, world_model, device)
+            idx, grid, feat = self.agent_encoder.tensorize_single(h_idx, state, world_model, device)
             idx_list.append(idx)
             grid_list.append(grid)
             feat_list.append(feat)
