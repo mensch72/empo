@@ -393,7 +393,7 @@ config = Phase2Config(
     use_lookup_tables=True,
     use_lookup_q_r=True,       # Q_r(s, a) as lookup table
     use_lookup_v_h_e=True,     # V_h^e(s, g) as lookup table
-    use_lookup_x_h=True,       # X_h(s) as lookup table
+    use_lookup_x_h=True,       # X_h(s) as lookup table (if x_h_use_network=True)
     use_lookup_u_r=True,       # U_r(s) as lookup table (if u_r_use_network=True)
     use_lookup_v_r=True,       # V_r(s) as lookup table (if v_r_use_network=True)
 )

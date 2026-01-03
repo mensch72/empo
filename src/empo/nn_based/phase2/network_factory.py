@@ -200,7 +200,7 @@ def create_all_phase2_lookup_networks(
 ) -> Tuple[
     BaseRobotQNetwork,
     BaseHumanGoalAchievementNetwork,
-    BaseAggregateGoalAbilityNetwork,
+    Optional[BaseAggregateGoalAbilityNetwork],
     Optional[BaseIntrinsicRewardNetwork],
     Optional[BaseRobotValueNetwork],
 ]:
@@ -217,7 +217,7 @@ def create_all_phase2_lookup_networks(
     
     Returns:
         Tuple of (q_r, v_h_e, x_h, u_r, v_r) networks.
-        u_r and v_r may be None depending on config.
+        x_h, u_r, and v_r may be None depending on config.
     
     Raises:
         ValueError: If config.use_lookup_tables is False.
@@ -241,10 +241,12 @@ def create_all_phase2_lookup_networks(
         include_step_count=config.include_step_count,
     )
     
-    x_h = LookupTableAggregateGoalAbilityNetwork(
-        default_x_h=config.get_lookup_default('x_h'),
-        include_step_count=config.include_step_count,
-    )
+    x_h = None
+    if config.x_h_use_network:
+        x_h = LookupTableAggregateGoalAbilityNetwork(
+            default_x_h=config.get_lookup_default('x_h'),
+            include_step_count=config.include_step_count,
+        )
     
     u_r = None
     if config.u_r_use_network:

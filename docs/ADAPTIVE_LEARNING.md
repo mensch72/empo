@@ -294,6 +294,54 @@ Unlike ensemble variance or MC Dropout (which have Bayesian interpretations), us
    - Apply same uncertainty scale to all network gradients
    - Train separate RND modules per network (expensive)
 
+#### Implementation Status: ✓ IMPLEMENTED
+
+RND-based adaptive learning rate is **implemented** in EMPO. Configuration:
+
+```python
+from empo.nn_based.phase2.config import Phase2Config
+
+config = Phase2Config(
+    # Enable RND (required for RND-based adaptive LR)
+    use_rnd=True,
+    
+    # Enable RND-based adaptive learning rate
+    rnd_use_adaptive_lr=True,
+    
+    # Scale multiplier for LR adjustment (default: 1.0)
+    rnd_adaptive_lr_scale=1.0,
+    
+    # Minimum LR multiplier (prevents vanishing updates)
+    rnd_adaptive_lr_min=0.1,
+    
+    # Maximum LR multiplier (prevents exploding updates)
+    rnd_adaptive_lr_max=10.0,
+)
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `rnd_use_adaptive_lr` | `False` | Enable RND-based adaptive learning rate |
+| `rnd_adaptive_lr_scale` | `1.0` | Multiplier for LR scaling |
+| `rnd_adaptive_lr_min` | `0.1` | Minimum LR scale (floor) |
+| `rnd_adaptive_lr_max` | `10.0` | Maximum LR scale (ceiling) |
+
+The implementation:
+1. Uses the existing robot RND network (state-only input)
+2. Computes raw MSE novelty for batch states
+3. Normalizes by running mean: `lr_scale = (rnd_mse / running_mean) * scale`
+4. Clamps to [min, max] range
+5. Scales all neural network gradients by mean batch LR scale
+
+**Usage with demo:**
+```bash
+# Tabular mode with 1/n adaptive LR
+python phase2_robot_policy_demo.py --tabular --adaptive
+
+# Neural mode with RND-based adaptive LR (requires --curious for RND)
+python phase2_robot_policy_demo.py --curious --adaptive
+```
+
 ### Option 3: Dropout-Based Uncertainty (MC Dropout)
 
 Use **Monte Carlo Dropout** to estimate uncertainty by running multiple forward passes with dropout enabled at inference time.

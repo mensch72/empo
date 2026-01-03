@@ -568,11 +568,11 @@ class TestDropoutConfig:
 
 
 # =============================================================================
-# 17. DIRECT U_R / V_R COMPUTATION MODES
+# 17. DIRECT U_R / V_R / X_H COMPUTATION MODES
 # =============================================================================
 
 class TestDirectComputationModes:
-    """Test direct U_r and V_r computation modes."""
+    """Test direct U_r, V_r, and X_h computation modes."""
     
     def test_u_r_use_network_default_false(self):
         """U_r should use direct computation by default."""
@@ -584,11 +584,85 @@ class TestDirectComputationModes:
         config = Phase2Config()
         assert config.v_r_use_network is False
     
+    def test_x_h_use_network_default_true(self):
+        """X_h should use network by default (unlike U_r and V_r)."""
+        config = Phase2Config()
+        assert config.x_h_use_network is True
+    
+    def test_x_h_use_network_configurable(self):
+        """X_h computation mode should be configurable."""
+        config_with_network = Phase2Config(x_h_use_network=True)
+        config_no_network = Phase2Config(x_h_use_network=False)
+        
+        assert config_with_network.x_h_use_network is True
+        assert config_no_network.x_h_use_network is False
+    
+    def test_x_h_use_network_false_sets_warmup_to_zero(self):
+        """When x_h_use_network=False, warmup_x_h_steps should be set to 0."""
+        config = Phase2Config(
+            warmup_x_h_steps=1000,  # Should be overridden to 0
+            x_h_use_network=False,
+        )
+        assert config.warmup_x_h_steps == 0
+    
     def test_network_modes_configurable(self):
         """Network computation modes should be configurable."""
         config = Phase2Config(u_r_use_network=True, v_r_use_network=True)
         assert config.u_r_use_network is True
         assert config.v_r_use_network is True
+    
+    def test_warmup_stages_with_x_h_use_network_false(self):
+        """Test warmup stages when X_h is computed directly (no network)."""
+        config = Phase2Config(
+            warmup_v_h_e_steps=1000,
+            warmup_x_h_steps=1000,  # Should be overridden to 0
+            warmup_u_r_steps=0,     # U_r not using network
+            warmup_q_r_steps=1000,
+            x_h_use_network=False,
+            u_r_use_network=False,
+        )
+        
+        # X_h warmup should be automatically set to 0
+        assert config.warmup_x_h_steps == 0
+        
+        # Stage progression skips X_h stage
+        assert config.get_active_networks(0) == {'v_h_e'}          # Stage 0: V_h^e only
+        assert config.get_active_networks(1500) == {'v_h_e', 'q_r'}  # Stage goes directly to Q_r
+        # X_h should NOT be in active networks when x_h_use_network=False
+        assert 'x_h' not in config.get_active_networks(1500)
+    
+    def test_warmup_stage_name_without_x_h_network(self):
+        """Test stage names reflect skipped X_h stage."""
+        config = Phase2Config(
+            warmup_v_h_e_steps=100,
+            x_h_use_network=False,
+            u_r_use_network=False,
+        )
+        
+        # After V_h^e stage, should go directly to Q_r
+        stage_name = config.get_warmup_stage_name(150)
+        assert 'Q_r' in stage_name or 'V_h^e' in stage_name
+    
+    def test_combined_x_h_and_u_r_false(self):
+        """Test both X_h and U_r computed directly."""
+        config = Phase2Config(
+            warmup_v_h_e_steps=1000,
+            warmup_q_r_steps=1000,
+            x_h_use_network=False,
+            u_r_use_network=False,
+        )
+        
+        # Both warmup stages should be 0
+        assert config.warmup_x_h_steps == 0
+        assert config.warmup_u_r_steps == 0
+        
+        # Active networks at various stages
+        assert config.get_active_networks(0) == {'v_h_e'}
+        # After v_h_e warmup, Q_r starts immediately
+        assert config.get_active_networks(1500) == {'v_h_e', 'q_r'}
+        # Neither X_h nor U_r should be active
+        assert 'x_h' not in config.get_active_networks(1500)
+        assert 'u_r' not in config.get_active_networks(1500)
 
 
 # =============================================================================

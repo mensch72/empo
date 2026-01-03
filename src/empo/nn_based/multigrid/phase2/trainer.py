@@ -538,7 +538,7 @@ def create_phase2_networks(
     # (i.e., lookup tables are NOT enabled for them)
     use_neural_q_r = not config.should_use_lookup_table('q_r')
     use_neural_v_h_e = not config.should_use_lookup_table('v_h_e')
-    use_neural_x_h = not config.should_use_lookup_table('x_h')
+    use_neural_x_h = config.x_h_use_network and not config.should_use_lookup_table('x_h')
     use_neural_u_r = config.u_r_use_network and not config.should_use_lookup_table('u_r')
     use_neural_v_r = config.v_r_use_network and not config.should_use_lookup_table('v_r')
     
@@ -568,10 +568,12 @@ def create_phase2_networks(
             include_step_count=config.include_step_count,
         )
         
-        x_h = LookupTableAggregateGoalAbilityNetwork(
-            default_x_h=config.get_lookup_default('x_h'),
-            include_step_count=config.include_step_count,
-        )
+        x_h = None
+        if config.x_h_use_network:
+            x_h = LookupTableAggregateGoalAbilityNetwork(
+                default_x_h=config.get_lookup_default('x_h'),
+                include_step_count=config.include_step_count,
+            )
         
         u_r = None
         if config.u_r_use_network:
@@ -812,29 +814,31 @@ def create_phase2_networks(
             include_step_count=config.include_step_count,
         )
     
-    # X_h network
-    if use_neural_x_h:
-        x_h = MultiGridAggregateGoalAbilityNetwork(
-            grid_height=grid_height,
-            grid_width=grid_width,
-            num_agents_per_color=num_agents_per_color,
-            state_feature_dim=hidden_dim,
-            hidden_dim=hidden_dim,
-            zeta=config.zeta,
-            dropout=config.x_h_dropout,
-            max_agents=max_agents,
-            agent_embedding_dim=agent_embedding_dim,
-            state_encoder=shared_state_encoder,       # From V_h^e (SHARED, used detached)
-            agent_encoder=shared_agent_encoder,       # From V_h^e (SHARED, used detached)
-            own_state_encoder=x_h_own_state_encoder,  # OWN (trained with X_h)
-            own_agent_encoder=x_h_own_agent_encoder,  # OWN (trained with X_h)
-        ).to(device)
-    else:
-        from empo.nn_based.phase2.lookup import LookupTableAggregateGoalAbilityNetwork
-        x_h = LookupTableAggregateGoalAbilityNetwork(
-            default_x_h=config.get_lookup_default('x_h'),
-            include_step_count=config.include_step_count,
-        )
+    # X_h network (optional, only if x_h_use_network=True)
+    x_h = None
+    if config.x_h_use_network:
+        if use_neural_x_h:
+            x_h = MultiGridAggregateGoalAbilityNetwork(
+                grid_height=grid_height,
+                grid_width=grid_width,
+                num_agents_per_color=num_agents_per_color,
+                state_feature_dim=hidden_dim,
+                hidden_dim=hidden_dim,
+                zeta=config.zeta,
+                dropout=config.x_h_dropout,
+                max_agents=max_agents,
+                agent_embedding_dim=agent_embedding_dim,
+                state_encoder=shared_state_encoder,       # From V_h^e (SHARED, used detached)
+                agent_encoder=shared_agent_encoder,       # From V_h^e (SHARED, used detached)
+                own_state_encoder=x_h_own_state_encoder,  # OWN (trained with X_h)
+                own_agent_encoder=x_h_own_agent_encoder,  # OWN (trained with X_h)
+            ).to(device)
+        else:
+            from empo.nn_based.phase2.lookup import LookupTableAggregateGoalAbilityNetwork
+            x_h = LookupTableAggregateGoalAbilityNetwork(
+                default_x_h=config.get_lookup_default('x_h'),
+                include_step_count=config.include_step_count,
+            )
     
     # U_r network (optional)
     u_r = None

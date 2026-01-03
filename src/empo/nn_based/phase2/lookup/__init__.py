@@ -61,8 +61,9 @@ def get_all_lookup_tables(networks) -> dict:
     network_map = {
         'q_r': networks.q_r,
         'v_h_e': networks.v_h_e,
-        'x_h': networks.x_h,
     }
+    if networks.x_h is not None:
+        network_map['x_h'] = networks.x_h
     if networks.u_r is not None:
         network_map['u_r'] = networks.u_r
     if networks.v_r is not None:

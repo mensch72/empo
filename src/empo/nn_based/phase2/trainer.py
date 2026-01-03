@@ -51,8 +51,8 @@ class Phase2Networks:
     """Container for all Phase 2 networks."""
     q_r: BaseRobotQNetwork
     v_h_e: BaseHumanGoalAchievementNetwork
-    x_h: BaseAggregateGoalAbilityNetwork
-    # U_r and V_r are optional - only created when use_network=True
+    # X_h, U_r and V_r are optional - only created when use_network=True
+    x_h: Optional[BaseAggregateGoalAbilityNetwork] = None
     u_r: Optional[BaseIntrinsicRewardNetwork] = None
     v_r: Optional[BaseRobotValueNetwork] = None
     
@@ -359,7 +359,10 @@ class BasePhase2Trainer(ABC):
         """Initialize target networks as copies of main networks."""
         self.networks.q_r_target = copy.deepcopy(self.networks.q_r)
         self.networks.v_h_e_target = copy.deepcopy(self.networks.v_h_e)
-        self.networks.x_h_target = copy.deepcopy(self.networks.x_h)
+        
+        # Only create X_h target if the network exists
+        if self.networks.x_h is not None:
+            self.networks.x_h_target = copy.deepcopy(self.networks.x_h)
         
         # Disable debug flags on target networks (they're copies, shouldn't print debug)
         if hasattr(self.networks.v_h_e_target, 'debug_new_keys'):
@@ -378,8 +381,9 @@ class BasePhase2Trainer(ABC):
             param.requires_grad = False
         for param in self.networks.v_h_e_target.parameters():
             param.requires_grad = False
-        for param in self.networks.x_h_target.parameters():
-            param.requires_grad = False
+        if self.networks.x_h_target is not None:
+            for param in self.networks.x_h_target.parameters():
+                param.requires_grad = False
         if self.networks.u_r_target is not None:
             for param in self.networks.u_r_target.parameters():
                 param.requires_grad = False
@@ -390,7 +394,8 @@ class BasePhase2Trainer(ABC):
         # Set target networks to eval mode (disables dropout during inference)
         self.networks.q_r_target.eval()
         self.networks.v_h_e_target.eval()
-        self.networks.x_h_target.eval()
+        if self.networks.x_h_target is not None:
+            self.networks.x_h_target.eval()
         if self.networks.u_r_target is not None:
             self.networks.u_r_target.eval()
         if self.networks.v_r_target is not None:
@@ -436,12 +441,14 @@ class BasePhase2Trainer(ABC):
                 lr=self.config.lr_v_h_e,
                 weight_decay=self.config.v_h_e_weight_decay
             ),
-            'x_h': make_optimizer(
+        }
+        # Only create X_h optimizer if using network (not direct computation from V_h^e)
+        if self.config.x_h_use_network:
+            optimizers['x_h'] = make_optimizer(
                 self.networks.x_h,
                 lr=self.config.lr_x_h,
                 weight_decay=self.config.x_h_weight_decay
-            ),
-        }
+            )
         # Only create U_r optimizer if using network (not direct computation)
         if self.config.u_r_use_network:
             optimizers['u_r'] = make_optimizer(
@@ -490,19 +497,23 @@ class BasePhase2Trainer(ABC):
         new_params_by_optimizer = {
             'q_r': [],
             'v_h_e': [],
-            'x_h': [],
         }
+        if self.config.x_h_use_network:
+            new_params_by_optimizer['x_h'] = []
         
         # Check each network for new params
         if hasattr(self.networks.q_r, 'get_new_params'):
             new_params_by_optimizer['q_r'].extend(self.networks.q_r.get_new_params())
         if hasattr(self.networks.v_h_e, 'get_new_params'):
             new_params_by_optimizer['v_h_e'].extend(self.networks.v_h_e.get_new_params())
-        if hasattr(self.networks.x_h, 'get_new_params'):
+        if self.config.x_h_use_network and self.networks.x_h is not None and hasattr(self.networks.x_h, 'get_new_params'):
             new_params_by_optimizer['x_h'].extend(self.networks.x_h.get_new_params())
         if self.config.u_r_use_network and hasattr(self.networks.u_r, 'get_new_params'):
-            # U_r shares optimizer with x_h
-            new_params_by_optimizer['x_h'].extend(self.networks.u_r.get_new_params())
+            # U_r shares optimizer with x_h if x_h exists, else with v_h_e
+            key = 'x_h' if self.config.x_h_use_network else 'v_h_e'
+            if key not in new_params_by_optimizer:
+                new_params_by_optimizer[key] = []
+            new_params_by_optimizer[key].extend(self.networks.u_r.get_new_params())
         if self.config.v_r_use_network and hasattr(self.networks.v_r, 'get_new_params'):
             # V_r shares optimizer with q_r
             new_params_by_optimizer['q_r'].extend(self.networks.v_r.get_new_params())
@@ -546,7 +557,7 @@ class BasePhase2Trainer(ABC):
             networks_to_scale.append(('q_r', self.networks.q_r))
         if hasattr(self.networks.v_h_e, 'scale_gradients_by_update_count'):
             networks_to_scale.append(('v_h_e', self.networks.v_h_e))
-        if hasattr(self.networks.x_h, 'scale_gradients_by_update_count'):
+        if self.config.x_h_use_network and self.networks.x_h is not None and hasattr(self.networks.x_h, 'scale_gradients_by_update_count'):
             networks_to_scale.append(('x_h', self.networks.x_h))
         if self.config.u_r_use_network and hasattr(self.networks.u_r, 'scale_gradients_by_update_count'):
             networks_to_scale.append(('u_r', self.networks.u_r))
@@ -558,14 +569,122 @@ class BasePhase2Trainer(ABC):
             keys_with_grads = network.scale_gradients_by_update_count(min_lr)
             network.increment_update_counts(keys_with_grads)
     
+    def _apply_rnd_adaptive_lr_scaling(
+        self, 
+        states: List[Any],
+        active_networks: set
+    ) -> Dict[str, float]:
+        """
+        Apply RND-based adaptive learning rate scaling for neural networks.
+        
+        When config.rnd_use_adaptive_lr is True and RND is enabled, this scales
+        gradients by the normalized RND prediction error (MSE) for each state
+        in the batch. States with high RND error (novel/uncertain) get larger
+        effective learning rates.
+        
+        This is a SPECULATIVE approach assuming RND novelty correlates with
+        value estimate uncertainty. See docs/ADAPTIVE_LEARNING.md for details.
+        
+        The scaling factor is: lr_scale = clamp(normalized_rnd_error * scale, min, max)
+        
+        Args:
+            states: List of states from the batch (for computing RND novelty).
+            active_networks: Set of network names that are active in current stage.
+        
+        Returns:
+            Dict mapping network names to the mean LR scale applied for logging.
+        """
+        if not self.config.rnd_use_adaptive_lr:
+            return {}
+        
+        if not self.config.use_rnd or self.networks.rnd is None:
+            return {}
+        
+        # Skip for lookup tables (they use 1/n adaptive LR instead)
+        if self.config.use_lookup_tables:
+            return {}
+        
+        # Get RND novelty (raw MSE) for states in the batch
+        features, encoder_coefficients = self.get_state_features_for_rnd(states)
+        
+        # Use raw MSE (already squared, analogous to variance)
+        with torch.no_grad():
+            rnd_mse = self.networks.rnd.compute_novelty_no_grad(
+                features, encoder_coefficients, use_raw=True
+            )  # Shape: (batch_size,)
+            
+            # Normalize by running mean to get relative uncertainty
+            # States with MSE above average get lr_scale > 1, below get < 1
+            running_mean = self.networks.rnd.running_mean
+            if running_mean > 1e-8:
+                # lr ∝ variance, so scale by rnd_mse / running_mean
+                lr_scale = (rnd_mse / running_mean) * self.config.rnd_adaptive_lr_scale
+            else:
+                # Running mean not yet established, use raw normalized values
+                mean_mse = rnd_mse.mean()
+                if mean_mse > 1e-8:
+                    lr_scale = (rnd_mse / mean_mse) * self.config.rnd_adaptive_lr_scale
+                else:
+                    # All zeros, no scaling
+                    return {}
+            
+            # Clamp to prevent extreme values
+            lr_scale = lr_scale.clamp(
+                min=self.config.rnd_adaptive_lr_min,
+                max=self.config.rnd_adaptive_lr_max
+            )
+            
+            # Compute mean scale per sample (for batch-level gradient scaling)
+            mean_lr_scale = lr_scale.mean().item()
+        
+        # Scale gradients for all neural network parameters
+        # We apply a uniform scale based on the batch mean because:
+        # 1. Neural networks share parameters across all states
+        # 2. Per-sample scaling would require per-sample gradients (expensive)
+        # 3. The batch mean provides a reasonable aggregate uncertainty signal
+        #
+        # For more fine-grained control, consider using sample-weighted losses
+        # during forward pass instead of gradient scaling.
+        
+        lr_scale_values = {}
+        networks_to_scale = {
+            'q_r': self.networks.q_r,
+            'v_h_e': self.networks.v_h_e,
+        }
+        if self.config.x_h_use_network and self.networks.x_h is not None:
+            networks_to_scale['x_h'] = self.networks.x_h
+        if self.config.u_r_use_network:
+            networks_to_scale['u_r'] = self.networks.u_r
+        if self.config.v_r_use_network:
+            networks_to_scale['v_r'] = self.networks.v_r
+        
+        for name, network in networks_to_scale.items():
+            if name not in active_networks:
+                continue
+            
+            # Skip lookup tables (they have their own adaptive LR)
+            if hasattr(network, 'scale_gradients_by_update_count'):
+                continue
+                
+            # Scale all gradients by the mean LR scale
+            for param in network.parameters():
+                if param.grad is not None:
+                    param.grad.mul_(mean_lr_scale)
+            
+            lr_scale_values[name] = mean_lr_scale
+        
+        return lr_scale_values
+    
     def _compute_param_norms(self) -> Dict[str, float]:
         """Compute L2 norms of network parameters for monitoring."""
         norms = {}
         networks = {
             'q_r': self.networks.q_r,
             'v_h_e': self.networks.v_h_e,
-            'x_h': self.networks.x_h,
         }
+        # Only include X_h if using network mode
+        if self.config.x_h_use_network and self.networks.x_h is not None:
+            networks['x_h'] = self.networks.x_h
         # Only include U_r if using network mode
         if self.config.u_r_use_network:
             networks['u_r'] = self.networks.u_r
@@ -586,8 +705,10 @@ class BasePhase2Trainer(ABC):
         networks = {
             'q_r': self.networks.q_r,
             'v_h_e': self.networks.v_h_e,
-            'x_h': self.networks.x_h,
         }
+        # Only include X_h if using network mode
+        if self.config.x_h_use_network and self.networks.x_h is not None:
+            networks['x_h'] = self.networks.x_h
         # Only include U_r if using network mode
         if self.config.u_r_use_network:
             networks['u_r'] = self.networks.u_r
@@ -615,9 +736,10 @@ class BasePhase2Trainer(ABC):
             self.networks.v_h_e_target.load_state_dict(self.networks.v_h_e.state_dict())
             self.networks.v_h_e_target.eval()
         
-        if step % self.config.x_h_target_update_interval == 0:
-            self.networks.x_h_target.load_state_dict(self.networks.x_h.state_dict())
-            self.networks.x_h_target.eval()
+        if self.config.x_h_use_network and self.networks.x_h_target is not None:
+            if step % self.config.x_h_target_update_interval == 0:
+                self.networks.x_h_target.load_state_dict(self.networks.x_h.state_dict())
+                self.networks.x_h_target.eval()
         
         if self.config.u_r_use_network and self.networks.u_r_target is not None:
             if step % self.config.u_r_target_update_interval == 0:
@@ -1779,9 +1901,10 @@ class BasePhase2Trainer(ABC):
         
         losses = {
             'v_h_e': torch.tensor(0.0, device=self.device),
-            'x_h': torch.tensor(0.0, device=self.device),
             'q_r': torch.tensor(0.0, device=self.device),
         }
+        if self.config.x_h_use_network:
+            losses['x_h'] = torch.tensor(0.0, device=self.device)
         if self.config.u_r_use_network:
             losses['u_r'] = torch.tensor(0.0, device=self.device)
         if self.config.v_r_use_network:
@@ -2017,7 +2140,8 @@ class BasePhase2Trainer(ABC):
         Compute U_r for a batch of states using target networks (fully batched).
         
         If u_r_use_network, uses U_r target network.
-        Otherwise, computes from X_h target values.
+        If x_h_use_network, uses X_h target network.
+        Otherwise, computes from V_h^e target values directly.
         
         Args:
             states: List of states.
@@ -2028,7 +2152,7 @@ class BasePhase2Trainer(ABC):
         if self.config.u_r_use_network:
             _, u_r = self.networks.u_r_target.forward_batch(states, self.env, self.device)
             return u_r
-        else:
+        elif self.config.x_h_use_network:
             # Compute from X_h: U_r = -E[X_h^{-xi}]^eta
             # Flatten all (state, human) pairs for single batched computation
             n_states = len(states)
@@ -2056,6 +2180,73 @@ class BasePhase2Trainer(ABC):
             # U_r = -y^eta
             u_r = -(y ** self.config.eta)
             return u_r
+        else:
+            # Both X_h and U_r computed from V_h^e samples
+            # X_h = E_g[V_h^e(s, g)^zeta] for each human
+            # U_r = -(E_h[X_h^{-xi}])^eta
+            return self._compute_u_r_from_v_h_e_samples(states)
+    
+    def _compute_u_r_from_v_h_e_samples(self, states: List[Any]) -> torch.Tensor:
+        """
+        Compute U_r directly from V_h^e samples (when x_h_use_network=False).
+        
+        For each state and each human, samples goals from goal_sampler and
+        computes X_h = E_g[V_h^e(s, g)^zeta] using Monte Carlo samples.
+        Then computes U_r = -(E_h[X_h^{-xi}])^eta.
+        
+        This is exact computation (no learned approximation) but requires
+        goal sampling at each step.
+        
+        Args:
+            states: List of states.
+            
+        Returns:
+            U_r values tensor of shape (batch_size,).
+        """
+        n_states = len(states)
+        n_humans = len(self.human_agent_indices)
+        
+        # Sample multiple goals per (state, human) pair for Monte Carlo X_h estimate
+        # Use a fixed number of samples for stability
+        n_goal_samples = 5  # Number of goals to sample per human
+        
+        # Collect all (state, human, goal) tuples for batched V_h^e computation
+        flat_states = []
+        flat_humans = []
+        flat_goals = []
+        
+        for state in states:
+            for h in self.human_agent_indices:
+                # Sample goals for this (state, human) pair
+                for _ in range(n_goal_samples):
+                    goal, _ = self.goal_sampler.sample(state, h)
+                    flat_states.append(state)
+                    flat_humans.append(h)
+                    flat_goals.append(goal)
+        
+        # Single batched forward pass for all (state, human, goal) tuples
+        v_h_e_all = self.networks.v_h_e_target.forward_batch(
+            flat_states, flat_goals, flat_humans, self.env, self.device
+        ).squeeze()
+        
+        # Apply hard clamp
+        v_h_e_all = self.networks.v_h_e_target.apply_hard_clamp(v_h_e_all)
+        
+        # Reshape to (n_states, n_humans, n_goal_samples)
+        v_h_e_reshaped = v_h_e_all.view(n_states, n_humans, n_goal_samples)
+        
+        # Compute X_h = mean over goals of V_h^e^zeta
+        x_h = (v_h_e_reshaped ** self.config.zeta).mean(dim=2)  # (n_states, n_humans)
+        
+        # Clamp X_h values
+        x_h_clamped = torch.clamp(x_h, min=1e-3, max=1.0)
+        
+        # y = E[X_h^{-xi}] = mean over humans
+        y = (x_h_clamped ** (-self.config.xi)).mean(dim=1)  # (n_states,)
+        
+        # U_r = -y^eta
+        u_r = -(y ** self.config.eta)
+        return u_r
     
     def _compute_rnd_loss_batch(self, states: List[Any]) -> torch.Tensor:
         """
@@ -2346,8 +2537,9 @@ class BasePhase2Trainer(ABC):
         network_map = {
             'q_r': self.networks.q_r,
             'v_h_e': self.networks.v_h_e,
-            'x_h': self.networks.x_h,
         }
+        if self.config.x_h_use_network and self.networks.x_h is not None:
+            network_map['x_h'] = self.networks.x_h
         if self.config.u_r_use_network:
             network_map['u_r'] = self.networks.u_r
         if self.config.v_r_use_network:
@@ -2376,6 +2568,11 @@ class BasePhase2Trainer(ABC):
         # Apply adaptive learning rate scaling for lookup tables
         # This scales gradients by 1/update_count to achieve arithmetic mean convergence
         self._apply_adaptive_lr_scaling()
+        
+        # Apply RND-based adaptive learning rate scaling for neural networks
+        # This scales gradients by normalized RND MSE as uncertainty proxy
+        states = [t.state for t in batch]
+        rnd_lr_scales = self._apply_rnd_adaptive_lr_scaling(states, active_networks)
         
         # Phase 2: Apply gradient clipping and optimizer steps
         with self.profiler.section("optimizer_step"):
@@ -2417,6 +2614,14 @@ class BasePhase2Trainer(ABC):
         # Add any new lookup table parameters to optimizers
         self._add_new_lookup_params_to_optimizers()
         
+        # Add RND LR scales to prediction_stats for logging
+        if rnd_lr_scales:
+            if 'rnd_adaptive_lr' not in prediction_stats:
+                prediction_stats['rnd_adaptive_lr'] = {}
+            prediction_stats['rnd_adaptive_lr'] = {
+                k: {'scale': v} for k, v in rnd_lr_scales.items()
+            }
+        
         return loss_values, grad_norms, prediction_stats
     
     def _compute_single_grad_norm(self, network_name: str) -> float:
@@ -2424,8 +2629,9 @@ class BasePhase2Trainer(ABC):
         networks = {
             'q_r': self.networks.q_r,
             'v_h_e': self.networks.v_h_e,
-            'x_h': self.networks.x_h,
         }
+        if self.config.x_h_use_network and self.networks.x_h is not None:
+            networks['x_h'] = self.networks.x_h
         if self.config.u_r_use_network:
             networks['u_r'] = self.networks.u_r
         # Only include V_r if using network mode
@@ -2662,6 +2868,12 @@ class BasePhase2Trainer(ABC):
                         if 'human_rnd_running_std' in stats:
                             self.writer.add_scalar('Exploration/human_rnd_norm_running_std', stats['human_rnd_running_std'], self.training_step_count)
                         continue
+                    # RND adaptive learning rate stats
+                    if key == 'rnd_adaptive_lr':
+                        for net_name, net_stats in stats.items():
+                            if 'scale' in net_stats:
+                                self.writer.add_scalar(f'AdaptiveLR/rnd_{net_name}_scale', net_stats['scale'], self.training_step_count)
+                        continue
                     self.writer.add_scalar(f'Predictions/{key}_mean', stats['mean'], self.training_step_count)
                     self.writer.add_scalar(f'Predictions/{key}_std', stats['std'], self.training_step_count)
                     if 'target_mean' in stats:
@@ -2846,7 +3058,8 @@ class BasePhase2Trainer(ABC):
         # Set main networks to train mode (enables dropout)
         self.networks.q_r.train()
         self.networks.v_h_e.train()
-        self.networks.x_h.train()
+        if self.networks.x_h is not None:
+            self.networks.x_h.train()
         if self.networks.u_r is not None:
             self.networks.u_r.train()
         if self.networks.v_r is not None:
@@ -2952,7 +3165,8 @@ class BasePhase2Trainer(ABC):
         # Set all networks to eval mode (disables dropout for rollouts)
         self.networks.q_r.eval()
         self.networks.v_h_e.eval()
-        self.networks.x_h.eval()
+        if self.networks.x_h is not None:
+            self.networks.x_h.eval()
         if self.networks.u_r is not None:
             self.networks.u_r.eval()
         if self.networks.v_r is not None:
@@ -3284,7 +3498,8 @@ class BasePhase2Trainer(ABC):
         # Set main networks to train mode (enables dropout)
         self.networks.q_r.train()
         self.networks.v_h_e.train()
-        self.networks.x_h.train()
+        if self.networks.x_h is not None:
+            self.networks.x_h.train()
         if self.networks.u_r is not None:
             self.networks.u_r.train()
         if self.networks.v_r is not None:
@@ -3393,7 +3608,8 @@ class BasePhase2Trainer(ABC):
         # Set all networks to eval mode (disables dropout for rollouts)
         self.networks.q_r.eval()
         self.networks.v_h_e.eval()
-        self.networks.x_h.eval()
+        if self.networks.x_h is not None:
+            self.networks.x_h.eval()
         if self.networks.u_r is not None:
             self.networks.u_r.eval()
         if self.networks.v_r is not None:
@@ -3463,7 +3679,6 @@ class BasePhase2Trainer(ABC):
         checkpoint = {
             'q_r': self.networks.q_r.state_dict(),
             'v_h_e': self.networks.v_h_e.state_dict(),
-            'x_h': self.networks.x_h.state_dict(),
             'total_env_steps': self.total_env_steps,
             'training_step_count': self.training_step_count,
             'config': {
@@ -3473,10 +3688,15 @@ class BasePhase2Trainer(ABC):
                 'zeta': self.config.zeta,
                 'xi': self.config.xi,
                 'eta': self.config.eta,
+                'x_h_use_network': self.config.x_h_use_network,
                 'u_r_use_network': self.config.u_r_use_network,
                 'v_r_use_network': self.config.v_r_use_network,
             }
         }
+        
+        # Save X_h network only if it exists
+        if self.networks.x_h is not None:
+            checkpoint['x_h'] = self.networks.x_h.state_dict()
         
         # Save U_r/V_r networks only if they exist
         if self.networks.u_r is not None:
@@ -3531,7 +3751,10 @@ class BasePhase2Trainer(ABC):
         
         self.networks.q_r.load_state_dict(checkpoint['q_r'], strict=strict)
         self.networks.v_h_e.load_state_dict(checkpoint['v_h_e'], strict=strict)
-        self.networks.x_h.load_state_dict(checkpoint['x_h'], strict=strict)
+        
+        # Load X_h only if it exists in checkpoint AND network exists
+        if 'x_h' in checkpoint and self.networks.x_h is not None:
+            self.networks.x_h.load_state_dict(checkpoint['x_h'], strict=strict)
         
         # Load U_r/V_r only if they exist in checkpoint AND network exists
         if 'u_r' in checkpoint and self.networks.u_r is not None:
@@ -3636,6 +3859,8 @@ class BasePhase2Trainer(ABC):
         """
         Get X_h(s) - aggregate goal achievement ability for human h.
         
+        If x_h_use_network=False, computes X_h directly from V_h^e samples.
+        
         Args:
             state: Environment state.
             world_model: Environment/world model.
@@ -3644,13 +3869,32 @@ class BasePhase2Trainer(ABC):
         Returns:
             X_h value in (0, 1].
         """
-        self.networks.x_h.eval()
-        with torch.no_grad():
-            x_h = self.networks.x_h.forward(
-                state, world_model, human_agent_idx, self.device
-            )
-            x_h_clamped = torch.clamp(x_h.squeeze(), min=1e-3, max=1.0)
-            return x_h_clamped.item()
+        if self.networks.x_h is not None:
+            self.networks.x_h.eval()
+            with torch.no_grad():
+                x_h = self.networks.x_h.forward(
+                    state, world_model, human_agent_idx, self.device
+                )
+                x_h_clamped = torch.clamp(x_h.squeeze(), min=1e-3, max=1.0)
+                return x_h_clamped.item()
+        else:
+            # Compute X_h from V_h^e samples
+            n_goal_samples = 5
+            goals = []
+            for _ in range(n_goal_samples):
+                goal, _ = self.goal_sampler.sample(state, human_agent_idx)
+                goals.append(goal)
+            
+            self.networks.v_h_e.eval()
+            with torch.no_grad():
+                v_h_e_values = self.networks.v_h_e.forward_batch(
+                    [state] * n_goal_samples, goals, [human_agent_idx] * n_goal_samples,
+                    self.env, self.device
+                ).squeeze()
+                v_h_e_values = self.networks.v_h_e.apply_hard_clamp(v_h_e_values)
+                x_h = (v_h_e_values ** self.config.zeta).mean()
+                x_h_clamped = torch.clamp(x_h, min=1e-3, max=1.0)
+                return x_h_clamped.item()
     
     def get_q_r(
         self,

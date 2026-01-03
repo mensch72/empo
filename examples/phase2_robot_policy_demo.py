@@ -27,6 +27,11 @@ Usage:
     python phase2_robot_policy_demo.py --async   # Use async actor-learner training
     python phase2_robot_policy_demo.py --tabular # Use lookup tables instead of neural networks
     python phase2_robot_policy_demo.py --curious # Enable curiosity exploration (RND or count-based)
+    python phase2_robot_policy_demo.py --adaptive # Enable adaptive learning rates
+    
+    # Adaptive learning rate modes:
+    # --tabular --adaptive    Uses 1/n per-entry learning rate for lookup tables
+    # --curious --adaptive    Uses RND-based uncertainty scaling for neural networks
     
     # Save/restore for continued training (networks/policy saved by default)
     python phase2_robot_policy_demo.py --save_networks model.pt  # Custom path for networks
@@ -47,7 +52,6 @@ Output:
 - Movie of rollouts with the learned policy (loaded from disk to verify save/restore)
 - Profiler output (with --profile): Detailed timing breakdown by component printed at end
 """
-
 import sys
 import os
 import time
@@ -649,7 +653,8 @@ def run_policy_rollout(
         if networks.v_r is not None:
             networks.v_r.eval()
         networks.v_h_e.eval()
-        networks.x_h.eval()
+        if networks.x_h is not None:
+            networks.x_h.eval()
     
     env.reset()
     num_actions = env.action_space.n
@@ -696,8 +701,20 @@ def run_policy_rollout(
                 # Compute U_r directly from X_h values
                 x_h_vals = []
                 for h in human_indices:
-                    x_h = networks.x_h.forward(state, env, h, device)
-                    x_h_clamped = torch.clamp(x_h.squeeze(), min=1e-3, max=1.0)
+                    if networks.x_h is not None:
+                        x_h = networks.x_h.forward(state, env, h, device)
+                        x_h_clamped = torch.clamp(x_h.squeeze(), min=1e-3, max=1.0)
+                    else:
+                        # Compute X_h from V_h^e samples
+                        n_goal_samples = 5
+                        v_h_e_vals = []
+                        for _ in range(n_goal_samples):
+                            goal, _ = goal_sampler.sample(state, h)
+                            v_h_e = networks.v_h_e.forward(state, env, goal, h, device)
+                            v_h_e_vals.append(v_h_e.squeeze())
+                        v_h_e_tensor = torch.stack(v_h_e_vals)
+                        zeta = config.zeta if config else 2.0
+                        x_h_clamped = torch.clamp((v_h_e_tensor ** zeta).mean(), min=1e-3, max=1.0)
                     x_h_vals.append(x_h_clamped)
                 if x_h_vals:
                     x_h_tensor = torch.stack(x_h_vals)
@@ -799,6 +816,7 @@ def main(
     use_encoders: bool = True,
     use_tabular: bool = False,
     use_curious: bool = False,
+    use_adaptive: bool = False,
     save_networks_path: str = None,
     save_policy_path: str = None,
     restore_networks_path: str = None,
@@ -832,6 +850,10 @@ def main(
     print()
     
     # Configuration - start with environment-based defaults
+    # For trivial env, we disable X_h network to compute directly from V_h^e samples
+    # This is simpler and faster for small state spaces
+    use_x_h_network = True  # Default for larger environments
+    
     if env_type == "trivial":
         num_training_steps = 1e6 # 10000
         num_rollouts = NUM_ROLLOUTS
@@ -841,7 +863,9 @@ def main(
         hidden_dim = 16
         goal_feature_dim = 8
         agent_embedding_dim = 4
+        use_x_h_network = False  # Compute X_h directly from V_h^e samples
         print("[TRIVIAL ENV] Using minimal network sizes for simple task")
+        print("[TRIVIAL ENV] X_h computed directly from V_h^e samples (x_h_use_network=False)")
     elif env_type == "small":
         num_training_steps = 20000
         num_rollouts = NUM_ROLLOUTS
@@ -1062,6 +1086,8 @@ def main(
         training_steps_per_env_step=0.1,  # 1 training step per 10 env steps (same ratio for sync/async)
         goal_resample_prob=0.1,
         v_h_e_target_update_interval=100,  # Standard target network update frequency
+        # X_h network mode (False for trivial env - compute directly from V_h^e samples)
+        x_h_use_network=use_x_h_network,
         # Warmup stage durations (each is duration in steps, not cumulative)
         warmup_v_h_e_steps=warmup_v_h_e_steps,
         warmup_x_h_steps=warmup_x_h_steps,
@@ -1077,7 +1103,7 @@ def main(
         use_encoders=use_encoders,
         # Tabular learning mode (lookup tables instead of neural networks)
         use_lookup_tables=use_tabular,
-        lookup_use_adaptive_lr=True,
+        lookup_use_adaptive_lr=use_adaptive and use_tabular,
         lookup_adaptive_lr_min=1e-6,
         q_r_weight_decay=0,
         v_r_weight_decay=0,
@@ -1092,6 +1118,12 @@ def main(
         rnd_feature_dim=64,
         rnd_hidden_dim=128,
         normalize_rnd=True,
+        # RND-based adaptive learning rate for neural networks
+        # Note: requires use_rnd=True, so --adaptive with neural nets also needs --curious
+        rnd_use_adaptive_lr=use_adaptive and not use_tabular and use_curious,
+        rnd_adaptive_lr_scale=1.0,
+        rnd_adaptive_lr_min=0.1,
+        rnd_adaptive_lr_max=10.0,
         # Count-based curiosity for tabular mode
         use_count_based_curiosity=use_curious and use_tabular,
         count_curiosity_scale=1.0,
@@ -1139,6 +1171,14 @@ def main(
                 print(f"  Curiosity (count-based): ENABLED (bonus_coef={config.count_curiosity_bonus_coef_r})")
             else:
                 print(f"  Curiosity (RND): ENABLED (bonus_coef={config.rnd_bonus_coef_r})")
+        if use_adaptive:
+            if use_tabular:
+                print(f"  Adaptive LR (1/n): ENABLED for lookup tables")
+            elif use_curious:
+                print(f"  Adaptive LR (RND-based): ENABLED (scale={config.rnd_adaptive_lr_scale}, "
+                      f"min={config.rnd_adaptive_lr_min}, max={config.rnd_adaptive_lr_max})")
+            else:
+                print(f"  Adaptive LR: --curious required for neural networks (RND needed for uncertainty)")
         print(f"  TensorBoard: {tensorboard_dir}")
         if restore_networks_path:
             print(f"  Restoring from: {restore_networks_path}")
@@ -1425,6 +1465,8 @@ if __name__ == "__main__":
                         help='Use lookup tables instead of neural networks (exact tabular learning)')
     parser.add_argument('--curious', '-c', '--rnd', action='store_true',
                         help='Enable curiosity-driven exploration (RND for neural, count-based for tabular)')
+    parser.add_argument('--adaptive', action='store_true',
+                        help='Enable adaptive learning rates (1/n for tabular, RND-based for neural)')
     
     # Save/restore options
     parser.add_argument('--save_networks', type=str, default=None, metavar='PATH',
@@ -1462,6 +1504,7 @@ if __name__ == "__main__":
         use_encoders=not args.no_encoders,
         use_tabular=args.tabular,
         use_curious=args.curious,
+        use_adaptive=args.adaptive,
         save_networks_path=args.save_networks,
         save_policy_path=args.save_policy,
         restore_networks_path=args.restore_networks,

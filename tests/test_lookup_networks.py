@@ -514,6 +514,17 @@ class TestPhase2ConfigLookupTables:
         # Should be False because u_r_use_network=False
         assert config.should_use_lookup_table('u_r') is False
     
+    def test_x_h_lookup_requires_network(self):
+        """Test that X_h lookup requires x_h_use_network=True."""
+        config = Phase2Config(
+            use_lookup_tables=True,
+            use_lookup_x_h=True,
+            x_h_use_network=False,  # X_h computed from V_h^e samples
+        )
+        
+        # Should be False because x_h_use_network=False
+        assert config.should_use_lookup_table('x_h') is False
+    
     def test_get_lookup_default(self):
         """Test getting default values for lookup table entries."""
         config = Phase2Config(
@@ -788,6 +799,27 @@ class TestNetworkFactory:
         assert u_r is None
         assert v_r is None
     
+    def test_create_all_lookup_without_x_h_network(self):
+        """Test creating lookup networks with x_h disabled."""
+        from empo.nn_based.phase2.network_factory import create_all_phase2_lookup_networks
+        
+        config = Phase2Config(
+            use_lookup_tables=True,
+            x_h_use_network=False,  # X_h computed from V_h^e samples
+            u_r_use_network=False,  # U_r computed from X_h
+            v_r_use_network=False,  # V_r computed from U_r and Q_r
+        )
+        
+        q_r, v_h_e, x_h, u_r, v_r = create_all_phase2_lookup_networks(
+            config, num_actions=4, num_robots=1
+        )
+        
+        assert isinstance(q_r, LookupTableRobotQNetwork)
+        assert isinstance(v_h_e, LookupTableHumanGoalAbilityNetwork)
+        assert x_h is None  # X_h computed directly from V_h^e samples
+        assert u_r is None
+        assert v_r is None
+    
     def test_create_all_lookup_requires_flag(self):
         """Test that factory raises error if use_lookup_tables is False."""
         from empo.nn_based.phase2.network_factory import create_all_phase2_lookup_networks
@@ -857,6 +889,22 @@ class TestNetworkFactory:
         network = create_robot_value_network(config)
         
         assert network is None
+    
+    def test_create_aggregate_goal_ability_network_when_disabled(self):
+        """Test X_h factory behavior when x_h_use_network=False.
+        
+        Note: Unlike U_r and V_r, the X_h factory always requires a network
+        to be created. When x_h_use_network=False, the trainer skips X_h
+        creation entirely and computes X_h directly from V_h^e samples.
+        The should_use_lookup_table('x_h') returns False to indicate this.
+        """
+        config = Phase2Config(x_h_use_network=False)
+        
+        # should_use_lookup_table returns False when x_h_use_network=False
+        assert config.should_use_lookup_table('x_h') is False
+        
+        # The create_aggregate_goal_ability_network is NOT called when
+        # x_h_use_network=False - the trainer handles this by setting x_h=None
 
 
 class TestAdaptiveLearningRate:

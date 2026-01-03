@@ -40,7 +40,7 @@ We do NOT use the term "epoch" in Phase 2 training. Unlike supervised learning w
 ### Stage (Warm-up)
 A warm-up **stage** is a phase where specific networks are active for training. There are 6 stages total:
 - Stage 0 (training steps 0 to warmup_v_h_e_steps): Only V_h^e trained
-- Stage 1 (+warmup_x_h_steps): V_h^e + X_h trained
+- Stage 1 (+warmup_x_h_steps): V_h^e + X_h trained (skipped if x_h_use_network=False)
 - Stage 2 (+warmup_u_r_steps): V_h^e + X_h + U_r trained (skipped if u_r_use_network=False)
 - Stage 3 (+warmup_q_r_steps): V_h^e + X_h + (U_r) + Q_r trained
 - Stage 4 (+beta_r_rampup_steps): All networks, beta_r ramping from 0 to nominal
