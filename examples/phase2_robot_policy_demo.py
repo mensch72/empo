@@ -705,16 +705,32 @@ def run_policy_rollout(
                         x_h = networks.x_h.forward(state, env, h, device)
                         x_h_clamped = torch.clamp(x_h.squeeze(), min=1e-3, max=1.0)
                     else:
-                        # Compute X_h from V_h^e samples
-                        n_goal_samples = 5
-                        v_h_e_vals = []
-                        for _ in range(n_goal_samples):
-                            goal, _ = goal_sampler.sample(state, h)
-                            v_h_e = networks.v_h_e.forward(state, env, goal, h, device)
-                            v_h_e_vals.append(v_h_e.squeeze())
-                        v_h_e_tensor = torch.stack(v_h_e_vals)
+                        # Compute X_h = E_g[weight * V_h^e(s, g)^zeta] exactly from all goals
                         zeta = config.zeta if config else 2.0
-                        x_h_clamped = torch.clamp((v_h_e_tensor ** zeta).mean(), min=1e-3, max=1.0)
+                        if hasattr(goal_sampler, 'goals') and hasattr(goal_sampler, 'weights') and hasattr(goal_sampler, 'probs'):
+                            # TabularGoalSampler: use all goals with their probs and weights
+                            goals = goal_sampler.goals
+                            probs = goal_sampler.probs
+                            weights = goal_sampler.weights
+                            v_h_e_vals = []
+                            for goal in goals:
+                                v_h_e = networks.v_h_e.forward(state, env, goal, h, device)
+                                v_h_e_vals.append(v_h_e.squeeze())
+                            v_h_e_tensor = torch.stack(v_h_e_vals)
+                            probs_tensor = torch.tensor(probs, device=device, dtype=v_h_e_tensor.dtype)
+                            weights_tensor = torch.tensor(weights, device=device, dtype=v_h_e_tensor.dtype)
+                            # X_h = E[weight * V_h^e^zeta] = sum_g prob_g * weight_g * V_h^e(s, g)^zeta
+                            x_h_clamped = torch.clamp((probs_tensor * weights_tensor * (v_h_e_tensor ** zeta)).sum(), min=1e-3, max=1.0)
+                        else:
+                            # Fall back to Monte Carlo sampling
+                            n_goal_samples = 10
+                            weighted_v_h_e_vals = []
+                            for _ in range(n_goal_samples):
+                                goal, weight = goal_sampler.sample(state, h)
+                                v_h_e = networks.v_h_e.forward(state, env, goal, h, device)
+                                weighted_v_h_e_vals.append(weight * (v_h_e.squeeze() ** zeta))
+                            weighted_v_h_e_tensor = torch.stack(weighted_v_h_e_vals)
+                            x_h_clamped = torch.clamp(weighted_v_h_e_tensor.mean(), min=1e-3, max=1.0)
                     x_h_vals.append(x_h_clamped)
                 if x_h_vals:
                     x_h_tensor = torch.stack(x_h_vals)

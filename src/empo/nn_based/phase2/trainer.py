@@ -3933,21 +3933,49 @@ class BasePhase2Trainer(ABC):
                 x_h_clamped = torch.clamp(x_h.squeeze(), min=1e-3, max=1.0)
                 return x_h_clamped.item()
         else:
-            # Compute X_h from V_h^e samples
-            n_goal_samples = 5
-            goals = []
-            for _ in range(n_goal_samples):
-                goal, _ = self.goal_sampler.sample(state, human_agent_idx)
-                goals.append(goal)
+            # Compute X_h = E_g[V_h^e(s, g)^zeta] exactly from all goals
+            # For TabularGoalSampler, use all goals with their probabilities
+            # For other samplers, fall back to Monte Carlo sampling
+            from empo.possible_goal import TabularGoalSampler
             
             self.networks.v_h_e.eval()
             with torch.no_grad():
-                v_h_e_values = self.networks.v_h_e.forward_batch(
-                    [state] * n_goal_samples, goals, [human_agent_idx] * n_goal_samples,
-                    self.env, self.device
-                ).squeeze()
-                v_h_e_values = self.networks.v_h_e.apply_hard_clamp(v_h_e_values)
-                x_h = (v_h_e_values ** self.config.zeta).mean()
+                if isinstance(self.goal_sampler, TabularGoalSampler):
+                    # Exact computation: X_h = E[weight * V_h^e^zeta] = sum_g prob_g * weight_g * V_h^e^zeta
+                    goals = self.goal_sampler.goals
+                    probs = self.goal_sampler.probs
+                    weights = self.goal_sampler.weights
+                    n_goals = len(goals)
+                    
+                    v_h_e_values = self.networks.v_h_e.forward_batch(
+                        [state] * n_goals, goals, [human_agent_idx] * n_goals,
+                        self.env, self.device
+                    ).squeeze()
+                    v_h_e_values = self.networks.v_h_e.apply_hard_clamp(v_h_e_values)
+                    
+                    # X_h = E[weight * V_h^e^zeta] = sum_g prob_g * weight_g * V_h^e(s, g)^zeta
+                    probs_tensor = torch.tensor(probs, device=self.device, dtype=v_h_e_values.dtype)
+                    weights_tensor = torch.tensor(weights, device=self.device, dtype=v_h_e_values.dtype)
+                    x_h = (probs_tensor * weights_tensor * (v_h_e_values ** self.config.zeta)).sum()
+                else:
+                    # Fall back to Monte Carlo sampling for non-tabular samplers
+                    n_goal_samples = 10  # Use more samples for better estimate
+                    goals = []
+                    weights = []
+                    for _ in range(n_goal_samples):
+                        goal, weight = self.goal_sampler.sample(state, human_agent_idx)
+                        goals.append(goal)
+                        weights.append(weight)
+                    
+                    v_h_e_values = self.networks.v_h_e.forward_batch(
+                        [state] * n_goal_samples, goals, [human_agent_idx] * n_goal_samples,
+                        self.env, self.device
+                    ).squeeze()
+                    v_h_e_values = self.networks.v_h_e.apply_hard_clamp(v_h_e_values)
+                    weights_tensor = torch.tensor(weights, device=self.device, dtype=v_h_e_values.dtype)
+                    # X_h = E[weight * V_h^e^zeta]
+                    x_h = (weights_tensor * (v_h_e_values ** self.config.zeta)).mean()
+                
                 x_h_clamped = torch.clamp(x_h, min=1e-3, max=1.0)
                 return x_h_clamped.item()
     
