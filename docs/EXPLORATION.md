@@ -451,6 +451,48 @@ When RND is enabled, additional metrics are logged:
 - `rnd_norm_running_*` are normalization parameters that adapt to keep normalized output around mean=0, std=1
 - For human RND, similar trends should appear for `human_rnd_*` metrics
 
+### RND Adaptive Learning Rate Diagnostics
+
+When `rnd_use_adaptive_lr=True` is enabled (using RND as an uncertainty proxy for adaptive learning rates), additional detailed metrics are logged under `AdaptiveLR/`:
+
+**Per-network metrics** (for each of q_r, v_h_e, x_h, etc.):
+
+| Metric | Description |
+|--------|-------------|
+| `rnd_{net}_scale_mean` | Mean LR scale applied (after clamping) |
+| `rnd_{net}_scale_std` | Std of LR scale before clamping |
+| `rnd_{net}_scale_min` | Min LR scale in batch (before clamping) |
+| `rnd_{net}_scale_max` | Max LR scale in batch (before clamping) |
+| `rnd_{net}_mse_mean` | Mean raw RND MSE in batch |
+| `rnd_{net}_mse_std` | Std of raw RND MSE in batch |
+| `rnd_{net}_mse_min` | Min raw RND MSE in batch |
+| `rnd_{net}_mse_max` | Max raw RND MSE in batch |
+| `rnd_{net}_frac_clamped_low` | Fraction hitting min clamp |
+| `rnd_{net}_frac_clamped_high` | Fraction hitting max clamp |
+| `rnd_{net}_running_mean` | Running mean used for normalization |
+
+**What to look for:**
+
+| Observation | Diagnosis | Suggested Action |
+|-------------|-----------|------------------|
+| `mse_std ≈ 0` | States not differentiated by RND | Check state encoder output diversity; try larger RND hidden_dim |
+| `mse_min ≈ mse_max` | All states have similar novelty | RND may be too simple or state features too low-dimensional |
+| `scale_std ≈ 0` | Adaptive LR not providing differentiation | Expected if all states equally familiar/novel |
+| `frac_clamped_low` high | Many states very familiar | Consider lowering `rnd_adaptive_lr_min` |
+| `frac_clamped_high` high | Many states very novel | Consider raising `rnd_adaptive_lr_max` or increasing RND training |
+| `scale_mean ≈ 1.0` always | Expected behavior | Scale is normalized by running mean, so mean ≈ 1 by design |
+
+**Healthy signs:**
+- `mse_std > 0` (some variance in novelty across batch)
+- `mse_min << mse_max` (spread indicates state differentiation)
+- Decreasing `mse_mean` over time (predictor learning)
+- Low clamping fractions (values within reasonable range)
+
+**Warning signs:**
+- `mse_std` very small but `mse_mean` non-zero → RND can't distinguish states
+- `mse_mean` not decreasing → RND predictor not learning (check `lr_rnd`)
+- High `frac_clamped_*` → Need to adjust clamp bounds or scale parameter
+
 ### Example Usage
 
 ```python
@@ -560,6 +602,91 @@ When count-based curiosity is enabled, these metrics are logged:
 - `unique_states` should grow over training (discovering new states)
 - `mean_visits` indicates how uniformly exploration is distributed
 - `coverage_ratio` shows what fraction of discovered states have been revisited
+
+**What to look for:**
+
+| Observation | Diagnosis | Suggested Action |
+|-------------|-----------|------------------|
+| `unique_states` plateaus early | Exploration stuck or state space exhausted | Increase `count_curiosity_scale` or check connectivity |
+| `unique_states` grows as √t | Normal random walk behavior | Expected for constrained environments |
+| `unique_states` grows linearly | Excellent exploration | Curiosity bonus is effective |
+| `mean_visits` very high, `unique_states` low | Stuck revisiting same states | **Increase `count_curiosity_bonus_coef_r`** |
+| `max_visits >> mean_visits` (heavy skew) | Bottleneck states | Some states unavoidably frequent (e.g., start state) |
+| `coverage_ratio` near 1.0 | Good revisitation coverage | Healthy exploration pattern |
+
+## General TensorBoard Diagnostics Guide
+
+This section summarizes how to diagnose exploration issues using TensorBoard metrics.
+
+### Quick Diagnostic Checklist
+
+1. **Is exploration happening?**
+   - Check `Exploration/epsilon_r` and `Exploration/epsilon_h` are non-zero
+   - Check `Exploration/unique_states_seen` is growing
+
+2. **Is exploration effective?**
+   - Check `Exploration/visit_count_distribution` histogram for heavy tails (bad) vs spread (good)
+   - For RND: Check `Exploration/rnd_raw_novelty_mean` is decreasing
+
+3. **Is curiosity helping?**
+   - For RND: Check `Loss/rnd` is decreasing (predictor learning)
+   - For count-based: Check `unique_states` growth rate
+
+4. **Is adaptive LR working?** (if enabled)
+   - Check `AdaptiveLR/rnd_{net}_scale_std > 0` (variance exists)
+   - Check `AdaptiveLR/rnd_{net}_mse_std > 0` (states differentiated)
+
+### Common Problems and Solutions
+
+| Symptom | Likely Cause | Solution |
+|---------|--------------|----------|
+| `unique_states_seen` stuck | Exploration too weak or environment constrained | ↑ epsilon decay steps, ↑ curiosity bonus |
+| `visit_count_distribution` heavily skewed | Random walk behavior, bottlenecks | ↑ curiosity bonus, use smart exploration policies |
+| `rnd_raw_novelty_mean` not decreasing | RND predictor not learning | ↑ `lr_rnd`, check RND network size |
+| `rnd_raw_novelty_std` ≈ 0 | State features not discriminative | Check encoder architecture, ↑ `hidden_dim` |
+| All adaptive LR scales ≈ 1.0 | Expected (normalized), check std | Look at `scale_std`, not `scale_mean` |
+| High `frac_clamped_*` | Clamp bounds too tight | Widen `rnd_adaptive_lr_min`/`max` |
+
+### Metric Dependencies
+
+Understanding which metrics affect which:
+
+```
+Environment Structure
+        │
+        ▼
+┌───────────────────┐
+│  State Features   │──────────────────────────────────────┐
+│  (from encoders)  │                                      │
+└───────────────────┘                                      │
+        │                                                  │
+        ▼                                                  ▼
+┌───────────────────┐                           ┌───────────────────┐
+│   RND Networks    │                           │  Value Networks   │
+│  target/predictor │                           │   Q_r, V_h^e...   │
+└───────────────────┘                           └───────────────────┘
+        │                                                  │
+        ▼                                                  │
+┌───────────────────┐                                      │
+│  RND MSE (novelty)│                                      │
+│  mse_mean/std/... │                                      │
+└───────────────────┘                                      │
+        │                                                  │
+        ├───────────────────────────────────────┐          │
+        ▼                                       ▼          │
+┌───────────────────┐               ┌───────────────────┐  │
+│ Curiosity Bonus   │               │ Adaptive LR Scale │  │
+│ (action selection)│               │ (gradient scaling)│──┘
+└───────────────────┘               └───────────────────┘
+        │                                       │
+        ▼                                       ▼
+┌───────────────────┐               ┌───────────────────┐
+│  Exploration      │               │  Learning Speed   │
+│  (unique_states)  │               │  (per-state)      │
+└───────────────────┘               └───────────────────┘
+```
+
+If `mse_std ≈ 0`, both curiosity bonus AND adaptive LR will be ineffective because all states look the same to RND.
 
 ### Example Usage
 

@@ -628,6 +628,18 @@ class BasePhase2Trainer(ABC):
                     # All zeros, no scaling
                     return {}
             
+            # Compute stats before clamping (for diagnostics)
+            lr_scale_unclamped_mean = lr_scale.mean().item()
+            lr_scale_unclamped_std = lr_scale.std().item() if len(lr_scale) > 1 else 0.0
+            lr_scale_unclamped_min = lr_scale.min().item()
+            lr_scale_unclamped_max = lr_scale.max().item()
+            
+            # Raw RND MSE stats (before any normalization)
+            rnd_mse_mean = rnd_mse.mean().item()
+            rnd_mse_std = rnd_mse.std().item() if len(rnd_mse) > 1 else 0.0
+            rnd_mse_min = rnd_mse.min().item()
+            rnd_mse_max = rnd_mse.max().item()
+            
             # Clamp to prevent extreme values
             lr_scale = lr_scale.clamp(
                 min=self.config.rnd_adaptive_lr_min,
@@ -636,6 +648,10 @@ class BasePhase2Trainer(ABC):
             
             # Compute mean scale per sample (for batch-level gradient scaling)
             mean_lr_scale = lr_scale.mean().item()
+            # Also track how many values were clamped
+            num_clamped_low = (lr_scale == self.config.rnd_adaptive_lr_min).sum().item()
+            num_clamped_high = (lr_scale == self.config.rnd_adaptive_lr_max).sum().item()
+            batch_size = len(lr_scale)
         
         # Scale gradients for all neural network parameters
         # We apply a uniform scale based on the batch mean because:
@@ -645,6 +661,22 @@ class BasePhase2Trainer(ABC):
         #
         # For more fine-grained control, consider using sample-weighted losses
         # during forward pass instead of gradient scaling.
+        
+        # Store detailed stats for logging
+        detailed_stats = {
+            'scale_mean': mean_lr_scale,
+            'scale_unclamped_mean': lr_scale_unclamped_mean,
+            'scale_unclamped_std': lr_scale_unclamped_std,
+            'scale_unclamped_min': lr_scale_unclamped_min,
+            'scale_unclamped_max': lr_scale_unclamped_max,
+            'rnd_mse_mean': rnd_mse_mean,
+            'rnd_mse_std': rnd_mse_std,
+            'rnd_mse_min': rnd_mse_min,
+            'rnd_mse_max': rnd_mse_max,
+            'frac_clamped_low': num_clamped_low / batch_size if batch_size > 0 else 0.0,
+            'frac_clamped_high': num_clamped_high / batch_size if batch_size > 0 else 0.0,
+            'running_mean': running_mean.item() if hasattr(running_mean, 'item') else running_mean,
+        }
         
         lr_scale_values = {}
         networks_to_scale = {
@@ -671,7 +703,8 @@ class BasePhase2Trainer(ABC):
                 if param.grad is not None:
                     param.grad.mul_(mean_lr_scale)
             
-            lr_scale_values[name] = mean_lr_scale
+            # Store all detailed stats for this network
+            lr_scale_values[name] = detailed_stats.copy()
         
         return lr_scale_values
     
@@ -2615,12 +2648,9 @@ class BasePhase2Trainer(ABC):
         self._add_new_lookup_params_to_optimizers()
         
         # Add RND LR scales to prediction_stats for logging
+        # rnd_lr_scales now contains detailed stats dict per network, not just scale values
         if rnd_lr_scales:
-            if 'rnd_adaptive_lr' not in prediction_stats:
-                prediction_stats['rnd_adaptive_lr'] = {}
-            prediction_stats['rnd_adaptive_lr'] = {
-                k: {'scale': v} for k, v in rnd_lr_scales.items()
-            }
+            prediction_stats['rnd_adaptive_lr'] = rnd_lr_scales
         
         return loss_values, grad_norms, prediction_stats
     
@@ -2868,11 +2898,36 @@ class BasePhase2Trainer(ABC):
                         if 'human_rnd_running_std' in stats:
                             self.writer.add_scalar('Exploration/human_rnd_norm_running_std', stats['human_rnd_running_std'], self.training_step_count)
                         continue
-                    # RND adaptive learning rate stats
+                    # RND adaptive learning rate stats (detailed diagnostics)
                     if key == 'rnd_adaptive_lr':
                         for net_name, net_stats in stats.items():
-                            if 'scale' in net_stats:
-                                self.writer.add_scalar(f'AdaptiveLR/rnd_{net_name}_scale', net_stats['scale'], self.training_step_count)
+                            # Mean LR scale applied (after clamping)
+                            if 'scale_mean' in net_stats:
+                                self.writer.add_scalar(f'AdaptiveLR/rnd_{net_name}_scale_mean', net_stats['scale_mean'], self.training_step_count)
+                            # Unclamped stats show the raw variance in uncertainty estimates
+                            if 'scale_unclamped_std' in net_stats:
+                                self.writer.add_scalar(f'AdaptiveLR/rnd_{net_name}_scale_std', net_stats['scale_unclamped_std'], self.training_step_count)
+                            if 'scale_unclamped_min' in net_stats:
+                                self.writer.add_scalar(f'AdaptiveLR/rnd_{net_name}_scale_min', net_stats['scale_unclamped_min'], self.training_step_count)
+                            if 'scale_unclamped_max' in net_stats:
+                                self.writer.add_scalar(f'AdaptiveLR/rnd_{net_name}_scale_max', net_stats['scale_unclamped_max'], self.training_step_count)
+                            # Raw RND MSE values (most important for diagnosing RND behavior)
+                            if 'rnd_mse_mean' in net_stats:
+                                self.writer.add_scalar(f'AdaptiveLR/rnd_{net_name}_mse_mean', net_stats['rnd_mse_mean'], self.training_step_count)
+                            if 'rnd_mse_std' in net_stats:
+                                self.writer.add_scalar(f'AdaptiveLR/rnd_{net_name}_mse_std', net_stats['rnd_mse_std'], self.training_step_count)
+                            if 'rnd_mse_min' in net_stats:
+                                self.writer.add_scalar(f'AdaptiveLR/rnd_{net_name}_mse_min', net_stats['rnd_mse_min'], self.training_step_count)
+                            if 'rnd_mse_max' in net_stats:
+                                self.writer.add_scalar(f'AdaptiveLR/rnd_{net_name}_mse_max', net_stats['rnd_mse_max'], self.training_step_count)
+                            # Clamping fraction shows if we're hitting limits
+                            if 'frac_clamped_low' in net_stats:
+                                self.writer.add_scalar(f'AdaptiveLR/rnd_{net_name}_frac_clamped_low', net_stats['frac_clamped_low'], self.training_step_count)
+                            if 'frac_clamped_high' in net_stats:
+                                self.writer.add_scalar(f'AdaptiveLR/rnd_{net_name}_frac_clamped_high', net_stats['frac_clamped_high'], self.training_step_count)
+                            # Running mean for context on normalization
+                            if 'running_mean' in net_stats:
+                                self.writer.add_scalar(f'AdaptiveLR/rnd_{net_name}_running_mean', net_stats['running_mean'], self.training_step_count)
                         continue
                     self.writer.add_scalar(f'Predictions/{key}_mean', stats['mean'], self.training_step_count)
                     self.writer.add_scalar(f'Predictions/{key}_std', stats['std'], self.training_step_count)
