@@ -106,12 +106,18 @@ class Phase2Config:
     rnd_feature_dim: int = 64                # Output dimension of RND networks
     rnd_hidden_dim: int = 256                # Hidden layer dimension for RND networks
     rnd_bonus_coef_r: float = 0.1            # Robot curiosity bonus coefficient
-    rnd_bonus_coef_h: float = 0.1            # Human curiosity bonus coefficient
+    rnd_bonus_coef_h: float = 0.1            # Human curiosity bonus coefficient (for human action RND)
     lr_rnd: float = 1e-4                     # Learning rate for RND predictor
     rnd_weight_decay: float = 1e-4           # Weight decay for RND predictor
     rnd_grad_clip: Optional[float] = 10.0    # Gradient clipping for RND
     normalize_rnd: bool = True               # Normalize novelty by running mean/std
     rnd_normalization_decay: float = 0.99    # EMA decay for normalization stats
+    
+    # Human Action RND: Separate RND module for human action exploration.
+    # Unlike the state-based RND for robots, this outputs per-action novelty
+    # scores for (state, human_identity, action) tuples, encouraging each human
+    # to try actions they haven't taken in similar states.
+    use_human_action_rnd: bool = False       # Enable human action RND (requires use_rnd=True)
     
     # =========================================================================
     # Curiosity-driven exploration (Count-based - for tabular/lookup table mode)

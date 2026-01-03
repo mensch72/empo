@@ -372,6 +372,99 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
                 features.append(feat)
             
             return torch.stack(features), encoder_coefficients
+    
+    def get_human_features_for_rnd(
+        self,
+        state: Any,
+        human_agent_indices: List[int]
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Get state and agent features for human action RND module.
+        
+        Uses the shared state encoder and agent encoder to produce features
+        for each human agent in the given state.
+        
+        Args:
+            state: Current state (tuple from get_state()).
+            human_agent_indices: List of human agent indices to get features for.
+            
+        Returns:
+            Tuple of:
+            - state_features: (num_humans, state_feature_dim) - same for all humans
+            - agent_features: (num_humans, agent_feature_dim) - different for each human
+        """
+        import torch
+        
+        num_humans = len(human_agent_indices)
+        if num_humans == 0:
+            # No humans - return empty tensors
+            state_dim = self.networks.v_h_e.state_encoder.feature_dim
+            agent_dim = self.networks.v_h_e.agent_encoder.output_dim
+            return (
+                torch.zeros(0, state_dim, device=self.device),
+                torch.zeros(0, agent_dim, device=self.device),
+            )
+        
+        # Get shared encoders from V_h^e
+        state_encoder = self.networks.v_h_e.state_encoder
+        agent_encoder = self.networks.v_h_e.agent_encoder
+        
+        # Check if we have neural encoders
+        if hasattr(state_encoder, 'tensorize_state'):
+            # Tensorize the state once
+            tensors = state_encoder.tensorize_state(state, self.env)
+            grid_tensor = tensors[0].to(self.device)  # (1, C, H, W)
+            global_features = tensors[1].to(self.device)  # (1, global_dim)
+            agent_features_raw = tensors[2].to(self.device)  # (1, agent_dim)
+            interactive_features = tensors[3].to(self.device)  # (1, interactive_dim)
+            
+            # Forward through state encoder (detached - human RND has its own networks)
+            with torch.no_grad():
+                state_features_single = state_encoder.forward(
+                    grid_tensor, global_features, agent_features_raw, interactive_features
+                )  # (1, state_feature_dim)
+            
+            # Expand to num_humans (same state features for all humans)
+            state_features = state_features_single.expand(num_humans, -1)  # (num_humans, state_feature_dim)
+            
+            # Get agent features for each human
+            agent_features_list = []
+            for h in human_agent_indices:
+                with torch.no_grad():
+                    # Use tensorize_single to extract tensors, then forward through agent encoder
+                    # tensorize_single returns: idx (1,), query_grid (1, 1, H, W), query_features (1, feat_dim)
+                    # forward() expects: idx (batch,), grid (batch, 1, H, W), features (batch, feat_dim)
+                    # So shapes already match with batch=1
+                    idx_tensor, query_grid, query_features = agent_encoder.tensorize_single(
+                        h, state, self.env, self.device
+                    )
+                    agent_feat = agent_encoder.forward(
+                        idx_tensor, query_grid, query_features
+                    )  # (1, agent_feature_dim)
+                agent_features_list.append(agent_feat)
+            
+            agent_features = torch.cat(agent_features_list, dim=0)  # (num_humans, agent_feature_dim)
+            
+            return state_features, agent_features
+        else:
+            # Lookup table mode - human action RND should not be enabled
+            # But provide a fallback with random features
+            state_dim = getattr(state_encoder, 'feature_dim', self.config.hidden_dim)
+            agent_dim = getattr(agent_encoder, 'output_dim', 80)  # Default agent feature dim
+            
+            state_hash = hash(state) % (2**31)
+            gen = torch.Generator(device=self.device).manual_seed(state_hash)
+            state_features = torch.randn(num_humans, state_dim, device=self.device, generator=gen)
+            
+            agent_features_list = []
+            for h in human_agent_indices:
+                agent_hash = hash((state, h)) % (2**31)
+                gen = torch.Generator(device=self.device).manual_seed(agent_hash)
+                agent_feat = torch.randn(1, agent_dim, device=self.device, generator=gen)
+                agent_features_list.append(agent_feat)
+            agent_features = torch.cat(agent_features_list, dim=0)
+            
+            return state_features, agent_features
 
 
 def create_phase2_networks(
@@ -819,6 +912,31 @@ def create_phase2_networks(
             normalization_decay=config.rnd_normalization_decay,
         ).to(device)
     
+    # =========================================================================
+    # Create Human Action RND (if enabled)
+    # =========================================================================
+    # Human Action RND outputs per-action novelty for (state, human, action) tuples.
+    # Input: state features (from shared encoder) + agent features (from agent encoder)
+    # Output: novelty scores for each action
+    human_rnd = None
+    if config.use_rnd and config.use_human_action_rnd:
+        from empo.nn_based.phase2.rnd import HumanActionRNDModule
+        
+        # State features from shared state encoder
+        state_feature_dim = shared_state_encoder.feature_dim
+        # Agent features from shared agent encoder
+        agent_feature_dim = shared_agent_encoder.output_dim
+        
+        human_rnd = HumanActionRNDModule(
+            state_feature_dim=state_feature_dim,
+            agent_feature_dim=agent_feature_dim,
+            num_actions=num_actions,
+            feature_dim=config.rnd_feature_dim,
+            hidden_dim=config.rnd_hidden_dim,
+            normalize=config.normalize_rnd,
+            normalization_decay=config.rnd_normalization_decay,
+        ).to(device)
+    
     return Phase2Networks(
         q_r=q_r,
         v_h_e=v_h_e,
@@ -827,6 +945,7 @@ def create_phase2_networks(
         v_r=v_r,
         rnd=rnd,
         rnd_encoder_dims=rnd_encoder_dims,  # Store for coefficient computation
+        human_rnd=human_rnd,
     )
 
 

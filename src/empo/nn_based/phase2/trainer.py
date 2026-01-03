@@ -34,7 +34,7 @@ from .aggregate_goal_ability import BaseAggregateGoalAbilityNetwork
 from .intrinsic_reward_network import BaseIntrinsicRewardNetwork
 from .robot_value_network import BaseRobotValueNetwork, compute_v_r_from_components
 from .lookup import get_all_lookup_tables, get_total_table_size
-from .rnd import RNDModule
+from .rnd import RNDModule, HumanActionRNDModule
 from .count_based_curiosity import CountBasedCuriosity
 
 # Try to import tensorboard (optional)
@@ -55,11 +55,15 @@ class Phase2Networks:
     u_r: Optional[BaseIntrinsicRewardNetwork] = None
     v_r: Optional[BaseRobotValueNetwork] = None
     
-    # RND module for curiosity-driven exploration (optional, for neural networks)
+    # RND module for robot curiosity-driven exploration (optional, for neural networks)
     rnd: Optional[RNDModule] = None
     # Individual encoder dimensions for RND coefficient weighting during warmup
     # Order: [shared, x_h_own, u_r_own (if used), q_r_own]
     rnd_encoder_dims: Optional[List[int]] = None
+    
+    # Human action RND module for human curiosity-driven exploration (optional)
+    # Takes state + agent features, outputs per-action novelty scores
+    human_rnd: Optional['HumanActionRNDModule'] = None
     
     # Count-based curiosity for tabular exploration (optional, for lookup tables)
     count_curiosity: Optional[CountBasedCuriosity] = None
@@ -390,6 +394,15 @@ class BasePhase2Trainer(ABC):
                 lr=self.config.lr_rnd,
                 weight_decay=self.config.rnd_weight_decay
             )
+        # Create Human Action RND optimizer if enabled
+        if (self.config.use_rnd and self.config.use_human_action_rnd 
+            and self.networks.human_rnd is not None):
+            # Only train the predictor network (target is frozen)
+            optimizers['human_rnd'] = optim.Adam(
+                self.networks.human_rnd.predictor.parameters(),
+                lr=self.config.lr_rnd,
+                weight_decay=self.config.rnd_weight_decay
+            )
         return optimizers
     
     def _add_new_lookup_params_to_optimizers(self):
@@ -688,9 +701,9 @@ class BasePhase2Trainer(ABC):
         epsilon = self.config.get_epsilon_r(self.training_step_count)
         effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
         
-        # Epsilon exploration: sample from exploration policy
+        # Epsilon exploration: sample from exploration policy (with optional curiosity bonus)
         if torch.rand(1).item() < epsilon:
-            return self._sample_robot_exploration_action(state)
+            return self._sample_robot_exploration_action(state, transition_probs_by_action)
         
         # Otherwise: sample from learned policy (with optional curiosity bonus)
         with torch.no_grad():
@@ -736,16 +749,21 @@ class BasePhase2Trainer(ABC):
             return self.config.count_curiosity_bonus_coef_h
         return self.config.rnd_bonus_coef_h
     
-    def _sample_robot_exploration_action(self, state: Any) -> Tuple[int, ...]:
+    def _sample_robot_exploration_action(
+        self,
+        state: Any,
+        transition_probs_by_action: Optional[Dict[int, List[Tuple[float, Any]]]] = None
+    ) -> Tuple[int, ...]:
         """
         Sample robot action during epsilon exploration.
         
-        Uses the configured exploration policy (or uniform random if none set).
-        This is the standard approach: curiosity only affects the (1-epsilon)
-        power-law policy portion via Q-value bonuses, not the epsilon exploration.
+        Uses the configured exploration policy (or uniform random if none set),
+        with optional curiosity bonus applied to the exploration probabilities.
         
         Args:
             state: Current state.
+            transition_probs_by_action: Pre-computed transition probabilities for
+                curiosity bonus computation.
             
         Returns:
             Tuple of robot actions.
@@ -754,32 +772,58 @@ class BasePhase2Trainer(ABC):
         
         num_action_combinations = self.networks.q_r_target.num_action_combinations
         
-        # Use configured exploration policy (curiosity does NOT affect epsilon exploration)
+        # Get base exploration probabilities
         if self.robot_exploration_policy is None:
             # Uniform random exploration
-            flat_idx = torch.randint(0, num_action_combinations, (1,)).item()
-            return self.networks.q_r_target.action_index_to_tuple(flat_idx)
+            base_probs = np.ones(num_action_combinations) / num_action_combinations
         elif isinstance(self.robot_exploration_policy, RobotPolicy):
-            # RobotPolicy object: use its sample() method directly
-            action = self.robot_exploration_policy.sample(state)
-            # Ensure return type is tuple
-            if isinstance(action, (list, tuple)):
-                return tuple(action)
+            # RobotPolicy object: get its probability distribution if available
+            if hasattr(self.robot_exploration_policy, '__call__'):
+                try:
+                    base_probs = self.robot_exploration_policy(state)
+                    base_probs = np.asarray(base_probs, dtype=np.float32)
+                except Exception:
+                    # Fallback: sample directly without curiosity
+                    action = self.robot_exploration_policy.sample(state)
+                    if isinstance(action, (list, tuple)):
+                        return tuple(action)
+                    return (action,)
             else:
+                # Cannot get probabilities, sample directly
+                action = self.robot_exploration_policy.sample(state)
+                if isinstance(action, (list, tuple)):
+                    return tuple(action)
                 return (action,)
         elif callable(self.robot_exploration_policy):
             # Callable exploration policy: get probabilities from function
-            probs = self.robot_exploration_policy(state, self.env)
-            probs_tensor = torch.tensor(probs, dtype=torch.float32)
-            probs_tensor = probs_tensor / probs_tensor.sum()  # Normalize
-            flat_idx = torch.multinomial(probs_tensor, 1).item()
-            return self.networks.q_r_target.action_index_to_tuple(flat_idx)
+            base_probs = self.robot_exploration_policy(state, self.env)
+            base_probs = np.asarray(base_probs, dtype=np.float32)
         else:
             # List/array exploration policy: use fixed probabilities
-            probs_tensor = torch.tensor(self.robot_exploration_policy, dtype=torch.float32)
-            probs_tensor = probs_tensor / probs_tensor.sum()  # Normalize
-            flat_idx = torch.multinomial(probs_tensor, 1).item()
-            return self.networks.q_r_target.action_index_to_tuple(flat_idx)
+            base_probs = np.asarray(self.robot_exploration_policy, dtype=np.float32)
+        
+        # Normalize base probabilities
+        base_probs = base_probs / (base_probs.sum() + 1e-10)
+        
+        # Apply curiosity bonus if enabled and transition_probs available
+        if self._curiosity_enabled_for_robot() and transition_probs_by_action is not None:
+            # Compute expected novelty for each action
+            novelty_scores = self._compute_action_novelty_scores(transition_probs_by_action)
+            
+            if novelty_scores is not None:
+                # Multiplicative scaling: P_eff(a) = P(a) * exp(+bonus * novelty(a))
+                # Higher novelty → larger scale → higher effective probability
+                bonus_coef = self._get_curiosity_bonus_coef_r()
+                scale_factors = np.exp(bonus_coef * novelty_scores)
+                modified_probs = base_probs * scale_factors
+                # Renormalize
+                modified_probs = modified_probs / (modified_probs.sum() + 1e-10)
+                base_probs = modified_probs
+        
+        # Sample from probabilities
+        probs_tensor = torch.tensor(base_probs, dtype=torch.float32)
+        flat_idx = torch.multinomial(probs_tensor, 1).item()
+        return self.networks.q_r_target.action_index_to_tuple(flat_idx)
     
     def _sample_curiosity_exploration_action(self, state: Any) -> Tuple[int, ...]:
         """
@@ -943,6 +987,82 @@ class BasePhase2Trainer(ABC):
         scale_factors = torch.exp(-bonus_coef * novelties)
         return q_values * scale_factors
     
+    def _compute_action_novelty_scores(
+        self,
+        transition_probs_by_action: Dict[int, List[Tuple[float, Any]]]
+    ) -> Optional[np.ndarray]:
+        """
+        Compute expected novelty score for each robot action.
+        
+        Uses PRE-COMPUTED transition_probs_by_action to compute the expected
+        novelty of successor states for each action.
+        
+        Args:
+            transition_probs_by_action: Pre-computed dict mapping action_idx -> [(prob, next_state), ...].
+            
+        Returns:
+            Numpy array of shape (num_action_combinations,) with novelty scores,
+            or None if curiosity module is not available.
+        """
+        num_action_combinations = self.networks.q_r_target.num_action_combinations
+        
+        # Collect all successor states from pre-computed transition_probs
+        all_next_states = []
+        state_mapping = []  # (action_idx, prob) for each state in all_next_states
+        
+        for action_idx, transitions in transition_probs_by_action.items():
+            if transitions is None or len(transitions) == 0:
+                continue
+            
+            for prob, next_state in transitions:
+                all_next_states.append(next_state)
+                state_mapping.append((action_idx, prob))
+        
+        if not all_next_states:
+            return None
+        
+        # Single batched novelty computation for all successor states
+        try:
+            all_novelty_scores = self.compute_novelty_for_states(all_next_states)
+        except Exception:
+            return None
+        
+        # Aggregate back to per-action expected novelty
+        novelties = np.zeros(num_action_combinations, dtype=np.float32)
+        for i, (action_idx, prob) in enumerate(state_mapping):
+            novelty = max(0.0, all_novelty_scores[i].item())  # Clamp negative
+            novelties[action_idx] += prob * novelty
+        
+        return novelties
+
+    def get_human_features_for_rnd(
+        self,
+        state: Any,
+        human_agent_indices: List[int]
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Get state and agent features for human RND module.
+        
+        Must be overridden by environment-specific subclasses to provide
+        appropriate features for the human action RND.
+        
+        Args:
+            state: Current state.
+            human_agent_indices: List of human agent indices to get features for.
+            
+        Returns:
+            Tuple of:
+            - state_features: (num_humans, state_feature_dim)
+            - agent_features: (num_humans, agent_feature_dim)
+            
+        Raises:
+            NotImplementedError: If human RND is enabled but this method
+                               is not overridden.
+        """
+        raise NotImplementedError(
+            "Subclass must implement get_human_features_for_rnd() to use human RND"
+        )
+    
     def sample_human_actions(
         self,
         state: Any,
@@ -954,9 +1074,8 @@ class BasePhase2Trainer(ABC):
         With probability epsilon_h, samples from the exploration policy
         (uniform random by default, or custom if human_exploration_policy is set).
         
-        TODO: Human curiosity-driven exploration is not yet implemented.
-        The transition_probs approach used for robot is not directly applicable
-        because human actions are sampled BEFORE robot action selection.
+        With probability (1 - epsilon_h), samples from the policy prior with
+        optional curiosity-based action weighting if human_rnd is enabled.
         
         Args:
             state: Current state.
@@ -968,27 +1087,69 @@ class BasePhase2Trainer(ABC):
         from empo.human_policy_prior import HumanPolicyPrior
         
         epsilon_h = self.config.get_epsilon_h(self.training_step_count)
+        num_actions = self.env.action_space.n
+        
+        # Check if human action RND is enabled for curiosity-driven exploration
+        use_human_curiosity = (
+            self.config.use_rnd 
+            and self.config.use_human_action_rnd
+            and self.networks.human_rnd is not None
+            and self._get_curiosity_bonus_coef_h() > 0
+        )
+        
+        # Pre-compute per-action novelty scores for all humans if using curiosity
+        action_novelties = None  # (num_humans, num_actions)
+        if use_human_curiosity and len(self.human_agent_indices) > 0:
+            try:
+                state_features, agent_features = self.get_human_features_for_rnd(
+                    state, self.human_agent_indices
+                )
+                action_novelties = self.networks.human_rnd.compute_action_novelties_no_grad(
+                    state_features, agent_features, use_raw=True
+                )  # (num_humans, num_actions)
+            except NotImplementedError:
+                # Fallback: no human curiosity if features not available
+                action_novelties = None
         
         actions = []
-        for h in self.human_agent_indices:
+        for idx, h in enumerate(self.human_agent_indices):
             goal = goals.get(h)
             
-            # Epsilon exploration: sample from exploration policy
+            # Get base probabilities (from exploration policy or prior)
             if torch.rand(1).item() < epsilon_h:
+                # Epsilon exploration: use exploration policy probabilities
                 if self.human_exploration_policy is None:
                     # Uniform random exploration
-                    num_actions = self.env.action_space.n
-                    action = torch.randint(0, num_actions, (1,)).item()
+                    base_probs = np.ones(num_actions) / num_actions
                 elif isinstance(self.human_exploration_policy, HumanPolicyPrior):
-                    # HumanPolicyPrior object: use its sample() method
-                    action = self.human_exploration_policy.sample(state, h, goal)
+                    # HumanPolicyPrior object: get its probability distribution
+                    base_probs = self.human_exploration_policy(state, h, goal)
                 else:
-                    # Fallback: use uniform random
-                    num_actions = self.env.action_space.n
-                    action = torch.randint(0, num_actions, (1,)).item()
+                    # Fallback: uniform random
+                    base_probs = np.ones(num_actions) / num_actions
             else:
-                # Use the human policy prior
-                action = self.human_policy_prior.sample(state, h, goal)
+                # Policy-based: use policy prior probabilities
+                base_probs = self.human_policy_prior(state, h, goal)  # np.ndarray
+            
+            # Apply curiosity bonus if available (affects BOTH epsilon and policy branches)
+            if action_novelties is not None:
+                # Get novelty for this human's actions
+                novelty = action_novelties[idx].cpu().numpy()  # (num_actions,)
+                # Clamp negative novelties (normalized can go negative)
+                novelty = np.maximum(0.0, novelty)
+                # Multiplicative scaling: P_eff(a) = P(a) * exp(+bonus * novelty(a))
+                # Higher novelty → larger scale → higher effective probability
+                # This encourages taking novel actions
+                bonus_coef = self._get_curiosity_bonus_coef_h()
+                scale_factors = np.exp(bonus_coef * novelty)
+                modified_probs = base_probs * scale_factors
+                # Renormalize
+                modified_probs = modified_probs / (modified_probs.sum() + 1e-10)
+                # Sample from modified distribution
+                action = np.random.choice(num_actions, p=modified_probs)
+            else:
+                # Sample from base probabilities
+                action = np.random.choice(num_actions, p=base_probs)
             
             actions.append(action)
         return actions
@@ -1691,6 +1852,22 @@ class BasePhase2Trainer(ABC):
                     'batch_raw_std': rnd_stats['rnd_batch_raw_std'],
                 }
         
+        # ----- Human Action RND loss (batched, for human curiosity exploration) -----
+        if (self.config.use_rnd and self.config.use_human_action_rnd 
+            and self.networks.human_rnd is not None):
+            human_rnd_loss = self._compute_human_rnd_loss_batch(batch)
+            losses['human_rnd'] = human_rnd_loss
+            
+            with torch.no_grad():
+                human_rnd_stats = self.networks.human_rnd.get_statistics()
+                prediction_stats['human_rnd'] = {
+                    'loss': human_rnd_loss.item(),
+                    'human_rnd_running_mean': human_rnd_stats['human_rnd_running_mean'],
+                    'human_rnd_running_std': human_rnd_stats['human_rnd_running_std'],
+                    'human_rnd_batch_raw_mean': human_rnd_stats['human_rnd_batch_raw_mean'],
+                    'human_rnd_batch_raw_std': human_rnd_stats['human_rnd_batch_raw_std'],
+                }
+        
         # ----- Count-based curiosity statistics (for tabular exploration) -----
         if self.config.use_count_based_curiosity and self.networks.count_curiosity is not None:
             with torch.no_grad():
@@ -1766,6 +1943,64 @@ class BasePhase2Trainer(ABC):
         
         # Compute RND loss with encoder coefficients for smooth warmup
         return self.networks.rnd.compute_loss(features, encoder_coefficients)
+    
+    def _compute_human_rnd_loss_batch(
+        self, 
+        batch: List['Phase2Transition']
+    ) -> torch.Tensor:
+        """
+        Compute Human Action RND loss for a batch of transitions.
+        
+        For each transition, we train on the (state, human, action) tuples
+        that were actually taken. This teaches the predictor to recognize
+        which actions each human has taken in each state.
+        
+        Args:
+            batch: List of Phase2Transition objects containing states and human_actions.
+            
+        Returns:
+            Scalar loss tensor.
+        """
+        # Collect all (state, human_idx, action) tuples from the batch
+        all_state_features = []
+        all_agent_features = []
+        all_actions = []
+        
+        for transition in batch:
+            state = transition.state
+            human_actions = transition.human_actions
+            
+            if not human_actions or len(self.human_agent_indices) == 0:
+                continue
+            
+            # Get features for all humans in this state
+            try:
+                state_features, agent_features = self.get_human_features_for_rnd(
+                    state, self.human_agent_indices
+                )
+            except NotImplementedError:
+                # Subclass doesn't implement get_human_features_for_rnd
+                return torch.tensor(0.0, device=self.device, requires_grad=True)
+            
+            # Add each human's (state, agent, action) tuple
+            for idx, (h, action) in enumerate(zip(self.human_agent_indices, human_actions)):
+                all_state_features.append(state_features[idx:idx+1])
+                all_agent_features.append(agent_features[idx:idx+1])
+                all_actions.append(action)
+        
+        if not all_actions:
+            # No human actions in batch
+            return torch.tensor(0.0, device=self.device, requires_grad=True)
+        
+        # Stack into batched tensors
+        state_features_batch = torch.cat(all_state_features, dim=0)
+        agent_features_batch = torch.cat(all_agent_features, dim=0)
+        actions_batch = torch.tensor(all_actions, device=self.device, dtype=torch.long)
+        
+        # Compute loss
+        return self.networks.human_rnd.compute_loss(
+            state_features_batch, agent_features_batch, actions_batch
+        )
     
     @abstractmethod
     def get_state_features_for_rnd(
@@ -2201,6 +2436,17 @@ class BasePhase2Trainer(ABC):
                         self.writer.add_scalar('Exploration/count_total_visits', stats['count_curiosity_total_visits'], self.training_step_count)
                     if 'count_curiosity_mean_visits' in stats:
                         self.writer.add_scalar('Exploration/count_mean_visits', stats['count_curiosity_mean_visits'], self.training_step_count)
+                    continue
+                # Human Action RND stats
+                if key == 'human_rnd':
+                    if 'human_rnd_batch_raw_mean' in stats:
+                        self.writer.add_scalar('Exploration/human_rnd_raw_novelty_mean', stats['human_rnd_batch_raw_mean'], self.training_step_count)
+                    if 'human_rnd_batch_raw_std' in stats:
+                        self.writer.add_scalar('Exploration/human_rnd_raw_novelty_std', stats['human_rnd_batch_raw_std'], self.training_step_count)
+                    if 'human_rnd_running_mean' in stats:
+                        self.writer.add_scalar('Exploration/human_rnd_norm_running_mean', stats['human_rnd_running_mean'], self.training_step_count)
+                    if 'human_rnd_running_std' in stats:
+                        self.writer.add_scalar('Exploration/human_rnd_norm_running_std', stats['human_rnd_running_std'], self.training_step_count)
                     continue
                 self.writer.add_scalar(f'Predictions/{key}_mean', stats['mean'], self.training_step_count)
                 self.writer.add_scalar(f'Predictions/{key}_std', stats['std'], self.training_step_count)

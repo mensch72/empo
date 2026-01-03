@@ -1071,6 +1071,7 @@ def main(
         # Curiosity-driven exploration
         # Use RND for neural networks, count-based for tabular mode
         use_rnd=use_curious and not use_tabular,
+        use_human_action_rnd=use_curious and not use_tabular,
         rnd_bonus_coef_r=0.1 if (use_curious and not use_tabular) else 0.0,
         rnd_feature_dim=64,
         rnd_hidden_dim=128,
