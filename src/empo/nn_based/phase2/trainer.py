@@ -27,6 +27,7 @@ import torch.optim as optim
 from tqdm import tqdm
 
 from .config import Phase2Config
+from .profiler import NoOpProfiler, TrainingProfiler
 from .replay_buffer import Phase2Transition, Phase2ReplayBuffer
 from .robot_q_network import BaseRobotQNetwork
 from .human_goal_ability import BaseHumanGoalAchievementNetwork
@@ -50,8 +51,8 @@ class Phase2Networks:
     """Container for all Phase 2 networks."""
     q_r: BaseRobotQNetwork
     v_h_e: BaseHumanGoalAchievementNetwork
-    x_h: BaseAggregateGoalAbilityNetwork
-    # U_r and V_r are optional - only created when use_network=True
+    # X_h, U_r and V_r are optional - only created when use_network=True
+    x_h: Optional[BaseAggregateGoalAbilityNetwork] = None
     u_r: Optional[BaseIntrinsicRewardNetwork] = None
     v_r: Optional[BaseRobotValueNetwork] = None
     
@@ -114,6 +115,8 @@ class BasePhase2Trainer(ABC):
             async training where the environment cannot be pickled. In ensemble mode,
             agent indices are automatically updated by calling the env's
             get_human_agent_indices() and get_robot_agent_indices() methods.
+        checkpoint_interval: Save checkpoint every N training steps (0 to disable).
+        checkpoint_path: Path for checkpoint file (default: output_dir/checkpoint.pt).
     """
     
     def __init__(
@@ -133,6 +136,8 @@ class BasePhase2Trainer(ABC):
         world_model_factory: Optional[Any] = None,
         robot_exploration_policy: Optional[Any] = None,
         human_exploration_policy: Optional[Any] = None,
+        checkpoint_interval: int = 0,
+        checkpoint_path: Optional[str] = None,
     ):
         self.env = env
         self.world_model_factory = world_model_factory
@@ -145,9 +150,28 @@ class BasePhase2Trainer(ABC):
         self.device = device
         self.verbose = verbose
         self.debug = debug
-        self.profiler = profiler
+        # Use NoOpProfiler if no profiler provided (zero overhead)
+        self.profiler = profiler if profiler is not None else NoOpProfiler()
         self.robot_exploration_policy = robot_exploration_policy
         self.human_exploration_policy = human_exploration_policy
+        
+        # Store output directory (parent of tensorboard_dir if provided)
+        self.output_dir: Optional[str] = None
+        if tensorboard_dir is not None:
+            import os
+            self.output_dir = os.path.dirname(tensorboard_dir)
+        
+        # Checkpoint settings
+        self.checkpoint_interval = checkpoint_interval
+        if checkpoint_path is not None:
+            self.checkpoint_path = checkpoint_path
+        elif self.output_dir is not None:
+            self.checkpoint_path = os.path.join(self.output_dir, "checkpoint.pt")
+        else:
+            self.checkpoint_path = None
+        
+        # Track if training was interrupted
+        self._interrupted = False
         
         # Compute the total number of agents from the indices
         self._update_num_agents()
@@ -231,6 +255,11 @@ class BasePhase2Trainer(ABC):
         # Dict maps state_hash -> visit_count for histogram analysis
         self._state_visit_counts: Dict[int, int] = {}
         
+        # Track position-based visit counts for debugging exploration coverage
+        # Maps ((human_pos, human_dir), ...), ((robot_pos, robot_dir), ...)) -> count
+        # This provides more detailed insight than hashes alone
+        self._position_visit_counts: Dict[tuple, int] = {}
+        
         if self.debug:
             print("[DEBUG] BasePhase2Trainer.__init__: Initialization complete.")
     
@@ -255,6 +284,7 @@ class BasePhase2Trainer(ABC):
         state['env'] = None
         # Don't pickle state visit counts dict - large and only needed in learner
         state['_state_visit_counts'] = {}
+        state['_position_visit_counts'] = {}
         return state
     
     def __setstate__(self, state):
@@ -263,13 +293,24 @@ class BasePhase2Trainer(ABC):
         # Recreate empty replay buffer if needed
         if self.replay_buffer is None:
             self.replay_buffer = Phase2ReplayBuffer(capacity=self.config.buffer_size)
+        # Recreate NoOpProfiler if not set
+        if self.profiler is None:
+            self.profiler = NoOpProfiler()
         # Note: env stays None until _ensure_world_model() is called
+    
+    @property
+    def interrupted(self) -> bool:
+        """Return True if training was interrupted by Ctrl-C."""
+        return self._interrupted
     
     def _archive_tensorboard_data(self, tensorboard_dir: str) -> None:
         """Archive existing TensorBoard event files to a zip before starting a new run.
         
         This prevents old data from mixing with new runs in TensorBoard visualization.
         Old files are moved to a timestamped zip archive in the same directory.
+        
+        If archiving fails (e.g., due to permission issues from Docker UID mismatch),
+        the entire tensorboard directory is deleted and recreated to allow new writes.
         
         Args:
             tensorboard_dir: Path to the TensorBoard log directory.
@@ -301,14 +342,33 @@ class BasePhase2Trainer(ABC):
             if self.verbose:
                 print(f"[TensorBoard] Archived {len(event_files)} old event files to {archive_name}")
         except Exception as e:
-            # Don't fail training if archiving fails, just warn
+            # Archiving failed (likely permission issues from Docker UID mismatch)
+            # Delete entire tensorboard dir and recreate to allow new writes
             print(f"[TensorBoard] Warning: Failed to archive old data: {e}")
+            print(f"[TensorBoard] Deleting and recreating tensorboard directory...")
+            try:
+                import shutil
+                shutil.rmtree(tensorboard_dir)
+                os.makedirs(tensorboard_dir, exist_ok=True)
+                if self.verbose:
+                    print(f"[TensorBoard] Successfully recreated {tensorboard_dir}")
+            except Exception as e2:
+                print(f"[TensorBoard] Warning: Could not recreate tensorboard dir: {e2}")
     
     def _init_target_networks(self):
         """Initialize target networks as copies of main networks."""
         self.networks.q_r_target = copy.deepcopy(self.networks.q_r)
         self.networks.v_h_e_target = copy.deepcopy(self.networks.v_h_e)
-        self.networks.x_h_target = copy.deepcopy(self.networks.x_h)
+        
+        # Only create X_h target if the network exists
+        if self.networks.x_h is not None:
+            self.networks.x_h_target = copy.deepcopy(self.networks.x_h)
+        
+        # Disable debug flags on target networks (they're copies, shouldn't print debug)
+        if hasattr(self.networks.v_h_e_target, 'debug_new_keys'):
+            self.networks.v_h_e_target.debug_new_keys = False
+        if hasattr(self.networks.v_h_e_target, 'debug_all_lookups'):
+            self.networks.v_h_e_target.debug_all_lookups = False
         
         # Only create U_r/V_r targets if the networks exist
         if self.networks.u_r is not None:
@@ -321,8 +381,9 @@ class BasePhase2Trainer(ABC):
             param.requires_grad = False
         for param in self.networks.v_h_e_target.parameters():
             param.requires_grad = False
-        for param in self.networks.x_h_target.parameters():
-            param.requires_grad = False
+        if self.networks.x_h_target is not None:
+            for param in self.networks.x_h_target.parameters():
+                param.requires_grad = False
         if self.networks.u_r_target is not None:
             for param in self.networks.u_r_target.parameters():
                 param.requires_grad = False
@@ -333,7 +394,8 @@ class BasePhase2Trainer(ABC):
         # Set target networks to eval mode (disables dropout during inference)
         self.networks.q_r_target.eval()
         self.networks.v_h_e_target.eval()
-        self.networks.x_h_target.eval()
+        if self.networks.x_h_target is not None:
+            self.networks.x_h_target.eval()
         if self.networks.u_r_target is not None:
             self.networks.u_r_target.eval()
         if self.networks.v_r_target is not None:
@@ -344,16 +406,29 @@ class BasePhase2Trainer(ABC):
         
         For lookup table networks that may have empty parameter lists,
         creates a placeholder parameter to satisfy the optimizer constructor.
+        
+        When lookup_use_adaptive_lr is True for lookup tables, the base learning
+        rate is set to 1.0 and actual per-entry learning rates are controlled via
+        gradient scaling in _apply_adaptive_lr_scaling().
         """
+        def get_lr(network, base_lr):
+            """Get learning rate, using 1.0 for lookup tables with adaptive LR."""
+            if (self.config.lookup_use_adaptive_lr 
+                and hasattr(network, 'scale_gradients_by_update_count')):
+                # With adaptive LR, use base_lr=1.0 since actual LR is via gradient scaling
+                return 1.0
+            return base_lr
+        
         def make_optimizer(network, lr, weight_decay):
             """Create optimizer, handling empty parameter case for lookup tables."""
             params = list(network.parameters())
+            effective_lr = get_lr(network, lr)
             if len(params) == 0:
                 # Lookup tables start empty - create placeholder parameter
                 # This will be replaced when optimizer is recreated after tables grow
                 placeholder = nn.Parameter(torch.zeros(1, requires_grad=True))
-                return optim.Adam([placeholder], lr=lr, weight_decay=weight_decay)
-            return optim.Adam(params, lr=lr, weight_decay=weight_decay)
+                return optim.Adam([placeholder], lr=effective_lr, weight_decay=weight_decay)
+            return optim.Adam(params, lr=effective_lr, weight_decay=weight_decay)
         
         optimizers = {
             'q_r': make_optimizer(
@@ -366,12 +441,14 @@ class BasePhase2Trainer(ABC):
                 lr=self.config.lr_v_h_e,
                 weight_decay=self.config.v_h_e_weight_decay
             ),
-            'x_h': make_optimizer(
+        }
+        # Only create X_h optimizer if using network (not direct computation from V_h^e)
+        if self.config.x_h_use_network:
+            optimizers['x_h'] = make_optimizer(
                 self.networks.x_h,
                 lr=self.config.lr_x_h,
                 weight_decay=self.config.x_h_weight_decay
-            ),
-        }
+            )
         # Only create U_r optimizer if using network (not direct computation)
         if self.config.u_r_use_network:
             optimizers['u_r'] = make_optimizer(
@@ -420,19 +497,23 @@ class BasePhase2Trainer(ABC):
         new_params_by_optimizer = {
             'q_r': [],
             'v_h_e': [],
-            'x_h': [],
         }
+        if self.config.x_h_use_network:
+            new_params_by_optimizer['x_h'] = []
         
         # Check each network for new params
         if hasattr(self.networks.q_r, 'get_new_params'):
             new_params_by_optimizer['q_r'].extend(self.networks.q_r.get_new_params())
         if hasattr(self.networks.v_h_e, 'get_new_params'):
             new_params_by_optimizer['v_h_e'].extend(self.networks.v_h_e.get_new_params())
-        if hasattr(self.networks.x_h, 'get_new_params'):
+        if self.config.x_h_use_network and self.networks.x_h is not None and hasattr(self.networks.x_h, 'get_new_params'):
             new_params_by_optimizer['x_h'].extend(self.networks.x_h.get_new_params())
         if self.config.u_r_use_network and hasattr(self.networks.u_r, 'get_new_params'):
-            # U_r shares optimizer with x_h
-            new_params_by_optimizer['x_h'].extend(self.networks.u_r.get_new_params())
+            # U_r shares optimizer with x_h if x_h exists, else with v_h_e
+            key = 'x_h' if self.config.x_h_use_network else 'v_h_e'
+            if key not in new_params_by_optimizer:
+                new_params_by_optimizer[key] = []
+            new_params_by_optimizer[key].extend(self.networks.u_r.get_new_params())
         if self.config.v_r_use_network and hasattr(self.networks.v_r, 'get_new_params'):
             # V_r shares optimizer with q_r
             new_params_by_optimizer['q_r'].extend(self.networks.v_r.get_new_params())
@@ -452,14 +533,191 @@ class BasePhase2Trainer(ABC):
             print(f"[DEBUG] Added {total_new} new params to optimizers "
                   f"(step {self.training_step_count}, {total_entries} total entries)")
     
+    def _apply_adaptive_lr_scaling(self) -> None:
+        """
+        Apply adaptive learning rate scaling for lookup table networks.
+        
+        When config.lookup_use_adaptive_lr is True, this scales gradients by 
+        1/update_count for each lookup table entry, achieving per-entry learning
+        rates that converge to the arithmetic mean of target values.
+        
+        This should be called after backward() but before optimizer.step().
+        
+        The method also increments update counts for entries that received gradients.
+        """
+        if not self.config.lookup_use_adaptive_lr:
+            return
+        
+        min_lr = self.config.lookup_adaptive_lr_min
+        
+        # Map networks to their optimizer names
+        networks_to_scale = []
+        
+        if hasattr(self.networks.q_r, 'scale_gradients_by_update_count'):
+            networks_to_scale.append(('q_r', self.networks.q_r))
+        if hasattr(self.networks.v_h_e, 'scale_gradients_by_update_count'):
+            networks_to_scale.append(('v_h_e', self.networks.v_h_e))
+        if self.config.x_h_use_network and self.networks.x_h is not None and hasattr(self.networks.x_h, 'scale_gradients_by_update_count'):
+            networks_to_scale.append(('x_h', self.networks.x_h))
+        if self.config.u_r_use_network and hasattr(self.networks.u_r, 'scale_gradients_by_update_count'):
+            networks_to_scale.append(('u_r', self.networks.u_r))
+        if self.config.v_r_use_network and hasattr(self.networks.v_r, 'scale_gradients_by_update_count'):
+            networks_to_scale.append(('v_r', self.networks.v_r))
+        
+        # Scale gradients and increment update counts
+        for name, network in networks_to_scale:
+            keys_with_grads = network.scale_gradients_by_update_count(min_lr)
+            network.increment_update_counts(keys_with_grads)
+    
+    def _apply_rnd_adaptive_lr_scaling(
+        self, 
+        states: List[Any],
+        active_networks: set
+    ) -> Dict[str, float]:
+        """
+        Apply RND-based adaptive learning rate scaling for neural networks.
+        
+        When config.rnd_use_adaptive_lr is True and RND is enabled, this scales
+        gradients by the normalized RND prediction error (MSE) for each state
+        in the batch. States with high RND error (novel/uncertain) get larger
+        effective learning rates.
+        
+        This is a SPECULATIVE approach assuming RND novelty correlates with
+        value estimate uncertainty. See docs/ADAPTIVE_LEARNING.md for details.
+        
+        The scaling factor is: lr_scale = clamp(normalized_rnd_error * scale, min, max)
+        
+        Args:
+            states: List of states from the batch (for computing RND novelty).
+            active_networks: Set of network names that are active in current stage.
+        
+        Returns:
+            Dict mapping network names to the mean LR scale applied for logging.
+        """
+        if not self.config.rnd_use_adaptive_lr:
+            return {}
+        
+        if not self.config.use_rnd or self.networks.rnd is None:
+            return {}
+        
+        # Skip for lookup tables (they use 1/n adaptive LR instead)
+        if self.config.use_lookup_tables:
+            return {}
+        
+        # Get RND novelty (raw MSE) for states in the batch
+        features, encoder_coefficients = self.get_state_features_for_rnd(states)
+        
+        # Use raw MSE (already squared, analogous to variance)
+        with torch.no_grad():
+            rnd_mse = self.networks.rnd.compute_novelty_no_grad(
+                features, encoder_coefficients, use_raw=True
+            )  # Shape: (batch_size,)
+            
+            # Normalize by running mean to get relative uncertainty
+            # States with MSE above average get lr_scale > 1, below get < 1
+            running_mean = self.networks.rnd.running_mean
+            if running_mean > 1e-8:
+                # lr ∝ variance, so scale by rnd_mse / running_mean
+                lr_scale = (rnd_mse / running_mean) * self.config.rnd_adaptive_lr_scale
+            else:
+                # Running mean not yet established, use raw normalized values
+                mean_mse = rnd_mse.mean()
+                if mean_mse > 1e-8:
+                    lr_scale = (rnd_mse / mean_mse) * self.config.rnd_adaptive_lr_scale
+                else:
+                    # All zeros, no scaling
+                    return {}
+            
+            # Compute stats before clamping (for diagnostics)
+            lr_scale_unclamped_mean = lr_scale.mean().item()
+            lr_scale_unclamped_std = lr_scale.std().item() if len(lr_scale) > 1 else 0.0
+            lr_scale_unclamped_min = lr_scale.min().item()
+            lr_scale_unclamped_max = lr_scale.max().item()
+            
+            # Raw RND MSE stats (before any normalization)
+            rnd_mse_mean = rnd_mse.mean().item()
+            rnd_mse_std = rnd_mse.std().item() if len(rnd_mse) > 1 else 0.0
+            rnd_mse_min = rnd_mse.min().item()
+            rnd_mse_max = rnd_mse.max().item()
+            
+            # Clamp to prevent extreme values
+            lr_scale = lr_scale.clamp(
+                min=self.config.rnd_adaptive_lr_min,
+                max=self.config.rnd_adaptive_lr_max
+            )
+            
+            # Compute mean scale per sample (for batch-level gradient scaling)
+            mean_lr_scale = lr_scale.mean().item()
+            # Also track how many values were clamped
+            num_clamped_low = (lr_scale == self.config.rnd_adaptive_lr_min).sum().item()
+            num_clamped_high = (lr_scale == self.config.rnd_adaptive_lr_max).sum().item()
+            batch_size = len(lr_scale)
+        
+        # Scale gradients for all neural network parameters
+        # We apply a uniform scale based on the batch mean because:
+        # 1. Neural networks share parameters across all states
+        # 2. Per-sample scaling would require per-sample gradients (expensive)
+        # 3. The batch mean provides a reasonable aggregate uncertainty signal
+        #
+        # For more fine-grained control, consider using sample-weighted losses
+        # during forward pass instead of gradient scaling.
+        
+        # Store detailed stats for logging
+        detailed_stats = {
+            'scale_mean': mean_lr_scale,
+            'scale_unclamped_mean': lr_scale_unclamped_mean,
+            'scale_unclamped_std': lr_scale_unclamped_std,
+            'scale_unclamped_min': lr_scale_unclamped_min,
+            'scale_unclamped_max': lr_scale_unclamped_max,
+            'rnd_mse_mean': rnd_mse_mean,
+            'rnd_mse_std': rnd_mse_std,
+            'rnd_mse_min': rnd_mse_min,
+            'rnd_mse_max': rnd_mse_max,
+            'frac_clamped_low': num_clamped_low / batch_size if batch_size > 0 else 0.0,
+            'frac_clamped_high': num_clamped_high / batch_size if batch_size > 0 else 0.0,
+            'running_mean': running_mean.item() if hasattr(running_mean, 'item') else running_mean,
+        }
+        
+        lr_scale_values = {}
+        networks_to_scale = {
+            'q_r': self.networks.q_r,
+            'v_h_e': self.networks.v_h_e,
+        }
+        if self.config.x_h_use_network and self.networks.x_h is not None:
+            networks_to_scale['x_h'] = self.networks.x_h
+        if self.config.u_r_use_network:
+            networks_to_scale['u_r'] = self.networks.u_r
+        if self.config.v_r_use_network:
+            networks_to_scale['v_r'] = self.networks.v_r
+        
+        for name, network in networks_to_scale.items():
+            if name not in active_networks:
+                continue
+            
+            # Skip lookup tables (they have their own adaptive LR)
+            if hasattr(network, 'scale_gradients_by_update_count'):
+                continue
+                
+            # Scale all gradients by the mean LR scale
+            for param in network.parameters():
+                if param.grad is not None:
+                    param.grad.mul_(mean_lr_scale)
+            
+            # Store all detailed stats for this network
+            lr_scale_values[name] = detailed_stats.copy()
+        
+        return lr_scale_values
+    
     def _compute_param_norms(self) -> Dict[str, float]:
         """Compute L2 norms of network parameters for monitoring."""
         norms = {}
         networks = {
             'q_r': self.networks.q_r,
             'v_h_e': self.networks.v_h_e,
-            'x_h': self.networks.x_h,
         }
+        # Only include X_h if using network mode
+        if self.config.x_h_use_network and self.networks.x_h is not None:
+            networks['x_h'] = self.networks.x_h
         # Only include U_r if using network mode
         if self.config.u_r_use_network:
             networks['u_r'] = self.networks.u_r
@@ -480,8 +738,10 @@ class BasePhase2Trainer(ABC):
         networks = {
             'q_r': self.networks.q_r,
             'v_h_e': self.networks.v_h_e,
-            'x_h': self.networks.x_h,
         }
+        # Only include X_h if using network mode
+        if self.config.x_h_use_network and self.networks.x_h is not None:
+            networks['x_h'] = self.networks.x_h
         # Only include U_r if using network mode
         if self.config.u_r_use_network:
             networks['u_r'] = self.networks.u_r
@@ -509,9 +769,10 @@ class BasePhase2Trainer(ABC):
             self.networks.v_h_e_target.load_state_dict(self.networks.v_h_e.state_dict())
             self.networks.v_h_e_target.eval()
         
-        if step % self.config.x_h_target_update_interval == 0:
-            self.networks.x_h_target.load_state_dict(self.networks.x_h.state_dict())
-            self.networks.x_h_target.eval()
+        if self.config.x_h_use_network and self.networks.x_h_target is not None:
+            if step % self.config.x_h_target_update_interval == 0:
+                self.networks.x_h_target.load_state_dict(self.networks.x_h.state_dict())
+                self.networks.x_h_target.eval()
         
         if self.config.u_r_use_network and self.networks.u_r_target is not None:
             if step % self.config.u_r_target_update_interval == 0:
@@ -733,9 +994,15 @@ class BasePhase2Trainer(ABC):
         """Check if curiosity-driven exploration is enabled for humans."""
         if self.config.use_count_based_curiosity and self.networks.count_curiosity is not None:
             return self.config.count_curiosity_bonus_coef_h > 0
-        if self.config.use_rnd and self.networks.rnd is not None:
+        if self.config.use_human_action_rnd and self.networks.human_rnd is not None:
             return self.config.rnd_bonus_coef_h > 0
         return False
+    
+    def _rnd_enabled(self) -> bool:
+        """Check if any RND network is enabled (for async sync frequency)."""
+        robot_rnd = self.config.use_rnd and self.networks.rnd is not None
+        human_rnd = self.config.use_human_action_rnd and self.networks.human_rnd is not None
+        return robot_rnd or human_rnd
     
     def _get_curiosity_bonus_coef_r(self) -> float:
         """Get the robot curiosity bonus coefficient."""
@@ -1195,7 +1462,8 @@ class BasePhase2Trainer(ABC):
             print(f"[DEBUG] collect_transition: sampling human actions first...")
         
         # Step 1: Sample human actions FIRST (before robot, so we can compute transition_probs once)
-        human_actions = self.sample_human_actions(state, goals)
+        with self.profiler.section("sample_human_actions"):
+            human_actions = self.sample_human_actions(state, goals)
         
         if self.debug:
             print(f"[DEBUG] collect_transition: human_actions={human_actions}, computing transition probs...")
@@ -1204,21 +1472,24 @@ class BasePhase2Trainer(ABC):
         # This is reused for both curiosity bonus and replay buffer
         transition_probs_by_action = None
         if self.config.use_model_based_targets and hasattr(self.env, 'transition_probabilities'):
-            transition_probs_by_action = self._precompute_transition_probs(
-                state, human_actions
-            )
+            with self.profiler.section("transition_probabilities"):
+                transition_probs_by_action = self._precompute_transition_probs(
+                    state, human_actions
+                )
         
         if self.debug:
             print(f"[DEBUG] collect_transition: sampling robot action (with transition_probs)...")
         
         # Step 3: Sample robot action, passing transition_probs for curiosity bonus
-        robot_action = self.sample_robot_action(state, transition_probs_by_action)
+        with self.profiler.section("sample_robot_action"):
+            robot_action = self.sample_robot_action(state, transition_probs_by_action)
         
         if self.debug:
             print(f"[DEBUG] collect_transition: robot_action={robot_action}, stepping environment...")
         
         # Step 4: Step environment to get the actual next state
-        next_state = self.step_environment(state, robot_action, human_actions)
+        with self.profiler.section("step_environment"):
+            next_state = self.step_environment(state, robot_action, human_actions)
         
         if self.debug:
             print(f"[DEBUG] collect_transition: environment stepped, creating transition...")
@@ -1663,9 +1934,10 @@ class BasePhase2Trainer(ABC):
         
         losses = {
             'v_h_e': torch.tensor(0.0, device=self.device),
-            'x_h': torch.tensor(0.0, device=self.device),
             'q_r': torch.tensor(0.0, device=self.device),
         }
+        if self.config.x_h_use_network:
+            losses['x_h'] = torch.tensor(0.0, device=self.device)
         if self.config.u_r_use_network:
             losses['u_r'] = torch.tensor(0.0, device=self.device)
         if self.config.v_r_use_network:
@@ -1674,15 +1946,17 @@ class BasePhase2Trainer(ABC):
         # ----- V_h^e loss -----
         if v_h_e_states:
             # Forward pass for current states
-            v_h_e_pred = self.networks.v_h_e.forward_batch(
-                v_h_e_states, v_h_e_goals, v_h_e_human_indices,
-                self.env, self.device
-            )
+            with self.profiler.section("forward_v_h_e"):
+                v_h_e_pred = self.networks.v_h_e.forward_batch(
+                    v_h_e_states, v_h_e_goals, v_h_e_human_indices,
+                    self.env, self.device
+                )
             
             # Compute targets using model-based expected value over transition probabilities
             # This gives exact expected values rather than single-sample TD estimates
-            with torch.no_grad():
-                target_v_h_e = self._compute_model_based_v_h_e_targets(batch, v_h_e_data)
+            with self.profiler.section("target_computation"):
+                with torch.no_grad():
+                    target_v_h_e = self._compute_model_based_v_h_e_targets(batch, v_h_e_data)
             
             # Debug logging for targets
             if self.debug and self.training_step_count % 100 == 0:
@@ -1717,10 +1991,11 @@ class BasePhase2Trainer(ABC):
         # ----- X_h loss (batched, potentially larger batch) -----
         if x_h_active and x_h_states:
             # Forward pass
-            x_h_pred = self.networks.x_h.forward_batch(
-                x_h_states, x_h_human_indices,
-                self.env, self.device
-            )
+            with self.profiler.section("forward_x_h"):
+                x_h_pred = self.networks.x_h.forward_batch(
+                    x_h_states, x_h_human_indices,
+                    self.env, self.device
+                )
             
             # Target from V_h^e target network
             with torch.no_grad():
@@ -1747,9 +2022,10 @@ class BasePhase2Trainer(ABC):
         # ----- U_r loss (fully batched, only if using network mode) -----
         if self.config.u_r_use_network and u_r_active and u_r_flat_states:
             # Forward pass on unique states for U_r predictions
-            y_pred, _ = self.networks.u_r.forward_batch(
-                states, self.env, self.device
-            )
+            with self.profiler.section("forward_u_r"):
+                y_pred, _ = self.networks.u_r.forward_batch(
+                    states, self.env, self.device
+                )
             
             # Single batched X_h computation for all (state, human) pairs
             with torch.no_grad():
@@ -1791,7 +2067,8 @@ class BasePhase2Trainer(ABC):
         # ----- Q_r loss (model-based: update ALL actions) -----
         if q_r_active:
             # Forward pass: get Q-values for all actions
-            q_r_all = self.networks.q_r.forward_batch(states, self.env, self.device)
+            with self.profiler.section("forward_q_r"):
+                q_r_all = self.networks.q_r.forward_batch(states, self.env, self.device)
             
             # Compute model-based targets for ALL robot actions
             # This allows us to update the entire Q-function per state, not just taken action
@@ -1821,7 +2098,8 @@ class BasePhase2Trainer(ABC):
         
         # ----- V_r loss (batched, only if using network mode) -----
         if self.config.v_r_use_network and v_r_active:
-            v_r_pred = self.networks.v_r.forward_batch(states, self.env, self.device)
+            with self.profiler.section("forward_v_r"):
+                v_r_pred = self.networks.v_r.forward_batch(states, self.env, self.device)
             
             with torch.no_grad():
                 u_r_for_v = self._compute_u_r_batch_target(states)
@@ -1846,7 +2124,8 @@ class BasePhase2Trainer(ABC):
         if self.config.use_rnd and self.networks.rnd is not None:
             # Compute RND loss on all states in batch
             # Need to get state features from the encoder
-            rnd_loss = self._compute_rnd_loss_batch(states)
+            with self.profiler.section("forward_rnd"):
+                rnd_loss = self._compute_rnd_loss_batch(states)
             losses['rnd'] = rnd_loss
             
             with torch.no_grad():
@@ -1863,7 +2142,8 @@ class BasePhase2Trainer(ABC):
         # ----- Human Action RND loss (batched, for human curiosity exploration) -----
         if (self.config.use_rnd and self.config.use_human_action_rnd 
             and self.networks.human_rnd is not None):
-            human_rnd_loss = self._compute_human_rnd_loss_batch(batch)
+            with self.profiler.section("forward_human_rnd"):
+                human_rnd_loss = self._compute_human_rnd_loss_batch(batch)
             losses['human_rnd'] = human_rnd_loss
             
             with torch.no_grad():
@@ -1893,7 +2173,8 @@ class BasePhase2Trainer(ABC):
         Compute U_r for a batch of states using target networks (fully batched).
         
         If u_r_use_network, uses U_r target network.
-        Otherwise, computes from X_h target values.
+        If x_h_use_network, uses X_h target network.
+        Otherwise, computes from V_h^e target values directly.
         
         Args:
             states: List of states.
@@ -1904,7 +2185,7 @@ class BasePhase2Trainer(ABC):
         if self.config.u_r_use_network:
             _, u_r = self.networks.u_r_target.forward_batch(states, self.env, self.device)
             return u_r
-        else:
+        elif self.config.x_h_use_network:
             # Compute from X_h: U_r = -E[X_h^{-xi}]^eta
             # Flatten all (state, human) pairs for single batched computation
             n_states = len(states)
@@ -1932,6 +2213,73 @@ class BasePhase2Trainer(ABC):
             # U_r = -y^eta
             u_r = -(y ** self.config.eta)
             return u_r
+        else:
+            # Both X_h and U_r computed from V_h^e samples
+            # X_h = E_g[V_h^e(s, g)^zeta] for each human
+            # U_r = -(E_h[X_h^{-xi}])^eta
+            return self._compute_u_r_from_v_h_e_samples(states)
+    
+    def _compute_u_r_from_v_h_e_samples(self, states: List[Any]) -> torch.Tensor:
+        """
+        Compute U_r directly from V_h^e samples (when x_h_use_network=False).
+        
+        For each state and each human, samples goals from goal_sampler and
+        computes X_h = E_g[V_h^e(s, g)^zeta] using Monte Carlo samples.
+        Then computes U_r = -(E_h[X_h^{-xi}])^eta.
+        
+        This is exact computation (no learned approximation) but requires
+        goal sampling at each step.
+        
+        Args:
+            states: List of states.
+            
+        Returns:
+            U_r values tensor of shape (batch_size,).
+        """
+        n_states = len(states)
+        n_humans = len(self.human_agent_indices)
+        
+        # Sample multiple goals per (state, human) pair for Monte Carlo X_h estimate
+        # Use a fixed number of samples for stability
+        n_goal_samples = 5  # Number of goals to sample per human
+        
+        # Collect all (state, human, goal) tuples for batched V_h^e computation
+        flat_states = []
+        flat_humans = []
+        flat_goals = []
+        
+        for state in states:
+            for h in self.human_agent_indices:
+                # Sample goals for this (state, human) pair
+                for _ in range(n_goal_samples):
+                    goal, _ = self.goal_sampler.sample(state, h)
+                    flat_states.append(state)
+                    flat_humans.append(h)
+                    flat_goals.append(goal)
+        
+        # Single batched forward pass for all (state, human, goal) tuples
+        v_h_e_all = self.networks.v_h_e_target.forward_batch(
+            flat_states, flat_goals, flat_humans, self.env, self.device
+        ).squeeze()
+        
+        # Apply hard clamp
+        v_h_e_all = self.networks.v_h_e_target.apply_hard_clamp(v_h_e_all)
+        
+        # Reshape to (n_states, n_humans, n_goal_samples)
+        v_h_e_reshaped = v_h_e_all.view(n_states, n_humans, n_goal_samples)
+        
+        # Compute X_h = mean over goals of V_h^e^zeta
+        x_h = (v_h_e_reshaped ** self.config.zeta).mean(dim=2)  # (n_states, n_humans)
+        
+        # Clamp X_h values
+        x_h_clamped = torch.clamp(x_h, min=1e-3, max=1.0)
+        
+        # y = E[X_h^{-xi}] = mean over humans
+        y = (x_h_clamped ** (-self.config.xi)).mean(dim=1)  # (n_states,)
+        
+        # U_r = -y^eta
+        u_r = -(y ** self.config.eta)
+        return u_r
     
     def _compute_rnd_loss_batch(self, states: List[Any]) -> torch.Tensor:
         """
@@ -2105,7 +2453,31 @@ class BasePhase2Trainer(ABC):
             else:
                 state_for_hash = state
             state_hash = hash(state_for_hash)
+            
             self._state_visit_counts[state_hash] = self._state_visit_counts.get(state_hash, 0) + 1
+            
+            # Also track position-based visits for debugging exploration coverage
+            # Extract agent positions from state tuple (without directions)
+            # State format: (step_count, agent_states, mobile_objects, mutable_objects)
+            # agent_states: tuple of (pos_x, pos_y, dir, terminated, started, paused, ...)
+            if isinstance(state, tuple) and len(state) >= 2:
+                agent_states = state[1]  # Second element is agent_states
+                if isinstance(agent_states, (tuple, list)) and len(agent_states) > 0:
+                    # Extract (pos_x, pos_y) only for each agent (no direction)
+                    human_positions = tuple(
+                        (agent_states[i][0], agent_states[i][1])
+                        for i in self.human_agent_indices
+                        if i < len(agent_states) and agent_states[i] is not None
+                    )
+                    robot_positions = tuple(
+                        (agent_states[i][0], agent_states[i][1])
+                        for i in self.robot_agent_indices
+                        if i < len(agent_states) and agent_states[i] is not None
+                    )
+                    # Also extract mobile object positions (rock/block positions)
+                    mobile_objects = state[2] if len(state) > 2 else ()
+                    position_key = (human_positions, robot_positions, mobile_objects)
+                    self._position_visit_counts[position_key] = self._position_visit_counts.get(position_key, 0) + 1
         except TypeError:
             # State not hashable - skip tracking
             pass
@@ -2118,6 +2490,37 @@ class BasePhase2Trainer(ABC):
                 state_for_counts = state
             self.networks.count_curiosity.record_visit(state_for_counts)
     
+    def get_position_visit_summary(self) -> Dict[str, Any]:
+        """
+        Get a summary of position-based visit counts for debugging exploration.
+        
+        Returns:
+            Dict with:
+                - 'unique_positions': Number of unique (human_pos, robot_pos, mobile_objects) combos
+                - 'total_visits': Total number of visits recorded
+                - 'visit_counts': Dict mapping position_key -> count (sorted by count descending)
+                - 'unvisited_estimate': Estimated number of unvisited positions (if small env)
+        """
+        if not self._position_visit_counts:
+            return {
+                'unique_positions': 0,
+                'total_visits': 0,
+                'visit_counts': {},
+            }
+        
+        # Sort by count (descending)
+        sorted_counts = sorted(
+            self._position_visit_counts.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )
+        
+        return {
+            'unique_positions': len(self._position_visit_counts),
+            'total_visits': sum(self._position_visit_counts.values()),
+            'visit_counts': dict(sorted_counts),
+        }
+
     def training_step(self) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, Dict[str, float]]]:
         """
         Perform one training step (sample batch, compute losses, update).
@@ -2133,16 +2536,18 @@ class BasePhase2Trainer(ABC):
             return {}, {}, {}
         
         # Sample batch for most networks
-        batch = self.replay_buffer.sample(self.config.batch_size)
-        
-        # Sample potentially larger batch for X_h if configured
-        if x_h_batch_size > self.config.batch_size:
-            x_h_batch = self.replay_buffer.sample(x_h_batch_size)
-        else:
-            x_h_batch = batch
+        with self.profiler.section("batch_sampling"):
+            batch = self.replay_buffer.sample(self.config.batch_size)
+            
+            # Sample potentially larger batch for X_h if configured
+            if x_h_batch_size > self.config.batch_size:
+                x_h_batch = self.replay_buffer.sample(x_h_batch_size)
+            else:
+                x_h_batch = batch
         
         # Compute losses (with separate X_h batch)
-        losses, prediction_stats = self.compute_losses(batch, x_h_batch)
+        with self.profiler.section("loss_computation"):
+            losses, prediction_stats = self.compute_losses(batch, x_h_batch)
         
         # Determine which networks are active in this warm-up stage
         active_networks = self.config.get_active_networks(self.training_step_count)
@@ -2165,8 +2570,9 @@ class BasePhase2Trainer(ABC):
         network_map = {
             'q_r': self.networks.q_r,
             'v_h_e': self.networks.v_h_e,
-            'x_h': self.networks.x_h,
         }
+        if self.config.x_h_use_network and self.networks.x_h is not None:
+            network_map['x_h'] = self.networks.x_h
         if self.config.u_r_use_network:
             network_map['u_r'] = self.networks.u_r
         if self.config.v_r_use_network:
@@ -2186,36 +2592,65 @@ class BasePhase2Trainer(ABC):
         for name, loss in trainable_losses:
             self.optimizers[name].zero_grad()
         
-        for i, (name, loss) in enumerate(trainable_losses):
-            # Use retain_graph=True for all but the last backward pass
-            retain = (i < len(trainable_losses) - 1)
-            loss.backward(retain_graph=retain)
+        with self.profiler.section("backward_pass"):
+            for i, (name, loss) in enumerate(trainable_losses):
+                # Use retain_graph=True for all but the last backward pass
+                retain = (i < len(trainable_losses) - 1)
+                loss.backward(retain_graph=retain)
+        
+        # Apply adaptive learning rate scaling for lookup tables
+        # This scales gradients by 1/update_count to achieve arithmetic mean convergence
+        self._apply_adaptive_lr_scaling()
+        
+        # Apply RND-based adaptive learning rate scaling for neural networks
+        # This scales gradients by normalized RND MSE as uncertainty proxy
+        states = [t.state for t in batch]
+        rnd_lr_scales = self._apply_rnd_adaptive_lr_scaling(states, active_networks)
         
         # Phase 2: Apply gradient clipping and optimizer steps
-        for name, loss in trainable_losses:
-            # Update learning rate using the new warm-up-aware schedule
-            self.update_counts[name] += 1
-            new_lr = self.config.get_learning_rate(
-                name, self.training_step_count, self.update_counts[name]
-            )
-            for param_group in self.optimizers[name].param_groups:
-                param_group['lr'] = new_lr
-            
-            # Apply gradient clipping (optionally scaled by learning rate)
-            if name in network_map:
-                net = network_map[name]
-                clip_val = self.config.get_effective_grad_clip(name, new_lr)
-                if clip_val and clip_val > 0:
-                    torch.nn.utils.clip_grad_norm_(net.parameters(), clip_val)
-            
-            grad_norms[name] = self._compute_single_grad_norm(name)
-            self.optimizers[name].step()
+        with self.profiler.section("optimizer_step"):
+            for name, loss in trainable_losses:
+                # Update learning rate using the new warm-up-aware schedule
+                self.update_counts[name] += 1
+                
+                # For lookup tables with adaptive LR, keep lr=1.0 (actual LR via gradient scaling)
+                net = network_map.get(name)
+                use_adaptive_lr = (
+                    self.config.lookup_use_adaptive_lr 
+                    and net is not None
+                    and hasattr(net, 'scale_gradients_by_update_count')
+                )
+                
+                if use_adaptive_lr:
+                    new_lr = 1.0
+                else:
+                    new_lr = self.config.get_learning_rate(
+                        name, self.training_step_count, self.update_counts[name]
+                    )
+                
+                for param_group in self.optimizers[name].param_groups:
+                    param_group['lr'] = new_lr
+                
+                # Apply gradient clipping (optionally scaled by learning rate)
+                if name in network_map:
+                    clip_val = self.config.get_effective_grad_clip(name, new_lr)
+                    if clip_val and clip_val > 0:
+                        torch.nn.utils.clip_grad_norm_(net.parameters(), clip_val)
+                
+                grad_norms[name] = self._compute_single_grad_norm(name)
+                self.optimizers[name].step()
         
         # Update target networks (each at its own interval)
-        self.update_target_networks()
+        with self.profiler.section("target_network_update"):
+            self.update_target_networks()
         
         # Add any new lookup table parameters to optimizers
         self._add_new_lookup_params_to_optimizers()
+        
+        # Add RND LR scales to prediction_stats for logging
+        # rnd_lr_scales now contains detailed stats dict per network, not just scale values
+        if rnd_lr_scales:
+            prediction_stats['rnd_adaptive_lr'] = rnd_lr_scales
         
         return loss_values, grad_norms, prediction_stats
     
@@ -2224,8 +2659,9 @@ class BasePhase2Trainer(ABC):
         networks = {
             'q_r': self.networks.q_r,
             'v_h_e': self.networks.v_h_e,
-            'x_h': self.networks.x_h,
         }
+        if self.config.x_h_use_network and self.networks.x_h is not None:
+            networks['x_h'] = self.networks.x_h
         if self.config.u_r_use_network:
             networks['u_r'] = self.networks.u_r
         # Only include V_r if using network mode
@@ -2319,19 +2755,22 @@ class BasePhase2Trainer(ABC):
         
         if goals_to_resample:
             # Resample only the achieved goals
-            new_goals, new_weights = self._sample_goals(next_state)
+            with self.profiler.section("goal_sampling"):
+                new_goals, new_weights = self._sample_goals(next_state)
             for h in goals_to_resample:
                 if h in new_goals:
                     actor_state.goals[h] = new_goals[h]
                     actor_state.goal_weights[h] = new_weights[h]
         # Also resample goals with some probability (exploration)
         elif random.random() < self.config.goal_resample_prob:
-            actor_state.goals, actor_state.goal_weights = self._sample_goals(actor_state.state)
+            with self.profiler.section("goal_sampling"):
+                actor_state.goals, actor_state.goal_weights = self._sample_goals(actor_state.state)
         
         # Reset environment periodically
         if actor_state.env_step_count >= self.config.steps_per_episode:
             actor_state.state = self.reset_environment()
-            actor_state.goals, actor_state.goal_weights = self._sample_goals(actor_state.state)
+            with self.profiler.section("goal_sampling"):
+                actor_state.goals, actor_state.goal_weights = self._sample_goals(actor_state.state)
             actor_state.env_step_count = 0
         
         return transition
@@ -2375,8 +2814,9 @@ class BasePhase2Trainer(ABC):
         """
         import time
         
-        # Do training step
-        losses, grad_norms, pred_stats = self.training_step()
+        # Do training step (profiling is inside training_step)
+        with self.profiler.section("learner_total"):
+            losses, grad_norms, pred_stats = self.training_step()
         
         # Increment training step counter (this is the gradient update counter)
         self.training_step_count += 1
@@ -2385,81 +2825,114 @@ class BasePhase2Trainer(ABC):
         current_param_norms = self._compute_param_norms()
         
         # Update progress bar with meaningful metrics
-        if pbar is not None:
-            pbar.update(1)
-            
-            # Compute average seconds per step
-            elapsed = time.time() - learner_state.start_time
-            steps_done = self.training_step_count - learner_state.start_step
-            avg_sec_per_step = elapsed / max(1, steps_done)
-            
-            # Compute parameter change magnitudes for x_h and q_r
-            x_h_change = abs(current_param_norms.get('x_h', 0) - learner_state.prev_param_norms.get('x_h', 0))
-            q_r_change = abs(current_param_norms.get('q_r', 0) - learner_state.prev_param_norms.get('q_r', 0))
-            
-            # Build postfix dict with v_h_e loss and network changes
-            postfix = {
-                'v_h_e': f"{losses.get('v_h_e', 0):.4f}",
-                'Δx_h': f"{x_h_change:.4f}",
-                'Δq_r': f"{q_r_change:.4f}",
-                's/step': f"{avg_sec_per_step:.2f}",
-            }
-            pbar.set_postfix(postfix, refresh=False)
-            
-            # Update prev_param_norms for next step
-            learner_state.prev_param_norms = current_param_norms
+        with self.profiler.section("progress_bar"):
+            if pbar is not None:
+                pbar.update(1)
+                
+                # Compute average seconds per step
+                elapsed = time.time() - learner_state.start_time
+                steps_done = self.training_step_count - learner_state.start_step
+                avg_sec_per_step = elapsed / max(1, steps_done)
+                
+                # Compute parameter change magnitudes for x_h and q_r
+                x_h_change = abs(current_param_norms.get('x_h', 0) - learner_state.prev_param_norms.get('x_h', 0))
+                q_r_change = abs(current_param_norms.get('q_r', 0) - learner_state.prev_param_norms.get('q_r', 0))
+                
+                # Build postfix dict with v_h_e loss and network changes
+                postfix = {
+                    'v_h_e': f"{losses.get('v_h_e', 0):.4f}",
+                    'Δx_h': f"{x_h_change:.4f}",
+                    'Δq_r': f"{q_r_change:.4f}",
+                    's/step': f"{avg_sec_per_step:.2f}",
+                }
+                pbar.set_postfix(postfix, refresh=False)
+                
+                # Update prev_param_norms for next step
+                learner_state.prev_param_norms = current_param_norms
         
         # Log to TensorBoard
-        if self.writer is not None:
-            self.writer.add_scalar('Progress/environment_steps', self.total_env_steps, self.training_step_count)
-            
-            for key, value in losses.items():
-                if key == 'u_r' and not self.config.u_r_use_network:
-                    continue
-                self.writer.add_scalar(f'Loss/{key}', value, self.training_step_count)
-            for key, value in grad_norms.items():
-                if key == 'u_r' and not self.config.u_r_use_network:
-                    continue
-                self.writer.add_scalar(f'GradNorm/{key}', value, self.training_step_count)
-            for key, stats in pred_stats.items():
-                # RND stats have different keys (running_mean/std instead of mean/std)
-                if key == 'rnd':
-                    # Raw novelty (before normalization) - THIS is what you want to watch
-                    # Should decrease over time as predictor learns to recognize states
-                    if 'batch_raw_mean' in stats:
-                        self.writer.add_scalar('Exploration/rnd_raw_novelty_mean', stats['batch_raw_mean'], self.training_step_count)
-                    if 'batch_raw_std' in stats:
-                        self.writer.add_scalar('Exploration/rnd_raw_novelty_std', stats['batch_raw_std'], self.training_step_count)
-                    # Running normalization stats (less useful for debugging)
-                    if 'running_mean' in stats:
-                        self.writer.add_scalar('Exploration/rnd_norm_running_mean', stats['running_mean'], self.training_step_count)
-                    if 'running_std' in stats:
-                        self.writer.add_scalar('Exploration/rnd_norm_running_std', stats['running_std'], self.training_step_count)
-                    continue
-                # Count-based curiosity stats
-                if key == 'count_curiosity':
-                    if 'count_curiosity_unique_states' in stats:
-                        self.writer.add_scalar('Exploration/count_unique_states', stats['count_curiosity_unique_states'], self.training_step_count)
-                    if 'count_curiosity_total_visits' in stats:
-                        self.writer.add_scalar('Exploration/count_total_visits', stats['count_curiosity_total_visits'], self.training_step_count)
-                    if 'count_curiosity_mean_visits' in stats:
-                        self.writer.add_scalar('Exploration/count_mean_visits', stats['count_curiosity_mean_visits'], self.training_step_count)
-                    continue
-                # Human Action RND stats
-                if key == 'human_rnd':
-                    if 'human_rnd_batch_raw_mean' in stats:
-                        self.writer.add_scalar('Exploration/human_rnd_raw_novelty_mean', stats['human_rnd_batch_raw_mean'], self.training_step_count)
-                    if 'human_rnd_batch_raw_std' in stats:
-                        self.writer.add_scalar('Exploration/human_rnd_raw_novelty_std', stats['human_rnd_batch_raw_std'], self.training_step_count)
-                    if 'human_rnd_running_mean' in stats:
-                        self.writer.add_scalar('Exploration/human_rnd_norm_running_mean', stats['human_rnd_running_mean'], self.training_step_count)
-                    if 'human_rnd_running_std' in stats:
-                        self.writer.add_scalar('Exploration/human_rnd_norm_running_std', stats['human_rnd_running_std'], self.training_step_count)
-                    continue
-                self.writer.add_scalar(f'Predictions/{key}_mean', stats['mean'], self.training_step_count)
-                self.writer.add_scalar(f'Predictions/{key}_std', stats['std'], self.training_step_count)
-                if 'target_mean' in stats:
-                    self.writer.add_scalar(f'Targets/{key}_mean', stats['target_mean'], self.training_step_count)
+        with self.profiler.section("tensorboard_logging"):
+            if self.writer is not None:
+                self.writer.add_scalar('Progress/environment_steps', self.total_env_steps, self.training_step_count)
+                
+                for key, value in losses.items():
+                    if key == 'u_r' and not self.config.u_r_use_network:
+                        continue
+                    self.writer.add_scalar(f'Loss/{key}', value, self.training_step_count)
+                for key, value in grad_norms.items():
+                    if key == 'u_r' and not self.config.u_r_use_network:
+                        continue
+                    self.writer.add_scalar(f'GradNorm/{key}', value, self.training_step_count)
+                for key, stats in pred_stats.items():
+                    # RND stats have different keys (running_mean/std instead of mean/std)
+                    if key == 'rnd':
+                        # Raw novelty (before normalization) - THIS is what you want to watch
+                        # Should decrease over time as predictor learns to recognize states
+                        if 'batch_raw_mean' in stats:
+                            self.writer.add_scalar('Exploration/rnd_raw_novelty_mean', stats['batch_raw_mean'], self.training_step_count)
+                        if 'batch_raw_std' in stats:
+                            self.writer.add_scalar('Exploration/rnd_raw_novelty_std', stats['batch_raw_std'], self.training_step_count)
+                        # Running normalization stats (less useful for debugging)
+                        if 'running_mean' in stats:
+                            self.writer.add_scalar('Exploration/rnd_norm_running_mean', stats['running_mean'], self.training_step_count)
+                        if 'running_std' in stats:
+                            self.writer.add_scalar('Exploration/rnd_norm_running_std', stats['running_std'], self.training_step_count)
+                        continue
+                    # Count-based curiosity stats
+                    if key == 'count_curiosity':
+                        if 'count_curiosity_unique_states' in stats:
+                            self.writer.add_scalar('Exploration/count_unique_states', stats['count_curiosity_unique_states'], self.training_step_count)
+                        if 'count_curiosity_total_visits' in stats:
+                            self.writer.add_scalar('Exploration/count_total_visits', stats['count_curiosity_total_visits'], self.training_step_count)
+                        if 'count_curiosity_mean_visits' in stats:
+                            self.writer.add_scalar('Exploration/count_mean_visits', stats['count_curiosity_mean_visits'], self.training_step_count)
+                        continue
+                    # Human Action RND stats
+                    if key == 'human_rnd':
+                        if 'human_rnd_batch_raw_mean' in stats:
+                            self.writer.add_scalar('Exploration/human_rnd_raw_novelty_mean', stats['human_rnd_batch_raw_mean'], self.training_step_count)
+                        if 'human_rnd_batch_raw_std' in stats:
+                            self.writer.add_scalar('Exploration/human_rnd_raw_novelty_std', stats['human_rnd_batch_raw_std'], self.training_step_count)
+                        if 'human_rnd_running_mean' in stats:
+                            self.writer.add_scalar('Exploration/human_rnd_norm_running_mean', stats['human_rnd_running_mean'], self.training_step_count)
+                        if 'human_rnd_running_std' in stats:
+                            self.writer.add_scalar('Exploration/human_rnd_norm_running_std', stats['human_rnd_running_std'], self.training_step_count)
+                        continue
+                    # RND adaptive learning rate stats (detailed diagnostics)
+                    if key == 'rnd_adaptive_lr':
+                        for net_name, net_stats in stats.items():
+                            # Mean LR scale applied (after clamping)
+                            if 'scale_mean' in net_stats:
+                                self.writer.add_scalar(f'AdaptiveLR/rnd_{net_name}_scale_mean', net_stats['scale_mean'], self.training_step_count)
+                            # Unclamped stats show the raw variance in uncertainty estimates
+                            if 'scale_unclamped_std' in net_stats:
+                                self.writer.add_scalar(f'AdaptiveLR/rnd_{net_name}_scale_std', net_stats['scale_unclamped_std'], self.training_step_count)
+                            if 'scale_unclamped_min' in net_stats:
+                                self.writer.add_scalar(f'AdaptiveLR/rnd_{net_name}_scale_min', net_stats['scale_unclamped_min'], self.training_step_count)
+                            if 'scale_unclamped_max' in net_stats:
+                                self.writer.add_scalar(f'AdaptiveLR/rnd_{net_name}_scale_max', net_stats['scale_unclamped_max'], self.training_step_count)
+                            # Raw RND MSE values (most important for diagnosing RND behavior)
+                            if 'rnd_mse_mean' in net_stats:
+                                self.writer.add_scalar(f'AdaptiveLR/rnd_{net_name}_mse_mean', net_stats['rnd_mse_mean'], self.training_step_count)
+                            if 'rnd_mse_std' in net_stats:
+                                self.writer.add_scalar(f'AdaptiveLR/rnd_{net_name}_mse_std', net_stats['rnd_mse_std'], self.training_step_count)
+                            if 'rnd_mse_min' in net_stats:
+                                self.writer.add_scalar(f'AdaptiveLR/rnd_{net_name}_mse_min', net_stats['rnd_mse_min'], self.training_step_count)
+                            if 'rnd_mse_max' in net_stats:
+                                self.writer.add_scalar(f'AdaptiveLR/rnd_{net_name}_mse_max', net_stats['rnd_mse_max'], self.training_step_count)
+                            # Clamping fraction shows if we're hitting limits
+                            if 'frac_clamped_low' in net_stats:
+                                self.writer.add_scalar(f'AdaptiveLR/rnd_{net_name}_frac_clamped_low', net_stats['frac_clamped_low'], self.training_step_count)
+                            if 'frac_clamped_high' in net_stats:
+                                self.writer.add_scalar(f'AdaptiveLR/rnd_{net_name}_frac_clamped_high', net_stats['frac_clamped_high'], self.training_step_count)
+                            # Running mean for context on normalization
+                            if 'running_mean' in net_stats:
+                                self.writer.add_scalar(f'AdaptiveLR/rnd_{net_name}_running_mean', net_stats['running_mean'], self.training_step_count)
+                        continue
+                    self.writer.add_scalar(f'Predictions/{key}_mean', stats['mean'], self.training_step_count)
+                    self.writer.add_scalar(f'Predictions/{key}_std', stats['std'], self.training_step_count)
+                    if 'target_mean' in stats:
+                        self.writer.add_scalar(f'Targets/{key}_mean', stats['target_mean'], self.training_step_count)
             
             # Log parameter norms
             param_norms = self._compute_param_norms()
@@ -2527,61 +3000,62 @@ class BasePhase2Trainer(ABC):
                 self.writer.add_scalar('LookupTable/total_entries', total_entries, self.training_step_count)
         
         # Check for warm-up stage transitions
-        current_stage = self.config.get_warmup_stage(self.training_step_count)
-        if current_stage != learner_state.prev_stage:
-            current_stage_name = self.config.get_warmup_stage_name(self.training_step_count)
-            active = self.config.get_active_networks(self.training_step_count)
-            
-            if self.verbose:
-                print(f"\n[Warmup] Stage transition at training step {self.training_step_count}:")
-                print(f"  {learner_state.prev_stage_name} -> {current_stage_name}")
-                print(f"  Active networks: {active}")
-                effective_beta = self.config.get_effective_beta_r(self.training_step_count)
-                print(f"  Effective beta_r: {effective_beta:.4f}")
-            
-            if self.writer is not None:
-                self.writer.add_scalar('Warmup/stage_transition', 1.0, self.training_step_count)
-                self.writer.add_text('Warmup/transitions', 
-                                    f"Step {self.training_step_count}: {learner_state.prev_stage_name} -> {current_stage_name}",
-                                    global_step=self.training_step_count)
-            
-            # Clear replay buffer at start of beta_r ramp-up (transition to stage 4)
-            if current_stage == 4 and learner_state.prev_stage == 3:
-                buffer_size_before = len(self.replay_buffer)
-                self.replay_buffer.clear()
-                # In async mode, reset shared_env_steps so actors can resume production
-                # (otherwise throttling keeps them paused since env_steps >> training_steps)
-                if self._shared_env_steps is not None:
-                    with self._shared_env_steps.get_lock():
-                        self._shared_env_steps.value = 0
-                    if self.verbose:
-                        print(f"  [Async] Reset shared_env_steps to 0 to unthrottle actors")
+        with self.profiler.section("warmup_check"):
+            current_stage = self.config.get_warmup_stage(self.training_step_count)
+            if current_stage != learner_state.prev_stage:
+                current_stage_name = self.config.get_warmup_stage_name(self.training_step_count)
+                active = self.config.get_active_networks(self.training_step_count)
+                
                 if self.verbose:
-                    print(f"  [Training] Cleared replay buffer ({buffer_size_before} transitions) at start of β_r ramp-up")
+                    print(f"\n[Warmup] Stage transition at training step {self.training_step_count}:")
+                    print(f"  {learner_state.prev_stage_name} -> {current_stage_name}")
+                    print(f"  Active networks: {active}")
+                    effective_beta = self.config.get_effective_beta_r(self.training_step_count)
+                    print(f"  Effective beta_r: {effective_beta:.4f}")
+                
                 if self.writer is not None:
-                    self.writer.add_text('Warmup/events', 
-                                        f"Cleared replay buffer ({buffer_size_before} transitions) at start of β_r ramp-up",
+                    self.writer.add_scalar('Warmup/stage_transition', 1.0, self.training_step_count)
+                    self.writer.add_text('Warmup/transitions', 
+                                        f"Step {self.training_step_count}: {learner_state.prev_stage_name} -> {current_stage_name}",
                                         global_step=self.training_step_count)
-            
-            # Clear replay buffer after beta_r ramp-up is done (transition to stage 5)
-            if current_stage == 5 and learner_state.prev_stage == 4:
-                buffer_size_before = len(self.replay_buffer)
-                self.replay_buffer.clear()
-                # In async mode, reset shared_env_steps so actors can resume production
-                if self._shared_env_steps is not None:
-                    with self._shared_env_steps.get_lock():
-                        self._shared_env_steps.value = 0
+                
+                # Clear replay buffer at start of beta_r ramp-up (transition to stage 4)
+                if current_stage == 4 and learner_state.prev_stage == 3:
+                    buffer_size_before = len(self.replay_buffer)
+                    self.replay_buffer.clear()
+                    # In async mode, reset shared_env_steps so actors can resume production
+                    # (otherwise throttling keeps them paused since env_steps >> training_steps)
+                    if self._shared_env_steps is not None:
+                        with self._shared_env_steps.get_lock():
+                            self._shared_env_steps.value = 0
+                        if self.verbose:
+                            print(f"  [Async] Reset shared_env_steps to 0 to unthrottle actors")
                     if self.verbose:
-                        print(f"  [Async] Reset shared_env_steps to 0 to unthrottle actors")
-                if self.verbose:
-                    print(f"  [Training] Cleared replay buffer ({buffer_size_before} transitions) after β_r ramp-up")
-                if self.writer is not None:
-                    self.writer.add_text('Warmup/events', 
-                                        f"Cleared replay buffer ({buffer_size_before} transitions) after β_r ramp-up",
-                                        global_step=self.training_step_count)
-            
-            learner_state.prev_stage = current_stage
-            learner_state.prev_stage_name = current_stage_name
+                        print(f"  [Training] Cleared replay buffer ({buffer_size_before} transitions) at start of β_r ramp-up")
+                    if self.writer is not None:
+                        self.writer.add_text('Warmup/events', 
+                                            f"Cleared replay buffer ({buffer_size_before} transitions) at start of β_r ramp-up",
+                                            global_step=self.training_step_count)
+                
+                # Clear replay buffer after beta_r ramp-up is done (transition to stage 5)
+                if current_stage == 5 and learner_state.prev_stage == 4:
+                    buffer_size_before = len(self.replay_buffer)
+                    self.replay_buffer.clear()
+                    # In async mode, reset shared_env_steps so actors can resume production
+                    if self._shared_env_steps is not None:
+                        with self._shared_env_steps.get_lock():
+                            self._shared_env_steps.value = 0
+                        if self.verbose:
+                            print(f"  [Async] Reset shared_env_steps to 0 to unthrottle actors")
+                    if self.verbose:
+                        print(f"  [Training] Cleared replay buffer ({buffer_size_before} transitions) after β_r ramp-up")
+                    if self.writer is not None:
+                        self.writer.add_text('Warmup/events', 
+                                            f"Cleared replay buffer ({buffer_size_before} transitions) after β_r ramp-up",
+                                            global_step=self.training_step_count)
+                
+                learner_state.prev_stage = current_stage
+                learner_state.prev_stage_name = current_stage_name
         
         # Periodic logging
         if self.training_step_count % 100 == 0:
@@ -2639,7 +3113,8 @@ class BasePhase2Trainer(ABC):
         # Set main networks to train mode (enables dropout)
         self.networks.q_r.train()
         self.networks.v_h_e.train()
-        self.networks.x_h.train()
+        if self.networks.x_h is not None:
+            self.networks.x_h.train()
         if self.networks.u_r is not None:
             self.networks.u_r.train()
         if self.networks.v_r is not None:
@@ -2668,46 +3143,85 @@ class BasePhase2Trainer(ABC):
         )
         pbar.update(self.training_step_count)  # Start from current position if resuming
         
-        while self.training_step_count < num_training_steps:
-            # Actor: collect one transition
-            transition = self._actor_step(actor_state)
-            
-            if transition is not None:
-                # Push to replay buffer
-                self.replay_buffer.push(
-                    transition.state,
-                    transition.robot_action,
-                    transition.goals,
-                    transition.goal_weights,
-                    transition.human_actions,
-                    transition.next_state,
-                    transition.transition_probs_by_action,
-                    terminal=transition.terminal
-                )
-                self.total_env_steps += 1
+        # Start profiling if TrainingProfiler is being used
+        self.profiler.start_profiling()
+        
+        # Track last checkpoint step
+        last_checkpoint_step = self.training_step_count
+        
+        try:
+            while self.training_step_count < num_training_steps:
+                # Actor: collect one transition
+                with self.profiler.section("actor_total"):
+                    transition = self._actor_step(actor_state)
                 
-                # Record state visit for count-based curiosity
-                self.record_state_visit(transition.state)
-            
-            # Learner: perform training updates based on ratio
-            # Accumulate fractional training steps and execute when we have >= 1
-            training_step_accumulator += self.config.training_steps_per_env_step
-            
-            while training_step_accumulator >= 1.0 and self.training_step_count < num_training_steps:
-                training_step_accumulator -= 1.0
+                if transition is not None:
+                    # Push to replay buffer
+                    with self.profiler.section("replay_buffer"):
+                        self.replay_buffer.push(
+                            transition.state,
+                            transition.robot_action,
+                            transition.goals,
+                            transition.goal_weights,
+                            transition.human_actions,
+                            transition.next_state,
+                            transition.transition_probs_by_action,
+                            terminal=transition.terminal
+                        )
+                    self.total_env_steps += 1
+                    
+                    # Record state visit for count-based curiosity
+                    self.record_state_visit(transition.state)
                 
-                losses = self._learner_step(learner_state, pbar)
+                # Learner: perform training updates based on ratio
+                # Accumulate fractional training steps and execute when we have >= 1
+                training_step_accumulator += self.config.training_steps_per_env_step
                 
-                # Log to history periodically
-                if self.training_step_count % 100 == 0:
-                    history.append(losses)
+                while training_step_accumulator >= 1.0 and self.training_step_count < num_training_steps:
+                    training_step_accumulator -= 1.0
+                    
+                    losses = self._learner_step(learner_state, pbar)
+                    
+                    # Log to history periodically
+                    if self.training_step_count % 100 == 0:
+                        history.append(losses)
+                    
+                    # Save checkpoint at interval
+                    if (self.checkpoint_interval > 0 and 
+                        self.checkpoint_path is not None and
+                        self.training_step_count - last_checkpoint_step >= self.checkpoint_interval):
+                        self.save_all_networks(self.checkpoint_path)
+                        last_checkpoint_step = self.training_step_count
+                        if self.verbose:
+                            print(f"\n[Checkpoint] Saved at step {self.training_step_count} to {self.checkpoint_path}")
+        
+        except KeyboardInterrupt:
+            self._interrupted = True
+            if self.verbose:
+                print(f"\n[Training] Interrupted at step {self.training_step_count}. Saving checkpoint...")
+            # Save checkpoint on interrupt
+            if self.checkpoint_path is not None:
+                self.save_all_networks(self.checkpoint_path)
+                if self.verbose:
+                    print(f"[Training] Checkpoint saved to {self.checkpoint_path}")
+        
+        # Stop profiling
+        self.profiler.stop_profiling()
         
         pbar.close()
+        
+        # Print profiler report if it's a TrainingProfiler
+        if hasattr(self.profiler, 'report') and hasattr(self.profiler, '_total_time'):
+            print(self.profiler.report())
+            # Save to file if save_report method exists
+            if hasattr(self.profiler, 'save_report') and self.output_dir:
+                self.profiler.save_report(self.output_dir, "profiler_report")
         
         # Set all networks to eval mode (disables dropout for rollouts)
         self.networks.q_r.eval()
         self.networks.v_h_e.eval()
-        self.networks.x_h.eval()
+        if self.networks.x_h is not None:
+            self.networks.x_h.eval()
         if self.networks.u_r is not None:
             self.networks.u_r.eval()
         if self.networks.v_r is not None:
@@ -2725,14 +3239,31 @@ class BasePhase2Trainer(ABC):
         """
         Get the state dict for policy networks needed by actors.
         
+        Includes Q_r for action selection, and RND networks if curiosity-driven
+        exploration is enabled (actors need up-to-date RND to compute novelty).
+        
         Override this in subclasses if actors need different networks.
         
         Returns:
             Dict with network state dicts for action selection.
         """
-        return {
+        state_dict = {
             'q_r': self.networks.q_r.state_dict(),
         }
+        # Include RND networks for curiosity-driven exploration
+        # Actors need trained RND to compute accurate novelty bonuses
+        if self.config.use_rnd and self.networks.rnd is not None:
+            state_dict['rnd_predictor'] = self.networks.rnd.predictor.state_dict()
+            # Also include normalization stats for consistent novelty scaling
+            state_dict['rnd_running_mean'] = self.networks.rnd.running_mean.clone()
+            state_dict['rnd_running_var'] = self.networks.rnd.running_var.clone()
+            state_dict['rnd_update_count'] = self.networks.rnd.update_count.clone()
+        if self.config.use_human_action_rnd and self.networks.human_rnd is not None:
+            state_dict['human_rnd_predictor'] = self.networks.human_rnd.predictor.state_dict()
+            state_dict['human_rnd_running_mean'] = self.networks.human_rnd.running_mean.clone()
+            state_dict['human_rnd_running_var'] = self.networks.human_rnd.running_var.clone()
+            state_dict['human_rnd_update_count'] = self.networks.human_rnd.update_count.clone()
+        return state_dict
     
     def _load_policy_state_dict(self, state_dict: Dict[str, Any]) -> None:
         """
@@ -2744,6 +3275,17 @@ class BasePhase2Trainer(ABC):
             state_dict: Dict with network state dicts.
         """
         self.networks.q_r.load_state_dict(state_dict['q_r'])
+        # Load RND networks if present (for curiosity-driven exploration)
+        if 'rnd_predictor' in state_dict and self.networks.rnd is not None:
+            self.networks.rnd.predictor.load_state_dict(state_dict['rnd_predictor'])
+            self.networks.rnd.running_mean.copy_(state_dict['rnd_running_mean'])
+            self.networks.rnd.running_var.copy_(state_dict['rnd_running_var'])
+            self.networks.rnd.update_count.copy_(state_dict['rnd_update_count'])
+        if 'human_rnd_predictor' in state_dict and self.networks.human_rnd is not None:
+            self.networks.human_rnd.predictor.load_state_dict(state_dict['human_rnd_predictor'])
+            self.networks.human_rnd.running_mean.copy_(state_dict['human_rnd_running_mean'])
+            self.networks.human_rnd.running_var.copy_(state_dict['human_rnd_running_var'])
+            self.networks.human_rnd.update_count.copy_(state_dict['human_rnd_update_count'])
     
     def _train_async(self, num_training_steps: int) -> List[Dict[str, float]]:
         """
@@ -2850,8 +3392,10 @@ class BasePhase2Trainer(ABC):
         def to_cpu(v):
             if isinstance(v, torch.Tensor):
                 return v.cpu()
+            elif isinstance(v, dict):
+                return {kk: to_cpu(vv) for kk, vv in v.items()}
             return v
-        cpu_state = {k: {kk: to_cpu(vv) for kk, vv in v.items()} for k, v in state.items()}
+        cpu_state = {k: to_cpu(v) for k, v in state.items()}
         buffer = io.BytesIO()
         torch.save(cpu_state, buffer)
         return buffer.getvalue()
@@ -2931,8 +3475,21 @@ class BasePhase2Trainer(ABC):
                     time.sleep(0.01)  # Wait 10ms before checking again
             
             # Sync policy and training_step_count periodically
+            # Frequencies are in training steps, so adapt to env steps for the actor.
+            # If max_env_steps_per_training_step=10, then 1 training step ≈ 10 env steps,
+            # so if learner publishes every N training steps, actor fetches every N*10 env steps.
+            env_steps_per_training_step = self.config.max_env_steps_per_training_step or 1.0
+            
+            # Policy sync frequency (in training steps), use RND freq if enabled and smaller
+            policy_sync_training_steps = self.config.actor_sync_freq
+            if self._rnd_enabled() and self.config.rnd_sync_freq > 0:
+                policy_sync_training_steps = min(policy_sync_training_steps, self.config.rnd_sync_freq)
+            
+            # Convert to env steps: N training steps * M env_steps/training_step
+            sync_freq_env_steps = max(1, int(policy_sync_training_steps * env_steps_per_training_step))
+            
             steps_since_sync += 1
-            if steps_since_sync >= self.config.actor_sync_freq or local_policy_version < 0:
+            if steps_since_sync >= sync_freq_env_steps or local_policy_version < 0:
                 with policy_lock:
                     current_version = shared_policy['version']
                     if current_version > local_policy_version:
@@ -2996,7 +3553,8 @@ class BasePhase2Trainer(ABC):
         # Set main networks to train mode (enables dropout)
         self.networks.q_r.train()
         self.networks.v_h_e.train()
-        self.networks.x_h.train()
+        if self.networks.x_h is not None:
+            self.networks.x_h.train()
         if self.networks.u_r is not None:
             self.networks.u_r.train()
         if self.networks.v_r is not None:
@@ -3015,6 +3573,9 @@ class BasePhase2Trainer(ABC):
         pbar = tqdm(total=num_training_steps, desc="Async Training", unit="steps")
         pbar.update(self.training_step_count)  # Start from current position if resuming
         
+        # Start profiling if TrainingProfiler is being used
+        self.profiler.start_profiling()
+        
         # Wait for minimum buffer size
         # Store shared_env_steps so _learner_step can reset it when buffer is cleared
         self._shared_env_steps = shared_env_steps
@@ -3030,34 +3591,71 @@ class BasePhase2Trainer(ABC):
         if self.verbose:
             print(f"[Learner] Buffer ready with {len(self.replay_buffer)} transitions. Starting training.")
         
+        # Track last checkpoint step
+        last_checkpoint_step = self.training_step_count
+        
         # Main training loop
-        while self.training_step_count < num_training_steps:
-            # Consume new transitions from queue
-            self._consume_transitions(transition_queue, max_items=50)
-            
-            # Do training step if buffer has enough samples
-            if len(self.replay_buffer) >= self.config.batch_size:
-                # Update total_env_steps from shared counter before logging
-                self.total_env_steps = shared_env_steps.value
+        try:
+            while self.training_step_count < num_training_steps:
+                # Consume new transitions from queue
+                self._consume_transitions(transition_queue, max_items=50)
                 
-                # Use shared learner logic
-                losses = self._learner_step(learner_state, pbar)
-                
-                # Update shared training_step_count so actors get correct epsilon/beta_r
-                shared_training_steps.value = self.training_step_count
-                
-                # Log to history periodically
-                if self.training_step_count % 100 == 0:
-                    history.append(losses)
-                
-                # Update shared policy periodically
-                if self.training_step_count % self.config.actor_sync_freq == 0:
-                    with policy_lock:
-                        shared_policy['state_dict'] = self._serialize_policy_state()
-                        shared_policy['version'] += 1
-                        policy_updates += 1
+                # Do training step if buffer has enough samples
+                if len(self.replay_buffer) >= self.config.batch_size:
+                    # Update total_env_steps from shared counter before logging
+                    self.total_env_steps = shared_env_steps.value
+                    
+                    # Use shared learner logic
+                    losses = self._learner_step(learner_state, pbar)
+                    
+                    # Update shared training_step_count so actors get correct epsilon/beta_r
+                    shared_training_steps.value = self.training_step_count
+                    
+                    # Log to history periodically
+                    if self.training_step_count % 100 == 0:
+                        history.append(losses)
+                    
+                    # Update shared policy periodically
+                    # Use more frequent sync when RND is enabled (rnd_sync_freq)
+                    sync_freq = self.config.actor_sync_freq
+                    if self._rnd_enabled() and self.config.rnd_sync_freq > 0:
+                        sync_freq = min(sync_freq, self.config.rnd_sync_freq)
+                    if self.training_step_count % sync_freq == 0:
+                        with policy_lock:
+                            shared_policy['state_dict'] = self._serialize_policy_state()
+                            shared_policy['version'] += 1
+                            policy_updates += 1
+                    
+                    # Save checkpoint at interval
+                    if (self.checkpoint_interval > 0 and 
+                        self.checkpoint_path is not None and
+                        self.training_step_count - last_checkpoint_step >= self.checkpoint_interval):
+                        self.save_all_networks(self.checkpoint_path)
+                        last_checkpoint_step = self.training_step_count
+                        if self.verbose:
+                            print(f"\n[Checkpoint] Saved at step {self.training_step_count} to {self.checkpoint_path}")
+        
+        except KeyboardInterrupt:
+            self._interrupted = True
+            if self.verbose:
+                print(f"\n[Training] Interrupted at step {self.training_step_count}. Saving checkpoint...")
+            # Save checkpoint on interrupt
+            if self.checkpoint_path is not None:
+                self.save_all_networks(self.checkpoint_path)
+                if self.verbose:
+                    print(f"[Training] Checkpoint saved to {self.checkpoint_path}")
+        
+        # Stop profiling and print report
+        self.profiler.stop_profiling()
         
         pbar.close()
+        
+        # Print profiler report if it's a TrainingProfiler
+        if hasattr(self.profiler, 'report') and hasattr(self.profiler, '_total_time'):
+            print(self.profiler.report())
+            # Save to file if save_report method exists
+            if hasattr(self.profiler, 'save_report') and self.output_dir:
+                self.profiler.save_report(self.output_dir, "profiler_report")
         
         if self.verbose:
             print(f"[Learner] Completed {self.training_step_count} training steps, {policy_updates} policy updates")
@@ -3065,7 +3663,8 @@ class BasePhase2Trainer(ABC):
         # Set all networks to eval mode (disables dropout for rollouts)
         self.networks.q_r.eval()
         self.networks.v_h_e.eval()
-        self.networks.x_h.eval()
+        if self.networks.x_h is not None:
+            self.networks.x_h.eval()
         if self.networks.u_r is not None:
             self.networks.u_r.eval()
         if self.networks.v_r is not None:
@@ -3135,7 +3734,6 @@ class BasePhase2Trainer(ABC):
         checkpoint = {
             'q_r': self.networks.q_r.state_dict(),
             'v_h_e': self.networks.v_h_e.state_dict(),
-            'x_h': self.networks.x_h.state_dict(),
             'total_env_steps': self.total_env_steps,
             'training_step_count': self.training_step_count,
             'config': {
@@ -3145,10 +3743,15 @@ class BasePhase2Trainer(ABC):
                 'zeta': self.config.zeta,
                 'xi': self.config.xi,
                 'eta': self.config.eta,
+                'x_h_use_network': self.config.x_h_use_network,
                 'u_r_use_network': self.config.u_r_use_network,
                 'v_r_use_network': self.config.v_r_use_network,
             }
         }
+        
+        # Save X_h network only if it exists
+        if self.networks.x_h is not None:
+            checkpoint['x_h'] = self.networks.x_h.state_dict()
         
         # Save U_r/V_r networks only if they exist
         if self.networks.u_r is not None:
@@ -3203,7 +3806,10 @@ class BasePhase2Trainer(ABC):
         
         self.networks.q_r.load_state_dict(checkpoint['q_r'], strict=strict)
         self.networks.v_h_e.load_state_dict(checkpoint['v_h_e'], strict=strict)
-        self.networks.x_h.load_state_dict(checkpoint['x_h'], strict=strict)
+        
+        # Load X_h only if it exists in checkpoint AND network exists
+        if 'x_h' in checkpoint and self.networks.x_h is not None:
+            self.networks.x_h.load_state_dict(checkpoint['x_h'], strict=strict)
         
         # Load U_r/V_r only if they exist in checkpoint AND network exists
         if 'u_r' in checkpoint and self.networks.u_r is not None:
@@ -3308,6 +3914,8 @@ class BasePhase2Trainer(ABC):
         """
         Get X_h(s) - aggregate goal achievement ability for human h.
         
+        If x_h_use_network=False, computes X_h directly from V_h^e samples.
+        
         Args:
             state: Environment state.
             world_model: Environment/world model.
@@ -3316,13 +3924,32 @@ class BasePhase2Trainer(ABC):
         Returns:
             X_h value in (0, 1].
         """
-        self.networks.x_h.eval()
-        with torch.no_grad():
-            x_h = self.networks.x_h.forward(
-                state, world_model, human_agent_idx, self.device
-            )
-            x_h_clamped = torch.clamp(x_h.squeeze(), min=1e-3, max=1.0)
-            return x_h_clamped.item()
+        if self.networks.x_h is not None:
+            self.networks.x_h.eval()
+            with torch.no_grad():
+                x_h = self.networks.x_h.forward(
+                    state, world_model, human_agent_idx, self.device
+                )
+                x_h_clamped = torch.clamp(x_h.squeeze(), min=1e-3, max=1.0)
+                return x_h_clamped.item()
+        else:
+            # Compute X_h from V_h^e samples
+            n_goal_samples = 5
+            goals = []
+            for _ in range(n_goal_samples):
+                goal, _ = self.goal_sampler.sample(state, human_agent_idx)
+                goals.append(goal)
+            
+            self.networks.v_h_e.eval()
+            with torch.no_grad():
+                v_h_e_values = self.networks.v_h_e.forward_batch(
+                    [state] * n_goal_samples, goals, [human_agent_idx] * n_goal_samples,
+                    self.env, self.device
+                ).squeeze()
+                v_h_e_values = self.networks.v_h_e.apply_hard_clamp(v_h_e_values)
+                x_h = (v_h_e_values ** self.config.zeta).mean()
+                x_h_clamped = torch.clamp(x_h, min=1e-3, max=1.0)
+                return x_h_clamped.item()
     
     def get_q_r(
         self,

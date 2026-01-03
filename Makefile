@@ -53,23 +53,24 @@ help:
 	@echo "  SIF_FILE             - Output SIF filename (default: $(SIF_FILE))"
 	@echo "  HIERARCHICAL_MODE    - Enable hierarchical deps in build (default: false)"
 
+# Export USER_ID and GROUP_ID for Docker (used in docker-compose.yml)
+export USER_ID ?= $(shell id -u)
+export GROUP_ID ?= $(shell id -g)
+
 # Docker Compose commands
 build:
+	@echo "Building with USER_ID=$(USER_ID), GROUP_ID=$(GROUP_ID)"
 	@docker compose build
 
 up:
 	@echo "Starting development environment..."
-	@# Set USER_ID and GROUP_ID if not already set
-	@if [ -z "$$USER_ID" ]; then export USER_ID=$$(id -u); fi; \
-	if [ -z "$$GROUP_ID" ]; then export GROUP_ID=$$(id -g); fi; \
-	if command -v nvidia-smi > /dev/null 2>&1 && nvidia-smi > /dev/null 2>&1; then \
+	@echo "✓ Using USER_ID=$(USER_ID), GROUP_ID=$(GROUP_ID) for file permissions"
+	@if command -v nvidia-smi > /dev/null 2>&1 && nvidia-smi > /dev/null 2>&1; then \
 		echo "✓ GPU detected - GPU will be available in container"; \
-		echo "✓ Using USER_ID=$$USER_ID, GROUP_ID=$$GROUP_ID for file permissions"; \
-		USER_ID=$$USER_ID GROUP_ID=$$GROUP_ID docker compose up -d --build; \
+		docker compose up -d --build; \
 	else \
 		echo "✓ No GPU detected - running in CPU mode"; \
-		echo "✓ Using USER_ID=$$USER_ID, GROUP_ID=$$GROUP_ID for file permissions"; \
-		USER_ID=$$USER_ID GROUP_ID=$$GROUP_ID docker compose up -d --build; \
+		docker compose up -d --build; \
 	fi
 	@echo "Development environment started. Use 'make shell' to enter."
 
@@ -87,14 +88,10 @@ restart:
 # Start development environment with Ollama server for LLM inference
 up-hierarchical:
 	@echo "Starting development environment with Ollama server..."
-	@if [ -z "$$USER_ID" ]; then export USER_ID=$$(id -u); fi; \
-	if [ -z "$$GROUP_ID" ]; then export GROUP_ID=$$(id -g); fi; \
-	echo "✓ Using USER_ID=$$USER_ID, GROUP_ID=$$GROUP_ID for file permissions"; \
-	echo "✓ Building with HIERARCHICAL_MODE=true (uses Docker cache for faster rebuilds)"; \
-	USER_ID=$$USER_ID GROUP_ID=$$GROUP_ID HIERARCHICAL_MODE=true \
-		docker compose --profile hierarchical build && \
-	USER_ID=$$USER_ID GROUP_ID=$$GROUP_ID HIERARCHICAL_MODE=true \
-		docker compose --profile hierarchical up -d
+	@echo "✓ Using USER_ID=$(USER_ID), GROUP_ID=$(GROUP_ID) for file permissions"
+	@echo "✓ Building with HIERARCHICAL_MODE=true (uses Docker cache for faster rebuilds)"
+	@HIERARCHICAL_MODE=true docker compose --profile hierarchical build
+	@HIERARCHICAL_MODE=true docker compose --profile hierarchical up -d
 	@echo "Development environment with Ollama started."
 	@echo "Use 'make shell' to enter the dev container."
 	@echo "Ollama API available at http://localhost:11434"

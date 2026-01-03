@@ -15,6 +15,7 @@ from gym_multigrid.multigrid import MultiGridEnv
 from empo.nn_based.phase2.config import Phase2Config
 from empo.nn_based.phase2.trainer import BasePhase2Trainer, Phase2Networks
 from empo.nn_based.phase2.replay_buffer import Phase2Transition
+from empo.nn_based.phase2.network_factory import create_count_based_curiosity
 from empo.nn_based.multigrid import MultiGridStateEncoder
 from empo.nn_based.multigrid.goal_encoder import MultiGridGoalEncoder
 from empo.nn_based.multigrid.agent_encoder import AgentIdentityEncoder
@@ -93,6 +94,8 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
             - HumanExplorationPolicy: A policy object with sample(state, human_idx, goal) method.
         world_model_factory: Optional factory for creating world models. Required for
             async training where the environment cannot be pickled.
+        checkpoint_interval: Save checkpoint every N training steps (0 to disable).
+        checkpoint_path: Path for checkpoint file (default: output_dir/checkpoint.pt).
     """
     
     def __init__(
@@ -112,6 +115,8 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         world_model_factory: Optional[Any] = None,
         robot_exploration_policy: Optional[Any] = None,
         human_exploration_policy: Optional[Any] = None,
+        checkpoint_interval: int = 0,
+        checkpoint_path: Optional[str] = None,
     ):
         super().__init__(
             env=env,
@@ -129,6 +134,8 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
             world_model_factory=world_model_factory,
             robot_exploration_policy=robot_exploration_policy,
             human_exploration_policy=human_exploration_policy,
+            checkpoint_interval=checkpoint_interval,
+            checkpoint_path=checkpoint_path,
         )
         
         # Caching is now handled internally by the shared encoders.
@@ -531,7 +538,7 @@ def create_phase2_networks(
     # (i.e., lookup tables are NOT enabled for them)
     use_neural_q_r = not config.should_use_lookup_table('q_r')
     use_neural_v_h_e = not config.should_use_lookup_table('v_h_e')
-    use_neural_x_h = not config.should_use_lookup_table('x_h')
+    use_neural_x_h = config.x_h_use_network and not config.should_use_lookup_table('x_h')
     use_neural_u_r = config.u_r_use_network and not config.should_use_lookup_table('u_r')
     use_neural_v_r = config.v_r_use_network and not config.should_use_lookup_table('v_r')
     
@@ -561,10 +568,12 @@ def create_phase2_networks(
             include_step_count=config.include_step_count,
         )
         
-        x_h = LookupTableAggregateGoalAbilityNetwork(
-            default_x_h=config.get_lookup_default('x_h'),
-            include_step_count=config.include_step_count,
-        )
+        x_h = None
+        if config.x_h_use_network:
+            x_h = LookupTableAggregateGoalAbilityNetwork(
+                default_x_h=config.get_lookup_default('x_h'),
+                include_step_count=config.include_step_count,
+            )
         
         u_r = None
         if config.u_r_use_network:
@@ -596,6 +605,9 @@ def create_phase2_networks(
                 stacklevel=2
             )
         
+        # Create count-based curiosity for tabular exploration
+        count_curiosity = create_count_based_curiosity(config)
+        
         return Phase2Networks(
             q_r=q_r,
             v_h_e=v_h_e,
@@ -603,6 +615,7 @@ def create_phase2_networks(
             u_r=u_r,
             v_r=v_r,
             rnd=rnd,
+            count_curiosity=count_curiosity,
         )
     
     # At least one network needs neural implementation
@@ -801,29 +814,31 @@ def create_phase2_networks(
             include_step_count=config.include_step_count,
         )
     
-    # X_h network
-    if use_neural_x_h:
-        x_h = MultiGridAggregateGoalAbilityNetwork(
-            grid_height=grid_height,
-            grid_width=grid_width,
-            num_agents_per_color=num_agents_per_color,
-            state_feature_dim=hidden_dim,
-            hidden_dim=hidden_dim,
-            zeta=config.zeta,
-            dropout=config.x_h_dropout,
-            max_agents=max_agents,
-            agent_embedding_dim=agent_embedding_dim,
-            state_encoder=shared_state_encoder,       # From V_h^e (SHARED, used detached)
-            agent_encoder=shared_agent_encoder,       # From V_h^e (SHARED, used detached)
-            own_state_encoder=x_h_own_state_encoder,  # OWN (trained with X_h)
-            own_agent_encoder=x_h_own_agent_encoder,  # OWN (trained with X_h)
-        ).to(device)
-    else:
-        from empo.nn_based.phase2.lookup import LookupTableAggregateGoalAbilityNetwork
-        x_h = LookupTableAggregateGoalAbilityNetwork(
-            default_x_h=config.get_lookup_default('x_h'),
-            include_step_count=config.include_step_count,
-        )
+    # X_h network (optional, only if x_h_use_network=True)
+    x_h = None
+    if config.x_h_use_network:
+        if use_neural_x_h:
+            x_h = MultiGridAggregateGoalAbilityNetwork(
+                grid_height=grid_height,
+                grid_width=grid_width,
+                num_agents_per_color=num_agents_per_color,
+                state_feature_dim=hidden_dim,
+                hidden_dim=hidden_dim,
+                zeta=config.zeta,
+                dropout=config.x_h_dropout,
+                max_agents=max_agents,
+                agent_embedding_dim=agent_embedding_dim,
+                state_encoder=shared_state_encoder,       # From V_h^e (SHARED, used detached)
+                agent_encoder=shared_agent_encoder,       # From V_h^e (SHARED, used detached)
+                own_state_encoder=x_h_own_state_encoder,  # OWN (trained with X_h)
+                own_agent_encoder=x_h_own_agent_encoder,  # OWN (trained with X_h)
+            ).to(device)
+        else:
+            from empo.nn_based.phase2.lookup import LookupTableAggregateGoalAbilityNetwork
+            x_h = LookupTableAggregateGoalAbilityNetwork(
+                default_x_h=config.get_lookup_default('x_h'),
+                include_step_count=config.include_step_count,
+            )
     
     # U_r network (optional)
     u_r = None
@@ -945,6 +960,9 @@ def create_phase2_networks(
             normalization_decay=config.rnd_normalization_decay,
         ).to(device)
     
+    # Create count-based curiosity (typically for tabular, but config allows mixed modes)
+    count_curiosity = create_count_based_curiosity(config)
+    
     return Phase2Networks(
         q_r=q_r,
         v_h_e=v_h_e,
@@ -954,6 +972,7 @@ def create_phase2_networks(
         rnd=rnd,
         rnd_encoder_dims=rnd_encoder_dims,  # Store for coefficient computation
         human_rnd=human_rnd,
+        count_curiosity=count_curiosity,
     )
 
 
@@ -979,6 +998,8 @@ def train_multigrid_phase2(
     world_model_factory: Optional[Any] = None,
     robot_exploration_policy: Optional[Any] = None,
     human_exploration_policy: Optional[Any] = None,
+    checkpoint_interval: int = 0,
+    checkpoint_path: Optional[str] = None,
 ) -> Tuple[MultiGridRobotQNetwork, Phase2Networks, List[Dict[str, float]], "MultiGridPhase2Trainer"]:
     """
     Train Phase 2 robot policy for a multigrid environment.
@@ -1016,6 +1037,8 @@ def train_multigrid_phase2(
         human_exploration_policy: Optional policy for human epsilon exploration. Can be:
             - None: Use uniform random policy for exploration (default).
             - HumanExplorationPolicy: A policy object with sample(state, human_idx, goal) method.
+        checkpoint_interval: Save checkpoint every N training steps (0 to disable).
+        checkpoint_path: Path for checkpoint file (default: output_dir/checkpoint.pt).
     
     Returns:
         Tuple of (robot_q_network, all_networks, training_history, trainer).
@@ -1071,6 +1094,10 @@ def train_multigrid_phase2(
     
     if debug:
         print("[DEBUG] Creating trainer...")
+        # Enable debug output for V_h^e new key creation (lookup tables only)
+        # Use setattr since the attribute is read via getattr with default
+        networks.v_h_e.debug_new_keys = True
+        print("[DEBUG] Enabled V_h^e debug_new_keys for tracking new lookup table entries")
     
     # Create trainer
     trainer = MultiGridPhase2Trainer(
@@ -1089,6 +1116,8 @@ def train_multigrid_phase2(
         world_model_factory=world_model_factory,
         robot_exploration_policy=robot_exploration_policy,
         human_exploration_policy=human_exploration_policy,
+        checkpoint_interval=checkpoint_interval,
+        checkpoint_path=checkpoint_path,
     )
     
     # Restore networks if checkpoint provided (skips warmup/rampup since already done)

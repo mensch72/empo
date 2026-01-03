@@ -88,6 +88,10 @@ class LookupTableRobotQNetwork(BaseRobotQNetwork):
         
         # Track which keys were accessed in current forward pass (for gradient flow)
         self._accessed_keys: List[int] = []
+        
+        # Track update counts per entry for adaptive learning rate
+        # Maps key -> number of gradient updates received
+        self._update_counts: Dict[int, int] = {}
     
     def _normalize_state(self, state: Hashable) -> Hashable:
         """
@@ -110,6 +114,57 @@ class LookupTableRobotQNetwork(BaseRobotQNetwork):
         params = self._new_params
         self._new_params = []
         return params
+
+    def get_update_count(self, key: int) -> int:
+        """
+        Get the update count for a specific entry.
+        
+        Args:
+            key: Hash key for the entry.
+            
+        Returns:
+            Number of gradient updates this entry has received.
+        """
+        return self._update_counts.get(key, 0)
+    
+    def increment_update_counts(self, keys: List[int]) -> None:
+        """
+        Increment update counts for the given keys.
+        
+        Should be called after each gradient update for entries that received gradients.
+        
+        Args:
+            keys: List of hash keys that received updates.
+        """
+        for key in keys:
+            self._update_counts[key] = self._update_counts.get(key, 0) + 1
+    
+    def scale_gradients_by_update_count(self, min_lr: float = 1e-6) -> List[int]:
+        """
+        Scale gradients by 1/update_count for adaptive learning rate.
+        
+        This should be called after backward() but before optimizer.step().
+        Scales each parameter's gradient by 1/n where n is its update count,
+        achieving effective learning rate of 1/n (arithmetic mean convergence).
+        
+        Args:
+            min_lr: Minimum effective learning rate (prevents 1/∞ = 0).
+            
+        Returns:
+            List of keys that had gradients (for incrementing update counts).
+        """
+        keys_with_grads = []
+        for key, param in self.table.items():
+            if param.grad is not None and param.grad.abs().sum() > 0:
+                # Count this update (starts at 1 for first update)
+                update_count = self._update_counts.get(key, 0) + 1
+                # Effective lr = max(min_lr, 1/update_count)
+                effective_lr = max(min_lr, 1.0 / update_count)
+                # Scale gradient so that base_lr * scaled_grad = effective_lr * original_grad
+                # With base_lr = 1.0: scaled_grad = effective_lr * original_grad
+                param.grad.mul_(effective_lr)
+                keys_with_grads.append(key)
+        return keys_with_grads
 
     def _get_or_create_entry(self, key: int, device: str = 'cpu') -> nn.Parameter:
         """
@@ -252,6 +307,7 @@ class LookupTableRobotQNetwork(BaseRobotQNetwork):
             'beta_r': self.beta_r,
             'default_q_r': self.default_q_r,
             'feasible_range': self.feasible_range,
+            'include_step_count': self.include_step_count,
             'table_size': len(self.table)
         }
     
@@ -272,17 +328,26 @@ class LookupTableRobotQNetwork(BaseRobotQNetwork):
             yield name, param
     
     def state_dict(self, destination=None, prefix='', keep_vars=False):
-        """Return state dict containing all table entries."""
+        """Return state dict containing all table entries and update counts."""
         state = {}
         for key, param in self.table.items():
             state[f"{prefix}table.{key}"] = param if keep_vars else param.data.clone()
         # Also save metadata
         state[f"{prefix}_table_keys"] = list(self.table.keys())
         state[f"{prefix}_config"] = self.get_config()
+        # Save update counts for adaptive learning rate persistence
+        state[f"{prefix}_update_counts"] = dict(self._update_counts)
         return state
     
     def load_state_dict(self, state_dict, strict=True):
-        """Load state dict containing table entries."""
+        """Load state dict containing table entries and update counts."""
+        # Restore config if present
+        config_key = '_config'
+        if config_key in state_dict:
+            config = state_dict[config_key]
+            if 'include_step_count' in config:
+                self.include_step_count = config['include_step_count']
+        
         # Find table keys
         prefix = ''
         keys_key = f"{prefix}_table_keys"
@@ -302,12 +367,25 @@ class LookupTableRobotQNetwork(BaseRobotQNetwork):
             param_key = f"{prefix}table.{key}"
             if param_key in state_dict:
                 self.table[key] = nn.Parameter(state_dict[param_key].clone())
+        
+        # Load update counts if present
+        update_counts_key = f"{prefix}_update_counts"
+        if update_counts_key in state_dict:
+            self._update_counts = dict(state_dict[update_counts_key])
+        else:
+            self._update_counts = {}
     
     def to(self, device):
         """Move all table entries to device."""
         for key in list(self.table.keys()):
             self.table[key] = nn.Parameter(self.table[key].to(device))
         return self
+    
+    def zero_grad(self):
+        """Zero gradients for all table entries."""
+        for param in self.table.values():
+            if param.grad is not None:
+                param.grad.zero_()
     
     def train(self, mode: bool = True):
         """Set training mode."""

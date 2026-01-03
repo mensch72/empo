@@ -155,15 +155,16 @@ class Phase2Config:
     # =========================================================================
     # Warm-up proceeds in stages. Each parameter specifies DURATION of that stage:
     # Stage 1: Only V_h^e (warmup_v_h_e_steps duration)
-    # Stage 2: V_h^e + X_h (warmup_x_h_steps duration)
+    # Stage 2: V_h^e + X_h (warmup_x_h_steps duration) - SKIPPED if x_h_use_network=False
     # Stage 3: V_h^e + X_h + U_r (warmup_u_r_steps duration) - SKIPPED if u_r_use_network=False
     # Stage 4: V_h^e + X_h + (U_r) + Q_r (warmup_q_r_steps duration)
     # Stage 5: All networks with beta_r ramp-up (beta_r_rampup_steps duration)
     # Stage 6: Full training with LR decay (remainder)
     # 
+    # NOTE: warmup_x_h_steps is set to 0 if x_h_use_network=False (in __post_init__)
     # NOTE: warmup_u_r_steps is set to 0 if u_r_use_network=False (in __post_init__)
     warmup_v_h_e_steps: int = 1000   # Duration of V_h^e-only stage
-    warmup_x_h_steps: int = 1000     # Duration of V_h^e + X_h stage  
+    warmup_x_h_steps: int = 1000     # Duration of V_h^e + X_h stage (0 if x_h_use_network=False)
     warmup_u_r_steps: int = 1000     # Duration of V_h^e + X_h + U_r stage (0 if u_r_use_network=False)
     warmup_q_r_steps: int = 1000     # Duration of V_h^e + X_h + (U_r) + Q_r stage
     
@@ -260,6 +261,12 @@ class Phase2Config:
     # error since U_r = -(E_h[X_h^{-ξ}])^η can be computed exactly from X_h.
     u_r_use_network: bool = False
     
+    # X_h computation mode: if False, compute X_h directly from V_h^e samples
+    # instead of using a separate network. This reduces complexity and one source of
+    # error since X_h = E_g[V_h^e(s, g)^ζ] can be computed exactly from V_h^e samples.
+    # When False, the goal sampler is used at each step to sample goals and compute X_h.
+    x_h_use_network: bool = True
+    
     # Whether to include step count (remaining time) in state encoding.
     # Set to False to verify that identical grid states get identical values.
     include_step_count: bool = True
@@ -289,13 +296,13 @@ class Phase2Config:
     # - use_lookup_q_r: Q_r(s, a_r) - robot Q-values
     # - use_lookup_v_r: V_r(s) - robot value function (only if v_r_use_network=True)
     # - use_lookup_v_h_e: V_h^e(s, g_h) - human goal achievement probability
-    # - use_lookup_x_h: X_h(s) - aggregate human goal ability
+    # - use_lookup_x_h: X_h(s) - aggregate human goal ability (only if x_h_use_network=True)
     # - use_lookup_u_r: U_r(s) - intrinsic reward (only if u_r_use_network=True)
     use_lookup_tables: bool = False
     use_lookup_q_r: bool = True      # Use lookup table for Q_r
     use_lookup_v_r: bool = True      # Use lookup table for V_r (if v_r_use_network=True)
     use_lookup_v_h_e: bool = True    # Use lookup table for V_h^e
-    use_lookup_x_h: bool = True      # Use lookup table for X_h
+    use_lookup_x_h: bool = True      # Use lookup table for X_h (if x_h_use_network=True)
     use_lookup_u_r: bool = True      # Use lookup table for U_r (if u_r_use_network=True)
     
     # Default values for lookup table entries (used when state is first seen)
@@ -304,6 +311,46 @@ class Phase2Config:
     lookup_default_v_h_e: float = 0.0    # V_h^e ∈ [0, 1] (probability) - 0 = pessimistic default
     lookup_default_x_h: float = 1e-10    # X_h ∈ (0, 1] (aggregate ability)
     lookup_default_y: float = 2.0        # y >= 1 (intermediate for U_r)
+    
+    # =========================================================================
+    # Adaptive per-entry learning rate for lookup tables
+    # =========================================================================
+    # When enabled, each lookup table entry uses a learning rate of 1/n where n
+    # is the number of updates to that entry. This makes each entry converge to
+    # the exact arithmetic mean of all target values it has seen.
+    #
+    # Implementation: Before optimizer.step(), gradients are scaled by 1/update_count
+    # for each entry. The base learning rate should be set to 1.0 for this mode.
+    #
+    # This generalizes to neural networks via uncertainty-weighted learning rates:
+    # instead of 1/update_count, use an uncertainty estimate (e.g., ensemble variance).
+    #
+    # Robbins-Monro condition: For convergence to true expectation, we need
+    # sum(lr) = ∞ and sum(lr²) < ∞. The 1/n schedule satisfies this exactly.
+    lookup_use_adaptive_lr: bool = False  # Enable per-entry adaptive learning rate
+    lookup_adaptive_lr_min: float = 1e-6  # Minimum learning rate (prevents 1/∞ = 0)
+    
+    # =========================================================================
+    # RND-based adaptive learning rate (neural network mode)
+    # =========================================================================
+    # When enabled in neural network mode with RND, gradients are scaled by the
+    # RND prediction error (MSE) as a proxy for uncertainty. States with high
+    # RND error (novel/uncertain) get larger effective learning rates.
+    #
+    # This is a SPECULATIVE approach (not published in literature) that assumes
+    # RND novelty correlates with value estimate uncertainty. The RND MSE is
+    # already a squared quantity, analogous to variance, so lr ∝ rnd_error.
+    #
+    # When both use_lookup_tables and rnd_use_adaptive_lr are set:
+    # - Lookup tables use 1/n update counts
+    # - Neural networks use RND-based scaling  
+    # If use_rnd=False but rnd_use_adaptive_lr=True, a warning is issued.
+    #
+    # See docs/ADAPTIVE_LEARNING.md for theoretical background.
+    rnd_use_adaptive_lr: bool = False  # Enable RND-based adaptive learning rate
+    rnd_adaptive_lr_scale: float = 1.0  # Multiplier for RND-based LR scaling
+    rnd_adaptive_lr_min: float = 0.1  # Minimum LR multiplier (prevents vanishing updates)
+    rnd_adaptive_lr_max: float = 10.0  # Maximum LR multiplier (prevents exploding updates)
     
     def __post_init__(self):
         """Compute cumulative warmup thresholds and apply network flags."""
@@ -316,6 +363,10 @@ class Phase2Config:
                 DeprecationWarning,
                 stacklevel=2
             )
+        
+        # Override X_h warmup duration to 0 if not using X_h network
+        if not self.x_h_use_network:
+            self.warmup_x_h_steps = 0
         
         # Override U_r warmup duration to 0 if not using U_r network
         if not self.u_r_use_network:
@@ -345,6 +396,13 @@ class Phase2Config:
                     UserWarning,
                     stacklevel=2
                 )
+            if self.use_lookup_x_h and not self.x_h_use_network:
+                warnings.warn(
+                    "use_lookup_x_h=True but x_h_use_network=False. "
+                    "X_h lookup table will not be used since X_h is computed directly from V_h^e samples.",
+                    UserWarning,
+                    stacklevel=2
+                )
         
         # Validate curiosity settings
         if self.use_rnd and self.use_count_based_curiosity:
@@ -366,6 +424,20 @@ class Phase2Config:
                 UserWarning,
                 stacklevel=2
             )
+        
+        # Validate RND-based adaptive learning rate settings
+        if self.rnd_use_adaptive_lr and not self.use_rnd:
+            warnings.warn(
+                "rnd_use_adaptive_lr=True but use_rnd=False. "
+                "RND-based adaptive learning rate requires use_rnd=True. "
+                "The adaptive learning rate will not be applied.",
+                UserWarning,
+                stacklevel=2
+            )
+        
+        if self.rnd_use_adaptive_lr and self.use_lookup_tables:
+            # Both can coexist: lookup tables use 1/n, neural networks use RND
+            pass  # No warning needed, they handle different network types
         
         # Handle env_steps_per_training_step as an alternative way to specify the ratio
         # If env_steps_per_training_step is set, convert to training_steps_per_env_step
@@ -400,6 +472,12 @@ class Phase2Config:
     # Lower = more on-policy but more sync overhead.
     # Higher = more off-policy but more efficient.
     actor_sync_freq: int = 100
+    
+    # Steps between syncing RND networks from learner to actors.
+    # RND novelty changes rapidly as the predictor learns, so we need
+    # more frequent sync than policy to keep exploration accurate.
+    # Set to 0 to use actor_sync_freq for RND as well.
+    rnd_sync_freq: int = 10
     
     # Minimum transitions in buffer before training starts (for async mode).
     # Ensures actors have collected enough initial data.
@@ -551,8 +629,8 @@ class Phase2Config:
         if self.use_rnd:
             active.add('rnd')
         
-        # X_h starts after V_h^e warmup
-        if step >= self._warmup_v_h_e_end:
+        # X_h starts after V_h^e warmup (only if using network mode)
+        if step >= self._warmup_v_h_e_end and self.x_h_use_network:
             active.add('x_h')
         
         # U_r starts after X_h warmup (only if using network mode)
@@ -668,11 +746,17 @@ class Phase2Config:
         """
         Get numeric warm-up stage (0-5).
         
-        When u_r_use_network=True:
+        When x_h_use_network=True and u_r_use_network=True:
             0: Stage 1 - V_h^e only
             1: Stage 2 - V_h^e + X_h
             2: Stage 3 - V_h^e + X_h + U_r
             3: Stage 4 - V_h^e + X_h + U_r + Q_r
+            4: Post-warmup (beta_r ramping)
+            5: Post-warmup (beta_r at nominal)
+        
+        When x_h_use_network=False (X_h stage skipped, warmup_x_h_steps=0):
+            0: Stage 1 - V_h^e only
+            3: Stage 2 - V_h^e + Q_r (X_h computed from V_h^e samples)
             4: Post-warmup (beta_r ramping)
             5: Post-warmup (beta_r at nominal)
         
@@ -686,6 +770,7 @@ class Phase2Config:
         if step < self._warmup_v_h_e_end:
             return 0  # V_h^e only
         elif step < self._warmup_x_h_end:
+            # This branch only reached if x_h_use_network=True (else warmup_x_h_steps=0)
             return 1  # + X_h
         elif step < self._warmup_u_r_end:
             # This branch only reached if u_r_use_network=True (else warmup_u_r_steps=0)
@@ -701,7 +786,7 @@ class Phase2Config:
         """Get human-readable name of current warm-up stage."""
         stage = self.get_warmup_stage(step)
         
-        if self.u_r_use_network:
+        if self.x_h_use_network and self.u_r_use_network:
             names = {
                 0: "Stage 1: V_h^e only",
                 1: "Stage 2: V_h^e + X_h",
@@ -710,12 +795,20 @@ class Phase2Config:
                 4: "β_r ramping (constant LR)",
                 5: "Full training (LR decay)",
             }
-        else:
-            # U_r computed directly from X_h, not trained (stage 2 skipped)
+        elif self.x_h_use_network and not self.u_r_use_network:
+            # U_r computed directly from X_h, not trained (U_r stage skipped)
             names = {
                 0: "Stage 1: V_h^e only",
                 1: "Stage 2: V_h^e + X_h",
-                3: "Stage 3: V_h^e + X_h + Q_r",  # Stage 3 (was 4 with U_r)
+                3: "Stage 3: V_h^e + X_h + Q_r",
+                4: "β_r ramping (constant LR)",
+                5: "Full training (LR decay)",
+            }
+        else:
+            # X_h computed directly from V_h^e samples, not trained (X_h stage skipped)
+            names = {
+                0: "Stage 1: V_h^e only",
+                3: "Stage 2: V_h^e + Q_r",
                 4: "β_r ramping (constant LR)",
                 5: "Full training (LR decay)",
             }
@@ -730,18 +823,22 @@ class Phase2Config:
         """
         transitions = []
         if self._warmup_v_h_e_end > 0:
-            transitions.append((self._warmup_v_h_e_end, "X_h starts"))
+            if self.x_h_use_network:
+                transitions.append((self._warmup_v_h_e_end, "X_h starts"))
+            else:
+                transitions.append((self._warmup_v_h_e_end, "Q_r starts (X_h computed from V_h^e)"))
         
-        if self.u_r_use_network:
-            # With U_r network: X_h -> U_r -> Q_r
-            if self._warmup_x_h_end > self._warmup_v_h_e_end:
-                transitions.append((self._warmup_x_h_end, "U_r starts"))
-            if self._warmup_u_r_end > self._warmup_x_h_end:
-                transitions.append((self._warmup_u_r_end, "Q_r starts"))
-        else:
-            # Without U_r network: X_h -> Q_r (skip U_r stage, _warmup_u_r_end == _warmup_x_h_end)
-            if self._warmup_x_h_end > self._warmup_v_h_e_end:
-                transitions.append((self._warmup_x_h_end, "Q_r starts"))
+        if self.x_h_use_network:
+            if self.u_r_use_network:
+                # With U_r network: X_h -> U_r -> Q_r
+                if self._warmup_x_h_end > self._warmup_v_h_e_end:
+                    transitions.append((self._warmup_x_h_end, "U_r starts"))
+                if self._warmup_u_r_end > self._warmup_x_h_end:
+                    transitions.append((self._warmup_u_r_end, "Q_r starts"))
+            else:
+                # Without U_r network: X_h -> Q_r (skip U_r stage, _warmup_u_r_end == _warmup_x_h_end)
+                if self._warmup_x_h_end > self._warmup_v_h_e_end:
+                    transitions.append((self._warmup_x_h_end, "Q_r starts"))
         
         if self._warmup_q_r_end > self._warmup_u_r_end:
             transitions.append((self._warmup_q_r_end, "Warmup ends"))
@@ -770,7 +867,7 @@ class Phase2Config:
             'q_r': self.use_lookup_q_r,
             'v_r': self.use_lookup_v_r and self.v_r_use_network,  # Only if V_r network is used
             'v_h_e': self.use_lookup_v_h_e,
-            'x_h': self.use_lookup_x_h,
+            'x_h': self.use_lookup_x_h and self.x_h_use_network,  # Only if X_h network is used
             'u_r': self.use_lookup_u_r and self.u_r_use_network,  # Only if U_r network is used
         }
         return lookup_flags.get(network_name, False)

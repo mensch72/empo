@@ -740,6 +740,10 @@ def render_test_map_values(
     
     frames = []
     
+    # Enable debug output for all V_h^e lookups during test map generation
+#    if hasattr(trainer, 'networks') and hasattr(trainer.networks, 'v_h_e'):
+#        trainer.networks.v_h_e.debug_all_lookups = True
+    
     # Action names for annotation
     single_action_names = ['still', 'left', 'right', 'forward']
     num_robots = len(robot_indices)
@@ -767,6 +771,8 @@ def render_test_map_values(
         )
         env.reset()
         state = env.get_state()
+        
+#        print(f"\n[DEBUG test_map {map_idx + 1}] Querying V_h^e for {len(goal_specs)} goals...")
         
         # Create fresh goals for this environment
         goals = []

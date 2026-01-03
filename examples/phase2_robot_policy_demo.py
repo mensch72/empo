@@ -27,6 +27,11 @@ Usage:
     python phase2_robot_policy_demo.py --async   # Use async actor-learner training
     python phase2_robot_policy_demo.py --tabular # Use lookup tables instead of neural networks
     python phase2_robot_policy_demo.py --curious # Enable curiosity exploration (RND or count-based)
+    python phase2_robot_policy_demo.py --adaptive # Enable adaptive learning rates
+    
+    # Adaptive learning rate modes:
+    # --tabular --adaptive    Uses 1/n per-entry learning rate for lookup tables
+    # --curious --adaptive    Uses RND-based uncertainty scaling for neural networks
     
     # Save/restore for continued training (networks/policy saved by default)
     python phase2_robot_policy_demo.py --save_networks model.pt  # Custom path for networks
@@ -37,7 +42,7 @@ Usage:
     
     # Advanced options
     python phase2_robot_policy_demo.py --debug   # Enable verbose debug output
-    python phase2_robot_policy_demo.py --profile # Profile training with torch.profiler
+    python phase2_robot_policy_demo.py --profile # Profile training component timings
     python phase2_robot_policy_demo.py --rollouts 100 --save_video my_rollouts.mp4
 
 Output:
@@ -45,9 +50,8 @@ Output:
 - All networks saved to outputs/phase2_demo_<env_type>/all_networks.pt
 - Policy saved to outputs/phase2_demo_<env_type>/policy.pt  
 - Movie of rollouts with the learned policy (loaded from disk to verify save/restore)
-- Profiler trace (with --profile): outputs/phase2_demo_<env_type>/profiler_trace.json
+- Profiler output (with --profile): Detailed timing breakdown by component printed at end
 """
-
 import sys
 import os
 import time
@@ -66,6 +70,7 @@ from empo.possible_goal import TabularGoalSampler, PossibleGoalSampler
 from empo.human_policy_prior import HeuristicPotentialPolicy, MultiGridHumanExplorationPolicy
 from empo.nn_based.multigrid import PathDistanceCalculator
 from empo.nn_based.phase2.config import Phase2Config
+from empo.nn_based.phase2.profiler import TrainingProfiler, NoOpProfiler
 from empo.nn_based.phase2.world_model_factory import CachedWorldModelFactory, EnsembleWorldModelFactory
 from empo.nn_based.multigrid.phase2 import train_multigrid_phase2
 from empo.nn_based.multigrid.phase2.robot_policy import MultiGridRobotPolicy, MultiGridRobotExplorationPolicy
@@ -648,7 +653,8 @@ def run_policy_rollout(
         if networks.v_r is not None:
             networks.v_r.eval()
         networks.v_h_e.eval()
-        networks.x_h.eval()
+        if networks.x_h is not None:
+            networks.x_h.eval()
     
     env.reset()
     num_actions = env.action_space.n
@@ -695,8 +701,20 @@ def run_policy_rollout(
                 # Compute U_r directly from X_h values
                 x_h_vals = []
                 for h in human_indices:
-                    x_h = networks.x_h.forward(state, env, h, device)
-                    x_h_clamped = torch.clamp(x_h.squeeze(), min=1e-3, max=1.0)
+                    if networks.x_h is not None:
+                        x_h = networks.x_h.forward(state, env, h, device)
+                        x_h_clamped = torch.clamp(x_h.squeeze(), min=1e-3, max=1.0)
+                    else:
+                        # Compute X_h from V_h^e samples
+                        n_goal_samples = 5
+                        v_h_e_vals = []
+                        for _ in range(n_goal_samples):
+                            goal, _ = goal_sampler.sample(state, h)
+                            v_h_e = networks.v_h_e.forward(state, env, goal, h, device)
+                            v_h_e_vals.append(v_h_e.squeeze())
+                        v_h_e_tensor = torch.stack(v_h_e_vals)
+                        zeta = config.zeta if config else 2.0
+                        x_h_clamped = torch.clamp((v_h_e_tensor ** zeta).mean(), min=1e-3, max=1.0)
                     x_h_vals.append(x_h_clamped)
                 if x_h_vals:
                     x_h_tensor = torch.stack(x_h_vals)
@@ -798,6 +816,7 @@ def main(
     use_encoders: bool = True,
     use_tabular: bool = False,
     use_curious: bool = False,
+    use_adaptive: bool = False,
     save_networks_path: str = None,
     save_policy_path: str = None,
     restore_networks_path: str = None,
@@ -805,8 +824,21 @@ def main(
     num_rollouts_override: int = None,
     save_video_path: str = None,
     num_training_steps_override: int = None,
+    checkpoint_interval: int = 0,
+    seed: int = 42,
 ):
     """Run Phase 2 demo."""
+    # Set random seeds for reproducibility (sync mode only - async mode is inherently non-deterministic)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    # Make PyTorch deterministic (may slow down training slightly)
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    
     # Configure environment based on command line option
     configure_environment(use_ensemble, use_small)
     
@@ -818,6 +850,10 @@ def main(
     print()
     
     # Configuration - start with environment-based defaults
+    # For trivial env, we disable X_h network to compute directly from V_h^e samples
+    # This is simpler and faster for small state spaces
+    use_x_h_network = True  # Default for larger environments
+    
     if env_type == "trivial":
         num_training_steps = 1e6 # 10000
         num_rollouts = NUM_ROLLOUTS
@@ -827,7 +863,9 @@ def main(
         hidden_dim = 16
         goal_feature_dim = 8
         agent_embedding_dim = 4
+        use_x_h_network = False  # Compute X_h directly from V_h^e samples
         print("[TRIVIAL ENV] Using minimal network sizes for simple task")
+        print("[TRIVIAL ENV] X_h computed directly from V_h^e samples (x_h_use_network=False)")
     elif env_type == "small":
         num_training_steps = 20000
         num_rollouts = NUM_ROLLOUTS
@@ -963,7 +1001,7 @@ def main(
         )
         # Create initial env using the factory
         env = env_creator()
-        goal_sampler = SmallGoalSampler(env, seed=123)
+        goal_sampler = SmallGoalSampler(env, seed=seed)
         # Ensemble mode: create new env each episode
         world_model_factory = EnsembleWorldModelFactory(env_creator, episodes_per_env=1)
     else:
@@ -1037,7 +1075,7 @@ def main(
         epsilon_h_decay_steps=num_training_steps // 3 * 2,  # Decay over 50% of training
         lr_q_r=1e-4,
         lr_v_r=1e-4,
-        lr_v_h_e=1e-3,  # faster since V_h^e is critical and the basis for other things
+        lr_v_h_e=1e-2, #1e-3,  # faster since V_h^e is critical and the basis for other things
         lr_x_h=1e-4,
         lr_u_r=1e-4,
         buffer_size=100000,
@@ -1045,9 +1083,11 @@ def main(
         x_h_batch_size=x_h_batch_size,  # Larger batch for X_h to reduce high variance
         num_training_steps=num_training_steps,
         steps_per_episode=env.max_steps,
-        training_steps_per_env_step=1.0,
+        training_steps_per_env_step=0.1,  # 1 training step per 10 env steps (same ratio for sync/async)
         goal_resample_prob=0.1,
         v_h_e_target_update_interval=100,  # Standard target network update frequency
+        # X_h network mode (False for trivial env - compute directly from V_h^e samples)
+        x_h_use_network=use_x_h_network,
         # Warmup stage durations (each is duration in steps, not cumulative)
         warmup_v_h_e_steps=warmup_v_h_e_steps,
         warmup_x_h_steps=warmup_x_h_steps,
@@ -1063,6 +1103,8 @@ def main(
         use_encoders=use_encoders,
         # Tabular learning mode (lookup tables instead of neural networks)
         use_lookup_tables=use_tabular,
+        lookup_use_adaptive_lr=use_adaptive and use_tabular,
+        lookup_adaptive_lr_min=1e-6,
         q_r_weight_decay=0,
         v_r_weight_decay=0,
         v_h_e_weight_decay=0,
@@ -1076,6 +1118,12 @@ def main(
         rnd_feature_dim=64,
         rnd_hidden_dim=128,
         normalize_rnd=True,
+        # RND-based adaptive learning rate for neural networks
+        # Note: requires use_rnd=True, so --adaptive with neural nets also needs --curious
+        rnd_use_adaptive_lr=use_adaptive and not use_tabular and use_curious,
+        rnd_adaptive_lr_scale=1.0,
+        rnd_adaptive_lr_min=0.1,
+        rnd_adaptive_lr_max=10.0,
         # Count-based curiosity for tabular mode
         use_count_based_curiosity=use_curious and use_tabular,
         count_curiosity_scale=1.0,
@@ -1123,6 +1171,14 @@ def main(
                 print(f"  Curiosity (count-based): ENABLED (bonus_coef={config.count_curiosity_bonus_coef_r})")
             else:
                 print(f"  Curiosity (RND): ENABLED (bonus_coef={config.rnd_bonus_coef_r})")
+        if use_adaptive:
+            if use_tabular:
+                print(f"  Adaptive LR (1/n): ENABLED for lookup tables")
+            elif use_curious:
+                print(f"  Adaptive LR (RND-based): ENABLED (scale={config.rnd_adaptive_lr_scale}, "
+                      f"min={config.rnd_adaptive_lr_min}, max={config.rnd_adaptive_lr_max})")
+            else:
+                print(f"  Adaptive LR: --curious required for neural networks (RND needed for uncertainty)")
         print(f"  TensorBoard: {tensorboard_dir}")
         if restore_networks_path:
             print(f"  Restoring from: {restore_networks_path}")
@@ -1131,67 +1187,39 @@ def main(
         t0 = time.time()
         
         if profile:
-            # Profile training with torch.profiler + TensorBoard integration
-            from torch.profiler import profile as torch_profile, ProfilerActivity, schedule, tensorboard_trace_handler
-            
-            profiler_dir = os.path.join(output_dir, 'profiler')
-            os.makedirs(profiler_dir, exist_ok=True)
-            profiler_trace_path = os.path.join(output_dir, 'profiler_trace.json')
-            
-            print(f"  Profiler TensorBoard output: {profiler_dir}")
-            print(f"  View with: tensorboard --logdir={profiler_dir}")
+            # Use our custom TrainingProfiler for detailed component-level timing
+            print("[PROFILE MODE] Using TrainingProfiler for detailed component timing")
+            print("  Categories profiled:")
+            print("    - Actor: sample_human_actions, sample_robot_action, transition_probabilities, step_environment")
+            print("    - Learner: forward passes (v_h_e, x_h, u_r, q_r, v_r, rnd), backward_pass, optimizer_step")
+            print("    - Logging: tensorboard_logging, progress_bar, warmup_check")
             print()
             
-            # Schedule: skip first 2 episodes (wait), warm up for 2, actively profile 6, repeat
-            # This captures steady-state behavior, not just initialization overhead
-            with torch_profile(
-                activities=[ProfilerActivity.CPU] + ([ProfilerActivity.CUDA] if device != 'cpu' else []),
-                schedule=schedule(wait=2, warmup=2, active=6, repeat=2),
-                on_trace_ready=tensorboard_trace_handler(profiler_dir),
-                record_shapes=True,
-                profile_memory=True,
-                with_stack=True,
-            ) as prof:
-                robot_q_network, networks, history, trainer = train_multigrid_phase2(
-                    world_model=env,
-                    human_agent_indices=human_indices,
-                    robot_agent_indices=robot_indices,
-                    human_policy_prior=human_policy,
-                    goal_sampler=goal_sampler,
-                    config=config,
-                    hidden_dim=hidden_dim,
-                    goal_feature_dim=goal_feature_dim,
-                    agent_embedding_dim=agent_embedding_dim,
-                    device=device,
-                    verbose=True,
-                    debug=debug,
-                    tensorboard_dir=tensorboard_dir,
-                    profiler=prof,
-                    restore_networks_path=restore_networks_path,
-                    world_model_factory=world_model_factory,
-                    robot_exploration_policy=robot_exploration_policy,
-                    human_exploration_policy=human_exploration_policy,
-                )
+            training_profiler = TrainingProfiler()
             
-            # Print profiler summary
-            print("\n" + "=" * 70)
-            print("PROFILER RESULTS")
-            print("=" * 70)
-            print("\nTop 30 operations by CPU time:")
-            print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=30))
+            robot_q_network, networks, history, trainer = train_multigrid_phase2(
+                world_model=env,
+                human_agent_indices=human_indices,
+                robot_agent_indices=robot_indices,
+                human_policy_prior=human_policy,
+                goal_sampler=goal_sampler,
+                config=config,
+                hidden_dim=hidden_dim,
+                goal_feature_dim=goal_feature_dim,
+                agent_embedding_dim=agent_embedding_dim,
+                device=device,
+                verbose=True,
+                debug=debug,
+                tensorboard_dir=tensorboard_dir,
+                profiler=training_profiler,
+                restore_networks_path=restore_networks_path,
+                world_model_factory=world_model_factory,
+                robot_exploration_policy=robot_exploration_policy,
+                human_exploration_policy=human_exploration_policy,
+                checkpoint_interval=checkpoint_interval,
+            )
             
-            print("\nTop 20 operations by self CPU time (excluding children):")
-            print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=20))
-            
-            # Also export Chrome trace as backup
-            prof.export_chrome_trace(profiler_trace_path)
-            print(f"\nProfiler outputs:")
-            print(f"  TensorBoard: {profiler_dir}")
-            print(f"    View: tensorboard --logdir={profiler_dir}")
-            print(f"    Then open: http://localhost:6006/#pytorch_profiler")
-            print(f"  Chrome trace: {profiler_trace_path}")
-            print(f"    View in Chrome: chrome://tracing")
-            print(f"    Or use: https://ui.perfetto.dev/")
+            # Note: The profiler report is automatically printed at the end of train()
         else:
             robot_q_network, networks, history, trainer = train_multigrid_phase2(
                 world_model=env,
@@ -1211,11 +1239,17 @@ def main(
                 world_model_factory=world_model_factory,
                 robot_exploration_policy=robot_exploration_policy,
                 human_exploration_policy=human_exploration_policy,
+                checkpoint_interval=checkpoint_interval,
             )
         
         elapsed = time.time() - t0
         
-        print(f"\nTraining completed in {elapsed:.2f} seconds")
+        # Check if training was interrupted
+        if trainer is not None and trainer.interrupted:
+            print(f"\n[Training] Interrupted after {elapsed:.2f} seconds at step {trainer.training_step_count}")
+            print("[Training] Continuing with rollouts and saving...")
+        else:
+            print(f"\nTraining completed in {elapsed:.2f} seconds")
     
     # Show loss history
     if history and len(history) > 0:
@@ -1225,6 +1259,66 @@ def main(
             loss_str = ", ".join(f"{k}={v:.4f}" for k, v in losses.items() if v > 0)
             print(f"  Episode {episode_num}: {loss_str}")
     
+    # Debug: Show position visit counts (helps diagnose exploration issues)
+    if trainer is not None and env_type == "trivial":
+        print("\n" + "=" * 70)
+        print("Position Visit Counts (16 reachable combos in trivial env)")
+        print("=" * 70)
+        
+        summary = trainer.get_position_visit_summary()
+        
+        # Build lookup from visit_counts
+        # Note: human_pos and robot_pos are stored as ((x,y),) tuples, so unwrap them
+        visit_lookup = {}
+        for pos_key, count in summary['visit_counts'].items():
+            human_pos, robot_pos, mobile_objs = pos_key
+            rock_pos = None
+            if mobile_objs:
+                for obj in mobile_objs:
+                    if obj[0] == 'rock':
+                        rock_pos = (obj[1], obj[2])
+                        break
+            # Unwrap human_pos and robot_pos from ((x,y),) to (x,y)
+            h_pos = human_pos[0] if human_pos else None
+            r_pos = robot_pos[0] if robot_pos else None
+            visit_lookup[(rock_pos, h_pos, r_pos)] = count
+        
+        # The 16 reachable (rock, human, robot) position combinations, sorted by difficulty to reach
+        all_expected = [
+            # Rock at (2,1): 1 combo (initial state)
+            ((2,1), (2,2), (1,1)),  # pos 0
+            # Rock at (3,1): 3 combos
+            ((3,1), (2,2), (2,1)),  # pos 1
+            ((3,1), (2,2), (1,1)),  # pos 2a
+            ((3,1), (2,1), (1,1)),  # pos 3a
+            # Rock at (4,1): 12 combos
+            ((4,1), (2,2), (3,1)),  # pos 2
+            ((4,1), (2,2), (2,1)),  # pos 3
+            ((4,1), (2,1), (3,1)),  # pos 3b
+            ((4,1), (2,2), (1,1)),  # pos 4
+            ((4,1), (1,1), (3,1)),  # pos 4b
+            ((4,1), (2,1), (1,1)),  # pos 5
+            ((4,1), (1,1), (2,1)),  # pos 5b
+            ((4,1), (3,1), (1,1)),  # pos 6
+            ((4,1), (1,1), (2,2)),  # pos 6b
+            ((4,1), (3,1), (2,1)),  # pos 7
+            ((4,1), (2,1), (2,2)),  # pos 7b
+            ((4,1), (3,1), (2,2)),  # pos 8
+        ]
+        
+        # Print table for all 16 combos
+        print(f"  {'Rock':<8} {'Human':<8} {'Robot':<8} {'Visits':>8}")
+        print(f"  {'-'*8} {'-'*8} {'-'*8} {'-'*8}")
+        visited_count = 0
+        for rock_pos, human_pos, robot_pos in all_expected:
+            count = visit_lookup.get((rock_pos, human_pos, robot_pos), 0)
+            if count > 0:
+                visited_count += 1
+            print(f"  {str(rock_pos):<8} {str(human_pos):<8} {str(robot_pos):<8} {count:>8}")
+        
+        print(f"\n  Coverage: {visited_count}/16 position combos visited")
+        print("=" * 70)
+
     # Save networks/policy after training (default paths unless overridden)
     # Always save by default to enable testing save/restore functionality
     actual_policy_path = None
@@ -1362,7 +1456,7 @@ if __name__ == "__main__":
     parser.add_argument('--debug', '-d', action='store_true',
                         help='Enable verbose debug output')
     parser.add_argument('--profile', '-p', action='store_true',
-                        help='Profile training with torch.profiler (outputs trace.json)')
+                        help='Profile training with detailed component timing (shows time breakdown by category)')
     parser.add_argument('--async', '-a', dest='use_async', action='store_true',
                         help='Use async actor-learner training (tests async mode on CPU)')
     parser.add_argument('--no-encoders', action='store_true',
@@ -1371,6 +1465,8 @@ if __name__ == "__main__":
                         help='Use lookup tables instead of neural networks (exact tabular learning)')
     parser.add_argument('--curious', '-c', '--rnd', action='store_true',
                         help='Enable curiosity-driven exploration (RND for neural, count-based for tabular)')
+    parser.add_argument('--adaptive', action='store_true',
+                        help='Enable adaptive learning rates (1/n for tabular, RND-based for neural)')
     
     # Save/restore options
     parser.add_argument('--save_networks', type=str, default=None, metavar='PATH',
@@ -1383,8 +1479,12 @@ if __name__ == "__main__":
                         help='Skip training and only run rollouts using policy from PATH')
     
     # Training options
+    parser.add_argument('--seed', type=int, default=42, metavar='N',
+                        help='Random seed for reproducibility (default: 42)')
     parser.add_argument('--steps', type=lambda x: int(float(x)), default=None, metavar='N',
                         help='Number of training steps (overrides default based on env type, supports scientific notation like 1e5)')
+    parser.add_argument('--checkpoint-interval', type=int, default=0, metavar='N',
+                        help='Save checkpoint every N training steps (0 to disable, default: 0)')
     
     # Rollout options
     parser.add_argument('--rollouts', type=int, default=None, metavar='N',
@@ -1404,6 +1504,7 @@ if __name__ == "__main__":
         use_encoders=not args.no_encoders,
         use_tabular=args.tabular,
         use_curious=args.curious,
+        use_adaptive=args.adaptive,
         save_networks_path=args.save_networks,
         save_policy_path=args.save_policy,
         restore_networks_path=args.restore_networks,
@@ -1411,4 +1512,6 @@ if __name__ == "__main__":
         num_rollouts_override=args.rollouts,
         save_video_path=args.save_video,
         num_training_steps_override=args.steps,
+        checkpoint_interval=args.checkpoint_interval,
+        seed=args.seed,
     )

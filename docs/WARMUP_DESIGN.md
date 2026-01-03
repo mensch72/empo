@@ -32,13 +32,14 @@ We break the circular dependencies by training networks in stages, starting with
 | Stage | Duration (default) | Cumulative End | Active Networks | β_r | Learning Rate |
 |-------|-------------------|----------------|-----------------|-----|---------------|
 | 0 | 1,000 steps | 1,000 | V_h^e | 0 | constant |
-| 1 | 1,000 steps | 2,000 | V_h^e, X_h | 0 | constant |
-| 2 | 1,000 steps* | 3,000 | V_h^e, X_h, U_r | 0 | constant |
+| 1 | 1,000 steps* | 2,000 | V_h^e, X_h | 0 | constant |
+| 2 | 1,000 steps** | 3,000 | V_h^e, X_h, U_r | 0 | constant |
 | 3 | 1,000 steps | 4,000 | V_h^e, X_h, U_r, Q_r | 0 | constant |
 | 4 | 2,000 steps | 6,000 | All | 0 → β_r | constant |
 | 5 | remainder | — | All | β_r | 1/√t decay |
 
-*Stage 2 (U_r) is skipped when `u_r_use_network=False` (default), reducing total warmup by 1,000 steps.
+*Stage 1 (X_h) is skipped when `x_h_use_network=False`, reducing total warmup by 1,000 steps.
+**Stage 2 (U_r) is skipped when `u_r_use_network=False` (default), reducing total warmup by 1,000 steps.
 
 ### Stage Details
 
@@ -50,13 +51,15 @@ Since β_r = 0, the robot takes actions uniformly at random. This provides a sta
 
 **Why start here**: V_h^e is the foundation of the EMPO objective. All other networks ultimately depend on accurate V_h^e estimates.
 
-#### Stage 1: + X_h (steps 1,000 - 2,000)
+#### Stage 1: + X_h (optional, skipped when `x_h_use_network=False`)
 
 **Goal**: Learn the aggregate goal achievement ability under the random robot policy.
 
 X_h predicts the aggregate ability of human h to achieve various goals, computed as E_{g_h}[V_h^e(s, g_h)^ζ] over possible goals. With V_h^e already converging, X_h can learn meaningful ability estimates.
 
 **Why this order**: X_h is needed by U_r (or directly for computing U_r when no U_r network), so it must be trained first.
+
+**Note**: When `x_h_use_network=False`, X_h is computed directly from V_h^e samples via Monte Carlo estimation: X_h = mean(V_h^e(s, g)^ζ) over sampled goals. This stage is skipped entirely (`warmup_x_h_steps` is set to 0).
 
 #### Stage 2: + U_r (optional, skipped when `u_r_use_network=False`)
 
@@ -131,7 +134,7 @@ To provide stable training targets and avoid chasing moving targets, the followi
 | `q_r_target` | Stable Q_r for policy computation in V_r and V_h^e targets |
 | `v_r_target` | Stable V_r for Q_r target computation (when `v_r_use_network=True`) |
 | `v_h_e_target` | Stable V_h^e for TD targets and X_h computation |
-| `x_h_target` | Stable X_h for U_r target computation |
+| `x_h_target` | Stable X_h for U_r target computation (when `x_h_use_network=True`) |
 | `u_r_target` | Stable U_r for V_r computation (both network and direct modes) |
 
 Target networks are updated periodically via hard copy. Each network has its own update interval (controlled by `q_r_target_update_interval`, `v_r_target_update_interval`, `v_h_e_target_update_interval`, `x_h_target_update_interval`, and `u_r_target_update_interval`).
@@ -159,7 +162,7 @@ All warmup parameters are in `Phase2Config`. Each `warmup_*_steps` parameter spe
 class Phase2Config:
     # Duration of each warmup stage (absolute, not cumulative)
     warmup_v_h_e_steps: int = 1000   # Duration of V_h^e-only stage
-    warmup_x_h_steps: int = 1000     # Duration of V_h^e + X_h stage
+    warmup_x_h_steps: int = 1000     # Duration of V_h^e + X_h stage (0 if x_h_use_network=False)
     warmup_u_r_steps: int = 1000     # Duration of V_h^e + X_h + U_r stage (0 if u_r_use_network=False)
     warmup_q_r_steps: int = 1000     # Duration of V_h^e + X_h + (U_r) + Q_r stage
     
@@ -170,17 +173,18 @@ class Phase2Config:
     # Learning rate decay
     use_sqrt_lr_decay: bool = True   # Use 1/√t decay after full warmup
     
-    # U_r computation mode
+    # Network computation modes
+    x_h_use_network: bool = True     # If False, warmup_x_h_steps is set to 0
     u_r_use_network: bool = False    # If False, warmup_u_r_steps is set to 0
 ```
 
-**Note:** When `u_r_use_network=False` (the default), `warmup_u_r_steps` is automatically set to 0 in `__post_init__`, effectively skipping the U_r warmup stage.
+**Note:** When `x_h_use_network=False`, `warmup_x_h_steps` is automatically set to 0 in `__post_init__`, effectively skipping the X_h warmup stage. Similarly, when `u_r_use_network=False` (the default), `warmup_u_r_steps` is automatically set to 0.
 
 Internally, cumulative thresholds are computed:
 - `_warmup_v_h_e_end = warmup_v_h_e_steps` (1000)
-- `_warmup_x_h_end = _warmup_v_h_e_end + warmup_x_h_steps` (2000)
-- `_warmup_u_r_end = _warmup_x_h_end + warmup_u_r_steps` (3000 or 2000 if u_r skipped)
-- `_warmup_q_r_end = _warmup_u_r_end + warmup_q_r_steps` (4000 or 3000 if u_r skipped)
+- `_warmup_x_h_end = _warmup_v_h_e_end + warmup_x_h_steps` (2000 or 1000 if x_h skipped)
+- `_warmup_u_r_end = _warmup_x_h_end + warmup_u_r_steps` (3000 or earlier if stages skipped)
+- `_warmup_q_r_end = _warmup_u_r_end + warmup_q_r_steps` (4000 or earlier if stages skipped)
 
 ### Disabling Warmup
 

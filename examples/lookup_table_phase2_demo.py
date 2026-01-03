@@ -115,7 +115,7 @@ def create_goal_sampler(env):
 # Training Configuration
 # =============================================================================
 
-def create_lookup_config(use_curiosity: bool = False) -> Phase2Config:
+def create_lookup_config(use_curiosity: bool = False, use_adaptive_lr: bool = False) -> Phase2Config:
     """Create Phase2Config for lookup table training.
     
     Key settings:
@@ -125,6 +125,8 @@ def create_lookup_config(use_curiosity: bool = False) -> Phase2Config:
     
     Args:
         use_curiosity: If True, enable count-based curiosity exploration.
+        use_adaptive_lr: If True, use per-entry adaptive learning rate (1/n)
+            so each entry converges to the arithmetic mean of target values.
     """
     return Phase2Config(
         # Enable lookup tables
@@ -146,6 +148,13 @@ def create_lookup_config(use_curiosity: bool = False) -> Phase2Config:
         lookup_default_x_h=0.5,
         lookup_default_y=2.0,  # For U_r (y > 1)
         
+        # Adaptive per-entry learning rate (converges to arithmetic mean)
+        # When enabled, each entry uses lr=1/n where n is its update count.
+        # This is mathematically equivalent to taking the arithmetic mean
+        # of all target values seen for that entry.
+        lookup_use_adaptive_lr=use_adaptive_lr,
+        lookup_adaptive_lr_min=1e-6,  # Prevents lr→0 as n→∞
+        
         # Theory parameters
         gamma_r=0.99,
         gamma_h=0.99,
@@ -165,7 +174,7 @@ def create_lookup_config(use_curiosity: bool = False) -> Phase2Config:
         count_curiosity_bonus_coef_r=0.1,
         count_curiosity_bonus_coef_h=0.1,
         
-        # Higher learning rates work well for lookup tables
+        # Learning rates (ignored when use_adaptive_lr=True for lookup tables)
         lr_q_r=0.01,
         lr_v_r=0.01,
         lr_v_h_e=0.01,

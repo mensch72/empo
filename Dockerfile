@@ -129,8 +129,9 @@ RUN if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
     fi
 
 # Create a non-root user for better security
-ARG USER_ID=1000
-ARG GROUP_ID=1000
+# Default to 1001 to match docker-compose.yml defaults
+ARG USER_ID=1001
+ARG GROUP_ID=1001
 RUN groupadd -g ${GROUP_ID} appuser && \
     useradd -m -u ${USER_ID} -g appuser -s /bin/bash appuser
 

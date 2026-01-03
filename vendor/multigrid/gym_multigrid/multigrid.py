@@ -2418,7 +2418,7 @@ class MultiGridEnv(WorldModel):
         
         # Compute and cache the initial map hash (immutable grid structure)
         # This is computed once per reset and used to distinguish states from different maps
-        self._initial_map_hash = self._compute_initial_map_hash()
+        self._initial_map_hash = self._compute_immutable_objects_hash()
 
         # Return first observation
         if self.partial_obs:
@@ -2460,7 +2460,7 @@ class MultiGridEnv(WorldModel):
         # Sort mobile objects by initial position for deterministic ordering
         self._mobile_objects.sort(key=lambda x: x[0])
     
-    def _compute_initial_map_hash(self) -> int:
+    def _compute_immutable_objects_hash(self) -> int:
         """
         Compute a hash of the initial/immutable grid structure.
         
@@ -2471,11 +2471,11 @@ class MultiGridEnv(WorldModel):
         
         The hash includes:
         - Grid dimensions (width, height)
-        - Positions and types of immutable objects (walls, goals, lava, keys, unsteady ground)
-        - Initial agent positions and colors (agents from different maps would conflict otherwise)
+        - Positions and types of immutable objects (walls, goals, lava, unsteady ground)
         
-        Note: Mobile objects (blocks, rocks) and mutable objects (doors, boxes, magic walls)
-        are NOT included since they can change during episodes and are tracked in get_state().
+        Note: Mobile objects (blocks, rocks, agents) and mutable objects (doors, boxes, 
+        magic walls, keys, balls) are NOT included since they can change during episodes
+        and are tracked in get_state().
         
         Returns:
             int: A hash value representing the immutable grid structure.
@@ -2485,7 +2485,8 @@ class MultiGridEnv(WorldModel):
         
         # Collect immutable objects from the grid
         # Types that don't change position and don't have mutable state
-        IMMUTABLE_TYPES = {'wall', 'goal', 'lava', 'key', 'ball', 'unsteadyground'}
+        # Note: keys and balls CAN be picked up/moved, so they're not truly immutable
+        IMMUTABLE_TYPES = {'wall', 'goal', 'lava', 'unsteadyground'}
         
         for j in range(self.grid.height):
             for i in range(self.grid.width):
@@ -2500,12 +2501,6 @@ class MultiGridEnv(WorldModel):
                 if terrain_cell is not None and terrain_cell.type in IMMUTABLE_TYPES:
                     color = getattr(terrain_cell, 'color', None)
                     immutable_data.append((i, j, terrain_cell.type, color, 'terrain'))
-        
-        # Include initial agent positions and colors
-        # This distinguishes maps with agents at different starting positions
-        for agent_idx, agent in enumerate(self.agents):
-            if agent.pos is not None:
-                immutable_data.append(('agent', agent_idx, int(agent.pos[0]), int(agent.pos[1]), agent.color))
         
         return hash(tuple(immutable_data))
     
