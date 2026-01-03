@@ -6,12 +6,14 @@ services:
       dockerfile: Dockerfile
       args:
         DEV_MODE: "true"
-        USER_ID: ${USER_ID:-1000}
-        GROUP_ID: ${GROUP_ID:-1000}
+        USER_ID: ${USER_ID:-1001}
+        GROUP_ID: ${GROUP_ID:-1001}
         HIERARCHICAL_MODE: ${HIERARCHICAL_MODE:-false}
-    image: empo:dev
+    image: empo:dev-${USER_ID:-1001}
     pull_policy: build
     container_name: empo-dev
+    # Run as the host user to avoid permission issues with mounted volumes
+    user: "${USER_ID:-1001}:${GROUP_ID:-1001}"
     
     volumes:
       - .:/workspace

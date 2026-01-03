@@ -1205,6 +1205,66 @@ def main(
             loss_str = ", ".join(f"{k}={v:.4f}" for k, v in losses.items() if v > 0)
             print(f"  Episode {episode_num}: {loss_str}")
     
+    # Debug: Show position visit counts (helps diagnose exploration issues)
+    if trainer is not None and env_type == "trivial":
+        print("\n" + "=" * 70)
+        print("Position Visit Counts (16 reachable combos in trivial env)")
+        print("=" * 70)
+        
+        summary = trainer.get_position_visit_summary()
+        
+        # Build lookup from visit_counts
+        # Note: human_pos and robot_pos are stored as ((x,y),) tuples, so unwrap them
+        visit_lookup = {}
+        for pos_key, count in summary['visit_counts'].items():
+            human_pos, robot_pos, mobile_objs = pos_key
+            rock_pos = None
+            if mobile_objs:
+                for obj in mobile_objs:
+                    if obj[0] == 'rock':
+                        rock_pos = (obj[1], obj[2])
+                        break
+            # Unwrap human_pos and robot_pos from ((x,y),) to (x,y)
+            h_pos = human_pos[0] if human_pos else None
+            r_pos = robot_pos[0] if robot_pos else None
+            visit_lookup[(rock_pos, h_pos, r_pos)] = count
+        
+        # The 16 reachable (rock, human, robot) position combinations
+        all_expected = [
+            # Rock at (2,1): 1 combo (initial state)
+            ((2,1), (2,2), (1,1)),
+            # Rock at (3,1): 3 combos
+            ((3,1), (2,1), (1,1)),
+            ((3,1), (2,2), (1,1)),
+            ((3,1), (2,2), (2,1)),
+            # Rock at (4,1): 12 combos
+            ((4,1), (2,1), (1,1)),
+            ((4,1), (2,2), (1,1)),
+            ((4,1), (3,1), (1,1)),
+            ((4,1), (1,1), (2,1)),
+            ((4,1), (2,2), (2,1)),
+            ((4,1), (3,1), (2,1)),
+            ((4,1), (1,1), (2,2)),
+            ((4,1), (2,1), (2,2)),
+            ((4,1), (3,1), (2,2)),
+            ((4,1), (1,1), (3,1)),
+            ((4,1), (2,1), (3,1)),
+            ((4,1), (2,2), (3,1)),
+        ]
+        
+        # Print table for all 16 combos
+        print(f"  {'Rock':<8} {'Human':<8} {'Robot':<8} {'Visits':>8}")
+        print(f"  {'-'*8} {'-'*8} {'-'*8} {'-'*8}")
+        visited_count = 0
+        for rock_pos, human_pos, robot_pos in all_expected:
+            count = visit_lookup.get((rock_pos, human_pos, robot_pos), 0)
+            if count > 0:
+                visited_count += 1
+            print(f"  {str(rock_pos):<8} {str(human_pos):<8} {str(robot_pos):<8} {count:>8}")
+        
+        print(f"\n  Coverage: {visited_count}/16 position combos visited")
+        print("=" * 70)
+
     # Save networks/policy after training (default paths unless overridden)
     # Always save by default to enable testing save/restore functionality
     actual_policy_path = None

@@ -255,6 +255,11 @@ class BasePhase2Trainer(ABC):
         # Dict maps state_hash -> visit_count for histogram analysis
         self._state_visit_counts: Dict[int, int] = {}
         
+        # Track position-based visit counts for debugging exploration coverage
+        # Maps ((human_pos, human_dir), ...), ((robot_pos, robot_dir), ...)) -> count
+        # This provides more detailed insight than hashes alone
+        self._position_visit_counts: Dict[tuple, int] = {}
+        
         if self.debug:
             print("[DEBUG] BasePhase2Trainer.__init__: Initialization complete.")
     
@@ -279,6 +284,7 @@ class BasePhase2Trainer(ABC):
         state['env'] = None
         # Don't pickle state visit counts dict - large and only needed in learner
         state['_state_visit_counts'] = {}
+        state['_position_visit_counts'] = {}
         return state
     
     def __setstate__(self, state):
@@ -302,6 +308,9 @@ class BasePhase2Trainer(ABC):
         
         This prevents old data from mixing with new runs in TensorBoard visualization.
         Old files are moved to a timestamped zip archive in the same directory.
+        
+        If archiving fails (e.g., due to permission issues from Docker UID mismatch),
+        the entire tensorboard directory is deleted and recreated to allow new writes.
         
         Args:
             tensorboard_dir: Path to the TensorBoard log directory.
@@ -333,8 +342,18 @@ class BasePhase2Trainer(ABC):
             if self.verbose:
                 print(f"[TensorBoard] Archived {len(event_files)} old event files to {archive_name}")
         except Exception as e:
-            # Don't fail training if archiving fails, just warn
+            # Archiving failed (likely permission issues from Docker UID mismatch)
+            # Delete entire tensorboard dir and recreate to allow new writes
             print(f"[TensorBoard] Warning: Failed to archive old data: {e}")
+            print(f"[TensorBoard] Deleting and recreating tensorboard directory...")
+            try:
+                import shutil
+                shutil.rmtree(tensorboard_dir)
+                os.makedirs(tensorboard_dir, exist_ok=True)
+                if self.verbose:
+                    print(f"[TensorBoard] Successfully recreated {tensorboard_dir}")
+            except Exception as e2:
+                print(f"[TensorBoard] Warning: Could not recreate tensorboard dir: {e2}")
     
     def _init_target_networks(self):
         """Initialize target networks as copies of main networks."""
@@ -2156,6 +2175,29 @@ class BasePhase2Trainer(ABC):
                 state_for_hash = state
             state_hash = hash(state_for_hash)
             self._state_visit_counts[state_hash] = self._state_visit_counts.get(state_hash, 0) + 1
+            
+            # Also track position-based visits for debugging exploration coverage
+            # Extract agent positions from state tuple (without directions)
+            # State format: (step_count, agent_states, mobile_objects, mutable_objects)
+            # agent_states: tuple of (pos_x, pos_y, dir, terminated, started, paused, ...)
+            if isinstance(state, tuple) and len(state) >= 2:
+                agent_states = state[1]  # Second element is agent_states
+                if isinstance(agent_states, (tuple, list)) and len(agent_states) > 0:
+                    # Extract (pos_x, pos_y) only for each agent (no direction)
+                    human_positions = tuple(
+                        (agent_states[i][0], agent_states[i][1])
+                        for i in self.human_agent_indices
+                        if i < len(agent_states) and agent_states[i] is not None
+                    )
+                    robot_positions = tuple(
+                        (agent_states[i][0], agent_states[i][1])
+                        for i in self.robot_agent_indices
+                        if i < len(agent_states) and agent_states[i] is not None
+                    )
+                    # Also extract mobile object positions (rock/block positions)
+                    mobile_objects = state[2] if len(state) > 2 else ()
+                    position_key = (human_positions, robot_positions, mobile_objects)
+                    self._position_visit_counts[position_key] = self._position_visit_counts.get(position_key, 0) + 1
         except TypeError:
             # State not hashable - skip tracking
             pass
@@ -2168,6 +2210,37 @@ class BasePhase2Trainer(ABC):
                 state_for_counts = state
             self.networks.count_curiosity.record_visit(state_for_counts)
     
+    def get_position_visit_summary(self) -> Dict[str, Any]:
+        """
+        Get a summary of position-based visit counts for debugging exploration.
+        
+        Returns:
+            Dict with:
+                - 'unique_positions': Number of unique (human_pos, robot_pos, mobile_objects) combos
+                - 'total_visits': Total number of visits recorded
+                - 'visit_counts': Dict mapping position_key -> count (sorted by count descending)
+                - 'unvisited_estimate': Estimated number of unvisited positions (if small env)
+        """
+        if not self._position_visit_counts:
+            return {
+                'unique_positions': 0,
+                'total_visits': 0,
+                'visit_counts': {},
+            }
+        
+        # Sort by count (descending)
+        sorted_counts = sorted(
+            self._position_visit_counts.items(),
+            key=lambda x: x[1],
+            reverse=True
+        )
+        
+        return {
+            'unique_positions': len(self._position_visit_counts),
+            'total_visits': sum(self._position_visit_counts.values()),
+            'visit_counts': dict(sorted_counts),
+        }
+
     def training_step(self) -> Tuple[Dict[str, float], Dict[str, float], Dict[str, Dict[str, float]]]:
         """
         Perform one training step (sample batch, compute losses, update).
