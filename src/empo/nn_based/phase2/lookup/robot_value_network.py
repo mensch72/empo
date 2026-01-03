@@ -56,6 +56,9 @@ class LookupTableRobotValueNetwork(BaseRobotValueNetwork):
         
         # Track new parameters for incremental optimizer updates
         self._new_params: List[nn.Parameter] = []
+        
+        # Track update counts per entry for adaptive learning rate
+        self._update_counts: Dict[int, int] = {}
     
     def _normalize_state(self, state: Hashable) -> Hashable:
         """
@@ -78,6 +81,30 @@ class LookupTableRobotValueNetwork(BaseRobotValueNetwork):
         params = self._new_params
         self._new_params = []
         return params
+
+    def get_update_count(self, key: int) -> int:
+        """Get the update count for a specific entry."""
+        return self._update_counts.get(key, 0)
+    
+    def increment_update_counts(self, keys: List[int]) -> None:
+        """Increment update counts for the given keys."""
+        for key in keys:
+            self._update_counts[key] = self._update_counts.get(key, 0) + 1
+    
+    def scale_gradients_by_update_count(self, min_lr: float = 1e-6) -> List[int]:
+        """
+        Scale gradients by 1/update_count for adaptive learning rate.
+        
+        Returns list of keys that had gradients (for incrementing update counts).
+        """
+        keys_with_grads = []
+        for key, param in self.table.items():
+            if param.grad is not None and param.grad.abs().sum() > 0:
+                update_count = self._update_counts.get(key, 0) + 1
+                effective_lr = max(min_lr, 1.0 / update_count)
+                param.grad.mul_(effective_lr)
+                keys_with_grads.append(key)
+        return keys_with_grads
 
     def _get_or_create_entry(self, key: int, device: str = 'cpu') -> nn.Parameter:
         """
@@ -221,12 +248,13 @@ class LookupTableRobotValueNetwork(BaseRobotValueNetwork):
             yield name, param
     
     def state_dict(self, destination=None, prefix='', keep_vars=False):
-        """Return state dict containing all table entries."""
+        """Return state dict containing all table entries and update counts."""
         state = {}
         for key, param in self.table.items():
             state[f"{prefix}table.{key}"] = param if keep_vars else param.data.clone()
         state[f"{prefix}_table_keys"] = list(self.table.keys())
         state[f"{prefix}_config"] = self.get_config()
+        state[f"{prefix}_update_counts"] = dict(self._update_counts)
         return state
     
     def load_state_dict(self, state_dict, strict=True):
@@ -254,12 +282,25 @@ class LookupTableRobotValueNetwork(BaseRobotValueNetwork):
             param_key = f"{prefix}table.{key}"
             if param_key in state_dict:
                 self.table[key] = nn.Parameter(state_dict[param_key].clone())
+        
+        # Load update counts if present
+        update_counts_key = f"{prefix}_update_counts"
+        if update_counts_key in state_dict:
+            self._update_counts = dict(state_dict[update_counts_key])
+        else:
+            self._update_counts = {}
     
     def to(self, device):
         """Move all table entries to device."""
         for key in list(self.table.keys()):
             self.table[key] = nn.Parameter(self.table[key].to(device))
         return self
+    
+    def zero_grad(self):
+        """Zero gradients for all table entries."""
+        for param in self.table.values():
+            if param.grad is not None:
+                param.grad.zero_()
     
     def train(self, mode: bool = True):
         """Set training mode."""

@@ -401,16 +401,29 @@ class BasePhase2Trainer(ABC):
         
         For lookup table networks that may have empty parameter lists,
         creates a placeholder parameter to satisfy the optimizer constructor.
+        
+        When lookup_use_adaptive_lr is True for lookup tables, the base learning
+        rate is set to 1.0 and actual per-entry learning rates are controlled via
+        gradient scaling in _apply_adaptive_lr_scaling().
         """
+        def get_lr(network, base_lr):
+            """Get learning rate, using 1.0 for lookup tables with adaptive LR."""
+            if (self.config.lookup_use_adaptive_lr 
+                and hasattr(network, 'scale_gradients_by_update_count')):
+                # With adaptive LR, use base_lr=1.0 since actual LR is via gradient scaling
+                return 1.0
+            return base_lr
+        
         def make_optimizer(network, lr, weight_decay):
             """Create optimizer, handling empty parameter case for lookup tables."""
             params = list(network.parameters())
+            effective_lr = get_lr(network, lr)
             if len(params) == 0:
                 # Lookup tables start empty - create placeholder parameter
                 # This will be replaced when optimizer is recreated after tables grow
                 placeholder = nn.Parameter(torch.zeros(1, requires_grad=True))
-                return optim.Adam([placeholder], lr=lr, weight_decay=weight_decay)
-            return optim.Adam(params, lr=lr, weight_decay=weight_decay)
+                return optim.Adam([placeholder], lr=effective_lr, weight_decay=weight_decay)
+            return optim.Adam(params, lr=effective_lr, weight_decay=weight_decay)
         
         optimizers = {
             'q_r': make_optimizer(
@@ -508,6 +521,42 @@ class BasePhase2Trainer(ABC):
             total_entries = get_total_table_size(self.networks)
             print(f"[DEBUG] Added {total_new} new params to optimizers "
                   f"(step {self.training_step_count}, {total_entries} total entries)")
+    
+    def _apply_adaptive_lr_scaling(self) -> None:
+        """
+        Apply adaptive learning rate scaling for lookup table networks.
+        
+        When config.lookup_use_adaptive_lr is True, this scales gradients by 
+        1/update_count for each lookup table entry, achieving per-entry learning
+        rates that converge to the arithmetic mean of target values.
+        
+        This should be called after backward() but before optimizer.step().
+        
+        The method also increments update counts for entries that received gradients.
+        """
+        if not self.config.lookup_use_adaptive_lr:
+            return
+        
+        min_lr = self.config.lookup_adaptive_lr_min
+        
+        # Map networks to their optimizer names
+        networks_to_scale = []
+        
+        if hasattr(self.networks.q_r, 'scale_gradients_by_update_count'):
+            networks_to_scale.append(('q_r', self.networks.q_r))
+        if hasattr(self.networks.v_h_e, 'scale_gradients_by_update_count'):
+            networks_to_scale.append(('v_h_e', self.networks.v_h_e))
+        if hasattr(self.networks.x_h, 'scale_gradients_by_update_count'):
+            networks_to_scale.append(('x_h', self.networks.x_h))
+        if self.config.u_r_use_network and hasattr(self.networks.u_r, 'scale_gradients_by_update_count'):
+            networks_to_scale.append(('u_r', self.networks.u_r))
+        if self.config.v_r_use_network and hasattr(self.networks.v_r, 'scale_gradients_by_update_count'):
+            networks_to_scale.append(('v_r', self.networks.v_r))
+        
+        # Scale gradients and increment update counts
+        for name, network in networks_to_scale:
+            keys_with_grads = network.scale_gradients_by_update_count(min_lr)
+            network.increment_update_counts(keys_with_grads)
     
     def _compute_param_norms(self) -> Dict[str, float]:
         """Compute L2 norms of network parameters for monitoring."""
@@ -2324,20 +2373,36 @@ class BasePhase2Trainer(ABC):
                 retain = (i < len(trainable_losses) - 1)
                 loss.backward(retain_graph=retain)
         
+        # Apply adaptive learning rate scaling for lookup tables
+        # This scales gradients by 1/update_count to achieve arithmetic mean convergence
+        self._apply_adaptive_lr_scaling()
+        
         # Phase 2: Apply gradient clipping and optimizer steps
         with self.profiler.section("optimizer_step"):
             for name, loss in trainable_losses:
                 # Update learning rate using the new warm-up-aware schedule
                 self.update_counts[name] += 1
-                new_lr = self.config.get_learning_rate(
-                    name, self.training_step_count, self.update_counts[name]
+                
+                # For lookup tables with adaptive LR, keep lr=1.0 (actual LR via gradient scaling)
+                net = network_map.get(name)
+                use_adaptive_lr = (
+                    self.config.lookup_use_adaptive_lr 
+                    and net is not None
+                    and hasattr(net, 'scale_gradients_by_update_count')
                 )
+                
+                if use_adaptive_lr:
+                    new_lr = 1.0
+                else:
+                    new_lr = self.config.get_learning_rate(
+                        name, self.training_step_count, self.update_counts[name]
+                    )
+                
                 for param_group in self.optimizers[name].param_groups:
                     param_group['lr'] = new_lr
                 
                 # Apply gradient clipping (optionally scaled by learning rate)
                 if name in network_map:
-                    net = network_map[name]
                     clip_val = self.config.get_effective_grad_clip(name, new_lr)
                     if clip_val and clip_val > 0:
                         torch.nn.utils.clip_grad_norm_(net.parameters(), clip_val)

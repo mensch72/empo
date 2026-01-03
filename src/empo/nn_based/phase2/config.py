@@ -305,6 +305,24 @@ class Phase2Config:
     lookup_default_x_h: float = 1e-10    # X_h ∈ (0, 1] (aggregate ability)
     lookup_default_y: float = 2.0        # y >= 1 (intermediate for U_r)
     
+    # =========================================================================
+    # Adaptive per-entry learning rate for lookup tables
+    # =========================================================================
+    # When enabled, each lookup table entry uses a learning rate of 1/n where n
+    # is the number of updates to that entry. This makes each entry converge to
+    # the exact arithmetic mean of all target values it has seen.
+    #
+    # Implementation: Before optimizer.step(), gradients are scaled by 1/update_count
+    # for each entry. The base learning rate should be set to 1.0 for this mode.
+    #
+    # This generalizes to neural networks via uncertainty-weighted learning rates:
+    # instead of 1/update_count, use an uncertainty estimate (e.g., ensemble variance).
+    #
+    # Robbins-Monro condition: For convergence to true expectation, we need
+    # sum(lr) = ∞ and sum(lr²) < ∞. The 1/n schedule satisfies this exactly.
+    lookup_use_adaptive_lr: bool = False  # Enable per-entry adaptive learning rate
+    lookup_adaptive_lr_min: float = 1e-6  # Minimum learning rate (prevents 1/∞ = 0)
+    
     def __post_init__(self):
         """Compute cumulative warmup thresholds and apply network flags."""
         # Warn about deprecated legacy LR decay flags

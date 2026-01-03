@@ -1077,6 +1077,8 @@ def main(
         use_encoders=use_encoders,
         # Tabular learning mode (lookup tables instead of neural networks)
         use_lookup_tables=use_tabular,
+        lookup_use_adaptive_lr=True,
+        lookup_adaptive_lr_min=1e-6,
         q_r_weight_decay=0,
         v_r_weight_decay=0,
         v_h_e_weight_decay=0,
