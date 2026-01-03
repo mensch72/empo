@@ -1027,12 +1027,14 @@ class TestAdaptiveLearningRate:
             optimizer.step()
         
         # After 5 updates, the first action value should be close to the mean
-        output = network.forward_batch(simple_states[:1], None, device='cpu')
+        _ = network.forward_batch(simple_states[:1], None, device='cpu')
         # Note: ensure_negative applies -softplus, so we need to check the raw value
         raw_value = network.table[key][0].item()
-        # The raw value goes through -softplus to get output
-        # So raw_value should be such that -softplus(raw_value) ≈ -3.0
-        # This is complex due to the transformation, but the update counts should be 5
+        # The raw value should converge toward the arithmetic mean of targets
+        # With 1/n learning rate, after n updates: value = (1/n) * sum(targets) = expected_mean
+        # Allow 15% tolerance due to the iterative nature and softplus transformation
+        assert raw_value == pytest.approx(expected_mean, rel=0.15), f"Raw value {raw_value} should be close to expected mean {expected_mean}"
+        # Verify update count is correct
         assert network.get_update_count(key) == 5
     
     def test_update_counts_persist_in_state_dict(self, simple_states):

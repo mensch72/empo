@@ -734,13 +734,6 @@ class TestAsyncRNDSync:
         """
         from empo.nn_based.phase2.rnd import RNDModule
         
-        config = Phase2Config(
-            use_rnd=True,
-            use_human_action_rnd=True,
-            rnd_feature_dim=32,
-            rnd_hidden_dim=64,
-        )
-        
         # Create source networks with trained values
         source_rnd = RNDModule(input_dim=64, feature_dim=32, hidden_dim=64)
         source_human_rnd = RNDModule(input_dim=64, feature_dim=32, hidden_dim=64)

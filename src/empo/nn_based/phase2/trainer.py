@@ -27,7 +27,7 @@ import torch.optim as optim
 from tqdm import tqdm
 
 from .config import Phase2Config
-from .profiler import NoOpProfiler, TrainingProfiler
+from .profiler import NoOpProfiler
 from .replay_buffer import Phase2Transition, Phase2ReplayBuffer
 from .robot_q_network import BaseRobotQNetwork
 from .human_goal_ability import BaseHumanGoalAchievementNetwork

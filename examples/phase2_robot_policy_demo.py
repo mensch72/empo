@@ -70,7 +70,7 @@ from empo.possible_goal import TabularGoalSampler, PossibleGoalSampler
 from empo.human_policy_prior import HeuristicPotentialPolicy, MultiGridHumanExplorationPolicy
 from empo.nn_based.multigrid import PathDistanceCalculator
 from empo.nn_based.phase2.config import Phase2Config
-from empo.nn_based.phase2.profiler import TrainingProfiler, NoOpProfiler
+from empo.nn_based.phase2.profiler import TrainingProfiler
 from empo.nn_based.phase2.world_model_factory import CachedWorldModelFactory, EnsembleWorldModelFactory
 from empo.nn_based.multigrid.phase2 import train_multigrid_phase2
 from empo.nn_based.multigrid.phase2.robot_policy import MultiGridRobotPolicy, MultiGridRobotExplorationPolicy
