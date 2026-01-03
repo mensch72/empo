@@ -1051,7 +1051,7 @@ def main(
         epsilon_h_decay_steps=num_training_steps // 3 * 2,  # Decay over 50% of training
         lr_q_r=1e-4,
         lr_v_r=1e-4,
-        lr_v_h_e=1e-3,  # faster since V_h^e is critical and the basis for other things
+        lr_v_h_e=1e-2, #1e-3,  # faster since V_h^e is critical and the basis for other things
         lr_x_h=1e-4,
         lr_u_r=1e-4,
         buffer_size=100000,
@@ -1241,27 +1241,27 @@ def main(
             r_pos = robot_pos[0] if robot_pos else None
             visit_lookup[(rock_pos, h_pos, r_pos)] = count
         
-        # The 16 reachable (rock, human, robot) position combinations
+        # The 16 reachable (rock, human, robot) position combinations, sorted by difficulty to reach
         all_expected = [
             # Rock at (2,1): 1 combo (initial state)
-            ((2,1), (2,2), (1,1)),
+            ((2,1), (2,2), (1,1)),  # pos 0
             # Rock at (3,1): 3 combos
-            ((3,1), (2,1), (1,1)),
-            ((3,1), (2,2), (1,1)),
-            ((3,1), (2,2), (2,1)),
+            ((3,1), (2,2), (2,1)),  # pos 1
+            ((3,1), (2,2), (1,1)),  # pos 2a
+            ((3,1), (2,1), (1,1)),  # pos 3a
             # Rock at (4,1): 12 combos
-            ((4,1), (2,1), (1,1)),
-            ((4,1), (2,2), (1,1)),
-            ((4,1), (3,1), (1,1)),
-            ((4,1), (1,1), (2,1)),
-            ((4,1), (2,2), (2,1)),
-            ((4,1), (3,1), (2,1)),
-            ((4,1), (1,1), (2,2)),
-            ((4,1), (2,1), (2,2)),
-            ((4,1), (3,1), (2,2)),
-            ((4,1), (1,1), (3,1)),
-            ((4,1), (2,1), (3,1)),
-            ((4,1), (2,2), (3,1)),
+            ((4,1), (2,2), (3,1)),  # pos 2
+            ((4,1), (2,2), (2,1)),  # pos 3
+            ((4,1), (2,1), (3,1)),  # pos 3b
+            ((4,1), (2,2), (1,1)),  # pos 4
+            ((4,1), (1,1), (3,1)),  # pos 4b
+            ((4,1), (2,1), (1,1)),  # pos 5
+            ((4,1), (1,1), (2,1)),  # pos 5b
+            ((4,1), (3,1), (1,1)),  # pos 6
+            ((4,1), (1,1), (2,2)),  # pos 6b
+            ((4,1), (3,1), (2,1)),  # pos 7
+            ((4,1), (2,1), (2,2)),  # pos 7b
+            ((4,1), (3,1), (2,2)),  # pos 8
         ]
         
         # Print table for all 16 combos

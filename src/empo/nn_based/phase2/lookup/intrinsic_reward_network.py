@@ -226,6 +226,7 @@ class LookupTableIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
             'xi': self.xi,
             'eta': self.eta,
             'default_y': self.default_y,
+            'include_step_count': self.include_step_count,
             'table_size': len(self.table)
         }
     
@@ -250,6 +251,13 @@ class LookupTableIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
     
     def load_state_dict(self, state_dict, strict=True):
         """Load state dict containing table entries."""
+        # Restore config if present
+        config_key = '_config'
+        if config_key in state_dict:
+            config = state_dict[config_key]
+            if 'include_step_count' in config:
+                self.include_step_count = config['include_step_count']
+        
         prefix = ''
         keys_key = f"{prefix}_table_keys"
         if keys_key not in state_dict:

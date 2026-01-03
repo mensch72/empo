@@ -1090,6 +1090,10 @@ def train_multigrid_phase2(
     
     if debug:
         print("[DEBUG] Creating trainer...")
+        # Enable debug output for V_h^e new key creation (lookup tables only)
+        # Use setattr since the attribute is read via getattr with default
+        networks.v_h_e.debug_new_keys = True
+        print("[DEBUG] Enabled V_h^e debug_new_keys for tracking new lookup table entries")
     
     # Create trainer
     trainer = MultiGridPhase2Trainer(

@@ -111,24 +111,42 @@ class LookupTableHumanGoalAbilityNetwork(BaseHumanGoalAchievementNetwork):
             return state[1:]
         return state
     
-    def _get_or_create_entry(self, key: int, device: str = 'cpu') -> nn.Parameter:
+    def _get_or_create_entry(self, key: int, device: str = 'cpu', state_for_debug: Hashable = None, goal_for_debug: Any = None, map_hash_for_debug: int = None) -> nn.Parameter:
         """
         Get entry for key, creating with default value if not present.
         
         Args:
             key: Hash key for the (state, goal, map_hash) triple.
             device: Target device for the parameter.
+            state_for_debug: Original state (for debug warnings).
+            goal_for_debug: Original goal (for debug warnings).
+            map_hash_for_debug: Map hash (for debug warnings).
         
         Returns:
             Parameter containing V_h^e value for this (state, goal, map_hash).
         """
-        if key not in self.table:
+        is_new = key not in self.table
+        if is_new:
+            # DEBUG: Print when new key is created during training
+            if getattr(self, 'debug_new_keys', False):
+                goal_hash = hash(goal_for_debug) if goal_for_debug else 'unknown'
+                goal_target = getattr(goal_for_debug, 'target_pos', str(goal_for_debug)[:30]) if goal_for_debug else 'unknown'
+                print(f"[DEBUG V_h^e NEW #{len(self.table)+1}] key={key} = hash((state={state_for_debug}, goal={goal_hash} ({goal_target}), map_hash={map_hash_for_debug})), init_value={self.default_v_h_e:.4f}")
             # Store raw value that will become default_v_h_e after clamping
             param = nn.Parameter(
                 torch.tensor([self.default_v_h_e], dtype=torch.float32, device=device)
             )
             self.table[key] = param
             self._new_params.append(param)
+        
+        # DEBUG: Print every lookup when debug_all_lookups is enabled (for test map generation)
+        if getattr(self, 'debug_all_lookups', False):
+            goal_hash = hash(goal_for_debug) if goal_for_debug else 'unknown'
+            goal_target = getattr(goal_for_debug, 'target_pos', str(goal_for_debug)[:30]) if goal_for_debug else 'unknown'
+            status = "NEW (not found!)" if is_new else "exists"
+            value = self.table[key].item()
+            print(f"[DEBUG V_h^e LOOKUP] key={key} = hash((state={state_for_debug}, goal={goal_hash} ({goal_target}), map_hash={map_hash_for_debug})) -> {status}, value={value:.4f}")
+        
         return self.table[key]
     
     def _batch_forward(
@@ -173,7 +191,7 @@ class LookupTableHumanGoalAbilityNetwork(BaseHumanGoalAchievementNetwork):
                         print(f"[DEBUG] HASH COLLISION! key={key} maps to both {prev_goal} and {goal_target}")
                 else:
                     key_to_inputs[key] = goal_target
-            param = self._get_or_create_entry(key, device)
+            param = self._get_or_create_entry(key, device, state_for_debug=normalized_state, goal_for_debug=goal, map_hash_for_debug=map_hash)
             params.append(param.squeeze())
         
         # Stack into batch tensor
@@ -206,7 +224,7 @@ class LookupTableHumanGoalAbilityNetwork(BaseHumanGoalAchievementNetwork):
         map_hash = _get_map_hash(world_model)
         normalized_state = self._normalize_state(state)
         key = hash((normalized_state, goal, map_hash))
-        param = self._get_or_create_entry(key, device)
+        param = self._get_or_create_entry(key, device, state_for_debug=normalized_state, goal_for_debug=goal, map_hash_for_debug=map_hash)
         raw_output = param.view(1)
         return self.apply_clamp(raw_output)
     
@@ -267,6 +285,7 @@ class LookupTableHumanGoalAbilityNetwork(BaseHumanGoalAchievementNetwork):
             'gamma_h': self.gamma_h,
             'default_v_h_e': self.default_v_h_e,
             'feasible_range': self.feasible_range,
+            'include_step_count': self.include_step_count,
             'table_size': len(self.table)
         }
     
@@ -291,6 +310,13 @@ class LookupTableHumanGoalAbilityNetwork(BaseHumanGoalAchievementNetwork):
     
     def load_state_dict(self, state_dict, strict=True):
         """Load state dict containing table entries."""
+        # Restore config if present
+        config_key = '_config'
+        if config_key in state_dict:
+            config = state_dict[config_key]
+            if 'include_step_count' in config:
+                self.include_step_count = config['include_step_count']
+        
         prefix = ''
         keys_key = f"{prefix}_table_keys"
         if keys_key not in state_dict:

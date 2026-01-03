@@ -361,6 +361,12 @@ class BasePhase2Trainer(ABC):
         self.networks.v_h_e_target = copy.deepcopy(self.networks.v_h_e)
         self.networks.x_h_target = copy.deepcopy(self.networks.x_h)
         
+        # Disable debug flags on target networks (they're copies, shouldn't print debug)
+        if hasattr(self.networks.v_h_e_target, 'debug_new_keys'):
+            self.networks.v_h_e_target.debug_new_keys = False
+        if hasattr(self.networks.v_h_e_target, 'debug_all_lookups'):
+            self.networks.v_h_e_target.debug_all_lookups = False
+        
         # Only create U_r/V_r targets if the networks exist
         if self.networks.u_r is not None:
             self.networks.u_r_target = copy.deepcopy(self.networks.u_r)
@@ -2174,6 +2180,7 @@ class BasePhase2Trainer(ABC):
             else:
                 state_for_hash = state
             state_hash = hash(state_for_hash)
+            
             self._state_visit_counts[state_hash] = self._state_visit_counts.get(state_hash, 0) + 1
             
             # Also track position-based visits for debugging exploration coverage

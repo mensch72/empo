@@ -252,6 +252,7 @@ class LookupTableRobotQNetwork(BaseRobotQNetwork):
             'beta_r': self.beta_r,
             'default_q_r': self.default_q_r,
             'feasible_range': self.feasible_range,
+            'include_step_count': self.include_step_count,
             'table_size': len(self.table)
         }
     
@@ -283,6 +284,13 @@ class LookupTableRobotQNetwork(BaseRobotQNetwork):
     
     def load_state_dict(self, state_dict, strict=True):
         """Load state dict containing table entries."""
+        # Restore config if present
+        config_key = '_config'
+        if config_key in state_dict:
+            config = state_dict[config_key]
+            if 'include_step_count' in config:
+                self.include_step_count = config['include_step_count']
+        
         # Find table keys
         prefix = ''
         keys_key = f"{prefix}_table_keys"
