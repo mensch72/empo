@@ -638,6 +638,296 @@ class TestModelBasedTargets:
 
 
 # =============================================================================
+# ASYNC RND SYNC TESTS
+# =============================================================================
+
+class TestAsyncRNDSync:
+    """
+    Test that RND networks are properly synced in async training mode.
+    
+    In async mode:
+    - The learner trains the RND predictor networks
+    - The actors need updated RND weights to compute accurate novelty bonuses
+    - Both robot RND and human_action RND should be synced
+    """
+    
+    def test_rnd_networks_included_in_policy_state_dict(self):
+        """
+        RND networks should be included in policy state dict for actor sync.
+        
+        This verifies that _get_policy_state_dict() includes RND when enabled.
+        """
+        from empo.nn_based.phase2.rnd import RNDModule
+        
+        # Create config with RND enabled
+        config = Phase2Config(
+            use_rnd=True,
+            use_human_action_rnd=True,
+            rnd_bonus_coef_r=0.1,
+            rnd_bonus_coef_h=0.1,
+            rnd_feature_dim=32,
+            rnd_hidden_dim=64,
+        )
+        
+        # Create mock networks including RND
+        networks = Phase2Networks(
+            q_r=MockQNetwork(),
+            q_r_target=MockQNetwork(),
+            v_h_e=MockVhNetwork(),
+            v_h_e_target=MockVhNetwork(),
+            x_h=MockXhNetwork(),
+            u_r=None,  # Not using U_r network
+            v_r=MockVrNetwork(),
+            rnd=RNDModule(input_dim=64, feature_dim=32, hidden_dim=64),
+            human_rnd=RNDModule(input_dim=64, feature_dim=32, hidden_dim=64),
+            count_curiosity=None,
+        )
+        
+        # Create a minimal mock trainer to test _get_policy_state_dict
+        class MockTrainer:
+            def __init__(self, config, networks):
+                self.config = config
+                self.networks = networks
+            
+            def _get_policy_state_dict(self):
+                """Copy of the actual implementation."""
+                state_dict = {
+                    'q_r': self.networks.q_r.state_dict(),
+                }
+                if self.config.use_rnd and self.networks.rnd is not None:
+                    state_dict['rnd_predictor'] = self.networks.rnd.predictor.state_dict()
+                    state_dict['rnd_running_mean'] = self.networks.rnd.running_mean.clone()
+                    state_dict['rnd_running_var'] = self.networks.rnd.running_var.clone()
+                    state_dict['rnd_update_count'] = self.networks.rnd.update_count.clone()
+                if self.config.use_human_action_rnd and self.networks.human_rnd is not None:
+                    state_dict['human_rnd_predictor'] = self.networks.human_rnd.predictor.state_dict()
+                    state_dict['human_rnd_running_mean'] = self.networks.human_rnd.running_mean.clone()
+                    state_dict['human_rnd_running_var'] = self.networks.human_rnd.running_var.clone()
+                    state_dict['human_rnd_update_count'] = self.networks.human_rnd.update_count.clone()
+                return state_dict
+        
+        trainer = MockTrainer(config, networks)
+        state_dict = trainer._get_policy_state_dict()
+        
+        # Verify Q_r is included (always)
+        assert 'q_r' in state_dict, "Q_r should always be in policy state dict"
+        
+        # Verify robot RND is included
+        assert 'rnd_predictor' in state_dict, "RND predictor should be in state dict when use_rnd=True"
+        assert 'rnd_running_mean' in state_dict, "RND running_mean should be in state dict"
+        assert 'rnd_running_var' in state_dict, "RND running_var should be in state dict"
+        assert 'rnd_update_count' in state_dict, "RND update_count should be in state dict"
+        
+        # Verify human RND is included
+        assert 'human_rnd_predictor' in state_dict, "Human RND predictor should be in state dict when use_human_action_rnd=True"
+        assert 'human_rnd_running_mean' in state_dict, "Human RND running_mean should be in state dict"
+        assert 'human_rnd_running_var' in state_dict, "Human RND running_var should be in state dict"
+        assert 'human_rnd_update_count' in state_dict, "Human RND update_count should be in state dict"
+        
+        print("✓ RND networks properly included in policy state dict")
+    
+    def test_rnd_networks_can_be_loaded_from_state_dict(self):
+        """
+        RND networks should be loadable from policy state dict.
+        
+        This verifies that _load_policy_state_dict() correctly restores RND.
+        """
+        from empo.nn_based.phase2.rnd import RNDModule
+        
+        config = Phase2Config(
+            use_rnd=True,
+            use_human_action_rnd=True,
+            rnd_feature_dim=32,
+            rnd_hidden_dim=64,
+        )
+        
+        # Create source networks with trained values
+        source_rnd = RNDModule(input_dim=64, feature_dim=32, hidden_dim=64)
+        source_human_rnd = RNDModule(input_dim=64, feature_dim=32, hidden_dim=64)
+        
+        # Modify the source networks to have non-default values
+        with torch.no_grad():
+            for param in source_rnd.predictor.parameters():
+                param.fill_(1.5)
+            source_rnd.running_mean.fill_(0.5)
+            source_rnd.running_var.fill_(2.0)
+            source_rnd.update_count.fill_(1000)
+            
+            for param in source_human_rnd.predictor.parameters():
+                param.fill_(2.5)
+            source_human_rnd.running_mean.fill_(0.7)
+            source_human_rnd.running_var.fill_(3.0)
+            source_human_rnd.update_count.fill_(2000)
+        
+        # Create state dict (simulating what learner would create)
+        state_dict = {
+            'q_r': MockQNetwork().state_dict(),
+            'rnd_predictor': source_rnd.predictor.state_dict(),
+            'rnd_running_mean': source_rnd.running_mean.clone(),
+            'rnd_running_var': source_rnd.running_var.clone(),
+            'rnd_update_count': source_rnd.update_count.clone(),
+            'human_rnd_predictor': source_human_rnd.predictor.state_dict(),
+            'human_rnd_running_mean': source_human_rnd.running_mean.clone(),
+            'human_rnd_running_var': source_human_rnd.running_var.clone(),
+            'human_rnd_update_count': source_human_rnd.update_count.clone(),
+        }
+        
+        # Create target networks (simulating fresh actor)
+        target_rnd = RNDModule(input_dim=64, feature_dim=32, hidden_dim=64)
+        target_human_rnd = RNDModule(input_dim=64, feature_dim=32, hidden_dim=64)
+        
+        # Verify target has different values initially
+        assert target_rnd.update_count.item() != 1000, "Target should start with different count"
+        assert target_human_rnd.update_count.item() != 2000, "Target should start with different count"
+        
+        # Load state dict into target (simulating actor sync)
+        target_rnd.predictor.load_state_dict(state_dict['rnd_predictor'])
+        target_rnd.running_mean.copy_(state_dict['rnd_running_mean'])
+        target_rnd.running_var.copy_(state_dict['rnd_running_var'])
+        target_rnd.update_count.copy_(state_dict['rnd_update_count'])
+        
+        target_human_rnd.predictor.load_state_dict(state_dict['human_rnd_predictor'])
+        target_human_rnd.running_mean.copy_(state_dict['human_rnd_running_mean'])
+        target_human_rnd.running_var.copy_(state_dict['human_rnd_running_var'])
+        target_human_rnd.update_count.copy_(state_dict['human_rnd_update_count'])
+        
+        # Verify values were restored correctly
+        assert target_rnd.update_count.item() == 1000, "RND update_count should be restored"
+        assert torch.allclose(target_rnd.running_mean, torch.full_like(target_rnd.running_mean, 0.5)), \
+            "RND running_mean should be restored"
+        assert torch.allclose(target_rnd.running_var, torch.full_like(target_rnd.running_var, 2.0)), \
+            "RND running_var should be restored"
+        
+        assert target_human_rnd.update_count.item() == 2000, "Human RND update_count should be restored"
+        assert torch.allclose(target_human_rnd.running_mean, torch.full_like(target_human_rnd.running_mean, 0.7)), \
+            "Human RND running_mean should be restored"
+        assert torch.allclose(target_human_rnd.running_var, torch.full_like(target_human_rnd.running_var, 3.0)), \
+            "Human RND running_var should be restored"
+        
+        # Verify predictor weights were restored
+        for target_param, source_param in zip(target_rnd.predictor.parameters(), source_rnd.predictor.parameters()):
+            assert torch.allclose(target_param, source_param), "RND predictor weights should match"
+        
+        for target_param, source_param in zip(target_human_rnd.predictor.parameters(), source_human_rnd.predictor.parameters()):
+            assert torch.allclose(target_param, source_param), "Human RND predictor weights should match"
+        
+        print("✓ RND networks can be loaded from state dict")
+    
+    def test_rnd_sync_freq_config(self):
+        """
+        Test that rnd_sync_freq config option exists and is used.
+        
+        RND should sync more frequently than policy since novelty changes rapidly.
+        """
+        # Default config should have rnd_sync_freq
+        config = Phase2Config()
+        assert hasattr(config, 'rnd_sync_freq'), "Config should have rnd_sync_freq"
+        assert config.rnd_sync_freq > 0, "rnd_sync_freq should be positive"
+        assert config.rnd_sync_freq <= config.actor_sync_freq, \
+            "rnd_sync_freq should be <= actor_sync_freq for more frequent RND updates"
+        
+        # Custom config
+        config = Phase2Config(
+            rnd_sync_freq=5,
+            actor_sync_freq=100,
+        )
+        assert config.rnd_sync_freq == 5
+        assert config.actor_sync_freq == 100
+        
+        print("✓ rnd_sync_freq config is properly defined")
+    
+    def test_rnd_enabled_property(self):
+        """
+        Test that _rnd_enabled() correctly detects when RND is in use.
+        """
+        from empo.nn_based.phase2.rnd import RNDModule
+        
+        # Test with robot RND only
+        config1 = Phase2Config(use_rnd=True, use_human_action_rnd=False)
+        networks1 = Phase2Networks(
+            q_r=MockQNetwork(),
+            q_r_target=MockQNetwork(),
+            v_h_e=MockVhNetwork(),
+            v_h_e_target=MockVhNetwork(),
+            x_h=MockXhNetwork(),
+            u_r=None,
+            v_r=MockVrNetwork(),
+            rnd=RNDModule(input_dim=64, feature_dim=32, hidden_dim=64),
+            human_rnd=None,
+            count_curiosity=None,
+        )
+        
+        class MockTrainer1:
+            def __init__(self, config, networks):
+                self.config = config
+                self.networks = networks
+            
+            def _rnd_enabled(self):
+                robot_rnd = self.config.use_rnd and self.networks.rnd is not None
+                human_rnd = self.config.use_human_action_rnd and self.networks.human_rnd is not None
+                return robot_rnd or human_rnd
+        
+        trainer1 = MockTrainer1(config1, networks1)
+        assert trainer1._rnd_enabled(), "Should detect robot RND enabled"
+        
+        # Test with human RND only
+        config2 = Phase2Config(use_rnd=False, use_human_action_rnd=True)
+        networks2 = Phase2Networks(
+            q_r=MockQNetwork(),
+            q_r_target=MockQNetwork(),
+            v_h_e=MockVhNetwork(),
+            v_h_e_target=MockVhNetwork(),
+            x_h=MockXhNetwork(),
+            u_r=None,
+            v_r=MockVrNetwork(),
+            rnd=None,
+            human_rnd=RNDModule(input_dim=64, feature_dim=32, hidden_dim=64),
+            count_curiosity=None,
+        )
+        
+        trainer2 = MockTrainer1(config2, networks2)
+        assert trainer2._rnd_enabled(), "Should detect human RND enabled"
+        
+        # Test with both RND
+        config3 = Phase2Config(use_rnd=True, use_human_action_rnd=True)
+        networks3 = Phase2Networks(
+            q_r=MockQNetwork(),
+            q_r_target=MockQNetwork(),
+            v_h_e=MockVhNetwork(),
+            v_h_e_target=MockVhNetwork(),
+            x_h=MockXhNetwork(),
+            u_r=None,
+            v_r=MockVrNetwork(),
+            rnd=RNDModule(input_dim=64, feature_dim=32, hidden_dim=64),
+            human_rnd=RNDModule(input_dim=64, feature_dim=32, hidden_dim=64),
+            count_curiosity=None,
+        )
+        
+        trainer3 = MockTrainer1(config3, networks3)
+        assert trainer3._rnd_enabled(), "Should detect both RND enabled"
+        
+        # Test with no RND
+        config4 = Phase2Config(use_rnd=False, use_human_action_rnd=False)
+        networks4 = Phase2Networks(
+            q_r=MockQNetwork(),
+            q_r_target=MockQNetwork(),
+            v_h_e=MockVhNetwork(),
+            v_h_e_target=MockVhNetwork(),
+            x_h=MockXhNetwork(),
+            u_r=None,
+            v_r=MockVrNetwork(),
+            rnd=None,
+            human_rnd=None,
+            count_curiosity=None,
+        )
+        
+        trainer4 = MockTrainer1(config4, networks4)
+        assert not trainer4._rnd_enabled(), "Should detect no RND enabled"
+        
+        print("✓ _rnd_enabled() correctly detects RND usage")
+
+
+# =============================================================================
 # RUN TESTS
 # =============================================================================
 

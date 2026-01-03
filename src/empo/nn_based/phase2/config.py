@@ -401,6 +401,12 @@ class Phase2Config:
     # Higher = more off-policy but more efficient.
     actor_sync_freq: int = 100
     
+    # Steps between syncing RND networks from learner to actors.
+    # RND novelty changes rapidly as the predictor learns, so we need
+    # more frequent sync than policy to keep exploration accurate.
+    # Set to 0 to use actor_sync_freq for RND as well.
+    rnd_sync_freq: int = 10
+    
     # Minimum transitions in buffer before training starts (for async mode).
     # Ensures actors have collected enough initial data.
     async_min_buffer_size: int = 1000

@@ -93,6 +93,8 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
             - HumanExplorationPolicy: A policy object with sample(state, human_idx, goal) method.
         world_model_factory: Optional factory for creating world models. Required for
             async training where the environment cannot be pickled.
+        checkpoint_interval: Save checkpoint every N training steps (0 to disable).
+        checkpoint_path: Path for checkpoint file (default: output_dir/checkpoint.pt).
     """
     
     def __init__(
@@ -112,6 +114,8 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         world_model_factory: Optional[Any] = None,
         robot_exploration_policy: Optional[Any] = None,
         human_exploration_policy: Optional[Any] = None,
+        checkpoint_interval: int = 0,
+        checkpoint_path: Optional[str] = None,
     ):
         super().__init__(
             env=env,
@@ -129,6 +133,8 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
             world_model_factory=world_model_factory,
             robot_exploration_policy=robot_exploration_policy,
             human_exploration_policy=human_exploration_policy,
+            checkpoint_interval=checkpoint_interval,
+            checkpoint_path=checkpoint_path,
         )
         
         # Caching is now handled internally by the shared encoders.
@@ -979,6 +985,8 @@ def train_multigrid_phase2(
     world_model_factory: Optional[Any] = None,
     robot_exploration_policy: Optional[Any] = None,
     human_exploration_policy: Optional[Any] = None,
+    checkpoint_interval: int = 0,
+    checkpoint_path: Optional[str] = None,
 ) -> Tuple[MultiGridRobotQNetwork, Phase2Networks, List[Dict[str, float]], "MultiGridPhase2Trainer"]:
     """
     Train Phase 2 robot policy for a multigrid environment.
@@ -1016,6 +1024,8 @@ def train_multigrid_phase2(
         human_exploration_policy: Optional policy for human epsilon exploration. Can be:
             - None: Use uniform random policy for exploration (default).
             - HumanExplorationPolicy: A policy object with sample(state, human_idx, goal) method.
+        checkpoint_interval: Save checkpoint every N training steps (0 to disable).
+        checkpoint_path: Path for checkpoint file (default: output_dir/checkpoint.pt).
     
     Returns:
         Tuple of (robot_q_network, all_networks, training_history, trainer).
@@ -1089,6 +1099,8 @@ def train_multigrid_phase2(
         world_model_factory=world_model_factory,
         robot_exploration_policy=robot_exploration_policy,
         human_exploration_policy=human_exploration_policy,
+        checkpoint_interval=checkpoint_interval,
+        checkpoint_path=checkpoint_path,
     )
     
     # Restore networks if checkpoint provided (skips warmup/rampup since already done)

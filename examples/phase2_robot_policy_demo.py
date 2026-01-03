@@ -37,7 +37,7 @@ Usage:
     
     # Advanced options
     python phase2_robot_policy_demo.py --debug   # Enable verbose debug output
-    python phase2_robot_policy_demo.py --profile # Profile training with torch.profiler
+    python phase2_robot_policy_demo.py --profile # Profile training component timings
     python phase2_robot_policy_demo.py --rollouts 100 --save_video my_rollouts.mp4
 
 Output:
@@ -45,7 +45,7 @@ Output:
 - All networks saved to outputs/phase2_demo_<env_type>/all_networks.pt
 - Policy saved to outputs/phase2_demo_<env_type>/policy.pt  
 - Movie of rollouts with the learned policy (loaded from disk to verify save/restore)
-- Profiler trace (with --profile): outputs/phase2_demo_<env_type>/profiler_trace.json
+- Profiler output (with --profile): Detailed timing breakdown by component printed at end
 """
 
 import sys
@@ -66,6 +66,7 @@ from empo.possible_goal import TabularGoalSampler, PossibleGoalSampler
 from empo.human_policy_prior import HeuristicPotentialPolicy, MultiGridHumanExplorationPolicy
 from empo.nn_based.multigrid import PathDistanceCalculator
 from empo.nn_based.phase2.config import Phase2Config
+from empo.nn_based.phase2.profiler import TrainingProfiler, NoOpProfiler
 from empo.nn_based.phase2.world_model_factory import CachedWorldModelFactory, EnsembleWorldModelFactory
 from empo.nn_based.multigrid.phase2 import train_multigrid_phase2
 from empo.nn_based.multigrid.phase2.robot_policy import MultiGridRobotPolicy, MultiGridRobotExplorationPolicy
@@ -805,6 +806,7 @@ def main(
     num_rollouts_override: int = None,
     save_video_path: str = None,
     num_training_steps_override: int = None,
+    checkpoint_interval: int = 0,
 ):
     """Run Phase 2 demo."""
     # Configure environment based on command line option
@@ -1131,67 +1133,39 @@ def main(
         t0 = time.time()
         
         if profile:
-            # Profile training with torch.profiler + TensorBoard integration
-            from torch.profiler import profile as torch_profile, ProfilerActivity, schedule, tensorboard_trace_handler
-            
-            profiler_dir = os.path.join(output_dir, 'profiler')
-            os.makedirs(profiler_dir, exist_ok=True)
-            profiler_trace_path = os.path.join(output_dir, 'profiler_trace.json')
-            
-            print(f"  Profiler TensorBoard output: {profiler_dir}")
-            print(f"  View with: tensorboard --logdir={profiler_dir}")
+            # Use our custom TrainingProfiler for detailed component-level timing
+            print("[PROFILE MODE] Using TrainingProfiler for detailed component timing")
+            print("  Categories profiled:")
+            print("    - Actor: sample_human_actions, sample_robot_action, transition_probabilities, step_environment")
+            print("    - Learner: forward passes (v_h_e, x_h, u_r, q_r, v_r, rnd), backward_pass, optimizer_step")
+            print("    - Logging: tensorboard_logging, progress_bar, warmup_check")
             print()
             
-            # Schedule: skip first 2 episodes (wait), warm up for 2, actively profile 6, repeat
-            # This captures steady-state behavior, not just initialization overhead
-            with torch_profile(
-                activities=[ProfilerActivity.CPU] + ([ProfilerActivity.CUDA] if device != 'cpu' else []),
-                schedule=schedule(wait=2, warmup=2, active=6, repeat=2),
-                on_trace_ready=tensorboard_trace_handler(profiler_dir),
-                record_shapes=True,
-                profile_memory=True,
-                with_stack=True,
-            ) as prof:
-                robot_q_network, networks, history, trainer = train_multigrid_phase2(
-                    world_model=env,
-                    human_agent_indices=human_indices,
-                    robot_agent_indices=robot_indices,
-                    human_policy_prior=human_policy,
-                    goal_sampler=goal_sampler,
-                    config=config,
-                    hidden_dim=hidden_dim,
-                    goal_feature_dim=goal_feature_dim,
-                    agent_embedding_dim=agent_embedding_dim,
-                    device=device,
-                    verbose=True,
-                    debug=debug,
-                    tensorboard_dir=tensorboard_dir,
-                    profiler=prof,
-                    restore_networks_path=restore_networks_path,
-                    world_model_factory=world_model_factory,
-                    robot_exploration_policy=robot_exploration_policy,
-                    human_exploration_policy=human_exploration_policy,
-                )
+            training_profiler = TrainingProfiler()
             
-            # Print profiler summary
-            print("\n" + "=" * 70)
-            print("PROFILER RESULTS")
-            print("=" * 70)
-            print("\nTop 30 operations by CPU time:")
-            print(prof.key_averages().table(sort_by="cpu_time_total", row_limit=30))
+            robot_q_network, networks, history, trainer = train_multigrid_phase2(
+                world_model=env,
+                human_agent_indices=human_indices,
+                robot_agent_indices=robot_indices,
+                human_policy_prior=human_policy,
+                goal_sampler=goal_sampler,
+                config=config,
+                hidden_dim=hidden_dim,
+                goal_feature_dim=goal_feature_dim,
+                agent_embedding_dim=agent_embedding_dim,
+                device=device,
+                verbose=True,
+                debug=debug,
+                tensorboard_dir=tensorboard_dir,
+                profiler=training_profiler,
+                restore_networks_path=restore_networks_path,
+                world_model_factory=world_model_factory,
+                robot_exploration_policy=robot_exploration_policy,
+                human_exploration_policy=human_exploration_policy,
+                checkpoint_interval=checkpoint_interval,
+            )
             
-            print("\nTop 20 operations by self CPU time (excluding children):")
-            print(prof.key_averages().table(sort_by="self_cpu_time_total", row_limit=20))
-            
-            # Also export Chrome trace as backup
-            prof.export_chrome_trace(profiler_trace_path)
-            print(f"\nProfiler outputs:")
-            print(f"  TensorBoard: {profiler_dir}")
-            print(f"    View: tensorboard --logdir={profiler_dir}")
-            print(f"    Then open: http://localhost:6006/#pytorch_profiler")
-            print(f"  Chrome trace: {profiler_trace_path}")
-            print(f"    View in Chrome: chrome://tracing")
-            print(f"    Or use: https://ui.perfetto.dev/")
+            # Note: The profiler report is automatically printed at the end of train()
         else:
             robot_q_network, networks, history, trainer = train_multigrid_phase2(
                 world_model=env,
@@ -1211,11 +1185,17 @@ def main(
                 world_model_factory=world_model_factory,
                 robot_exploration_policy=robot_exploration_policy,
                 human_exploration_policy=human_exploration_policy,
+                checkpoint_interval=checkpoint_interval,
             )
         
         elapsed = time.time() - t0
         
-        print(f"\nTraining completed in {elapsed:.2f} seconds")
+        # Check if training was interrupted
+        if trainer is not None and trainer.interrupted:
+            print(f"\n[Training] Interrupted after {elapsed:.2f} seconds at step {trainer.training_step_count}")
+            print("[Training] Continuing with rollouts and saving...")
+        else:
+            print(f"\nTraining completed in {elapsed:.2f} seconds")
     
     # Show loss history
     if history and len(history) > 0:
@@ -1362,7 +1342,7 @@ if __name__ == "__main__":
     parser.add_argument('--debug', '-d', action='store_true',
                         help='Enable verbose debug output')
     parser.add_argument('--profile', '-p', action='store_true',
-                        help='Profile training with torch.profiler (outputs trace.json)')
+                        help='Profile training with detailed component timing (shows time breakdown by category)')
     parser.add_argument('--async', '-a', dest='use_async', action='store_true',
                         help='Use async actor-learner training (tests async mode on CPU)')
     parser.add_argument('--no-encoders', action='store_true',
@@ -1385,6 +1365,8 @@ if __name__ == "__main__":
     # Training options
     parser.add_argument('--steps', type=lambda x: int(float(x)), default=None, metavar='N',
                         help='Number of training steps (overrides default based on env type, supports scientific notation like 1e5)')
+    parser.add_argument('--checkpoint-interval', type=int, default=0, metavar='N',
+                        help='Save checkpoint every N training steps (0 to disable, default: 0)')
     
     # Rollout options
     parser.add_argument('--rollouts', type=int, default=None, metavar='N',
@@ -1411,4 +1393,5 @@ if __name__ == "__main__":
         num_rollouts_override=args.rollouts,
         save_video_path=args.save_video,
         num_training_steps_override=args.steps,
+        checkpoint_interval=args.checkpoint_interval,
     )
