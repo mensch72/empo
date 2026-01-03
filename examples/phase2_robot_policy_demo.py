@@ -807,8 +807,20 @@ def main(
     save_video_path: str = None,
     num_training_steps_override: int = None,
     checkpoint_interval: int = 0,
+    seed: int = 42,
 ):
     """Run Phase 2 demo."""
+    # Set random seeds for reproducibility (sync mode only - async mode is inherently non-deterministic)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    # Make PyTorch deterministic (may slow down training slightly)
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    
     # Configure environment based on command line option
     configure_environment(use_ensemble, use_small)
     
@@ -965,7 +977,7 @@ def main(
         )
         # Create initial env using the factory
         env = env_creator()
-        goal_sampler = SmallGoalSampler(env, seed=123)
+        goal_sampler = SmallGoalSampler(env, seed=seed)
         # Ensemble mode: create new env each episode
         world_model_factory = EnsembleWorldModelFactory(env_creator, episodes_per_env=1)
     else:
@@ -1047,7 +1059,7 @@ def main(
         x_h_batch_size=x_h_batch_size,  # Larger batch for X_h to reduce high variance
         num_training_steps=num_training_steps,
         steps_per_episode=env.max_steps,
-        training_steps_per_env_step=1.0,
+        training_steps_per_env_step=0.1,  # 1 training step per 10 env steps (same ratio for sync/async)
         goal_resample_prob=0.1,
         v_h_e_target_update_interval=100,  # Standard target network update frequency
         # Warmup stage durations (each is duration in steps, not cumulative)
@@ -1423,6 +1435,8 @@ if __name__ == "__main__":
                         help='Skip training and only run rollouts using policy from PATH')
     
     # Training options
+    parser.add_argument('--seed', type=int, default=42, metavar='N',
+                        help='Random seed for reproducibility (default: 42)')
     parser.add_argument('--steps', type=lambda x: int(float(x)), default=None, metavar='N',
                         help='Number of training steps (overrides default based on env type, supports scientific notation like 1e5)')
     parser.add_argument('--checkpoint-interval', type=int, default=0, metavar='N',
@@ -1454,4 +1468,5 @@ if __name__ == "__main__":
         save_video_path=args.save_video,
         num_training_steps_override=args.steps,
         checkpoint_interval=args.checkpoint_interval,
+        seed=args.seed,
     )
