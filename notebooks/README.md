@@ -124,10 +124,3 @@ jupyter notebook
 ```
 
 See the main [README.md](../README.md) for more information.
-
-import sys, os
-sys.path.insert(0, os.path.join(os.getcwd(), 'src'))
-sys.path.insert(0, os.path.join(os.getcwd(), 'vendor', 'multigrid'))
-```
-
-See the main [README.md](../README.md) for more information.

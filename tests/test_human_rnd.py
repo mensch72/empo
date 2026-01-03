@@ -10,7 +10,7 @@ These tests verify that:
 import pytest
 import torch
 import numpy as np
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 from empo.nn_based.phase2.rnd import HumanActionRNDModule
 
@@ -338,12 +338,11 @@ class TestHumanRNDStatisticalBehavior:
         """Test that uniform novelty doesn't change the distribution much."""
         np.random.seed(42)
         
-        num_samples = 10000
         num_actions = 6
         
         # Same novelty for all actions
-        novelty = np.array([1.0] * 6)
-        prior_probs = np.array([1/6] * 6)
+        novelty = np.array([1.0] * num_actions)
+        prior_probs = np.array([1 / num_actions] * num_actions)
         bonus_coef = 0.5
         
         scale_factors = np.exp(bonus_coef * novelty)

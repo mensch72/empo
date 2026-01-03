@@ -405,6 +405,14 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
                 torch.zeros(0, agent_dim, device=self.device),
             )
         
+        # Validate that indices are valid agent indices
+        num_agents = len(self.env.agents)
+        for idx in human_agent_indices:
+            if idx < 0 or idx >= num_agents:
+                raise ValueError(
+                    f"Invalid human agent index {idx}: must be in range [0, {num_agents})"
+                )
+        
         # Get shared encoders from V_h^e
         state_encoder = self.networks.v_h_e.state_encoder
         agent_encoder = self.networks.v_h_e.agent_encoder

@@ -193,8 +193,13 @@ def fix_protobuf_issues():
     try:
         # Force protobuf to use pure-python implementation to avoid C++ issues
         os.environ.setdefault('PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION', 'python')
-    except Exception:
-        pass
+    except Exception as exc:
+        # Best-effort: failing to tweak this env var should not break setup,
+        # but we log a warning so issues are not silently hidden.
+        print(
+            f"Warning: could not set PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION: {exc}",
+            file=sys.stderr,
+        )
 
 
 def setup(install_deps: bool = True, quiet: bool = True) -> dict:

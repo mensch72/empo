@@ -782,8 +782,13 @@ class BasePhase2Trainer(ABC):
                 try:
                     base_probs = self.robot_exploration_policy(state)
                     base_probs = np.asarray(base_probs, dtype=np.float32)
-                except Exception:
-                    # Fallback: sample directly without curiosity
+                except Exception as exc:
+                    # Fallback: sample directly without curiosity.
+                    # Log warning so issues in custom policy implementations aren't hidden.
+                    import warnings
+                    warnings.warn(
+                        f"Could not get probabilities from RobotPolicy, sampling directly: {exc}"
+                    )
                     action = self.robot_exploration_policy.sample(state)
                     if isinstance(action, (list, tuple)):
                         return tuple(action)
@@ -827,11 +832,13 @@ class BasePhase2Trainer(ABC):
     
     def _sample_curiosity_exploration_action(self, state: Any) -> Tuple[int, ...]:
         """
-        Sample robot action weighted by curiosity bonus for successor states.
+        Sample a robot action for curiosity-driven exploration, weighting actions
+        by the curiosity bonus of their successor states.
         
-        NOTE: This method is currently UNUSED. Standard RND methodology applies
-        curiosity only to the learned policy (via Q-value bonuses), not to epsilon
-        exploration. Kept for potential future experimentation.
+        In this trainer, curiosity (e.g., via RND or count-based bonuses) can
+        influence both the learned policy (through Q-value bonuses) and explicit
+        exploration behavior. This helper supports the latter by defining a
+        curiosity-aware exploration distribution over robot actions.
         
         Uses transition_probabilities to compute expected novelty for each action,
         then samples proportionally to novelty.
@@ -1524,9 +1531,10 @@ class BasePhase2Trainer(ABC):
             if v_r_all.dim() == 0:
                 v_r_all = v_r_all.unsqueeze(0)
             
-            # Q_r target = γ_r * V_r(s') for each unique state (Equation 4)
-            # Note: U_r is NOT added here - it's already included in V_r's definition:
-            # V_r(s) = U_r(s) + E_{a~π_r}[Q_r(s,a)] (Equation 9)
+            # Q_r target = γ_r * V_r(s') for each unique state (Equation 4).
+            # U_r is already accounted for via the definition of V_r:
+            # V_r(s) = U_r(s) + E_{a~π_r}[Q_r(s,a)] (Equation 9),
+            # so we do not add an extra U_r term here.
             q_targets_all = self.config.gamma_r * v_r_all  # (n_unique,)
         
         # Phase 3: Aggregate targets back to (batch_size, num_actions)

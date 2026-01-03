@@ -499,7 +499,6 @@ class HumanActionRNDModule(nn.Module):
         Args:
             state_features: State encoder features (batch_size, state_feature_dim).
             agent_features: Agent identity features (batch_size, agent_feature_dim).
-            agent_features: Agent identity features (batch_size, agent_feature_dim).
             update_stats: Whether to update running statistics.
             
         Returns:
