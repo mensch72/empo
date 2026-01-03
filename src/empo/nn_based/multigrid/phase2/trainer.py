@@ -15,6 +15,7 @@ from gym_multigrid.multigrid import MultiGridEnv
 from empo.nn_based.phase2.config import Phase2Config
 from empo.nn_based.phase2.trainer import BasePhase2Trainer, Phase2Networks
 from empo.nn_based.phase2.replay_buffer import Phase2Transition
+from empo.nn_based.phase2.network_factory import create_count_based_curiosity
 from empo.nn_based.multigrid import MultiGridStateEncoder
 from empo.nn_based.multigrid.goal_encoder import MultiGridGoalEncoder
 from empo.nn_based.multigrid.agent_encoder import AgentIdentityEncoder
@@ -602,6 +603,9 @@ def create_phase2_networks(
                 stacklevel=2
             )
         
+        # Create count-based curiosity for tabular exploration
+        count_curiosity = create_count_based_curiosity(config)
+        
         return Phase2Networks(
             q_r=q_r,
             v_h_e=v_h_e,
@@ -609,6 +613,7 @@ def create_phase2_networks(
             u_r=u_r,
             v_r=v_r,
             rnd=rnd,
+            count_curiosity=count_curiosity,
         )
     
     # At least one network needs neural implementation
@@ -951,6 +956,9 @@ def create_phase2_networks(
             normalization_decay=config.rnd_normalization_decay,
         ).to(device)
     
+    # Create count-based curiosity (typically for tabular, but config allows mixed modes)
+    count_curiosity = create_count_based_curiosity(config)
+    
     return Phase2Networks(
         q_r=q_r,
         v_h_e=v_h_e,
@@ -960,6 +968,7 @@ def create_phase2_networks(
         rnd=rnd,
         rnd_encoder_dims=rnd_encoder_dims,  # Store for coefficient computation
         human_rnd=human_rnd,
+        count_curiosity=count_curiosity,
     )
 
 
