@@ -1254,10 +1254,10 @@ def main(
             },
             expected_k={
                 'still': 1.0,          # Short waits
-                'forward': 3.0,        # Longer straight runs
-                'left_forward': 2.0,
-                'right_forward': 2.0,
-                'back_forward': 2.0,
+                'forward': 2, #3.0,        # Longer straight runs
+                'left_forward': 1.5, #2.0,
+                'right_forward': 1.5, #2.0,
+                'back_forward': 1.5, #2.0,
             },
         )
         
@@ -1275,10 +1275,10 @@ def main(
             },
             expected_k={
                 'still': 1.0,          # Short waits
-                'forward': 3.0,        # Longer straight runs
-                'left_forward': 2.0,
-                'right_forward': 2.0,
-                'back_forward': 2.0,
+                'forward': 2, #3.0,        # Longer straight runs
+                'left_forward': 1.5, #2.0,
+                'right_forward': 1.5, #2.0,
+                'back_forward': 1.5, #2.0,
             },
         )
         
