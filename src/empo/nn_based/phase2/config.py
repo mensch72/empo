@@ -177,6 +177,18 @@ class Phase2Config:
     # This is a compromise between 1/t (for expectations) and constant (for Q-learning)
     use_sqrt_lr_decay: bool = True
     
+    # Fraction of total training steps to keep LR constant before starting decay.
+    # 0.0 = decay immediately after warm-up (original behavior)
+    # 0.8 = constant LR until 80% of total steps, then decay
+    # This allows the network to learn the value function structure before fine-tuning.
+    # Recommended: 0.8 for most cases.
+    lr_constant_fraction: float = 0.0
+    
+    # If True, use 1/t decay (instead of 1/sqrt(t)) after the constant phase.
+    # 1/t is theoretically correct for converging to expected values (Robbins-Monro).
+    # Only applies after lr_constant_fraction of training is complete.
+    constant_lr_then_1_over_t: bool = False
+    
     # Legacy 1/t decay settings (DEPRECATED - use use_sqrt_lr_decay instead)
     # These flags take precedence over use_sqrt_lr_decay if enabled.
     lr_x_h_warmup_steps: int = 1000  # Steps before 1/t decay starts (0 = always 1/t)
@@ -702,8 +714,14 @@ class Phase2Config:
         """
         Get learning rate for a network at the given step.
         
-        During warm-up: constant learning rate
-        After warm-up: 1/sqrt(t) decay if use_sqrt_lr_decay is True
+        Schedule:
+        1. During warm-up: constant learning rate
+        2. After warm-up until lr_constant_fraction of total steps: constant LR
+        3. After lr_constant_fraction: 1/sqrt(t) or 1/t decay
+        
+        The constant phase allows the network to learn the value function structure
+        before fine-tuning. The late decay phase (1/t) satisfies Robbins-Monro
+        conditions for converging to true expected values.
         
         Also respects legacy 1/t decay settings for X_h and U_r if enabled.
         
@@ -731,17 +749,30 @@ class Phase2Config:
             return self.get_lr_u_r(update_count)
         
         # During warm-up and beta_r ramp-up: constant learning rate
-        # LR decay only starts after beta_r ramp-up is complete
         full_warmup_end = self._warmup_q_r_end + self.beta_r_rampup_steps
-        if step < full_warmup_end or not self.use_sqrt_lr_decay:
+        if step < full_warmup_end:
             return base_lr
         
-        # After full warmup (including ramp-up): 1/sqrt(t) decay
-        # We count steps since full warmup ended
-        t = max(1, step - full_warmup_end + 1)  # +1 to avoid division issues
+        # Compute when decay should start (based on lr_constant_fraction)
+        decay_start_step = max(
+            full_warmup_end,
+            int(self.lr_constant_fraction * self.num_training_steps)
+        )
         
-        # 1/sqrt(t) decay: lr = lr_base / sqrt(t)
-        return base_lr / math.sqrt(t)
+        # If LR decay is disabled or we haven't reached decay start, return constant
+        if not self.use_sqrt_lr_decay or step < decay_start_step:
+            return base_lr
+        
+        # After decay start: apply decay schedule
+        # Count steps since decay started
+        t = max(1, step - decay_start_step + 1)  # +1 to avoid division issues
+        
+        if self.constant_lr_then_1_over_t:
+            # 1/t decay: lr = lr_base / t (converges to expected values)
+            return base_lr / t
+        else:
+            # 1/sqrt(t) decay: lr = lr_base / sqrt(t)
+            return base_lr / math.sqrt(t)
     
     def get_warmup_stage(self, step: int) -> int:
         """
@@ -969,6 +1000,8 @@ class Phase2Config:
                 },
                 'schedule': {
                     'use_sqrt_lr_decay': self.use_sqrt_lr_decay,
+                    'lr_constant_fraction': self.lr_constant_fraction,
+                    'constant_lr_then_1_over_t': self.constant_lr_then_1_over_t,
                     'lr_x_h_use_1_over_t': self.lr_x_h_use_1_over_t,
                     'lr_u_r_use_1_over_t': self.lr_u_r_use_1_over_t,
                     'lr_x_h_warmup_steps': self.lr_x_h_warmup_steps,

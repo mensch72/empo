@@ -998,11 +998,11 @@ def main(
         print("[QUICK MODE] Running with reduced episodes, rollouts, batch sizes, network size, and warmup stages")
     else:
         # Use default warmup stages (each stage ~1000 steps)
-        warmup_v_h_e_steps = 1000
-        warmup_x_h_steps = 1000
-        warmup_u_r_steps = 1000  # Will be set to 0 if u_r_use_network=False
-        warmup_q_r_steps = 1000
-        beta_r_rampup_steps = 2000
+        warmup_v_h_e_steps = 1e4
+        warmup_x_h_steps = 1e4
+        warmup_u_r_steps = 1e4  # Will be set to 0 if u_r_use_network=False
+        warmup_q_r_steps = 1e4
+        beta_r_rampup_steps = 5e4
     
     # Override training steps if specified via command line
     if num_training_steps_override is not None:
@@ -1273,7 +1273,13 @@ def main(
                 'right_forward': 0.18,
                 'back_forward': 0.09,
             },
-            expected_k=2.0,  # Single value for all sequence types
+            expected_k={
+                'still': 1.0,          # Short waits
+                'forward': 3.0,        # Longer straight runs
+                'left_forward': 2.0,
+                'right_forward': 2.0,
+                'back_forward': 2.0,
+            },
         )
         
         # Train Phase 2

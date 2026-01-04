@@ -170,13 +170,40 @@ class Phase2Config:
     beta_r_rampup_steps: int = 2000  # Steps to ramp β_r from 0 to nominal
     beta_r: float = 10.0             # Nominal β_r value
     
-    # Learning rate decay
-    use_sqrt_lr_decay: bool = True   # Use 1/√t decay after full warmup
+    # Learning rate schedule
+    use_sqrt_lr_decay: bool = True   # Use 1/√t decay after constant phase
+    lr_constant_fraction: float = 0.0  # Fraction of total steps to keep LR constant (0.8 recommended)
+    constant_lr_then_1_over_t: bool = False  # Use 1/t instead of 1/√t for final convergence
     
     # Network computation modes
     x_h_use_network: bool = True     # If False, warmup_x_h_steps is set to 0
     u_r_use_network: bool = False    # If False, warmup_u_r_steps is set to 0
 ```
+
+### Learning Rate Schedule
+
+The learning rate follows a three-phase schedule:
+
+1. **Warmup/Ramp-up (constant)**: During warmup stages and β_r ramp-up, LR is constant.
+2. **Constant phase**: After ramp-up, LR stays constant until `lr_constant_fraction` of total steps.
+3. **Decay phase**: LR decays as 1/√t (or 1/t if `constant_lr_then_1_over_t=True`).
+
+**Recommended settings for stable training:**
+
+```python
+config = Phase2Config(
+    lr_constant_fraction=0.8,        # Keep LR constant for first 80% of training
+    constant_lr_then_1_over_t=True,  # Use 1/t decay for proper convergence
+    lr_q_r=1e-3,                     # Higher base LR (will be constant longer)
+)
+```
+
+With 500k steps:
+- Steps 0–6000: Constant LR (warmup/rampup)
+- Steps 6000–400000: Constant LR (main learning phase)
+- Steps 400000–500000: 1/t decay (convergence to expected values)
+
+The 1/t decay satisfies the Robbins-Monro conditions (∑lr = ∞, ∑lr² < ∞) required for converging to true expected values.
 
 **Note:** When `x_h_use_network=False`, `warmup_x_h_steps` is automatically set to 0 in `__post_init__`, effectively skipping the X_h warmup stage. Similarly, when `u_r_use_network=False` (the default), `warmup_u_r_steps` is automatically set to 0.
 
