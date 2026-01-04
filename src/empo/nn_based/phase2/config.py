@@ -189,6 +189,20 @@ class Phase2Config:
     # Only applies after lr_constant_fraction of training is complete.
     constant_lr_then_1_over_t: bool = False
     
+    # =========================================================================
+    # Z-space transformation for Q_r, V_r, U_r networks
+    # =========================================================================
+    # When enabled, networks predict z = f(Q) = (-Q)^{-1/(ηξ)} ∈ (0, 1]
+    # instead of Q directly. This makes it easier for networks to represent
+    # values across orders of magnitude (e.g., Q from -1 to -1000).
+    #
+    # Loss function depends on training phase:
+    # - During constant LR phase: MSE in z-space (balanced gradients)
+    # - During 1/t decay phase: MSE in Q-space (Robbins-Monro convergence)
+    #
+    # See docs/plans/learning_qr_scale.md for full rationale.
+    use_z_space_transform: bool = False  # Enable z-space transformation
+    
     # Legacy 1/t decay settings (DEPRECATED - use use_sqrt_lr_decay instead)
     # These flags take precedence over use_sqrt_lr_decay if enabled.
     lr_x_h_warmup_steps: int = 1000  # Steps before 1/t decay starts (0 = always 1/t)
@@ -610,6 +624,27 @@ class Phase2Config:
     def get_total_warmup_steps(self) -> int:
         """Get total number of warm-up steps (including beta_r ramp-up)."""
         return self._warmup_q_r_end + self.beta_r_rampup_steps
+    
+    def is_in_decay_phase(self, step: int) -> bool:
+        """
+        Check if we're in the late decay phase (1/t or 1/sqrt(t) decay).
+        
+        This is the phase where we want to use Q-space loss for Robbins-Monro
+        convergence to true expected values.
+        
+        Args:
+            step: Current training step.
+            
+        Returns:
+            True if we're past lr_constant_fraction of training and 
+            constant_lr_then_1_over_t is enabled.
+        """
+        full_warmup_end = self._warmup_q_r_end + self.beta_r_rampup_steps
+        decay_start_step = max(
+            full_warmup_end,
+            int(self.lr_constant_fraction * self.num_training_steps)
+        )
+        return step >= decay_start_step and self.constant_lr_then_1_over_t
     
     def is_in_warmup(self, step: int) -> bool:
         """Check if we're still in the warm-up phase (before all networks active)."""
@@ -1087,6 +1122,7 @@ class Phase2Config:
                 'x_h_use_network': self.x_h_use_network,
                 'use_encoders': self.use_encoders,
                 'include_step_count': self.include_step_count,
+                'use_z_space_transform': self.use_z_space_transform,
             },
             'lookup_tables': {
                 'use_lookup_tables': self.use_lookup_tables,

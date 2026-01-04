@@ -37,6 +37,7 @@ from .robot_value_network import BaseRobotValueNetwork, compute_v_r_from_compone
 from .lookup import get_all_lookup_tables, get_total_table_size
 from .rnd import RNDModule, HumanActionRNDModule
 from .count_based_curiosity import CountBasedCuriosity
+from .value_transforms import to_z_space, from_z_space, compute_z_space_loss, compute_q_space_loss, y_to_z_space, z_to_y_space
 
 # Try to import tensorboard (optional)
 try:
@@ -2049,20 +2050,41 @@ class BasePhase2Trainer(ABC):
                 x_h_sums = torch.zeros(n_states, device=self.device)
                 x_h_sums.scatter_add_(0, state_indices_t, x_h_power)
                 
-                # Average: y = E[X_h^{-xi}]
+                # Average: y_target = E[X_h^{-xi}]  (the intermediate value, not U_r)
                 humans_per_state_t = torch.tensor(u_r_humans_per_state, device=self.device, dtype=torch.float32)
-                u_r_targets_tensor = x_h_sums / humans_per_state_t
+                y_target = x_h_sums / humans_per_state_t
             
-            losses['u_r'] = ((y_pred.squeeze() - u_r_targets_tensor) ** 2).mean()
+            # Apply z-space transformation if enabled
+            # For y ∈ [1, ∞), use z = y^{-1/ξ} ∈ (0, 1]
+            if self.config.use_z_space_transform:
+                in_decay_phase = self.config.is_in_decay_phase(self.training_step_count)
+                if in_decay_phase:
+                    # Phase B: y-space MSE for Robbins-Monro convergence
+                    losses['u_r'] = ((y_pred.squeeze() - y_target) ** 2).mean()
+                else:
+                    # Phase A: z-space MSE for balanced gradients
+                    z_pred = y_to_z_space(y_pred.squeeze(), self.config.xi)
+                    z_target = y_to_z_space(y_target, self.config.xi)
+                    losses['u_r'] = ((z_pred - z_target) ** 2).mean()
+            else:
+                losses['u_r'] = ((y_pred.squeeze() - y_target) ** 2).mean()
             
             with torch.no_grad():
-                # U_r = -y^eta
-                target_u_r = -(u_r_targets_tensor ** self.config.eta)
-                prediction_stats['u_r'] = {
-                    'mean': y_pred.mean().item(),
-                    'std': y_pred.std().item() if y_pred.numel() > 1 else 0.0,
-                    'target_mean': target_u_r.mean().item()
+                # U_r = -y^eta (for logging only)
+                target_u_r = -(y_target ** self.config.eta)
+                stats = {
+                    'y_mean': y_pred.mean().item(),
+                    'y_std': y_pred.std().item() if y_pred.numel() > 1 else 0.0,
+                    'y_target_mean': y_target.mean().item(),
+                    'u_r_target_mean': target_u_r.mean().item()
                 }
+                # Add z-space statistics when enabled
+                if self.config.use_z_space_transform:
+                    z_pred_stat = y_to_z_space(y_pred.squeeze(), self.config.xi)
+                    z_target_stat = y_to_z_space(y_target, self.config.xi)
+                    stats['z_mean'] = z_pred_stat.mean().item()
+                    stats['z_target_mean'] = z_target_stat.mean().item()
+                prediction_stats['u_r'] = stats
         
         # ----- Q_r loss (model-based: update ALL actions) -----
         if q_r_active:
@@ -2076,8 +2098,21 @@ class BasePhase2Trainer(ABC):
                 target_q_r_all = self._compute_model_based_q_r_targets(batch)
             
             # Loss: MSE over ALL action Q-values (full Bellman backup)
-            # This is much more sample-efficient than only updating the taken action
-            losses['q_r'] = ((q_r_all - target_q_r_all) ** 2).mean()
+            # When use_z_space_transform is enabled:
+            # - During constant LR phase: use z-space MSE for balanced gradients
+            # - During 1/t decay phase: use Q-space MSE for Robbins-Monro convergence
+            if self.config.use_z_space_transform:
+                in_decay_phase = self.config.is_in_decay_phase(self.training_step_count)
+                if in_decay_phase:
+                    # Phase B: Q-space MSE
+                    losses['q_r'] = ((q_r_all - target_q_r_all) ** 2).mean()
+                else:
+                    # Phase A: z-space MSE
+                    z_pred = to_z_space(q_r_all, self.config.eta, self.config.xi)
+                    z_target = to_z_space(target_q_r_all, self.config.eta, self.config.xi)
+                    losses['q_r'] = ((z_pred - z_target) ** 2).mean()
+            else:
+                losses['q_r'] = ((q_r_all - target_q_r_all) ** 2).mean()
             
             # Statistics: report for taken actions for comparability
             robot_actions = [t.robot_action for t in batch]
@@ -2089,12 +2124,20 @@ class BasePhase2Trainer(ABC):
             target_q_r_taken = target_q_r_all.gather(1, action_indices.unsqueeze(1)).squeeze(1)
             
             with torch.no_grad():
-                prediction_stats['q_r'] = {
+                stats = {
                     'mean': q_r_pred_taken.mean().item(),
                     'std': q_r_pred_taken.std().item() if q_r_pred_taken.numel() > 1 else 0.0,
                     'target_mean': target_q_r_taken.mean().item(),
                     'all_actions_loss': losses['q_r'].item()
                 }
+                # Add z-space statistics when enabled
+                if self.config.use_z_space_transform:
+                    z_pred_taken = to_z_space(q_r_pred_taken, self.config.eta, self.config.xi)
+                    z_target_taken = to_z_space(target_q_r_taken, self.config.eta, self.config.xi)
+                    stats['z_mean'] = z_pred_taken.mean().item()
+                    stats['z_target_mean'] = z_target_taken.mean().item()
+                    stats['in_decay_phase'] = 1.0 if self.config.is_in_decay_phase(self.training_step_count) else 0.0
+                prediction_stats['q_r'] = stats
         
         # ----- V_r loss (batched, only if using network mode) -----
         if self.config.v_r_use_network and v_r_active:
@@ -2111,7 +2154,18 @@ class BasePhase2Trainer(ABC):
             target_v_r = compute_v_r_from_components(
                 u_r_for_v.squeeze(), q_r_for_v, pi_r
             )
-            losses['v_r'] = ((v_r_pred.squeeze() - target_v_r) ** 2).mean()
+            
+            # Apply z-space transformation if enabled
+            if self.config.use_z_space_transform:
+                in_decay_phase = self.config.is_in_decay_phase(self.training_step_count)
+                if in_decay_phase:
+                    losses['v_r'] = ((v_r_pred.squeeze() - target_v_r) ** 2).mean()
+                else:
+                    z_pred = to_z_space(v_r_pred.squeeze(), self.config.eta, self.config.xi)
+                    z_target = to_z_space(target_v_r, self.config.eta, self.config.xi)
+                    losses['v_r'] = ((z_pred - z_target) ** 2).mean()
+            else:
+                losses['v_r'] = ((v_r_pred.squeeze() - target_v_r) ** 2).mean()
             
             with torch.no_grad():
                 prediction_stats['v_r'] = {

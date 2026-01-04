@@ -11,6 +11,54 @@ The fundamental issue is that the network's output scale is initialized around O
 1. Early in training, errors are huge → unstable gradients
 2. Late in training with decayed LR, the network can't catch up
 
+## Chosen Solution: Theory-Grounded z-Space with Two-Phase Loss
+
+### Key Insight
+
+Neural networks naturally output values near 0 (due to weight initialization). Getting a network to output Q = -400 requires pushing weights to extreme values. But getting it to output z ≈ 0.4 (where z = f(Q) for our transformation) is trivial.
+
+### Transformation
+
+We use the theory-grounded power transformation:
+```
+z = f(Q) = (-Q)^{-1/(ηξ)}
+Q = f^{-1}(z) = -z^{-ηξ}
+```
+
+This maps:
+- Q ∈ (-∞, -1] → z ∈ (0, 1]
+- Q = -1 → z = 1
+- Q → -∞ → z → 0
+
+The network predicts z ∈ (0, 1], which is a natural output range.
+
+### Two-Phase Loss Strategy
+
+**Phase A (constant LR, exploring the value space):**
+```python
+loss = (z_pred - z_target)²  where z_target = f(Q_target)
+```
+The z-space MSE gives balanced gradients across all scales, allowing the network to quickly find the right ballpark.
+
+**Phase B (1/t decay, converging to expectations):**
+```python
+loss = (Q_pred - Q_target)²  where Q_pred = f^{-1}(z_pred)
+```
+Switch to Q-space MSE for proper Robbins-Monro convergence to arithmetic means.
+
+**Rationale:**
+- During Phase A, we want the network to output the correct *structure* of values (which states have higher/lower values). The z-space loss helps because it doesn't overweight large Q-values.
+- During Phase B, we want convergence to the *exact* expected values. The Q-space loss with 1/t decay satisfies Robbins-Monro conditions for unbiased convergence.
+
+The losses are mathematically equivalent in terms of gradients (chain rule), but the scale of the error term differs, which affects the effective learning rate.
+
+### Configuration
+
+```python
+use_z_space_transform: bool = True  # Enable theory-grounded z-space
+# Uses lr_constant_fraction and constant_lr_then_1_over_t to determine phases
+```
+
 ## Standard Approaches from Literature
 
 ### 1. Pop-Art (Preserving Outputs Precisely, while Adaptively Rescaling Targets)
@@ -310,83 +358,80 @@ Pop-Art remains a solid option if we need exact arithmetic means:
    - Initialize final layer so z ≈ 1 initially (i.e., Q_r ≈ -1)
    - Use softplus(output) + eps to ensure z > 0
 
-### Phase 2: Add Log-Space as Simpler Alternative
+## Implementation Plan (Updated)
 
-Already included in Phase 1 as `q_r_transform='log'`.
+### Architecture
 
-### Phase 3: Add Pop-Art as Fallback
+1. **Network output**: Network predicts raw value `x ∈ R`, transformed to `z = sigmoid(x) ∈ (0, 1)`
+2. **Q-value recovery**: `Q = f^{-1}(z) = -z^{-ηξ}` (used for policy and logging)
+3. **Loss function**: Depends on training phase (see below)
 
-Keep Pop-Art for users who need exact arithmetic means:
+### Two-Phase Loss
 
-1. **Create `PopArtNormalizer` class** in `value_transforms.py`
-
-2. **Config option**:
-   ```python
-   # Pop-Art normalization (alternative, more complex)
-   use_popart_normalization: bool = False
-   popart_beta: float = 0.0001  # EMA decay for running stats
-   ```
-
-### Phase 4: Logging and Diagnostics
-
-1. **TensorBoard metrics**:
-   - `Predictions/z_q_r_mean`, `Predictions/z_q_r_std`: Transformed predictions
-   - `Predictions/q_r_mean`: Recovered Q_r for interpretability
-   - `Targets/z_q_r_mean`: Transformed targets
-   - `Loss/q_r_transformed`: Loss in transformed space
-   - If Pop-Art: `PopArt/mean`, `PopArt/std`
-
-2. **Sanity checks**:
-   - Assert Q_r targets are negative (warn if any ≥ 0)
-   - Assert z predictions are positive (for power transform)
-   - Log when switching transform modes (if transform_during_decay=False)
-
-### Phase 5: Testing
-
-1. **Unit tests**:
-   - `test_to_z_space_from_z_space_inverse()`
-   - `test_to_log_space_from_log_space_inverse()`
-   - `test_z_space_loss_gradient_bounded()`
-   - `test_policy_from_z_space_equivalent()`
-
-2. **Integration tests**:
-   - Train on simple environment, verify Q-values converge
-   - Compare convergence: power-transform vs log-transform vs MSE vs Pop-Art
+```python
+def compute_q_r_loss(z_pred, q_target, config, training_step):
+    """
+    Compute Q_r loss with phase-dependent transformation.
+    
+    Phase A (constant LR): MSE in z-space
+    Phase B (1/t decay): MSE in Q-space
+    """
+    # Check if we're in the decay phase
+    total_warmup = config.get_total_warmup_steps()
+    decay_start = total_warmup + int(config.lr_constant_fraction * 
+                                      (config.num_training_steps - total_warmup))
+    in_decay_phase = training_step >= decay_start and config.constant_lr_then_1_over_t
+    
+    if in_decay_phase:
+        # Phase B: Q-space MSE for Robbins-Monro convergence
+        q_pred = from_z_space(z_pred, config.eta, config.xi)
+        return F.mse_loss(q_pred, q_target)
+    else:
+        # Phase A: z-space MSE for balanced gradients
+        z_target = to_z_space(q_target, config.eta, config.xi)
+        return F.mse_loss(z_pred, z_target)
+```
 
 ### Files to Modify
 
-1. **New file**: `src/empo/nn_based/phase2/value_transforms.py` - Transform functions
-2. **Modify**: `src/empo/nn_based/phase2/config.py` - Add config options
-3. **Modify**: `src/empo/nn_based/phase2/trainer.py` - Use transforms in loss computation
-4. **Modify**: `src/empo/nn_based/multigrid/phase2/trainer.py` - Same
-5. **Modify**: `src/empo/nn_based/multigrid/phase2/networks.py` - Output layer (softplus for z>0)
-6. **New file**: `tests/test_value_transforms.py`
-7. **Update**: `docs/WARMUP_DESIGN.md` - Document transform options
-
-### Open Questions
-
-1. **Output activation for power transform**: Need z > 0. Options:
-   - `softplus(output) + eps` (smooth, always positive)
-   - `exp(output)` (guarantees z > 0, but can overflow)
-   - `relu(output) + eps` (simple, but gradient=0 for negative outputs)
+1. **New file**: `src/empo/nn_based/phase2/value_transforms.py`
+   - `to_z_space(q, eta, xi)` - Q to z transformation
+   - `from_z_space(z, eta, xi)` - z to Q transformation
    
-   Recommend: `F.softplus(output) + 1e-6`
-
-2. **Lookup table mode** Store transformed values in tables.
-
-3. **U_r and V_r computed analytically**: When U_r = -(E_h[X_h^{-ξ}])^η is computed directly (not via network), we have exact values in raw space. Transform only applies to network predictions.
-
-4. **Interaction with policy computation**: Current policy is π ∝ |Q_r|^{β_r}. With z-space:
-   ```python
-   # |Q_r| = z^{-ηξ}
-   # |Q_r|^{β_r} = z^{-ηξβ_r}
-   # log(|Q_r|^{β_r}) = -ηξβ_r * log(z)
+2. **Modify**: `src/empo/nn_based/phase2/config.py`
+   - Add `use_z_space_transform: bool = True`
    
-   # For action selection, compute log-probabilities:
-   log_unnorm_policy = -config.eta * config.xi * config.beta_r * torch.log(z)
-   policy = F.softmax(log_unnorm_policy, dim=-1)
-   ```
-   This is numerically stable since we never compute the huge |Q_r| values directly.
+3. **Modify**: `src/empo/nn_based/phase2/robot_q_network.py`
+   - Change `ensure_negative()` to output z ∈ (0, 1) when z-space enabled
+   - Add method to convert z to Q
+   
+4. **Modify**: `src/empo/nn_based/phase2/robot_value_network.py`
+   - Same changes for V_r
+   
+5. **Modify**: `src/empo/nn_based/phase2/trainer.py`
+   - Use phase-dependent loss computation
+   - Log both z and Q values
+
+6. **Modify lookup table networks**: Store z values, convert to Q for policy
+
+### Policy Computation with z-Space
+
+When networks output z, the policy computation simplifies:
+```python
+# π ∝ |Q_r|^{β_r} = (-Q_r)^{β_r} = (z^{-ηξ})^{β_r} = z^{-ηξβ_r}
+# log π ∝ -ηξβ_r * log(z)
+
+log_policy_unnorm = -config.eta * config.xi * effective_beta_r * torch.log(z)
+policy = F.softmax(log_policy_unnorm, dim=-1)
+```
+
+This is numerically stable and avoids computing huge Q-values.
+
+### Initialization
+
+Initialize network so z ≈ 0.5 initially (Q ≈ -2^{ηξ} ≈ -2.14 for η=1.1, ξ=1):
+- Final layer bias = 0 (sigmoid(0) = 0.5)
+- Final layer weights near 0
 
 ## References
 
