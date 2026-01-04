@@ -1195,8 +1195,8 @@ def main(
         use_count_based_curiosity=use_curious and use_tabular,
         count_curiosity_scale=1.0,
         count_curiosity_use_ucb=False,
-        count_curiosity_bonus_coef_r=0.1 if (use_curious and use_tabular) else 0.0,
-        count_curiosity_bonus_coef_h=0.1 if (use_curious and use_tabular) else 0.0,
+        count_curiosity_bonus_coef_r=1.0 if (use_curious and use_tabular) else 0.0,
+        count_curiosity_bonus_coef_h=1.0 if (use_curious and use_tabular) else 0.0,
     )
     
     # Apply config overrides from --config YAML file
@@ -1376,25 +1376,25 @@ def main(
         
         # The 16 reachable (rock, human, robot) position combinations, sorted by difficulty to reach
         all_expected = [
-            # Rock at (2,1): 1 combo (initial state)
+            # most likely path
             ((2,1), (2,2), (1,1)),  # pos 0
-            # Rock at (3,1): 3 combos
-            ((3,1), (2,2), (2,1)),  # pos 1
-            ((3,1), (2,2), (1,1)),  # pos 2a
-            ((3,1), (2,1), (1,1)),  # pos 3a
-            # Rock at (4,1): 12 combos
-            ((4,1), (2,2), (3,1)),  # pos 2
-            ((4,1), (2,2), (2,1)),  # pos 3
-            ((4,1), (2,1), (3,1)),  # pos 3b
-            ((4,1), (2,2), (1,1)),  # pos 4
-            ((4,1), (1,1), (3,1)),  # pos 4b
-            ((4,1), (2,1), (1,1)),  # pos 5
-            ((4,1), (1,1), (2,1)),  # pos 5b
-            ((4,1), (3,1), (1,1)),  # pos 6
-            ((4,1), (1,1), (2,2)),  # pos 6b
-            ((4,1), (3,1), (2,1)),  # pos 7
-            ((4,1), (2,1), (2,2)),  # pos 7b
-            ((4,1), (3,1), (2,2)),  # pos 8
+            ((3,1), (2,2), (2,1)),  # pos 1, robot has pushed rock once
+            ((4,1), (2,2), (3,1)),  # pos 2, robot has pushed rock twice
+            ((4,1), (2,1), (3,1)),  # pos 3, human has moved up
+            ((4,1), (1,1), (3,1)),  # pos 4, human has moved left
+            ((4,1), (1,1), (2,1)),  # pos 5, robot has returned one step
+            ((4,1), (1,1), (2,2)),  # pos 6, robot has moved down
+            ((4,1), (2,1), (2,2)),  # pos 7, human has returned right one step
+            ((4,1), (3,1), (2,2)),  # pos 8, human has moved further right
+            # less likely path:
+            ((3,1), (2,2), (1,1)),  # pos 2a, robot has returned after pushing once (less likely than 2)
+            ((3,1), (2,1), (1,1)),  # pos 3a, human has moved up
+            # even less likely path:
+            ((4,1), (2,2), (2,1)),  # pos 3b, robot has returned one step after pushing twice (less likely than 3)
+            ((4,1), (2,2), (1,1)),  # pos 4b, robot has returned two steps after pushing twice
+            ((4,1), (2,1), (1,1)),  # pos 5b, human has moved up
+            ((4,1), (3,1), (1,1)),  # pos 6b, human has moved right
+            ((4,1), (3,1), (2,1)),  # pos 7b, robot has followed one step
         ]
         
         # Print table for all 16 combos
