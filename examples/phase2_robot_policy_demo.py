@@ -1286,8 +1286,7 @@ def main(
         print("Training Phase 2 robot policy...")
         print(f"  Training steps: {config.num_training_steps:,}")
         print(f"  Environment steps per episode: {config.steps_per_episode}")
-        print(f"  Robot exploration policy: multi-step sequences (forward-biased, expected_k varies by type)")
-        print(f"  Human exploration policy: multi-step sequences (forward-biased, expected_k=2.0)")
+        print(f"  Robot and human exploration policies: multi-step sequences (forward-biased, expected_k varies by type)")
         if use_curious:
             if use_tabular:
                 print(f"  Curiosity (count-based): ENABLED (bonus_coef={config.count_curiosity_bonus_coef_r})")
