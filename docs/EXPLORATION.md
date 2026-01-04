@@ -160,11 +160,79 @@ Without custom exploration policies, epsilon-exploration samples uniformly from 
 
 EMPO provides capability-aware exploration policies that bias toward useful actions.
 
-*Remark: both are currently restricted to the SmallActions set for multigrid (still, left, right, forward) and should be extended for the full Actions set of 8 possible actions (including toggle, drop, etc.).*
+*Remark: these policies are currently restricted to the SmallActions set for multigrid (still, left, right, forward) and should be extended for the full Actions set of 8 possible actions (including toggle, drop, etc.).*
 
-#### `MultiGridRobotExplorationPolicy`
+#### `MultiGridMultiStepExplorationPolicy` (Recommended)
 
 Located in `empo.nn_based.multigrid.phase2.robot_policy`.
+
+This is a **non-Markovian** exploration policy that samples multi-step action sequences, enabling more directed spatial exploration than simple Markov policies. It can be used for both robots and humans.
+
+```python
+from empo.nn_based.multigrid.phase2 import MultiGridMultiStepExplorationPolicy
+
+# For robots
+robot_exploration = MultiGridMultiStepExplorationPolicy(
+    agent_indices=[1],  # Robot at index 1
+    sequence_probs={
+        'still': 0.05,         # k times still
+        'forward': 0.50,       # k times forward
+        'left_forward': 0.18,  # turn left, then k times forward
+        'right_forward': 0.18, # turn right, then k times forward
+        'back_forward': 0.09,  # turn 180°, then k times forward
+    },
+    expected_k=2.0,  # Expected number of forward/still steps
+)
+
+# For humans (same class, different agent indices)
+human_exploration = MultiGridMultiStepExplorationPolicy(
+    agent_indices=[0],  # Human at index 0
+    sequence_probs={'forward': 0.5, 'left_forward': 0.2, 'right_forward': 0.2, 'still': 0.1},
+    expected_k=2.0,
+)
+```
+
+**Sequence Types:**
+- `'still'`: k times still (stay in place)
+- `'forward'`: k times forward (move straight)
+- `'left_forward'`: turn left, then k times forward
+- `'right_forward'`: turn right, then k times forward
+- `'back_forward'`: turn left twice (180°), then k times forward
+
+**Key Features:**
+- **Non-Markovian**: Samples multi-step sequences, enabling directed movement
+- **Geometric k**: The number of steps k is drawn from a geometric distribution with configurable expected value
+- **Per-sequence-type expected_k**: Can specify different expected_k for each sequence type:
+  ```python
+  exploration = MultiGridMultiStepExplorationPolicy(
+      expected_k={
+          'still': 1.0,         # Short waits
+          'forward': 3.0,       # Longer straight runs
+          'left_forward': 2.0,
+          'right_forward': 2.0,
+          'back_forward': 2.0,
+      }
+  )
+  ```
+- **Feasibility checking**: Only starts sequences if forward movement is possible in the target direction
+- **Sequence cancellation**: Cancels ongoing sequence if forward becomes blocked (e.g., by another agent)
+- **Dual interface**: Works as both `RobotPolicy` and `HumanPolicyPrior`
+- **Capability-aware**: Uses `can_forward()` to account for agent capabilities
+
+**Why Non-Markovian Exploration Helps:**
+
+Standard Markovian exploration (sampling each action independently) tends to produce "random walk" behavior where agents frequently reverse direction. This results in √t coverage of the state space.
+
+Multi-step sequences encourage more directed movement:
+- Forward sequences encourage exploring in straight lines
+- Turn+forward sequences explore new directions systematically
+- The geometric distribution allows for variable-length runs
+
+#### `MultiGridRobotExplorationPolicy` (Simple Markovian)
+
+Located in `empo.nn_based.multigrid.phase2.robot_policy`.
+
+A simpler Markovian exploration policy for robots.
 
 ```python
 from empo.nn_based.multigrid.phase2 import MultiGridRobotExplorationPolicy
@@ -181,9 +249,11 @@ Features:
 - Accounts for robot capabilities: can push rocks, can enter magic walls
 - Uses `env.can_forward(state, agent_index)` internally
 
-#### `MultiGridHumanExplorationPolicy`
+#### `MultiGridHumanExplorationPolicy` (Simple Markovian)
 
 Located in `empo.human_policy_prior` (same file as `HeuristicPotentialPolicy`).
+
+A simpler Markovian exploration policy for humans.
 
 ```python
 from empo.human_policy_prior import MultiGridHumanExplorationPolicy
@@ -204,7 +274,7 @@ Features:
 
 ### The `can_forward()` Method
 
-Both exploration policies rely on `MultiGridEnv.can_forward(state, agent_index)`:
+All exploration policies rely on `MultiGridEnv.can_forward(state, agent_index)`:
 
 ```python
 can_move = env.can_forward(state, agent_index=0)
@@ -223,9 +293,8 @@ This method checks whether an agent can move forward **in principle** (ignoring 
 ```python
 from empo.nn_based.multigrid.phase2 import (
     MultiGridPhase2Trainer,
-    MultiGridRobotExplorationPolicy,
+    MultiGridMultiStepExplorationPolicy,
 )
-from empo.human_policy_prior import MultiGridHumanExplorationPolicy
 
 # Configure exploration
 config = Phase2Config(
@@ -237,13 +306,16 @@ config = Phase2Config(
     epsilon_h_decay_steps=50000,
 )
 
-# Create smart exploration policies
-robot_exploration = MultiGridRobotExplorationPolicy(
-    action_probs=[0.1, 0.1, 0.2, 0.6],
-    robot_agent_indices=[1]
+# Create multi-step exploration policies (recommended)
+robot_exploration = MultiGridMultiStepExplorationPolicy(
+    agent_indices=[1],
+    sequence_probs={'forward': 0.5, 'left_forward': 0.2, 'right_forward': 0.2, 'back_forward': 0.05, 'still': 0.05},
+    expected_k={'forward': 3.0, 'left_forward': 2.0, 'right_forward': 2.0, 'back_forward': 2.0, 'still': 1.0},
 )
-human_exploration = MultiGridHumanExplorationPolicy(
-    action_probs=[0.1, 0.1, 0.2, 0.6]
+human_exploration = MultiGridMultiStepExplorationPolicy(
+    agent_indices=[0],
+    sequence_probs={'forward': 0.5, 'left_forward': 0.2, 'right_forward': 0.2, 'back_forward': 0.05, 'still': 0.05},
+    expected_k=2.0,
 )
 
 # Create trainer with exploration

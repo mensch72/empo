@@ -2886,6 +2886,10 @@ class BasePhase2Trainer(ABC):
                             self.writer.add_scalar('Exploration/count_total_visits', stats['count_curiosity_total_visits'], self.training_step_count)
                         if 'count_curiosity_mean_visits' in stats:
                             self.writer.add_scalar('Exploration/count_mean_visits', stats['count_curiosity_mean_visits'], self.training_step_count)
+                        if 'count_curiosity_max_visits' in stats:
+                            self.writer.add_scalar('Exploration/count_max_visits', stats['count_curiosity_max_visits'], self.training_step_count)
+                        if 'count_curiosity_min_visits' in stats:
+                            self.writer.add_scalar('Exploration/count_min_visits', stats['count_curiosity_min_visits'], self.training_step_count)
                         continue
                     # Human Action RND stats
                     if key == 'human_rnd':

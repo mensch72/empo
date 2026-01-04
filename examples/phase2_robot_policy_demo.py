@@ -67,13 +67,15 @@ from gym_multigrid.multigrid import (
 )
 from empo.multigrid import MultiGridGoalSampler, ReachCellGoal, ReachRectangleGoal, render_test_map_values
 from empo.possible_goal import TabularGoalSampler, PossibleGoalSampler
-from empo.human_policy_prior import HeuristicPotentialPolicy, MultiGridHumanExplorationPolicy
+from empo.human_policy_prior import HeuristicPotentialPolicy
 from empo.nn_based.multigrid import PathDistanceCalculator
 from empo.nn_based.phase2.config import Phase2Config
 from empo.nn_based.phase2.profiler import TrainingProfiler
 from empo.nn_based.phase2.world_model_factory import CachedWorldModelFactory, EnsembleWorldModelFactory
 from empo.nn_based.multigrid.phase2 import train_multigrid_phase2
-from empo.nn_based.multigrid.phase2.robot_policy import MultiGridRobotPolicy, MultiGridRobotExplorationPolicy
+from empo.nn_based.multigrid.phase2.robot_policy import (
+    MultiGridRobotPolicy, MultiGridRobotExplorationPolicy, MultiGridMultiStepExplorationPolicy
+)
 
 
 def load_config_yaml(path: str) -> dict:
@@ -1195,8 +1197,8 @@ def main(
         use_count_based_curiosity=use_curious and use_tabular,
         count_curiosity_scale=1.0,
         count_curiosity_use_ucb=False,
-        count_curiosity_bonus_coef_r=1.0 if (use_curious and use_tabular) else 0.0,
-        count_curiosity_bonus_coef_h=1.0 if (use_curious and use_tabular) else 0.0,
+        count_curiosity_bonus_coef_r=10.0 if (use_curious and use_tabular) else 0.0,
+        count_curiosity_bonus_coef_h=10.0 if (use_curious and use_tabular) else 0.0,
     )
     
     # Apply config overrides from --config YAML file
@@ -1238,25 +1240,48 @@ def main(
     else:
         # Define custom robot exploration policy for epsilon-greedy exploration.
         # SmallActions: 0=still, 1=left, 2=right, 3=forward
-        # We bias exploration toward forward movement to encourage spatial exploration.
-        # Use smart policy that avoids "forward" when blocked by walls/objects.
-        robot_exploration_policy = MultiGridRobotExplorationPolicy(
-            action_probs=[0.1, 0.1, 0.2, 0.6]  # still, left, right, forward
+        # We use multi-step exploration to encourage directed movement rather than
+        # random walk behavior. This samples sequences like "k times forward" or
+        # "turn left, then k times forward" where k is geometric(p=1/expected_k).
+        robot_exploration_policy = MultiGridMultiStepExplorationPolicy(
+            agent_indices=robot_indices,
+            sequence_probs={
+                'still': 0.05,         # Occasional waiting
+                'forward': 0.50,       # Prefer moving forward
+                'left_forward': 0.18,  # 90° turns
+                'right_forward': 0.18,
+                'back_forward': 0.09,  # 180° turns (less common)
+            },
+            expected_k={
+                'still': 1.0,          # Short waits
+                'forward': 3.0,        # Longer straight runs
+                'left_forward': 2.0,
+                'right_forward': 2.0,
+                'back_forward': 2.0,
+            },
         )
         
         # Define custom human exploration policy for epsilon-greedy exploration.
-        # Same logic as robot exploration - bias toward forward, avoid blocked moves.
+        # Same multi-step approach as robot exploration for consistency.
         # Note: world_model will be set by the trainer via set_world_model()
-        human_exploration_policy = MultiGridHumanExplorationPolicy(
-            action_probs=[0.1, 0.1, 0.2, 0.6]  # still, left, right, forward
+        human_exploration_policy = MultiGridMultiStepExplorationPolicy(
+            agent_indices=human_indices,
+            sequence_probs={
+                'still': 0.05,
+                'forward': 0.50,
+                'left_forward': 0.18,
+                'right_forward': 0.18,
+                'back_forward': 0.09,
+            },
+            expected_k=2.0,  # Single value for all sequence types
         )
         
         # Train Phase 2
         print("Training Phase 2 robot policy...")
         print(f"  Training steps: {config.num_training_steps:,}")
         print(f"  Environment steps per episode: {config.steps_per_episode}")
-        print(f"  Robot exploration policy: forward-biased (avoids blocked forward)")
-        print(f"  Human exploration policy: forward-biased (avoids blocked forward)")
+        print(f"  Robot exploration policy: multi-step sequences (forward-biased, expected_k varies by type)")
+        print(f"  Human exploration policy: multi-step sequences (forward-biased, expected_k=2.0)")
         if use_curious:
             if use_tabular:
                 print(f"  Curiosity (count-based): ENABLED (bonus_coef={config.count_curiosity_bonus_coef_r})")
