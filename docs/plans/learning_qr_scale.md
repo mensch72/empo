@@ -171,126 +171,222 @@ Maps: -400 → -6.0, -1 → -0.69, 0 → 0
 
 ## Recommendation for EMPO Phase 2
 
-### Primary Approach: Pop-Art Normalization
+### Primary Approach: Theory-Grounded Power Transformation
 
-Pop-Art is the best fit because:
-1. **Convergence matters**: We need networks to converge to *expected values* (Robbins-Monro), not transformed values
-2. **Policy depends on Q-values**: The power-law policy π ∝ |Q|^β requires actual Q magnitudes
-3. **Proven at scale**: Used successfully in Impala, R2D2, Agent57
+Since Q_r, U_r, V_r are all **guaranteed negative** by the EMPO theory, and their scale is determined by the power transformations in equations (4)-(9), we can use a principled inverse transformation.
 
-### Fallback: Symlog during constant LR phase
+**Key insight**: The transformation chain that creates U_r from X_h is:
+```
+X_h ∈ (0,1] → X_h^{-ξ} ∈ [1,∞) → E_h[...]^η ∈ [1,∞) → -(...) = U_r ∈ (-∞,-1]
+```
 
-During the constant LR phase (before Robbins-Monro convergence), we could use Symlog for stability, then switch to Pop-Art or MSE for the final 1/t decay phase.
+We can approximately "undo" this by predicting:
+```
+z = (-Q_r)^{-1/(ηξ)}
+```
+
+**Transformation functions**:
+```python
+def to_z_space(q: Tensor, eta: float, xi: float, eps: float = 1e-8) -> Tensor:
+    """Transform Q < 0 to z-space: z = (-Q)^{-1/(ηξ)} ∈ (0, ∞)."""
+    return torch.pow(-q.clamp(max=-eps), -1.0 / (eta * xi))
+
+def from_z_space(z: Tensor, eta: float, xi: float, eps: float = 1e-8) -> Tensor:
+    """Transform z-space back to Q < 0: Q = -z^{-ηξ}."""
+    return -torch.pow(z.clamp(min=eps), -eta * xi)
+```
+
+**Scale mapping** (with η=1.1, ξ=1.0):
+| Q_r | z = (-Q_r)^{-1/(ηξ)} |
+|-----|----------------------|
+| -10000 | 0.00052 |
+| -1000 | 0.0016 |
+| -100 | 0.012 |
+| -10 | 0.095 |
+| -1 | 1.0 |
+
+**Why this is ideal for EMPO**:
+
+1. **Theory-grounded**: The transformation uses the same power parameters (η, ξ) from the EMPO equations. The z-space relates back to the X_h scale that humans operate on.
+
+2. **Natural bounds**: For typical U_r ∈ (-∞, -1], we get z ∈ (0, 1]. The network predicts values in a natural range.
+
+3. **Policy computation**: 
+   ```python
+   # π ∝ |Q_r|^{β_r} = (-Q_r)^{β_r} = z^{-ηξβ_r}
+   # log π ∝ -ηξβ_r · log(z)
+   # Softmax: softmax(-η*ξ*β_r * log(z_a)) for each action a
+   ```
+
+4. **Bounded gradients**: The power transformation compresses large values.
+
+5. **Interpretable**: When z ≈ 1, Q_r ≈ -1 (neutral). When z → 0, Q_r → -∞ (very negative).
+
+### Alternative: Simple Log-Space
+
+For simpler implementation, predict z = log(-Q_r):
+
+```python
+def to_log_space(q: Tensor, eps: float = 1e-8) -> Tensor:
+    """Transform Q < 0 to log space: z = log(-Q)."""
+    return torch.log(-q.clamp(max=-eps))
+
+def from_log_space(z: Tensor) -> Tensor:
+    """Transform log space back to Q < 0: Q = -exp(z)."""
+    return -torch.exp(z)
+```
+
+| Q_r | z = log(-Q_r) |
+|-----|---------------|
+| -400 | 6.0 |
+| -1 | 0 |
+| -0.01 | -4.6 |
+
+**Pros**: Simpler, no dependency on η/ξ
+**Cons**: Not theory-grounded, z can be any real number
+
+### Fallback: Pop-Art Normalization
+
+Pop-Art remains a solid option if we need exact arithmetic means:
+- More complex (requires weight adjustment after each batch)
+- May be needed during 1/t decay phase for proper Robbins-Monro convergence
 
 ## Implementation Plan
 
-### Phase 1: Add Pop-Art Normalizer
+### Phase 1: Add Theory-Grounded Power Transformation
 
-1. **Create `PopArtNormalizer` class** in `src/empo/nn_based/phase2/normalization.py`:
+1. **Helper functions** in `src/empo/nn_based/phase2/value_transforms.py`:
    ```python
-   class PopArtNormalizer:
-       def __init__(self, beta=0.0001):
-           self.mean = 0.0
-           self.var = 1.0
-           self.beta = beta  # EMA decay rate
-       
-       def update(self, targets: Tensor) -> None:
-           """Update running statistics."""
-           
-       def normalize(self, x: Tensor) -> Tensor:
-           """Normalize values."""
-           
-       def denormalize(self, x: Tensor) -> Tensor:
-           """Denormalize values."""
-           
-       def update_network_weights(self, linear_layer: nn.Linear, 
-                                   old_mean: float, old_std: float) -> None:
-           """Adjust final layer weights to preserve outputs."""
+   def to_z_space(q: Tensor, eta: float, xi: float, eps: float = 1e-8) -> Tensor:
+       """Transform Q < 0 to z-space: z = (-Q)^{-1/(ηξ)} ∈ (0, ∞)."""
+       return torch.pow(-q.clamp(max=-eps), -1.0 / (eta * xi))
+   
+   def from_z_space(z: Tensor, eta: float, xi: float, eps: float = 1e-8) -> Tensor:
+       """Transform z-space back to Q < 0: Q = -z^{-ηξ}."""
+       return -torch.pow(z.clamp(min=eps), -eta * xi)
+   
+   def z_space_loss(z_pred: Tensor, q_target: Tensor, 
+                    eta: float, xi: float, eps: float = 1e-8) -> Tensor:
+       """MSE loss in z-space."""
+       z_target = to_z_space(q_target, eta, xi, eps)
+       return F.mse_loss(z_pred, z_target)
+   
+   # Also include log-space as simpler alternative
+   def to_log_space(q: Tensor, eps: float = 1e-8) -> Tensor:
+       """Transform Q < 0 to log space: z = log(-Q)."""
+       return torch.log(-q.clamp(max=-eps))
+   
+   def from_log_space(z: Tensor) -> Tensor:
+       """Transform log space back to Q < 0: Q = -exp(z)."""
+       return -torch.exp(z)
    ```
 
 2. **Config options** in `Phase2Config`:
    ```python
-   # Pop-Art normalization for Q_r, U_r, V_r
-   use_popart_normalization: bool = True
-   popart_beta: float = 0.0001  # EMA decay for running stats
+   # Value transformation for Q_r, U_r, V_r (all guaranteed negative)
+   # Options: 'none' (raw MSE), 'log' (log-space), 'power' (theory-grounded)
+   q_r_transform: str = 'power'   # For Q_r network
+   u_r_transform: str = 'power'   # For U_r network (if u_r_use_network=True)
+   v_r_transform: str = 'power'   # For V_r network (if v_r_use_network=True)
    
-   # Per-network control
-   popart_q_r: bool = True
-   popart_u_r: bool = True  # Only if u_r_use_network=True
-   popart_v_r: bool = True  # Only if v_r_use_network=True
+   # During 1/t decay phase, optionally switch to MSE on raw values
+   # for proper Robbins-Monro convergence to arithmetic mean
+   transform_during_decay: bool = False  # If False, switch to 'none' during decay
    ```
 
-3. **Integration points** in trainer:
-   - After computing targets, before loss: `normalized_targets = normalizer.normalize(targets)`
-   - After each batch: `normalizer.update(targets)` and `normalizer.update_network_weights(...)`
-   - For policy sampling: use raw network output (already in correct scale due to weight adjustment)
+3. **Network output interpretation**:
+   - Raw network output is z > 0 (use softplus or ReLU+eps to ensure positivity)
+   - For loss: compare z to transform(target)
+   - For policy: 
+     ```python
+     # Power transform: π ∝ |Q|^β = z^{-ηξβ}
+     # Log-softmax: -ηξβ * log(z) - logsumexp(...)
+     log_policy = -eta * xi * beta_r * torch.log(z)
+     policy = F.softmax(log_policy, dim=-1)
+     ```
+   - For logging: Q_r = from_z_space(z)
 
-### Phase 2: Add Symlog Option
+4. **Initialization**: 
+   - Initialize final layer so z ≈ 1 initially (i.e., Q_r ≈ -1)
+   - Use softplus(output) + eps to ensure z > 0
 
-1. **Symlog functions** in `normalization.py`:
-   ```python
-   def symlog(x: Tensor) -> Tensor:
-       return torch.sign(x) * torch.log1p(torch.abs(x))
-   
-   def symexp(x: Tensor) -> Tensor:
-       return torch.sign(x) * (torch.exp(torch.abs(x)) - 1)
-   ```
+### Phase 2: Add Log-Space as Simpler Alternative
+
+Already included in Phase 1 as `q_r_transform='log'`.
+
+### Phase 3: Add Pop-Art as Fallback
+
+Keep Pop-Art for users who need exact arithmetic means:
+
+1. **Create `PopArtNormalizer` class** in `value_transforms.py`
 
 2. **Config option**:
    ```python
-   # Alternative: Symlog transformation (simpler but biased)
-   use_symlog_targets: bool = False
-   
-   # Hybrid: Symlog during constant LR, Pop-Art during decay
-   use_hybrid_normalization: bool = False
+   # Pop-Art normalization (alternative, more complex)
+   use_popart_normalization: bool = False
+   popart_beta: float = 0.0001  # EMA decay for running stats
    ```
 
-### Phase 3: Logging and Diagnostics
+### Phase 4: Logging and Diagnostics
 
 1. **TensorBoard metrics**:
-   - `PopArt/mean_q_r`, `PopArt/std_q_r`: Running statistics
-   - `PopArt/weight_adjustment_magnitude`: How much weights change
-   - `Targets/raw_mean`, `Targets/normalized_mean`: Before/after normalization
+   - `Predictions/z_q_r_mean`, `Predictions/z_q_r_std`: Transformed predictions
+   - `Predictions/q_r_mean`: Recovered Q_r for interpretability
+   - `Targets/z_q_r_mean`: Transformed targets
+   - `Loss/q_r_transformed`: Loss in transformed space
+   - If Pop-Art: `PopArt/mean`, `PopArt/std`
 
 2. **Sanity checks**:
-   - Assert normalized targets are roughly in [-5, 5]
-   - Warn if std is very small (< 0.01) or very large (> 100)
-   - Log when weight adjustments are large
+   - Assert Q_r targets are negative (warn if any ≥ 0)
+   - Assert z predictions are positive (for power transform)
+   - Log when switching transform modes (if transform_during_decay=False)
 
-### Phase 4: Testing
+### Phase 5: Testing
 
 1. **Unit tests**:
-   - `test_popart_normalize_denormalize_inverse()`
-   - `test_popart_weight_adjustment_preserves_output()`
-   - `test_symlog_symexp_inverse()`
+   - `test_to_z_space_from_z_space_inverse()`
+   - `test_to_log_space_from_log_space_inverse()`
+   - `test_z_space_loss_gradient_bounded()`
+   - `test_policy_from_z_space_equivalent()`
 
 2. **Integration tests**:
-   - Train on simple environment, verify Q-values converge to correct scale
-   - Compare MSE vs Pop-Art vs Symlog on heavy-tailed target distribution
+   - Train on simple environment, verify Q-values converge
+   - Compare convergence: power-transform vs log-transform vs MSE vs Pop-Art
 
 ### Files to Modify
 
-1. **New file**: `src/empo/nn_based/phase2/normalization.py`
+1. **New file**: `src/empo/nn_based/phase2/value_transforms.py` - Transform functions
 2. **Modify**: `src/empo/nn_based/phase2/config.py` - Add config options
-3. **Modify**: `src/empo/nn_based/phase2/trainer.py` - Integrate normalizer
+3. **Modify**: `src/empo/nn_based/phase2/trainer.py` - Use transforms in loss computation
 4. **Modify**: `src/empo/nn_based/multigrid/phase2/trainer.py` - Same
-5. **New file**: `tests/test_popart_normalization.py`
-6. **Update**: `docs/WARMUP_DESIGN.md` - Document normalization options
+5. **Modify**: `src/empo/nn_based/multigrid/phase2/networks.py` - Output layer (softplus for z>0)
+6. **New file**: `tests/test_value_transforms.py`
+7. **Update**: `docs/WARMUP_DESIGN.md` - Document transform options
 
 ### Open Questions
 
-1. **Separate normalizers per network?** Q_r, U_r, V_r may have different scales. Probably yes.
+1. **Output activation for power transform**: Need z > 0. Options:
+   - `softplus(output) + eps` (smooth, always positive)
+   - `exp(output)` (guarantees z > 0, but can overflow)
+   - `relu(output) + eps` (simple, but gradient=0 for negative outputs)
+   
+   Recommend: `F.softplus(output) + 1e-6`
 
-2. **Share statistics across state-action pairs?** Pop-Art typically uses global statistics. For our case with (state, action) → Q, we use global stats across all Q(s,a).
+2. **Lookup table mode** Store transformed values in tables.
 
-3. **Interaction with 1/t decay?** During 1/t decay phase, Pop-Art weight adjustments may interfere with convergence. Options:
-   - Freeze normalizer statistics during decay phase
-   - Use very small beta during decay phase
-   - Switch to pure MSE during decay phase
+3. **U_r and V_r computed analytically**: When U_r = -(E_h[X_h^{-ξ}])^η is computed directly (not via network), we have exact values in raw space. Transform only applies to network predictions.
 
-4. **Lookup table mode?** Pop-Art doesn't apply to lookup tables (no final linear layer). For lookup tables, consider direct target normalization or adaptive per-entry learning rates (already implemented).
-
-5. **V_h^e normalization?** V_h^e is bounded in [0, 1] by construction, so probably doesn't need normalization. But X_h could benefit if it varies widely.
+4. **Interaction with policy computation**: Current policy is π ∝ |Q_r|^{β_r}. With z-space:
+   ```python
+   # |Q_r| = z^{-ηξ}
+   # |Q_r|^{β_r} = z^{-ηξβ_r}
+   # log(|Q_r|^{β_r}) = -ηξβ_r * log(z)
+   
+   # For action selection, compute log-probabilities:
+   log_unnorm_policy = -config.eta * config.xi * config.beta_r * torch.log(z)
+   policy = F.softmax(log_unnorm_policy, dim=-1)
+   ```
+   This is numerically stable since we never compute the huge |Q_r| values directly.
 
 ## References
 
