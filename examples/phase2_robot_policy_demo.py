@@ -76,6 +76,52 @@ from empo.nn_based.multigrid.phase2 import train_multigrid_phase2
 from empo.nn_based.multigrid.phase2.robot_policy import MultiGridRobotPolicy, MultiGridRobotExplorationPolicy
 
 
+def load_config_yaml(path: str) -> dict:
+    """
+    Load a YAML config file and extract all leaf values.
+    
+    Recursively traverses the YAML structure and collects all leaf values
+    (non-dict values) with their keys. This ignores any hierarchical organization
+    and just returns a flat dict of parameter names to values.
+    
+    Also strips end-of-line comments from string values (text after '#').
+    
+    Args:
+        path: Path to the YAML config file.
+        
+    Returns:
+        Flat dict mapping parameter names to their values.
+    """
+    try:
+        import yaml
+    except ImportError:
+        raise ImportError(
+            "PyYAML is required for --config. Install with: pip install pyyaml"
+        )
+    
+    with open(path, 'r') as f:
+        config = yaml.safe_load(f)
+    
+    def extract_leaves(obj, result=None):
+        """Recursively extract leaf values from nested dict."""
+        if result is None:
+            result = {}
+        
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                if isinstance(value, dict):
+                    # Recurse into nested dicts
+                    extract_leaves(value, result)
+                else:
+                    # Leaf value - strip comments from strings
+                    if isinstance(value, str) and '#' in value:
+                        value = value.split('#')[0].strip()
+                    result[key] = value
+        return result
+    
+    return extract_leaves(config)
+
+
 # ============================================================================
 # Environment Definition
 # ============================================================================
@@ -714,7 +760,7 @@ def run_policy_rollout(
                             weights = goal_sampler.weights
                             v_h_e_vals = []
                             for goal in goals:
-                                v_h_e = networks.v_h_e.forward(state, env, goal, h, device)
+                                v_h_e = networks.v_h_e.forward(state, env, h, goal, device)
                                 v_h_e_vals.append(v_h_e.squeeze())
                             v_h_e_tensor = torch.stack(v_h_e_vals)
                             probs_tensor = torch.tensor(probs, device=device, dtype=v_h_e_tensor.dtype)
@@ -727,7 +773,7 @@ def run_policy_rollout(
                             weighted_v_h_e_vals = []
                             for _ in range(n_goal_samples):
                                 goal, weight = goal_sampler.sample(state, h)
-                                v_h_e = networks.v_h_e.forward(state, env, goal, h, device)
+                                v_h_e = networks.v_h_e.forward(state, env, h, goal, device)
                                 weighted_v_h_e_vals.append(weight * (v_h_e.squeeze() ** zeta))
                             weighted_v_h_e_tensor = torch.stack(weighted_v_h_e_vals)
                             x_h_clamped = torch.clamp(weighted_v_h_e_tensor.mean(), min=1e-3, max=1.0)
@@ -842,6 +888,8 @@ def main(
     num_training_steps_override: int = None,
     checkpoint_interval: int = 0,
     seed: int = 42,
+    output_dir_override: str = None,
+    config_overrides: dict = None,
 ):
     """Run Phase 2 demo."""
     # Set random seeds for reproducibility (sync mode only - async mode is inherently non-deterministic)
@@ -879,9 +927,9 @@ def main(
         hidden_dim = 16
         goal_feature_dim = 8
         agent_embedding_dim = 4
-        use_x_h_network = False  # Compute X_h directly from V_h^e samples
+        use_x_h_network = False  # Compute X_h directly from V_h^e
         print("[TRIVIAL ENV] Using minimal network sizes for simple task")
-        print("[TRIVIAL ENV] X_h computed directly from V_h^e samples (x_h_use_network=False)")
+        print("[TRIVIAL ENV] X_h computed directly from V_h^e (x_h_use_network=False)")
     elif env_type == "small":
         num_training_steps = 20000
         num_rollouts = NUM_ROLLOUTS
@@ -978,8 +1026,11 @@ def main(
     
     device = 'cpu'
     
-    # Create output directory (includes env_type in name)
-    output_dir = os.path.join(os.path.dirname(__file__), '..', 'outputs', f'phase2_demo_{env_type}')
+    # Create output directory (includes env_type in name, or use override)
+    if output_dir_override:
+        output_dir = output_dir_override
+    else:
+        output_dir = os.path.join(os.path.dirname(__file__), '..', 'outputs', f'phase2_demo_{env_type}')
     os.makedirs(output_dir, exist_ok=True)
     tensorboard_dir = os.path.join(output_dir, 'tensorboard')
     
@@ -1130,7 +1181,7 @@ def main(
         # Use RND for neural networks, count-based for tabular mode
         use_rnd=use_curious and not use_tabular,
         use_human_action_rnd=use_curious and not use_tabular,
-        rnd_bonus_coef_r=0.1 if (use_curious and not use_tabular) else 0.0,
+        rnd_bonus_coef_r=1.0 if (use_curious and not use_tabular) else 0.0,
         rnd_feature_dim=64,
         rnd_hidden_dim=128,
         normalize_rnd=True,
@@ -1147,6 +1198,30 @@ def main(
         count_curiosity_bonus_coef_r=0.1 if (use_curious and use_tabular) else 0.0,
         count_curiosity_bonus_coef_h=0.1 if (use_curious and use_tabular) else 0.0,
     )
+    
+    # Apply config overrides from --config YAML file
+    if config_overrides:
+        from dataclasses import fields
+        valid_fields = {f.name for f in fields(config)}
+        applied = []
+        skipped = []
+        for key, value in config_overrides.items():
+            if key in valid_fields:
+                setattr(config, key, value)
+                applied.append(key)
+            else:
+                skipped.append(key)
+        if applied:
+            print(f"[CONFIG] Applied {len(applied)} overrides from YAML: {', '.join(sorted(applied)[:10])}{'...' if len(applied) > 10 else ''}")
+        if skipped:
+            print(f"[CONFIG] Skipped {len(skipped)} unknown keys: {', '.join(sorted(skipped)[:5])}{'...' if len(skipped) > 5 else ''}")
+        # Re-run __post_init__ to recompute derived values
+        config.__post_init__()
+    
+    # Save config to YAML file in output directory
+    config_yaml_path = os.path.join(output_dir, 'config.yaml')
+    actual_config_path = config.save_yaml(config_yaml_path)
+    print(f"Config saved to: {actual_config_path}")
     
     # If using policy directly (no training), skip to rollouts
     if use_policy_path:
@@ -1485,6 +1560,8 @@ if __name__ == "__main__":
                         help='Enable adaptive learning rates (1/n for tabular, RND-based for neural)')
     
     # Save/restore options
+    parser.add_argument('--config', type=str, default=None, metavar='PATH',
+                        help='Load config from YAML file (overrides defaults, extracts leaf values ignoring hierarchy)')
     parser.add_argument('--save_networks', type=str, default=None, metavar='PATH',
                         help='Save all trained networks to PATH after training')
     parser.add_argument('--save_policy', type=str, default=None, metavar='PATH',
@@ -1502,6 +1579,10 @@ if __name__ == "__main__":
     parser.add_argument('--checkpoint-interval', type=int, default=0, metavar='N',
                         help='Save checkpoint every N training steps (0 to disable, default: 0)')
     
+    # Output options
+    parser.add_argument('--output-dir', '-o', type=str, default=None, metavar='PATH',
+                        help='Output directory for logs, models, and videos (default: outputs/phase2_demo_<env>)')
+    
     # Rollout options
     parser.add_argument('--rollouts', type=int, default=None, metavar='N',
                         help='Number of rollouts to generate (overrides default)')
@@ -1509,6 +1590,13 @@ if __name__ == "__main__":
                         help='Path to save rollout video (default: outputs/phase2_demo_<env>/...mp4)')
     
     args = parser.parse_args()
+    
+    # Load config overrides from YAML file if specified
+    config_overrides = None
+    if args.config:
+        config_overrides = load_config_yaml(args.config)
+        print(f"Loaded {len(config_overrides)} config values from: {args.config}")
+    
     main(
         quick_mode=args.quick,
         lightningfast_mode=args.lightningfast,
@@ -1530,4 +1618,6 @@ if __name__ == "__main__":
         num_training_steps_override=args.steps,
         checkpoint_interval=args.checkpoint_interval,
         seed=args.seed,
+        output_dir_override=args.output_dir,
+        config_overrides=config_overrides,
     )
