@@ -1040,7 +1040,84 @@ def _rp_compute_sequential(
     eta: float, # robots' additional intertemporal power-inequality aversion
     terminal_Vr: float = -1e-10  # must be strictly negative !
 ) -> None:
-    """(under construction)
+    """Compute Phase 2 human and robot value functions and the robot policy via backward induction.
+
+    This routine implements the sequential (single-process) version of the Phase 2
+    algorithm. It assumes that the world model state graph has already been converted
+    into a directed acyclic graph (DAG) with a topological ordering of `states` and
+    associated `transitions`. It then performs a backward pass over that ordering
+    to populate:
+
+    * `Vh_values[state_index][agent_index][goal]`: human power values for each
+      human agent and possible goal.
+    * `Vr_values[state_index]`: the aggregate robot power value at each state.
+    * `robot_policy[state_index][agent_index][action]`: the robot's power-law
+      softmax policy over actions for each robot agent.
+
+    All results are written **in place** into the mutable mappings passed in as
+    `Vh_values`, `Vr_values`, and `robot_policy`. The function does not return a
+    value.
+
+    Parameters
+    ----------
+    states:
+        List of world model states in reverse topological order (or any order
+        compatible with the given `transitions` such that all successors of a
+        state have an index greater than or equal to that state).
+    Vh_values:
+        Mutable container mapping state indices to per-human, per-goal values.
+        This will be filled during the backward pass.
+    Vr_values:
+        Mutable container mapping state indices to the robot's aggregate power
+        value `V_r` at each state. This will be filled during the backward pass.
+    robot_policy:
+        Mutable container mapping state indices and robot agent indices to
+        action distributions. This is where the computed robot policy is stored.
+    transitions:
+        For each state index, a list of outgoing transitions. Each transition is a
+        tuple `(next_state_indices, probs, joint_action_indices)` describing the
+        possible successor state indices, their probabilities, and the joint action
+        profile that leads to them.
+    human_agent_indices:
+        Indices of agents that are treated as humans when computing `V_h`.
+    robot_agent_indices:
+        Indices of agents that are controlled by the robot policy being computed.
+    possible_goal_generator:
+        Generator providing the set of hypothetical human goals used to index
+        `V_h`. This should be the same generator used in Phase 1.
+    num_agents:
+        Total number of agents in the world model.
+    num_actions:
+        Number of discrete actions available to each agent.
+    action_powers:
+        Array of shape `(num_actions, num_agents)` (or broadcast-compatible) giving
+        per-action power contributions used in the robot power metric.
+    human_policy_prior:
+        Tabular human policy prior (Phase 1 result) providing the conditional
+        policy over actions for each human agent and goal.
+    beta_r:
+        Softmax parameter for robots' power-law softmax policies. Higher values
+        make the robot policy more concentrated on high-power actions.
+    gamma_h:
+        Discount factor for human power values.
+    gamma_r:
+        Discount factor for robot power values.
+    zeta:
+        Robot risk-aversion parameter in the power aggregation.
+    xi:
+        Robot inter-human power-inequality aversion parameter.
+    eta:
+        Additional intertemporal power-inequality aversion parameter for the robot.
+    terminal_Vr:
+        Constant robot value assigned to terminal states. Must be strictly
+        negative by design.
+
+    Notes
+    -----
+    This function is part of the Phase 2 robot policy computation and should be
+    considered experimental until the Phase 2 API is finalized. It assumes that
+    the `states`, `transitions`, and value containers have been initialized
+    consistently by the caller.
     """
     # Generate all possible robot action profiles (cartesian product of actions for each robot)
     robot_action_profiles: List[RobotActionProfile] = [
