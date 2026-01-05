@@ -22,8 +22,7 @@ import gymnasium as gym
 sys.modules['gym'] = gym
 
 from gym_multigrid.multigrid import (
-    MultiGridEnv, Grid, Agent, Wall, World, SmallActions, SmallWorld,
-    Goal, Ball
+    MultiGridEnv, Grid, Agent, SmallActions, SmallWorld
 )
 from empo.possible_goal import PossibleGoal, PossibleGoalGenerator
 from empo.backward_induction import (
