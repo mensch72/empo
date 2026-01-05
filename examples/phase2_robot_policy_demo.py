@@ -1608,8 +1608,8 @@ if __name__ == "__main__":
                         help='Random seed for reproducibility (default: 42)')
     parser.add_argument('--steps', type=lambda x: int(float(x)), default=None, metavar='N',
                         help='Number of training steps (overrides default based on env type, supports scientific notation like 1e5)')
-    parser.add_argument('--checkpoint-interval', type=int, default=0, metavar='N',
-                        help='Save checkpoint every N training steps (0 to disable, default: 0)')
+    parser.add_argument('--checkpoint-interval', type=int, default=None, metavar='N',
+                        help='Save checkpoint every N training steps (default: from config, typically 10000)')
     
     # Output options
     parser.add_argument('--output-dir', '-o', type=str, default=None, metavar='PATH',

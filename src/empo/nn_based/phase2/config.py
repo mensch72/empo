@@ -519,6 +519,28 @@ class Phase2Config:
     # Should be large enough to buffer actor output during learner training.
     async_queue_size: int = 10000
     
+    # =========================================================================
+    # Checkpoint and Memory Monitoring
+    # =========================================================================
+    # Checkpoint configuration for saving training state periodically.
+    # Memory monitoring to prevent OOM crashes that could lose training progress.
+    
+    # Save checkpoint every N training steps (0 to disable periodic checkpoints).
+    # Checkpoints are always saved on Ctrl-C interrupt or memory limit breach.
+    # Recommended: Set to 10000-50000 for long runs to avoid losing progress.
+    checkpoint_interval: int = 10000
+    
+    # Maximum memory usage as a fraction of total system memory (0.0-1.0).
+    # When exceeded, training stops gracefully (like Ctrl-C) and saves checkpoint.
+    # Set to 0.0 to disable memory monitoring.
+    # Recommended: 0.95 (95%) to leave some headroom for other processes.
+    max_memory_fraction: float = 0.95
+    
+    # How often to check memory usage (in training steps).
+    # Lower values catch memory issues faster but add overhead.
+    # Recommended: 100-1000 depending on training speed.
+    memory_check_interval: int = 100
+    
     # Network architecture
     hidden_dim: int = 256
     state_feature_dim: int = 256
@@ -1161,6 +1183,11 @@ class Phase2Config:
             'profiling': {
                 'profile_batching': self.profile_batching,
                 'profile_batching_interval': self.profile_batching_interval,
+            },
+            'checkpointing_and_memory': {
+                'checkpoint_interval': self.checkpoint_interval,
+                'max_memory_fraction': self.max_memory_fraction,
+                'memory_check_interval': self.memory_check_interval,
             },
         }
         

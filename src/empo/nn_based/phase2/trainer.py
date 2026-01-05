@@ -26,6 +26,12 @@ import torch.nn as nn
 import torch.optim as optim
 from tqdm import tqdm
 
+try:
+    import psutil
+    HAS_PSUTIL = True
+except ImportError:
+    HAS_PSUTIL = False
+
 from .config import Phase2Config
 from .profiler import NoOpProfiler
 from .replay_buffer import Phase2Transition, Phase2ReplayBuffer
@@ -137,7 +143,7 @@ class BasePhase2Trainer(ABC):
         world_model_factory: Optional[Any] = None,
         robot_exploration_policy: Optional[Any] = None,
         human_exploration_policy: Optional[Any] = None,
-        checkpoint_interval: int = 0,
+        checkpoint_interval: Optional[int] = None,
         checkpoint_path: Optional[str] = None,
     ):
         self.env = env
@@ -162,8 +168,13 @@ class BasePhase2Trainer(ABC):
             import os
             self.output_dir = os.path.dirname(tensorboard_dir)
         
-        # Checkpoint settings
-        self.checkpoint_interval = checkpoint_interval
+        # Checkpoint settings - use config default if not explicitly set
+        # checkpoint_interval=None means "use config default"
+        # checkpoint_interval=0 means "disable checkpoints"
+        if checkpoint_interval is None:
+            self.checkpoint_interval = config.checkpoint_interval
+        else:
+            self.checkpoint_interval = checkpoint_interval
         if checkpoint_path is not None:
             self.checkpoint_path = checkpoint_path
         elif self.output_dir is not None:
@@ -844,6 +855,30 @@ class BasePhase2Trainer(ABC):
             self.goal_sampler.set_world_model(self.env)
         if hasattr(self.human_policy_prior, 'set_world_model'):
             self.human_policy_prior.set_world_model(self.env)
+    
+    def _check_memory_limit(self) -> bool:
+        """
+        Check if memory usage exceeds the configured limit.
+        
+        Returns:
+            True if memory limit is exceeded, False otherwise.
+            Always returns False if psutil is not available or monitoring is disabled.
+        """
+        if not HAS_PSUTIL:
+            return False
+        if self.config.max_memory_fraction <= 0.0:
+            return False
+        
+        # Get system memory info
+        mem_info = psutil.virtual_memory()
+        memory_fraction = mem_info.percent / 100.0
+        
+        if memory_fraction > self.config.max_memory_fraction:
+            if self.verbose:
+                print(f"\n[Memory] Usage {memory_fraction*100:.1f}% exceeds limit "
+                      f"{self.config.max_memory_fraction*100:.1f}%. Stopping training...")
+            return True
+        return False
     
     def check_goal_achieved(self, state: Any, human_idx: int, goal: Any) -> bool:
         """
@@ -3269,6 +3304,13 @@ class BasePhase2Trainer(ABC):
                     if self.training_step_count % 100 == 0:
                         history.append(losses)
                     
+                    # Check memory limit periodically
+                    if (self.config.memory_check_interval > 0 and
+                        self.training_step_count % self.config.memory_check_interval == 0 and
+                        self._check_memory_limit()):
+                        # Memory limit exceeded - trigger graceful shutdown like Ctrl-C
+                        raise KeyboardInterrupt("Memory limit exceeded")
+                    
                     # Save checkpoint at interval
                     if (self.checkpoint_interval > 0 and 
                         self.checkpoint_path is not None and
@@ -3697,6 +3739,13 @@ class BasePhase2Trainer(ABC):
                     # Log to history periodically
                     if self.training_step_count % 100 == 0:
                         history.append(losses)
+                    
+                    # Check memory limit periodically
+                    if (self.config.memory_check_interval > 0 and
+                        self.training_step_count % self.config.memory_check_interval == 0 and
+                        self._check_memory_limit()):
+                        # Memory limit exceeded - trigger graceful shutdown like Ctrl-C
+                        raise KeyboardInterrupt("Memory limit exceeded")
                     
                     # Update shared policy periodically
                     # Use more frequent sync when RND is enabled (rnd_sync_freq)

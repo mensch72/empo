@@ -115,7 +115,7 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         world_model_factory: Optional[Any] = None,
         robot_exploration_policy: Optional[Any] = None,
         human_exploration_policy: Optional[Any] = None,
-        checkpoint_interval: int = 0,
+        checkpoint_interval: Optional[int] = None,
         checkpoint_path: Optional[str] = None,
     ):
         super().__init__(
@@ -998,7 +998,7 @@ def train_multigrid_phase2(
     world_model_factory: Optional[Any] = None,
     robot_exploration_policy: Optional[Any] = None,
     human_exploration_policy: Optional[Any] = None,
-    checkpoint_interval: int = 0,
+    checkpoint_interval: Optional[int] = None,
     checkpoint_path: Optional[str] = None,
 ) -> Tuple[MultiGridRobotQNetwork, Phase2Networks, List[Dict[str, float]], "MultiGridPhase2Trainer"]:
     """
