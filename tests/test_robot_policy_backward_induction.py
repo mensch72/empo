@@ -15,7 +15,6 @@ These tests verify:
 import sys
 import numpy as np
 import pytest
-from typing import List, Tuple, Dict, Any
 from itertools import product
 
 # Patch gym import for compatibility
