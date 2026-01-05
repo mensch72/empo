@@ -15,7 +15,6 @@ These tests verify:
 import sys
 import numpy as np
 import pytest
-from itertools import product
 
 # Patch gym import for compatibility
 import gymnasium as gym
