@@ -54,7 +54,7 @@ from gym_multigrid.multigrid import (
     MultiGridEnv, Grid, Agent, Wall, World, SmallActions, SmallWorld,
     Rock
 )
-from empo.possible_goal import PossibleGoal, PossibleGoalGenerator, TabularGoalSampler
+from empo.possible_goal import PossibleGoalGenerator, TabularGoalSampler
 from empo.backward_induction import (
     compute_human_policy_prior, 
     compute_robot_policy,
