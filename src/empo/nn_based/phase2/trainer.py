@@ -27,7 +27,7 @@ import torch.optim as optim
 from tqdm import tqdm
 
 from .config import Phase2Config
-from .profiler import NoOpProfiler, TrainingProfiler
+from .profiler import NoOpProfiler
 from .replay_buffer import Phase2Transition, Phase2ReplayBuffer
 from .robot_q_network import BaseRobotQNetwork
 from .human_goal_ability import BaseHumanGoalAchievementNetwork
@@ -37,6 +37,7 @@ from .robot_value_network import BaseRobotValueNetwork, compute_v_r_from_compone
 from .lookup import get_all_lookup_tables, get_total_table_size
 from .rnd import RNDModule, HumanActionRNDModule
 from .count_based_curiosity import CountBasedCuriosity
+from .value_transforms import to_z_space, from_z_space, compute_z_space_loss, compute_q_space_loss, y_to_z_space, z_to_y_space
 
 # Try to import tensorboard (optional)
 try:
@@ -2049,20 +2050,41 @@ class BasePhase2Trainer(ABC):
                 x_h_sums = torch.zeros(n_states, device=self.device)
                 x_h_sums.scatter_add_(0, state_indices_t, x_h_power)
                 
-                # Average: y = E[X_h^{-xi}]
+                # Average: y_target = E[X_h^{-xi}]  (the intermediate value, not U_r)
                 humans_per_state_t = torch.tensor(u_r_humans_per_state, device=self.device, dtype=torch.float32)
-                u_r_targets_tensor = x_h_sums / humans_per_state_t
+                y_target = x_h_sums / humans_per_state_t
             
-            losses['u_r'] = ((y_pred.squeeze() - u_r_targets_tensor) ** 2).mean()
+            # Apply z-space transformation if enabled
+            # For y ∈ [1, ∞), use z = y^{-1/ξ} ∈ (0, 1]
+            if self.config.use_z_space_transform:
+                in_decay_phase = self.config.is_in_decay_phase(self.training_step_count)
+                if in_decay_phase:
+                    # Phase B: y-space MSE for Robbins-Monro convergence
+                    losses['u_r'] = ((y_pred.squeeze() - y_target) ** 2).mean()
+                else:
+                    # Phase A: z-space MSE for balanced gradients
+                    z_pred = y_to_z_space(y_pred.squeeze(), self.config.xi)
+                    z_target = y_to_z_space(y_target, self.config.xi)
+                    losses['u_r'] = ((z_pred - z_target) ** 2).mean()
+            else:
+                losses['u_r'] = ((y_pred.squeeze() - y_target) ** 2).mean()
             
             with torch.no_grad():
-                # U_r = -y^eta
-                target_u_r = -(u_r_targets_tensor ** self.config.eta)
-                prediction_stats['u_r'] = {
-                    'mean': y_pred.mean().item(),
-                    'std': y_pred.std().item() if y_pred.numel() > 1 else 0.0,
-                    'target_mean': target_u_r.mean().item()
+                # U_r = -y^eta (for logging only)
+                target_u_r = -(y_target ** self.config.eta)
+                stats = {
+                    'y_mean': y_pred.mean().item(),
+                    'y_std': y_pred.std().item() if y_pred.numel() > 1 else 0.0,
+                    'y_target_mean': y_target.mean().item(),
+                    'u_r_target_mean': target_u_r.mean().item()
                 }
+                # Add z-space statistics when enabled
+                if self.config.use_z_space_transform:
+                    z_pred_stat = y_to_z_space(y_pred.squeeze(), self.config.xi)
+                    z_target_stat = y_to_z_space(y_target, self.config.xi)
+                    stats['z_mean'] = z_pred_stat.mean().item()
+                    stats['z_target_mean'] = z_target_stat.mean().item()
+                prediction_stats['u_r'] = stats
         
         # ----- Q_r loss (model-based: update ALL actions) -----
         if q_r_active:
@@ -2076,8 +2098,21 @@ class BasePhase2Trainer(ABC):
                 target_q_r_all = self._compute_model_based_q_r_targets(batch)
             
             # Loss: MSE over ALL action Q-values (full Bellman backup)
-            # This is much more sample-efficient than only updating the taken action
-            losses['q_r'] = ((q_r_all - target_q_r_all) ** 2).mean()
+            # When use_z_space_transform is enabled:
+            # - During constant LR phase: use z-space MSE for balanced gradients
+            # - During 1/t decay phase: use Q-space MSE for Robbins-Monro convergence
+            if self.config.use_z_space_transform:
+                in_decay_phase = self.config.is_in_decay_phase(self.training_step_count)
+                if in_decay_phase:
+                    # Phase B: Q-space MSE
+                    losses['q_r'] = ((q_r_all - target_q_r_all) ** 2).mean()
+                else:
+                    # Phase A: z-space MSE
+                    z_pred = to_z_space(q_r_all, self.config.eta, self.config.xi)
+                    z_target = to_z_space(target_q_r_all, self.config.eta, self.config.xi)
+                    losses['q_r'] = ((z_pred - z_target) ** 2).mean()
+            else:
+                losses['q_r'] = ((q_r_all - target_q_r_all) ** 2).mean()
             
             # Statistics: report for taken actions for comparability
             robot_actions = [t.robot_action for t in batch]
@@ -2089,12 +2124,20 @@ class BasePhase2Trainer(ABC):
             target_q_r_taken = target_q_r_all.gather(1, action_indices.unsqueeze(1)).squeeze(1)
             
             with torch.no_grad():
-                prediction_stats['q_r'] = {
+                stats = {
                     'mean': q_r_pred_taken.mean().item(),
                     'std': q_r_pred_taken.std().item() if q_r_pred_taken.numel() > 1 else 0.0,
                     'target_mean': target_q_r_taken.mean().item(),
                     'all_actions_loss': losses['q_r'].item()
                 }
+                # Add z-space statistics when enabled
+                if self.config.use_z_space_transform:
+                    z_pred_taken = to_z_space(q_r_pred_taken, self.config.eta, self.config.xi)
+                    z_target_taken = to_z_space(target_q_r_taken, self.config.eta, self.config.xi)
+                    stats['z_mean'] = z_pred_taken.mean().item()
+                    stats['z_target_mean'] = z_target_taken.mean().item()
+                    stats['in_decay_phase'] = 1.0 if self.config.is_in_decay_phase(self.training_step_count) else 0.0
+                prediction_stats['q_r'] = stats
         
         # ----- V_r loss (batched, only if using network mode) -----
         if self.config.v_r_use_network and v_r_active:
@@ -2111,14 +2154,32 @@ class BasePhase2Trainer(ABC):
             target_v_r = compute_v_r_from_components(
                 u_r_for_v.squeeze(), q_r_for_v, pi_r
             )
-            losses['v_r'] = ((v_r_pred.squeeze() - target_v_r) ** 2).mean()
+            
+            # Apply z-space transformation if enabled
+            if self.config.use_z_space_transform:
+                in_decay_phase = self.config.is_in_decay_phase(self.training_step_count)
+                if in_decay_phase:
+                    losses['v_r'] = ((v_r_pred.squeeze() - target_v_r) ** 2).mean()
+                else:
+                    z_pred = to_z_space(v_r_pred.squeeze(), self.config.eta, self.config.xi)
+                    z_target = to_z_space(target_v_r, self.config.eta, self.config.xi)
+                    losses['v_r'] = ((z_pred - z_target) ** 2).mean()
+            else:
+                losses['v_r'] = ((v_r_pred.squeeze() - target_v_r) ** 2).mean()
             
             with torch.no_grad():
-                prediction_stats['v_r'] = {
+                stats = {
                     'mean': v_r_pred.mean().item(),
                     'std': v_r_pred.std().item() if v_r_pred.numel() > 1 else 0.0,
                     'target_mean': target_v_r.mean().item()
                 }
+                # Add z-space statistics when enabled
+                if self.config.use_z_space_transform:
+                    z_pred_stat = to_z_space(v_r_pred.squeeze(), self.config.eta, self.config.xi)
+                    z_target_stat = to_z_space(target_v_r, self.config.eta, self.config.xi)
+                    stats['z_mean'] = z_pred_stat.mean().item()
+                    stats['z_target_mean'] = z_target_stat.mean().item()
+                prediction_stats['v_r'] = stats
         
         # ----- RND loss (batched, for curiosity-driven exploration) -----
         if self.config.use_rnd and self.networks.rnd is not None:
@@ -2886,6 +2947,10 @@ class BasePhase2Trainer(ABC):
                             self.writer.add_scalar('Exploration/count_total_visits', stats['count_curiosity_total_visits'], self.training_step_count)
                         if 'count_curiosity_mean_visits' in stats:
                             self.writer.add_scalar('Exploration/count_mean_visits', stats['count_curiosity_mean_visits'], self.training_step_count)
+                        if 'count_curiosity_max_visits' in stats:
+                            self.writer.add_scalar('Exploration/count_max_visits', stats['count_curiosity_max_visits'], self.training_step_count)
+                        if 'count_curiosity_min_visits' in stats:
+                            self.writer.add_scalar('Exploration/count_min_visits', stats['count_curiosity_min_visits'], self.training_step_count)
                         continue
                     # Human Action RND stats
                     if key == 'human_rnd':
@@ -2929,10 +2994,28 @@ class BasePhase2Trainer(ABC):
                             if 'running_mean' in net_stats:
                                 self.writer.add_scalar(f'AdaptiveLR/rnd_{net_name}_running_mean', net_stats['running_mean'], self.training_step_count)
                         continue
-                    self.writer.add_scalar(f'Predictions/{key}_mean', stats['mean'], self.training_step_count)
-                    self.writer.add_scalar(f'Predictions/{key}_std', stats['std'], self.training_step_count)
-                    if 'target_mean' in stats:
-                        self.writer.add_scalar(f'Targets/{key}_mean', stats['target_mean'], self.training_step_count)
+                    # Handle U_r specially (it predicts y, not U_r directly)
+                    if key == 'u_r' and 'y_mean' in stats:
+                        self.writer.add_scalar(f'Predictions/u_r_y_mean', stats['y_mean'], self.training_step_count)
+                        if 'y_std' in stats:
+                            self.writer.add_scalar(f'Predictions/u_r_y_std', stats['y_std'], self.training_step_count)
+                        if 'y_target_mean' in stats:
+                            self.writer.add_scalar(f'Targets/u_r_y_mean', stats['y_target_mean'], self.training_step_count)
+                        if 'u_r_target_mean' in stats:
+                            self.writer.add_scalar(f'Targets/u_r_mean', stats['u_r_target_mean'], self.training_step_count)
+                    elif 'mean' in stats:
+                        self.writer.add_scalar(f'Predictions/{key}_mean', stats['mean'], self.training_step_count)
+                        if 'std' in stats:
+                            self.writer.add_scalar(f'Predictions/{key}_std', stats['std'], self.training_step_count)
+                        if 'target_mean' in stats:
+                            self.writer.add_scalar(f'Targets/{key}_mean', stats['target_mean'], self.training_step_count)
+                    # Log z-space values when available (for Q_r, V_r, U_r with z-space transform)
+                    if 'z_mean' in stats:
+                        self.writer.add_scalar(f'ZSpace/{key}_z_pred', stats['z_mean'], self.training_step_count)
+                    if 'z_target_mean' in stats:
+                        self.writer.add_scalar(f'ZSpace/{key}_z_target', stats['z_target_mean'], self.training_step_count)
+                    if 'in_decay_phase' in stats:
+                        self.writer.add_scalar(f'ZSpace/in_decay_phase', stats['in_decay_phase'], self.training_step_count)
             
             # Log parameter norms
             param_norms = self._compute_param_norms()
@@ -3933,21 +4016,49 @@ class BasePhase2Trainer(ABC):
                 x_h_clamped = torch.clamp(x_h.squeeze(), min=1e-3, max=1.0)
                 return x_h_clamped.item()
         else:
-            # Compute X_h from V_h^e samples
-            n_goal_samples = 5
-            goals = []
-            for _ in range(n_goal_samples):
-                goal, _ = self.goal_sampler.sample(state, human_agent_idx)
-                goals.append(goal)
+            # Compute X_h = E_g[V_h^e(s, g)^zeta] exactly from all goals
+            # For TabularGoalSampler, use all goals with their probabilities
+            # For other samplers, fall back to Monte Carlo sampling
+            from empo.possible_goal import TabularGoalSampler
             
             self.networks.v_h_e.eval()
             with torch.no_grad():
-                v_h_e_values = self.networks.v_h_e.forward_batch(
-                    [state] * n_goal_samples, goals, [human_agent_idx] * n_goal_samples,
-                    self.env, self.device
-                ).squeeze()
-                v_h_e_values = self.networks.v_h_e.apply_hard_clamp(v_h_e_values)
-                x_h = (v_h_e_values ** self.config.zeta).mean()
+                if isinstance(self.goal_sampler, TabularGoalSampler):
+                    # Exact computation: X_h = E[weight * V_h^e^zeta] = sum_g prob_g * weight_g * V_h^e^zeta
+                    goals = self.goal_sampler.goals
+                    probs = self.goal_sampler.probs
+                    weights = self.goal_sampler.weights
+                    n_goals = len(goals)
+                    
+                    v_h_e_values = self.networks.v_h_e.forward_batch(
+                        [state] * n_goals, goals, [human_agent_idx] * n_goals,
+                        self.env, self.device
+                    ).squeeze()
+                    v_h_e_values = self.networks.v_h_e.apply_hard_clamp(v_h_e_values)
+                    
+                    # X_h = E[weight * V_h^e^zeta] = sum_g prob_g * weight_g * V_h^e(s, g)^zeta
+                    probs_tensor = torch.tensor(probs, device=self.device, dtype=v_h_e_values.dtype)
+                    weights_tensor = torch.tensor(weights, device=self.device, dtype=v_h_e_values.dtype)
+                    x_h = (probs_tensor * weights_tensor * (v_h_e_values ** self.config.zeta)).sum()
+                else:
+                    # Fall back to Monte Carlo sampling for non-tabular samplers
+                    n_goal_samples = 10  # Use more samples for better estimate
+                    goals = []
+                    weights = []
+                    for _ in range(n_goal_samples):
+                        goal, weight = self.goal_sampler.sample(state, human_agent_idx)
+                        goals.append(goal)
+                        weights.append(weight)
+                    
+                    v_h_e_values = self.networks.v_h_e.forward_batch(
+                        [state] * n_goal_samples, goals, [human_agent_idx] * n_goal_samples,
+                        self.env, self.device
+                    ).squeeze()
+                    v_h_e_values = self.networks.v_h_e.apply_hard_clamp(v_h_e_values)
+                    weights_tensor = torch.tensor(weights, device=self.device, dtype=v_h_e_values.dtype)
+                    # X_h = E[weight * V_h^e^zeta]
+                    x_h = (weights_tensor * (v_h_e_values ** self.config.zeta)).mean()
+                
                 x_h_clamped = torch.clamp(x_h, min=1e-3, max=1.0)
                 return x_h_clamped.item()
     

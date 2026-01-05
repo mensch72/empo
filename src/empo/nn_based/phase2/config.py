@@ -3,9 +3,10 @@ Configuration for Phase 2 robot policy learning.
 """
 
 import warnings
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, asdict
 from typing import Optional, Set
 import math
+import os
 
 
 @dataclass
@@ -175,6 +176,32 @@ class Phase2Config:
     # After warm-up, use 1/sqrt(t) decay: lr(t) = lr_base * sqrt(warmup) / sqrt(t)
     # This is a compromise between 1/t (for expectations) and constant (for Q-learning)
     use_sqrt_lr_decay: bool = True
+    
+    # Fraction of total training steps to keep LR constant before starting decay.
+    # 0.0 = decay immediately after warm-up (original behavior)
+    # 0.8 = constant LR until 80% of total steps, then decay
+    # This allows the network to learn the value function structure before fine-tuning.
+    # Recommended: 0.8 for most cases.
+    lr_constant_fraction: float = 0.0
+    
+    # If True, use 1/t decay (instead of 1/sqrt(t)) after the constant phase.
+    # 1/t is theoretically correct for converging to expected values (Robbins-Monro).
+    # Only applies after lr_constant_fraction of training is complete.
+    constant_lr_then_1_over_t: bool = False
+    
+    # =========================================================================
+    # Z-space transformation for Q_r, V_r, U_r networks
+    # =========================================================================
+    # When enabled, networks predict z = f(Q) = (-Q)^{-1/(ηξ)} ∈ (0, 1]
+    # instead of Q directly. This makes it easier for networks to represent
+    # values across orders of magnitude (e.g., Q from -1 to -1000).
+    #
+    # Loss function depends on training phase:
+    # - During constant LR phase: MSE in z-space (balanced gradients)
+    # - During 1/t decay phase: MSE in Q-space (Robbins-Monro convergence)
+    #
+    # See docs/plans/learning_qr_scale.md for full rationale.
+    use_z_space_transform: bool = False  # Enable z-space transformation
     
     # Legacy 1/t decay settings (DEPRECATED - use use_sqrt_lr_decay instead)
     # These flags take precedence over use_sqrt_lr_decay if enabled.
@@ -598,6 +625,27 @@ class Phase2Config:
         """Get total number of warm-up steps (including beta_r ramp-up)."""
         return self._warmup_q_r_end + self.beta_r_rampup_steps
     
+    def is_in_decay_phase(self, step: int) -> bool:
+        """
+        Check if we're in the late decay phase (1/t or 1/sqrt(t) decay).
+        
+        This is the phase where we want to use Q-space loss for Robbins-Monro
+        convergence to true expected values.
+        
+        Args:
+            step: Current training step.
+            
+        Returns:
+            True if we're past lr_constant_fraction of training and 
+            constant_lr_then_1_over_t is enabled.
+        """
+        full_warmup_end = self._warmup_q_r_end + self.beta_r_rampup_steps
+        decay_start_step = max(
+            full_warmup_end,
+            int(self.lr_constant_fraction * self.num_training_steps)
+        )
+        return step >= decay_start_step and self.constant_lr_then_1_over_t
+    
     def is_in_warmup(self, step: int) -> bool:
         """Check if we're still in the warm-up phase (before all networks active)."""
         return step < self._warmup_q_r_end
@@ -701,8 +749,14 @@ class Phase2Config:
         """
         Get learning rate for a network at the given step.
         
-        During warm-up: constant learning rate
-        After warm-up: 1/sqrt(t) decay if use_sqrt_lr_decay is True
+        Schedule:
+        1. During warm-up: constant learning rate
+        2. After warm-up until lr_constant_fraction of total steps: constant LR
+        3. After lr_constant_fraction: 1/sqrt(t) or 1/t decay
+        
+        The constant phase allows the network to learn the value function structure
+        before fine-tuning. The late decay phase (1/t) satisfies Robbins-Monro
+        conditions for converging to true expected values.
         
         Also respects legacy 1/t decay settings for X_h and U_r if enabled.
         
@@ -730,17 +784,30 @@ class Phase2Config:
             return self.get_lr_u_r(update_count)
         
         # During warm-up and beta_r ramp-up: constant learning rate
-        # LR decay only starts after beta_r ramp-up is complete
         full_warmup_end = self._warmup_q_r_end + self.beta_r_rampup_steps
-        if step < full_warmup_end or not self.use_sqrt_lr_decay:
+        if step < full_warmup_end:
             return base_lr
         
-        # After full warmup (including ramp-up): 1/sqrt(t) decay
-        # We count steps since full warmup ended
-        t = max(1, step - full_warmup_end + 1)  # +1 to avoid division issues
+        # Compute when decay should start (based on lr_constant_fraction)
+        decay_start_step = max(
+            full_warmup_end,
+            int(self.lr_constant_fraction * self.num_training_steps)
+        )
         
-        # 1/sqrt(t) decay: lr = lr_base / sqrt(t)
-        return base_lr / math.sqrt(t)
+        # If LR decay is disabled or we haven't reached decay start, return constant
+        if not self.use_sqrt_lr_decay or step < decay_start_step:
+            return base_lr
+        
+        # After decay start: apply decay schedule
+        # Count steps since decay started
+        t = max(1, step - decay_start_step + 1)  # +1 to avoid division issues
+        
+        if self.constant_lr_then_1_over_t:
+            # 1/t decay: lr = lr_base / t (converges to expected values)
+            return base_lr / t
+        else:
+            # 1/sqrt(t) decay: lr = lr_base / sqrt(t)
+            return base_lr / math.sqrt(t)
     
     def get_warmup_stage(self, step: int) -> int:
         """
@@ -890,3 +957,231 @@ class Phase2Config:
             'u_r': self.lookup_default_y,  # For U_r, this is default y value
         }
         return defaults.get(network_name, 0.0)
+    
+    def save_yaml(self, path: str) -> str:
+        """
+        Save all configuration parameters to a YAML file with structured sections.
+        
+        Args:
+            path: Path to save the YAML file.
+            
+        Returns:
+            Actual path where the file was saved (may differ if fallback used).
+        """
+        try:
+            import yaml
+        except ImportError:
+            raise ImportError(
+                "PyYAML is required for save_yaml(). Install with: pip install pyyaml"
+            )
+        
+        # Organize fields into logical sections
+        config_dict = {
+            'theory_parameters': {
+                'discount_factors': {
+                    'gamma_r': self.gamma_r,
+                    'gamma_h': self.gamma_h,
+                },
+                'power_metric': {
+                    'zeta': self.zeta,
+                    'xi': self.xi,
+                    'eta': self.eta,
+                },
+                'robot_policy': {
+                    'beta_r': self.beta_r,
+                },
+            },
+            'exploration': {
+                'robot': {
+                    'epsilon_r_start': self.epsilon_r_start,
+                    'epsilon_r_end': self.epsilon_r_end,
+                    'epsilon_r_decay_steps': self.epsilon_r_decay_steps,
+                },
+                'human': {
+                    'epsilon_h_start': self.epsilon_h_start,
+                    'epsilon_h_end': self.epsilon_h_end,
+                    'epsilon_h_decay_steps': self.epsilon_h_decay_steps,
+                },
+            },
+            'curiosity': {
+                'rnd': {
+                    'use_rnd': self.use_rnd,
+                    'use_human_action_rnd': self.use_human_action_rnd,
+                    'rnd_feature_dim': self.rnd_feature_dim,
+                    'rnd_hidden_dim': self.rnd_hidden_dim,
+                    'rnd_bonus_coef_r': self.rnd_bonus_coef_r,
+                    'rnd_bonus_coef_h': self.rnd_bonus_coef_h,
+                    'lr_rnd': self.lr_rnd,
+                    'rnd_weight_decay': self.rnd_weight_decay,
+                    'rnd_grad_clip': self.rnd_grad_clip,
+                    'normalize_rnd': self.normalize_rnd,
+                    'rnd_normalization_decay': self.rnd_normalization_decay,
+                },
+                'count_based': {
+                    'use_count_based_curiosity': self.use_count_based_curiosity,
+                    'count_curiosity_scale': self.count_curiosity_scale,
+                    'count_curiosity_use_ucb': self.count_curiosity_use_ucb,
+                    'count_curiosity_bonus_coef_r': self.count_curiosity_bonus_coef_r,
+                    'count_curiosity_bonus_coef_h': self.count_curiosity_bonus_coef_h,
+                },
+            },
+            'learning_rates': {
+                'base_rates': {
+                    'lr_q_r': self.lr_q_r,
+                    'lr_v_r': self.lr_v_r,
+                    'lr_v_h_e': self.lr_v_h_e,
+                    'lr_x_h': self.lr_x_h,
+                    'lr_u_r': self.lr_u_r,
+                },
+                'schedule': {
+                    'use_sqrt_lr_decay': self.use_sqrt_lr_decay,
+                    'lr_constant_fraction': self.lr_constant_fraction,
+                    'constant_lr_then_1_over_t': self.constant_lr_then_1_over_t,
+                    'lr_x_h_use_1_over_t': self.lr_x_h_use_1_over_t,
+                    'lr_u_r_use_1_over_t': self.lr_u_r_use_1_over_t,
+                    'lr_x_h_warmup_steps': self.lr_x_h_warmup_steps,
+                    'lr_u_r_warmup_steps': self.lr_u_r_warmup_steps,
+                },
+                'adaptive_lookup': {
+                    'lookup_use_adaptive_lr': self.lookup_use_adaptive_lr,
+                    'lookup_adaptive_lr_min': self.lookup_adaptive_lr_min,
+                },
+                'adaptive_rnd': {
+                    'rnd_use_adaptive_lr': self.rnd_use_adaptive_lr,
+                    'rnd_adaptive_lr_scale': self.rnd_adaptive_lr_scale,
+                    'rnd_adaptive_lr_min': self.rnd_adaptive_lr_min,
+                    'rnd_adaptive_lr_max': self.rnd_adaptive_lr_max,
+                },
+            },
+            'warmup': {
+                'stage_durations': {
+                    'warmup_v_h_e_steps': self.warmup_v_h_e_steps,
+                    'warmup_x_h_steps': self.warmup_x_h_steps,
+                    'warmup_u_r_steps': self.warmup_u_r_steps,
+                    'warmup_q_r_steps': self.warmup_q_r_steps,
+                    'beta_r_rampup_steps': self.beta_r_rampup_steps,
+                },
+                'computed_thresholds': {
+                    'warmup_v_h_e_end': self._warmup_v_h_e_end,
+                    'warmup_x_h_end': self._warmup_x_h_end,
+                    'warmup_u_r_end': self._warmup_u_r_end,
+                    'warmup_q_r_end': self._warmup_q_r_end,
+                    'total_warmup_steps': self.get_total_warmup_steps(),
+                },
+            },
+            'target_networks': {
+                'q_r_target_update_interval': self.q_r_target_update_interval,
+                'v_r_target_update_interval': self.v_r_target_update_interval,
+                'v_h_e_target_update_interval': self.v_h_e_target_update_interval,
+                'x_h_target_update_interval': self.x_h_target_update_interval,
+                'u_r_target_update_interval': self.u_r_target_update_interval,
+            },
+            'training': {
+                'buffer_size': self.buffer_size,
+                'batch_size': self.batch_size,
+                'x_h_batch_size': self.x_h_batch_size,
+                'num_training_steps': self.num_training_steps,
+                'steps_per_episode': self.steps_per_episode,
+                'training_steps_per_env_step': self.training_steps_per_env_step,
+                'env_steps_per_training_step': self.env_steps_per_training_step,
+                'goal_resample_prob': self.goal_resample_prob,
+                'use_model_based_targets': self.use_model_based_targets,
+            },
+            'sampling': {
+                'u_r_sample_humans': self.u_r_sample_humans,
+                'x_h_sample_humans': self.x_h_sample_humans,
+            },
+            'regularization': {
+                'weight_decay': {
+                    'q_r_weight_decay': self.q_r_weight_decay,
+                    'v_r_weight_decay': self.v_r_weight_decay,
+                    'v_h_e_weight_decay': self.v_h_e_weight_decay,
+                    'x_h_weight_decay': self.x_h_weight_decay,
+                    'u_r_weight_decay': self.u_r_weight_decay,
+                },
+                'gradient_clipping': {
+                    'q_r_grad_clip': self.q_r_grad_clip,
+                    'v_r_grad_clip': self.v_r_grad_clip,
+                    'v_h_e_grad_clip': self.v_h_e_grad_clip,
+                    'x_h_grad_clip': self.x_h_grad_clip,
+                    'u_r_grad_clip': self.u_r_grad_clip,
+                    'auto_grad_clip': self.auto_grad_clip,
+                    'auto_grad_clip_reference_lr': self.auto_grad_clip_reference_lr,
+                },
+                'dropout': {
+                    'q_r_dropout': self.q_r_dropout,
+                    'v_r_dropout': self.v_r_dropout,
+                    'v_h_e_dropout': self.v_h_e_dropout,
+                    'x_h_dropout': self.x_h_dropout,
+                    'u_r_dropout': self.u_r_dropout,
+                },
+            },
+            'network_modes': {
+                'v_r_use_network': self.v_r_use_network,
+                'u_r_use_network': self.u_r_use_network,
+                'x_h_use_network': self.x_h_use_network,
+                'use_encoders': self.use_encoders,
+                'include_step_count': self.include_step_count,
+                'use_z_space_transform': self.use_z_space_transform,
+            },
+            'lookup_tables': {
+                'use_lookup_tables': self.use_lookup_tables,
+                'network_flags': {
+                    'use_lookup_q_r': self.use_lookup_q_r,
+                    'use_lookup_v_r': self.use_lookup_v_r,
+                    'use_lookup_v_h_e': self.use_lookup_v_h_e,
+                    'use_lookup_x_h': self.use_lookup_x_h,
+                    'use_lookup_u_r': self.use_lookup_u_r,
+                },
+                'default_values': {
+                    'lookup_default_q_r': self.lookup_default_q_r,
+                    'lookup_default_v_r': self.lookup_default_v_r,
+                    'lookup_default_v_h_e': self.lookup_default_v_h_e,
+                    'lookup_default_x_h': self.lookup_default_x_h,
+                    'lookup_default_y': self.lookup_default_y,
+                },
+            },
+            'async_training': {
+                'async_training': self.async_training,
+                'num_actors': self.num_actors,
+                'actor_sync_freq': self.actor_sync_freq,
+                'rnd_sync_freq': self.rnd_sync_freq,
+                'async_min_buffer_size': self.async_min_buffer_size,
+                'max_env_steps_per_training_step': self.max_env_steps_per_training_step,
+                'async_queue_size': self.async_queue_size,
+            },
+            'network_architecture': {
+                'hidden_dim': self.hidden_dim,
+                'state_feature_dim': self.state_feature_dim,
+                'goal_feature_dim': self.goal_feature_dim,
+                'agent_embedding_dim': self.agent_embedding_dim,
+                'agent_position_feature_dim': self.agent_position_feature_dim,
+                'agent_feature_dim': self.agent_feature_dim,
+            },
+            'profiling': {
+                'profile_batching': self.profile_batching,
+                'profile_batching_interval': self.profile_batching_interval,
+            },
+        }
+        
+        # Try to save to the specified path
+        actual_path = path
+        try:
+            dir_path = os.path.dirname(path)
+            if dir_path:
+                os.makedirs(dir_path, exist_ok=True)
+            with open(path, 'w') as f:
+                yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
+        except (IOError, OSError) as e:
+            # Fallback to /tmp if original path fails
+            fallback_path = os.path.join('/tmp', os.path.basename(path))
+            warnings.warn(
+                f"Could not write to {path}: {e}. Falling back to {fallback_path}",
+                UserWarning,
+                stacklevel=2
+            )
+            with open(fallback_path, 'w') as f:
+                yaml.dump(config_dict, f, default_flow_style=False, sort_keys=False)
+            actual_path = fallback_path
+        
+        return actual_path

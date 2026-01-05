@@ -20,8 +20,8 @@ class Phase2Transition:
         state: The current state s.
         robot_action: Tuple of actions, one per robot (a_r).
         goals: Dict mapping human index to their goal {h: g_h}.
-        goal_weights: Dict mapping human index to their goal's importance weight {h: w_h}.
-            Used for proper X_h target computation with importance sampling.
+        goal_weights: Dict mapping human index to their goal's weight {h: w_h}.
+            Used for X_h target computation: X_h = E[weight * V_h^e].
         human_actions: List of human actions (a_H).
         next_state: The successor state s'.
         transition_probs_by_action: Optional pre-computed transition probabilities

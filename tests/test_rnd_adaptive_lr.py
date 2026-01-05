@@ -12,7 +12,6 @@ Tests verify that:
 import pytest
 import torch
 import torch.nn as nn
-from typing import List, Any, Tuple, Optional
 
 from empo.nn_based.phase2.config import Phase2Config
 from empo.nn_based.phase2.rnd import RNDModule
@@ -67,7 +66,7 @@ class TestRNDAdaptiveLRConfig:
         
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
-            config = Phase2Config(
+            Phase2Config(
                 rnd_use_adaptive_lr=True,
                 use_rnd=False,
             )
@@ -120,9 +119,10 @@ class TestRNDNoveltyComputation:
         features = torch.randn(16, 10)
         _ = rnd.compute_novelty(features, update_stats=True)
         
-        # Running mean should have changed
+        # Running mean should have changed (or at least been computed from batch)
         assert rnd.update_count > 0, "Update count should have increased"
-        # Note: running_mean might not change much with first batch, but update_count should
+        # After first batch, running_mean is set to batch mean (not the initial zero)
+        assert rnd.running_mean != initial_mean or rnd.update_count == 1, "Running mean should have been updated"
     
     def test_no_grad_computation(self):
         """Test that compute_novelty_no_grad doesn't require gradients."""

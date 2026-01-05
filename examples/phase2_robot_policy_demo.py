@@ -67,13 +67,61 @@ from gym_multigrid.multigrid import (
 )
 from empo.multigrid import MultiGridGoalSampler, ReachCellGoal, ReachRectangleGoal, render_test_map_values
 from empo.possible_goal import TabularGoalSampler, PossibleGoalSampler
-from empo.human_policy_prior import HeuristicPotentialPolicy, MultiGridHumanExplorationPolicy
+from empo.human_policy_prior import HeuristicPotentialPolicy
 from empo.nn_based.multigrid import PathDistanceCalculator
 from empo.nn_based.phase2.config import Phase2Config
-from empo.nn_based.phase2.profiler import TrainingProfiler, NoOpProfiler
+from empo.nn_based.phase2.profiler import TrainingProfiler
 from empo.nn_based.phase2.world_model_factory import CachedWorldModelFactory, EnsembleWorldModelFactory
 from empo.nn_based.multigrid.phase2 import train_multigrid_phase2
-from empo.nn_based.multigrid.phase2.robot_policy import MultiGridRobotPolicy, MultiGridRobotExplorationPolicy
+from empo.nn_based.multigrid.phase2.robot_policy import (
+    MultiGridRobotPolicy, MultiGridRobotExplorationPolicy, MultiGridMultiStepExplorationPolicy
+)
+
+
+def load_config_yaml(path: str) -> dict:
+    """
+    Load a YAML config file and extract all leaf values.
+    
+    Recursively traverses the YAML structure and collects all leaf values
+    (non-dict values) with their keys. This ignores any hierarchical organization
+    and just returns a flat dict of parameter names to values.
+    
+    Also strips end-of-line comments from string values (text after '#').
+    
+    Args:
+        path: Path to the YAML config file.
+        
+    Returns:
+        Flat dict mapping parameter names to their values.
+    """
+    try:
+        import yaml
+    except ImportError:
+        raise ImportError(
+            "PyYAML is required for --config. Install with: pip install pyyaml"
+        )
+    
+    with open(path, 'r') as f:
+        config = yaml.safe_load(f)
+    
+    def extract_leaves(obj, result=None):
+        """Recursively extract leaf values from nested dict."""
+        if result is None:
+            result = {}
+        
+        if isinstance(obj, dict):
+            for key, value in obj.items():
+                if isinstance(value, dict):
+                    # Recurse into nested dicts
+                    extract_leaves(value, result)
+                else:
+                    # Leaf value - strip comments from strings
+                    if isinstance(value, str) and '#' in value:
+                        value = value.split('#')[0].strip()
+                    result[key] = value
+        return result
+    
+    return extract_leaves(config)
 
 
 # ============================================================================
@@ -705,16 +753,32 @@ def run_policy_rollout(
                         x_h = networks.x_h.forward(state, env, h, device)
                         x_h_clamped = torch.clamp(x_h.squeeze(), min=1e-3, max=1.0)
                     else:
-                        # Compute X_h from V_h^e samples
-                        n_goal_samples = 5
-                        v_h_e_vals = []
-                        for _ in range(n_goal_samples):
-                            goal, _ = goal_sampler.sample(state, h)
-                            v_h_e = networks.v_h_e.forward(state, env, goal, h, device)
-                            v_h_e_vals.append(v_h_e.squeeze())
-                        v_h_e_tensor = torch.stack(v_h_e_vals)
+                        # Compute X_h = E_g[weight * V_h^e(s, g)^zeta] exactly from all goals
                         zeta = config.zeta if config else 2.0
-                        x_h_clamped = torch.clamp((v_h_e_tensor ** zeta).mean(), min=1e-3, max=1.0)
+                        if hasattr(goal_sampler, 'goals') and hasattr(goal_sampler, 'weights') and hasattr(goal_sampler, 'probs'):
+                            # TabularGoalSampler: use all goals with their probs and weights
+                            goals = goal_sampler.goals
+                            probs = goal_sampler.probs
+                            weights = goal_sampler.weights
+                            v_h_e_vals = []
+                            for goal in goals:
+                                v_h_e = networks.v_h_e.forward(state, env, h, goal, device)
+                                v_h_e_vals.append(v_h_e.squeeze())
+                            v_h_e_tensor = torch.stack(v_h_e_vals)
+                            probs_tensor = torch.tensor(probs, device=device, dtype=v_h_e_tensor.dtype)
+                            weights_tensor = torch.tensor(weights, device=device, dtype=v_h_e_tensor.dtype)
+                            # X_h = E[weight * V_h^e^zeta] = sum_g prob_g * weight_g * V_h^e(s, g)^zeta
+                            x_h_clamped = torch.clamp((probs_tensor * weights_tensor * (v_h_e_tensor ** zeta)).sum(), min=1e-3, max=1.0)
+                        else:
+                            # Fall back to Monte Carlo sampling
+                            n_goal_samples = 10
+                            weighted_v_h_e_vals = []
+                            for _ in range(n_goal_samples):
+                                goal, weight = goal_sampler.sample(state, h)
+                                v_h_e = networks.v_h_e.forward(state, env, h, goal, device)
+                                weighted_v_h_e_vals.append(weight * (v_h_e.squeeze() ** zeta))
+                            weighted_v_h_e_tensor = torch.stack(weighted_v_h_e_vals)
+                            x_h_clamped = torch.clamp(weighted_v_h_e_tensor.mean(), min=1e-3, max=1.0)
                     x_h_vals.append(x_h_clamped)
                 if x_h_vals:
                     x_h_tensor = torch.stack(x_h_vals)
@@ -826,6 +890,8 @@ def main(
     num_training_steps_override: int = None,
     checkpoint_interval: int = 0,
     seed: int = 42,
+    output_dir_override: str = None,
+    config_overrides: dict = None,
 ):
     """Run Phase 2 demo."""
     # Set random seeds for reproducibility (sync mode only - async mode is inherently non-deterministic)
@@ -863,9 +929,9 @@ def main(
         hidden_dim = 16
         goal_feature_dim = 8
         agent_embedding_dim = 4
-        use_x_h_network = False  # Compute X_h directly from V_h^e samples
+        use_x_h_network = False  # Compute X_h directly from V_h^e
         print("[TRIVIAL ENV] Using minimal network sizes for simple task")
-        print("[TRIVIAL ENV] X_h computed directly from V_h^e samples (x_h_use_network=False)")
+        print("[TRIVIAL ENV] X_h computed directly from V_h^e (x_h_use_network=False)")
     elif env_type == "small":
         num_training_steps = 20000
         num_rollouts = NUM_ROLLOUTS
@@ -932,11 +998,11 @@ def main(
         print("[QUICK MODE] Running with reduced episodes, rollouts, batch sizes, network size, and warmup stages")
     else:
         # Use default warmup stages (each stage ~1000 steps)
-        warmup_v_h_e_steps = 1000
-        warmup_x_h_steps = 1000
-        warmup_u_r_steps = 1000  # Will be set to 0 if u_r_use_network=False
-        warmup_q_r_steps = 1000
-        beta_r_rampup_steps = 2000
+        warmup_v_h_e_steps = 1e4
+        warmup_x_h_steps = 1e4
+        warmup_u_r_steps = 1e4  # Will be set to 0 if u_r_use_network=False
+        warmup_q_r_steps = 1e4
+        beta_r_rampup_steps = 5e4
     
     # Override training steps if specified via command line
     if num_training_steps_override is not None:
@@ -962,8 +1028,11 @@ def main(
     
     device = 'cpu'
     
-    # Create output directory (includes env_type in name)
-    output_dir = os.path.join(os.path.dirname(__file__), '..', 'outputs', f'phase2_demo_{env_type}')
+    # Create output directory (includes env_type in name, or use override)
+    if output_dir_override:
+        output_dir = output_dir_override
+    else:
+        output_dir = os.path.join(os.path.dirname(__file__), '..', 'outputs', f'phase2_demo_{env_type}')
     os.makedirs(output_dir, exist_ok=True)
     tensorboard_dir = os.path.join(output_dir, 'tensorboard')
     
@@ -1114,7 +1183,7 @@ def main(
         # Use RND for neural networks, count-based for tabular mode
         use_rnd=use_curious and not use_tabular,
         use_human_action_rnd=use_curious and not use_tabular,
-        rnd_bonus_coef_r=0.1 if (use_curious and not use_tabular) else 0.0,
+        rnd_bonus_coef_r=1.0 if (use_curious and not use_tabular) else 0.0,
         rnd_feature_dim=64,
         rnd_hidden_dim=128,
         normalize_rnd=True,
@@ -1128,9 +1197,35 @@ def main(
         use_count_based_curiosity=use_curious and use_tabular,
         count_curiosity_scale=1.0,
         count_curiosity_use_ucb=False,
-        count_curiosity_bonus_coef_r=0.1 if (use_curious and use_tabular) else 0.0,
-        count_curiosity_bonus_coef_h=0.1 if (use_curious and use_tabular) else 0.0,
+        count_curiosity_bonus_coef_r=10.0 if (use_curious and use_tabular) else 0.0,
+        count_curiosity_bonus_coef_h=10.0 if (use_curious and use_tabular) else 0.0,
+        constant_lr_then_1_over_t=True, # Use 1/n adaptive LR after initial constant LR phase
+        use_z_space_transform=True,
     )
+    
+    # Apply config overrides from --config YAML file
+    if config_overrides:
+        from dataclasses import fields
+        valid_fields = {f.name for f in fields(config)}
+        applied = []
+        skipped = []
+        for key, value in config_overrides.items():
+            if key in valid_fields:
+                setattr(config, key, value)
+                applied.append(key)
+            else:
+                skipped.append(key)
+        if applied:
+            print(f"[CONFIG] Applied {len(applied)} overrides from YAML: {', '.join(sorted(applied)[:10])}{'...' if len(applied) > 10 else ''}")
+        if skipped:
+            print(f"[CONFIG] Skipped {len(skipped)} unknown keys: {', '.join(sorted(skipped)[:5])}{'...' if len(skipped) > 5 else ''}")
+        # Re-run __post_init__ to recompute derived values
+        config.__post_init__()
+    
+    # Save config to YAML file in output directory
+    config_yaml_path = os.path.join(output_dir, 'config.yaml')
+    actual_config_path = config.save_yaml(config_yaml_path)
+    print(f"Config saved to: {actual_config_path}")
     
     # If using policy directly (no training), skip to rollouts
     if use_policy_path:
@@ -1147,25 +1242,53 @@ def main(
     else:
         # Define custom robot exploration policy for epsilon-greedy exploration.
         # SmallActions: 0=still, 1=left, 2=right, 3=forward
-        # We bias exploration toward forward movement to encourage spatial exploration.
-        # Use smart policy that avoids "forward" when blocked by walls/objects.
-        robot_exploration_policy = MultiGridRobotExplorationPolicy(
-            action_probs=[0.1, 0.1, 0.2, 0.6]  # still, left, right, forward
+        # We use multi-step exploration to encourage directed movement rather than
+        # random walk behavior. This samples sequences like "k times forward" or
+        # "turn left, then k times forward" where k is geometric(p=1/expected_k).
+        robot_exploration_policy = MultiGridMultiStepExplorationPolicy(
+            agent_indices=robot_indices,
+            sequence_probs={
+                'still': 0.05,         # Occasional waiting
+                'forward': 0.50,       # Prefer moving forward
+                'left_forward': 0.18,  # 90° turns
+                'right_forward': 0.18,
+                'back_forward': 0.09,  # 180° turns (less common)
+            },
+            expected_k={
+                'still': 1.0,          # Short waits
+                'forward': 2, #3.0,        # Longer straight runs
+                'left_forward': 1.5, #2.0,
+                'right_forward': 1.5, #2.0,
+                'back_forward': 1.5, #2.0,
+            },
         )
         
         # Define custom human exploration policy for epsilon-greedy exploration.
-        # Same logic as robot exploration - bias toward forward, avoid blocked moves.
+        # Same multi-step approach as robot exploration for consistency.
         # Note: world_model will be set by the trainer via set_world_model()
-        human_exploration_policy = MultiGridHumanExplorationPolicy(
-            action_probs=[0.1, 0.1, 0.2, 0.6]  # still, left, right, forward
+        human_exploration_policy = MultiGridMultiStepExplorationPolicy(
+            agent_indices=human_indices,
+            sequence_probs={
+                'still': 0.05,
+                'forward': 0.50,
+                'left_forward': 0.18,
+                'right_forward': 0.18,
+                'back_forward': 0.09,
+            },
+            expected_k={
+                'still': 1.0,          # Short waits
+                'forward': 2, #3.0,        # Longer straight runs
+                'left_forward': 1.5, #2.0,
+                'right_forward': 1.5, #2.0,
+                'back_forward': 1.5, #2.0,
+            },
         )
         
         # Train Phase 2
         print("Training Phase 2 robot policy...")
         print(f"  Training steps: {config.num_training_steps:,}")
         print(f"  Environment steps per episode: {config.steps_per_episode}")
-        print(f"  Robot exploration policy: forward-biased (avoids blocked forward)")
-        print(f"  Human exploration policy: forward-biased (avoids blocked forward)")
+        print(f"  Robot and human exploration policies: multi-step sequences (forward-biased, expected_k varies by type)")
         if use_curious:
             if use_tabular:
                 print(f"  Curiosity (count-based): ENABLED (bonus_coef={config.count_curiosity_bonus_coef_r})")
@@ -1285,25 +1408,25 @@ def main(
         
         # The 16 reachable (rock, human, robot) position combinations, sorted by difficulty to reach
         all_expected = [
-            # Rock at (2,1): 1 combo (initial state)
+            # most likely path
             ((2,1), (2,2), (1,1)),  # pos 0
-            # Rock at (3,1): 3 combos
-            ((3,1), (2,2), (2,1)),  # pos 1
-            ((3,1), (2,2), (1,1)),  # pos 2a
-            ((3,1), (2,1), (1,1)),  # pos 3a
-            # Rock at (4,1): 12 combos
-            ((4,1), (2,2), (3,1)),  # pos 2
-            ((4,1), (2,2), (2,1)),  # pos 3
-            ((4,1), (2,1), (3,1)),  # pos 3b
-            ((4,1), (2,2), (1,1)),  # pos 4
-            ((4,1), (1,1), (3,1)),  # pos 4b
-            ((4,1), (2,1), (1,1)),  # pos 5
-            ((4,1), (1,1), (2,1)),  # pos 5b
-            ((4,1), (3,1), (1,1)),  # pos 6
-            ((4,1), (1,1), (2,2)),  # pos 6b
-            ((4,1), (3,1), (2,1)),  # pos 7
-            ((4,1), (2,1), (2,2)),  # pos 7b
-            ((4,1), (3,1), (2,2)),  # pos 8
+            ((3,1), (2,2), (2,1)),  # pos 1, robot has pushed rock once
+            ((4,1), (2,2), (3,1)),  # pos 2, robot has pushed rock twice
+            ((4,1), (2,1), (3,1)),  # pos 3, human has moved up
+            ((4,1), (1,1), (3,1)),  # pos 4, human has moved left
+            ((4,1), (1,1), (2,1)),  # pos 5, robot has returned one step
+            ((4,1), (1,1), (2,2)),  # pos 6, robot has moved down
+            ((4,1), (2,1), (2,2)),  # pos 7, human has returned right one step
+            ((4,1), (3,1), (2,2)),  # pos 8, human has moved further right
+            # less likely path:
+            ((3,1), (2,2), (1,1)),  # pos 2a, robot has returned after pushing once (less likely than 2)
+            ((3,1), (2,1), (1,1)),  # pos 3a, human has moved up
+            # even less likely path:
+            ((4,1), (2,2), (2,1)),  # pos 3b, robot has returned one step after pushing twice (less likely than 3)
+            ((4,1), (2,2), (1,1)),  # pos 4b, robot has returned two steps after pushing twice
+            ((4,1), (2,1), (1,1)),  # pos 5b, human has moved up
+            ((4,1), (3,1), (1,1)),  # pos 6b, human has moved right
+            ((4,1), (3,1), (2,1)),  # pos 7b, robot has followed one step
         ]
         
         # Print table for all 16 combos
@@ -1469,6 +1592,8 @@ if __name__ == "__main__":
                         help='Enable adaptive learning rates (1/n for tabular, RND-based for neural)')
     
     # Save/restore options
+    parser.add_argument('--config', type=str, default=None, metavar='PATH',
+                        help='Load config from YAML file (overrides defaults, extracts leaf values ignoring hierarchy)')
     parser.add_argument('--save_networks', type=str, default=None, metavar='PATH',
                         help='Save all trained networks to PATH after training')
     parser.add_argument('--save_policy', type=str, default=None, metavar='PATH',
@@ -1486,6 +1611,10 @@ if __name__ == "__main__":
     parser.add_argument('--checkpoint-interval', type=int, default=0, metavar='N',
                         help='Save checkpoint every N training steps (0 to disable, default: 0)')
     
+    # Output options
+    parser.add_argument('--output-dir', '-o', type=str, default=None, metavar='PATH',
+                        help='Output directory for logs, models, and videos (default: outputs/phase2_demo_<env>)')
+    
     # Rollout options
     parser.add_argument('--rollouts', type=int, default=None, metavar='N',
                         help='Number of rollouts to generate (overrides default)')
@@ -1493,6 +1622,13 @@ if __name__ == "__main__":
                         help='Path to save rollout video (default: outputs/phase2_demo_<env>/...mp4)')
     
     args = parser.parse_args()
+    
+    # Load config overrides from YAML file if specified
+    config_overrides = None
+    if args.config:
+        config_overrides = load_config_yaml(args.config)
+        print(f"Loaded {len(config_overrides)} config values from: {args.config}")
+    
     main(
         quick_mode=args.quick,
         lightningfast_mode=args.lightningfast,
@@ -1514,4 +1650,6 @@ if __name__ == "__main__":
         num_training_steps_override=args.steps,
         checkpoint_interval=args.checkpoint_interval,
         seed=args.seed,
+        output_dir_override=args.output_dir,
+        config_overrides=config_overrides,
     )

@@ -225,6 +225,79 @@ class TestLearningRateDecay:
         
         assert lr_before == lr_after == config.lr_q_r
 
+    def test_lr_constant_fraction(self):
+        """Learning rate should stay constant until lr_constant_fraction of total steps."""
+        config = Phase2Config(
+            num_training_steps=100000,
+            warmup_v_h_e_steps=100,
+            warmup_x_h_steps=100,
+            warmup_u_r_steps=0,
+            warmup_q_r_steps=100,
+            beta_r_rampup_steps=100,
+            use_sqrt_lr_decay=True,
+            lr_constant_fraction=0.8,  # Decay starts at step 80000
+            lr_q_r=1e-4,
+        )
+        
+        full_warmup_end = config._warmup_q_r_end + config.beta_r_rampup_steps
+        decay_start = int(0.8 * 100000)  # 80000
+        
+        # Before decay_start: should be constant at base LR
+        lr_early = config.get_learning_rate('q_r', full_warmup_end + 1000, 0)
+        lr_mid = config.get_learning_rate('q_r', 50000, 0)
+        lr_just_before = config.get_learning_rate('q_r', decay_start - 1, 0)
+        
+        assert lr_early == config.lr_q_r, f"Expected constant LR early, got {lr_early}"
+        assert lr_mid == config.lr_q_r, f"Expected constant LR mid, got {lr_mid}"
+        assert lr_just_before == config.lr_q_r, f"Expected constant LR just before decay, got {lr_just_before}"
+        
+        # At and after decay_start: should start decaying
+        lr_at_start = config.get_learning_rate('q_r', decay_start, 0)
+        lr_late = config.get_learning_rate('q_r', 90000, 0)
+        
+        assert lr_at_start == config.lr_q_r, f"Expected base LR at decay start (t=1), got {lr_at_start}"
+        assert lr_late < config.lr_q_r, f"Expected decayed LR late, got {lr_late}"
+
+    def test_constant_lr_then_1_over_t(self):
+        """Learning rate should decay as 1/t when constant_lr_then_1_over_t is True."""
+        config = Phase2Config(
+            num_training_steps=100000,
+            warmup_v_h_e_steps=100,
+            warmup_x_h_steps=100,
+            warmup_u_r_steps=0,
+            warmup_q_r_steps=100,
+            beta_r_rampup_steps=100,
+            use_sqrt_lr_decay=True,
+            lr_constant_fraction=0.5,  # Decay starts at step 50000
+            constant_lr_then_1_over_t=True,  # Use 1/t instead of 1/sqrt(t)
+            lr_q_r=1e-3,
+        )
+        
+        decay_start = 50000
+        
+        # At t=1 (step 50000): lr = base_lr / 1 = base_lr
+        lr_t1 = config.get_learning_rate('q_r', decay_start, 0)
+        assert abs(lr_t1 - config.lr_q_r) < 1e-10, f"At t=1, expected {config.lr_q_r}, got {lr_t1}"
+        
+        # At t=100 (step 50099): lr = base_lr / 100
+        lr_t100 = config.get_learning_rate('q_r', decay_start + 99, 0)
+        expected_t100 = config.lr_q_r / 100
+        assert abs(lr_t100 - expected_t100) < 1e-10, f"At t=100, expected {expected_t100}, got {lr_t100}"
+        
+        # Verify 1/t ratio (not 1/sqrt(t))
+        # For 1/t: lr(t2)/lr(t1) = t1/t2
+        # For 1/sqrt(t): lr(t2)/lr(t1) = sqrt(t1)/sqrt(t2)
+        t1, t2 = 100, 400
+        lr1 = config.get_learning_rate('q_r', decay_start + t1 - 1, 0)
+        lr2 = config.get_learning_rate('q_r', decay_start + t2 - 1, 0)
+        
+        actual_ratio = lr2 / lr1
+        expected_1_over_t_ratio = t1 / t2  # = 0.25
+        expected_sqrt_ratio = math.sqrt(t1) / math.sqrt(t2)  # = 0.5
+        
+        assert abs(actual_ratio - expected_1_over_t_ratio) < 0.001, \
+            f"Expected 1/t ratio {expected_1_over_t_ratio}, got {actual_ratio}"
+
 
 # =============================================================================
 # 4. EPSILON-GREEDY EXPLORATION

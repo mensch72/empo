@@ -104,8 +104,7 @@ class PossibleGoalSampler(ABC):
     Abstract base class for stochastic sampling of possible goals.
     
     Used for Monte Carlo approximation of integrals over goal space.
-    Each sample returns a goal along with an importance weight for
-    weighted averaging.
+    Each sample returns a goal along with a weight for computing X_h.
     
     This is useful when the goal space is too large for exact enumeration.
     
@@ -152,8 +151,7 @@ class PossibleGoalSampler(ABC):
         """
         Sample a possible goal for a human agent in the given state.
         
-        The returned weight is used for importance sampling. If sampling
-        uniformly from all goals, the weight should be 1.0 for all samples.
+        The returned weight is used for computing X_h = E[weight * V_h^e].
         
         Args:
             state: Current world state (hashable tuple from get_state()).
@@ -162,7 +160,7 @@ class PossibleGoalSampler(ABC):
         Returns:
             Tuple of (goal, weight) where:
                 - goal: A PossibleGoal instance
-                - weight: Importance weight for this sample (float > 0)
+                - weight: Weight for this goal in X_h computation (float > 0)
         """
         pass
 
@@ -178,11 +176,10 @@ def approx_integral_over_possible_goals(
     Approximate an integral over possible goals using Monte Carlo sampling.
     
     Computes the weighted average of func(goal) over goals sampled from the
-    sampler. Uses importance sampling with the weights returned by the sampler.
+    sampler, using the weights returned by the sampler.
     
     The approximation converges to the true integral as sample_size increases,
-    assuming the sampler has support over all goals and the weights are
-    valid importance weights.
+    assuming the sampler has support over all goals.
     
     Args:
         state: Current world state.
@@ -273,7 +270,7 @@ class DeterministicGoalSampler(PossibleGoalSampler):
     
     Args:
         goal: The fixed PossibleGoal instance to return.
-        weight: The importance weight to return (default 1.0).
+        weight: The weight for X_h computation (default 1.0).
     """
     
     def __init__(self, goal: 'PossibleGoal', weight: float = 1.0):
@@ -282,7 +279,7 @@ class DeterministicGoalSampler(PossibleGoalSampler):
         
         Args:
             goal: The PossibleGoal instance to always return.
-            weight: The importance weight (default 1.0).
+            weight: The weight for X_h computation (default 1.0).
         """
         super().__init__(goal.env)
         self.goal = goal
@@ -345,12 +342,12 @@ class TabularGoalSampler(PossibleGoalSampler):
     A goal sampler that samples from a fixed list of goals.
     
     Samples goals according to the provided probabilities (or uniformly if not given),
-    and returns the specified importance weights (or 1.0 if not given).
+    and returns the specified weights for X_h computation (or 1.0 if not given).
     
     Args:
         goals: Iterable of PossibleGoal instances.
         probabilities: Optional iterable of sampling probabilities. If None, uniform (1/n) is used.
-        weights: Optional iterable of importance weights to return. If None, 1.0 is used for all.
+        weights: Optional iterable of weights for X_h computation. If None, 1.0 is used for all.
     """
     
     def __init__(self, goals, probabilities=None, weights=None):
@@ -361,7 +358,7 @@ class TabularGoalSampler(PossibleGoalSampler):
             goals: Iterable of PossibleGoal instances.
             probabilities: Optional iterable of sampling probabilities (will be normalized).
                           If None, uses uniform 1/n probabilities.
-            weights: Optional iterable of importance weights to return.
+            weights: Optional iterable of weights for X_h computation.
                     If None, uses 1.0 for all goals.
         """
         self.goals = list(goals)
@@ -383,7 +380,7 @@ class TabularGoalSampler(PossibleGoalSampler):
             total = sum(probs)
             self.probs = [p / total for p in probs]
         
-        # Set up importance weights to return
+        # Set up weights for X_h computation
         if weights is None:
             self.weights = [1.0] * n
         else:

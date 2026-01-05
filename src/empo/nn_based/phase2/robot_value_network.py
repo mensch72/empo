@@ -6,6 +6,10 @@ Implements V_r(s) from equation (9) of the EMPO paper:
 
 This is the robot's value function, representing the expected long-term
 aggregate human power starting from state s.
+
+When use_z_space=True, the network internally represents values in z-space:
+    z = (-V)^{-1/(ηξ)} ∈ (0, 1]
+This makes it easier to represent values across orders of magnitude.
 """
 
 import torch
@@ -57,13 +61,29 @@ class BaseRobotValueNetwork(nn.Module, ABC):
     - V_r < 0 always (since U_r < 0 and Q_r < 0)
     - This can be computed from U_r and Q_r directly, or learned separately
     
+    When use_z_space=True:
+    - Network internally stores z = (-V)^{-1/(ηξ)} ∈ (0, 1]
+    - forward() returns V-values (converted from z)
+    
     Args:
         gamma_r: Robot discount factor.
+        use_z_space: If True, use z-space representation internally.
+        eta: η parameter for z-space transformation (default 1.1).
+        xi: ξ parameter for z-space transformation (default 1.0).
     """
     
-    def __init__(self, gamma_r: float = 0.99):
+    def __init__(
+        self,
+        gamma_r: float = 0.99,
+        use_z_space: bool = False,
+        eta: float = 1.1,
+        xi: float = 1.0
+    ):
         super().__init__()
         self.gamma_r = gamma_r
+        self.use_z_space = use_z_space
+        self.eta = eta
+        self.xi = xi
     
     @abstractmethod
     def forward(
@@ -90,11 +110,28 @@ class BaseRobotValueNetwork(nn.Module, ABC):
         """Return configuration dict for save/load."""
         pass
     
+    def raw_to_z(self, raw_values: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
+        """Convert raw network output to z ∈ (0, 1)."""
+        return torch.sigmoid(raw_values).clamp(min=eps, max=1.0 - eps)
+    
+    def z_to_v(self, z: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+        """Convert z-values to V-values: V = -z^{-ηξ}."""
+        z_clamped = z.clamp(min=eps)
+        exponent = -self.eta * self.xi
+        return -torch.pow(z_clamped, exponent)
+    
+    def v_to_z(self, v: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+        """Convert V-values to z-values: z = (-V)^{-1/(ηξ)}."""
+        v_clamped = v.clamp(max=-eps)
+        exponent = -1.0 / (self.eta * self.xi)
+        return torch.pow(-v_clamped, exponent)
+    
     def ensure_negative(self, raw_values: torch.Tensor) -> torch.Tensor:
         """
         Ensure V_r values are negative.
         
-        Uses -softplus(-x) which maps R -> (-∞, 0).
+        When use_z_space=True, converts raw → z → V.
+        Otherwise, uses -softplus(-x) which maps R -> (-∞, 0).
         
         Args:
             raw_values: Unbounded network output.
@@ -102,10 +139,14 @@ class BaseRobotValueNetwork(nn.Module, ABC):
         Returns:
             Negative values.
         """
-        # -softplus(-x) maps R -> (-∞, 0)
-        # When x is large positive, -softplus(-x) ≈ x (large negative)
-        # When x is large negative, -softplus(-x) ≈ 0 (approaches 0 from below)
-        return -F.softplus(-raw_values)
+        if self.use_z_space:
+            z = self.raw_to_z(raw_values)
+            return self.z_to_v(z)
+        else:
+            # -softplus(-x) maps R -> (-∞, 0)
+            # When x is large positive, -softplus(-x) ≈ x (large negative)
+            # When x is large negative, -softplus(-x) ≈ 0 (approaches 0 from below)
+            return -F.softplus(-raw_values)
     
     def compute_from_components(
         self,
