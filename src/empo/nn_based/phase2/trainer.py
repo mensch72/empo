@@ -2874,7 +2874,8 @@ class BasePhase2Trainer(ABC):
     class _LearnerState:
         """Mutable state for learner (warmup tracking and progress metrics)."""
         def __init__(self, prev_stage: int, prev_stage_name: str, 
-                     prev_param_norms: Optional[Dict[str, float]] = None):
+                     prev_param_norms: Optional[Dict[str, float]] = None,
+                     in_lr_decay_phase: bool = False):
             self.prev_stage = prev_stage
             self.prev_stage_name = prev_stage_name
             # For tracking network parameter changes
@@ -2882,6 +2883,8 @@ class BasePhase2Trainer(ABC):
             # For tracking average time per step
             self.start_time: Optional[float] = None
             self.start_step: int = 0
+            # For tracking LR decay phase transition
+            self.in_lr_decay_phase = in_lr_decay_phase
     
     def _init_learner_state(self) -> "_LearnerState":
         """Initialize learner state for warmup tracking."""
@@ -2889,7 +2892,8 @@ class BasePhase2Trainer(ABC):
         prev_stage = self.config.get_warmup_stage(self.training_step_count)
         prev_stage_name = self.config.get_warmup_stage_name(self.training_step_count)
         prev_param_norms = self._compute_param_norms()
-        state = BasePhase2Trainer._LearnerState(prev_stage, prev_stage_name, prev_param_norms)
+        in_lr_decay_phase = self.config.is_in_decay_phase(self.training_step_count)
+        state = BasePhase2Trainer._LearnerState(prev_stage, prev_stage_name, prev_param_norms, in_lr_decay_phase)
         state.start_time = time.time()
         state.start_step = self.training_step_count
         return state
@@ -3174,6 +3178,24 @@ class BasePhase2Trainer(ABC):
                 
                 learner_state.prev_stage = current_stage
                 learner_state.prev_stage_name = current_stage_name
+        
+        # Check for LR decay phase transition
+        with self.profiler.section("lr_decay_check"):
+            currently_in_decay = self.config.is_in_decay_phase(self.training_step_count)
+            if currently_in_decay and not learner_state.in_lr_decay_phase:
+                # Transition from constant LR to decay phase
+                decay_type = "1/t" if self.config.constant_lr_then_1_over_t else "1/√t"
+                if self.verbose:
+                    print(f"\n[LR Schedule] Entering {decay_type} decay phase at training step {self.training_step_count}")
+                    print(f"  Learning rates will now decay smoothly proportional to {decay_type}")
+                
+                if self.writer is not None:
+                    self.writer.add_scalar('LearningRate/decay_phase_start', 1.0, self.training_step_count)
+                    self.writer.add_text('LearningRate/transitions',
+                                        f"Step {self.training_step_count}: Entering {decay_type} decay phase",
+                                        global_step=self.training_step_count)
+                
+                learner_state.in_lr_decay_phase = True
         
         # Periodic logging
         if self.training_step_count % 100 == 0:
