@@ -539,11 +539,17 @@ class MultiGridMultiStepExplorationPolicy(RobotPolicy, HumanPolicyPrior):
     def __call__(
         self,
         state: Any,
-        human_agent_index: int,
+        human_agent_index: Optional[int] = None,
         possible_goal: Any = None
     ) -> np.ndarray:
         """
-        Get action distribution for an agent (HumanPolicyPrior interface).
+        Get action distribution for agent(s).
+        
+        This method supports two call signatures:
+        1. __call__(state) - Returns joint action probabilities over all action 
+           combinations for all agents (RobotPolicy interface). Shape: (num_actions^num_agents,)
+        2. __call__(state, human_agent_index, possible_goal=None) - Returns single-agent
+           action probabilities (HumanPolicyPrior interface). Shape: (4,)
         
         Returns the probability distribution over actions based on the current
         sequence state. If no sequence is active, returns the probability of
@@ -551,18 +557,64 @@ class MultiGridMultiStepExplorationPolicy(RobotPolicy, HumanPolicyPrior):
         
         Args:
             state: Current world state.
-            human_agent_index: Index of the agent.
+            human_agent_index: If provided, return distribution for this specific agent only.
+                              If None, return joint distribution over all agents.
             possible_goal: Ignored (exploration is goal-independent).
+        
+        Returns:
+            np.ndarray: If human_agent_index is provided, probability distribution over 
+                       single-agent actions [still, left, right, forward] with shape (4,).
+                       If human_agent_index is None, joint probability distribution over
+                       all action combinations with shape (num_actions^num_agents,).
+        """
+        if human_agent_index is not None:
+            # Single-agent call (HumanPolicyPrior interface)
+            return self._get_single_agent_probs(state, human_agent_index)
+        else:
+            # Multi-agent call (RobotPolicy interface)
+            # Compute joint probabilities assuming independence between agents
+            num_actions = 4  # SmallActions: still, left, right, forward
+            agent_probs = []
+            for agent_idx in self.agent_indices:
+                probs = self._get_single_agent_probs(state, agent_idx)
+                agent_probs.append(probs)
+            
+            if len(agent_probs) == 0:
+                # No agents - return uniform over single action
+                return np.ones(num_actions) / num_actions
+            
+            if len(agent_probs) == 1:
+                # Single agent - return its probabilities directly
+                return agent_probs[0]
+            
+            # Multiple agents - compute joint probabilities via outer product
+            # For 2 agents with 4 actions each: result is 4*4 = 16 probabilities
+            # Joint index = a0 * 4 + a1 for agents [a0, a1]
+            # This matches the action_tuple_to_index convention in RobotQNetwork
+            joint_probs = agent_probs[0]
+            for i in range(1, len(agent_probs)):
+                # Outer product: joint_probs[i,j] = joint_probs[i] * agent_probs[j]
+                joint_probs = np.outer(joint_probs, agent_probs[i]).flatten()
+            
+            return joint_probs
+    
+    def _get_single_agent_probs(self, state: Any, agent_index: int) -> np.ndarray:
+        """
+        Get action probabilities for a single agent.
+        
+        Args:
+            state: Current world state.
+            agent_index: Index of the agent.
         
         Returns:
             np.ndarray: Probability distribution over actions [still, left, right, forward].
         """
         # Get agent's current direction from state
-        agent_dir = self._get_agent_direction(state, human_agent_index)
+        agent_dir = self._get_agent_direction(state, agent_index)
         
         # Check if agent has an ongoing sequence
-        if human_agent_index in self._agent_sequences:
-            seq_info = self._agent_sequences[human_agent_index]
+        if agent_index in self._agent_sequences:
+            seq_info = self._agent_sequences[agent_index]
             if seq_info['remaining_actions']:
                 # Return deterministic distribution for current sequence action
                 next_action = seq_info['remaining_actions'][0]
@@ -586,7 +638,7 @@ class MultiGridMultiStepExplorationPolicy(RobotPolicy, HumanPolicyPrior):
                 continue
             
             first_action = self._get_first_action_for_sequence(seq_type)
-            is_feasible = self._is_sequence_feasible(seq_type, state, human_agent_index, agent_dir)
+            is_feasible = self._is_sequence_feasible(seq_type, state, agent_index, agent_dir)
             
             if is_feasible:
                 feasible_seq_types.append(seq_type)

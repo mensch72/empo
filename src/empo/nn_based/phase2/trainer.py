@@ -2168,11 +2168,18 @@ class BasePhase2Trainer(ABC):
                 losses['v_r'] = ((v_r_pred.squeeze() - target_v_r) ** 2).mean()
             
             with torch.no_grad():
-                prediction_stats['v_r'] = {
+                stats = {
                     'mean': v_r_pred.mean().item(),
                     'std': v_r_pred.std().item() if v_r_pred.numel() > 1 else 0.0,
                     'target_mean': target_v_r.mean().item()
                 }
+                # Add z-space statistics when enabled
+                if self.config.use_z_space_transform:
+                    z_pred_stat = to_z_space(v_r_pred.squeeze(), self.config.eta, self.config.xi)
+                    z_target_stat = to_z_space(target_v_r, self.config.eta, self.config.xi)
+                    stats['z_mean'] = z_pred_stat.mean().item()
+                    stats['z_target_mean'] = z_target_stat.mean().item()
+                prediction_stats['v_r'] = stats
         
         # ----- RND loss (batched, for curiosity-driven exploration) -----
         if self.config.use_rnd and self.networks.rnd is not None:
@@ -2987,10 +2994,28 @@ class BasePhase2Trainer(ABC):
                             if 'running_mean' in net_stats:
                                 self.writer.add_scalar(f'AdaptiveLR/rnd_{net_name}_running_mean', net_stats['running_mean'], self.training_step_count)
                         continue
-                    self.writer.add_scalar(f'Predictions/{key}_mean', stats['mean'], self.training_step_count)
-                    self.writer.add_scalar(f'Predictions/{key}_std', stats['std'], self.training_step_count)
-                    if 'target_mean' in stats:
-                        self.writer.add_scalar(f'Targets/{key}_mean', stats['target_mean'], self.training_step_count)
+                    # Handle U_r specially (it predicts y, not U_r directly)
+                    if key == 'u_r' and 'y_mean' in stats:
+                        self.writer.add_scalar(f'Predictions/u_r_y_mean', stats['y_mean'], self.training_step_count)
+                        if 'y_std' in stats:
+                            self.writer.add_scalar(f'Predictions/u_r_y_std', stats['y_std'], self.training_step_count)
+                        if 'y_target_mean' in stats:
+                            self.writer.add_scalar(f'Targets/u_r_y_mean', stats['y_target_mean'], self.training_step_count)
+                        if 'u_r_target_mean' in stats:
+                            self.writer.add_scalar(f'Targets/u_r_mean', stats['u_r_target_mean'], self.training_step_count)
+                    elif 'mean' in stats:
+                        self.writer.add_scalar(f'Predictions/{key}_mean', stats['mean'], self.training_step_count)
+                        if 'std' in stats:
+                            self.writer.add_scalar(f'Predictions/{key}_std', stats['std'], self.training_step_count)
+                        if 'target_mean' in stats:
+                            self.writer.add_scalar(f'Targets/{key}_mean', stats['target_mean'], self.training_step_count)
+                    # Log z-space values when available (for Q_r, V_r, U_r with z-space transform)
+                    if 'z_mean' in stats:
+                        self.writer.add_scalar(f'ZSpace/{key}_z_pred', stats['z_mean'], self.training_step_count)
+                    if 'z_target_mean' in stats:
+                        self.writer.add_scalar(f'ZSpace/{key}_z_target', stats['z_target_mean'], self.training_step_count)
+                    if 'in_decay_phase' in stats:
+                        self.writer.add_scalar(f'ZSpace/in_decay_phase', stats['in_decay_phase'], self.training_step_count)
             
             # Log parameter norms
             param_norms = self._compute_param_norms()

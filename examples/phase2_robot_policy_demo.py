@@ -1199,6 +1199,8 @@ def main(
         count_curiosity_use_ucb=False,
         count_curiosity_bonus_coef_r=10.0 if (use_curious and use_tabular) else 0.0,
         count_curiosity_bonus_coef_h=10.0 if (use_curious and use_tabular) else 0.0,
+        constant_lr_then_1_over_t=True, # Use 1/n adaptive LR after initial constant LR phase
+        use_z_space_transform=True,
     )
     
     # Apply config overrides from --config YAML file
