@@ -53,6 +53,7 @@ from typing import Optional, Callable, List, Tuple, Dict, Any, Union, overload, 
 
 import cloudpickle
 from tqdm import tqdm
+from scipy.special import logsumexp
 
 from empo.possible_goal import PossibleGoal, PossibleGoalGenerator
 from empo.human_policy_prior import TabularHumanPolicyPrior
@@ -1079,9 +1080,12 @@ def _rp_compute_sequential(
                     v += human_action_profile_prob * float(np.dot(next_state_probabilities, Vr_values[next_state_indices]))
                 Qr_values[robot_action_profile_index] = gamma_r * v
             # compute the robot policy as a power-law policy over its Q values:
-            powers = (-Qr_values) ** -beta_r
-            powers_sum = np.sum(powers)
-            ps = powers / powers_sum
+            # Use log-space computation for numerical stability:
+            # pi_r(a) ∝ (-Q_r(a))^{-beta_r} = exp(-beta_r * log(-Q_r(a)))
+            log_neg_Qr = np.log(-Qr_values)  # Q_r values are always negative
+            log_powers = -beta_r * log_neg_Qr
+            log_normalizer = logsumexp(log_powers)
+            ps = np.exp(log_powers - log_normalizer)
             robot_policy[state] = { robot_action_profile: ps[idx] 
                                    for idx, robot_action_profile in enumerate(robot_action_profiles) }
             # compute V_h, X_h, and U_r values:
@@ -1225,9 +1229,12 @@ def _rp_process_state_batch(
                 Qr_values[robot_action_profile_index] = gamma_r * v
             
             # Compute robot policy as power-law policy
-            powers = (-Qr_values) ** -beta_r
-            powers_sum = np.sum(powers)
-            ps = powers / powers_sum
+            # Use log-space computation for numerical stability:
+            # pi_r(a) ∝ (-Q_r(a))^{-beta_r} = exp(-beta_r * log(-Q_r(a)))
+            log_neg_Qr = np.log(-Qr_values)  # Q_r values are always negative
+            log_powers = -beta_r * log_neg_Qr
+            log_normalizer = logsumexp(log_powers)
+            ps = np.exp(log_powers - log_normalizer)
             p_results[state] = {robot_action_profile: ps[idx] 
                                for idx, robot_action_profile in enumerate(robot_action_profiles)}
             
