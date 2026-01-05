@@ -1027,6 +1027,8 @@ class TestAdaptiveLearningRate:
             optimizer.step()
         
         # After 5 updates, the first action value should be close to the mean
+        # Run a final forward pass to ensure the table entry is initialized/updated;
+        # the returned value is not used because we verify the raw table value directly.
         _ = network.forward_batch(simple_states[:1], None, device='cpu')
         # Note: ensure_negative applies -softplus, so we need to check the raw value
         raw_value = network.table[key][0].item()
