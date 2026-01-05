@@ -206,6 +206,13 @@ class Phase2Config:
     # See docs/plans/learning_qr_scale.md for full rationale.
     use_z_space_transform: bool = False  # Enable z-space transformation
     
+    # Loss function mode when z-space transform is enabled:
+    # - True: Use z-based loss in constant LR phase, Q-based loss in decay phase (legacy)
+    # - False (default): Use Q-based loss throughout (recommended for faster outlier correction)
+    # Only has effect when use_z_space_transform=True.
+    # See docs/VALUE_TRANSFORMATIONS.md for rationale.
+    use_z_based_loss: bool = False
+    
     # Legacy 1/t decay settings (DEPRECATED - use use_sqrt_lr_decay instead)
     # These flags take precedence over use_sqrt_lr_decay if enabled.
     lr_x_h_warmup_steps: int = 1000  # Steps before 1/t decay starts (0 = always 1/t)
@@ -460,6 +467,17 @@ class Phase2Config:
                 stacklevel=2
             )
         
+        # Validate z-based loss settings
+        if self.use_z_based_loss and not self.use_z_space_transform:
+            warnings.warn(
+                "use_z_based_loss=True but use_z_space_transform=False. "
+                "Z-based loss requires z-space transformation to be enabled. "
+                "Setting use_z_based_loss=False.",
+                UserWarning,
+                stacklevel=2
+            )
+            self.use_z_based_loss = False
+        
         # Validate RND-based adaptive learning rate settings
         if self.rnd_use_adaptive_lr and not self.use_rnd:
             warnings.warn(
@@ -675,6 +693,32 @@ class Phase2Config:
             int(self.lr_constant_fraction * self.num_training_steps)
         )
         return step >= decay_start_step and self.constant_lr_then_1_over_t
+    
+    def should_use_z_loss(self, step: int) -> bool:
+        """
+        Check if z-space loss should be used at the given step.
+        
+        Z-space loss is only used when:
+        1. use_z_space_transform=True (z-space predictions enabled)
+        2. use_z_based_loss=True (legacy mode for z-based loss in constant LR phase)
+        3. Not in decay phase (switch to Q-space loss for Robbins-Monro)
+        
+        When use_z_based_loss=False (default), Q-space loss is used throughout,
+        which corrects large outliers faster while still benefiting from the
+        bounded network output range that z-space predictions provide.
+        
+        Args:
+            step: Current training step.
+            
+        Returns:
+            True if z-space MSE loss should be used, False for Q-space MSE loss.
+        """
+        if not self.use_z_space_transform:
+            return False
+        if not self.use_z_based_loss:
+            return False
+        # In legacy mode, use z-loss only during constant LR phase
+        return not self.is_in_decay_phase(step)
     
     def is_in_warmup(self, step: int) -> bool:
         """Check if we're still in the warm-up phase (before all networks active)."""

@@ -2091,17 +2091,16 @@ class BasePhase2Trainer(ABC):
             
             # Apply z-space transformation if enabled
             # For y ∈ [1, ∞), use z = y^{-1/ξ} ∈ (0, 1]
-            if self.config.use_z_space_transform:
-                in_decay_phase = self.config.is_in_decay_phase(self.training_step_count)
-                if in_decay_phase:
-                    # Phase B: y-space MSE for Robbins-Monro convergence
-                    losses['u_r'] = ((y_pred.squeeze() - y_target) ** 2).mean()
-                else:
-                    # Phase A: z-space MSE for balanced gradients
-                    z_pred = y_to_z_space(y_pred.squeeze(), self.config.xi)
-                    z_target = y_to_z_space(y_target, self.config.xi)
-                    losses['u_r'] = ((z_pred - z_target) ** 2).mean()
+            # Loss function depends on use_z_based_loss setting:
+            # - use_z_based_loss=True (legacy): z-space MSE in constant LR, y-space in decay
+            # - use_z_based_loss=False (default): y-space MSE throughout (faster outlier correction)
+            if self.config.should_use_z_loss(self.training_step_count):
+                # Z-space MSE for balanced gradients (legacy mode)
+                z_pred = y_to_z_space(y_pred.squeeze(), self.config.xi)
+                z_target = y_to_z_space(y_target, self.config.xi)
+                losses['u_r'] = ((z_pred - z_target) ** 2).mean()
             else:
+                # Y-space MSE (default: faster outlier correction, Robbins-Monro convergence)
                 losses['u_r'] = ((y_pred.squeeze() - y_target) ** 2).mean()
             
             with torch.no_grad():
@@ -2133,20 +2132,16 @@ class BasePhase2Trainer(ABC):
                 target_q_r_all = self._compute_model_based_q_r_targets(batch)
             
             # Loss: MSE over ALL action Q-values (full Bellman backup)
-            # When use_z_space_transform is enabled:
-            # - During constant LR phase: use z-space MSE for balanced gradients
-            # - During 1/t decay phase: use Q-space MSE for Robbins-Monro convergence
-            if self.config.use_z_space_transform:
-                in_decay_phase = self.config.is_in_decay_phase(self.training_step_count)
-                if in_decay_phase:
-                    # Phase B: Q-space MSE
-                    losses['q_r'] = ((q_r_all - target_q_r_all) ** 2).mean()
-                else:
-                    # Phase A: z-space MSE
-                    z_pred = to_z_space(q_r_all, self.config.eta, self.config.xi)
-                    z_target = to_z_space(target_q_r_all, self.config.eta, self.config.xi)
-                    losses['q_r'] = ((z_pred - z_target) ** 2).mean()
+            # Loss function depends on use_z_based_loss setting:
+            # - use_z_based_loss=True (legacy): z-space MSE in constant LR, Q-space in decay
+            # - use_z_based_loss=False (default): Q-space MSE throughout (faster outlier correction)
+            if self.config.should_use_z_loss(self.training_step_count):
+                # Z-space MSE for balanced gradients (legacy mode)
+                z_pred = to_z_space(q_r_all, self.config.eta, self.config.xi)
+                z_target = to_z_space(target_q_r_all, self.config.eta, self.config.xi)
+                losses['q_r'] = ((z_pred - z_target) ** 2).mean()
             else:
+                # Q-space MSE (default: faster outlier correction, Robbins-Monro convergence)
                 losses['q_r'] = ((q_r_all - target_q_r_all) ** 2).mean()
             
             # Statistics: report for taken actions for comparability
@@ -2190,16 +2185,16 @@ class BasePhase2Trainer(ABC):
                 u_r_for_v.squeeze(), q_r_for_v, pi_r
             )
             
-            # Apply z-space transformation if enabled
-            if self.config.use_z_space_transform:
-                in_decay_phase = self.config.is_in_decay_phase(self.training_step_count)
-                if in_decay_phase:
-                    losses['v_r'] = ((v_r_pred.squeeze() - target_v_r) ** 2).mean()
-                else:
-                    z_pred = to_z_space(v_r_pred.squeeze(), self.config.eta, self.config.xi)
-                    z_target = to_z_space(target_v_r, self.config.eta, self.config.xi)
-                    losses['v_r'] = ((z_pred - z_target) ** 2).mean()
+            # Loss function depends on use_z_based_loss setting:
+            # - use_z_based_loss=True (legacy): z-space MSE in constant LR, V_r-space in decay
+            # - use_z_based_loss=False (default): V_r-space MSE throughout (faster outlier correction)
+            if self.config.should_use_z_loss(self.training_step_count):
+                # Z-space MSE for balanced gradients (legacy mode)
+                z_pred = to_z_space(v_r_pred.squeeze(), self.config.eta, self.config.xi)
+                z_target = to_z_space(target_v_r, self.config.eta, self.config.xi)
+                losses['v_r'] = ((z_pred - z_target) ** 2).mean()
             else:
+                # V_r-space MSE (default: faster outlier correction, Robbins-Monro convergence)
                 losses['v_r'] = ((v_r_pred.squeeze() - target_v_r) ** 2).mean()
             
             with torch.no_grad():

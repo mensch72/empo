@@ -1190,6 +1190,7 @@ def main(
         count_curiosity_bonus_coef_r=10.0 if (use_curious and use_tabular) else 0.0,
         count_curiosity_bonus_coef_h=10.0 if (use_curious and use_tabular) else 0.0,
         use_z_space_transform=True,
+        use_z_based_loss=False,
     )
     
     # Apply config overrides from --config YAML file
