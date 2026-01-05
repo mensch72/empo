@@ -1666,10 +1666,10 @@ def compute_robot_policy(
                                 v += human_action_profile_prob * float(np.dot(next_state_probabilities, Vr_values[next_state_indices]))
                             Qr_values[robot_action_profile_index] = gamma_r * v
                         
-                        # Compute robot policy
-                        powers = (-Qr_values) ** -beta_r
-                        powers_sum = np.sum(powers)
-                        ps = powers / powers_sum
+                        # Compute robot policy (log-space for numerical stability)
+                        log_powers = -beta_r * np.log(-Qr_values)
+                        log_Z = logsumexp(log_powers)
+                        ps = np.exp(log_powers - log_Z)
                         robot_policy_values[state] = {robot_action_profile: ps[idx] 
                                                      for idx, robot_action_profile in enumerate(robot_action_profiles)}
                         
