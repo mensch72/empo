@@ -1139,6 +1139,8 @@ def train_multigrid_phase2(
             print(f"  Curiosity (RND): enabled (bonus_coef_r={config.rnd_bonus_coef_r})")
         if tensorboard_dir:
             print(f"  TensorBoard: {tensorboard_dir}")
+        # Print stages table
+        print(f"\n{config.format_stages_table()}")
     
     # Train
     history = trainer.train(config.num_training_steps)

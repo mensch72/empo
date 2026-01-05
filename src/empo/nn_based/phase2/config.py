@@ -159,18 +159,21 @@ class Phase2Config:
     # Stage 2: V_h^e + X_h (warmup_x_h_steps duration) - SKIPPED if x_h_use_network=False
     # Stage 3: V_h^e + X_h + U_r (warmup_u_r_steps duration) - SKIPPED if u_r_use_network=False
     # Stage 4: V_h^e + X_h + (U_r) + Q_r (warmup_q_r_steps duration)
-    # Stage 5: All networks with beta_r ramp-up (beta_r_rampup_steps duration)
-    # Stage 6: Full training with LR decay (remainder)
+    # Stage 5: V_h^e + X_h + (U_r) + Q_r + V_r (warmup_v_r_steps duration) - SKIPPED if v_r_use_network=False
+    # Stage 6: All networks with beta_r ramp-up (beta_r_rampup_steps duration)
+    # Stage 7: Full training with LR decay (remainder)
     # 
     # NOTE: warmup_x_h_steps is set to 0 if x_h_use_network=False (in __post_init__)
     # NOTE: warmup_u_r_steps is set to 0 if u_r_use_network=False (in __post_init__)
-    warmup_v_h_e_steps: int = 1000   # Duration of V_h^e-only stage
-    warmup_x_h_steps: int = 1000     # Duration of V_h^e + X_h stage (0 if x_h_use_network=False)
-    warmup_u_r_steps: int = 1000     # Duration of V_h^e + X_h + U_r stage (0 if u_r_use_network=False)
-    warmup_q_r_steps: int = 1000     # Duration of V_h^e + X_h + (U_r) + Q_r stage
+    # NOTE: warmup_v_r_steps is set to 0 if v_r_use_network=False (in __post_init__)
+    warmup_v_h_e_steps: int = 1e4   # Duration of V_h^e-only stage
+    warmup_x_h_steps: int = 1e4     # Duration of V_h^e + X_h stage (0 if x_h_use_network=False)
+    warmup_u_r_steps: int = 5e3     # Duration of V_h^e + X_h + U_r stage (0 if u_r_use_network=False)
+    warmup_q_r_steps: int = 1e4     # Duration of V_h^e + X_h + (U_r) + Q_r stage
+    warmup_v_r_steps: int = 5e3     # Duration of + V_r stage (0 if v_r_use_network=False)
     
     # Beta_r schedule: ramps from 0 to beta_r over this many steps after warm-up ends
-    beta_r_rampup_steps: int = 2000
+    beta_r_rampup_steps: int = 2e4
     
     # Learning rate schedule after warm-up
     # After warm-up, use 1/sqrt(t) decay: lr(t) = lr_base * sqrt(warmup) / sqrt(t)
@@ -179,15 +182,15 @@ class Phase2Config:
     
     # Fraction of total training steps to keep LR constant before starting decay.
     # 0.0 = decay immediately after warm-up (original behavior)
-    # 0.8 = constant LR until 80% of total steps, then decay
+    # 0.7 = constant LR until 70% of total steps, then decay
     # This allows the network to learn the value function structure before fine-tuning.
-    # Recommended: 0.8 for most cases.
-    lr_constant_fraction: float = 0.0
+    # Recommended: 0.7 for most cases.
+    lr_constant_fraction: float = 0.7
     
     # If True, use 1/t decay (instead of 1/sqrt(t)) after the constant phase.
     # 1/t is theoretically correct for converging to expected values (Robbins-Monro).
     # Only applies after lr_constant_fraction of training is complete.
-    constant_lr_then_1_over_t: bool = False
+    constant_lr_then_1_over_t: bool = True
     
     # =========================================================================
     # Z-space transformation for Q_r, V_r, U_r networks
@@ -223,7 +226,7 @@ class Phase2Config:
     x_h_batch_size: Optional[int] = None  # Larger batch for X_h (None = use batch_size)
     
     # Training
-    num_training_steps: int = 500000  # Total training steps (gradient updates)
+    num_training_steps: int = 1e5  # Total training steps (gradient updates)
     steps_per_episode: int = 50
     
     # Env-to-training step ratio (for sync mode)
@@ -399,12 +402,17 @@ class Phase2Config:
         if not self.u_r_use_network:
             self.warmup_u_r_steps = 0
         
+        # Override V_r warmup duration to 0 if not using V_r network
+        if not self.v_r_use_network:
+            self.warmup_v_r_steps = 0
+        
         # Compute cumulative thresholds from per-stage durations
         # These are used internally for all step-based comparisons
         self._warmup_v_h_e_end = self.warmup_v_h_e_steps
         self._warmup_x_h_end = self._warmup_v_h_e_end + self.warmup_x_h_steps
         self._warmup_u_r_end = self._warmup_x_h_end + self.warmup_u_r_steps
         self._warmup_q_r_end = self._warmup_u_r_end + self.warmup_q_r_steps
+        self._warmup_v_r_end = self._warmup_q_r_end + self.warmup_v_r_steps
         
         # Validate lookup table settings
         if self.use_lookup_tables:
@@ -645,7 +653,7 @@ class Phase2Config:
     
     def get_total_warmup_steps(self) -> int:
         """Get total number of warm-up steps (including beta_r ramp-up)."""
-        return self._warmup_q_r_end + self.beta_r_rampup_steps
+        return self._warmup_v_r_end + self.beta_r_rampup_steps
     
     def is_in_decay_phase(self, step: int) -> bool:
         """
@@ -661,7 +669,7 @@ class Phase2Config:
             True if we're past lr_constant_fraction of training and 
             constant_lr_then_1_over_t is enabled.
         """
-        full_warmup_end = self._warmup_q_r_end + self.beta_r_rampup_steps
+        full_warmup_end = self._warmup_v_r_end + self.beta_r_rampup_steps
         decay_start_step = max(
             full_warmup_end,
             int(self.lr_constant_fraction * self.num_training_steps)
@@ -670,15 +678,15 @@ class Phase2Config:
     
     def is_in_warmup(self, step: int) -> bool:
         """Check if we're still in the warm-up phase (before all networks active)."""
-        return step < self._warmup_q_r_end
+        return step < self._warmup_v_r_end
     
     def is_in_rampup(self, step: int) -> bool:
         """Check if we're in the beta_r ramp-up phase."""
-        return self._warmup_q_r_end <= step < self._warmup_q_r_end + self.beta_r_rampup_steps
+        return self._warmup_v_r_end <= step < self._warmup_v_r_end + self.beta_r_rampup_steps
     
     def is_fully_trained(self, step: int) -> bool:
         """Check if we're past all warmup/rampup phases (LR decay starts here)."""
-        return step >= self._warmup_q_r_end + self.beta_r_rampup_steps
+        return step >= self._warmup_v_r_end + self.beta_r_rampup_steps
     
     def get_active_networks(self, step: int) -> Set[str]:
         """
@@ -712,6 +720,7 @@ class Phase2Config:
             active.add('q_r')
         
         # V_r starts after Q_r warmup (only if using network mode)
+        # Note: uses _warmup_q_r_end, then runs for warmup_v_r_steps before ramp-up
         if step >= self._warmup_q_r_end and self.v_r_use_network:
             active.add('v_r')
         
@@ -733,7 +742,7 @@ class Phase2Config:
         Returns:
             Effective beta_r value.
         """
-        warmup_end = self._warmup_q_r_end
+        warmup_end = self._warmup_v_r_end
         
         if step < warmup_end:
             # During warm-up: uniform random policy
@@ -806,7 +815,7 @@ class Phase2Config:
             return self.get_lr_u_r(update_count)
         
         # During warm-up and beta_r ramp-up: constant learning rate
-        full_warmup_end = self._warmup_q_r_end + self.beta_r_rampup_steps
+        full_warmup_end = self._warmup_v_r_end + self.beta_r_rampup_steps
         if step < full_warmup_end:
             return base_lr
         
@@ -834,28 +843,32 @@ class Phase2Config:
     
     def get_warmup_stage(self, step: int) -> int:
         """
-        Get numeric warm-up stage (0-5).
+        Get numeric warm-up stage (0-6).
         
-        When x_h_use_network=True and u_r_use_network=True:
+        When x_h_use_network=True, u_r_use_network=True, v_r_use_network=True:
             0: Stage 1 - V_h^e only
             1: Stage 2 - V_h^e + X_h
             2: Stage 3 - V_h^e + X_h + U_r
             3: Stage 4 - V_h^e + X_h + U_r + Q_r
-            4: Post-warmup (beta_r ramping)
-            5: Post-warmup (beta_r at nominal)
+            4: Stage 5 - V_h^e + X_h + U_r + Q_r + V_r
+            5: Post-warmup (beta_r ramping)
+            6: Post-warmup (beta_r at nominal)
         
         When x_h_use_network=False (X_h stage skipped, warmup_x_h_steps=0):
             0: Stage 1 - V_h^e only
             3: Stage 2 - V_h^e + Q_r (X_h computed from V_h^e samples)
-            4: Post-warmup (beta_r ramping)
-            5: Post-warmup (beta_r at nominal)
+            5: Post-warmup (beta_r ramping)
+            6: Post-warmup (beta_r at nominal)
         
         When u_r_use_network=False (U_r stage skipped, warmup_u_r_steps=0):
             0: Stage 1 - V_h^e only
             1: Stage 2 - V_h^e + X_h
             3: Stage 3 - V_h^e + X_h + Q_r
-            4: Post-warmup (beta_r ramping)
-            5: Post-warmup (beta_r at nominal)
+            5: Post-warmup (beta_r ramping)
+            6: Post-warmup (beta_r at nominal)
+        
+        When v_r_use_network=False (default, V_r stage skipped, warmup_v_r_steps=0):
+            Stages 0-3 as above, then stage 5 (beta_r ramping), then stage 6 (full training)
         """
         if step < self._warmup_v_h_e_end:
             return 0  # V_h^e only
@@ -867,23 +880,36 @@ class Phase2Config:
             return 2  # + U_r (training U_r before Q_r)
         elif step < self._warmup_q_r_end:
             return 3  # + Q_r
-        elif step < self._warmup_q_r_end + self.beta_r_rampup_steps:
-            return 4  # beta_r ramping
+        elif step < self._warmup_v_r_end:
+            # This branch only reached if v_r_use_network=True (else warmup_v_r_steps=0)
+            return 4  # + V_r
+        elif step < self._warmup_v_r_end + self.beta_r_rampup_steps:
+            return 5  # beta_r ramping
         else:
-            return 5  # full training with LR decay
+            return 6  # full training with LR decay
     
     def get_warmup_stage_name(self, step: int) -> str:
         """Get human-readable name of current warm-up stage."""
         stage = self.get_warmup_stage(step)
         
-        if self.x_h_use_network and self.u_r_use_network:
+        if self.x_h_use_network and self.u_r_use_network and self.v_r_use_network:
             names = {
                 0: "Stage 1: V_h^e only",
                 1: "Stage 2: V_h^e + X_h",
                 2: "Stage 3: V_h^e + X_h + U_r",
                 3: "Stage 4: V_h^e + X_h + U_r + Q_r",
-                4: "β_r ramping (constant LR)",
-                5: "Full training (LR decay)",
+                4: "Stage 5: V_h^e + X_h + U_r + Q_r + V_r",
+                5: "β_r ramping (constant LR)",
+                6: "Full training (LR decay)",
+            }
+        elif self.x_h_use_network and self.u_r_use_network and not self.v_r_use_network:
+            names = {
+                0: "Stage 1: V_h^e only",
+                1: "Stage 2: V_h^e + X_h",
+                2: "Stage 3: V_h^e + X_h + U_r",
+                3: "Stage 4: V_h^e + X_h + U_r + Q_r",
+                5: "β_r ramping (constant LR)",
+                6: "Full training (LR decay)",
             }
         elif self.x_h_use_network and not self.u_r_use_network:
             # U_r computed directly from X_h, not trained (U_r stage skipped)
@@ -891,16 +917,16 @@ class Phase2Config:
                 0: "Stage 1: V_h^e only",
                 1: "Stage 2: V_h^e + X_h",
                 3: "Stage 3: V_h^e + X_h + Q_r",
-                4: "β_r ramping (constant LR)",
-                5: "Full training (LR decay)",
+                5: "β_r ramping (constant LR)",
+                6: "Full training (LR decay)",
             }
         else:
             # X_h computed directly from V_h^e samples, not trained (X_h stage skipped)
             names = {
                 0: "Stage 1: V_h^e only",
                 3: "Stage 2: V_h^e + Q_r",
-                4: "β_r ramping (constant LR)",
-                5: "Full training (LR decay)",
+                5: "β_r ramping (constant LR)",
+                6: "Full training (LR decay)",
             }
         return names.get(stage, "Unknown")
     
@@ -931,10 +957,184 @@ class Phase2Config:
                     transitions.append((self._warmup_x_h_end, "Q_r starts"))
         
         if self._warmup_q_r_end > self._warmup_u_r_end:
-            transitions.append((self._warmup_q_r_end, "Warmup ends"))
+            if self.v_r_use_network:
+                transitions.append((self._warmup_q_r_end, "V_r starts"))
+            else:
+                transitions.append((self._warmup_q_r_end, "Warmup ends"))
+        
+        if self.v_r_use_network and self._warmup_v_r_end > self._warmup_q_r_end:
+            transitions.append((self._warmup_v_r_end, "Warmup ends"))
+        
         if self.beta_r_rampup_steps > 0:
-            transitions.append((self._warmup_q_r_end + self.beta_r_rampup_steps, "β_r ramp complete"))
+            transitions.append((self._warmup_v_r_end + self.beta_r_rampup_steps, "β_r ramp complete"))
         return transitions
+    
+    def get_stages_info(self) -> list:
+        """
+        Get list of all training stages with their durations and cumulative end steps.
+        
+        Returns:
+            List of dicts with keys: 'stage_num', 'name', 'duration', 'end_step', 'networks'
+            Stages with duration 0 (skipped) are not included.
+        """
+        stages = []
+        
+        # Stage 0: V_h^e only
+        if self.warmup_v_h_e_steps > 0:
+            stages.append({
+                'stage_num': 0,
+                'name': 'V_h^e only',
+                'duration': int(self.warmup_v_h_e_steps),
+                'end_step': int(self._warmup_v_h_e_end),
+                'networks': ['v_h_e'],
+            })
+        
+        # Stage 1: V_h^e + X_h (only if x_h_use_network=True)
+        if self.x_h_use_network and self.warmup_x_h_steps > 0:
+            stages.append({
+                'stage_num': 1,
+                'name': 'V_h^e + X_h',
+                'duration': int(self.warmup_x_h_steps),
+                'end_step': int(self._warmup_x_h_end),
+                'networks': ['v_h_e', 'x_h'],
+            })
+        
+        # Stage 2: V_h^e + X_h + U_r (only if u_r_use_network=True)
+        if self.u_r_use_network and self.warmup_u_r_steps > 0:
+            stages.append({
+                'stage_num': 2,
+                'name': 'V_h^e + X_h + U_r',
+                'duration': int(self.warmup_u_r_steps),
+                'end_step': int(self._warmup_u_r_end),
+                'networks': ['v_h_e', 'x_h', 'u_r'],
+            })
+        
+        # Stage 3: + Q_r
+        if self.warmup_q_r_steps > 0:
+            networks = ['v_h_e', 'q_r']
+            if self.x_h_use_network:
+                networks.insert(1, 'x_h')
+            if self.u_r_use_network:
+                networks.insert(-1, 'u_r')
+            stages.append({
+                'stage_num': 3,
+                'name': '+ Q_r',
+                'duration': int(self.warmup_q_r_steps),
+                'end_step': int(self._warmup_q_r_end),
+                'networks': networks,
+            })
+        
+        # Stage 4: + V_r (only if v_r_use_network=True)
+        if self.v_r_use_network and self.warmup_v_r_steps > 0:
+            networks = ['v_h_e', 'q_r', 'v_r']
+            if self.x_h_use_network:
+                networks.insert(1, 'x_h')
+            if self.u_r_use_network:
+                networks.insert(-2, 'u_r')
+            stages.append({
+                'stage_num': 4,
+                'name': '+ V_r',
+                'duration': int(self.warmup_v_r_steps),
+                'end_step': int(self._warmup_v_r_end),
+                'networks': networks,
+            })
+        
+        # Stage 5: β_r ramp-up
+        if self.beta_r_rampup_steps > 0:
+            networks = ['v_h_e', 'q_r']
+            if self.x_h_use_network:
+                networks.insert(1, 'x_h')
+            if self.u_r_use_network:
+                networks.insert(-1, 'u_r')
+            if self.v_r_use_network:
+                networks.append('v_r')
+            stages.append({
+                'stage_num': 5,
+                'name': 'β_r ramp-up',
+                'duration': int(self.beta_r_rampup_steps),
+                'end_step': int(self._warmup_v_r_end + self.beta_r_rampup_steps),
+                'networks': networks,
+            })
+        
+        # Stage 6: Full training
+        full_warmup_end = int(self._warmup_v_r_end + self.beta_r_rampup_steps)
+        remaining = int(self.num_training_steps) - full_warmup_end
+        if remaining > 0:
+            networks = ['v_h_e', 'q_r']
+            if self.x_h_use_network:
+                networks.insert(1, 'x_h')
+            if self.u_r_use_network:
+                networks.insert(-1, 'u_r')
+            if self.v_r_use_network:
+                networks.append('v_r')
+            stages.append({
+                'stage_num': 6,
+                'name': 'Full training',
+                'duration': remaining,
+                'end_step': int(self.num_training_steps),
+                'networks': networks,
+            })
+        
+        return stages
+    
+    def format_stages_table(self) -> str:
+        """
+        Get a formatted ASCII table of all training stages.
+        
+        Returns:
+            String with formatted table showing stage names, durations, and end steps.
+        """
+        stages = self.get_stages_info()
+        if not stages:
+            return "No stages configured."
+        
+        # Build table
+        lines = []
+        lines.append("Training Stages:")
+        lines.append("-" * 70)
+        lines.append(f"{'Stage':<6} {'Name':<25} {'Duration':>12} {'End Step':>12} {'Networks'}")
+        lines.append("-" * 70)
+        
+        for s in stages:
+            networks_str = ', '.join(s['networks'])
+            lines.append(
+                f"{s['stage_num']:<6} {s['name']:<25} {s['duration']:>12,} {s['end_step']:>12,} {networks_str}"
+            )
+        
+        lines.append("-" * 70)
+        total_warmup = int(self._warmup_v_r_end + self.beta_r_rampup_steps)
+        lines.append(f"Total warmup (before LR decay): {total_warmup:,} steps")
+        lines.append(f"Total training steps: {int(self.num_training_steps):,}")
+        
+        return '\n'.join(lines)
+    
+    def get_stage_duration(self, stage_num: int) -> int:
+        """
+        Get the duration in steps for a specific stage number.
+        
+        Args:
+            stage_num: Stage number (0-6)
+            
+        Returns:
+            Duration in training steps, or 0 if stage is skipped.
+        """
+        if stage_num == 0:
+            return int(self.warmup_v_h_e_steps)
+        elif stage_num == 1:
+            return int(self.warmup_x_h_steps) if self.x_h_use_network else 0
+        elif stage_num == 2:
+            return int(self.warmup_u_r_steps) if self.u_r_use_network else 0
+        elif stage_num == 3:
+            return int(self.warmup_q_r_steps)
+        elif stage_num == 4:
+            return int(self.warmup_v_r_steps) if self.v_r_use_network else 0
+        elif stage_num == 5:
+            return int(self.beta_r_rampup_steps)
+        elif stage_num == 6:
+            full_warmup_end = int(self._warmup_v_r_end + self.beta_r_rampup_steps)
+            return max(0, int(self.num_training_steps) - full_warmup_end)
+        else:
+            return 0
     
     # =========================================================================
     # Lookup table helper methods
@@ -1082,6 +1282,7 @@ class Phase2Config:
                     'warmup_x_h_steps': self.warmup_x_h_steps,
                     'warmup_u_r_steps': self.warmup_u_r_steps,
                     'warmup_q_r_steps': self.warmup_q_r_steps,
+                    'warmup_v_r_steps': self.warmup_v_r_steps,
                     'beta_r_rampup_steps': self.beta_r_rampup_steps,
                 },
                 'computed_thresholds': {
@@ -1089,6 +1290,7 @@ class Phase2Config:
                     'warmup_x_h_end': self._warmup_x_h_end,
                     'warmup_u_r_end': self._warmup_u_r_end,
                     'warmup_q_r_end': self._warmup_q_r_end,
+                    'warmup_v_r_end': self._warmup_v_r_end,
                     'total_warmup_steps': self.get_total_warmup_steps(),
                 },
             },

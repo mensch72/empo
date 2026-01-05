@@ -50,11 +50,11 @@ class TestWarmupStages:
         assert config.get_warmup_stage(3500) == 3
         assert config.get_active_networks(3500) == {'v_h_e', 'x_h', 'u_r', 'q_r'}
         
-        # Stage 4: Beta_r ramping
-        assert config.get_warmup_stage(4500) == 4
+        # Stage 5: Beta_r ramping (stage 4 is V_r warmup, skipped when v_r_use_network=False)
+        assert config.get_warmup_stage(4500) == 5
         
-        # Stage 5: Full training
-        assert config.get_warmup_stage(7000) == 5
+        # Stage 6: Full training
+        assert config.get_warmup_stage(7000) == 6
     
     def test_warmup_stage_progression_without_u_r_network(self):
         """Test warmup stages when U_r is computed directly (no network)."""
@@ -103,7 +103,7 @@ class TestBetaRSchedule:
             beta_r=10.0,
         )
         
-        warmup_end = config._warmup_q_r_end
+        warmup_end = config._warmup_v_r_end
         
         # All warmup steps should have beta_r = 0
         for step in [0, 500, 1000, 2000, warmup_end - 1]:
@@ -120,7 +120,7 @@ class TestBetaRSchedule:
             beta_r=10.0,
         )
         
-        warmup_end = config._warmup_q_r_end  # = 3000
+        warmup_end = config._warmup_v_r_end  # = 3000 (v_r_use_network=False by default)
         rampup_end = warmup_end + config.beta_r_rampup_steps  # = 5000
         
         # Just after warmup: small but non-zero
@@ -146,7 +146,7 @@ class TestBetaRSchedule:
             beta_r=10.0,
         )
         
-        warmup_end = config._warmup_q_r_end
+        warmup_end = config._warmup_v_r_end
         
         # Last warmup step should still be 0
         assert config.get_effective_beta_r(warmup_end - 1) == 0.0
@@ -173,7 +173,7 @@ class TestLearningRateDecay:
             lr_q_r=1e-4,
         )
         
-        full_warmup_end = config._warmup_q_r_end + config.beta_r_rampup_steps
+        full_warmup_end = config._warmup_v_r_end + config.beta_r_rampup_steps
         
         # All steps during warmup and ramp-up should have base LR
         for step in [0, 1000, 2000, 3000, 4000, full_warmup_end - 1]:
@@ -181,7 +181,11 @@ class TestLearningRateDecay:
             assert lr == config.lr_q_r, f"LR should be constant at step {step}"
     
     def test_sqrt_decay_after_warmup(self):
-        """Learning rate should decay as 1/sqrt(t) after full warmup."""
+        """Learning rate should decay as 1/sqrt(step) after full warmup.
+        
+        The decay uses lr = base_lr * sqrt(decay_start_step / step) to ensure
+        continuity at decay_start_step while decaying proportionally to 1/sqrt(step).
+        """
         config = Phase2Config(
             warmup_v_h_e_steps=1000,
             warmup_x_h_steps=1000,
@@ -189,19 +193,21 @@ class TestLearningRateDecay:
             warmup_q_r_steps=1000,
             beta_r_rampup_steps=2000,
             use_sqrt_lr_decay=True,
+            lr_constant_fraction=0.0,  # Start decay immediately after warmup
+            constant_lr_then_1_over_t=False,  # Use 1/sqrt(t) not 1/t
             lr_q_r=1e-4,
         )
         
-        full_warmup_end = config._warmup_q_r_end + config.beta_r_rampup_steps
+        full_warmup_end = config._warmup_v_r_end + config.beta_r_rampup_steps
         
-        # Get LRs at different points after warmup
-        t1 = 1001  # step - full_warmup_end + 1
-        t2 = 5001
-        lr1 = config.get_learning_rate('q_r', full_warmup_end + t1 - 1, 0)
-        lr2 = config.get_learning_rate('q_r', full_warmup_end + t2 - 1, 0)
+        # Get LRs at different steps after warmup
+        step1 = full_warmup_end + 1000
+        step2 = full_warmup_end + 5000
+        lr1 = config.get_learning_rate('q_r', step1, 0)
+        lr2 = config.get_learning_rate('q_r', step2, 0)
         
-        # Verify ratio follows 1/sqrt(t)
-        expected_ratio = math.sqrt(t1) / math.sqrt(t2)
+        # Verify ratio follows 1/sqrt(step): lr2/lr1 = sqrt(step1/step2)
+        expected_ratio = math.sqrt(step1 / step2)
         actual_ratio = lr2 / lr1
         
         assert abs(expected_ratio - actual_ratio) < 0.001
@@ -218,7 +224,7 @@ class TestLearningRateDecay:
             lr_q_r=1e-4,
         )
         
-        full_warmup_end = config._warmup_q_r_end + config.beta_r_rampup_steps
+        full_warmup_end = config._warmup_v_r_end + config.beta_r_rampup_steps
         
         lr_before = config.get_learning_rate('q_r', full_warmup_end + 100, 0)
         lr_after = config.get_learning_rate('q_r', full_warmup_end + 10000, 0)
@@ -239,7 +245,7 @@ class TestLearningRateDecay:
             lr_q_r=1e-4,
         )
         
-        full_warmup_end = config._warmup_q_r_end + config.beta_r_rampup_steps
+        full_warmup_end = config._warmup_v_r_end + config.beta_r_rampup_steps
         decay_start = int(0.8 * 100000)  # 80000
         
         # Before decay_start: should be constant at base LR
@@ -259,7 +265,11 @@ class TestLearningRateDecay:
         assert lr_late < config.lr_q_r, f"Expected decayed LR late, got {lr_late}"
 
     def test_constant_lr_then_1_over_t(self):
-        """Learning rate should decay as 1/t when constant_lr_then_1_over_t is True."""
+        """Learning rate should decay as 1/step when constant_lr_then_1_over_t is True.
+        
+        The decay uses lr = base_lr * decay_start_step / step to ensure
+        continuity at decay_start_step while decaying proportionally to 1/step.
+        """
         config = Phase2Config(
             num_training_steps=100000,
             warmup_v_h_e_steps=100,
@@ -269,34 +279,34 @@ class TestLearningRateDecay:
             beta_r_rampup_steps=100,
             use_sqrt_lr_decay=True,
             lr_constant_fraction=0.5,  # Decay starts at step 50000
-            constant_lr_then_1_over_t=True,  # Use 1/t instead of 1/sqrt(t)
+            constant_lr_then_1_over_t=True,  # Use 1/step instead of 1/sqrt(step)
             lr_q_r=1e-3,
         )
         
         decay_start = 50000
         
-        # At t=1 (step 50000): lr = base_lr / 1 = base_lr
-        lr_t1 = config.get_learning_rate('q_r', decay_start, 0)
-        assert abs(lr_t1 - config.lr_q_r) < 1e-10, f"At t=1, expected {config.lr_q_r}, got {lr_t1}"
+        # At decay_start: lr = base_lr (continuous with constant phase)
+        lr_at_start = config.get_learning_rate('q_r', decay_start, 0)
+        assert abs(lr_at_start - config.lr_q_r) < 1e-10, f"At decay_start, expected {config.lr_q_r}, got {lr_at_start}"
         
-        # At t=100 (step 50099): lr = base_lr / 100
-        lr_t100 = config.get_learning_rate('q_r', decay_start + 99, 0)
-        expected_t100 = config.lr_q_r / 100
-        assert abs(lr_t100 - expected_t100) < 1e-10, f"At t=100, expected {expected_t100}, got {lr_t100}"
+        # At step 100000: lr = base_lr * 50000 / 100000 = base_lr / 2
+        lr_at_100k = config.get_learning_rate('q_r', 100000, 0)
+        expected_at_100k = config.lr_q_r / 2
+        assert abs(lr_at_100k - expected_at_100k) < 1e-10, f"At step 100000, expected {expected_at_100k}, got {lr_at_100k}"
         
-        # Verify 1/t ratio (not 1/sqrt(t))
-        # For 1/t: lr(t2)/lr(t1) = t1/t2
-        # For 1/sqrt(t): lr(t2)/lr(t1) = sqrt(t1)/sqrt(t2)
-        t1, t2 = 100, 400
-        lr1 = config.get_learning_rate('q_r', decay_start + t1 - 1, 0)
-        lr2 = config.get_learning_rate('q_r', decay_start + t2 - 1, 0)
+        # Verify 1/step ratio (not 1/sqrt(step))
+        # For 1/step: lr(step2)/lr(step1) = step1/step2
+        # For 1/sqrt(step): lr(step2)/lr(step1) = sqrt(step1)/sqrt(step2)
+        step1, step2 = 60000, 80000
+        lr1 = config.get_learning_rate('q_r', step1, 0)
+        lr2 = config.get_learning_rate('q_r', step2, 0)
         
         actual_ratio = lr2 / lr1
-        expected_1_over_t_ratio = t1 / t2  # = 0.25
-        expected_sqrt_ratio = math.sqrt(t1) / math.sqrt(t2)  # = 0.5
+        expected_1_over_step_ratio = step1 / step2  # = 0.75
+        expected_sqrt_ratio = math.sqrt(step1 / step2)  # ≈ 0.866
         
-        assert abs(actual_ratio - expected_1_over_t_ratio) < 0.001, \
-            f"Expected 1/t ratio {expected_1_over_t_ratio}, got {actual_ratio}"
+        assert abs(actual_ratio - expected_1_over_step_ratio) < 0.001, \
+            f"Expected 1/step ratio {expected_1_over_step_ratio}, got {actual_ratio}"
 
 
 # =============================================================================

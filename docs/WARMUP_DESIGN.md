@@ -35,11 +35,13 @@ We break the circular dependencies by training networks in stages, starting with
 | 1 | 1,000 steps* | 2,000 | V_h^e, X_h | 0 | constant |
 | 2 | 1,000 steps** | 3,000 | V_h^e, X_h, U_r | 0 | constant |
 | 3 | 1,000 steps | 4,000 | V_h^e, X_h, U_r, Q_r | 0 | constant |
-| 4 | 2,000 steps | 6,000 | All | 0 → β_r | constant |
-| 5 | remainder | — | All | β_r | 1/√t decay |
+| 4 | 1,000 steps*** | 5,000 | V_h^e, X_h, U_r, Q_r, V_r | 0 | constant |
+| 5 | 2,000 steps | 7,000 | All | 0 → β_r | constant |
+| 6 | remainder | — | All | β_r | 1/√t decay |
 
 *Stage 1 (X_h) is skipped when `x_h_use_network=False`, reducing total warmup by 1,000 steps.
 **Stage 2 (U_r) is skipped when `u_r_use_network=False` (default), reducing total warmup by 1,000 steps.
+***Stage 4 (V_r) is skipped when `v_r_use_network=False` (default), reducing total warmup by 1,000 steps.
 
 ### Stage Details
 
@@ -79,7 +81,17 @@ Q_r(s, a) = γ_r × E[V_r(s')] (Equation 4). Note that U_r is NOT added here—i
 
 **Note**: Even though Q_r is now trained, β_r remains 0, so the policy is still uniform random. This prevents the policy from affecting V_h^e, X_h, and U_r targets while Q_r is still learning.
 
-#### Stage 4: β_r Ramp-up
+#### Stage 4: + V_r (optional, skipped when `v_r_use_network=False`)
+
+**Goal**: Learn the robot's state-value function under the still-random policy.
+
+V_r(s) = U_r(s) + E_{a~π_r}[Q_r(s,a)] (Equation 9). With Q_r now providing action values, V_r can learn the expected value under the current policy. Since β_r = 0 during this stage, V_r learns values under a uniform random robot policy.
+
+**Why this order**: V_r depends on Q_r, so it must be trained after Q_r has had time to converge.
+
+**Note**: When `v_r_use_network=False` (the default), V_r is computed directly from U_r and Q_r without a separate network: V_r(s) = U_r(s) + sum(π_r(a|s) * Q_r(s,a)). This stage is skipped entirely (`warmup_v_r_steps` is set to 0).
+
+#### Stage 5: β_r Ramp-up
 
 **Goal**: Gradually transition from random to optimal policy.
 
@@ -105,7 +117,7 @@ This provides:
 
 The sigmoid is normalized so β_r goes from ~0 at t=0 to ~β_r_nominal at t=T.
 
-#### Stage 5: Full Training (steps 6,000+)
+#### Stage 6: Full Training (steps 7,000+)
 
 **Goal**: Fine-tune all networks with the optimal policy.
 
@@ -114,8 +126,8 @@ All networks continue training with:
 - Learning rate decaying as 1/√t
 
 **Replay buffer clearing**: The replay buffer is cleared at BOTH transitions around the ramp-up phase:
-- **Start of ramp-up (stage 3→4)**: Removes all transitions collected during warmup when β_r = 0 (uniform random robot policy)
-- **End of ramp-up (stage 4→5)**: Removes transitions collected during ramp-up when β_r was increasing, ensuring fine-tuning uses only data collected with full β_r
+- **Start of ramp-up (stage 4→5)**: Removes all transitions collected during warmup when β_r = 0 (uniform random robot policy)
+- **End of ramp-up (stage 5→6)**: Removes transitions collected during ramp-up when β_r was increasing, ensuring fine-tuning uses only data collected with full β_r
 
 **Learning rate decay**: After the full warmup, learning rates decay as:
 
@@ -123,7 +135,7 @@ All networks continue training with:
 lr(t) = lr_base / √t
 ```
 
-where t counts from when Stage 5 begins. This satisfies theoretical convergence requirements while maintaining reasonable learning speed.
+where t counts from when Stage 6 begins. This satisfies theoretical convergence requirements while maintaining reasonable learning speed.
 
 ## Target Networks
 
@@ -199,19 +211,20 @@ config = Phase2Config(
 ```
 
 With 500k steps:
-- Steps 0–6000: Constant LR (warmup/rampup)
-- Steps 6000–400000: Constant LR (main learning phase)
+- Steps 0–7000: Constant LR (warmup/rampup)
+- Steps 7000–400000: Constant LR (main learning phase)
 - Steps 400000–500000: 1/t decay (convergence to expected values)
 
 The 1/t decay satisfies the Robbins-Monro conditions (∑lr = ∞, ∑lr² < ∞) required for converging to true expected values.
 
-**Note:** When `x_h_use_network=False`, `warmup_x_h_steps` is automatically set to 0 in `__post_init__`, effectively skipping the X_h warmup stage. Similarly, when `u_r_use_network=False` (the default), `warmup_u_r_steps` is automatically set to 0.
+**Note:** When `x_h_use_network=False`, `warmup_x_h_steps` is automatically set to 0 in `__post_init__`, effectively skipping the X_h warmup stage. Similarly, when `u_r_use_network=False` (the default), `warmup_u_r_steps` is automatically set to 0, and when `v_r_use_network=False` (the default), `warmup_v_r_steps` is automatically set to 0.
 
 Internally, cumulative thresholds are computed:
 - `_warmup_v_h_e_end = warmup_v_h_e_steps` (1000)
 - `_warmup_x_h_end = _warmup_v_h_e_end + warmup_x_h_steps` (2000 or 1000 if x_h skipped)
 - `_warmup_u_r_end = _warmup_x_h_end + warmup_u_r_steps` (3000 or earlier if stages skipped)
 - `_warmup_q_r_end = _warmup_u_r_end + warmup_q_r_steps` (4000 or earlier if stages skipped)
+- `_warmup_v_r_end = _warmup_q_r_end + warmup_v_r_steps` (5000 or earlier if stages skipped)
 
 ### Disabling Warmup
 
@@ -223,6 +236,7 @@ config = Phase2Config(
     warmup_x_h_steps=0,
     warmup_u_r_steps=0,
     warmup_q_r_steps=0,
+    warmup_v_r_steps=0,
     beta_r_rampup_steps=0,
 )
 ```

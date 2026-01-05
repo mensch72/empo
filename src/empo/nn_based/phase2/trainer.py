@@ -3126,11 +3126,12 @@ class BasePhase2Trainer(ABC):
             current_stage = self.config.get_warmup_stage(self.training_step_count)
             if current_stage != learner_state.prev_stage:
                 current_stage_name = self.config.get_warmup_stage_name(self.training_step_count)
+                current_stage_duration = self.config.get_stage_duration(current_stage)
                 active = self.config.get_active_networks(self.training_step_count)
                 
                 if self.verbose:
                     print(f"\n[Warmup] Stage transition at training step {self.training_step_count}:")
-                    print(f"  {learner_state.prev_stage_name} -> {current_stage_name}")
+                    print(f"  {learner_state.prev_stage_name} -> {current_stage_name} ({current_stage_duration:,} steps)")
                     print(f"  Active networks: {active}")
                     effective_beta = self.config.get_effective_beta_r(self.training_step_count)
                     print(f"  Effective beta_r: {effective_beta:.4f}")
@@ -3138,11 +3139,11 @@ class BasePhase2Trainer(ABC):
                 if self.writer is not None:
                     self.writer.add_scalar('Warmup/stage_transition', 1.0, self.training_step_count)
                     self.writer.add_text('Warmup/transitions', 
-                                        f"Step {self.training_step_count}: {learner_state.prev_stage_name} -> {current_stage_name}",
+                                        f"Step {self.training_step_count}: {learner_state.prev_stage_name} -> {current_stage_name} ({current_stage_duration:,} steps)",
                                         global_step=self.training_step_count)
                 
-                # Clear replay buffer at start of beta_r ramp-up (transition to stage 4)
-                if current_stage == 4 and learner_state.prev_stage == 3:
+                # Clear replay buffer at start of β_r ramp-up (transition to stage 5)
+                if current_stage == 5 and learner_state.prev_stage < 5:
                     buffer_size_before = len(self.replay_buffer)
                     self.replay_buffer.clear()
                     # In async mode, reset shared_env_steps so actors can resume production
@@ -3159,8 +3160,8 @@ class BasePhase2Trainer(ABC):
                                             f"Cleared replay buffer ({buffer_size_before} transitions) at start of β_r ramp-up",
                                             global_step=self.training_step_count)
                 
-                # Clear replay buffer after beta_r ramp-up is done (transition to stage 5)
-                if current_stage == 5 and learner_state.prev_stage == 4:
+                # Clear replay buffer after β_r ramp-up is done (transition to stage 6)
+                if current_stage == 6 and learner_state.prev_stage == 5:
                     buffer_size_before = len(self.replay_buffer)
                     self.replay_buffer.clear()
                     # In async mode, reset shared_env_steps so actors can resume production

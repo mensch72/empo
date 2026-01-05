@@ -213,8 +213,8 @@ class PossibleGoalGenerator(ABC):
     number of possible goals is finite and small enough to enumerate.
     
     This is a Python generator that yields (goal, weight) pairs.
-    The weights should sum to 1.0 for proper probability weighting,
-    or all be 1.0 for uniform weighting.
+
+    If there is a corresponding PossibleGoalSampler, each weight in this generator should equal the corresponding weight returned by the sampler TIMES the corresponding probability under the sampler! This is because the generator is used for exact integration where a SUM of weight*value is taken, while the sampler is used for Monte Carlo approximation, where an EXPECTED VALUE (using the probabilities) of weight*value is taken!
     
     Attributes:
         env: Reference to the gymnasium environment this generator applies to.
