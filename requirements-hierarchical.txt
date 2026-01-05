@@ -22,3 +22,4 @@ Pillow>=10.0.0
 # MineLand Python dependencies (pre-installed):
 gymnasium>=0.28.0
 numpy>=1.24.0
+psutil>=5.9.0

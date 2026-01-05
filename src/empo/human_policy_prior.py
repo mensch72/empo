@@ -273,7 +273,11 @@ class TabularHumanPolicyPrior(HumanPolicyPrior):
         else:
             # Compute marginal by averaging over goals weighted by their prior
             vs = self.values[state][human_agent_index]
-            num_actions: int = self.world_model.action_space.n  # type: ignore[attr-defined]
+            # Support override for parallel mode where world_model is None after unpickling
+            if hasattr(self, '_num_actions_override') and self._num_actions_override is not None:
+                num_actions: int = self._num_actions_override
+            else:
+                num_actions = self.world_model.action_space.n  # type: ignore[attr-defined]
             total = np.zeros(num_actions)
             for goal, weight in self.possible_goal_generator.generate(state, human_agent_index):
                 total += vs[goal] * weight
@@ -311,6 +315,49 @@ class TabularHumanPolicyPrior(HumanPolicyPrior):
             return self._profile_distribution_torch(marginals, device)
         else:
             # Use NumPy - fastest for CPU
+            return self._profile_distribution_numpy(marginals)
+
+    def profile_distribution_with_fixed_goal(
+        self, 
+        state,
+        fixed_agent_index: int,
+        fixed_goal: 'PossibleGoal',
+        device: Optional[str] = None
+    ) -> List[tuple]:
+        """
+        Get the joint action profile distribution where one agent has a fixed goal.
+        
+        For the specified agent, uses the goal-conditioned policy for the fixed goal.
+        For all other human agents, uses their marginal policy (averaged over their goals).
+        Assumes independence between agents.
+        
+        Args:
+            state: Current world state.
+            fixed_agent_index: The agent index whose goal is fixed.
+            fixed_goal: The specific goal for the fixed agent.
+            device: Optional computation backend (same as profile_distribution).
+        
+        Returns:
+            List of tuples (probability, action_profile) where action_profile is
+            a list of actions for each human agent in order of human_agent_indices.
+        """
+        # Pre-compute distributions for all agents
+        # For the fixed agent, use goal-conditioned policy; for others, use marginal
+        marginals = []
+        for agent_index in self.human_agent_indices:
+            if agent_index == fixed_agent_index:
+                # Use goal-specific policy for this agent
+                marginals.append(self._to_probability_array(self(state, agent_index, fixed_goal)))
+            else:
+                # Use marginal policy (averaged over goals) for other agents
+                marginals.append(self._to_probability_array(self(state, agent_index)))
+        
+        if not marginals:
+            return [(1.0, [])]
+        
+        if device is not None and device.startswith('cuda'):
+            return self._profile_distribution_torch(marginals, device)
+        else:
             return self._profile_distribution_numpy(marginals)
     
     def _profile_distribution_numpy(self, marginals: List[np.ndarray]) -> List[tuple]:

@@ -73,6 +73,11 @@ up:
 		docker compose up -d --build; \
 	fi
 	@echo "Development environment started. Use 'make shell' to enter."
+	@echo ""
+	@echo "Port mappings (set HOST_*_PORT env vars to customize):"
+	@docker compose port empo-dev 8888 2>/dev/null | sed 's/^/  Jupyter:     http:\/\//' || true
+	@docker compose port empo-dev 6006 2>/dev/null | sed 's/^/  TensorBoard: http:\/\//' || true
+	@docker compose port empo-dev 5678 2>/dev/null | sed 's/^/  Debugger:    /' || true
 
 down:
 	@# Stop all containers including hierarchical profile services
@@ -96,6 +101,11 @@ up-hierarchical:
 	@echo "Use 'make shell' to enter the dev container."
 	@echo "Ollama API available at http://localhost:11434"
 	@echo "Pull a vision model with: docker exec ollama ollama pull qwen2.5vl:7b"
+	@echo ""
+	@echo "Port mappings (set HOST_*_PORT env vars to customize):"
+	@docker compose port empo-dev 8888 2>/dev/null | sed 's/^/  Jupyter:     http:\/\//' || true
+	@docker compose port empo-dev 6006 2>/dev/null | sed 's/^/  TensorBoard: http:\/\//' || true
+	@docker compose port empo-dev 5678 2>/dev/null | sed 's/^/  Debugger:    /' || true
 
 shell:
 	docker compose exec empo-dev bash

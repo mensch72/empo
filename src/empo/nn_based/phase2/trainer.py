@@ -26,6 +26,12 @@ import torch.nn as nn
 import torch.optim as optim
 from tqdm import tqdm
 
+try:
+    import psutil
+    HAS_PSUTIL = True
+except ImportError:
+    HAS_PSUTIL = False
+
 from .config import Phase2Config
 from .profiler import NoOpProfiler
 from .replay_buffer import Phase2Transition, Phase2ReplayBuffer
@@ -137,7 +143,7 @@ class BasePhase2Trainer(ABC):
         world_model_factory: Optional[Any] = None,
         robot_exploration_policy: Optional[Any] = None,
         human_exploration_policy: Optional[Any] = None,
-        checkpoint_interval: int = 0,
+        checkpoint_interval: Optional[int] = None,
         checkpoint_path: Optional[str] = None,
     ):
         self.env = env
@@ -162,8 +168,13 @@ class BasePhase2Trainer(ABC):
             import os
             self.output_dir = os.path.dirname(tensorboard_dir)
         
-        # Checkpoint settings
-        self.checkpoint_interval = checkpoint_interval
+        # Checkpoint settings - use config default if not explicitly set
+        # checkpoint_interval=None means "use config default"
+        # checkpoint_interval=0 means "disable checkpoints"
+        if checkpoint_interval is None:
+            self.checkpoint_interval = config.checkpoint_interval
+        else:
+            self.checkpoint_interval = checkpoint_interval
         if checkpoint_path is not None:
             self.checkpoint_path = checkpoint_path
         elif self.output_dir is not None:
@@ -844,6 +855,30 @@ class BasePhase2Trainer(ABC):
             self.goal_sampler.set_world_model(self.env)
         if hasattr(self.human_policy_prior, 'set_world_model'):
             self.human_policy_prior.set_world_model(self.env)
+    
+    def _check_memory_limit(self) -> bool:
+        """
+        Check if memory usage exceeds the configured limit.
+        
+        Returns:
+            True if memory limit is exceeded, False otherwise.
+            Always returns False if psutil is not available or monitoring is disabled.
+        """
+        if not HAS_PSUTIL:
+            return False
+        if self.config.max_memory_fraction <= 0.0:
+            return False
+        
+        # Get system memory info
+        mem_info = psutil.virtual_memory()
+        memory_fraction = mem_info.percent / 100.0
+        
+        if memory_fraction > self.config.max_memory_fraction:
+            if self.verbose:
+                print(f"\n[Memory] Usage {memory_fraction*100:.1f}% exceeds limit "
+                      f"{self.config.max_memory_fraction*100:.1f}%. Stopping training...")
+            return True
+        return False
     
     def check_goal_achieved(self, state: Any, human_idx: int, goal: Any) -> bool:
         """
@@ -2839,7 +2874,8 @@ class BasePhase2Trainer(ABC):
     class _LearnerState:
         """Mutable state for learner (warmup tracking and progress metrics)."""
         def __init__(self, prev_stage: int, prev_stage_name: str, 
-                     prev_param_norms: Optional[Dict[str, float]] = None):
+                     prev_param_norms: Optional[Dict[str, float]] = None,
+                     in_lr_decay_phase: bool = False):
             self.prev_stage = prev_stage
             self.prev_stage_name = prev_stage_name
             # For tracking network parameter changes
@@ -2847,6 +2883,8 @@ class BasePhase2Trainer(ABC):
             # For tracking average time per step
             self.start_time: Optional[float] = None
             self.start_step: int = 0
+            # For tracking LR decay phase transition
+            self.in_lr_decay_phase = in_lr_decay_phase
     
     def _init_learner_state(self) -> "_LearnerState":
         """Initialize learner state for warmup tracking."""
@@ -2854,7 +2892,8 @@ class BasePhase2Trainer(ABC):
         prev_stage = self.config.get_warmup_stage(self.training_step_count)
         prev_stage_name = self.config.get_warmup_stage_name(self.training_step_count)
         prev_param_norms = self._compute_param_norms()
-        state = BasePhase2Trainer._LearnerState(prev_stage, prev_stage_name, prev_param_norms)
+        in_lr_decay_phase = self.config.is_in_decay_phase(self.training_step_count)
+        state = BasePhase2Trainer._LearnerState(prev_stage, prev_stage_name, prev_param_norms, in_lr_decay_phase)
         state.start_time = time.time()
         state.start_step = self.training_step_count
         return state
@@ -3087,11 +3126,12 @@ class BasePhase2Trainer(ABC):
             current_stage = self.config.get_warmup_stage(self.training_step_count)
             if current_stage != learner_state.prev_stage:
                 current_stage_name = self.config.get_warmup_stage_name(self.training_step_count)
+                current_stage_duration = self.config.get_stage_duration(current_stage)
                 active = self.config.get_active_networks(self.training_step_count)
                 
                 if self.verbose:
                     print(f"\n[Warmup] Stage transition at training step {self.training_step_count}:")
-                    print(f"  {learner_state.prev_stage_name} -> {current_stage_name}")
+                    print(f"  {learner_state.prev_stage_name} -> {current_stage_name} ({current_stage_duration:,} steps)")
                     print(f"  Active networks: {active}")
                     effective_beta = self.config.get_effective_beta_r(self.training_step_count)
                     print(f"  Effective beta_r: {effective_beta:.4f}")
@@ -3099,11 +3139,11 @@ class BasePhase2Trainer(ABC):
                 if self.writer is not None:
                     self.writer.add_scalar('Warmup/stage_transition', 1.0, self.training_step_count)
                     self.writer.add_text('Warmup/transitions', 
-                                        f"Step {self.training_step_count}: {learner_state.prev_stage_name} -> {current_stage_name}",
+                                        f"Step {self.training_step_count}: {learner_state.prev_stage_name} -> {current_stage_name} ({current_stage_duration:,} steps)",
                                         global_step=self.training_step_count)
                 
-                # Clear replay buffer at start of beta_r ramp-up (transition to stage 4)
-                if current_stage == 4 and learner_state.prev_stage == 3:
+                # Clear replay buffer at start of β_r ramp-up (transition to stage 5)
+                if current_stage == 5 and learner_state.prev_stage < 5:
                     buffer_size_before = len(self.replay_buffer)
                     self.replay_buffer.clear()
                     # In async mode, reset shared_env_steps so actors can resume production
@@ -3120,8 +3160,8 @@ class BasePhase2Trainer(ABC):
                                             f"Cleared replay buffer ({buffer_size_before} transitions) at start of β_r ramp-up",
                                             global_step=self.training_step_count)
                 
-                # Clear replay buffer after beta_r ramp-up is done (transition to stage 5)
-                if current_stage == 5 and learner_state.prev_stage == 4:
+                # Clear replay buffer after β_r ramp-up is done (transition to stage 6)
+                if current_stage == 6 and learner_state.prev_stage == 5:
                     buffer_size_before = len(self.replay_buffer)
                     self.replay_buffer.clear()
                     # In async mode, reset shared_env_steps so actors can resume production
@@ -3139,6 +3179,24 @@ class BasePhase2Trainer(ABC):
                 
                 learner_state.prev_stage = current_stage
                 learner_state.prev_stage_name = current_stage_name
+        
+        # Check for LR decay phase transition
+        with self.profiler.section("lr_decay_check"):
+            currently_in_decay = self.config.is_in_decay_phase(self.training_step_count)
+            if currently_in_decay and not learner_state.in_lr_decay_phase:
+                # Transition from constant LR to decay phase
+                decay_type = "1/t" if self.config.constant_lr_then_1_over_t else "1/√t"
+                if self.verbose:
+                    print(f"\n[LR Schedule] Entering {decay_type} decay phase at training step {self.training_step_count}")
+                    print(f"  Learning rates will now decay smoothly proportional to {decay_type}")
+                
+                if self.writer is not None:
+                    self.writer.add_scalar('LearningRate/decay_phase_start', 1.0, self.training_step_count)
+                    self.writer.add_text('LearningRate/transitions',
+                                        f"Step {self.training_step_count}: Entering {decay_type} decay phase",
+                                        global_step=self.training_step_count)
+                
+                learner_state.in_lr_decay_phase = True
         
         # Periodic logging
         if self.training_step_count % 100 == 0:
@@ -3268,6 +3326,13 @@ class BasePhase2Trainer(ABC):
                     # Log to history periodically
                     if self.training_step_count % 100 == 0:
                         history.append(losses)
+                    
+                    # Check memory limit periodically
+                    if (self.config.memory_check_interval > 0 and
+                        self.training_step_count % self.config.memory_check_interval == 0 and
+                        self._check_memory_limit()):
+                        # Memory limit exceeded - trigger graceful shutdown like Ctrl-C
+                        raise KeyboardInterrupt("Memory limit exceeded")
                     
                     # Save checkpoint at interval
                     if (self.checkpoint_interval > 0 and 
@@ -3697,6 +3762,13 @@ class BasePhase2Trainer(ABC):
                     # Log to history periodically
                     if self.training_step_count % 100 == 0:
                         history.append(losses)
+                    
+                    # Check memory limit periodically
+                    if (self.config.memory_check_interval > 0 and
+                        self.training_step_count % self.config.memory_check_interval == 0 and
+                        self._check_memory_limit()):
+                        # Memory limit exceeded - trigger graceful shutdown like Ctrl-C
+                        raise KeyboardInterrupt("Memory limit exceeded")
                     
                     # Update shared policy periodically
                     # Use more frequent sync when RND is enabled (rnd_sync_freq)

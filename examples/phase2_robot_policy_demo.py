@@ -972,11 +972,6 @@ def main(
         hidden_dim = 32
         goal_feature_dim = 16
         agent_embedding_dim = 4
-        warmup_v_h_e_steps = 10
-        warmup_x_h_steps = 10
-        warmup_u_r_steps = 0
-        warmup_q_r_steps = 10
-        beta_r_rampup_steps = 20
         print("[LIGHTNINGFAST MODE] Running with minimal steps for syntax checking")
     elif quick_mode:
         num_training_steps = 1000
@@ -987,27 +982,19 @@ def main(
         hidden_dim = 64  # Smaller network for faster forward passes
         goal_feature_dim = 32
         agent_embedding_dim = 8
-        # Shorter warmup stages to fit within quick mode training
-        # Default warmup is 3000+ steps, which won't complete in quick mode
-        warmup_v_h_e_steps = 100  # ~10 episodes
-        warmup_x_h_steps = 100   # ~10 episodes  
-        warmup_u_r_steps = 0     # Skipped (u_r_use_network=False by default)
-        warmup_q_r_steps = 100   # ~10 episodes
-        beta_r_rampup_steps = 200  # ~20 episodes
-        # Total warmup: 500 steps, leaving 500 steps for actual training
         print("[QUICK MODE] Running with reduced episodes, rollouts, batch sizes, network size, and warmup stages")
-    else:
-        # Use default warmup stages (each stage ~1000 steps)
-        warmup_v_h_e_steps = 1e4
-        warmup_x_h_steps = 1e4
-        warmup_u_r_steps = 1e4  # Will be set to 0 if u_r_use_network=False
-        warmup_q_r_steps = 1e4
-        beta_r_rampup_steps = 5e4
-    
+
     # Override training steps if specified via command line
     if num_training_steps_override is not None:
         num_training_steps = num_training_steps_override
         print(f"[OVERRIDE] Training steps set to {num_training_steps}")
+    
+    warmup_v_h_e_steps = 0.1 * num_training_steps
+    warmup_x_h_steps = 0.1 * num_training_steps
+    warmup_u_r_steps = 0.05 * num_training_steps
+    warmup_q_r_steps = 0.1 * num_training_steps
+    warmup_v_r_steps = 0.05 * num_training_steps
+    beta_r_rampup_steps = 0.2 * num_training_steps
     
     # Print async mode status
     if use_async:
@@ -1147,6 +1134,8 @@ def main(
         lr_v_h_e=1e-2, #1e-3,  # faster since V_h^e is critical and the basis for other things
         lr_x_h=1e-4,
         lr_u_r=1e-4,
+        constant_lr_then_1_over_t=True,
+        lr_constant_fraction=0.7,  # Constant LR for first 70% of training
         buffer_size=100000,
         batch_size=batch_size,
         x_h_batch_size=x_h_batch_size,  # Larger batch for X_h to reduce high variance
@@ -1162,6 +1151,7 @@ def main(
         warmup_x_h_steps=warmup_x_h_steps,
         warmup_u_r_steps=warmup_u_r_steps,
         warmup_q_r_steps=warmup_q_r_steps,
+        warmup_v_r_steps=warmup_v_r_steps,
         beta_r_rampup_steps=beta_r_rampup_steps,
         # Async training mode (actor-learner architecture)
         async_training=use_async,
@@ -1199,7 +1189,6 @@ def main(
         count_curiosity_use_ucb=False,
         count_curiosity_bonus_coef_r=10.0 if (use_curious and use_tabular) else 0.0,
         count_curiosity_bonus_coef_h=10.0 if (use_curious and use_tabular) else 0.0,
-        constant_lr_then_1_over_t=True, # Use 1/n adaptive LR after initial constant LR phase
         use_z_space_transform=True,
     )
     
@@ -1608,8 +1597,8 @@ if __name__ == "__main__":
                         help='Random seed for reproducibility (default: 42)')
     parser.add_argument('--steps', type=lambda x: int(float(x)), default=None, metavar='N',
                         help='Number of training steps (overrides default based on env type, supports scientific notation like 1e5)')
-    parser.add_argument('--checkpoint-interval', type=int, default=0, metavar='N',
-                        help='Save checkpoint every N training steps (0 to disable, default: 0)')
+    parser.add_argument('--checkpoint-interval', type=int, default=None, metavar='N',
+                        help='Save checkpoint every N training steps (default: from config, typically 10000)')
     
     # Output options
     parser.add_argument('--output-dir', '-o', type=str, default=None, metavar='PATH',

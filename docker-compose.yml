@@ -22,10 +22,13 @@ services:
     stdin_open: true
     tty: true
     
+    # Port mappings: host_port:container_port
+    # Use HOST_TENSORBOARD_PORT=0 for auto-select, or set a specific port
+    # Default 0 means Docker will choose an available port automatically
     ports:
-      - "8888:8888"
-      - "6006:6006"
-      - "5678:5678"
+      - "${HOST_JUPYTER_PORT:-8888}:8888"
+      - "${HOST_TENSORBOARD_PORT:-0}:6006"
+      - "${HOST_DEBUG_PORT:-5678}:5678"
     
     working_dir: /workspace
     
