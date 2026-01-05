@@ -821,15 +821,16 @@ class Phase2Config:
             return base_lr
         
         # After decay start: apply decay schedule
-        # Count steps since decay started
-        t = max(1, step - decay_start_step + 1)  # +1 to avoid division issues
+        # Use lr = base_lr * decay_start_step / step to ensure continuity at decay_start_step
+        # At step = decay_start_step: lr = base_lr (continuous with constant phase)
+        # As step increases: lr decays smoothly proportional to 1/step
         
         if self.constant_lr_then_1_over_t:
-            # 1/t decay: lr = lr_base / t (converges to expected values)
-            return base_lr / t
+            # 1/t decay: lr = base_lr * decay_start_step / step
+            return base_lr * decay_start_step / step
         else:
-            # 1/sqrt(t) decay: lr = lr_base / sqrt(t)
-            return base_lr / math.sqrt(t)
+            # 1/sqrt(t) decay: lr = base_lr * sqrt(decay_start_step) / sqrt(step)
+            return base_lr * math.sqrt(decay_start_step / step)
     
     def get_warmup_stage(self, step: int) -> int:
         """
