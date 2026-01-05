@@ -13,7 +13,6 @@ These tests verify:
 """
 
 import sys
-import os
 import numpy as np
 import pytest
 from typing import List, Tuple, Dict, Any
