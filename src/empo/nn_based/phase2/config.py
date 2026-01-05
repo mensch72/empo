@@ -943,8 +943,8 @@ class Phase2Config:
                 2: "Stage 3: V_h^e + X_h + U_r",
                 3: "Stage 4: V_h^e + X_h + U_r + Q_r",
                 4: "Stage 5: V_h^e + X_h + U_r + Q_r + V_r",
-                5: "β_r ramping (constant LR)",
-                6: "Full training (LR decay)",
+                5: "β_r ramping",
+                6: "Full training",
             }
         elif self.x_h_use_network and self.u_r_use_network and not self.v_r_use_network:
             names = {
@@ -952,8 +952,8 @@ class Phase2Config:
                 1: "Stage 2: V_h^e + X_h",
                 2: "Stage 3: V_h^e + X_h + U_r",
                 3: "Stage 4: V_h^e + X_h + U_r + Q_r",
-                5: "β_r ramping (constant LR)",
-                6: "Full training (LR decay)",
+                5: "β_r ramping",
+                6: "Full training",
             }
         elif self.x_h_use_network and not self.u_r_use_network:
             # U_r computed directly from X_h, not trained (U_r stage skipped)
@@ -961,16 +961,16 @@ class Phase2Config:
                 0: "Stage 1: V_h^e only",
                 1: "Stage 2: V_h^e + X_h",
                 3: "Stage 3: V_h^e + X_h + Q_r",
-                5: "β_r ramping (constant LR)",
-                6: "Full training (LR decay)",
+                5: "β_r ramping",
+                6: "Full training",
             }
         else:
             # X_h computed directly from V_h^e samples, not trained (X_h stage skipped)
             names = {
                 0: "Stage 1: V_h^e only",
                 3: "Stage 2: V_h^e + Q_r",
-                5: "β_r ramping (constant LR)",
-                6: "Full training (LR decay)",
+                5: "β_r ramping",
+                6: "Full training",
             }
         return names.get(stage, "Unknown")
     

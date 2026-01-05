@@ -305,7 +305,7 @@ When `verbose=True`, stage transitions are logged to console:
   Effective beta_r: 0.0000
 
 [Warmup] Stage transition at step 6000, episode 120:
-  β_r ramping (constant LR) -> Full training (LR decay)
+  β_r ramping -> Full training
   Active networks: {'v_h_e', 'x_h', 'u_r', 'q_r'}
   Effective beta_r: 10.0000
   [Training] Cleared replay buffer (50000 transitions) after β_r ramp-up
