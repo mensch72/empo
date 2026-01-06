@@ -59,7 +59,7 @@ Module structure:
 
 # Re-export public API for backward compatibility
 from .helpers import (
-    default_believed_others_policy,
+    DefaultBelievedOthersPolicy,
     combine_action_profiles,
     combine_action_profiles_batch,
     combine_profile_distributions,
@@ -92,6 +92,7 @@ __all__ = [
     'SlicedAttainmentCache',
     # Helpers
     'default_believed_others_policy',
+    'DefaultBelievedOthersPolicy',
     'combine_action_profiles',
     'combine_action_profiles_batch',
     'combine_profile_distributions',

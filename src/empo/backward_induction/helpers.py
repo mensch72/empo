@@ -129,29 +129,85 @@ def make_slice_id(state_indices: List[int]) -> SliceId:
     return tuple(sorted(state_indices))
 
 
-def default_believed_others_policy(
-    state: State, 
-    agent_index: int, 
-    action: int, 
-    num_agents: int, 
-    num_actions: int,
-    robot_agent_indices: List[int]
-) -> List[Tuple[float, npt.NDArray[np.int64]]]:
-    """Default believed others policy - uniform distribution over other humans.
+class DefaultBelievedOthersPolicy:
+    """Callable that returns uniform distribution over other humans' actions.
     
+    Precomputes results for each human agent index at initialization time,
+    since the result only depends on agent_index (not state or action).
     Robot agent positions are set to -1 (placeholder) since they will be
     overwritten by the caller when iterating over robot action profiles.
+    
+    Usage:
+        # Create once at start of Phase 1
+        believed_others = DefaultBelievedOthersPolicy(
+            num_agents=4, num_actions=5, 
+            human_agent_indices=[0, 2], robot_agent_indices=[1, 3]
+        )
+        # Call like the old function (state and action are ignored)
+        distribution = believed_others(state, agent_index=0, action=2, ...)
     """
-    # Number of other human agents (exclude self and robots)
-    num_other_humans = num_agents - 1 - len(robot_agent_indices)
-    uniform_p = 1 / (num_actions ** num_other_humans) if num_other_humans > 0 else 1.0
-    # Each action profile for the other human agents gets the same probability.
-    # The agent's own action and robot actions are set to -1 since they will be overwritten.
-    all_actions = list(range(num_actions))
-    robot_set = set(robot_agent_indices)
-    return [(uniform_p, np.array(action_profile, dtype=np.int64)) for action_profile in product(*[
-        [-1] if (idx == agent_index or idx in robot_set) else all_actions
-        for idx in range(num_agents)])]
+    
+    def __init__(
+        self,
+        num_agents: int,
+        num_actions: int,
+        human_agent_indices: List[int],
+        robot_agent_indices: List[int]
+    ):
+        """Precompute believed others policy for each human agent.
+        
+        Args:
+            num_agents: Total number of agents
+            num_actions: Number of actions per agent
+            human_agent_indices: List of agent indices that are humans
+            robot_agent_indices: List of agent indices that are robots
+        """
+        self.num_agents = num_agents
+        self.num_actions = num_actions
+        self.robot_agent_indices = robot_agent_indices
+        
+        # Precompute for each human agent index, None for non-humans
+        self._cached: List[Optional[List[Tuple[float, npt.NDArray[np.int64]]]]] = [
+            None for _ in range(num_agents)
+        ]
+        
+        robot_set = set(robot_agent_indices)
+        all_actions = list(range(num_actions))
+        
+        # Number of other human agents (exclude one human and all robots)
+        num_other_humans = num_agents - 1 - len(robot_agent_indices)
+        uniform_p = 1.0 / (num_actions ** num_other_humans) if num_other_humans > 0 else 1.0
+        
+        for agent_index in human_agent_indices:
+            # Each action profile for the other human agents gets the same probability.
+            # The agent's own action and robot actions are set to -1 since they will be overwritten.
+            self._cached[agent_index] = [
+                (uniform_p, np.array(action_profile, dtype=np.int64))
+                for action_profile in product(*[
+                    [-1] if (idx == agent_index or idx in robot_set) else all_actions
+                    for idx in range(num_agents)
+                ])
+            ]
+    
+    def __call__(
+        self,
+        _unused_state: State,
+        agent_index: int,
+        _unused_action: int,
+    ) -> List[Tuple[float, npt.NDArray[np.int64]]]:
+        """Return precomputed distribution for the given agent index.
+        
+        Args match the old function signature for API compatibility.
+        state and action are ignored (result doesn't depend on them).
+        num_agents, num_actions, robot_agent_indices should match init values.
+        
+        Returns:
+            List of (probability, action_profile) tuples for other agents.
+        """
+        result = self._cached[agent_index]
+        if result is None:
+            raise ValueError(f"Agent {agent_index} is not a human agent")
+        return result
 
 
 def collect_goals_by_human(

@@ -47,7 +47,7 @@ from empo.shared_attainment_cache import (
 
 from .helpers import (
     State, TransitionData, SliceCache, SliceId, SlicedAttainmentCache,
-    default_believed_others_policy,
+    DefaultBelievedOthersPolicy,
     compute_dependency_levels_general,
     compute_dependency_levels_fast,
     split_into_batches,
@@ -375,9 +375,9 @@ def _hpp_process_state_batch(
     if _shared_believed_others_policy_pickle is not None:
         believed_others_policy = cloudpickle.loads(_shared_believed_others_policy_pickle)
     else:
-        # Create default believed others policy function
-        believed_others_policy = lambda state, agent_index, action: default_believed_others_policy(
-            state, agent_index, action, num_agents, num_actions, robot_agent_indices)
+        # Create precomputed default believed others policy
+        believed_others_policy = DefaultBelievedOthersPolicy(
+            num_agents, num_actions, human_agent_indices, robot_agent_indices)
     
     for state_index in state_indices:
         state = states[state_index]
@@ -624,9 +624,9 @@ def compute_human_policy_prior(
     robot_action_profiles: List[List[int]] = [list(profile) for profile in product(range(num_actions), repeat=len(robot_agent_indices))] if robot_agent_indices else [[]]
 
     if believed_others_policy is None:
-        # Create wrapper for sequential execution (parallel uses default directly)
-        believed_others_policy = lambda state, agent_index, action: default_believed_others_policy(
-            state, agent_index, action, num_agents, num_actions, robot_agent_indices)
+        # Create precomputed default believed others policy (fast for sequential execution)
+        believed_others_policy = DefaultBelievedOthersPolicy(
+            num_agents, num_actions, human_agent_indices, robot_agent_indices)
         believed_others_policy_pickle: Optional[bytes] = None  # No need to pickle the default
     else:
         # Serialize custom believed_others_policy using cloudpickle for parallel mode
