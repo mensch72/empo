@@ -553,6 +553,19 @@ def main(
             for func, name in functions_to_profile:
                 profiler.add_function(func)
                 print(f"  - {name}")
+            
+            # Also profile HumanPolicyPrior methods (called heavily in Phase 2)
+            hpp_methods_to_profile = [
+                (TabularHumanPolicyPrior.__call__, 'TabularHumanPolicyPrior.__call__'),
+                (TabularHumanPolicyPrior.profile_distribution, 'TabularHumanPolicyPrior.profile_distribution'),
+                (TabularHumanPolicyPrior.profile_distribution_with_fixed_goal, 'TabularHumanPolicyPrior.profile_distribution_with_fixed_goal'),
+                (TabularHumanPolicyPrior._profile_distribution_numpy, 'TabularHumanPolicyPrior._profile_distribution_numpy'),
+                (TabularHumanPolicyPrior._to_probability_array, 'TabularHumanPolicyPrior._to_probability_array'),
+            ]
+            print(f"  Plus {len(hpp_methods_to_profile)} HumanPolicyPrior methods:")
+            for func, name in hpp_methods_to_profile:
+                profiler.add_function(func)
+                print(f"  - {name}")
             print()
         except ImportError:
             print("WARNING: line_profiler not installed. Install with: pip install line_profiler")

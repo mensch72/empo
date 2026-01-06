@@ -140,7 +140,8 @@ class HumanPolicyPrior(ABC):
             num_actions = len(action_distribution)
             probs = np.array([action_distribution[i] for i in range(num_actions)])
         else:
-            probs = np.asarray(action_distribution)
+            probs = action_distribution
+#            probs = np.asarray(action_distribution)
         
         # Ensure probabilities sum to 1.0 (handle floating-point errors and edge cases)
         prob_sum = probs.sum()
@@ -361,27 +362,50 @@ class TabularHumanPolicyPrior(HumanPolicyPrior):
             return self._profile_distribution_numpy(marginals)
     
     def _profile_distribution_numpy(self, marginals: List[np.ndarray]) -> List[tuple]:
-        """NumPy implementation of profile distribution computation."""
-        # Build all action combinations using meshgrid
-        action_ranges = [np.arange(len(m)) for m in marginals]
-        grids = np.meshgrid(*action_ranges, indexing='ij')
+        """NumPy implementation of profile distribution computation.
         
-        # Stack all profiles: shape (num_agents, total_combinations)
-        all_profiles = np.stack([g.ravel() for g in grids], axis=0)
+        Optimized with fast paths for common cases (1-2 agents).
+        """
+        n_agents = len(marginals)
         
-        # Gather probabilities for each agent's action choices
-        probs_matrix = np.array([
-            marginals[i][all_profiles[i]] for i in range(len(marginals))
-        ])
+        # Fast path for single agent (most common case)
+        if n_agents == 1:
+            m = marginals[0]
+            # Direct iteration is faster than meshgrid for single agent
+            return [(float(m[a]), [int(a)]) for a in np.nonzero(m > 0)[0]]
         
-        # Compute joint probabilities as product across agents
-        joint_probs = np.prod(probs_matrix, axis=0)
+        # Fast path for two agents (very common case)
+        if n_agents == 2:
+            m0, m1 = marginals[0], marginals[1]
+            # Use outer product instead of meshgrid - much faster
+            joint = np.outer(m0, m1)
+            i_indices, j_indices = np.nonzero(joint > 0)
+            # Vectorized extraction of probabilities
+            probs = joint[i_indices, j_indices]
+            # Build result - convert indices to Python ints for list creation
+            return [(float(probs[k]), [int(i_indices[k]), int(j_indices[k])]) 
+                    for k in range(len(probs))]
         
-        # Filter out zero probabilities and build result
-        nonzero_mask = joint_probs > 0.0
+        # General case for 3+ agents (rare)
+        # Use indices instead of meshgrid - more memory efficient
+        shape = tuple(len(m) for m in marginals)
+        total_combinations = np.prod(shape)
+        
+        # Compute joint probabilities directly using broadcasting
+        # Start with first marginal reshaped to broadcast
+        joint = marginals[0].copy()
+        for i in range(1, n_agents):
+            # Reshape current joint to add new dimension, multiply with next marginal
+            joint = np.outer(joint.ravel(), marginals[i]).reshape(joint.shape + (len(marginals[i]),))
+        
+        # Find non-zero entries
+        nonzero_indices = np.nonzero(joint > 0)
+        probs = joint[nonzero_indices]
+        
+        # Convert multi-indices to action profiles
         result = [
-            (joint_probs[j], all_profiles[:, j].tolist())
-            for j in np.where(nonzero_mask)[0]
+            (float(probs[k]), [int(nonzero_indices[agent][k]) for agent in range(n_agents)])
+            for k in range(len(probs))
         ]
         
         return result
