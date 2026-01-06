@@ -17,3 +17,4 @@ map: |
 
 max_steps: 100
 orientations: ["e"]
+action_class: "MinimalActions"

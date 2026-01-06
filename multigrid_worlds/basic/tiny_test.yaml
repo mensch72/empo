@@ -1,0 +1,11 @@
+# Tiny test environment for unit tests
+map: |
+  We We We We We
+  We .. .. .. We
+  We .. Ay .. We
+  We .. .. .. We
+  We We We We We
+
+max_steps: 3
+possible_goals:
+  - "1,1, 3,3"   # rectangular area goal covering all walkable cells

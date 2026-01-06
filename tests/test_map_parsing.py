@@ -21,12 +21,13 @@ def test_parse_map_string_basic():
     We We We We We
     """
     
-    width, height, cells, agents = parse_map_string(test_map, World)
+    width, height, cells, agents, has_interactive = parse_map_string(test_map, World)
     
     assert width == 5
     assert height == 5
     assert len(agents) == 1
     assert agents[0] == (2, 2, {'color': 'red'})
+    assert has_interactive is False  # No keys, doors, etc.
 
 
 def test_parse_map_string_no_whitespace():
@@ -39,7 +40,7 @@ def test_parse_map_string_no_whitespace():
     WeWeWeWeWe
     """
     
-    width, height, cells, agents = parse_map_string(test_map, World)
+    width, height, cells, agents, _ = parse_map_string(test_map, World)
     
     assert width == 5
     assert height == 5
@@ -56,7 +57,7 @@ def test_parse_map_list_of_strings():
         "We We We We We"
     ]
     
-    width, height, cells, agents = parse_map_string(test_map, World)
+    width, height, cells, agents, _ = parse_map_string(test_map, World)
     
     assert width == 5
     assert height == 5
@@ -72,7 +73,7 @@ def test_parse_map_list_of_lists():
         ['We', 'We', 'We', 'We', 'We']
     ]
     
-    width, height, cells, agents = parse_map_string(test_map, World)
+    width, height, cells, agents, _ = parse_map_string(test_map, World)
     
     assert width == 5
     assert height == 5
@@ -86,7 +87,7 @@ def test_all_color_codes():
     We We We We We We We We
     """
     
-    width, height, cells, agents = parse_map_string(test_map, World)
+    width, height, cells, agents, _ = parse_map_string(test_map, World)
     
     assert len(agents) == 6
     expected_colors = ['red', 'green', 'blue', 'purple', 'yellow', 'grey']
@@ -106,7 +107,10 @@ def test_all_object_types():
     We We We We We We We We We We
     """
     
-    width, height, cells, agents = parse_map_string(test_map, World)
+    width, height, cells, agents, has_interactive = parse_map_string(test_map, World)
+    
+    # Has keys, doors, balls, boxes - should detect interactive objects
+    assert has_interactive is True
     
     # Check block
     assert cells[1][1] == ('block', {})

@@ -556,16 +556,23 @@ class Phase2Config:
     # Recommended: Set to 10000-50000 for long runs to avoid losing progress.
     checkpoint_interval: int = 10000
     
-    # Maximum memory usage as a fraction of total system memory (0.0-1.0).
-    # When exceeded, training stops gracefully (like Ctrl-C) and saves checkpoint.
+    # Minimum free memory as a fraction of total system memory (0.0-1.0).
+    # When free memory falls below this threshold:
+    # 1. Training pauses for memory_pause_duration seconds
+    # 2. If still low, training stops gracefully (like Ctrl-C) and saves checkpoint.
     # Set to 0.0 to disable memory monitoring.
-    # Recommended: 0.95 (95%) to leave some headroom for other processes.
-    max_memory_fraction: float = 0.95
+    # Recommended: 0.1 (10%) to leave headroom for other processes.
+    min_free_memory_fraction: float = 0.1
     
     # How often to check memory usage (in training steps).
     # Lower values catch memory issues faster but add overhead.
     # Recommended: 100-1000 depending on training speed.
     memory_check_interval: int = 100
+    
+    # How long to pause (seconds) when memory is low before checking again.
+    # If memory is still low after this pause, training stops.
+    # Recommended: 60 seconds to give other processes time to release memory.
+    memory_pause_duration: float = 60.0
     
     # Network architecture
     hidden_dim: int = 256
@@ -1433,8 +1440,9 @@ class Phase2Config:
             },
             'checkpointing_and_memory': {
                 'checkpoint_interval': self.checkpoint_interval,
-                'max_memory_fraction': self.max_memory_fraction,
+                'min_free_memory_fraction': self.min_free_memory_fraction,
                 'memory_check_interval': self.memory_check_interval,
+                'memory_pause_duration': self.memory_pause_duration,
             },
         }
         

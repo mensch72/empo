@@ -66,6 +66,32 @@ Maps use two-character codes separated by spaces. The `|` syntax in YAML preserv
 - `s` - South (down)
 - `w` - West (left)
 
+### Possible Goals
+
+The `possible_goals` key specifies goals that humans might pursue. These are used by the backward induction algorithms to compute human policy priors. Goals can be:
+
+- **Cell goals**: Agent wants to reach a specific cell `(x, y)`
+- **Rectangle goals**: Agent wants to reach any cell in a rectangle from `(x1, y1)` to `(x2, y2)`
+
+Multiple syntax formats are supported:
+
+```yaml
+possible_goals:
+  # String format (most common in YAML)
+  - "3,3"           # Cell goal at (3, 3)
+  - "1,1, 3,3"      # Rectangle from (1,1) to (3,3) - spaces allowed
+  - "1,1,3,3"       # Rectangle - no spaces also works
+  
+  # List format (useful for programmatic configs)
+  - [3, 3]          # Cell goal at (3, 3)
+  - [1, 1, 3, 3]    # Rectangle from (1,1) to (3,3)
+  
+  # Nested list format (explicit corner notation)
+  - [[1, 1], [3, 3]]  # Rectangle from (1,1) to (3,3)
+```
+
+All goals are assigned uniform weights by default. The same goals apply to all human agents.
+
 ## Usage
 
 Load an environment from a config file:
@@ -81,6 +107,37 @@ env = MultiGridEnv(config_file='multigrid_worlds/puzzles/one_or_three_chambers.y
 
 # JSON files are also supported
 env = MultiGridEnv(config_file='some_world.json')
+```
+
+Or create an environment programmatically with a config dict (same format as YAML):
+
+```python
+from gym_multigrid.multigrid import MultiGridEnv
+
+config = {
+    'width': 5,
+    'height': 5,
+    'max_steps': 10,
+    'possible_goals': ['3,3', [1, 1, 3, 3]]  # Cell and rectangle goals
+}
+env = MultiGridEnv(config=config)
+
+# The environment's goal generator is automatically available
+for goal, weight in env.possible_goal_generator.generate(state, agent_index=0):
+    print(f"Goal: {goal}, weight: {weight}")
+```
+
+Using goals with backward induction:
+
+```python
+from empo.backward_induction import compute_human_policy_prior
+
+# If possible_goals is specified in config, no need to pass goal generator
+human_policy = compute_human_policy_prior(
+    world_model=env,
+    human_agent_indices=[0]
+    # possible_goal_generator uses env.possible_goal_generator by default
+)
 ```
 
 ## Available Worlds

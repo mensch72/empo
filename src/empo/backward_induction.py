@@ -55,9 +55,14 @@ import cloudpickle
 from tqdm import tqdm
 from scipy.special import logsumexp
 
+from empo.memory_monitor import MemoryMonitor
 from empo.possible_goal import PossibleGoal, PossibleGoalGenerator
 from empo.human_policy_prior import TabularHumanPolicyPrior
 from empo.world_model import WorldModel
+from empo.shared_dag import (
+    SharedDAG, init_shared_dag, get_shared_dag_info, attach_shared_dag, 
+    get_shared_dag, cleanup_shared_dag
+)
 
 # Type aliases for complex types used throughout
 State: TypeAlias = Any  # State is typically a hashable tuple from WorldModel.get_state()
@@ -437,7 +442,8 @@ def _hpp_compute_sequential(
     believed_others_policy: Callable[[State, int, int], List[Tuple[float, List[int]]]], 
     beta_h: float, 
     gamma_h: float,
-    progress_callback: Optional[Callable[[int, int], None]] = None
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+    memory_monitor: Optional[MemoryMonitor] = None
 ) -> None:
     """Original sequential algorithm.
     
@@ -449,9 +455,17 @@ def _hpp_compute_sequential(
         * V(s, g) = Σ_a π(a|s,g) * Q(s, a, g)
     """
     actions = range(num_actions)
+    total_states = len(states)
     
     # loop over the nodes in reverse topological order:
     for state_index in range(len(states)-1, -1, -1):
+        # Check memory periodically (using step = states processed)
+        states_processed = total_states - state_index
+        if memory_monitor is not None:
+            memory_monitor.check(states_processed)
+        # Update progress bar
+        if progress_callback is not None:
+            progress_callback(states_processed, total_states)
         if DEBUG:
             print(f"Processing state {state_index}")
         state = states[state_index]
@@ -524,12 +538,30 @@ def _hpp_init_shared_data(
     transitions: List[List[TransitionData]], 
     Vh_values: VhValues, 
     params: Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], float, float],
-    believed_others_policy_pickle: Optional[bytes] = None
+    believed_others_policy_pickle: Optional[bytes] = None,
+    use_shared_memory: bool = False
 ) -> None:
-    """Initialize shared data for worker processes."""
+    """Initialize shared data for worker processes.
+    
+    Args:
+        states: List of states (will be stored in shared memory if use_shared_memory=True)
+        transitions: List of transitions (will be stored in shared memory if use_shared_memory=True)
+        Vh_values: Value function (always passed via globals, updated by workers)
+        params: Parameters tuple
+        believed_others_policy_pickle: Pickled policy function
+        use_shared_memory: If True, store states and transitions in shared memory
+    """
     global _shared_states, _shared_transitions, _shared_Vh_values, _shared_params, _shared_believed_others_policy_pickle
-    _shared_states = states
-    _shared_transitions = transitions
+    
+    if use_shared_memory:
+        # Store DAG in shared memory to avoid copy-on-write
+        init_shared_dag(states, transitions)
+        _shared_states = None  # Will be loaded from shared memory in workers
+        _shared_transitions = None
+    else:
+        _shared_states = states
+        _shared_transitions = transitions
+    
     _shared_Vh_values = Vh_values
     _shared_params = params
     _shared_believed_others_policy_pickle = believed_others_policy_pickle
@@ -548,13 +580,27 @@ def _hpp_process_state_batch(
     batch_start = time.perf_counter()
     
     # Access shared data - these are guaranteed to be set when called from parallel context
-    assert _shared_states is not None
-    assert _shared_transitions is not None
     assert _shared_Vh_values is not None
     assert _shared_params is not None
     
-    states = _shared_states
-    transitions = _shared_transitions
+    # Try to get states/transitions from shared memory first, fall back to globals
+    shared_dag = get_shared_dag()
+    if shared_dag is None:
+        # Try to attach to shared memory (first call in this worker)
+        shared_dag = attach_shared_dag()
+    
+    if shared_dag is not None:
+        states = shared_dag.get_states()
+        transitions = shared_dag.get_transitions()
+    else:
+        # Fall back to module-level globals
+        assert _shared_states is not None
+        assert _shared_transitions is not None
+        states = _shared_states
+        transitions = _shared_transitions
+    
+    assert transitions is not None
+    
     Vh_values = _shared_Vh_values
     (human_agent_indices, possible_goal_generator, num_agents, num_actions, 
      action_powers, beta_h, gamma_h) = _shared_params
@@ -631,7 +677,7 @@ def _hpp_process_state_batch(
 def compute_human_policy_prior(
     world_model: WorldModel, 
     human_agent_indices: List[int], 
-    possible_goal_generator: PossibleGoalGenerator, 
+    possible_goal_generator: Optional[PossibleGoalGenerator] = None, 
     believed_others_policy: Optional[Callable[[State, int, int], List[Tuple[float, List[int]]]]] = None, 
     *,
     beta_h: float = 10.0, 
@@ -641,7 +687,10 @@ def compute_human_policy_prior(
     level_fct: Optional[Callable[[State], int]] = None, 
     return_Vh: Literal[False] = False,
     progress_callback: Optional[Callable[[int, int], None]] = None,
-    quiet: bool = False
+    quiet: bool = False,
+    min_free_memory_fraction: float = 0.1,
+    memory_check_interval: int = 100,
+    memory_pause_duration: float = 60.0
 ) -> TabularHumanPolicyPrior: ...
 
 
@@ -649,7 +698,7 @@ def compute_human_policy_prior(
 def compute_human_policy_prior(
     world_model: WorldModel, 
     human_agent_indices: List[int], 
-    possible_goal_generator: PossibleGoalGenerator, 
+    possible_goal_generator: Optional[PossibleGoalGenerator] = None, 
     believed_others_policy: Optional[Callable[[State, int, int], List[Tuple[float, List[int]]]]] = None, 
     *, 
     beta_h: float = 10.0, 
@@ -659,14 +708,17 @@ def compute_human_policy_prior(
     level_fct: Optional[Callable[[State], int]] = None, 
     return_Vh: Literal[True],
     progress_callback: Optional[Callable[[int, int], None]] = None,
-    quiet: bool = False
+    quiet: bool = False,
+    min_free_memory_fraction: float = 0.1,
+    memory_check_interval: int = 100,
+    memory_pause_duration: float = 60.0
 ) -> Tuple[TabularHumanPolicyPrior, Dict[State, Dict[int, Dict[PossibleGoal, float]]]]: ...
 
 
 def compute_human_policy_prior(
     world_model: WorldModel, 
     human_agent_indices: List[int], 
-    possible_goal_generator: PossibleGoalGenerator, 
+    possible_goal_generator: Optional[PossibleGoalGenerator] = None, 
     believed_others_policy: Optional[Callable[[State, int, int], List[Tuple[float, List[int]]]]] = None, 
     *,
     beta_h: float = 10.0, 
@@ -676,7 +728,10 @@ def compute_human_policy_prior(
     level_fct: Optional[Callable[[State], int]] = None, 
     return_Vh: bool = False,
     progress_callback: Optional[Callable[[int, int], None]] = None,
-    quiet: bool = False
+    quiet: bool = False,
+    min_free_memory_fraction: float = 0.1,
+    memory_check_interval: int = 100,
+    memory_pause_duration: float = 60.0
 ) -> Union[TabularHumanPolicyPrior, Tuple[TabularHumanPolicyPrior, Dict[State, Dict[int, Dict[PossibleGoal, float]]]]]:
     """
     Compute human policy prior via backward induction on the state DAG.
@@ -703,6 +758,8 @@ def compute_human_policy_prior(
                             Other agents are modeled by believed_others_policy.
         possible_goal_generator: Generator that yields (goal, weight) pairs for
                                 each state and agent. See PossibleGoalGenerator.
+                                If None, uses world_model.possible_goal_generator
+                                (which can be set via config file 'possible_goals' key).
         believed_others_policy: Function(state, agent_index, action) -> List[(prob, action_profile)]
                                specifying beliefs about other agents' actions.
                                If None, uses uniform distribution over all action profiles.
@@ -716,6 +773,14 @@ def compute_human_policy_prior(
                   for fast dependency computation. States at higher levels are processed
                   first. If None, uses general topological sort (slower for large DAGs).
         return_Vh: If True, also return the computed value function.
+        progress_callback: Optional callback(done, total) for progress updates.
+        quiet: If True, suppress progress output.
+        min_free_memory_fraction: Minimum free memory as fraction of total (0.0-1.0).
+            When free memory falls below this threshold, computation pauses for
+            memory_pause_duration seconds, then checks again. If still low, raises
+            KeyboardInterrupt for graceful shutdown. Set to 0.0 to disable (default).
+        memory_check_interval: How often to check memory, in states processed.
+        memory_pause_duration: How long to pause (seconds) when memory is low.
     
     Returns:
         TabularHumanPolicyPrior: Policy prior that can be called as prior(state, agent, goal).
@@ -747,6 +812,15 @@ def compute_human_policy_prior(
         >>> state = env.get_state()
         >>> action_dist = policy(state, 0, my_goal)  # numpy array of probabilities
     """
+    # Use world_model's goal generator if none provided
+    if possible_goal_generator is None:
+        possible_goal_generator = getattr(world_model, 'possible_goal_generator', None)
+        if possible_goal_generator is None:
+            raise ValueError(
+                "possible_goal_generator must be provided either as an argument "
+                "or via world_model.possible_goal_generator (set in config file)"
+            )
+    
     human_policy_priors: HumanPolicyDict = {}  # these will be a mixture of system-1 and system-2 policies
 
     # Q_vectors = {}
@@ -819,6 +893,12 @@ def compute_human_policy_prior(
         # Use 'fork' context explicitly to ensure shared memory works
         ctx = mp.get_context('fork')
         
+        # Initialize DAG in shared memory to avoid copy-on-write overhead
+        # This is done once before processing levels
+        if not quiet:
+            print("Storing DAG in shared memory...")
+        init_shared_dag(states, transitions)
+        
         # Profiling counters
         if PROFILE_PARALLEL:
             prof_states_parallel: int = 0
@@ -833,8 +913,23 @@ def compute_human_policy_prior(
             prof_total_parallel_time = 0.0
             prof_batch_times: List[float] = []  # Worker timing for each batch
         
+        # Create memory monitor if enabled (for parallel mode - check at each level)
+        memory_monitor: Optional[MemoryMonitor] = None
+        if min_free_memory_fraction > 0.0:
+            memory_monitor = MemoryMonitor(
+                min_free_fraction=min_free_memory_fraction,
+                check_interval=1,  # Check every level in parallel mode
+                pause_duration=memory_pause_duration,
+                verbose=not quiet,
+                enabled=True
+            )
+        
         # Process each level sequentially, but parallelize within each level
         for level_idx, level in enumerate(dependency_levels):
+            # Check memory at the start of each level
+            if memory_monitor is not None:
+                memory_monitor.check(level_idx)
+            
             if DEBUG:
                 print(f"Processing level {level_idx} with {len(level)} states")
             
@@ -886,7 +981,8 @@ def compute_human_policy_prior(
                 
                 # Re-initialize shared data so new workers see updated Vh_values from previous levels
                 # Also pass the cloudpickle'd believed_others_policy for custom policy support
-                _hpp_init_shared_data(states, transitions, Vh_values, params, believed_others_policy_pickle)
+                # DAG (states, transitions) is already in shared memory, only update Vh_values
+                _hpp_init_shared_data(states, transitions, Vh_values, params, believed_others_policy_pickle, use_shared_memory=True)
                 
                 # Only pass state indices - workers access shared data via globals
                 batches = split_into_batches(level, num_workers)
@@ -982,14 +1078,27 @@ def compute_human_policy_prior(
                     print(f"  Theoretical max speedup:    {theoretical_speedup:.2f}x")
                     print(f"  Load imbalance (max/mean):  {max_batch/mean_batch:.2f}x")
             print("=========================================")
+        
+        # Clean up shared memory after parallel processing
+        cleanup_shared_dag()
     
     else:
         # Sequential execution (original algorithm)
+        # Create memory monitor if enabled
+        memory_monitor: Optional[MemoryMonitor] = None
+        if min_free_memory_fraction > 0.0:
+            memory_monitor = MemoryMonitor(
+                min_free_fraction=min_free_memory_fraction,
+                check_interval=memory_check_interval,
+                pause_duration=memory_pause_duration,
+                verbose=not quiet,
+                enabled=True
+            )
         _hpp_compute_sequential(states, Vh_values, system2_policies, transitions,
                          human_agent_indices, possible_goal_generator,
                          num_agents, num_actions, action_powers,
                          believed_others_policy, beta_h, gamma_h,
-                         progress_callback)
+                         progress_callback, memory_monitor)
     
     human_policy_priors = system2_policies # TODO: mix with system-1 policies!
 
@@ -1038,95 +1147,28 @@ def _rp_compute_sequential(
     zeta: float, # robots' risk-aversion
     xi: float, # robots' inter-human power-inequality aversion
     eta: float, # robots' additional intertemporal power-inequality aversion
-    terminal_Vr: float = -1e-10  # must be strictly negative !
+    terminal_Vr: float = -1e-10,  # must be strictly negative !
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+    memory_monitor: Optional[MemoryMonitor] = None
 ) -> None:
-    """Compute Phase 2 human and robot value functions and the robot policy via backward induction.
-
-    This routine implements the sequential (single-process) version of the Phase 2
-    algorithm. It assumes that the world model state graph has already been converted
-    into a directed acyclic graph (DAG) with a topological ordering of `states` and
-    associated `transitions`. It then performs a backward pass over that ordering
-    to populate:
-
-    * `Vh_values[state_index][agent_index][goal]`: human power values for each
-      human agent and possible goal.
-    * `Vr_values[state_index]`: the aggregate robot power value at each state.
-    * `robot_policy[state_index][agent_index][action]`: the robot's power-law
-      softmax policy over actions for each robot agent.
-
-    All results are written **in place** into the mutable mappings passed in as
-    `Vh_values`, `Vr_values`, and `robot_policy`. The function does not return a
-    value.
-
-    Parameters
-    ----------
-    states:
-        List of world model states in reverse topological order (or any order
-        compatible with the given `transitions` such that all successors of a
-        state have an index greater than or equal to that state).
-    Vh_values:
-        Mutable container mapping state indices to per-human, per-goal values.
-        This will be filled during the backward pass.
-    Vr_values:
-        Mutable container mapping state indices to the robot's aggregate power
-        value `V_r` at each state. This will be filled during the backward pass.
-    robot_policy:
-        Mutable container mapping state indices and robot agent indices to
-        action distributions. This is where the computed robot policy is stored.
-    transitions:
-        For each state index, a list of outgoing transitions. Each transition is a
-        tuple `(next_state_indices, probs, joint_action_indices)` describing the
-        possible successor state indices, their probabilities, and the joint action
-        profile that leads to them.
-    human_agent_indices:
-        Indices of agents that are treated as humans when computing `V_h`.
-    robot_agent_indices:
-        Indices of agents that are controlled by the robot policy being computed.
-    possible_goal_generator:
-        Generator providing the set of hypothetical human goals used to index
-        `V_h`. This should be the same generator used in Phase 1.
-    num_agents:
-        Total number of agents in the world model.
-    num_actions:
-        Number of discrete actions available to each agent.
-    action_powers:
-        Array of shape `(num_actions, num_agents)` (or broadcast-compatible) giving
-        per-action power contributions used in the robot power metric.
-    human_policy_prior:
-        Tabular human policy prior (Phase 1 result) providing the conditional
-        policy over actions for each human agent and goal.
-    beta_r:
-        Softmax parameter for robots' power-law softmax policies. Higher values
-        make the robot policy more concentrated on high-power actions.
-    gamma_h:
-        Discount factor for human power values.
-    gamma_r:
-        Discount factor for robot power values.
-    zeta:
-        Robot risk-aversion parameter in the power aggregation.
-    xi:
-        Robot inter-human power-inequality aversion parameter.
-    eta:
-        Additional intertemporal power-inequality aversion parameter for the robot.
-    terminal_Vr:
-        Constant robot value assigned to terminal states. Must be strictly
-        negative by design.
-
-    Notes
-    -----
-    This function is part of the Phase 2 robot policy computation and should be
-    considered experimental until the Phase 2 API is finalized. It assumes that
-    the `states`, `transitions`, and value containers have been initialized
-    consistently by the caller.
+    """(under construction)
     """
     # Generate all possible robot action profiles (cartesian product of actions for each robot)
     robot_action_profiles: List[RobotActionProfile] = [
         tuple(actions) for actions in product(range(num_actions), repeat=len(robot_agent_indices))
     ]
     
+    total_states = len(states)
     action_profile: npt.NDArray[np.int64] = np.zeros(num_agents, dtype=np.int64)
     # loop over the nodes in reverse topological order:
     for state_index in range(len(states)-1, -1, -1):
+        # Check memory periodically (using step = states processed)
+        states_processed = total_states - state_index
+        if memory_monitor is not None:
+            memory_monitor.check(states_processed)
+        # Update progress bar
+        if progress_callback is not None:
+            progress_callback(states_processed, total_states)
         if DEBUG:
             print(f"Processing state {state_index}")
         state = states[state_index]
@@ -1170,6 +1212,15 @@ def _rp_compute_sequential(
             for agent_index in human_agent_indices:
                 if DEBUG:
                     print(f"   Human agent {agent_index}")
+                    # Check if at least one goal is achieved in this state
+                    goals_achieved = []
+                    for pg, _ in possible_goal_generator.generate(state, agent_index):
+                        achieved = pg.is_achieved(state)
+                        goals_achieved.append((pg, achieved))
+                    if not any(a for _, a in goals_achieved):
+                        print(f"   WARNING: No goal achieved in state {state_index}!")
+                        for pg, a in goals_achieved:
+                            print(f"     {pg}: is_achieved={a}")
                 xh = 0
                 for possible_goal, possible_goal_weight in possible_goal_generator.generate(state, agent_index):
                     if DEBUG:
@@ -1199,6 +1250,54 @@ def _rp_compute_sequential(
                     xh += possible_goal_weight * vh**zeta
                 if DEBUG:
                     print(f"   ...Xh = {xh:.4f}")
+                if xh == 0:
+                    # xh is zero means no goal has positive expected achievement value
+                    # This should NEVER happen if goals cover all walkable cells!
+                    print(f"\nERROR: xh=0 for agent {agent_index} in state {state_index}!")
+                    print(f"  State: {state}")
+                    print(f"  This means no goal has positive expected achievement value.")
+                    
+                    # Check: does every successor state have at least one goal achieved?
+                    print(f"\n  Checking if every successor state has at least one goal achieved:")
+                    all_goals = list(possible_goal_generator.generate(state, agent_index))
+                    
+                    for robot_action_profile in robot_action_profiles:
+                        action_profile[robot_agent_indices] = robot_action_profile
+                        for _, human_action_profile in human_policy_prior.profile_distribution(state):
+                            action_profile[human_agent_indices] = human_action_profile
+                            action_profile_index = int(np.dot(action_profile, action_powers))
+                            _, next_state_probs, next_state_indices = transitions[state_index][action_profile_index]
+                            
+                            for prob, next_idx in zip(next_state_probs, next_state_indices):
+                                if prob > 0:
+                                    next_state = states[next_idx]
+                                    # Check if ANY goal is achieved in this successor state
+                                    goals_achieved_in_succ = []
+                                    for pg, pw in all_goals:
+                                        achieved = pg.is_achieved(next_state)
+                                        if achieved:
+                                            goals_achieved_in_succ.append(pg)
+                                    
+                                    if not goals_achieved_in_succ:
+                                        # Extract human position from successor state
+                                        _, agent_states, _, _ = next_state
+                                        human_pos = (int(agent_states[agent_index][0]), int(agent_states[agent_index][1]))
+                                        print(f"\n  PROBLEM FOUND: No goal achieved in successor state {next_idx}!")
+                                        print(f"    Human position in successor: {human_pos}")
+                                        print(f"    Action profile: robot={robot_action_profile}, human={human_action_profile}")
+                                        print(f"    Transition prob: {prob}")
+                                        print(f"    Goals checked:")
+                                        for pg, pw in all_goals:
+                                            if hasattr(pg, 'target_pos'):
+                                                print(f"      {pg}: target_pos={pg.target_pos}, is_achieved={pg.is_achieved(next_state)}")
+                                            elif hasattr(pg, 'target_rect'):
+                                                print(f"      {pg}: target_rect={pg.target_rect}, is_achieved={pg.is_achieved(next_state)}")
+                    
+                    raise ValueError(
+                        f"xh=0 for agent {agent_index} in state {state_index}: "
+                        f"no goal is achieved in at least one successor state! "
+                        f"Check that goals cover all walkable cells."
+                    )
                 powersum += xh**(-xi)
             y = powersum / len(human_agent_indices)  # because (other than in the paper) y is the average over humans, not the sum   
             ur = -(y**eta)  
@@ -1219,13 +1318,31 @@ def _rp_init_shared_data(
     Vh_values: VhValues, 
     Vr_values: VrValues,
     params: Tuple[List[int], List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], float, float, float, float, float, float, float],
-    human_policy_prior_pickle: bytes
+    human_policy_prior_pickle: bytes,
+    use_shared_memory: bool = False
 ) -> None:
-    """Initialize shared data for robot policy worker processes."""
+    """Initialize shared data for robot policy worker processes.
+    
+    Args:
+        states: List of states (will be stored in shared memory if use_shared_memory=True)
+        transitions: List of transitions (will be stored in shared memory if use_shared_memory=True)
+        Vh_values: Human value function (always passed via globals)
+        Vr_values: Robot value function (always passed via globals)
+        params: Parameters tuple
+        human_policy_prior_pickle: Pickled human policy prior
+        use_shared_memory: If True, states and transitions are already in shared memory
+    """
     global _shared_states, _shared_transitions, _shared_Vh_values, _shared_Vr_values
     global _shared_rp_params, _shared_human_policy_prior_pickle
-    _shared_states = states
-    _shared_transitions = transitions
+    
+    if use_shared_memory:
+        # DAG is already in shared memory, just store refs as None
+        _shared_states = None
+        _shared_transitions = None
+    else:
+        _shared_states = states
+        _shared_transitions = transitions
+    
     _shared_Vh_values = Vh_values
     _shared_Vr_values = Vr_values
     _shared_rp_params = params
@@ -1246,15 +1363,29 @@ def _rp_process_state_batch(
     batch_start = time.perf_counter()
     
     # Access shared data - these are guaranteed to be set when called from parallel context
-    assert _shared_states is not None
-    assert _shared_transitions is not None
     assert _shared_Vh_values is not None
     assert _shared_Vr_values is not None
     assert _shared_rp_params is not None
     assert _shared_human_policy_prior_pickle is not None
     
-    states = _shared_states
-    transitions = _shared_transitions
+    # Try to get states/transitions from shared memory first, fall back to globals
+    shared_dag = get_shared_dag()
+    if shared_dag is None:
+        # Try to attach to shared memory (first call in this worker)
+        shared_dag = attach_shared_dag()
+    
+    if shared_dag is not None:
+        states = shared_dag.get_states()
+        transitions = shared_dag.get_transitions()
+    else:
+        # Fall back to module-level globals
+        assert _shared_states is not None
+        assert _shared_transitions is not None
+        states = _shared_states
+        transitions = _shared_transitions
+    
+    assert transitions is not None
+    
     Vh_values = _shared_Vh_values
     Vr_values = _shared_Vr_values
     (human_agent_indices, robot_agent_indices, possible_goal_generator, 
@@ -1318,7 +1449,19 @@ def _rp_process_state_batch(
             # Compute V_h, X_h, and U_r values
             powersum = 0  # sum over humans of X_h^(-xi)
             for agent_index in human_agent_indices:
+                if DEBUG:
+                    # Check if at least one goal is achieved in this state
+                    goals_achieved = []
+                    for pg, _ in possible_goal_generator.generate(state, agent_index):
+                        achieved = pg.is_achieved(state)
+                        goals_achieved.append((pg, achieved))
+                    if not any(a for _, a in goals_achieved):
+                        import sys
+                        print(f"WARNING: No goal achieved in state {state_index}!", file=sys.stderr, flush=True)
+                        for pg, a in goals_achieved:
+                            print(f"  {pg}: is_achieved={a}", file=sys.stderr, flush=True)
                 xh = 0
+                some_goal_achieved_with_positive_prob = False
                 for possible_goal, possible_goal_weight in possible_goal_generator.generate(state, agent_index):
                     vh = 0
                     for robot_action_profile_index, robot_action_profile in enumerate(robot_action_profiles):
@@ -1332,6 +1475,8 @@ def _rp_process_state_batch(
                                 possible_goal.is_achieved(states[next_state_index]) 
                                 for next_state_index in next_state_indices
                             ])
+                            if float(np.dot(next_state_probabilities, attainment_values_array)) > 0.0:
+                                some_goal_achieved_with_positive_prob = True
                             vhe_values_array: npt.NDArray[np.floating[Any]] = np.array([
                                 Vh_values[next_state_index][agent_index].get(possible_goal, 0)
                                 for next_state_index in next_state_indices
@@ -1341,7 +1486,24 @@ def _rp_process_state_batch(
                         vh += ps[robot_action_profile_index] * v
                     vh_results[state_index][agent_index][possible_goal] = vh
                     xh += possible_goal_weight * vh**zeta
+                assert some_goal_achieved_with_positive_prob, \
+                    f"No goal achievable with positive probability for agent {agent_index} in state {state_index}!"
+                if xh == 0:
+                    # xh is zero means no goal is reachable - raise error with details
+                    import sys
+                    print(f"\nERROR: xh=0 for agent {agent_index} in state {state_index}!", file=sys.stderr, flush=True)
+                    print(f"  State: {state}", file=sys.stderr, flush=True)
+                    print(f"  This means no goal has positive expected achievement value.", file=sys.stderr, flush=True)
+                    raise ValueError(f"xh=0 for agent {agent_index} in state {state_index}: no goal is reachable!")
                 powersum += xh**(-xi)
+                if False:  # debugging block
+                    try:
+                        # Temporarily convert warnings to errors for this operation
+                        with np.errstate(divide='raise', invalid='raise'):
+                            powersum += xh**(-xi)
+                    except (ZeroDivisionError, FloatingPointError):
+                        # output state in readable format:
+                        raise ZeroDivisionError(f"ZeroDivisionError computing X_h**(-xi) for human agent {agent_index} in state {state}, xh={xh}")
             
             y = powersum / len(human_agent_indices)
             ur = -(y**eta)
@@ -1441,8 +1603,8 @@ def compute_robot_policy(
     world_model: WorldModel, 
     human_agent_indices: List[int], 
     robot_agent_indices: List[int],
-    possible_goal_generator: PossibleGoalGenerator,
-    human_policy_prior: TabularHumanPolicyPrior,
+    possible_goal_generator: Optional[PossibleGoalGenerator] = None,
+    human_policy_prior: Optional[TabularHumanPolicyPrior] = None,
     *,
     beta_r: float = 10.0,
     gamma_h: float = 1.0, 
@@ -1456,7 +1618,10 @@ def compute_robot_policy(
     level_fct: Optional[Callable[[State], int]] = None, 
     return_values: Literal[False] = False,
     progress_callback: Optional[Callable[[int, int], None]] = None,
-    quiet: bool = False
+    quiet: bool = False,
+    min_free_memory_fraction: float = 0.1,
+    memory_check_interval: int = 100,
+    memory_pause_duration: float = 60.0
 ) -> TabularRobotPolicy: ...
 
 
@@ -1465,8 +1630,8 @@ def compute_robot_policy(
     world_model: WorldModel, 
     human_agent_indices: List[int], 
     robot_agent_indices: List[int],
-    possible_goal_generator: PossibleGoalGenerator,
-    human_policy_prior: TabularHumanPolicyPrior,
+    possible_goal_generator: Optional[PossibleGoalGenerator] = None,
+    human_policy_prior: Optional[TabularHumanPolicyPrior] = None,
     *,
     beta_r: float = 10.0,
     gamma_h: float = 1.0, 
@@ -1480,7 +1645,10 @@ def compute_robot_policy(
     level_fct: Optional[Callable[[State], int]] = None, 
     return_values: Literal[True],
     progress_callback: Optional[Callable[[int, int], None]] = None,
-    quiet: bool = False
+    quiet: bool = False,
+    min_free_memory_fraction: float = 0.1,
+    memory_check_interval: int = 100,
+    memory_pause_duration: float = 60.0
 ) -> Tuple[TabularRobotPolicy, Dict[State, float], Dict[State, Dict[int, Dict[PossibleGoal, float]]]]: ...
 
 
@@ -1488,8 +1656,8 @@ def compute_robot_policy(
     world_model: WorldModel, 
     human_agent_indices: List[int], 
     robot_agent_indices: List[int],
-    possible_goal_generator: PossibleGoalGenerator,
-    human_policy_prior: TabularHumanPolicyPrior,
+    possible_goal_generator: Optional[PossibleGoalGenerator] = None,
+    human_policy_prior: Optional[TabularHumanPolicyPrior] = None,
     *,
     beta_r: float = 10.0,
     gamma_h: float = 1.0, 
@@ -1503,7 +1671,10 @@ def compute_robot_policy(
     level_fct: Optional[Callable[[State], int]] = None, 
     return_values: bool = False,
     progress_callback: Optional[Callable[[int, int], None]] = None,
-    quiet: bool = False
+    quiet: bool = False,
+    min_free_memory_fraction: float = 0.1,
+    memory_check_interval: int = 100,
+    memory_pause_duration: float = 60.0
 ) -> Union[TabularRobotPolicy, Tuple[TabularRobotPolicy, Dict[State, float], Dict[State, Dict[int, Dict[PossibleGoal, float]]]]]:
     """
     Compute robot policy via backward induction on the state DAG.
@@ -1532,7 +1703,9 @@ def compute_robot_policy(
         robot_agent_indices: List of agent indices representing robots.
         possible_goal_generator: Generator that yields (goal, weight) pairs for
                                 each state and agent. See PossibleGoalGenerator.
+                                If None, uses world_model.possible_goal_generator.
         human_policy_prior: Precomputed human policy prior from compute_human_policy_prior().
+                           If None, will be computed automatically using the goal generator.
         beta_r: Power-law concentration parameter. Higher = more deterministic.
         gamma_h: Discount factor for human goal achievement values.
         gamma_r: Discount factor for robot values.
@@ -1548,6 +1721,12 @@ def compute_robot_policy(
         return_values: If True, also return V_r and V_h^e value functions.
         progress_callback: Optional callback(done, total) for progress updates.
         quiet: If True, suppress progress output.
+        min_free_memory_fraction: Minimum free memory as fraction of total (0.0-1.0).
+            When free memory falls below this threshold, computation pauses for
+            memory_pause_duration seconds, then checks again. If still low, raises
+            KeyboardInterrupt for graceful shutdown. Set to 0.0 to disable (default).
+        memory_check_interval: How often to check memory, in states processed.
+        memory_pause_duration: How long to pause (seconds) when memory is low.
     
     Returns:
         TabularRobotPolicy: Robot policy that can be called as policy(state).
@@ -1573,6 +1752,26 @@ def compute_robot_policy(
         >>> state = env.get_state()
         >>> robot_actions = robot_policy.sample(state)  # tuple of actions
     """
+    # Use world_model's goal generator if none provided
+    if possible_goal_generator is None:
+        possible_goal_generator = getattr(world_model, 'possible_goal_generator', None)
+        if possible_goal_generator is None:
+            raise ValueError(
+                "possible_goal_generator must be provided either as an argument "
+                "or via world_model.possible_goal_generator (set in config file)"
+            )
+    
+    # Compute human policy prior if not provided
+    if human_policy_prior is None:
+        human_policy_prior = compute_human_policy_prior(
+            world_model=world_model,
+            human_agent_indices=human_agent_indices,
+            possible_goal_generator=possible_goal_generator,
+            parallel=parallel,
+            num_workers=num_workers,
+            quiet=quiet
+        )
+    
     robot_policy_values: RobotPolicyDict = {}
 
     num_agents: int = len(world_model.agents)  # type: ignore[attr-defined]
@@ -1632,8 +1831,28 @@ def compute_robot_policy(
         # Use 'fork' context explicitly to ensure shared memory works
         ctx = mp.get_context('fork')
         
+        # Initialize shared memory for DAG data to avoid copy-on-write overhead
+        if not quiet:
+            print("Storing DAG in shared memory...")
+        init_shared_dag(states, transitions)
+        
+        # Create memory monitor if enabled (for parallel mode - check at each level)
+        memory_monitor: Optional[MemoryMonitor] = None
+        if min_free_memory_fraction > 0.0:
+            memory_monitor = MemoryMonitor(
+                min_free_fraction=min_free_memory_fraction,
+                check_interval=1,  # Check every level in parallel mode
+                pause_duration=memory_pause_duration,
+                verbose=not quiet,
+                enabled=True
+            )
+        
         # Process each level sequentially, but parallelize within each level
         for level_idx, level in enumerate(dependency_levels):
+            # Check memory at the start of each level
+            if memory_monitor is not None:
+                memory_monitor.check(level_idx)
+            
             if DEBUG:
                 print(f"Processing level {level_idx} with {len(level)} states")
             
@@ -1666,17 +1885,30 @@ def compute_robot_policy(
                                 v += human_action_profile_prob * float(np.dot(next_state_probabilities, Vr_values[next_state_indices]))
                             Qr_values[robot_action_profile_index] = gamma_r * v
                         
-                        # Compute robot policy (log-space for numerical stability)
-                        log_powers = -beta_r * np.log(-Qr_values)
-                        log_Z = logsumexp(log_powers)
-                        ps = np.exp(log_powers - log_Z)
+                        # Compute robot policy using log-space for numerical stability
+                        # pi_r(a) ∝ (-Q_r(a))^{-beta_r} = exp(-beta_r * log(-Q_r(a)))
+                        log_neg_Qr = np.log(-Qr_values)  # Q_r values are always negative
+                        log_powers = -beta_r * log_neg_Qr
+                        log_normalizer = logsumexp(log_powers)
+                        ps = np.exp(log_powers - log_normalizer)
                         robot_policy_values[state] = {robot_action_profile: ps[idx] 
                                                      for idx, robot_action_profile in enumerate(robot_action_profiles)}
                         
                         # Compute V_h, X_h, U_r values
                         powersum = 0
                         for agent_index in human_agent_indices:
+                            if DEBUG:
+                                # Check if at least one goal is achieved in this state
+                                goals_achieved = []
+                                for pg, _ in possible_goal_generator.generate(state, agent_index):
+                                    achieved = pg.is_achieved(state)
+                                    goals_achieved.append((pg, achieved))
+                                if not any(a for _, a in goals_achieved):
+                                    print(f"WARNING: No goal achieved in state {state_index}!")
+                                    for pg, a in goals_achieved:
+                                        print(f"  {pg}: is_achieved={a}")
                             xh = 0
+                            some_goal_achieved_with_positive_prob = False
                             for possible_goal, possible_goal_weight in possible_goal_generator.generate(state, agent_index):
                                 vh = 0
                                 for robot_action_profile_index, robot_action_profile in enumerate(robot_action_profiles):
@@ -1690,6 +1922,8 @@ def compute_robot_policy(
                                             possible_goal.is_achieved(states[next_state_index]) 
                                             for next_state_index in next_state_indices
                                         ])
+                                        if float(np.dot(next_state_probabilities, attainment_values_array)) > 0.0:
+                                            some_goal_achieved_with_positive_prob = True
                                         vhe_values_array = np.array([
                                             Vh_values[next_state_index][agent_index].get(possible_goal, 0)
                                             for next_state_index in next_state_indices
@@ -1697,8 +1931,16 @@ def compute_robot_policy(
                                         continuation_values_array = attainment_values_array + (1-attainment_values_array) * gamma_h * vhe_values_array
                                         v += human_action_profile_prob * float(np.dot(next_state_probabilities, continuation_values_array))
                                     vh += ps[robot_action_profile_index] * v
+                                assert some_goal_achieved_with_positive_prob, \
+                                    f"No goal achievable with positive probability for agent {agent_index} in state {state_index}!"
                                 Vh_values[state_index][agent_index][possible_goal] = vh
                                 xh += possible_goal_weight * vh**zeta
+                            if xh == 0:
+                                # xh is zero means no goal is reachable - raise error with details
+                                print(f"\nERROR: xh=0 for agent {agent_index} in state {state_index}!")
+                                print(f"  State: {state}")
+                                print(f"  This means no goal has positive expected achievement value.")
+                                raise ValueError(f"xh=0 for agent {agent_index} in state {state_index}: no goal is reachable!")
                             powersum += xh**(-xi)
                         
                         y = powersum / len(human_agent_indices)
@@ -1707,7 +1949,7 @@ def compute_robot_policy(
             else:
                 # Many states - parallelize
                 # Re-initialize shared data so new workers see updated values from previous levels
-                _rp_init_shared_data(states, transitions, Vh_values, Vr_values, params, human_policy_prior_pickle)
+                _rp_init_shared_data(states, transitions, Vh_values, Vr_values, params, human_policy_prior_pickle, use_shared_memory=True)
                 
                 batches = split_into_batches(level, num_workers)
                 
@@ -1735,18 +1977,29 @@ def compute_robot_policy(
             if progress_callback:
                 states_processed = sum(len(lvl) for lvl in dependency_levels[:level_idx + 1])
                 progress_callback(states_processed, len(states))
+        
+        # Clean up shared memory after parallel processing
+        cleanup_shared_dag()
     
     else:
         # Sequential execution
+        # Create memory monitor if enabled
+        memory_monitor: Optional[MemoryMonitor] = None
+        if min_free_memory_fraction > 0.0:
+            memory_monitor = MemoryMonitor(
+                min_free_fraction=min_free_memory_fraction,
+                check_interval=memory_check_interval,
+                pause_duration=memory_pause_duration,
+                verbose=not quiet,
+                enabled=True
+            )
         _rp_compute_sequential(
             states, Vh_values, Vr_values, robot_policy_values, transitions,
             human_agent_indices, robot_agent_indices, possible_goal_generator,
             num_agents, num_actions, action_powers,
-            human_policy_prior, beta_r, gamma_h, gamma_r, zeta, xi, eta, terminal_Vr
+            human_policy_prior, beta_r, gamma_h, gamma_r, zeta, xi, eta, terminal_Vr,
+            progress_callback, memory_monitor
         )
-        
-        if progress_callback:
-            progress_callback(len(states), len(states))
 
     robot_policy = TabularRobotPolicy(
         world_model=world_model, 

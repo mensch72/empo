@@ -32,6 +32,8 @@ try:
 except ImportError:
     HAS_PSUTIL = False
 
+from empo.memory_monitor import MemoryMonitor
+
 from .config import Phase2Config
 from .profiler import NoOpProfiler
 from .replay_buffer import Phase2Transition, Phase2ReplayBuffer
@@ -271,6 +273,15 @@ class BasePhase2Trainer(ABC):
         # Maps ((human_pos, human_dir), ...), ((robot_pos, robot_dir), ...)) -> count
         # This provides more detailed insight than hashes alone
         self._position_visit_counts: Dict[tuple, int] = {}
+        
+        # Initialize memory monitor
+        self._memory_monitor = MemoryMonitor(
+            min_free_fraction=config.min_free_memory_fraction,
+            check_interval=config.memory_check_interval,
+            pause_duration=config.memory_pause_duration,
+            verbose=verbose,
+            enabled=config.min_free_memory_fraction > 0.0
+        )
         
         if self.debug:
             print("[DEBUG] BasePhase2Trainer.__init__: Initialization complete.")
@@ -856,29 +867,20 @@ class BasePhase2Trainer(ABC):
         if hasattr(self.human_policy_prior, 'set_world_model'):
             self.human_policy_prior.set_world_model(self.env)
     
-    def _check_memory_limit(self) -> bool:
+    def _check_memory_and_maybe_interrupt(self) -> None:
         """
-        Check if memory usage exceeds the configured limit.
+        Check memory using the memory monitor and handle low-memory situations.
         
-        Returns:
-            True if memory limit is exceeded, False otherwise.
-            Always returns False if psutil is not available or monitoring is disabled.
+        This method delegates to the MemoryMonitor which:
+        1. Checks if free memory is below the configured threshold
+        2. If low, pauses for the configured duration
+        3. If still low after pausing, raises KeyboardInterrupt
+        
+        The KeyboardInterrupt is caught by the training loop to save checkpoints.
         """
-        if not HAS_PSUTIL:
-            return False
-        if self.config.max_memory_fraction <= 0.0:
-            return False
-        
-        # Get system memory info
-        mem_info = psutil.virtual_memory()
-        memory_fraction = mem_info.percent / 100.0
-        
-        if memory_fraction > self.config.max_memory_fraction:
-            if self.verbose:
-                print(f"\n[Memory] Usage {memory_fraction*100:.1f}% exceeds limit "
-                      f"{self.config.max_memory_fraction*100:.1f}%. Stopping training...")
-            return True
-        return False
+        # The monitor handles the check interval internally, but we call it every
+        # memory_check_interval steps from the training loop for compatibility
+        self._memory_monitor.check(self.training_step_count, force=True)
     
     def check_goal_achieved(self, state: Any, human_idx: int, goal: Any) -> bool:
         """
@@ -3322,12 +3324,10 @@ class BasePhase2Trainer(ABC):
                     if self.training_step_count % 100 == 0:
                         history.append(losses)
                     
-                    # Check memory limit periodically
+                    # Check memory limit periodically (may pause and/or raise KeyboardInterrupt)
                     if (self.config.memory_check_interval > 0 and
-                        self.training_step_count % self.config.memory_check_interval == 0 and
-                        self._check_memory_limit()):
-                        # Memory limit exceeded - trigger graceful shutdown like Ctrl-C
-                        raise KeyboardInterrupt("Memory limit exceeded")
+                        self.training_step_count % self.config.memory_check_interval == 0):
+                        self._check_memory_and_maybe_interrupt()
                     
                     # Save checkpoint at interval
                     if (self.checkpoint_interval > 0 and 
@@ -3758,12 +3758,10 @@ class BasePhase2Trainer(ABC):
                     if self.training_step_count % 100 == 0:
                         history.append(losses)
                     
-                    # Check memory limit periodically
+                    # Check memory limit periodically (may pause and/or raise KeyboardInterrupt)
                     if (self.config.memory_check_interval > 0 and
-                        self.training_step_count % self.config.memory_check_interval == 0 and
-                        self._check_memory_limit()):
-                        # Memory limit exceeded - trigger graceful shutdown like Ctrl-C
-                        raise KeyboardInterrupt("Memory limit exceeded")
+                        self.training_step_count % self.config.memory_check_interval == 0):
+                        self._check_memory_and_maybe_interrupt()
                     
                     # Update shared policy periodically
                     # Use more frequent sync when RND is enabled (rnd_sync_freq)

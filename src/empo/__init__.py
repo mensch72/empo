@@ -43,6 +43,7 @@ from empo.world_model import WorldModel
 from empo.possible_goal import PossibleGoal, PossibleGoalGenerator, PossibleGoalSampler
 from empo.human_policy_prior import HumanPolicyPrior, TabularHumanPolicyPrior
 from empo.backward_induction import compute_human_policy_prior
+from empo.memory_monitor import MemoryMonitor, check_memory
 
 # Transport environment wrapper (optional import - requires ai_transport)
 try:
@@ -73,6 +74,9 @@ __all__ = [
     "TabularHumanPolicyPrior",
     # Backward Induction
     "compute_human_policy_prior",
+    # Memory Monitoring
+    "MemoryMonitor",
+    "check_memory",
 ]
 
 # Add transport exports if available

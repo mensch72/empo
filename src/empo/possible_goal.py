@@ -421,6 +421,85 @@ class TabularGoalSampler(PossibleGoalSampler):
         import random
         idx = random.choices(range(len(self.goals)), weights=self.probs, k=1)[0]
         return self.goals[idx], self.weights[idx]
+    
+    def get_generator(self) -> 'TabularGoalGenerator':
+        """
+        Create a TabularGoalGenerator from this sampler.
+        
+        The generator's weights are computed as probs * weights from the sampler,
+        which represents the expected contribution of each goal to X_h computation.
+        
+        Returns:
+            TabularGoalGenerator with weights = probs * weights.
+        """
+        combined_weights = [p * w for p, w in zip(self.probs, self.weights)]
+        return TabularGoalGenerator(self.goals, weights=combined_weights)
+    
+    def validate_coverage(self, raise_on_error: bool = True) -> list:
+        """
+        Validate that goals cover all walkable cells in the grid.
+        
+        A cell is considered walkable if it doesn't contain an immutable object
+        (wall, lava, magicwall). The method checks that every such cell is covered
+        by at least one goal (cell or rectangle).
+        
+        This only works for goals that have a target_rect attribute (ReachCellGoal,
+        ReachRectangleGoal) which define the cells they cover.
+        
+        Args:
+            raise_on_error: If True, raises ValueError listing uncovered cells.
+                           If False, returns list of uncovered cells.
+        
+        Returns:
+            List of (x, y) tuples of uncovered walkable cells.
+            Empty list if all walkable cells are covered.
+        
+        Raises:
+            ValueError: If raise_on_error=True and there are uncovered cells.
+        """
+        if self.env is None:
+            raise ValueError("Cannot validate coverage: env/world_model is None")
+        
+        # Build set of all cells covered by goals
+        covered_cells = set()
+        for goal in self.goals:
+            if hasattr(goal, 'target_rect'):
+                x1, y1, x2, y2 = goal.target_rect
+                if x1 > x2:
+                    x1, x2 = x2, x1
+                if y1 > y2:
+                    y1, y2 = y2, y1
+                for x in range(x1, x2 + 1):
+                    for y in range(y1, y2 + 1):
+                        covered_cells.add((x, y))
+            elif hasattr(goal, 'target_pos'):
+                covered_cells.add(goal.target_pos)
+        
+        # Find all walkable cells (not containing immutable objects)
+        immutable_types = {'wall', 'lava', 'magicwall'}
+        uncovered = []
+        
+        for x in range(self.env.width):
+            for y in range(self.env.height):
+                cell = self.env.grid.get(x, y)
+                cell_type = getattr(cell, 'type', None) if cell else None
+                
+                # Skip cells with immutable objects
+                if cell_type in immutable_types:
+                    continue
+                
+                # Check if this walkable cell is covered
+                if (x, y) not in covered_cells:
+                    uncovered.append((x, y))
+        
+        if uncovered and raise_on_error:
+            raise ValueError(
+                f"Goals do not cover all walkable cells. Uncovered cells: {uncovered}\n"
+                f"Goals: {self.goals}\n"
+                f"Add goals covering these cells or use a rectangle goal covering the entire grid."
+            )
+        
+        return uncovered
 
 
 class TabularGoalGenerator(PossibleGoalGenerator):
@@ -469,3 +548,81 @@ class TabularGoalGenerator(PossibleGoalGenerator):
         """
         for goal, weight in zip(self.goals, self.weights):
             yield goal, weight
+    
+    def get_sampler(self) -> 'TabularGoalSampler':
+        """
+        Create a TabularGoalSampler from this generator.
+        
+        The sampler's probabilities are set to the generator's weights (normalized),
+        and the sampler's weights are set to 1.0 for all goals.
+        
+        Returns:
+            TabularGoalSampler with probs = weights (normalized), weights = 1.0.
+        """
+        return TabularGoalSampler(self.goals, probabilities=self.weights, weights=None)
+    
+    def validate_coverage(self, raise_on_error: bool = True) -> list:
+        """
+        Validate that goals cover all walkable cells in the grid.
+        
+        A cell is considered walkable if it doesn't contain an immutable object
+        (wall, lava, magicwall). The method checks that every such cell is covered
+        by at least one goal (cell or rectangle).
+        
+        This only works for goals that have a target_rect attribute (ReachCellGoal,
+        ReachRectangleGoal) which define the cells they cover.
+        
+        Args:
+            raise_on_error: If True, raises ValueError listing uncovered cells.
+                           If False, returns list of uncovered cells.
+        
+        Returns:
+            List of (x, y) tuples of uncovered walkable cells.
+            Empty list if all walkable cells are covered.
+        
+        Raises:
+            ValueError: If raise_on_error=True and there are uncovered cells.
+        """
+        if self.env is None:
+            raise ValueError("Cannot validate coverage: env/world_model is None")
+        
+        # Build set of all cells covered by goals
+        covered_cells = set()
+        for goal in self.goals:
+            if hasattr(goal, 'target_rect'):
+                x1, y1, x2, y2 = goal.target_rect
+                if x1 > x2:
+                    x1, x2 = x2, x1
+                if y1 > y2:
+                    y1, y2 = y2, y1
+                for x in range(x1, x2 + 1):
+                    for y in range(y1, y2 + 1):
+                        covered_cells.add((x, y))
+            elif hasattr(goal, 'target_pos'):
+                covered_cells.add(goal.target_pos)
+        
+        # Find all walkable cells (not containing immutable objects)
+        immutable_types = {'wall', 'lava', 'magicwall'}
+        uncovered = []
+        
+        for x in range(self.env.width):
+            for y in range(self.env.height):
+                cell = self.env.grid.get(x, y)
+                cell_type = getattr(cell, 'type', None) if cell else None
+                
+                # Skip cells with immutable objects
+                if cell_type in immutable_types:
+                    continue
+                
+                # Check if this walkable cell is covered
+                if (x, y) not in covered_cells:
+                    uncovered.append((x, y))
+        
+        if uncovered and raise_on_error:
+            raise ValueError(
+                f"Goals do not cover all walkable cells. Uncovered cells: {uncovered}\n"
+                f"Goals: {self.goals}\n"
+                f"Add goals covering these cells or use a rectangle goal covering the entire grid."
+            )
+        
+        return uncovered
