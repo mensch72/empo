@@ -27,7 +27,7 @@ import os
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from itertools import product
-from typing import Optional, Callable, List, Tuple, Dict, Any, Union, overload, Literal, TypeAlias
+from typing import Optional, Callable, List, Tuple, Dict, Any, Union, overload, Literal
 
 import cloudpickle
 from tqdm import tqdm
