@@ -478,7 +478,10 @@ def get_all_functions_from_module(module, _seen=None):
                 submodule = __import__(submodule_name, fromlist=[modname])
                 functions.extend(get_all_functions_from_module(submodule, _seen))
             except ImportError:
-                pass
+                # Some submodules may not be importable (for example, they can depend on
+                # optional packages that are not installed). In that case we intentionally
+                # skip them and continue discovering functions from the remaining submodules.
+                continue
     
     # Get functions defined directly in this module (not re-exports)
     for name, obj in inspect.getmembers(module):
