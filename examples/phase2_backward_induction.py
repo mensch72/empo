@@ -555,7 +555,6 @@ def main(
             print("WARNING: line_profiler not installed. Install with: pip install line_profiler")
             print("Continuing without profiling...")
             print()
-            profile = False
     
     # Create output directory
     if output_dir is None:
