@@ -62,7 +62,7 @@ _shared_human_policy_prior_pickle: Optional[bytes] = None
 _shared_rp_params: Optional[Tuple[List[int], List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], float, float, float, float, float, float, float]] = None
 
 
-def _process_single_state_phase2(
+def _rp_process_single_state(
     state_index: int,
     state: State,
     states: List[State],
@@ -274,20 +274,13 @@ def _rp_compute_sequential(
     
     # loop over the nodes in reverse topological order:
     for state_index in range(len(states)-1, -1, -1):
-        # Check memory periodically (using step = states processed)
-        states_processed = total_states - state_index
-        if memory_monitor is not None:
-            memory_monitor.check(states_processed)
-        # Update progress bar
-        if progress_callback is not None:
-            progress_callback(states_processed, total_states)
         if DEBUG:
             print(f"Processing state {state_index}")
         
         state = states[state_index]
         
         # Use unified helper
-        vh_results, vr_result, p_result = _process_single_state_phase2(
+        vh_results, vr_result, p_result = _rp_process_single_state(
             state_index, state, states, transitions, Vh_values, Vr_values,
             human_agent_indices, robot_agent_indices, robot_action_profiles,
             possible_goal_generator, num_agents, num_actions, action_powers,
@@ -302,6 +295,13 @@ def _rp_compute_sequential(
         
         if p_result is not None:
             robot_policy[state] = p_result
+        
+        # Check memory and update progress AFTER processing each state
+        states_processed = total_states - state_index
+        if memory_monitor is not None:
+            memory_monitor.check(states_processed)
+        if progress_callback is not None:
+            progress_callback(states_processed, total_states)
 
 
 def _rp_init_shared_data(
@@ -403,7 +403,7 @@ def _rp_process_state_batch(
         state = states[state_index]
         
         # Use unified helper
-        vh_results_state, vr_result, p_result = _process_single_state_phase2(
+        vh_results_state, vr_result, p_result = _rp_process_single_state(
             state_index, state, states, transitions, Vh_values, Vr_values,
             human_agent_indices, robot_agent_indices, robot_action_profiles,
             possible_goal_generator, num_agents, num_actions, action_powers,
@@ -773,7 +773,7 @@ def compute_robot_policy(
                     state = states[state_index]
                     
                     # Use unified helper
-                    vh_results, vr_result, p_result = _process_single_state_phase2(
+                    vh_results, vr_result, p_result = _rp_process_single_state(
                         state_index, state, states, transitions, Vh_values, Vr_values,
                         human_agent_indices, robot_agent_indices, robot_action_profiles,
                         possible_goal_generator, num_agents, num_actions, action_powers,

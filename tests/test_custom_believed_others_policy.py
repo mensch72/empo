@@ -59,21 +59,30 @@ class SimpleGoalGenerator(PossibleGoalGenerator):
             yield (goal, 1.0 / len(self.target_cells))
 
 
-def create_custom_believed_others_policy(num_agents, num_actions):
+def create_custom_believed_others_policy(num_agents, num_actions, robot_agent_indices=None):
     """
     Creates a custom believed_others_policy function using a closure.
     
     This function returns a policy that is functionally equivalent to the default
     uniform policy, but tests the cloudpickle serialization path because it
     captures num_agents and num_actions in its closure.
+    
+    Args:
+        num_agents: Total number of agents
+        num_actions: Number of actions per agent
+        robot_agent_indices: List of robot agent indices (their actions will be set to -1)
     """
+    if robot_agent_indices is None:
+        robot_agent_indices = []
+    robot_set = set(robot_agent_indices)
     all_actions = list(range(num_actions))
-    uniform_p = 1 / num_actions**(num_agents - 1)
+    num_other_humans = num_agents - 1 - len(robot_agent_indices)
+    uniform_p = 1 / (num_actions ** num_other_humans) if num_other_humans > 0 else 1.0
     
     def custom_policy(state, agent_index, action):
         """Custom policy with captured closure variables."""
-        return [(uniform_p, list(action_profile)) for action_profile in product(*[
-            [-1] if idx == agent_index else all_actions
+        return [(uniform_p, np.array(action_profile, dtype=np.int64)) for action_profile in product(*[
+            [-1] if (idx == agent_index or idx in robot_set) else all_actions
             for idx in range(num_agents)])]
     
     return custom_policy
@@ -130,9 +139,10 @@ def test_custom_believed_others_policy_parallel():
     target_cells = [(0, 0), (5, 5)]
     goal_gen = SimpleGoalGenerator(wm, target_cells)
     human_agent_indices = [0, 1]
+    robot_agent_indices = [i for i in range(num_agents) if i not in human_agent_indices]
     
     # Create a custom believed_others_policy using a closure
-    custom_policy = create_custom_believed_others_policy(num_agents, num_actions)
+    custom_policy = create_custom_believed_others_policy(num_agents, num_actions, robot_agent_indices)
     
     # Run with custom policy in sequential mode
     result_seq = compute_human_policy_prior(
@@ -169,6 +179,7 @@ def test_custom_believed_others_policy_consistency():
     target_cells = [(0, 0), (5, 5)]
     goal_gen = SimpleGoalGenerator(wm, target_cells)
     human_agent_indices = [0, 1]
+    robot_agent_indices = [i for i in range(num_agents) if i not in human_agent_indices]
     
     # Run with default policy
     result_default = compute_human_policy_prior(
@@ -179,7 +190,7 @@ def test_custom_believed_others_policy_consistency():
     
     # Reset and run with custom policy (equivalent to default)
     wm.reset()
-    custom_policy = create_custom_believed_others_policy(num_agents, num_actions)
+    custom_policy = create_custom_believed_others_policy(num_agents, num_actions, robot_agent_indices)
     result_custom = compute_human_policy_prior(
         wm, human_agent_indices, goal_gen,
         believed_others_policy=custom_policy,
@@ -205,14 +216,17 @@ def test_lambda_believed_others_policy():
     target_cells = [(0, 0), (5, 5)]
     goal_gen = SimpleGoalGenerator(wm, target_cells)
     human_agent_indices = [0, 1]
+    robot_agent_indices = [i for i in range(num_agents) if i not in human_agent_indices]
+    robot_set = set(robot_agent_indices)
     
     # Create a lambda-based policy (these are harder to pickle with standard pickle)
     all_actions = list(range(num_actions))
-    uniform_p = 1 / num_actions**(num_agents - 1)
+    num_other_humans = num_agents - 1 - len(robot_agent_indices)
+    uniform_p = 1 / (num_actions ** num_other_humans) if num_other_humans > 0 else 1.0
     
     lambda_policy = lambda state, agent_index, action: [
-        (uniform_p, list(action_profile)) for action_profile in product(*[
-            [-1] if idx == agent_index else all_actions
+        (uniform_p, np.array(action_profile, dtype=np.int64)) for action_profile in product(*[
+            [-1] if (idx == agent_index or idx in robot_set) else all_actions
             for idx in range(num_agents)])
     ]
     

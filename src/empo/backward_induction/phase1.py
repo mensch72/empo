@@ -60,7 +60,7 @@ PROFILE_PARALLEL = os.environ.get('PROFILE_PARALLEL', '').lower() in ('1', 'true
 _shared_states: Optional[List[State]] = None
 _shared_transitions: Optional[List[List[TransitionData]]] = None
 _shared_Vh_values: Optional[VhValues] = None
-_shared_params: Optional[Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], float, float]] = None
+_shared_params: Optional[Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], List[int], List[List[int]], float, float]] = None
 _shared_believed_others_policy_pickle: Optional[bytes] = None  # cloudpickle'd believed_others_policy function
 
 
@@ -74,7 +74,9 @@ def _hpp_process_single_state(
     possible_goal_generator: PossibleGoalGenerator,
     num_actions: int,
     action_powers: npt.NDArray[np.int64],
-    believed_others_policy: Callable[[State, int, int], List[Tuple[float, List[int]]]],
+    believed_others_policy: Callable[[State, int, int], List[Tuple[float, npt.NDArray[np.int64]]]],
+    robot_agent_indices: List[int],
+    robot_action_profiles: List[List[int]],
     beta_h: float,
     gamma_h: float,
 ) -> Tuple[Dict[int, Dict[PossibleGoal, float]], Optional[Dict[int, Dict[PossibleGoal, npt.NDArray[np.floating[Any]]]]]]:
@@ -134,22 +136,28 @@ def _hpp_process_single_state(
                 for action in actions:
                     v_accum: float = 0.0
                     for action_profile_prob, action_profile in believed_others_policy(state, agent_index, action):
+                        worst_expectation = float('inf')
                         action_profile[agent_index] = action
-                        action_profile_index = int(np.dot(action_profile, action_powers))
-                        _, next_state_probabilities, next_state_indices = transitions[state_index][action_profile_index]
+                        for robot_action_profile in robot_action_profiles:
+                            action_profile[robot_agent_indices] = robot_action_profile
+                            action_profile_index = int(np.dot(action_profile, action_powers))
+                            _, next_state_probabilities, next_state_indices = transitions[state_index][action_profile_index]
 
-                        attainment_values_array: npt.NDArray[np.floating[Any]] = np.array([
-                            possible_goal.is_achieved(states[next_state_index]) 
-                            for next_state_index in next_state_indices
-                        ])
+                            attainment_values_array: npt.NDArray[np.floating[Any]] = np.array([
+                                possible_goal.is_achieved(states[next_state_index]) 
+                                for next_state_index in next_state_indices
+                            ])
 
-                        # Get V values from successors (use .get for parallel safety)
-                        v_values_array: npt.NDArray[np.floating[Any]] = np.array([
-                            Vh_values[next_state_indices[i]][agent_index].get(possible_goal, 0)
-                            for i in range(len(next_state_indices))
-                        ])
-                        continuation_values_array = attainment_values_array + (1-attainment_values_array) * v_values_array
-                        v_accum += action_profile_prob * float(np.dot(next_state_probabilities, continuation_values_array))
+                            # Get V values from successors (use .get for parallel safety)
+                            v_values_array: npt.NDArray[np.floating[Any]] = np.array([
+                                Vh_values[next_state_indices[i]][agent_index].get(possible_goal, 0)
+                                for i in range(len(next_state_indices))
+                            ])
+                            continuation_values_array = attainment_values_array + (1-attainment_values_array) * v_values_array
+                            expectation = float(np.dot(next_state_probabilities, continuation_values_array))
+                            if expectation < worst_expectation:
+                                worst_expectation = expectation
+                        v_accum += action_profile_prob * worst_expectation
                     expected_Vs[action] = v_accum
                 
                 q = gamma_h * expected_Vs
@@ -185,7 +193,9 @@ def _hpp_compute_sequential(
     num_agents: int, 
     num_actions: int, 
     action_powers: npt.NDArray[np.int64],
-    believed_others_policy: Callable[[State, int, int], List[Tuple[float, List[int]]]], 
+    believed_others_policy: Callable[[State, int, int], List[Tuple[float, npt.NDArray[np.int64]]]], 
+    robot_agent_indices: List[int],
+    robot_action_profiles: List[List[int]],
     beta_h: float, 
     gamma_h: float,
     progress_callback: Optional[Callable[[int, int], None]] = None,
@@ -217,6 +227,7 @@ def _hpp_compute_sequential(
             state_index, state, states, transitions, Vh_values,
             human_agent_indices, possible_goal_generator,
             num_actions, action_powers, believed_others_policy,
+            robot_agent_indices, robot_action_profiles,
             beta_h, gamma_h
         )
         
@@ -298,7 +309,7 @@ def _hpp_process_state_batch(
     
     Vh_values = _shared_Vh_values
     (human_agent_indices, possible_goal_generator, num_agents, num_actions, 
-     action_powers, beta_h, gamma_h) = _shared_params
+     action_powers, robot_agent_indices, robot_action_profiles, beta_h, gamma_h) = _shared_params
     
     v_results: Dict[int, Dict[int, Dict[PossibleGoal, float]]] = {}
     p_results: Dict[State, Dict[int, Dict[PossibleGoal, npt.NDArray[np.floating[Any]]]]] = {}
@@ -309,7 +320,7 @@ def _hpp_process_state_batch(
     else:
         # Create default believed others policy function
         believed_others_policy = lambda state, agent_index, action: default_believed_others_policy(
-            state, agent_index, action, num_agents, num_actions)
+            state, agent_index, action, num_agents, num_actions, robot_agent_indices)
     
     for state_index in state_indices:
         state = states[state_index]
@@ -319,6 +330,7 @@ def _hpp_process_state_batch(
             state_index, state, states, transitions, Vh_values,
             human_agent_indices, possible_goal_generator,
             num_actions, action_powers, believed_others_policy,
+            robot_agent_indices, robot_action_profiles,
             beta_h, gamma_h
         )
         
@@ -335,7 +347,7 @@ def compute_human_policy_prior(
     world_model: WorldModel, 
     human_agent_indices: List[int], 
     possible_goal_generator: Optional[PossibleGoalGenerator] = None, 
-    believed_others_policy: Optional[Callable[[State, int, int], List[Tuple[float, List[int]]]]] = None, 
+    believed_others_policy: Optional[Callable[[State, int, int], List[Tuple[float, npt.NDArray[np.int64]]]]] = None, 
     *,
     beta_h: float = 10.0, 
     gamma_h: float = 1.0, 
@@ -356,7 +368,7 @@ def compute_human_policy_prior(
     world_model: WorldModel, 
     human_agent_indices: List[int], 
     possible_goal_generator: Optional[PossibleGoalGenerator] = None, 
-    believed_others_policy: Optional[Callable[[State, int, int], List[Tuple[float, List[int]]]]] = None, 
+    believed_others_policy: Optional[Callable[[State, int, int], List[Tuple[float, npt.NDArray[np.int64]]]]] = None, 
     *, 
     beta_h: float = 10.0, 
     gamma_h: float = 1.0, 
@@ -376,7 +388,7 @@ def compute_human_policy_prior(
     world_model: WorldModel, 
     human_agent_indices: List[int], 
     possible_goal_generator: Optional[PossibleGoalGenerator] = None, 
-    believed_others_policy: Optional[Callable[[State, int, int], List[Tuple[float, List[int]]]]] = None, 
+    believed_others_policy: Optional[Callable[[State, int, int], List[Tuple[float, npt.NDArray[np.int64]]]]] = None, 
     *,
     beta_h: float = 10.0, 
     gamma_h: float = 1.0, 
@@ -419,6 +431,7 @@ def compute_human_policy_prior(
                                 (which can be set via config file 'possible_goals' key).
         believed_others_policy: Function(state, agent_index, action) -> List[(prob, action_profile)]
                                specifying beliefs about other agents' actions.
+                               action_profile must be a numpy array of int64.
                                If None, uses uniform distribution over all action profiles.
         beta_h: Inverse temperature for Boltzmann policy. Higher = more deterministic.
                 Use float('inf') for pure argmax (greedy) policy.
@@ -488,10 +501,14 @@ def compute_human_policy_prior(
     num_agents: int = len(world_model.agents)  # type: ignore[attr-defined]
     num_actions: int = world_model.action_space.n  # type: ignore[attr-defined]
 
+    # Compute robot agent indices and all possible robot action profiles
+    robot_agent_indices: List[int] = [i for i in range(num_agents) if i not in human_agent_indices]
+    robot_action_profiles: List[List[int]] = [list(profile) for profile in product(range(num_actions), repeat=len(robot_agent_indices))] if robot_agent_indices else [[]]
+
     if believed_others_policy is None:
         # Create wrapper for sequential execution (parallel uses default directly)
         believed_others_policy = lambda state, agent_index, action: default_believed_others_policy(
-            state, agent_index, action, num_agents, num_actions)
+            state, agent_index, action, num_agents, num_actions, robot_agent_indices)
         believed_others_policy_pickle: Optional[bytes] = None  # No need to pickle the default
     else:
         # Serialize custom believed_others_policy using cloudpickle for parallel mode
@@ -541,9 +558,9 @@ def compute_human_policy_prior(
         
         # Initialize shared data for worker processes
         # On Linux (fork), workers inherit these as copy-on-write
-        params: Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], float, float] = (
+        params: Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], List[int], List[List[int]], float, float] = (
             human_agent_indices, possible_goal_generator, num_agents, num_actions,
-            action_powers, beta_h, gamma_h
+            action_powers, robot_agent_indices, robot_action_profiles, beta_h, gamma_h
         )
         
         # Use 'fork' context explicitly to ensure shared memory works
@@ -602,6 +619,7 @@ def compute_human_policy_prior(
                         state_index, state, states, transitions, Vh_values,
                         human_agent_indices, possible_goal_generator,
                         num_actions, action_powers, believed_others_policy,
+                        robot_agent_indices, robot_action_profiles,
                         beta_h, gamma_h
                     )
                     
@@ -738,7 +756,8 @@ def compute_human_policy_prior(
         _hpp_compute_sequential(states, Vh_values, system2_policies, transitions,
                          human_agent_indices, possible_goal_generator,
                          num_agents, num_actions, action_powers,
-                         believed_others_policy, beta_h, gamma_h,
+                         believed_others_policy, robot_agent_indices, robot_action_profiles,
+                         beta_h, gamma_h,
                          progress_callback, memory_monitor)
     
     human_policy_priors = system2_policies # TODO: mix with system-1 policies!

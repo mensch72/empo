@@ -25,14 +25,23 @@ def default_believed_others_policy(
     agent_index: int, 
     action: int, 
     num_agents: int, 
-    num_actions: int
-) -> List[Tuple[float, List[int]]]:
-    """Default believed others policy - uniform distribution."""
-    uniform_p = 1 / num_actions**(num_agents - 1)
-    # each action profile for the other (!) agents gets the same probability, and the agent's own action is always put to -1 since it will be overwritten in the loop below:
+    num_actions: int,
+    robot_agent_indices: List[int]
+) -> List[Tuple[float, npt.NDArray[np.int64]]]:
+    """Default believed others policy - uniform distribution over other humans.
+    
+    Robot agent positions are set to -1 (placeholder) since they will be
+    overwritten by the caller when iterating over robot action profiles.
+    """
+    # Number of other human agents (exclude self and robots)
+    num_other_humans = num_agents - 1 - len(robot_agent_indices)
+    uniform_p = 1 / (num_actions ** num_other_humans) if num_other_humans > 0 else 1.0
+    # Each action profile for the other human agents gets the same probability.
+    # The agent's own action and robot actions are set to -1 since they will be overwritten.
     all_actions = list(range(num_actions))
-    return [(uniform_p, list(action_profile)) for action_profile in product(*[
-        [-1] if idx == agent_index else all_actions
+    robot_set = set(robot_agent_indices)
+    return [(uniform_p, np.array(action_profile, dtype=np.int64)) for action_profile in product(*[
+        [-1] if (idx == agent_index or idx in robot_set) else all_actions
         for idx in range(num_agents)])]
 
 
