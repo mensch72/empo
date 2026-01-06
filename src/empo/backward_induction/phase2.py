@@ -20,7 +20,6 @@ Attainment Cache:
     redundant is_achieved() computation between phases.
 """
 
-import math
 import numpy as np
 import numpy.typing as npt
 import time
