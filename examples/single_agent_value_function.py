@@ -53,6 +53,8 @@ class ReachCellGoal(PossibleGoal):
         super().__init__(world_model)
         self.human_agent_index = human_agent_index
         self.target_pos = target_pos
+        self._hash = hash((self.human_agent_index, target_pos[0], target_pos[1]))
+        super()._freeze()  # Make immutable
     
     def is_achieved(self, state) -> int:
         """Returns 1 if the agent is at the target position, 0 otherwise."""
@@ -69,7 +71,7 @@ class ReachCellGoal(PossibleGoal):
         return f"ReachCell({self.target_pos[0]},{self.target_pos[1]})"
     
     def __hash__(self):
-        return hash((self.human_agent_index, self.target_pos[0], self.target_pos[1]))
+        return self._hash
     
     def __eq__(self, other):
         if not isinstance(other, ReachCellGoal):

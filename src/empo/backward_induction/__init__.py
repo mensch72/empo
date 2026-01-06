@@ -67,6 +67,7 @@ from .helpers import (
     compute_dependency_levels_general,
     compute_dependency_levels_fast,
     split_into_batches,
+    AttainmentCache,
 )
 
 from .phase1 import compute_human_policy_prior
@@ -82,6 +83,8 @@ __all__ = [
     # Phase 2
     'compute_robot_policy',
     'TabularRobotPolicy',
+    # Types
+    'AttainmentCache',
     # Helpers
     'default_believed_others_policy',
     'combine_action_profiles',

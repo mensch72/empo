@@ -914,6 +914,9 @@ class TransportGoal(PossibleGoal):
         self.target_node = target_node
         # Store target_pos for compatibility with existing goal rendering code
         self.target_pos = target_node
+        # Cache hash since goals are immutable
+        self._hash = hash((self.agent_idx, self.target_node))
+        super()._freeze()  # Make immutable
     
     def is_achieved(self, state) -> int:
         """
@@ -939,8 +942,8 @@ class TransportGoal(PossibleGoal):
         return 0
     
     def __hash__(self) -> int:
-        """Return hash based on agent index and target node."""
-        return hash((self.agent_idx, self.target_node))
+        """Return cached hash based on agent index and target node."""
+        return self._hash
     
     def __eq__(self, other) -> bool:
         """Check equality with another TransportGoal."""
@@ -1086,6 +1089,9 @@ class TransportClusterGoal(PossibleGoal):
             self.target_pos = env.cluster_info['centroids'].get(target_cluster)
         else:
             self.target_pos = None
+        # Cache hash since goals are immutable
+        self._hash = hash((self.agent_idx, self.target_cluster, 'cluster'))
+        super()._freeze()  # Make immutable
     
     def is_achieved(self, state) -> int:
         """
@@ -1115,8 +1121,8 @@ class TransportClusterGoal(PossibleGoal):
         return 0
     
     def __hash__(self) -> int:
-        """Return hash based on agent index and target cluster."""
-        return hash((self.agent_idx, self.target_cluster, 'cluster'))
+        """Return cached hash based on agent index and target cluster."""
+        return self._hash
     
     def __eq__(self, other) -> bool:
         """Check equality with another TransportClusterGoal."""

@@ -41,7 +41,7 @@ from empo.shared_dag import (
 )
 
 from .helpers import (
-    State, TransitionData,
+    State, TransitionData, AttainmentCache,
     default_believed_others_policy,
     compute_dependency_levels_general,
     compute_dependency_levels_fast,
@@ -60,6 +60,7 @@ PROFILE_PARALLEL = os.environ.get('PROFILE_PARALLEL', '').lower() in ('1', 'true
 _shared_states: Optional[List[State]] = None
 _shared_transitions: Optional[List[List[TransitionData]]] = None
 _shared_Vh_values: Optional[VhValues] = None
+_shared_attainment_cache: Optional[AttainmentCache] = None  # Cache for goal attainment arrays
 _shared_params: Optional[Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], List[int], List[List[int]], float, float]] = None
 _shared_believed_others_policy_pickle: Optional[bytes] = None  # cloudpickle'd believed_others_policy function
 
@@ -79,6 +80,7 @@ def _hpp_process_single_state(
     robot_action_profiles: List[List[int]],
     beta_h: float,
     gamma_h: float,
+    attainment_cache: Optional[AttainmentCache] = None,
 ) -> Tuple[Dict[int, Dict[PossibleGoal, float]], Optional[Dict[int, Dict[PossibleGoal, npt.NDArray[np.floating[Any]]]]]]:
     """Process a single state, returning (v_results, p_results).
     
@@ -97,6 +99,9 @@ def _hpp_process_single_state(
         believed_others_policy: Function for beliefs about other agents
         beta_h: Inverse temperature (can be float('inf') for argmax)
         gamma_h: Discount factor
+        attainment_cache: Optional cache to store/retrieve goal attainment arrays.
+            If provided, caches attainment_values_array keyed by 
+            (state_index, action_profile_index, goal) for reuse in phase 2.
     
     Returns:
         Tuple of:
@@ -143,10 +148,43 @@ def _hpp_process_single_state(
                             action_profile_index = int(np.dot(action_profile, action_powers))
                             _, next_state_probabilities, next_state_indices = transitions[state_index][action_profile_index]
 
-                            attainment_values_array: npt.NDArray[np.floating[Any]] = np.array([
-                                possible_goal.is_achieved(states[next_state_index]) 
-                                for next_state_index in next_state_indices
-                            ])
+                            # Check attainment cache first, compute and store if not found
+                            attainment_values_array: npt.NDArray[np.int8]
+                            if attainment_cache is not None:
+                                state_cache = attainment_cache.get(state_index)
+                                if state_cache is not None:
+                                    ap_cache = state_cache.get(action_profile_index)
+                                    if ap_cache is not None:
+                                        cached = ap_cache.get(possible_goal)
+                                        if cached is not None:
+                                            attainment_values_array = cached
+                                        else:
+                                            # Compute and cache
+                                            attainment_values_array = np.array([
+                                                possible_goal.is_achieved(states[next_state_index]) 
+                                                for next_state_index in next_state_indices
+                                            ], dtype=np.int8)
+                                            ap_cache[possible_goal] = attainment_values_array
+                                    else:
+                                        # Compute and cache
+                                        attainment_values_array = np.array([
+                                            possible_goal.is_achieved(states[next_state_index]) 
+                                            for next_state_index in next_state_indices
+                                        ], dtype=np.int8)
+                                        state_cache[action_profile_index] = {possible_goal: attainment_values_array}
+                                else:
+                                    # Compute and cache
+                                    attainment_values_array = np.array([
+                                        possible_goal.is_achieved(states[next_state_index]) 
+                                        for next_state_index in next_state_indices
+                                    ], dtype=np.int8)
+                                    attainment_cache[state_index] = {action_profile_index: {possible_goal: attainment_values_array}}
+                            else:
+                                # No cache, compute directly
+                                attainment_values_array = np.array([
+                                    possible_goal.is_achieved(states[next_state_index]) 
+                                    for next_state_index in next_state_indices
+                                ], dtype=np.int8)
 
                             # Get V values from successors (use .get for parallel safety)
                             v_values_array: npt.NDArray[np.floating[Any]] = np.array([
@@ -199,7 +237,8 @@ def _hpp_compute_sequential(
     beta_h: float, 
     gamma_h: float,
     progress_callback: Optional[Callable[[int, int], None]] = None,
-    memory_monitor: Optional[MemoryMonitor] = None
+    memory_monitor: Optional[MemoryMonitor] = None,
+    attainment_cache: Optional[AttainmentCache] = None,
 ) -> None:
     """Sequential backward induction algorithm.
     
@@ -228,7 +267,8 @@ def _hpp_compute_sequential(
             human_agent_indices, possible_goal_generator,
             num_actions, action_powers, believed_others_policy,
             robot_agent_indices, robot_action_profiles,
-            beta_h, gamma_h
+            beta_h, gamma_h,
+            attainment_cache,
         )
         
         # Store results back into Vh_values and system2_policies
@@ -245,7 +285,8 @@ def _hpp_init_shared_data(
     Vh_values: VhValues, 
     params: Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], float, float],
     believed_others_policy_pickle: Optional[bytes] = None,
-    use_shared_memory: bool = False
+    use_shared_memory: bool = False,
+    attainment_cache: Optional[AttainmentCache] = None,
 ) -> None:
     """Initialize shared data for worker processes.
     
@@ -256,8 +297,9 @@ def _hpp_init_shared_data(
         params: Parameters tuple
         believed_others_policy_pickle: Pickled policy function
         use_shared_memory: If True, store states and transitions in shared memory
+        attainment_cache: Optional cache for goal attainment arrays
     """
-    global _shared_states, _shared_transitions, _shared_Vh_values, _shared_params, _shared_believed_others_policy_pickle
+    global _shared_states, _shared_transitions, _shared_Vh_values, _shared_params, _shared_believed_others_policy_pickle, _shared_attainment_cache
     
     if use_shared_memory:
         # Store DAG in shared memory to avoid copy-on-write
@@ -271,17 +313,19 @@ def _hpp_init_shared_data(
     _shared_Vh_values = Vh_values
     _shared_params = params
     _shared_believed_others_policy_pickle = believed_others_policy_pickle
+    _shared_attainment_cache = attainment_cache
 
 
 def _hpp_process_state_batch(
     state_indices: List[int]
 ) -> Tuple[Dict[int, Dict[int, Dict[PossibleGoal, float]]], 
            Dict[State, Dict[int, Dict[PossibleGoal, npt.NDArray[np.floating[Any]]]]], 
+           Dict[int, Dict[int, Dict[PossibleGoal, npt.NDArray[np.int8]]]],  # attainment cache updates
            float]:
     """Process a batch of states that can be computed in parallel.
     
     Uses module-level shared data (inherited via fork) to avoid copying.
-    Returns both V-values and policies for non-terminal states, plus timing.
+    Returns V-values, policies for non-terminal states, attainment cache updates, plus timing.
     """
     batch_start = time.perf_counter()
     
@@ -314,6 +358,9 @@ def _hpp_process_state_batch(
     v_results: Dict[int, Dict[int, Dict[PossibleGoal, float]]] = {}
     p_results: Dict[State, Dict[int, Dict[PossibleGoal, npt.NDArray[np.floating[Any]]]]] = {}
     
+    # Create local attainment cache for this batch if caching is enabled
+    local_attainment_cache: Optional[AttainmentCache] = {} if _shared_attainment_cache is not None else None
+    
     # Deserialize believed_others_policy if custom one was provided via cloudpickle
     if _shared_believed_others_policy_pickle is not None:
         believed_others_policy = cloudpickle.loads(_shared_believed_others_policy_pickle)
@@ -331,7 +378,8 @@ def _hpp_process_state_batch(
             human_agent_indices, possible_goal_generator,
             num_actions, action_powers, believed_others_policy,
             robot_agent_indices, robot_action_profiles,
-            beta_h, gamma_h
+            beta_h, gamma_h,
+            local_attainment_cache,
         )
         
         v_results[state_index] = state_v_results
@@ -339,7 +387,7 @@ def _hpp_process_state_batch(
             p_results[state] = state_p_results
     
     batch_time = time.perf_counter() - batch_start
-    return v_results, p_results, batch_time
+    return v_results, p_results, local_attainment_cache or {}, batch_time
 
 
 @overload
@@ -355,6 +403,7 @@ def compute_human_policy_prior(
     num_workers: Optional[int] = None, 
     level_fct: Optional[Callable[[State], int]] = None, 
     return_Vh: Literal[False] = False,
+    return_attainment_cache: Literal[False] = False,
     progress_callback: Optional[Callable[[int, int], None]] = None,
     quiet: bool = False,
     min_free_memory_fraction: float = 0.1,
@@ -376,12 +425,57 @@ def compute_human_policy_prior(
     num_workers: Optional[int] = None, 
     level_fct: Optional[Callable[[State], int]] = None, 
     return_Vh: Literal[True],
+    return_attainment_cache: Literal[False] = False,
     progress_callback: Optional[Callable[[int, int], None]] = None,
     quiet: bool = False,
     min_free_memory_fraction: float = 0.1,
     memory_check_interval: int = 100,
     memory_pause_duration: float = 60.0
 ) -> Tuple[TabularHumanPolicyPrior, Dict[State, Dict[int, Dict[PossibleGoal, float]]]]: ...
+
+
+@overload
+def compute_human_policy_prior(
+    world_model: WorldModel, 
+    human_agent_indices: List[int], 
+    possible_goal_generator: Optional[PossibleGoalGenerator] = None, 
+    believed_others_policy: Optional[Callable[[State, int, int], List[Tuple[float, npt.NDArray[np.int64]]]]] = None, 
+    *, 
+    beta_h: float = 10.0, 
+    gamma_h: float = 1.0, 
+    parallel: bool = False, 
+    num_workers: Optional[int] = None, 
+    level_fct: Optional[Callable[[State], int]] = None, 
+    return_Vh: Literal[False] = False,
+    return_attainment_cache: Literal[True],
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+    quiet: bool = False,
+    min_free_memory_fraction: float = 0.1,
+    memory_check_interval: int = 100,
+    memory_pause_duration: float = 60.0
+) -> Tuple[TabularHumanPolicyPrior, AttainmentCache]: ...
+
+
+@overload
+def compute_human_policy_prior(
+    world_model: WorldModel, 
+    human_agent_indices: List[int], 
+    possible_goal_generator: Optional[PossibleGoalGenerator] = None, 
+    believed_others_policy: Optional[Callable[[State, int, int], List[Tuple[float, npt.NDArray[np.int64]]]]] = None, 
+    *, 
+    beta_h: float = 10.0, 
+    gamma_h: float = 1.0, 
+    parallel: bool = False, 
+    num_workers: Optional[int] = None, 
+    level_fct: Optional[Callable[[State], int]] = None, 
+    return_Vh: Literal[True],
+    return_attainment_cache: Literal[True],
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+    quiet: bool = False,
+    min_free_memory_fraction: float = 0.1,
+    memory_check_interval: int = 100,
+    memory_pause_duration: float = 60.0
+) -> Tuple[TabularHumanPolicyPrior, Dict[State, Dict[int, Dict[PossibleGoal, float]]], AttainmentCache]: ...
 
 
 def compute_human_policy_prior(
@@ -396,12 +490,16 @@ def compute_human_policy_prior(
     num_workers: Optional[int] = None, 
     level_fct: Optional[Callable[[State], int]] = None, 
     return_Vh: bool = False,
+    return_attainment_cache: bool = False,
     progress_callback: Optional[Callable[[int, int], None]] = None,
     quiet: bool = False,
     min_free_memory_fraction: float = 0.1,
     memory_check_interval: int = 100,
     memory_pause_duration: float = 60.0
-) -> Union[TabularHumanPolicyPrior, Tuple[TabularHumanPolicyPrior, Dict[State, Dict[int, Dict[PossibleGoal, float]]]]]:
+) -> Union[TabularHumanPolicyPrior, 
+           Tuple[TabularHumanPolicyPrior, Dict[State, Dict[int, Dict[PossibleGoal, float]]]],
+           Tuple[TabularHumanPolicyPrior, AttainmentCache],
+           Tuple[TabularHumanPolicyPrior, Dict[State, Dict[int, Dict[PossibleGoal, float]]], AttainmentCache]]:
     """
     Compute human policy prior via backward induction on the state DAG.
     
@@ -443,6 +541,10 @@ def compute_human_policy_prior(
                   for fast dependency computation. States at higher levels are processed
                   first. If None, uses general topological sort (slower for large DAGs).
         return_Vh: If True, also return the computed value function.
+        return_attainment_cache: If True, also return the attainment cache containing
+            precomputed goal achievement values for each (state_index, action_profile_index, goal)
+            combination. This cache can be passed to compute_robot_policy() to avoid
+            recomputing these values in Phase 2.
         progress_callback: Optional callback(done, total) for progress updates.
         quiet: If True, suppress progress output.
         min_free_memory_fraction: Minimum free memory as fraction of total (0.0-1.0).
@@ -457,6 +559,10 @@ def compute_human_policy_prior(
         
         If return_Vh=True, returns tuple (policy_prior, Vh_values_dict) where
         Vh_values_dict maps state -> agent_idx -> goal -> float.
+        
+        If return_attainment_cache=True, returns tuple with attainment_cache as
+        the last element. The cache maps state_index -> action_profile_index -> 
+        goal -> ndarray of 0/1 values for successor states.
     
     Performance notes:
         - State space must be finite and acyclic (DAG structure)
@@ -533,6 +639,9 @@ def compute_human_policy_prior(
     
     # Initialize V_values as nested lists for faster access
     Vh_values: VhValues = [[{} for _ in range(num_agents)] for _ in range(len(states))]
+    
+    # Initialize attainment cache if requested
+    attainment_cache: Optional[AttainmentCache] = {} if return_attainment_cache else None
     
     if parallel and len(states) > 1:
         # Parallel execution using shared memory via fork
@@ -620,7 +729,8 @@ def compute_human_policy_prior(
                         human_agent_indices, possible_goal_generator,
                         num_actions, action_powers, believed_others_policy,
                         robot_agent_indices, robot_action_profiles,
-                        beta_h, gamma_h
+                        beta_h, gamma_h,
+                        attainment_cache,
                     )
                     
                     # Store results
@@ -641,7 +751,7 @@ def compute_human_policy_prior(
                 # Re-initialize shared data so new workers see updated Vh_values from previous levels
                 # Also pass the cloudpickle'd believed_others_policy for custom policy support
                 # DAG (states, transitions) is already in shared memory, only update Vh_values
-                _hpp_init_shared_data(states, transitions, Vh_values, params, believed_others_policy_pickle, use_shared_memory=True)
+                _hpp_init_shared_data(states, transitions, Vh_values, params, believed_others_policy_pickle, use_shared_memory=True, attainment_cache=attainment_cache)
                 
                 # Only pass state indices - workers access shared data via globals
                 batches = split_into_batches(level, num_workers)
@@ -667,7 +777,7 @@ def compute_human_policy_prior(
                     for future in as_completed(futures):
                         if PROFILE_PARALLEL:
                             _wait_t0 = time.perf_counter()
-                        v_results, p_results, batch_time = future.result()
+                        v_results, p_results, batch_attainment_cache, batch_time = future.result()
                         if PROFILE_PARALLEL:
                             prof_wait_time += time.perf_counter() - _wait_t0
                             prof_batch_times.append(batch_time)
@@ -693,6 +803,16 @@ def compute_human_policy_prior(
                                 system2_policies[state][agent_idx].update(agent_policies)
                         if PROFILE_PARALLEL:
                             prof_merge_p_time += time.perf_counter() - _merge_p_t0
+                        
+                        # Merge attainment cache back
+                        if attainment_cache is not None and batch_attainment_cache:
+                            for state_idx, ap_dict in batch_attainment_cache.items():
+                                if state_idx not in attainment_cache:
+                                    attainment_cache[state_idx] = {}
+                                for ap_idx, goal_dict in ap_dict.items():
+                                    if ap_idx not in attainment_cache[state_idx]:
+                                        attainment_cache[state_idx][ap_idx] = {}
+                                    attainment_cache[state_idx][ap_idx].update(goal_dict)
                 
                 if PROFILE_PARALLEL:
                     prof_total_parallel_time += time.perf_counter() - _level_t0
@@ -758,7 +878,8 @@ def compute_human_policy_prior(
                          num_agents, num_actions, action_powers,
                          believed_others_policy, robot_agent_indices, robot_action_profiles,
                          beta_h, gamma_h,
-                         progress_callback, memory_monitor)
+                         progress_callback, memory_monitor,
+                         attainment_cache)
     
     human_policy_priors = system2_policies # TODO: mix with system-1 policies!
 
@@ -766,6 +887,9 @@ def compute_human_policy_prior(
         world_model=world_model, human_agent_indices=human_agent_indices, 
         possible_goal_generator=possible_goal_generator, values=human_policy_priors
     )
+    
+    if _pbar is not None:
+        _pbar.close()
     
     if return_Vh:
         # Convert V_values from list-indexed to state-indexed dict
@@ -775,10 +899,13 @@ def compute_human_policy_prior(
                 Vh_values_dict[state] = {agent_idx: Vh_values[state_idx][agent_idx] 
                                         for agent_idx in human_agent_indices
                                         if Vh_values[state_idx][agent_idx]}
-        if _pbar is not None:
-            _pbar.close()
+        if return_attainment_cache:
+            assert attainment_cache is not None
+            return policy_prior, Vh_values_dict, attainment_cache
         return policy_prior, Vh_values_dict
     
-    if _pbar is not None:
-        _pbar.close()
+    if return_attainment_cache:
+        assert attainment_cache is not None
+        return policy_prior, attainment_cache
+    
     return policy_prior

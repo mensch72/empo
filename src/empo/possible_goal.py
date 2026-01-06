@@ -22,6 +22,8 @@ Example usage:
     ...     def __init__(self, env, target_pos):
     ...         super().__init__(env)
     ...         self.target_pos = target_pos
+    ...         self._hash = hash(self.target_pos)  # Cache hash at init
+    ...         super()._freeze()  # Must call last in __init__
     ...     
     ...     def is_achieved(self, state) -> int:
     ...         # Check if agent is at target position
@@ -30,7 +32,7 @@ Example usage:
     ...         return 1 if agent_pos == self.target_pos else 0
     ...     
     ...     def __hash__(self):
-    ...         return hash(self.target_pos)
+    ...         return self._hash
     ...     
     ...     def __eq__(self, other):
     ...         return isinstance(other, ReachCell) and self.target_pos == other.target_pos
@@ -59,11 +61,29 @@ class PossibleGoal(ABC):
     Attributes:
         env: Reference to the gymnasium environment this goal applies to.
     
-    Note:
-        Goals should be immutable after creation to ensure consistent hashing.
+    Immutability:
+        Goals are immutable after creation. The base class enforces this by
+        raising AttributeError if you try to modify or delete attributes after
+        __init__ completes. Subclasses must set all attributes (including
+        self._hash for cached hash) during __init__, calling super().__init__(env)
+        first and super()._freeze() last.
+    
+    Performance:
+        For performance, subclasses should cache the hash value at initialization
+        (store in self._hash) and return it from __hash__(), since goals are
+        frequently used as dictionary keys in backward induction.
+    
+    Example:
+        >>> class MyGoal(PossibleGoal):
+        ...     def __init__(self, env, target):
+        ...         super().__init__(env)
+        ...         self.target = target
+        ...         self._hash = hash(self.target)
+        ...         super()._freeze()  # Must call last in __init__
     """
 
     env: Any  # gymnasium.Env or compatible
+    _frozen: bool  # Whether the object is frozen (immutable)
     
     def __init__(self, env: Any):
         """
@@ -71,8 +91,38 @@ class PossibleGoal(ABC):
         
         Args:
             env: The gymnasium environment (or compatible) this goal applies to.
+        
+        Note:
+            Subclasses must call super()._freeze() at the END of their __init__
+            to enable immutability enforcement.
         """
+        object.__setattr__(self, '_frozen', False)
         self.env = env
+    
+    def _freeze(self) -> None:
+        """Freeze the object to prevent further modifications.
+        
+        Subclasses MUST call this at the end of their __init__ method.
+        """
+        object.__setattr__(self, '_frozen', True)
+    
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Prevent attribute modification after initialization."""
+        if getattr(self, '_frozen', False):
+            raise AttributeError(
+                f"Cannot modify attribute '{name}' of immutable {self.__class__.__name__}. "
+                f"PossibleGoal objects are immutable after creation."
+            )
+        object.__setattr__(self, name, value)
+    
+    def __delattr__(self, name: str) -> None:
+        """Prevent attribute deletion."""
+        if getattr(self, '_frozen', False):
+            raise AttributeError(
+                f"Cannot delete attribute '{name}' of immutable {self.__class__.__name__}. "
+                f"PossibleGoal objects are immutable after creation."
+            )
+        object.__delattr__(self, name)
 
     @abstractmethod
     def is_achieved(self, state) -> int:

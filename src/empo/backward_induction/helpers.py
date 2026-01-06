@@ -19,6 +19,12 @@ State: TypeAlias = Any  # State is typically a hashable tuple from WorldModel.ge
 ActionProfile = List[int]
 TransitionData = Tuple[Tuple[int, ...], List[float], List[State]]  # (action_profile, probs, successor_states)
 
+# Cache for goal attainment values computed during phase 1 and reused in phase 2.
+# Structure: state_index -> action_profile_index -> goal -> array of attainment values for successor states.
+# Using nested dicts for fast O(1) lookups. The innermost value is an ndarray of 0/1 values
+# indicating whether each successor state achieves the goal.
+AttainmentCache: TypeAlias = Dict[int, Dict[int, Dict["PossibleGoal", npt.NDArray[np.int8]]]]
+
 
 def default_believed_others_policy(
     state: State, 
