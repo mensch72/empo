@@ -50,16 +50,15 @@ import gymnasium as gym
 sys.modules['gym'] = gym
 
 from gym_multigrid.multigrid import (
-    MultiGridEnv, Grid, Agent, Wall, World, SmallActions, SmallWorld,
-    Rock
+    MultiGridEnv, World, SmallActions
 )
 from empo.possible_goal import PossibleGoalGenerator, TabularGoalSampler
 from empo.backward_induction import (
     compute_human_policy_prior, 
     compute_robot_policy,
-    TabularHumanPolicyPrior,
     TabularRobotPolicy
 )
+from empo.human_policy_prior import TabularHumanPolicyPrior
 from empo.multigrid import ReachCellGoal
 
 

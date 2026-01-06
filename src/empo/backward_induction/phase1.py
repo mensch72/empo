@@ -64,6 +64,111 @@ _shared_params: Optional[Tuple[List[int], PossibleGoalGenerator, int, int, npt.N
 _shared_believed_others_policy_pickle: Optional[bytes] = None  # cloudpickle'd believed_others_policy function
 
 
+def _process_single_state(
+    state_index: int,
+    state: State,
+    transitions: List[List[TransitionData]],
+    Vh_values: VhValues,
+    human_agent_indices: List[int],
+    possible_goal_generator: PossibleGoalGenerator,
+    num_actions: int,
+    action_powers: npt.NDArray[np.int64],
+    believed_others_policy: Callable[[State, int, int], List[Tuple[float, List[int]]]],
+    beta_h: float,
+    gamma_h: float,
+) -> Tuple[Dict[int, Dict[PossibleGoal, float]], Optional[Dict[int, Dict[PossibleGoal, npt.NDArray[np.floating[Any]]]]]]:
+    """Process a single state, returning (v_results, p_results).
+    
+    Unified implementation for sequential, parallel batch, and inline fallback.
+    Handles both terminal and non-terminal states correctly.
+    
+    Args:
+        state_index: Index of the state in the states list
+        state: The state to process
+        transitions: Full transitions list (indexed by state_index)
+        Vh_values: Value function (reads from successors, may write to state_index)
+        human_agent_indices: List of agent indices to compute for
+        possible_goal_generator: Generator for possible goals
+        num_actions: Number of actions available
+        action_powers: Precomputed powers for action profile indexing
+        believed_others_policy: Function for beliefs about other agents
+        beta_h: Inverse temperature (can be float('inf') for argmax)
+        gamma_h: Discount factor
+    
+    Returns:
+        Tuple of:
+        - v_results: Dict[agent_index, Dict[goal, float]] - V-values for this state
+        - p_results: Dict[agent_index, Dict[goal, ndarray]] - policies (None for terminal states)
+    """
+    actions = range(num_actions)
+    v_results: Dict[int, Dict[PossibleGoal, float]] = {}
+    p_results: Optional[Dict[int, Dict[PossibleGoal, npt.NDArray[np.floating[Any]]]]] = None
+    
+    is_terminal = not transitions[state_index]
+    
+    if is_terminal:
+        # Terminal state: only V-values, no policy
+        for agent_index in human_agent_indices:
+            v_results[agent_index] = {}
+            for possible_goal, _ in possible_goal_generator.generate(state, agent_index):
+                v_results[agent_index][possible_goal] = possible_goal.is_achieved(state)
+                if DEBUG:
+                    print(f"    Terminal state, agent {agent_index}, goal {possible_goal}: V = {v_results[agent_index][possible_goal]}")
+    else:
+        # Non-terminal state: compute both V-values and policies
+        p_results = {}
+        for agent_index in human_agent_indices:
+            v_results[agent_index] = {}
+            p_results[agent_index] = {}
+            
+            for possible_goal, _ in possible_goal_generator.generate(state, agent_index):
+                if possible_goal.is_achieved(state):
+                    # Goal achieved in this state: uniform policy, V=1
+                    v_results[agent_index][possible_goal] = 1
+                    p_results[agent_index][possible_goal] = np.ones(num_actions) / num_actions
+                    if DEBUG:
+                        print(f"    Goal achieved in state, agent {agent_index}: V = 1, uniform policy")
+                else:
+                    # Compute Q values as expected future V values
+                    expected_Vs: npt.NDArray[np.floating[Any]] = np.zeros(num_actions)
+                    for action in actions:
+                        v_accum: float = 0.0
+                        for action_profile_prob, action_profile in believed_others_policy(state, agent_index, action):
+                            action_profile[agent_index] = action
+                            action_profile_index = int(np.dot(action_profile, action_powers))
+                            _, next_state_probabilities, next_state_indices = transitions[state_index][action_profile_index]
+                            
+                            # Get V values from successors (use .get for parallel safety)
+                            v_values_array: npt.NDArray[np.floating[Any]] = np.array([
+                                Vh_values[next_state_indices[i]][agent_index].get(possible_goal, 0)
+                                for i in range(len(next_state_indices))
+                            ])
+                            v_accum += action_profile_prob * float(np.dot(next_state_probabilities, v_values_array))
+                        expected_Vs[action] = v_accum
+                    
+                    q = gamma_h * expected_Vs
+                    
+                    # Boltzmann policy (numerically stable softmax)
+                    if beta_h == float('inf'):
+                        # Infinite beta: deterministic argmax policy
+                        max_q = np.max(q)
+                        p = np.zeros_like(q)
+                        max_indices = np.where(q == max_q)[0]
+                        p[max_indices] = 1.0 / len(max_indices)  # Uniform over max actions
+                    else:
+                        scaled_q = beta_h * (q - np.max(q))  # Subtract max for numerical stability
+                        p = np.exp(scaled_q)
+                        p /= np.sum(p)
+                    
+                    v_results[agent_index][possible_goal] = float(np.sum(p * q))
+                    p_results[agent_index][possible_goal] = p
+                    
+                    if DEBUG:
+                        print(f"    Agent {agent_index}, goal {possible_goal}: V = {v_results[agent_index][possible_goal]:.4f}")
+    
+    return v_results, p_results
+
+
 def _hpp_compute_sequential(
     states: List[State], 
     Vh_values: VhValues,  # result is inserted into this!
@@ -80,16 +185,11 @@ def _hpp_compute_sequential(
     progress_callback: Optional[Callable[[int, int], None]] = None,
     memory_monitor: Optional[MemoryMonitor] = None
 ) -> None:
-    """Original sequential algorithm.
+    """Sequential backward induction algorithm.
     
-    Processes a batch of independent states:
-    - Terminal states: V(s, g) = is_achieved(g, s)
-    - Non-terminal states: 
-        * Q(s, a, g) = γ * E[V(s', g)] under believed_others_policy
-        * π(a|s,g) = softmax(β * Q(s, *, g))
-        * V(s, g) = Σ_a π(a|s,g) * Q(s, a, g)
+    Processes states in reverse topological order using the unified
+    _process_single_state helper.
     """
-    actions = range(num_actions)
     total_states = len(states)
     
     # loop over the nodes in reverse topological order:
@@ -103,69 +203,23 @@ def _hpp_compute_sequential(
             progress_callback(states_processed, total_states)
         if DEBUG:
             print(f"Processing state {state_index}")
-        state = states[state_index]
-        is_terminal = not transitions[state_index]
         
-        if is_terminal:
-            if DEBUG:
-                print(f"  Terminal state")
-            # in terminal states, policy and Q values are undefined, only Vh values need computation:
-            for agent_index in human_agent_indices:
-                if DEBUG:
-                    print(f"  Human agent {agent_index}")
-                for possible_goal, _ in possible_goal_generator.generate(state, agent_index):
-                    v = Vh_values[state_index][agent_index][possible_goal] = possible_goal.is_achieved(state)
-                    if DEBUG:
-                        print(f"    Possible goal: {possible_goal}, Vh = {v:.4f}")
-        else:
-            ps = system2_policies[state] = {}
-            for agent_index in human_agent_indices:
-                if DEBUG:
-                    print(f"  Human agent {agent_index}")
-                psi = ps[agent_index] = {}
-                for possible_goal, _ in possible_goal_generator.generate(state, agent_index):
-                    if DEBUG:
-                        print(f"    Possible goal: {possible_goal}")
-                    # if the goal is achieved in that state, the human will not care about future rewards and use a uniform policy:
-                    if possible_goal.is_achieved(state):
-                        if DEBUG:
-                            print(f"      Goal achieved in this state; using uniform policy")
-                        Vh_values[state_index][agent_index][possible_goal] = 1
-                        psi[possible_goal] = np.ones(num_actions) / num_actions
-                    else:
-                        # otherwise, compute the Q values as expected future V values, and the policy as a Boltzmann policy based on those Q values:
-                        expected_Vs: npt.NDArray[np.floating[Any]] = np.zeros(num_actions)
-                        for action in actions:
-                            v_accum: float = 0.0
-                            for action_profile_prob, action_profile in believed_others_policy(state, agent_index, action):
-                                action_profile[agent_index] = action
-                                # convert profile [a,b,c] into index a + b*num_actions + c*num_actions*num_actions ...
-                                # Optimized base conversion using precomputed powers
-                                action_profile_index = int(np.dot(action_profile, action_powers))
-                                _, next_state_probabilities, next_state_indices = transitions[state_index][action_profile_index]
-                                # Vectorized computation using numpy
-                                v_values_array: npt.NDArray[np.floating[Any]] = np.array([
-                                    Vh_values[next_state_indices[i]][agent_index][possible_goal] 
-                                    for i in range(len(next_state_indices))
-                                ])
-                                v_accum += action_profile_prob * float(np.dot(next_state_probabilities, v_values_array))
-                            expected_Vs[action] = v_accum
-                        q = gamma_h * expected_Vs
-                        # Boltzmann policy (numerically stable softmax):
-                        if beta_h == float('inf'):
-                            # Infinite beta: deterministic argmax policy
-                            max_q = np.max(q)
-                            p = np.zeros_like(q)
-                            max_indices = np.where(q == max_q)[0]
-                            p[max_indices] = 1.0 / len(max_indices)  # Uniform over max actions
-                        else:
-                            scaled_q = beta_h * (q - np.max(q))  # Subtract max for numerical stability
-                            p = np.exp(scaled_q)
-                            p /= np.sum(p)
-                        psi[possible_goal] = p
-                        v_result = Vh_values[state_index][agent_index][possible_goal] = float(np.sum(p * q))
-                        if DEBUG:
-                            print(f"      Goal not achieved; Vh = {v_result:.4f}")
+        state = states[state_index]
+        
+        # Use unified helper
+        v_results, p_results = _process_single_state(
+            state_index, state, transitions, Vh_values,
+            human_agent_indices, possible_goal_generator,
+            num_actions, action_powers, believed_others_policy,
+            beta_h, gamma_h
+        )
+        
+        # Store results back into Vh_values and system2_policies
+        for agent_index, agent_v in v_results.items():
+            Vh_values[state_index][agent_index].update(agent_v)
+        
+        if p_results is not None:
+            system2_policies[state] = p_results
 
 
 def _hpp_init_shared_data(
@@ -240,7 +294,6 @@ def _hpp_process_state_batch(
     (human_agent_indices, possible_goal_generator, num_agents, num_actions, 
      action_powers, beta_h, gamma_h) = _shared_params
     
-    actions = range(num_actions)
     v_results: Dict[int, Dict[int, Dict[PossibleGoal, float]]] = {}
     p_results: Dict[State, Dict[int, Dict[PossibleGoal, npt.NDArray[np.floating[Any]]]]] = {}
     
@@ -254,55 +307,18 @@ def _hpp_process_state_batch(
     
     for state_index in state_indices:
         state = states[state_index]
-        v_results[state_index] = {}
         
-        # Check if terminal - transitions[state_index] is empty list for terminal states
-        is_terminal = not transitions[state_index]
+        # Use unified helper
+        state_v_results, state_p_results = _process_single_state(
+            state_index, state, transitions, Vh_values,
+            human_agent_indices, possible_goal_generator,
+            num_actions, action_powers, believed_others_policy,
+            beta_h, gamma_h
+        )
         
-        if is_terminal:
-            # Terminal state: only Vh-values, no policy
-            for agent_index in human_agent_indices:
-                v_results[state_index][agent_index] = {}
-                for possible_goal, _ in possible_goal_generator.generate(state, agent_index):
-                    v_results[state_index][agent_index][possible_goal] = possible_goal.is_achieved(state)
-        else:
-            # Non-terminal state: compute both Vh-values and policies
-            p_results[state] = {}
-            for agent_index in human_agent_indices:
-                v_results[state_index][agent_index] = {}
-                p_results[state][agent_index] = {}
-                
-                for possible_goal, _ in possible_goal_generator.generate(state, agent_index):
-                    if possible_goal.is_achieved(state):
-                        # Goal achieved, treated as episode end: uniform policy, Vh=1
-                        v_results[state_index][agent_index][possible_goal] = 1
-                        p_results[state][agent_index][possible_goal] = np.ones(num_actions) / num_actions
-                    else:
-                        # Compute Q values
-                        expected_Vs: npt.NDArray[np.floating[Any]] = np.zeros(num_actions)
-                        for action in actions:
-                            v_accum: float = 0.0
-                            for action_profile_prob, action_profile in believed_others_policy(state, agent_index, action):
-                                action_profile[agent_index] = action
-                                action_profile_index = int(np.dot(action_profile, action_powers))
-                                _, next_state_probabilities, next_state_indices = transitions[state_index][action_profile_index]
-                                
-                                # Get Vh values from shared data
-                                v_values_array: npt.NDArray[np.floating[Any]] = np.array([
-                                    Vh_values[next_state_indices[i]][agent_index].get(possible_goal, 0)
-                                    for i in range(len(next_state_indices))
-                                ])
-                                v_accum += action_profile_prob * float(np.dot(next_state_probabilities, v_values_array))
-                            
-                            expected_Vs[action] = v_accum
-                        
-                        q = gamma_h * expected_Vs
-                        p = np.exp(beta_h * q)
-                        p /= np.sum(p)
-                        
-                        # Store both Vh-value and policy
-                        v_results[state_index][agent_index][possible_goal] = float(np.sum(p * q))
-                        p_results[state][agent_index][possible_goal] = p
+        v_results[state_index] = state_v_results
+        if state_p_results is not None:
+            p_results[state] = state_p_results
     
     batch_time = time.perf_counter() - batch_start
     return v_results, p_results, batch_time
@@ -465,7 +481,6 @@ def compute_human_policy_prior(
 
     num_agents: int = len(world_model.agents)  # type: ignore[attr-defined]
     num_actions: int = world_model.action_space.n  # type: ignore[attr-defined]
-    actions = range(num_actions)
 
     if believed_others_policy is None:
         # Create wrapper for sequential execution (parallel uses default directly)
@@ -575,37 +590,22 @@ def compute_human_policy_prior(
                     prof_states_sequential += len(level)
                 for state_index in level:
                     state = states[state_index]
-                    is_terminal = not transitions[state_index]
                     
-                    if is_terminal:
-                        for agent_index in human_agent_indices:
-                            for possible_goal, _ in possible_goal_generator.generate(state, agent_index):
-                                Vh_values[state_index][agent_index][possible_goal] = possible_goal.is_achieved(state)
-                    else:
-                        ps = system2_policies[state] = {}
-                        for agent_index in human_agent_indices:
-                            psi = ps[agent_index] = {}
-                            for possible_goal, _ in possible_goal_generator.generate(state, agent_index):
-                                if possible_goal.is_achieved(state):
-                                    Vh_values[state_index][agent_index][possible_goal] = 1
-                                    psi[possible_goal] = np.ones(num_actions) / num_actions
-                                else:
-                                    expected_Vs = np.zeros(num_actions)
-                                    for action in actions:
-                                        v = 0
-                                        for action_profile_prob, action_profile in believed_others_policy(state, agent_index, action):
-                                            action_profile[agent_index] = action
-                                            action_profile_index = np.dot(action_profile, action_powers)
-                                            _, next_state_probabilities, next_state_indices = transitions[state_index][action_profile_index]
-                                            v_values_array = np.array([Vh_values[next_state_indices[i]][agent_index][possible_goal] 
-                                                                      for i in range(len(next_state_indices))])
-                                            v += action_profile_prob * np.dot(next_state_probabilities, v_values_array)
-                                        expected_Vs[action] = v
-                                    q = gamma_h * expected_Vs
-                                    p = np.exp(beta_h * q)
-                                    p /= np.sum(p)
-                                    psi[possible_goal] = p
-                                    Vh_values[state_index][agent_index][possible_goal] = np.sum(p * q)
+                    # Use unified helper
+                    v_results, p_results = _process_single_state(
+                        state_index, state, transitions, Vh_values,
+                        human_agent_indices, possible_goal_generator,
+                        num_actions, action_powers, believed_others_policy,
+                        beta_h, gamma_h
+                    )
+                    
+                    # Store results
+                    for agent_index, agent_v in v_results.items():
+                        Vh_values[state_index][agent_index].update(agent_v)
+                    
+                    if p_results is not None:
+                        system2_policies[state] = p_results
+                
                 if PROFILE_PARALLEL:
                     prof_seq_in_par_time += time.perf_counter() - _t0
             else:
