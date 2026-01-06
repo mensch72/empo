@@ -14,7 +14,6 @@ either by waiting for other processes to release memory or by triggering
 a clean shutdown with checkpoint saving.
 """
 
-import signal
 import time
 from typing import Optional
 
