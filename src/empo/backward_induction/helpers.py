@@ -9,7 +9,10 @@ import numpy as np
 import numpy.typing as npt
 from collections import defaultdict
 from itertools import product
-from typing import Optional, Callable, List, Tuple, Dict, Any, TypeAlias
+from typing import Optional, Callable, List, Tuple, Dict, Any, TypeAlias, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from empo.possible_goal import PossibleGoal, PossibleGoalGenerator
 
 # Type aliases for complex types used throughout
 State: TypeAlias = Any  # State is typically a hashable tuple from WorldModel.get_state()
@@ -31,6 +34,39 @@ def default_believed_others_policy(
     return [(uniform_p, list(action_profile)) for action_profile in product(*[
         [-1] if idx == agent_index else all_actions
         for idx in range(num_agents)])]
+
+
+def collect_goals_by_human(
+    goal_generator: "PossibleGoalGenerator",
+    human_agent_indices: List[int],
+    state: State
+) -> Dict[int, List[Tuple["PossibleGoal", float]]]:
+    """
+    Collect all possible goals for each human agent from a generator.
+    
+    This function iterates through the goal generator for each human agent
+    and collects all (goal, weight) pairs into a dictionary keyed by human
+    agent index.
+    
+    Args:
+        goal_generator: A PossibleGoalGenerator that yields (goal, weight) pairs.
+        human_agent_indices: List of agent indices that are humans.
+        state: Current world state (passed to the generator).
+    
+    Returns:
+        Dict mapping each human agent index to a list of (PossibleGoal, weight)
+        tuples as returned by the generator for that human.
+    
+    Example:
+        >>> generator = AllCellsGenerator(env)
+        >>> goals_by_human = collect_goals_by_human(generator, [0, 2], state)
+        >>> # goals_by_human[0] contains all (goal, weight) pairs for human 0
+        >>> # goals_by_human[2] contains all (goal, weight) pairs for human 2
+    """
+    return {
+        human_idx: list(goal_generator.generate(state, human_idx))
+        for human_idx in human_agent_indices
+    }
 
 
 def combine_action_profiles(

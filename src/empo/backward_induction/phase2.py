@@ -62,6 +62,181 @@ _shared_human_policy_prior_pickle: Optional[bytes] = None
 _shared_rp_params: Optional[Tuple[List[int], List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], float, float, float, float, float, float, float]] = None
 
 
+def _process_single_state_phase2(
+    state_index: int,
+    state: State,
+    states: List[State],
+    transitions: List[List[TransitionData]],
+    Vh_values: VhValues,
+    Vr_values: VrValues,
+    human_agent_indices: List[int],
+    robot_agent_indices: List[int],
+    robot_action_profiles: List[RobotActionProfile],
+    possible_goal_generator: PossibleGoalGenerator,
+    num_agents: int,
+    num_actions: int,
+    action_powers: npt.NDArray[np.int64],
+    human_policy_prior: TabularHumanPolicyPrior,
+    beta_r: float,
+    gamma_h: float,
+    gamma_r: float,
+    zeta: float,
+    xi: float,
+    eta: float,
+    terminal_Vr: float,
+) -> Tuple[
+    Dict[int, Dict[PossibleGoal, float]],  # vh_results: agent -> goal -> value
+    float,  # vr_result
+    Optional[Dict[RobotActionProfile, float]]  # robot_policy (None for terminal)
+]:
+    """Process a single state for Phase 2, returning (vh_results, vr_result, robot_policy).
+    
+    Unified implementation for sequential, parallel batch, and inline fallback.
+    Handles both terminal and non-terminal states correctly.
+    
+    Args:
+        state_index: Index of the state in the states list
+        state: The state to process
+        states: Full states list (needed for goal achievement checks)
+        transitions: Full transitions list (indexed by state_index)
+        Vh_values: Human value function (reads from successors)
+        Vr_values: Robot value function (reads from successors)
+        human_agent_indices: List of human agent indices
+        robot_agent_indices: List of robot agent indices
+        robot_action_profiles: Precomputed list of robot action profiles
+        possible_goal_generator: Generator for possible goals
+        num_agents: Total number of agents
+        num_actions: Number of actions available
+        action_powers: Precomputed powers for action profile indexing
+        human_policy_prior: Human policy prior for computing expectations
+        beta_r: Robot inverse temperature (power-law parameter)
+        gamma_h: Human discount factor
+        gamma_r: Robot discount factor
+        zeta: Risk-aversion parameter
+        xi: Inter-human power-inequality aversion
+        eta: Intertemporal power-inequality aversion
+        terminal_Vr: Value for terminal states
+    
+    Returns:
+        Tuple of:
+        - vh_results: Dict[agent_index, Dict[goal, float]] - V_h^e values for this state
+        - vr_result: float - V_r value for this state
+        - robot_policy: Dict[RobotActionProfile, float] or None (None for terminal states)
+    """
+    vh_results: Dict[int, Dict[PossibleGoal, float]] = {agent_idx: {} for agent_idx in human_agent_indices}
+    action_profile: npt.NDArray[np.int64] = np.zeros(num_agents, dtype=np.int64)
+    
+    is_terminal = not transitions[state_index]
+    
+    if is_terminal:
+        # Terminal state: V_h^e = 0 for all goals (dict defaults to 0), V_r = terminal_Vr, no robot policy
+        if DEBUG:
+            print(f"  Terminal state {state_index}")
+        return vh_results, terminal_Vr, None
+    
+    # Non-terminal state: compute Q_r, pi_r, V_h^e, X_h, U_r, V_r
+    if DEBUG:
+        print(f"  Transient state {state_index}")
+    
+    # Compute Q_r values for all robot action profiles
+    Qr_values: npt.NDArray[np.floating[Any]] = np.zeros(len(robot_action_profiles))
+    for robot_action_profile_index, robot_action_profile in enumerate(robot_action_profiles):
+        action_profile[robot_agent_indices] = robot_action_profile
+        v = 0.0
+        for human_action_profile_prob, human_action_profile in human_policy_prior.profile_distribution(state):
+            action_profile[human_agent_indices] = human_action_profile
+            action_profile_index = int(np.dot(action_profile, action_powers))
+            _, next_state_probabilities, next_state_indices = transitions[state_index][action_profile_index]
+            v += human_action_profile_prob * float(np.dot(next_state_probabilities, Vr_values[next_state_indices]))
+        Qr_values[robot_action_profile_index] = gamma_r * v
+    
+    # Compute robot policy as power-law policy
+    # Use log-space computation for numerical stability:
+    # pi_r(a) ∝ (-Q_r(a))^{-beta_r} = exp(-beta_r * log(-Q_r(a)))
+    log_neg_Qr = np.log(-Qr_values)  # Q_r values are always negative
+    log_powers = -beta_r * log_neg_Qr
+    log_normalizer = logsumexp(log_powers)
+    ps = np.exp(log_powers - log_normalizer)
+    robot_policy = {robot_action_profile: ps[idx] 
+                   for idx, robot_action_profile in enumerate(robot_action_profiles)}
+    
+    # Compute V_h^e, X_h, and U_r values
+    powersum = 0.0  # sum over humans of X_h^(-xi)
+    for agent_index in human_agent_indices:
+        if DEBUG:
+            print(f"   Human agent {agent_index}")
+            # Check if at least one goal is achieved in this state
+            goals_achieved = []
+            for pg, _ in possible_goal_generator.generate(state, agent_index):
+                achieved = pg.is_achieved(state)
+                goals_achieved.append((pg, achieved))
+            if not any(a for _, a in goals_achieved):
+                print(f"   WARNING: No goal achieved in state {state_index}!")
+                for pg, a in goals_achieved:
+                    print(f"     {pg}: is_achieved={a}")
+        
+        xh = 0.0
+        some_goal_achieved_with_positive_prob = False
+        
+        for possible_goal, possible_goal_weight in possible_goal_generator.generate(state, agent_index):
+            if DEBUG:
+                print(f"    Possible goal: {possible_goal}")
+            
+            vh = 0.0
+            for robot_action_profile_index, robot_action_profile in enumerate(robot_action_profiles):
+                action_profile[robot_agent_indices] = robot_action_profile
+                v = 0.0
+                for human_action_profile_prob, human_action_profile in human_policy_prior.profile_distribution_with_fixed_goal(state, agent_index, possible_goal):
+                    action_profile[human_agent_indices] = human_action_profile
+                    action_profile_index = int(np.dot(action_profile, action_powers))
+                    _, next_state_probabilities, next_state_indices = transitions[state_index][action_profile_index]
+                    
+                    attainment_values_array: npt.NDArray[np.floating[Any]] = np.array([
+                        possible_goal.is_achieved(states[next_state_index]) 
+                        for next_state_index in next_state_indices
+                    ])
+                    if float(np.dot(next_state_probabilities, attainment_values_array)) > 0.0:
+                        some_goal_achieved_with_positive_prob = True
+                    
+                    vhe_values_array: npt.NDArray[np.floating[Any]] = np.array([
+                        Vh_values[next_state_index][agent_index].get(possible_goal, 0)
+                        for next_state_index in next_state_indices
+                    ])
+                    continuation_values_array = attainment_values_array + (1-attainment_values_array) * gamma_h * vhe_values_array
+                    v += human_action_profile_prob * float(np.dot(next_state_probabilities, continuation_values_array))
+                vh += ps[robot_action_profile_index] * v
+            
+            vh_results[agent_index][possible_goal] = vh
+            xh += possible_goal_weight * vh**zeta
+            
+            if DEBUG:
+                print(f"      ...Vh = {vh:.4f}")
+        
+        assert some_goal_achieved_with_positive_prob, \
+            f"No goal achievable with positive probability for agent {agent_index} in state {state_index}!"
+        
+        if xh == 0:
+            # xh is zero means no goal has positive expected achievement value
+            raise ValueError(
+                f"xh=0 for agent {agent_index} in state {state_index}: "
+                f"no goal is reachable! State: {state}"
+            )
+        
+        if DEBUG:
+            print(f"   ...Xh = {xh:.4f}")
+        
+        powersum += xh**(-xi)
+    
+    y = powersum / len(human_agent_indices)  # average over humans
+    ur = -(y**eta)
+    vr = ur + float(np.dot(ps, Qr_values))
+    
+    if DEBUG:
+        print(f"  ...Ur = {ur:.4f}, Vr = {vr:.4f}")
+    
+    return vh_results, vr, robot_policy
+
+
 def _rp_compute_sequential(
     states: List[State], 
     Vh_values: VhValues,  # result is inserted into this!
@@ -85,7 +260,10 @@ def _rp_compute_sequential(
     progress_callback: Optional[Callable[[int, int], None]] = None,
     memory_monitor: Optional[MemoryMonitor] = None
 ) -> None:
-    """(under construction)
+    """Sequential Phase 2 backward induction algorithm.
+    
+    Processes states in reverse topological order using the unified
+    _process_single_state_phase2 helper.
     """
     # Generate all possible robot action profiles (cartesian product of actions for each robot)
     robot_action_profiles: List[RobotActionProfile] = [
@@ -93,7 +271,7 @@ def _rp_compute_sequential(
     ]
     
     total_states = len(states)
-    action_profile: npt.NDArray[np.int64] = np.zeros(num_agents, dtype=np.int64)
+    
     # loop over the nodes in reverse topological order:
     for state_index in range(len(states)-1, -1, -1):
         # Check memory periodically (using step = states processed)
@@ -105,139 +283,25 @@ def _rp_compute_sequential(
             progress_callback(states_processed, total_states)
         if DEBUG:
             print(f"Processing state {state_index}")
-        state = states[state_index]
-        is_terminal = not transitions[state_index]
         
-        if is_terminal:
-            # in terminal states, Q_r, pi_r, X_h, and U_r are undefined, V_h_e is zero, and V_r is a fixed terminal value:
-            if DEBUG:
-                print(f"  Terminal state")
-            for agent_index in human_agent_indices:
-                if DEBUG:
-                    print(f"   Human agent {agent_index}")
-                Vh_values[state_index][agent_index] = {}  # defaults to zero for all possible goals
-            Vr_values[state_index] = terminal_Vr
-        else:
-            # in transient states, compute everything in the order Q_r, pi_r, V_h_e, X_h, U_r, V_r:
-            if DEBUG:
-                print(f"  Transient state")
-            # compute the robot's Q values and policy based on *only* the discounted successor Vr values (i.e., not including Ur as a separate term as this is already covered by the successor Vr values!):
-            Qr_values: npt.NDArray[np.floating[Any]] = np.zeros(len(robot_action_profiles))
-            for robot_action_profile_index, robot_action_profile in enumerate(robot_action_profiles):
-                action_profile[robot_agent_indices] = robot_action_profile
-                v = 0.0
-                for human_action_profile_prob, human_action_profile in human_policy_prior.profile_distribution(state):
-                    action_profile[human_agent_indices] = human_action_profile
-                    action_profile_index = int(np.dot(action_profile, action_powers))
-                    _, next_state_probabilities, next_state_indices = transitions[state_index][action_profile_index]
-                    v += human_action_profile_prob * float(np.dot(next_state_probabilities, Vr_values[next_state_indices]))
-                Qr_values[robot_action_profile_index] = gamma_r * v
-            # compute the robot policy as a power-law policy over its Q values:
-            # Use log-space computation for numerical stability:
-            # pi_r(a) ∝ (-Q_r(a))^{-beta_r} = exp(-beta_r * log(-Q_r(a)))
-            log_neg_Qr = np.log(-Qr_values)  # Q_r values are always negative
-            log_powers = -beta_r * log_neg_Qr
-            log_normalizer = logsumexp(log_powers)
-            ps = np.exp(log_powers - log_normalizer)
-            robot_policy[state] = { robot_action_profile: ps[idx] 
-                                   for idx, robot_action_profile in enumerate(robot_action_profiles) }
-            # compute V_h, X_h, and U_r values:
-            powersum = 0  # sum over humans of X_h^(-xi)
-            for agent_index in human_agent_indices:
-                if DEBUG:
-                    print(f"   Human agent {agent_index}")
-                    # Check if at least one goal is achieved in this state
-                    goals_achieved = []
-                    for pg, _ in possible_goal_generator.generate(state, agent_index):
-                        achieved = pg.is_achieved(state)
-                        goals_achieved.append((pg, achieved))
-                    if not any(a for _, a in goals_achieved):
-                        print(f"   WARNING: No goal achieved in state {state_index}!")
-                        for pg, a in goals_achieved:
-                            print(f"     {pg}: is_achieved={a}")
-                xh = 0
-                for possible_goal, possible_goal_weight in possible_goal_generator.generate(state, agent_index):
-                    if DEBUG:
-                        print(f"    Possible goal: {possible_goal}")
-                    vh = 0
-                    for robot_action_profile_index, robot_action_profile in enumerate(robot_action_profiles):
-                        action_profile[robot_agent_indices] = robot_action_profile
-                        v = 0
-                        for human_action_profile_prob, human_action_profile in human_policy_prior.profile_distribution_with_fixed_goal(state, agent_index, possible_goal):
-                            action_profile[human_agent_indices] = human_action_profile
-                            action_profile_index = int(np.dot(action_profile, action_powers))
-                            _, next_state_probabilities, next_state_indices = transitions[state_index][action_profile_index]
-                            attainment_values_array: npt.NDArray[np.floating[Any]] = np.array([
-                                possible_goal.is_achieved(states[next_state_index]) 
-                                for next_state_index in next_state_indices
-                            ])
-                            vhe_values_array: npt.NDArray[np.floating[Any]] = np.array([
-                                Vh_values[next_state_index][agent_index].get(possible_goal, 0)
-                                for next_state_index in next_state_indices
-                            ])
-                            continuation_values_array = attainment_values_array + (1-attainment_values_array) * gamma_h * vhe_values_array
-                            v += human_action_profile_prob * float(np.dot(next_state_probabilities, continuation_values_array))
-                        vh += ps[robot_action_profile_index] * v
-                    Vh_values[state_index][agent_index][possible_goal] = vh
-                    if DEBUG:
-                        print(f"      ...Vh = {vh:.4f}")
-                    xh += possible_goal_weight * vh**zeta
-                if DEBUG:
-                    print(f"   ...Xh = {xh:.4f}")
-                if xh == 0:
-                    # xh is zero means no goal has positive expected achievement value
-                    # This should NEVER happen if goals cover all walkable cells!
-                    print(f"\nERROR: xh=0 for agent {agent_index} in state {state_index}!")
-                    print(f"  State: {state}")
-                    print(f"  This means no goal has positive expected achievement value.")
-                    
-                    # Check: does every successor state have at least one goal achieved?
-                    print(f"\n  Checking if every successor state has at least one goal achieved:")
-                    all_goals = list(possible_goal_generator.generate(state, agent_index))
-                    
-                    for robot_action_profile in robot_action_profiles:
-                        action_profile[robot_agent_indices] = robot_action_profile
-                        for _, human_action_profile in human_policy_prior.profile_distribution(state):
-                            action_profile[human_agent_indices] = human_action_profile
-                            action_profile_index = int(np.dot(action_profile, action_powers))
-                            _, next_state_probs, next_state_indices = transitions[state_index][action_profile_index]
-                            
-                            for prob, next_idx in zip(next_state_probs, next_state_indices):
-                                if prob > 0:
-                                    next_state = states[next_idx]
-                                    # Check if ANY goal is achieved in this successor state
-                                    goals_achieved_in_succ = []
-                                    for pg, pw in all_goals:
-                                        achieved = pg.is_achieved(next_state)
-                                        if achieved:
-                                            goals_achieved_in_succ.append(pg)
-                                    
-                                    if not goals_achieved_in_succ:
-                                        # Extract human position from successor state
-                                        _, agent_states, _, _ = next_state
-                                        human_pos = (int(agent_states[agent_index][0]), int(agent_states[agent_index][1]))
-                                        print(f"\n  PROBLEM FOUND: No goal achieved in successor state {next_idx}!")
-                                        print(f"    Human position in successor: {human_pos}")
-                                        print(f"    Action profile: robot={robot_action_profile}, human={human_action_profile}")
-                                        print(f"    Transition prob: {prob}")
-                                        print(f"    Goals checked:")
-                                        for pg, pw in all_goals:
-                                            if hasattr(pg, 'target_pos'):
-                                                print(f"      {pg}: target_pos={pg.target_pos}, is_achieved={pg.is_achieved(next_state)}")
-                                            elif hasattr(pg, 'target_rect'):
-                                                print(f"      {pg}: target_rect={pg.target_rect}, is_achieved={pg.is_achieved(next_state)}")
-                    
-                    raise ValueError(
-                        f"xh=0 for agent {agent_index} in state {state_index}: "
-                        f"no goal is achieved in at least one successor state! "
-                        f"Check that goals cover all walkable cells."
-                    )
-                powersum += xh**(-xi)
-            y = powersum / len(human_agent_indices)  # because (other than in the paper) y is the average over humans, not the sum   
-            ur = -(y**eta)  
-            vr = Vr_values[state_index] = ur + float(np.dot(ps, Qr_values))
-            if DEBUG:
-                print(f"  ...Ur = {ur:.4f}, Vr = {vr:.4f}")
+        state = states[state_index]
+        
+        # Use unified helper
+        vh_results, vr_result, p_result = _process_single_state_phase2(
+            state_index, state, states, transitions, Vh_values, Vr_values,
+            human_agent_indices, robot_agent_indices, robot_action_profiles,
+            possible_goal_generator, num_agents, num_actions, action_powers,
+            human_policy_prior, beta_r, gamma_h, gamma_r, zeta, xi, eta, terminal_Vr
+        )
+        
+        # Store results
+        for agent_index, agent_vh in vh_results.items():
+            Vh_values[state_index][agent_index].update(agent_vh)
+        
+        Vr_values[state_index] = vr_result
+        
+        if p_result is not None:
+            robot_policy[state] = p_result
 
 
 def _rp_init_shared_data(
@@ -335,107 +399,21 @@ def _rp_process_state_batch(
     vr_results: Dict[int, float] = {}
     p_results: Dict[State, Dict[RobotActionProfile, float]] = {}
     
-    action_profile: npt.NDArray[np.int64] = np.zeros(num_agents, dtype=np.int64)
-    
     for state_index in state_indices:
         state = states[state_index]
-        vh_results[state_index] = {agent_idx: {} for agent_idx in human_agent_indices}
         
-        # Check if terminal - transitions[state_index] is empty list for terminal states
-        is_terminal = not transitions[state_index]
+        # Use unified helper
+        vh_results_state, vr_result, p_result = _process_single_state_phase2(
+            state_index, state, states, transitions, Vh_values, Vr_values,
+            human_agent_indices, robot_agent_indices, robot_action_profiles,
+            possible_goal_generator, num_agents, num_actions, action_powers,
+            human_policy_prior, beta_r, gamma_h, gamma_r, zeta, xi, eta, terminal_Vr
+        )
         
-        if is_terminal:
-            # Terminal state: Vh = 0 for all goals, Vr = terminal_Vr, no robot policy
-            for agent_index in human_agent_indices:
-                vh_results[state_index][agent_index] = {}  # defaults to zero
-            vr_results[state_index] = terminal_Vr
-        else:
-            # Non-terminal state: compute Q_r, pi_r, V_h_e, X_h, U_r, V_r
-            
-            # Compute Q_r values for all robot action profiles
-            Qr_values: npt.NDArray[np.floating[Any]] = np.zeros(len(robot_action_profiles))
-            for robot_action_profile_index, robot_action_profile in enumerate(robot_action_profiles):
-                action_profile[robot_agent_indices] = robot_action_profile
-                v = 0.0
-                for human_action_profile_prob, human_action_profile in human_policy_prior.profile_distribution(state):
-                    action_profile[human_agent_indices] = human_action_profile
-                    action_profile_index = int(np.dot(action_profile, action_powers))
-                    _, next_state_probabilities, next_state_indices = transitions[state_index][action_profile_index]
-                    v += human_action_profile_prob * float(np.dot(next_state_probabilities, Vr_values[next_state_indices]))
-                Qr_values[robot_action_profile_index] = gamma_r * v
-            
-            # Compute robot policy as power-law policy
-            # Use log-space computation for numerical stability:
-            # pi_r(a) ∝ (-Q_r(a))^{-beta_r} = exp(-beta_r * log(-Q_r(a)))
-            log_neg_Qr = np.log(-Qr_values)  # Q_r values are always negative
-            log_powers = -beta_r * log_neg_Qr
-            log_normalizer = logsumexp(log_powers)
-            ps = np.exp(log_powers - log_normalizer)
-            p_results[state] = {robot_action_profile: ps[idx] 
-                               for idx, robot_action_profile in enumerate(robot_action_profiles)}
-            
-            # Compute V_h, X_h, and U_r values
-            powersum = 0  # sum over humans of X_h^(-xi)
-            for agent_index in human_agent_indices:
-                if DEBUG:
-                    # Check if at least one goal is achieved in this state
-                    goals_achieved = []
-                    for pg, _ in possible_goal_generator.generate(state, agent_index):
-                        achieved = pg.is_achieved(state)
-                        goals_achieved.append((pg, achieved))
-                    if not any(a for _, a in goals_achieved):
-                        import sys
-                        print(f"WARNING: No goal achieved in state {state_index}!", file=sys.stderr, flush=True)
-                        for pg, a in goals_achieved:
-                            print(f"  {pg}: is_achieved={a}", file=sys.stderr, flush=True)
-                xh = 0
-                some_goal_achieved_with_positive_prob = False
-                for possible_goal, possible_goal_weight in possible_goal_generator.generate(state, agent_index):
-                    vh = 0
-                    for robot_action_profile_index, robot_action_profile in enumerate(robot_action_profiles):
-                        action_profile[robot_agent_indices] = robot_action_profile
-                        v = 0
-                        for human_action_profile_prob, human_action_profile in human_policy_prior.profile_distribution_with_fixed_goal(state, agent_index, possible_goal):
-                            action_profile[human_agent_indices] = human_action_profile
-                            action_profile_index = int(np.dot(action_profile, action_powers))
-                            _, next_state_probabilities, next_state_indices = transitions[state_index][action_profile_index]
-                            attainment_values_array: npt.NDArray[np.floating[Any]] = np.array([
-                                possible_goal.is_achieved(states[next_state_index]) 
-                                for next_state_index in next_state_indices
-                            ])
-                            if float(np.dot(next_state_probabilities, attainment_values_array)) > 0.0:
-                                some_goal_achieved_with_positive_prob = True
-                            vhe_values_array: npt.NDArray[np.floating[Any]] = np.array([
-                                Vh_values[next_state_index][agent_index].get(possible_goal, 0)
-                                for next_state_index in next_state_indices
-                            ])
-                            continuation_values_array = attainment_values_array + (1-attainment_values_array) * gamma_h * vhe_values_array
-                            v += human_action_profile_prob * float(np.dot(next_state_probabilities, continuation_values_array))
-                        vh += ps[robot_action_profile_index] * v
-                    vh_results[state_index][agent_index][possible_goal] = vh
-                    xh += possible_goal_weight * vh**zeta
-                assert some_goal_achieved_with_positive_prob, \
-                    f"No goal achievable with positive probability for agent {agent_index} in state {state_index}!"
-                if xh == 0:
-                    # xh is zero means no goal is reachable - raise error with details
-                    import sys
-                    print(f"\nERROR: xh=0 for agent {agent_index} in state {state_index}!", file=sys.stderr, flush=True)
-                    print(f"  State: {state}", file=sys.stderr, flush=True)
-                    print(f"  This means no goal has positive expected achievement value.", file=sys.stderr, flush=True)
-                    raise ValueError(f"xh=0 for agent {agent_index} in state {state_index}: no goal is reachable!")
-                powersum += xh**(-xi)
-                if False:  # debugging block
-                    try:
-                        # Temporarily convert warnings to errors for this operation
-                        with np.errstate(divide='raise', invalid='raise'):
-                            powersum += xh**(-xi)
-                    except (ZeroDivisionError, FloatingPointError):
-                        # output state in readable format:
-                        raise ZeroDivisionError(f"ZeroDivisionError computing X_h**(-xi) for human agent {agent_index} in state {state}, xh={xh}")
-            
-            y = powersum / len(human_agent_indices)
-            ur = -(y**eta)
-            vr_results[state_index] = ur + float(np.dot(ps, Qr_values))
+        vh_results[state_index] = vh_results_state
+        vr_results[state_index] = vr_result
+        if p_result is not None:
+            p_results[state] = p_result
     
     batch_time = time.perf_counter() - batch_start
     return vh_results, vr_results, p_results, batch_time
@@ -788,92 +766,28 @@ def compute_robot_policy(
             robot_action_profiles: List[RobotActionProfile] = [
                 tuple(actions) for actions in product(range(num_actions), repeat=len(robot_agent_indices))
             ]
-            action_profile: npt.NDArray[np.int64] = np.zeros(num_agents, dtype=np.int64)
             
             if len(level) <= num_workers:
                 # Few states - process sequentially to avoid overhead
                 for state_index in level:
                     state = states[state_index]
-                    is_terminal = not transitions[state_index]
                     
-                    if is_terminal:
-                        for agent_index in human_agent_indices:
-                            Vh_values[state_index][agent_index] = {}
-                        Vr_values[state_index] = terminal_Vr
-                    else:
-                        # Compute Q_r values
-                        Qr_values: npt.NDArray[np.floating[Any]] = np.zeros(len(robot_action_profiles))
-                        for robot_action_profile_index, robot_action_profile in enumerate(robot_action_profiles):
-                            action_profile[robot_agent_indices] = robot_action_profile
-                            v = 0.0
-                            for human_action_profile_prob, human_action_profile in human_policy_prior.profile_distribution(state):
-                                action_profile[human_agent_indices] = human_action_profile
-                                action_profile_index = int(np.dot(action_profile, action_powers))
-                                _, next_state_probabilities, next_state_indices = transitions[state_index][action_profile_index]
-                                v += human_action_profile_prob * float(np.dot(next_state_probabilities, Vr_values[next_state_indices]))
-                            Qr_values[robot_action_profile_index] = gamma_r * v
-                        
-                        # Compute robot policy using log-space for numerical stability
-                        # pi_r(a) ∝ (-Q_r(a))^{-beta_r} = exp(-beta_r * log(-Q_r(a)))
-                        log_neg_Qr = np.log(-Qr_values)  # Q_r values are always negative
-                        log_powers = -beta_r * log_neg_Qr
-                        log_normalizer = logsumexp(log_powers)
-                        ps = np.exp(log_powers - log_normalizer)
-                        robot_policy_values[state] = {robot_action_profile: ps[idx] 
-                                                     for idx, robot_action_profile in enumerate(robot_action_profiles)}
-                        
-                        # Compute V_h, X_h, U_r values
-                        powersum = 0
-                        for agent_index in human_agent_indices:
-                            if DEBUG:
-                                # Check if at least one goal is achieved in this state
-                                goals_achieved = []
-                                for pg, _ in possible_goal_generator.generate(state, agent_index):
-                                    achieved = pg.is_achieved(state)
-                                    goals_achieved.append((pg, achieved))
-                                if not any(a for _, a in goals_achieved):
-                                    print(f"WARNING: No goal achieved in state {state_index}!")
-                                    for pg, a in goals_achieved:
-                                        print(f"  {pg}: is_achieved={a}")
-                            xh = 0
-                            some_goal_achieved_with_positive_prob = False
-                            for possible_goal, possible_goal_weight in possible_goal_generator.generate(state, agent_index):
-                                vh = 0
-                                for robot_action_profile_index, robot_action_profile in enumerate(robot_action_profiles):
-                                    action_profile[robot_agent_indices] = robot_action_profile
-                                    v = 0
-                                    for human_action_profile_prob, human_action_profile in human_policy_prior.profile_distribution_with_fixed_goal(state, agent_index, possible_goal):
-                                        action_profile[human_agent_indices] = human_action_profile
-                                        action_profile_index = int(np.dot(action_profile, action_powers))
-                                        _, next_state_probabilities, next_state_indices = transitions[state_index][action_profile_index]
-                                        attainment_values_array = np.array([
-                                            possible_goal.is_achieved(states[next_state_index]) 
-                                            for next_state_index in next_state_indices
-                                        ])
-                                        if float(np.dot(next_state_probabilities, attainment_values_array)) > 0.0:
-                                            some_goal_achieved_with_positive_prob = True
-                                        vhe_values_array = np.array([
-                                            Vh_values[next_state_index][agent_index].get(possible_goal, 0)
-                                            for next_state_index in next_state_indices
-                                        ])
-                                        continuation_values_array = attainment_values_array + (1-attainment_values_array) * gamma_h * vhe_values_array
-                                        v += human_action_profile_prob * float(np.dot(next_state_probabilities, continuation_values_array))
-                                    vh += ps[robot_action_profile_index] * v
-                                assert some_goal_achieved_with_positive_prob, \
-                                    f"No goal achievable with positive probability for agent {agent_index} in state {state_index}!"
-                                Vh_values[state_index][agent_index][possible_goal] = vh
-                                xh += possible_goal_weight * vh**zeta
-                            if xh == 0:
-                                # xh is zero means no goal is reachable - raise error with details
-                                print(f"\nERROR: xh=0 for agent {agent_index} in state {state_index}!")
-                                print(f"  State: {state}")
-                                print(f"  This means no goal has positive expected achievement value.")
-                                raise ValueError(f"xh=0 for agent {agent_index} in state {state_index}: no goal is reachable!")
-                            powersum += xh**(-xi)
-                        
-                        y = powersum / len(human_agent_indices)
-                        ur = -(y**eta)
-                        Vr_values[state_index] = ur + float(np.dot(ps, Qr_values))
+                    # Use unified helper
+                    vh_results, vr_result, p_result = _process_single_state_phase2(
+                        state_index, state, states, transitions, Vh_values, Vr_values,
+                        human_agent_indices, robot_agent_indices, robot_action_profiles,
+                        possible_goal_generator, num_agents, num_actions, action_powers,
+                        human_policy_prior, beta_r, gamma_h, gamma_r, zeta, xi, eta, terminal_Vr
+                    )
+                    
+                    # Store results
+                    for agent_index, agent_vh in vh_results.items():
+                        Vh_values[state_index][agent_index].update(agent_vh)
+                    
+                    Vr_values[state_index] = vr_result
+                    
+                    if p_result is not None:
+                        robot_policy_values[state] = p_result
             else:
                 # Many states - parallelize
                 # Re-initialize shared data so new workers see updated values from previous levels
