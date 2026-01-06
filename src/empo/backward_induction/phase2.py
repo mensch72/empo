@@ -20,6 +20,7 @@ Attainment Cache:
     redundant is_achieved() computation between phases.
 """
 
+import math
 import numpy as np
 import numpy.typing as npt
 import time
@@ -157,15 +158,15 @@ def _rp_process_single_state(
         print(f"  Transient state {state_index}")
     
     # Compute Q_r values for all robot action profiles
-    Qr_values: npt.NDArray[np.floating[Any]] = np.zeros(len(robot_action_profiles))
+    Qr_values = np.zeros(len(robot_action_profiles))
     for robot_action_profile_index, robot_action_profile in enumerate(robot_action_profiles):
         action_profile[robot_agent_indices] = robot_action_profile
         v = 0.0
         for human_action_profile_prob, human_action_profile in human_policy_prior.profile_distribution(state):
             action_profile[human_agent_indices] = human_action_profile
-            action_profile_index = int(np.dot(action_profile, action_powers))
+            action_profile_index = (action_profile @ action_powers).item()
             _, next_state_probabilities, next_state_indices = transitions[state_index][action_profile_index]
-            v += human_action_profile_prob * float(np.dot(next_state_probabilities, Vr_values[next_state_indices]))
+            v += human_action_profile_prob * np.dot(next_state_probabilities, Vr_values[next_state_indices])
         Qr_values[robot_action_profile_index] = gamma_r * v
     
     # Compute robot policy as power-law policy
@@ -206,13 +207,12 @@ def _rp_process_single_state(
                 v = 0.0
                 for human_action_profile_prob, human_action_profile in human_policy_prior.profile_distribution_with_fixed_goal(state, agent_index, possible_goal):
                     action_profile[human_agent_indices] = human_action_profile
-                    action_profile_index = int(np.dot(action_profile, action_powers))
+                    action_profile_index = (action_profile @ action_powers).item()
                     _, next_state_probabilities, next_state_indices = transitions[state_index][action_profile_index]
                     
                     # Look up attainment values from Phase 1 cache
                     # The slice_cache is pre-populated with all values for this batch from Phase 1
-                    attainment_values_array: npt.NDArray[np.floating[Any]]
-                    cached: Optional[npt.NDArray[np.int8]] = None
+                    cached = None
                     
                     if slice_cache is not None and state_index in slice_cache:
                         cached = slice_cache[state_index][action_profile_index].get(possible_goal)
@@ -222,20 +222,27 @@ def _rp_process_single_state(
                     else:
                         # Cache miss - compute attainment values
                         # This should rarely happen if Phase 1 populated the cache correctly
-                        attainment_values_array = np.array([
-                            possible_goal.is_achieved(states[next_state_index]) 
-                            for next_state_index in next_state_indices
-                        ], dtype=np.int8)
+                        attainment_values_array = np.fromiter(
+                            (possible_goal.is_achieved(states[next_state_index]) 
+                             for next_state_index in next_state_indices),
+                            dtype=np.int8,
+                            count=len(next_state_indices)
+                        )
                     
-                    if float(np.dot(next_state_probabilities, attainment_values_array)) > 0.0:
+                    if np.dot(next_state_probabilities, attainment_values_array) > 0.0:
                         some_goal_achieved_with_positive_prob = True
                     
-                    vhe_values_array: npt.NDArray[np.floating[Any]] = np.array([
-                        Vh_values[next_state_index][agent_index].get(possible_goal, 0)
-                        for next_state_index in next_state_indices
-                    ])
-                    continuation_values_array = attainment_values_array + (1-attainment_values_array) * gamma_h * vhe_values_array
-                    v += human_action_profile_prob * float(np.dot(next_state_probabilities, continuation_values_array))
+                    vhe_values_array = np.fromiter(
+                        (Vh_values[next_state_index][agent_index].get(possible_goal, 0)
+                         for next_state_index in next_state_indices),
+                        dtype=np.float64,
+                        count=len(next_state_indices)
+                    )
+                    # Use np.where to avoid intermediate array allocation
+                    v += human_action_profile_prob * np.dot(
+                        next_state_probabilities,
+                        np.where(attainment_values_array, 1.0, gamma_h * vhe_values_array)
+                    )
                 vh += ps[robot_action_profile_index] * v
             
             vh_results[agent_index][possible_goal] = vh
@@ -542,7 +549,7 @@ class TabularRobotPolicy:
             return tuple(np.random.randint(0, self.num_actions) for _ in self.robot_agent_indices)
         
         profiles = list(dist.keys())
-        probs = np.array([dist[p] for p in profiles])
+        probs = np.fromiter((dist[p] for p in profiles), dtype=np.float64, count=len(profiles))
         probs = probs / probs.sum()  # normalize
         idx = np.random.choice(len(profiles), p=probs)
         return profiles[idx]

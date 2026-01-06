@@ -21,6 +21,7 @@ Parameters:
     gamma_h: Human discount factor (γ).
 """
 
+import math
 import numpy as np
 import numpy.typing as npt
 import time
@@ -87,7 +88,6 @@ def _hpp_process_single_state(
     beta_h: float,
     gamma_h: float,
     slice_cache: Optional[SliceCache] = None,
-    sliced_cache: Optional[SlicedAttainmentCache] = None,
 ) -> Tuple[Dict[int, Dict[PossibleGoal, float]], Optional[Dict[int, Dict[PossibleGoal, npt.NDArray[np.floating[Any]]]]]]:
     """Process a single state, returning (v_results, p_results).
     
@@ -108,14 +108,15 @@ def _hpp_process_single_state(
         gamma_h: Discount factor
         slice_cache: Optional slice cache to WRITE to (worker's local cache for this batch).
             Structure: Dict[state_index, List[Dict[goal, array]]]
-        sliced_cache: Optional SlicedAttainmentCache to READ from (populated by previous levels).
-            Workers read from here but write to slice_cache.
     
     Returns:
         Tuple of:
         - v_results: Dict[agent_index, Dict[goal, float]] - V-values for this state
         - p_results: Dict[agent_index, Dict[goal, ndarray]] - policies (None for terminal states)
     """
+    if slice_cache is not None:
+        this_state_cache = slice_cache[state_index]
+
     actions = range(num_actions)
     v_results: Dict[int, Dict[PossibleGoal, float]] = {}
     p_results: Optional[Dict[int, Dict[PossibleGoal, npt.NDArray[np.floating[Any]]]]] = None
@@ -131,63 +132,67 @@ def _hpp_process_single_state(
     # Non-terminal state: compute both V-values and policies
     p_results = {}
     for agent_index in human_agent_indices:
-        v_results[agent_index] = {}
-        p_results[agent_index] = {}
+        vres = v_results[agent_index] = {}
+        pres = p_results[agent_index] = {}
         
         for possible_goal, _ in possible_goal_generator.generate(state, agent_index):
             if possible_goal.is_achieved(state):
                 # Goal achieved already in this state: remain still, V=0
-                v_results[agent_index][possible_goal] = 0
+                vres[possible_goal] = 0
                 ps = np.zeros(num_actions)
                 ps[0] = 1.0  # Assume action 0 is 'stay still'
-                p_results[agent_index][possible_goal] = ps
+                pres[possible_goal] = ps
                 if DEBUG:
                     print(f"    Goal achieved in state, agent {agent_index}: V = 0, remain still policy")
             else:
                 # Compute Q values as expected future V values
-                expected_Vs: npt.NDArray[np.floating[Any]] = np.zeros(num_actions)
+                expected_Vs = np.zeros(num_actions)
                 for action in actions:
-                    v_accum: float = 0.0
+                    v_accum = 0.0
                     for action_profile_prob, action_profile in believed_others_policy(state, agent_index, action):
-                        worst_expectation = float('inf')
+                        worst_expectation = math.inf
                         action_profile[agent_index] = action
                         for robot_action_profile in robot_action_profiles:
                             action_profile[robot_agent_indices] = robot_action_profile
-                            action_profile_index = int(np.dot(action_profile, action_powers))
+                            action_profile_index = (action_profile @ action_powers).item()
                             _, next_state_probabilities, next_state_indices = transitions[state_index][action_profile_index]
 
                             # Check caches first, compute and store if not found
-                            attainment_values_array: npt.NDArray[np.int8]
-                            cached: Optional[npt.NDArray[np.int8]] = None
+                            cached = None
                             
                             # Try to read from caches:
                             # 1. slice_cache (this worker's local cache for current batch)
                             # 2. sliced_cache (master cache with slices from previous levels)
-                            if slice_cache is not None and state_index in slice_cache:
-                                cached = slice_cache[state_index][action_profile_index].get(possible_goal)
-                            if cached is None and sliced_cache is not None:
-                                cached = sliced_cache.get(state_index, action_profile_index, possible_goal)
+                            if this_state_cache is not None:
+                                cached = this_state_cache[action_profile_index].get(possible_goal)
                             
                             if cached is not None:
                                 attainment_values_array = cached
                             else:
                                 # Compute attainment values
-                                attainment_values_array = np.array([
-                                    possible_goal.is_achieved(states[next_state_index]) 
-                                    for next_state_index in next_state_indices
-                                ], dtype=np.int8)
+                                attainment_values_array = np.fromiter(
+                                    (possible_goal.is_achieved(states[next_state_index]) 
+                                     for next_state_index in next_state_indices),
+                                    dtype=np.int8,
+                                    count=len(next_state_indices)
+                                )
                                 
                                 # Store in slice_cache if available
-                                if slice_cache is not None and state_index in slice_cache:
-                                    slice_cache[state_index][action_profile_index][possible_goal] = attainment_values_array
+                                if this_state_cache is not None:
+                                    this_state_cache[action_profile_index][possible_goal] = attainment_values_array
 
                             # Get V values from successors (use .get for parallel safety)
-                            v_values_array: npt.NDArray[np.floating[Any]] = np.array([
-                                Vh_values[next_state_indices[i]][agent_index].get(possible_goal, 0)
-                                for i in range(len(next_state_indices))
-                            ])
-                            continuation_values_array = attainment_values_array + (1-attainment_values_array) * v_values_array
-                            expectation = float(np.dot(next_state_probabilities, continuation_values_array))
+                            v_values_array = np.fromiter(
+                                (Vh_values[next_state_index][agent_index].get(possible_goal, 0)
+                                 for next_state_index in next_state_indices),
+                                dtype=np.float64,
+                                count=len(next_state_indices)
+                            )
+                            # Use np.where to avoid intermediate array allocation
+                            expectation = np.dot(
+                                next_state_probabilities,
+                                np.where(attainment_values_array, 1.0, v_values_array)
+                            )
                             if expectation < worst_expectation:
                                 worst_expectation = expectation
                         v_accum += action_profile_prob * worst_expectation
@@ -196,7 +201,7 @@ def _hpp_process_single_state(
                 q = gamma_h * expected_Vs
                 
                 # Boltzmann policy (numerically stable softmax)
-                if beta_h == float('inf'):
+                if beta_h == math.inf:
                     # Infinite beta: deterministic argmax policy
                     max_q = np.max(q)
                     p = np.zeros_like(q)
@@ -207,8 +212,8 @@ def _hpp_process_single_state(
                     p = np.exp(scaled_q)
                     p /= np.sum(p)
                 
-                v_results[agent_index][possible_goal] = float(np.sum(p * q))
-                p_results[agent_index][possible_goal] = p
+                vres[possible_goal] = float(np.sum(p * q))
+                pres[possible_goal] = p
                 
                 if DEBUG:
                     print(f"    Agent {agent_index}, goal {possible_goal}: V = {v_results[agent_index][possible_goal]:.4f}")
@@ -271,7 +276,6 @@ def _hpp_compute_sequential(
             robot_agent_indices, robot_action_profiles,
             beta_h, gamma_h,
             slice_cache=slice_cache,
-            sliced_cache=sliced_cache,
         )
         
         # Store results back into Vh_values and system2_policies
@@ -400,7 +404,6 @@ def _hpp_process_state_batch(
             robot_agent_indices, robot_action_profiles,
             beta_h, gamma_h,
             slice_cache=slice_cache,
-            sliced_cache=_shared_sliced_cache,
         )
         
         v_results[state_index] = state_v_results
@@ -773,7 +776,6 @@ def compute_human_policy_prior(
                         robot_agent_indices, robot_action_profiles,
                         beta_h, gamma_h,
                         slice_cache=inline_slice_cache,
-                        sliced_cache=sliced_cache,
                     )
                     
                     # Store results
