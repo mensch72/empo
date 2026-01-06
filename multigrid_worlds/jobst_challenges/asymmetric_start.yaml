@@ -14,4 +14,13 @@ map: |
   We Ay .. Ae .. .. .. Ay We
   We We We We We We We We We
 
-max_steps: 30
+max_steps: 10
+
+possible_goals:
+  - 1,1
+  - 2,1
+  - 3,1
+  - 4,1
+  - 5,1
+  - 6,1
+  - 7,1

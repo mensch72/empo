@@ -6,10 +6,9 @@ This script demonstrates computing the robot policy using exact backward inducti
 on the state DAG, rather than neural network training. This is computationally
 exact but only feasible for small state spaces.
 
-Uses the trivial world model from phase2_robot_policy_demo.py:
-- 4x6 grid with 1 human, 1 robot
-- Rock that can be pushed by the robot
-- Human has goals to reach specific cells
+Uses either:
+- The trivial world model (default): 4x6 grid with 1 human, 1 robot, and a rock
+- A custom world from multigrid_worlds/ via --world parameter
 
 The demo:
 1. Computes human policy prior via backward induction
@@ -17,9 +16,9 @@ The demo:
 3. Records rollout movies with value annotations
 
 Usage:
-    python phase2_backward_induction.py           # Default 5 max steps
+    python phase2_backward_induction.py           # Default trivial world, 5 max steps
     python phase2_backward_induction.py --steps 3 # Shorter horizon
-    python phase2_backward_induction.py --steps 7 # Longer horizon (slower)
+    python phase2_backward_induction.py --world basic/two_agents  # Use custom world
     python phase2_backward_induction.py --parallel  # Use parallel computation
     python phase2_backward_induction.py --rollouts 20  # More rollouts
 
@@ -37,6 +36,7 @@ Output:
 """
 
 import argparse
+import inspect
 import itertools
 import os
 import random
@@ -51,16 +51,16 @@ import gymnasium as gym
 sys.modules['gym'] = gym
 
 from gym_multigrid.multigrid import (
-    MultiGridEnv, Grid, Agent, Wall, World, SmallActions, SmallWorld,
-    Rock
+    MultiGridEnv, World, SmallActions
 )
 from empo.possible_goal import PossibleGoalGenerator, TabularGoalSampler
 from empo.backward_induction import (
     compute_human_policy_prior, 
     compute_robot_policy,
-    TabularHumanPolicyPrior,
     TabularRobotPolicy
 )
+from empo import backward_induction as backward_induction_pkg
+from empo.human_policy_prior import TabularHumanPolicyPrior
 from empo.multigrid import ReachCellGoal
 
 
@@ -99,6 +99,7 @@ def create_trivial_env(max_steps: int = 5) -> MultiGridEnv:
         .. = Empty cell
     
     Note: Agent ordering is different here - robot is agent 0, human is agent 1.
+    Human/robot indices are auto-detected by color (yellow=human, grey=robot).
     """
     GRID_MAP = """
     We We We We We We
@@ -112,6 +113,42 @@ def create_trivial_env(max_steps: int = 5) -> MultiGridEnv:
         max_steps=max_steps,
         partial_obs=False,
         objects_set=World,
+        actions_set=SmallActions
+    )
+    # Agent indices are auto-detected via properties (yellow=human, grey=robot)
+    return env
+
+
+def create_env_from_world(world_path: str, max_steps: int = 5) -> MultiGridEnv:
+    """
+    Create an environment from a YAML world file.
+    
+    Args:
+        world_path: Path relative to multigrid_worlds/, e.g., "basic/two_agents"
+                   (.yaml extension is optional)
+        max_steps: Maximum steps per episode (overrides config file value)
+    
+    Returns:
+        MultiGridEnv loaded from the config file.
+    """
+    # Find the multigrid_worlds directory
+    script_dir = os.path.dirname(__file__)
+    worlds_dir = os.path.join(script_dir, '..', 'multigrid_worlds')
+    
+    # Add .yaml extension if not present
+    if not world_path.endswith('.yaml') and not world_path.endswith('.yml'):
+        world_path = world_path + '.yaml'
+    
+    config_path = os.path.join(worlds_dir, world_path)
+    config_path = os.path.abspath(config_path)
+    
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"World file not found: {config_path}")
+    
+    env = MultiGridEnv(
+        config_file=config_path,
+        max_steps=max_steps,
+        partial_obs=False,
         actions_set=SmallActions
     )
     return env
@@ -142,23 +179,41 @@ def create_goal_sampler(env: MultiGridEnv, human_idx: int) -> TabularGoalSampler
 # Goal Generator for Backward Induction
 # =============================================================================
 
+class CellGoalSampler:
+    """
+    A goal sampler that creates ReachCellGoal on-the-fly for any human.
+    
+    Samples goals uniformly from a list of cell coordinates, creating the
+    goal object on-the-fly with the correct human_agent_index.
+    """
+    
+    def __init__(self, env: MultiGridEnv, goal_cells: List[Tuple[int, int]]):
+        self.env = env
+        self.goal_cells = goal_cells
+    
+    def sample(self, state, human_agent_index: int):
+        """Sample a random cell goal for the specified human."""
+        import random
+        cell = random.choice(self.goal_cells)
+        goal = ReachCellGoal(self.env, human_agent_index, cell)
+        return goal, 1.0  # Uniform weight
+
+
 class TrivialGoalGenerator(PossibleGoalGenerator):
     """
     Goal generator for the trivial environment.
     
-    Generates all possible cell goals for the human agent.
+    Generates all possible cell goals for any human agent.
     
     Args:
         world_model: The environment.
-        human_idx: Index of the human agent.
         goal_weights: Optional dict mapping cell tuples to weights.
                      Default weight is 1.0 for cells not in the dict.
     """
     
-    def __init__(self, world_model: MultiGridEnv, human_idx: int, 
+    def __init__(self, world_model: MultiGridEnv,
                  goal_weights: Optional[Dict[Tuple[int, int], float]] = None):
         super().__init__(world_model)
-        self.human_idx = human_idx
         self.goal_weights = goal_weights or {}
         # All walkable cells the human could potentially reach
         self.goal_cells = [
@@ -175,6 +230,61 @@ class TrivialGoalGenerator(PossibleGoalGenerator):
             goal = ReachCellGoal(self.env, human_agent_index, cell)
             weight = self.goal_weights.get(cell, 1.0)
             yield (goal, weight)
+    
+    def get_sampler(self) -> CellGoalSampler:
+        """Create a sampler that samples from this generator's goal cells."""
+        return CellGoalSampler(self.env, self.goal_cells)
+
+
+class GenericGoalGenerator(PossibleGoalGenerator):
+    """
+    Goal generator that discovers walkable cells automatically.
+    
+    Generates ReachCellGoal for each empty/walkable cell in the grid.
+    
+    Args:
+        world_model: The environment.
+        goal_weights: Optional dict mapping cell tuples to weights.
+                     Default weight is 1.0 for cells not in the dict.
+    """
+    
+    def __init__(self, world_model: MultiGridEnv,
+                 goal_weights: Optional[Dict[Tuple[int, int], float]] = None):
+        super().__init__(world_model)
+        self.goal_weights = goal_weights or {}
+        self.goal_cells = self._discover_walkable_cells()
+    
+    def _discover_walkable_cells(self) -> List[Tuple[int, int]]:
+        """Find all cells that are empty or contain only agents."""
+        walkable = []
+        grid = self.env.grid
+        for x in range(self.env.width):
+            for y in range(self.env.height):
+                cell = grid.get(x, y)
+                # Cell is walkable if empty or contains only an agent
+                if cell is None:
+                    walkable.append((x, y))
+                elif hasattr(cell, 'can_overlap') and cell.can_overlap():
+                    walkable.append((x, y))
+        
+        # Also include agent starting positions
+        for agent in self.env.agents:
+            pos = tuple(agent.pos)
+            if pos not in walkable:
+                walkable.append(pos)
+        
+        return sorted(walkable)
+    
+    def generate(self, state, human_agent_index: int):
+        """Generate all possible goals with weights."""
+        for cell in self.goal_cells:
+            goal = ReachCellGoal(self.env, human_agent_index, cell)
+            weight = self.goal_weights.get(cell, 1.0)
+            yield (goal, weight)
+    
+    def get_sampler(self) -> CellGoalSampler:
+        """Create a sampler that samples from this generator's goal cells."""
+        return CellGoalSampler(self.env, self.goal_cells)
 
 
 # =============================================================================
@@ -197,14 +307,12 @@ def get_joint_action_names(num_agents: int, num_single_actions: int = 4) -> list
     combinations = list(itertools.product(single_names, repeat=num_agents))
     return [', '.join(combo) for combo in combinations]
 
-
 def run_policy_rollout(
     env: MultiGridEnv,
     robot_policy: TabularRobotPolicy,
     human_policy_prior: TabularHumanPolicyPrior,
-    goal_sampler: TabularGoalSampler,
-    human_idx: int,
-    robot_idx: int,
+    goal_sampler,
+    goal_generator,
     Vr_values: Optional[Dict] = None,
     Vh_values: Optional[Dict] = None,
     beta_r: float = 100.0,
@@ -220,16 +328,22 @@ def run_policy_rollout(
     Returns:
         Number of steps taken.
     """
+    # Get agent indices from env
+    human_agent_indices = env.human_agent_indices
+    robot_agent_indices = env.robot_agent_indices
+    
     # Generate action names
     joint_action_names = get_joint_action_names(1)  # Single robot
     
     env.reset()
     steps_taken = 0
     
-    # Sample initial goal for human
+    # Sample initial goal for each human
     state = env.get_state()
-    human_goal, _ = goal_sampler.sample(state, human_idx)
-    human_goals = {human_idx: human_goal}
+    human_goals = {}
+    for h_idx in human_agent_indices:
+        human_goal, _ = goal_sampler.sample(state, h_idx)
+        human_goals[h_idx] = human_goal
     
     def compute_annotation_text(state, selected_action=None):
         """Compute annotation text for the current state."""
@@ -257,13 +371,14 @@ def run_policy_rollout(
             if Vh_values is not None and state in Vh_values:
                 x_h_vals = []
                 vh_state = Vh_values.get(state, {})
-                if human_idx in vh_state:
-                    for goal in goal_sampler.goals:
-                        if goal in vh_state[human_idx]:
-                            vh = vh_state[human_idx][goal]
-                            x_h_vals.append(vh ** zeta)
+                for h_idx in human_agent_indices:
+                    if h_idx in vh_state:
+                        for goal, _ in goal_generator.generate(state, h_idx):
+                            if goal in vh_state[h_idx]:
+                                vh = vh_state[h_idx][goal]
+                                x_h_vals.append(vh ** zeta)
                 if x_h_vals:
-                    x_h = sum(x_h_vals) / len(x_h_vals)  # Average over goals
+                    x_h = sum(x_h_vals) / len(x_h_vals)  # Average over goals and humans
                     if x_h > 0:
                         y = x_h ** (-xi)
                         u_r = -(y ** eta)
@@ -277,10 +392,14 @@ def run_policy_rollout(
         sorted_actions = sorted(policy_dist.items(), key=lambda x: -x[1])
         
         for action_profile, prob in sorted_actions:
-            action_idx = action_profile[0]  # Single robot
-            action_name = joint_action_names[action_idx] if action_idx < len(joint_action_names) else f"a{action_idx}"
-            marker = ">" if selected_action is not None and action_idx == selected_action else " "
-            lines.append(f"{marker}{action_name:>7}: {prob:.3f}")
+            # Format action names for all robots
+            action_names = []
+            for action_idx in action_profile:
+                name = SINGLE_ACTION_NAMES[action_idx] if action_idx < len(SINGLE_ACTION_NAMES) else f"a{action_idx}"
+                action_names.append(name)
+            action_str = ', '.join(action_names)
+            marker = ">" if selected_action is not None and action_profile == selected_action else " "
+            lines.append(f"{marker}{action_str}: {prob:.3f}")
         
         return lines
     
@@ -290,7 +409,7 @@ def run_policy_rollout(
     
     # Render initial frame
     robot_action = get_robot_action(state)
-    selected_action = robot_action[0] if robot_action else None
+    selected_action = robot_action if robot_action else None
     annotation = compute_annotation_text(state, selected_action)
     env.render(mode='rgb_array', highlight=False, tile_size=RENDER_TILE_SIZE,
                annotation_text=annotation, annotation_panel_width=ANNOTATION_PANEL_WIDTH,
@@ -302,15 +421,18 @@ def run_policy_rollout(
         # Get actions
         actions = [0] * len(env.agents)
         
-        # Human uses computed policy prior
-        human_action_dist = human_policy_prior(state, human_idx, human_goal)
-        if human_action_dist is not None:
-            actions[human_idx] = np.random.choice(len(human_action_dist), p=human_action_dist)
+        # Each human uses computed policy prior with their sampled goal
+        for h_idx in human_agent_indices:
+            human_goal = human_goals[h_idx]
+            human_action_dist = human_policy_prior(state, h_idx, human_goal)
+            if human_action_dist is not None:
+                actions[h_idx] = np.random.choice(len(human_action_dist), p=human_action_dist)
         
-        # Robot uses computed policy
+        # Each robot uses computed policy
         robot_action = robot_policy.sample(state)
         if robot_action is not None:
-            actions[robot_idx] = robot_action[0]  # Single robot
+            for i, r_idx in enumerate(robot_agent_indices):
+                actions[r_idx] = robot_action[i]
         
         # Step environment
         _, _, done, _ = env.step(actions)
@@ -319,7 +441,7 @@ def run_policy_rollout(
         # Render frame
         new_state = env.get_state()
         new_robot_action = get_robot_action(new_state)
-        selected_action = new_robot_action[0] if new_robot_action else None
+        selected_action = new_robot_action if new_robot_action else None
         annotation = compute_annotation_text(new_state, selected_action)
         env.render(mode='rgb_array', highlight=False, tile_size=RENDER_TILE_SIZE,
                    annotation_text=annotation, annotation_panel_width=ANNOTATION_PANEL_WIDTH,
@@ -335,12 +457,60 @@ def run_policy_rollout(
 # Main
 # =============================================================================
 
+def get_all_functions_from_module(module, _seen=None):
+    """
+    Recursively get all functions from a module and its submodules.
+    
+    Returns a list of (function_object, qualified_name) tuples.
+    Tracks already seen functions to avoid duplicates from re-exports.
+    """
+    if _seen is None:
+        _seen = set()
+    
+    functions = []
+    
+    # Recursively process submodules FIRST so we get functions from their source modules
+    if hasattr(module, '__path__'):
+        import pkgutil
+        for importer, modname, ispkg in pkgutil.iter_modules(module.__path__):
+            submodule_name = f"{module.__name__}.{modname}"
+            try:
+                submodule = __import__(submodule_name, fromlist=[modname])
+                functions.extend(get_all_functions_from_module(submodule, _seen))
+            except ImportError:
+                # Some submodules may not be importable (for example, they can depend on
+                # optional packages that are not installed). In that case we intentionally
+                # skip them and continue discovering functions from the remaining submodules.
+                continue
+    
+    # Get functions defined directly in this module (not re-exports)
+    for name, obj in inspect.getmembers(module):
+        if inspect.isfunction(obj):
+            # Only include functions actually defined in this specific module
+            if hasattr(obj, '__module__') and obj.__module__ == module.__name__:
+                func_id = id(obj)
+                if func_id not in _seen:
+                    _seen.add(func_id)
+                    functions.append((obj, f"{obj.__module__}.{obj.__name__}"))
+        elif inspect.isclass(obj):
+            # Get methods from classes defined in this module
+            if hasattr(obj, '__module__') and obj.__module__ == module.__name__:
+                for method_name, method in inspect.getmembers(obj, predicate=inspect.isfunction):
+                    if not method_name.startswith('_') or method_name in ('__init__', '__call__'):
+                        func_id = id(method)
+                        if func_id not in _seen:
+                            _seen.add(func_id)
+                            functions.append((method, f"{obj.__module__}.{obj.__name__}.{method_name}"))
+    
+    return functions
+
+
 def main(
     max_steps: int = 5,
     num_rollouts: int = 20,
     parallel: bool = True,
     num_workers: Optional[int] = 4,
-    beta_h: float = 2.0,
+    beta_h: float = 10.0,
     beta_r: float = 100.0,
     gamma_h: float = 0.99,
     gamma_r: float = 0.99,
@@ -353,6 +523,10 @@ def main(
     output_dir: Optional[str] = None,
     movie_fps: int = 3,
     save_video_path: Optional[str] = None,
+    world_path: Optional[str] = None,
+    human_idx: Optional[int] = None,
+    robot_idx: Optional[int] = None,
+    profile: bool = False,
 ):
     """Run Phase 2 backward induction demo."""
     # Set random seeds
@@ -365,6 +539,39 @@ def main(
     print("=" * 70)
     print()
     
+    # Set up line profiler if requested
+    profiler = None
+    if profile:
+        try:
+            from line_profiler import LineProfiler
+            profiler = LineProfiler()
+            
+            # Get all functions from the backward_induction package
+            functions_to_profile = get_all_functions_from_module(backward_induction_pkg)
+            
+            print(f"Line profiling enabled. Profiling {len(functions_to_profile)} functions:")
+            for func, name in functions_to_profile:
+                profiler.add_function(func)
+                print(f"  - {name}")
+            
+            # Also profile HumanPolicyPrior methods (called heavily in Phase 2)
+            hpp_methods_to_profile = [
+                (TabularHumanPolicyPrior.__call__, 'TabularHumanPolicyPrior.__call__'),
+                (TabularHumanPolicyPrior.profile_distribution, 'TabularHumanPolicyPrior.profile_distribution'),
+                (TabularHumanPolicyPrior.profile_distribution_with_fixed_goal, 'TabularHumanPolicyPrior.profile_distribution_with_fixed_goal'),
+                (TabularHumanPolicyPrior._profile_distribution_numpy, 'TabularHumanPolicyPrior._profile_distribution_numpy'),
+                (TabularHumanPolicyPrior._to_probability_array, 'TabularHumanPolicyPrior._to_probability_array'),
+            ]
+            print(f"  Plus {len(hpp_methods_to_profile)} HumanPolicyPrior methods:")
+            for func, name in hpp_methods_to_profile:
+                profiler.add_function(func)
+                print(f"  - {name}")
+            print()
+        except ImportError:
+            print("WARNING: line_profiler not installed. Install with: pip install line_profiler")
+            print("Continuing without profiling...")
+            print()
+    
     # Create output directory
     if output_dir is None:
         output_dir = os.path.join(os.path.dirname(__file__), '..', 'outputs', 'phase2_backward_induction')
@@ -372,41 +579,58 @@ def main(
     
     # Create environment
     print("Creating environment...")
-    env = create_trivial_env(max_steps=max_steps)
+    if world_path is not None:
+        print(f"  Loading world from: {world_path}")
+        env = create_env_from_world(world_path, max_steps=max_steps)
+    else:
+        env = create_trivial_env(max_steps=max_steps)
     env.reset()
     
-    # Identify agents
-    # In our trivial env, robot (grey/agent 0) comes before human (yellow/agent 1)
-    human_idx = None
-    robot_idx = None
-    for i, agent in enumerate(env.agents):
-        if agent.color == 'yellow':
-            human_idx = i
-            print(f"  Human (agent {i}): pos={tuple(agent.pos)}")
-        elif agent.color == 'grey':
-            robot_idx = i
-            print(f"  Robot (agent {i}): pos={tuple(agent.pos)}")
+    # Override agent indices from CLI if specified
+    if human_idx is not None:
+        env.human_agent_indices = [human_idx]
+    if robot_idx is not None:
+        env.robot_agent_indices = [robot_idx]
     
-    if human_idx is None or robot_idx is None:
-        raise ValueError("Could not identify human and robot agents")
-    
-    human_agent_indices = [human_idx]
-    robot_agent_indices = [robot_idx]
+    # Print agent info
+    for h_idx in env.human_agent_indices:
+        print(f"  Human (agent {h_idx}): pos={tuple(env.agents[h_idx].pos)}, color={env.agents[h_idx].color}")
+    for r_idx in env.robot_agent_indices:
+        print(f"  Robot (agent {r_idx}): pos={tuple(env.agents[r_idx].pos)}, color={env.agents[r_idx].color}")
     
     print(f"  Grid: {env.width}x{env.height}")
     print(f"  Max steps: {max_steps}")
+    print(f"  Humans: {len(env.human_agent_indices)}, Robots: {len(env.robot_agent_indices)}")
     print()
     
     # Create goal generator for backward induction
     print("Creating goal generator...")
-    goal_generator = TrivialGoalGenerator(env, human_idx, goal_weights=goal_weights)
     
-    # Also create goal sampler for rollouts
-    goal_sampler = create_goal_sampler(env, human_idx)
-    
-    print(f"  Goals: {len(goal_generator.goal_cells)} possible cell goals")
-    if goal_weights:
-        print(f"  Custom goal weights: {goal_weights}")
+    # First check if env has a goal generator from config (possible_goals in YAML)
+    if hasattr(env, 'possible_goal_generator') and env.possible_goal_generator is not None:
+        goal_generator = env.possible_goal_generator
+        goal_sampler = env.possible_goal_sampler
+        print(f"  Using goal generator from config file")
+        print(f"  Goals: {len(goal_generator.goal_coords)} goals from config")
+        print(f"  Goal coords: {goal_generator.goal_coords}")
+    elif world_path is not None:
+        # Use generic goal generator for custom worlds without possible_goals
+        goal_generator = GenericGoalGenerator(env, goal_weights=goal_weights)
+        # Create goal sampler for rollouts - creates goals on-the-fly with correct human_agent_index
+        goal_sampler = goal_generator.get_sampler()
+        print(f"  Goals: {len(goal_generator.goal_cells)} possible cell goals (auto-discovered)")
+        print(f"  Goal cells: {goal_generator.goal_cells}")
+        if goal_weights:
+            print(f"  Custom goal weights: {goal_weights}")
+    else:
+        # Use trivial goal generator for the default world
+        goal_generator = TrivialGoalGenerator(env, goal_weights=goal_weights)
+        # Create goal sampler for rollouts - creates goals on-the-fly with correct human_agent_index
+        goal_sampler = goal_generator.get_sampler()
+        print(f"  Goals: {len(goal_generator.goal_cells)} possible cell goals")
+        print(f"  Goal cells: {goal_generator.goal_cells}")
+        if goal_weights:
+            print(f"  Custom goal weights: {goal_weights}")
     print()
     
     # =========================================================================
@@ -424,9 +648,11 @@ def main(
     print()
     
     t0 = time.time()
+    if profiler:
+        profiler.enable()
     human_policy_prior, Vh_phase1 = compute_human_policy_prior(
         world_model=env,
-        human_agent_indices=human_agent_indices,
+        human_agent_indices=env.human_agent_indices,
         possible_goal_generator=goal_generator,
         believed_others_policy=None,  # Uniform prior for others
         beta_h=beta_h,
@@ -462,8 +688,8 @@ def main(
     t0 = time.time()
     robot_policy, Vr_values, Vh_phase2 = compute_robot_policy(
         world_model=env,
-        human_agent_indices=human_agent_indices,
-        robot_agent_indices=robot_agent_indices,
+        human_agent_indices=env.human_agent_indices,
+        robot_agent_indices=env.robot_agent_indices,
         possible_goal_generator=goal_generator,
         human_policy_prior=human_policy_prior,
         beta_r=beta_r,
@@ -477,6 +703,8 @@ def main(
         num_workers=num_workers,
         return_values=True,
     )
+    if profiler:
+        profiler.disable()
     t1 = time.time()
     
     print(f"Robot policy computed in {t1 - t0:.2f} seconds")
@@ -494,8 +722,8 @@ def main(
     if policy_dist:
         print("  Robot policy at initial state:")
         for action_profile, prob in sorted(policy_dist.items(), key=lambda x: -x[1]):
-            action_name = SINGLE_ACTION_NAMES[action_profile[0]] if action_profile[0] < 4 else f"a{action_profile[0]}"
-            print(f"    {action_name}: {prob:.3f}")
+            action_names = [SINGLE_ACTION_NAMES[a] if a < len(SINGLE_ACTION_NAMES) else f"a{a}" for a in action_profile]
+            print(f"    {', '.join(action_names)}: {prob:.3f}")
     print()
     
     # =========================================================================
@@ -553,7 +781,8 @@ def main(
         sorted_by_diff = sorted(differences, key=lambda x: -x[5])
         print("Top 5 entries with largest improvement (Phase2 - Phase1):")
         for i, (state, agent_idx, goal, vh1, vh2, diff) in enumerate(sorted_by_diff[:5]):
-            print(f"  {i+1}. Goal={goal}, Vh1={vh1:.4f}, Vh2={vh2:.4f}, Δ={diff:+.4f}")
+            print(f"  {i+1}. State={state}")
+            print(f"      Goal={goal}, Vh1={vh1:.4f}, Vh2={vh2:.4f}, Δ={diff:+.4f}")
         
         # Show entries where Phase 2 is worse (if any)
         if num_worse > 0:
@@ -561,7 +790,8 @@ def main(
             print(f"Entries where Phase2 < Phase1 (robot policy hurts this goal):")
             sorted_worst = sorted(differences, key=lambda x: x[5])
             for i, (state, agent_idx, goal, vh1, vh2, diff) in enumerate(sorted_worst[:min(5, num_worse)]):
-                print(f"  {i+1}. Goal={goal}, Vh1={vh1:.4f}, Vh2={vh2:.4f}, Δ={diff:+.4f}")
+                print(f"  {i+1}. State={state}")
+                print(f"      Goal={goal}, Vh1={vh1:.4f}, Vh2={vh2:.4f}, Δ={diff:+.4f}")
         
         # Show initial state comparison
         print()
@@ -598,8 +828,7 @@ def main(
             robot_policy=robot_policy,
             human_policy_prior=human_policy_prior,
             goal_sampler=goal_sampler,
-            human_idx=human_idx,
-            robot_idx=robot_idx,
+            goal_generator=goal_generator,
             Vr_values=Vr_values,
             Vh_values=Vh_phase2,
             beta_r=beta_r,
@@ -622,9 +851,49 @@ def main(
     env.save_video(movie_path, fps=movie_fps)
     
     print()
+    
+    # Write profiling results if enabled
+    if profiler:
+        profile_path = os.path.join(output_dir, 'line_profile_results.txt')
+        print("=" * 70)
+        print("Writing line profiling results...")
+        print("=" * 70)
+        
+        with open(profile_path, 'w') as f:
+            profiler.print_stats(stream=f)
+        
+        print(f"  Profile saved to: {os.path.abspath(profile_path)}")
+        print()
+        
+        # Also print summary to console
+        print("Top functions by total time (see file for line-by-line details):")
+        import io
+        stats_buffer = io.StringIO()
+        profiler.print_stats(stream=stats_buffer)
+        stats_text = stats_buffer.getvalue()
+        
+        # Extract and show summary (first few function headers)
+        lines = stats_text.split('\n')
+        in_header = False
+        func_count = 0
+        for line in lines:
+            if 'Total time:' in line:
+                in_header = True
+                func_count += 1
+                if func_count <= 5:  # Show top 5 function summaries
+                    print(f"  {line.strip()}")
+            elif in_header and 'Function:' in line:
+                if func_count <= 5:
+                    print(f"  {line.strip()}")
+                    print()
+                in_header = False
+        print()
+    
     print("=" * 70)
     print("Demo completed!")
     print(f"  Movie saved to: {os.path.abspath(movie_path)}")
+    if profiler:
+        print(f"  Profile saved to: {os.path.abspath(profile_path)}")
     print("=" * 70)
 
 
@@ -639,11 +908,18 @@ if __name__ == "__main__":
                         help='Maximum steps per episode (horizon length)')
     parser.add_argument('--rollouts', '-r', type=int, default=20,
                         help='Number of rollouts to generate')
+    parser.add_argument('--world', type=str, default=None,
+                        help='Path to world YAML file relative to multigrid_worlds/, '
+                             'e.g., "basic/two_agents" (default: use trivial world)')
+    parser.add_argument('--human-idx', type=int, default=None,
+                        help='Index of human agent (default: auto-detect)')
+    parser.add_argument('--robot-idx', type=int, default=None,
+                        help='Index of robot agent (default: auto-detect)')
     
     # Computation options
     parser.add_argument('--parallel', '-p', action='store_true',
                         help='Use parallel computation')
-    parser.add_argument('--workers', '-w', type=int, default=12,
+    parser.add_argument('--workers', '-w', type=int, default=4,
                         help='Number of parallel workers (default: auto)')
     
     # Theory parameters
@@ -685,19 +961,26 @@ if __name__ == "__main__":
                         help='Frames per second for video')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed')
+    parser.add_argument('--profile', action='store_true',
+                        help='Enable line profiling of backward_induction package '
+                             '(requires line_profiler: pip install line_profiler)')
     
     args = parser.parse_args()
     
-    # Build goal_weights dict from command line args
-    goal_weights = {
-        (1, 1): args.weight11,
-        (2, 1): args.weight21,
-        (3, 1): args.weight31,
-        (4, 1): args.weight41,
-        (2, 2): args.weight22,
-    }
-    # Remove entries with default weight 1.0 to keep output clean
-    goal_weights = {k: v for k, v in goal_weights.items() if v != 1.0}
+    # Build goal_weights dict from command line args (only for trivial world)
+    goal_weights = None
+    if args.world is None:
+        goal_weights = {
+            (1, 1): args.weight11,
+            (2, 1): args.weight21,
+            (3, 1): args.weight31,
+            (4, 1): args.weight41,
+            (2, 2): args.weight22,
+        }
+        # Remove entries with default weight 1.0 to keep output clean
+        goal_weights = {k: v for k, v in goal_weights.items() if v != 1.0}
+        if not goal_weights:
+            goal_weights = None
     
     main(
         max_steps=args.steps,
@@ -712,9 +995,13 @@ if __name__ == "__main__":
         xi=args.xi,
         eta=args.eta,
         terminal_Vr=args.terminal_Vr,
-        goal_weights=goal_weights if goal_weights else None,
+        goal_weights=goal_weights,
         seed=args.seed,
         output_dir=args.output_dir,
         movie_fps=args.fps,
         save_video_path=args.save_video,
+        world_path=args.world,
+        human_idx=args.human_idx,
+        robot_idx=args.robot_idx,
+        profile=args.profile,
     )

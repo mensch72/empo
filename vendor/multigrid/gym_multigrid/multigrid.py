@@ -1,5 +1,6 @@
 import math
 import json
+from abc import ABC, abstractmethod
 try:
     import yaml
     YAML_AVAILABLE = True
@@ -72,6 +73,507 @@ if _src_path not in sys.path:
     sys.path.insert(0, _src_path)
 
 from empo.world_model import WorldModel
+
+# Lazy imports for goal types (loaded on demand to avoid circular imports)
+_ReachCellGoal = None
+_ReachRectangleGoal = None
+_TabularGoalGenerator = None
+_TabularGoalSampler = None
+_PossibleGoalGenerator = None
+_PossibleGoalSampler = None
+
+def _load_goal_classes():
+    """Lazy load goal classes to avoid circular imports."""
+    global _ReachCellGoal, _ReachRectangleGoal, _TabularGoalGenerator, _TabularGoalSampler
+    global _PossibleGoalGenerator, _PossibleGoalSampler
+    if _ReachCellGoal is None:
+        from empo.multigrid import ReachCellGoal, ReachRectangleGoal
+        from empo.possible_goal import (
+            TabularGoalGenerator, TabularGoalSampler,
+            PossibleGoalGenerator, PossibleGoalSampler
+        )
+        _ReachCellGoal = ReachCellGoal
+        _ReachRectangleGoal = ReachRectangleGoal
+        _TabularGoalGenerator = TabularGoalGenerator
+        _TabularGoalSampler = TabularGoalSampler
+        _PossibleGoalGenerator = PossibleGoalGenerator
+        _PossibleGoalSampler = PossibleGoalSampler
+
+
+def parse_goal_specs(goal_specs: list, env: 'MultiGridEnv', human_agent_index: int = 0):
+    """
+    Parse goal specifications from config file into goal objects.
+    
+    Goal format examples:
+      - "1,1, 3,3"  -> Rectangle goal from (1,1) to (3,3)
+      - "3,2"       -> Single cell goal at (3,2)
+      - [1, 1, 3, 3] -> Rectangle goal from (1,1) to (3,3)
+      - [3, 2]      -> Single cell goal at (3,2)
+    
+    Args:
+        goal_specs: List of goal specifications (strings or lists of ints)
+        env: The MultiGridEnv instance
+        human_agent_index: Index of the human agent for these goals
+        
+    Returns:
+        List of PossibleGoal instances (ReachCellGoal or ReachRectangleGoal)
+    """
+    _load_goal_classes()
+    
+    goals = []
+    for spec in goal_specs:
+        # Parse spec into coordinates
+        if isinstance(spec, str):
+            # String format: "x1,y1, x2,y2" or "x,y"
+            parts = [int(p.strip()) for p in spec.replace(' ', '').split(',')]
+        elif isinstance(spec, (list, tuple)):
+            parts = [int(p) for p in spec]
+        else:
+            raise ValueError(f"Invalid goal spec: {spec}. Must be string or list.")
+        
+        if len(parts) == 2:
+            # Single cell goal
+            x, y = parts
+            goals.append(_ReachCellGoal(env, human_agent_index, (x, y)))
+        elif len(parts) == 4:
+            # Rectangle goal
+            x1, y1, x2, y2 = parts
+            goals.append(_ReachRectangleGoal(env, human_agent_index, (x1, y1, x2, y2)))
+        else:
+            raise ValueError(f"Invalid goal spec: {spec}. Must have 2 or 4 coordinates.")
+    
+    return goals
+
+
+def _parse_goal_spec_to_coords(spec) -> tuple:
+    """
+    Parse a single goal specification into coordinates.
+    
+    Supported formats:
+        - "x,y" or "x, y" - cell goal (string with 2 coords)
+        - "x1,y1,x2,y2" or "x1,y1, x2,y2" - rectangle goal (string with 4 coords)
+        - [x, y] - cell goal (flat list with 2 elements)
+        - [x1, y1, x2, y2] - rectangle goal (flat list with 4 elements)
+        - [[x1, y1], [x2, y2]] - rectangle goal (nested list with 2 pairs)
+    
+    Returns:
+        Tuple of (x1, y1) for cell goal or (x1, y1, x2, y2) for rectangle goal.
+    """
+    if isinstance(spec, str):
+        # String format: "x,y" or "x1,y1,x2,y2" (with optional spaces)
+        parts = [int(p.strip()) for p in spec.replace(' ', '').split(',')]
+    elif isinstance(spec, (list, tuple)):
+        # Check if nested list: [[x1, y1], [x2, y2]]
+        if len(spec) == 2 and all(isinstance(p, (list, tuple)) and len(p) == 2 for p in spec):
+            # Nested format: [[x1, y1], [x2, y2]] -> (x1, y1, x2, y2)
+            parts = [int(spec[0][0]), int(spec[0][1]), int(spec[1][0]), int(spec[1][1])]
+        else:
+            # Flat list: [x, y] or [x1, y1, x2, y2]
+            parts = [int(p) for p in spec]
+    else:
+        raise ValueError(f"Invalid goal spec: {spec}. Must be string or list.")
+    
+    if len(parts) == 2:
+        return tuple(parts)  # (x, y)
+    elif len(parts) == 4:
+        return tuple(parts)  # (x1, y1, x2, y2)
+    else:
+        raise ValueError(f"Invalid goal spec: {spec}. Must have 2 or 4 coordinates.")
+
+
+class ConfigGoalGenerator:
+    """
+    Goal generator that creates goals from config specs for any human agent.
+    
+    This class creates goal objects on-the-fly from coordinate specs. When
+    generate() is called with a human_agent_index, it creates goals about
+    THAT human (e.g., human h reaches cell X).
+    
+    Args:
+        env: The MultiGridEnv instance
+        goal_coords: List of goal coordinate tuples - either (x, y) for cell goals
+                    or (x1, y1, x2, y2) for rectangle goals
+        weights: Optional list of weights. If None, uses uniform 1/n weights.
+    """
+    
+    def __init__(self, env: 'MultiGridEnv', goal_coords: list, weights: list = None):
+        _load_goal_classes()
+        self.env = self.world_model = env
+        self.goal_coords = goal_coords
+        n = len(goal_coords)
+        self.weights = weights if weights is not None else [1.0 / n] * n
+        self._goals_cache = {}  # Cache goals by human_agent_index
+    
+    @property
+    def goals(self):
+        """Return list of goals for agent index 0 (for compatibility)."""
+        return self._get_goals_for_agent(0)
+    
+    def _get_goals_for_agent(self, human_agent_index: int):
+        """Get or create goals for a specific agent index."""
+        if human_agent_index not in self._goals_cache:
+            _load_goal_classes()
+            goals = []
+            for coords in self.goal_coords:
+                if len(coords) == 2:
+                    goal = _ReachCellGoal(self.env, human_agent_index, coords)
+                else:
+                    goal = _ReachRectangleGoal(self.env, human_agent_index, coords)
+                goals.append(goal)
+            self._goals_cache[human_agent_index] = goals
+        return self._goals_cache[human_agent_index]
+    
+    def set_world_model(self, world_model):
+        """Set or update the world model reference."""
+        self.env = self.world_model = world_model
+        self._goals_cache.clear()  # Clear cache when world model changes
+    
+    def __getstate__(self):
+        """Exclude world_model/env from pickling."""
+        state = self.__dict__.copy()
+        state['env'] = None
+        state['world_model'] = None
+        state['_goals_cache'] = {}
+        return state
+    
+    def __setstate__(self, state):
+        """Restore state after unpickling."""
+        self.__dict__.update(state)
+    
+    def generate(self, state, human_agent_index: int):
+        """
+        Generate goals for the specified human agent.
+        
+        Creates goal objects on-the-fly about the specified human
+        (e.g., human h reaches cell X).
+        
+        Args:
+            state: Current state (unused)
+            human_agent_index: Index of the human agent these goals are ABOUT
+            
+        Yields:
+            Tuples of (goal, weight)
+        """
+        goals = self._get_goals_for_agent(human_agent_index)
+        for goal, weight in zip(goals, self.weights):
+            yield goal, weight
+    
+    def get_sampler(self) -> 'ConfigGoalSampler':
+        """
+        Create a ConfigGoalSampler from this generator.
+        
+        The sampler's probabilities are set to the generator's weights (normalized),
+        and the sampler's weights are set to 1.0 for all goals.
+        
+        Returns:
+            ConfigGoalSampler with probs = weights (normalized), weights = 1.0.
+        """
+        return ConfigGoalSampler(self.env, self.goal_coords, probabilities=self.weights, weights=None)
+    
+    def validate_coverage(self, raise_on_error: bool = True) -> list:
+        """
+        Validate that goals cover all walkable cells in the grid.
+        
+        A cell is considered walkable if it doesn't contain an immutable object
+        (wall, lava, magicwall). The method checks that every such cell is covered
+        by at least one goal (cell or rectangle).
+        
+        Args:
+            raise_on_error: If True, raises ValueError listing uncovered cells.
+                           If False, returns list of uncovered cells.
+        
+        Returns:
+            List of (x, y) tuples of uncovered walkable cells.
+            Empty list if all walkable cells are covered.
+        
+        Raises:
+            ValueError: If raise_on_error=True and there are uncovered cells.
+        """
+        if self.env is None:
+            raise ValueError("Cannot validate coverage: env is None")
+        
+        # Build set of all cells covered by goals
+        covered_cells = set()
+        for coords in self.goal_coords:
+            if len(coords) == 2:
+                # Cell goal: (x, y)
+                covered_cells.add((coords[0], coords[1]))
+            else:
+                # Rectangle goal: (x1, y1, x2, y2)
+                x1, y1, x2, y2 = coords
+                if x1 > x2:
+                    x1, x2 = x2, x1
+                if y1 > y2:
+                    y1, y2 = y2, y1
+                for x in range(x1, x2 + 1):
+                    for y in range(y1, y2 + 1):
+                        covered_cells.add((x, y))
+        
+        # Find all walkable cells (not containing immutable objects)
+        immutable_types = {'wall', 'lava', 'magicwall'}
+        uncovered = []
+        
+        for x in range(self.env.width):
+            for y in range(self.env.height):
+                cell = self.env.grid.get(x, y)
+                cell_type = getattr(cell, 'type', None) if cell else None
+                
+                # Skip cells with immutable objects
+                if cell_type in immutable_types:
+                    continue
+                
+                # Check if this walkable cell is covered
+                if (x, y) not in covered_cells:
+                    uncovered.append((x, y))
+        
+        if uncovered and raise_on_error:
+            raise ValueError(
+                f"Goals do not cover all walkable cells. Uncovered cells: {uncovered}\n"
+                f"Goal coords: {self.goal_coords}\n"
+                f"Add goals covering these cells or use a rectangle goal like "
+                f"[0, 0, {self.env.width-1}, {self.env.height-1}] to cover the entire grid."
+            )
+        
+        return uncovered
+
+
+class ConfigGoalSampler:
+    """
+    Goal sampler that creates goals from config specs for any human agent.
+    
+    This class creates goal objects on-the-fly from coordinate specs. When
+    sample() is called with a human_agent_index, it creates and samples goals
+    about THAT human (e.g., human h reaches cell X).
+    
+    Args:
+        env: The MultiGridEnv instance
+        goal_coords: List of goal coordinate tuples - either (x, y) for cell goals
+                    or (x1, y1, x2, y2) for rectangle goals
+        probabilities: Optional list of sampling probabilities. If None, uses uniform 1/n.
+        weights: Optional list of weights for X_h computation. If None, uses 1.0 for all.
+    """
+    
+    def __init__(self, env: 'MultiGridEnv', goal_coords: list, 
+                 probabilities: list = None, weights: list = None):
+        _load_goal_classes()
+        self.env = self.world_model = env
+        self.goal_coords = goal_coords
+        n = len(goal_coords)
+        
+        if probabilities is None:
+            self.probs = [1.0 / n] * n
+        else:
+            total = sum(probabilities)
+            self.probs = [p / total for p in probabilities]
+        
+        self.weights = weights if weights is not None else [1.0] * n
+        self._goals_cache = {}  # Cache goals by human_agent_index
+    
+    @property
+    def goals(self):
+        """Return list of goals for agent index 0 (for compatibility)."""
+        return self._get_goals_for_agent(0)
+    
+    def _get_goals_for_agent(self, human_agent_index: int):
+        """Get or create goals for a specific agent index."""
+        if human_agent_index not in self._goals_cache:
+            _load_goal_classes()
+            goals = []
+            for coords in self.goal_coords:
+                if len(coords) == 2:
+                    goal = _ReachCellGoal(self.env, human_agent_index, coords)
+                else:
+                    goal = _ReachRectangleGoal(self.env, human_agent_index, coords)
+                goals.append(goal)
+            self._goals_cache[human_agent_index] = goals
+        return self._goals_cache[human_agent_index]
+    
+    def set_world_model(self, world_model):
+        """Set or update the world model reference."""
+        self.env = self.world_model = world_model
+        self._goals_cache.clear()  # Clear cache when world model changes
+    
+    def __getstate__(self):
+        """Exclude world_model/env from pickling."""
+        state = self.__dict__.copy()
+        state['env'] = None
+        state['world_model'] = None
+        state['_goals_cache'] = {}
+        return state
+    
+    def __setstate__(self, state):
+        """Restore state after unpickling."""
+        self.__dict__.update(state)
+    
+    def sample(self, state, human_agent_index: int):
+        """
+        Sample a goal for the specified human agent.
+        
+        Creates a goal object on-the-fly about the specified human
+        (e.g., human h reaches cell X).
+        
+        Args:
+            state: Current state (unused)
+            human_agent_index: Index of the human agent these goals are ABOUT
+            
+        Returns:
+            Tuple of (goal, weight)
+        """
+        import random
+        goals = self._get_goals_for_agent(human_agent_index)
+        idx = random.choices(range(len(goals)), weights=self.probs, k=1)[0]
+        return goals[idx], self.weights[idx]
+    
+    def get_generator(self) -> 'ConfigGoalGenerator':
+        """
+        Create a ConfigGoalGenerator from this sampler.
+        
+        The generator's weights are computed as probs * weights from the sampler,
+        which represents the expected contribution of each goal to X_h computation.
+        
+        Returns:
+            ConfigGoalGenerator with weights = probs * weights.
+        """
+        combined_weights = [p * w for p, w in zip(self.probs, self.weights)]
+        return ConfigGoalGenerator(self.env, self.goal_coords, weights=combined_weights)
+    
+    def validate_coverage(self, raise_on_error: bool = True) -> list:
+        """
+        Validate that goals cover all walkable cells in the grid.
+        
+        A cell is considered walkable if it doesn't contain an immutable object
+        (wall, lava, magicwall). The method checks that every such cell is covered
+        by at least one goal (cell or rectangle).
+        
+        Args:
+            raise_on_error: If True, raises ValueError listing uncovered cells.
+                           If False, returns list of uncovered cells.
+        
+        Returns:
+            List of (x, y) tuples of uncovered walkable cells.
+            Empty list if all walkable cells are covered.
+        
+        Raises:
+            ValueError: If raise_on_error=True and there are uncovered cells.
+        """
+        if self.env is None:
+            raise ValueError("Cannot validate coverage: env is None")
+        
+        # Build set of all cells covered by goals
+        covered_cells = set()
+        for coords in self.goal_coords:
+            if len(coords) == 2:
+                # Cell goal: (x, y)
+                covered_cells.add((coords[0], coords[1]))
+            else:
+                # Rectangle goal: (x1, y1, x2, y2)
+                x1, y1, x2, y2 = coords
+                if x1 > x2:
+                    x1, x2 = x2, x1
+                if y1 > y2:
+                    y1, y2 = y2, y1
+                for x in range(x1, x2 + 1):
+                    for y in range(y1, y2 + 1):
+                        covered_cells.add((x, y))
+        
+        # Find all walkable cells (not containing immutable objects)
+        immutable_types = {'wall', 'lava', 'magicwall'}
+        uncovered = []
+        
+        for x in range(self.env.width):
+            for y in range(self.env.height):
+                cell = self.env.grid.get(x, y)
+                cell_type = getattr(cell, 'type', None) if cell else None
+                
+                # Skip cells with immutable objects
+                if cell_type in immutable_types:
+                    continue
+                
+                # Check if this walkable cell is covered
+                if (x, y) not in covered_cells:
+                    uncovered.append((x, y))
+        
+        if uncovered and raise_on_error:
+            raise ValueError(
+                f"Goals do not cover all walkable cells. Uncovered cells: {uncovered}\n"
+                f"Goal coords: {self.goal_coords}\n"
+                f"Add goals covering these cells or use a rectangle goal like "
+                f"[0, 0, {self.env.width-1}, {self.env.height-1}] to cover the entire grid."
+            )
+        
+        return uncovered
+
+
+def create_goal_sampler_and_generator(goals: list, env: 'MultiGridEnv'):
+    """
+    Create TabularGoalSampler and TabularGoalGenerator from a list of goals.
+    
+    Uses uniform weights (1/n) for the generator. The sampler is derived from
+    the generator using get_sampler(), which uses the weights as probabilities
+    and sets sampler weights to 1.0.
+    
+    Args:
+        goals: List of PossibleGoal instances
+        env: The MultiGridEnv instance (for setting world_model reference)
+        
+    Returns:
+        Tuple of (TabularGoalSampler, TabularGoalGenerator)
+    """
+    _load_goal_classes()
+    
+    n = len(goals)
+    if n == 0:
+        return None, None
+    
+    # Generator: uniform weights = 1/n (for exact integration)
+    generator = _TabularGoalGenerator(goals, weights=[1.0 / n] * n)
+    
+    # Sampler: derived from generator (uses weights as probabilities, sets weights to 1)
+    sampler = generator.get_sampler()
+    
+    return sampler, generator
+
+
+def create_config_goal_sampler_and_generator(goal_specs: list, env: 'MultiGridEnv'):
+    """
+    Create ConfigGoalSampler and ConfigGoalGenerator from goal specs.
+    
+    These create goals on-the-fly for any human_agent_index. When generate()
+    or sample() is called with a human index, they create goals about THAT
+    human (e.g., human h reaching cell X).
+    
+    Uses uniform weights (1/n) for the generator. The sampler is derived from
+    the generator using get_sampler(), which uses the weights as probabilities
+    and sets sampler weights to 1.0.
+    
+    Args:
+        goal_specs: List of goal specifications from config file
+        env: The MultiGridEnv instance
+        
+    Returns:
+        Tuple of (ConfigGoalSampler, ConfigGoalGenerator)
+    
+    Raises:
+        ValueError: If the goals don't cover all walkable cells in the grid.
+    """
+    if not goal_specs:
+        return None, None
+    
+    # Parse specs to coordinates
+    goal_coords = [_parse_goal_spec_to_coords(spec) for spec in goal_specs]
+    n = len(goal_coords)
+    
+    # Generator: uniform weights = 1/n (for exact integration)
+    generator = ConfigGoalGenerator(env, goal_coords, weights=[1.0 / n] * n)
+    
+    # Validate that goals cover all walkable cells
+    generator.validate_coverage(raise_on_error=True)
+    
+    # Sampler: derived from generator (uses weights as probabilities, sets weights to 1)
+    sampler = generator.get_sampler()
+    
+    return sampler, generator
+
 
 # Size in pixels of a tile in the full-scale human view
 TILE_PIXELS = 32
@@ -1719,8 +2221,30 @@ class Grid:
 
         return mask
 
-class Actions:
-    available=['still', 'left', 'right', 'forward', 'pickup', 'drop', 'toggle', 'done']
+
+class ActionsBase(ABC):
+    """
+    Abstract base class for action sets.
+    
+    All action classes must define:
+    - available: list of action names that are valid for this action set
+    - Class attributes mapping action names to integer codes
+    
+    Action codes should be consecutive integers starting from 0.
+    Actions not available in a subclass should be set to None.
+    """
+    available: list  # List of available action names
+    
+    # Common action attributes - subclasses should define these as int or None
+    still: int = None  # Stay in place (no-op)
+    left: int = None   # Turn left
+    right: int = None  # Turn right
+    forward: int = None  # Move forward
+
+
+class Actions(ActionsBase):
+    """Full action set with all available actions."""
+    available = ['still', 'left', 'right', 'forward', 'pickup', 'drop', 'toggle', 'done']
 
     still = 0
     # Turn left, turn right, move forward
@@ -1738,8 +2262,28 @@ class Actions:
     # Done completing task
     done = 7
 
-class SmallActions:
-    available=['still', 'left', 'right', 'forward']
+FullActions = Actions  # Alias for backward compatibility
+class ObjectActions(ActionsBase):
+    """Standard action set with all available actions except 'done'."""
+    available = ['still', 'left', 'right', 'forward', 'pickup', 'drop', 'toggle']
+
+    still = 0
+    # Turn left, turn right, move forward
+    left = 1
+    right = 2
+    forward = 3
+
+    # Pick up an object
+    pickup = 4
+    # Drop an object
+    drop = 5
+    # Toggle/activate an object
+    toggle = 6
+
+
+class SmallActions(ActionsBase):
+    """Reduced action set: still, left, right, forward."""
+    available = ['still', 'left', 'right', 'forward']
 
     # Turn left, turn right, move forward
     still = 0
@@ -1747,14 +2291,72 @@ class SmallActions:
     right = 2
     forward = 3
 
-class MineActions:
-    available=['still', 'left', 'right', 'forward', 'build']
+
+class MinimalActions(ActionsBase):
+    """
+    Minimal action set: forward and left only.
+    
+    This is useful for environments where agents only need to move forward
+    and turn left (turning right can be achieved by three left turns).
+    
+    Note: There is no 'still' action - agents must always move or turn.
+    Action codes are consecutive starting from 0.
+    """
+    available = ['forward', 'left']
+    
+    still = None  # No still action available
+    forward = 0
+    left = 1
+    right = None  # No right action available
+
+
+class MineActions(ActionsBase):
+    """Action set with building capability."""
+    available = ['still', 'left', 'right', 'forward', 'build']
 
     still = 0
     left = 1
     right = 2
     forward = 3
     build = 4
+
+
+def get_actions_class(name: str) -> type:
+    """
+    Look up an action class by name in this module.
+    
+    The class must derive from ActionsBase.
+    
+    Args:
+        name: Name of the action class (e.g., 'SmallActions', 'MinimalActions')
+        
+    Returns:
+        The action class
+        
+    Raises:
+        ValueError: If the class is not found or doesn't derive from ActionsBase
+    """
+    # Look up in the current module's globals
+    cls = globals().get(name)
+    
+    if cls is None:
+        raise ValueError(f"Unknown action class '{name}'. "
+                        f"Class not found in multigrid module.")
+    
+    if not isinstance(cls, type) or not issubclass(cls, ActionsBase):
+        raise ValueError(f"'{name}' is not a valid action class. "
+                        f"Must be a class deriving from ActionsBase.")
+    
+    return cls
+
+# Object types that require pickup/drop/toggle actions
+# If a map contains any of these, ObjectActions should be used instead of SmallActions
+OBJECTS_REQUIRING_INTERACTION = {
+    # Pickable objects
+    'key', 'ball', 'box',
+    # Toggleable objects  
+    'door', 'pauseswitch', 'disablingswitch', 'controlbutton',
+}
 
 
 # Map encoding constants
@@ -1820,11 +2422,12 @@ def parse_map_string(map_spec, objects_set=World):
         objects_set: The World class to use for object creation
         
     Returns:
-        tuple: (width, height, cells, agents) where:
+        tuple: (width, height, cells, agents, has_interactive_objects) where:
                - width: The grid width in cells
                - height: The grid height in cells
                - cells: A 2D list of cell specs, each is a tuple (type, params_dict) or None for empty
                - agents: A list of (x, y, params_dict) tuples for each agent found
+               - has_interactive_objects: True if map contains objects that need pickup/toggle actions
     """
     # Normalize to list of strings (one per row)
     if isinstance(map_spec, str):
@@ -1864,6 +2467,7 @@ def parse_map_string(map_spec, objects_set=World):
     # Parse each cell
     cells = []
     agents = []  # Track agent positions and colors for later creation
+    has_interactive_objects = False  # Track if map has objects needing pickup/toggle
     
     for y, row in enumerate(rows):
         cell_row = []
@@ -1875,10 +2479,14 @@ def parse_map_string(map_spec, objects_set=World):
             # Track agents for later
             if cell_spec and cell_spec[0] == 'agent':
                 agents.append((x, y, cell_spec[1]))
+            
+            # Check if this object requires interaction actions
+            if cell_spec and cell_spec[0] in OBJECTS_REQUIRING_INTERACTION:
+                has_interactive_objects = True
         
         cells.append(cell_row)
     
-    return width, height, cells, agents
+    return width, height, cells, agents, has_interactive_objects
 
 
 def _parse_cell(cell_str, objects_set):
@@ -2097,6 +2705,7 @@ class MultiGridEnv(WorldModel):
             orientations=0,
             can_push_rocks='e',
             config_file=None,
+            config=None,
             stumble_probability=0.5,
             solidify_probability=0.1
     ):
@@ -2125,13 +2734,21 @@ class MultiGridEnv(WorldModel):
                         If provided, loads map and other parameters from the file.
                         YAML files (.yaml, .yml) use PyYAML; JSON files use standard json.
                         Parameters passed explicitly to __init__ override config file values.
+                        Supports 'action_class' key to specify the action set by name
+                        (e.g., 'SmallActions', 'MinimalActions', 'Actions', 'MineActions').
+            config: Dict containing config parameters (same format as YAML/JSON files).
+                   Alternative to config_file for programmatic configuration.
+                   If both config and config_file are provided, config_file takes precedence.
             stumble_probability: Default probability of stumbling on UnsteadyGround (0.0 to 1.0)
             solidify_probability: Default probability of MagicWall solidifying on failed entry (0.0 to 1.0)
         """
-        # Load config from config file if provided
+        # Load config from config file or dict if provided
         if config_file is not None:
             config = self._load_config_file(config_file)
-            
+        # If no config_file but config dict provided, use it directly
+        # (config parameter is already set from function argument)
+        
+        if config is not None:
             # Apply config values as defaults (explicit params override config)
             # Note: We check against the default values to determine if a parameter
             # was explicitly passed. This ensures backward compatibility with existing
@@ -2163,13 +2780,22 @@ class MultiGridEnv(WorldModel):
                 stumble_probability = config['stumble_probability']
             if solidify_probability == 0.1 and 'solidify_probability' in config:  # default: 0.1
                 solidify_probability = config['solidify_probability']
+            # Handle action_class from config
+            if actions_set is Actions and 'action_class' in config:
+                action_class_name = config['action_class']
+                actions_set = get_actions_class(action_class_name)
+            
+            # Store possible_goals specs for later parsing (after reset)
+            self._possible_goals_specs = config.get('possible_goals', None)
             
             # Store config file path for reference
             self._config_file = config_file
             self._config_metadata = config.get('metadata', {})
         else:
+            # No config provided (neither file nor dict)
             self._config_file = None
             self._config_metadata = {}
+            self._possible_goals_specs = None
         
         # Store map specification for use in _gen_grid
         self._map_spec = map
@@ -2205,8 +2831,17 @@ class MultiGridEnv(WorldModel):
         
         # If map is provided, parse it to get dimensions and agents
         if map is not None:
-            map_width, map_height, cells, map_agents = parse_map_string(map, objects_set)
+            map_width, map_height, cells, map_agents, has_interactive_objects = parse_map_string(map, objects_set)
             self._map_parsed = (map_width, map_height, cells, map_agents)
+            self._has_interactive_objects = has_interactive_objects
+            
+            # Auto-select action class based on map contents if not explicitly set
+            # SmallActions for simple movement, ObjectActions if pickup/toggle needed
+            if actions_set is Actions:  # Default was used, auto-detect
+                if has_interactive_objects:
+                    actions_set = ObjectActions
+                else:
+                    actions_set = SmallActions
             
             # Override width/height with map dimensions
             width = map_width
@@ -2305,6 +2940,15 @@ class MultiGridEnv(WorldModel):
 
         # Initialize the state
         self.reset()
+        
+        # Parse possible goals from config (needs to be after reset so env is initialized)
+        # Goals are created on-the-fly for any human_agent_index passed to generate()/sample()
+        if self._possible_goals_specs:
+            self.possible_goal_sampler, self.possible_goal_generator = \
+                create_config_goal_sampler_and_generator(self._possible_goals_specs, self)
+        else:
+            self.possible_goal_sampler = None
+            self.possible_goal_generator = None
     
     def _get_construction_args(self) -> tuple:
         """Get positional arguments for reconstructing this environment."""
@@ -3095,6 +3739,22 @@ class MultiGridEnv(WorldModel):
 
         return obs_cell is not None and obs_cell.type == world_cell.type
 
+    def _is_still_action(self, action) -> bool:
+        """
+        Check if an action is the 'still' (no-op) action.
+        
+        Handles action sets that don't have a 'still' action (like MinimalActions)
+        by returning False when still is not defined or is None.
+        
+        Args:
+            action: The action index to check
+            
+        Returns:
+            bool: True if the action is the 'still' action, False otherwise
+        """
+        still_action = getattr(self.actions, 'still', None)
+        return still_action is not None and action == still_action
+
     def _execute_single_agent_action(self, agent_idx, action, rewards):
         """
         Execute a single agent's action. This is the core action execution logic
@@ -3389,7 +4049,7 @@ class MultiGridEnv(WorldModel):
                 if (not self.agents[i].terminated and 
                     not self.agents[i].paused and 
                     self.agents[i].started and 
-                    actions[i] != self.actions.still):
+                    not self._is_still_action(actions[i])):
                     active_agents.append(i)
         
         for i in active_agents:
@@ -4158,27 +4818,53 @@ class MultiGridEnv(WorldModel):
             tuple(mutable_objects),
         )
     
-    def get_human_agent_indices(self):
+    @property
+    def human_agent_indices(self):
         """
         Get the indices of human agents in the environment.
         
-        In MultiGrid, human agents are identified by the color 'yellow'.
+        If _human_agent_indices is set (e.g., from YAML config), use that.
+        Otherwise, identify human agents by the color 'yellow'.
         
         Returns:
             List of indices for human agents.
         """
+        if hasattr(self, '_human_agent_indices') and self._human_agent_indices is not None:
+            return self._human_agent_indices
         return [i for i, agent in enumerate(self.agents) if agent.color == 'yellow']
     
-    def get_robot_agent_indices(self):
+    @human_agent_indices.setter
+    def human_agent_indices(self, value):
+        """Set the human agent indices explicitly."""
+        self._human_agent_indices = value
+    
+    @property
+    def robot_agent_indices(self):
         """
         Get the indices of robot agents in the environment.
         
-        In MultiGrid, robot agents are identified by the color 'grey'.
+        If _robot_agent_indices is set (e.g., from YAML config), use that.
+        Otherwise, identify robot agents by the color 'grey'.
         
         Returns:
             List of indices for robot agents.
         """
+        if hasattr(self, '_robot_agent_indices') and self._robot_agent_indices is not None:
+            return self._robot_agent_indices
         return [i for i, agent in enumerate(self.agents) if agent.color == 'grey']
+    
+    @robot_agent_indices.setter
+    def robot_agent_indices(self, value):
+        """Set the robot agent indices explicitly."""
+        self._robot_agent_indices = value
+    
+    def get_human_agent_indices(self):
+        """Deprecated: Use human_agent_indices property instead."""
+        return self.human_agent_indices
+    
+    def get_robot_agent_indices(self):
+        """Deprecated: Use robot_agent_indices property instead."""
+        return self.robot_agent_indices
     
     def set_state(self, state):
         """
@@ -4455,7 +5141,7 @@ class MultiGridEnv(WorldModel):
             if (not self.agents[i].terminated and 
                 not self.agents[i].paused and 
                 self.agents[i].started and 
-                actions[i] != self.actions.still):
+                not self._is_still_action(actions[i])):
                 active_agents.append(i)
             else:
                 inactive_agents.append(i)
@@ -4869,7 +5555,7 @@ class MultiGridEnv(WorldModel):
             if (self.agents[i].terminated or 
                 self.agents[i].paused or 
                 not self.agents[i].started or 
-                actions[i] == self.actions.still):
+                self._is_still_action(actions[i])):
                 continue
             
             # Execute the action using shared helper
@@ -4935,10 +5621,10 @@ class MultiGridEnv(WorldModel):
             if isinstance(action, tuple):
                 # This is an unsteady agent with (action, outcome_type)
                 orig_action, outcome_type = action
-                if orig_action != self.actions.still:
+                if not self._is_still_action(orig_action):
                     unsteady_forward_agents_list.append(i)
                     unsteady_outcomes_dict[i] = outcome_type
-            elif action != self.actions.still:
+            elif not self._is_still_action(action):
                 # Check if this is a magic wall agent
                 if magic_wall_outcomes and i in magic_wall_outcomes:
                     magic_wall_agents_list.append(i)

@@ -56,6 +56,9 @@ class ReachCellGoal(PossibleGoal):
         # For consistency with rectangle goals
         self.target_rect = (self.target_pos[0], self.target_pos[1],
                            self.target_pos[0], self.target_pos[1])
+        # Cache hash since goals are immutable
+        self._hash = hash((self.human_agent_index, self.target_pos))
+        super()._freeze()  # Make immutable
     
     def is_achieved(self, state) -> int:
         """Check if agent is at the target cell."""
@@ -71,7 +74,7 @@ class ReachCellGoal(PossibleGoal):
         return f"ReachCell({self.target_pos})"
     
     def __hash__(self):
-        return hash((self.human_agent_index, self.target_pos))
+        return self._hash
     
     def __eq__(self, other):
         if not isinstance(other, ReachCellGoal):
@@ -108,6 +111,9 @@ class ReachRectangleGoal(PossibleGoal):
         self.target_rect = (x1, y1, x2, y2)
         # For compatibility with point goal interface
         self.target_pos = ((x1 + x2) // 2, (y1 + y2) // 2)
+        # Cache hash since goals are immutable
+        self._hash = hash((self.human_agent_index, self.target_rect))
+        super()._freeze()  # Make immutable
     
     def is_achieved(self, state) -> int:
         """Check if agent is inside the rectangle."""
@@ -124,7 +130,7 @@ class ReachRectangleGoal(PossibleGoal):
         return f"ReachRect({self.target_rect})"
     
     def __hash__(self):
-        return hash((self.human_agent_index, self.target_rect))
+        return self._hash
     
     def __eq__(self, other):
         if not isinstance(other, ReachRectangleGoal):

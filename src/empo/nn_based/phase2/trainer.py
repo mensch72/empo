@@ -32,6 +32,8 @@ try:
 except ImportError:
     HAS_PSUTIL = False
 
+from empo.memory_monitor import MemoryMonitor
+
 from .config import Phase2Config
 from .profiler import NoOpProfiler
 from .replay_buffer import Phase2Transition, Phase2ReplayBuffer
@@ -271,6 +273,15 @@ class BasePhase2Trainer(ABC):
         # Maps ((human_pos, human_dir), ...), ((robot_pos, robot_dir), ...)) -> count
         # This provides more detailed insight than hashes alone
         self._position_visit_counts: Dict[tuple, int] = {}
+        
+        # Initialize memory monitor
+        self._memory_monitor = MemoryMonitor(
+            min_free_fraction=config.min_free_memory_fraction,
+            check_interval=config.memory_check_interval,
+            pause_duration=config.memory_pause_duration,
+            verbose=verbose,
+            enabled=config.min_free_memory_fraction > 0.0
+        )
         
         if self.debug:
             print("[DEBUG] BasePhase2Trainer.__init__: Initialization complete.")
@@ -856,29 +867,20 @@ class BasePhase2Trainer(ABC):
         if hasattr(self.human_policy_prior, 'set_world_model'):
             self.human_policy_prior.set_world_model(self.env)
     
-    def _check_memory_limit(self) -> bool:
+    def _check_memory_and_maybe_interrupt(self) -> None:
         """
-        Check if memory usage exceeds the configured limit.
+        Check memory using the memory monitor and handle low-memory situations.
         
-        Returns:
-            True if memory limit is exceeded, False otherwise.
-            Always returns False if psutil is not available or monitoring is disabled.
+        This method delegates to the MemoryMonitor which:
+        1. Checks if free memory is below the configured threshold
+        2. If low, pauses for the configured duration
+        3. If still low after pausing, raises KeyboardInterrupt
+        
+        The KeyboardInterrupt is caught by the training loop to save checkpoints.
         """
-        if not HAS_PSUTIL:
-            return False
-        if self.config.max_memory_fraction <= 0.0:
-            return False
-        
-        # Get system memory info
-        mem_info = psutil.virtual_memory()
-        memory_fraction = mem_info.percent / 100.0
-        
-        if memory_fraction > self.config.max_memory_fraction:
-            if self.verbose:
-                print(f"\n[Memory] Usage {memory_fraction*100:.1f}% exceeds limit "
-                      f"{self.config.max_memory_fraction*100:.1f}%. Stopping training...")
-            return True
-        return False
+        # The monitor handles the check interval internally, but we call it every
+        # memory_check_interval steps from the training loop for compatibility
+        self._memory_monitor.check(self.training_step_count, force=True)
     
     def check_goal_achieved(self, state: Any, human_idx: int, goal: Any) -> bool:
         """
@@ -2091,17 +2093,16 @@ class BasePhase2Trainer(ABC):
             
             # Apply z-space transformation if enabled
             # For y ∈ [1, ∞), use z = y^{-1/ξ} ∈ (0, 1]
-            if self.config.use_z_space_transform:
-                in_decay_phase = self.config.is_in_decay_phase(self.training_step_count)
-                if in_decay_phase:
-                    # Phase B: y-space MSE for Robbins-Monro convergence
-                    losses['u_r'] = ((y_pred.squeeze() - y_target) ** 2).mean()
-                else:
-                    # Phase A: z-space MSE for balanced gradients
-                    z_pred = y_to_z_space(y_pred.squeeze(), self.config.xi)
-                    z_target = y_to_z_space(y_target, self.config.xi)
-                    losses['u_r'] = ((z_pred - z_target) ** 2).mean()
+            # Loss function depends on use_z_based_loss setting:
+            # - use_z_based_loss=True (legacy): z-space MSE in constant LR, y-space in decay
+            # - use_z_based_loss=False (default): y-space MSE throughout (faster outlier correction)
+            if self.config.should_use_z_loss(self.training_step_count):
+                # Z-space MSE for balanced gradients (legacy mode)
+                z_pred = y_to_z_space(y_pred.squeeze(), self.config.xi)
+                z_target = y_to_z_space(y_target, self.config.xi)
+                losses['u_r'] = ((z_pred - z_target) ** 2).mean()
             else:
+                # Y-space MSE (default: faster outlier correction, Robbins-Monro convergence)
                 losses['u_r'] = ((y_pred.squeeze() - y_target) ** 2).mean()
             
             with torch.no_grad():
@@ -2133,20 +2134,16 @@ class BasePhase2Trainer(ABC):
                 target_q_r_all = self._compute_model_based_q_r_targets(batch)
             
             # Loss: MSE over ALL action Q-values (full Bellman backup)
-            # When use_z_space_transform is enabled:
-            # - During constant LR phase: use z-space MSE for balanced gradients
-            # - During 1/t decay phase: use Q-space MSE for Robbins-Monro convergence
-            if self.config.use_z_space_transform:
-                in_decay_phase = self.config.is_in_decay_phase(self.training_step_count)
-                if in_decay_phase:
-                    # Phase B: Q-space MSE
-                    losses['q_r'] = ((q_r_all - target_q_r_all) ** 2).mean()
-                else:
-                    # Phase A: z-space MSE
-                    z_pred = to_z_space(q_r_all, self.config.eta, self.config.xi)
-                    z_target = to_z_space(target_q_r_all, self.config.eta, self.config.xi)
-                    losses['q_r'] = ((z_pred - z_target) ** 2).mean()
+            # Loss function depends on use_z_based_loss setting:
+            # - use_z_based_loss=True (legacy): z-space MSE in constant LR, Q-space in decay
+            # - use_z_based_loss=False (default): Q-space MSE throughout (faster outlier correction)
+            if self.config.should_use_z_loss(self.training_step_count):
+                # Z-space MSE for balanced gradients (legacy mode)
+                z_pred = to_z_space(q_r_all, self.config.eta, self.config.xi)
+                z_target = to_z_space(target_q_r_all, self.config.eta, self.config.xi)
+                losses['q_r'] = ((z_pred - z_target) ** 2).mean()
             else:
+                # Q-space MSE (default: faster outlier correction, Robbins-Monro convergence)
                 losses['q_r'] = ((q_r_all - target_q_r_all) ** 2).mean()
             
             # Statistics: report for taken actions for comparability
@@ -2190,16 +2187,16 @@ class BasePhase2Trainer(ABC):
                 u_r_for_v.squeeze(), q_r_for_v, pi_r
             )
             
-            # Apply z-space transformation if enabled
-            if self.config.use_z_space_transform:
-                in_decay_phase = self.config.is_in_decay_phase(self.training_step_count)
-                if in_decay_phase:
-                    losses['v_r'] = ((v_r_pred.squeeze() - target_v_r) ** 2).mean()
-                else:
-                    z_pred = to_z_space(v_r_pred.squeeze(), self.config.eta, self.config.xi)
-                    z_target = to_z_space(target_v_r, self.config.eta, self.config.xi)
-                    losses['v_r'] = ((z_pred - z_target) ** 2).mean()
+            # Loss function depends on use_z_based_loss setting:
+            # - use_z_based_loss=True (legacy): z-space MSE in constant LR, V_r-space in decay
+            # - use_z_based_loss=False (default): V_r-space MSE throughout (faster outlier correction)
+            if self.config.should_use_z_loss(self.training_step_count):
+                # Z-space MSE for balanced gradients (legacy mode)
+                z_pred = to_z_space(v_r_pred.squeeze(), self.config.eta, self.config.xi)
+                z_target = to_z_space(target_v_r, self.config.eta, self.config.xi)
+                losses['v_r'] = ((z_pred - z_target) ** 2).mean()
             else:
+                # V_r-space MSE (default: faster outlier correction, Robbins-Monro convergence)
                 losses['v_r'] = ((v_r_pred.squeeze() - target_v_r) ** 2).mean()
             
             with torch.no_grad():
@@ -3327,12 +3324,10 @@ class BasePhase2Trainer(ABC):
                     if self.training_step_count % 100 == 0:
                         history.append(losses)
                     
-                    # Check memory limit periodically
+                    # Check memory limit periodically (may pause and/or raise KeyboardInterrupt)
                     if (self.config.memory_check_interval > 0 and
-                        self.training_step_count % self.config.memory_check_interval == 0 and
-                        self._check_memory_limit()):
-                        # Memory limit exceeded - trigger graceful shutdown like Ctrl-C
-                        raise KeyboardInterrupt("Memory limit exceeded")
+                        self.training_step_count % self.config.memory_check_interval == 0):
+                        self._check_memory_and_maybe_interrupt()
                     
                     # Save checkpoint at interval
                     if (self.checkpoint_interval > 0 and 
@@ -3763,12 +3758,10 @@ class BasePhase2Trainer(ABC):
                     if self.training_step_count % 100 == 0:
                         history.append(losses)
                     
-                    # Check memory limit periodically
+                    # Check memory limit periodically (may pause and/or raise KeyboardInterrupt)
                     if (self.config.memory_check_interval > 0 and
-                        self.training_step_count % self.config.memory_check_interval == 0 and
-                        self._check_memory_limit()):
-                        # Memory limit exceeded - trigger graceful shutdown like Ctrl-C
-                        raise KeyboardInterrupt("Memory limit exceeded")
+                        self.training_step_count % self.config.memory_check_interval == 0):
+                        self._check_memory_and_maybe_interrupt()
                     
                     # Update shared policy periodically
                     # Use more frequent sync when RND is enabled (rnd_sync_freq)

@@ -96,19 +96,38 @@ def z_to_y_space(z: Tensor, xi: float, eps: float = 1e-8) -> Tensor:
 
 ### Two-Phase Loss Strategy
 
+The z-space transformation primarily benefits network output range (bounded ∈ (0, 1] instead of 
+unbounded negative values). The loss function used for training can be configured independently:
+
+**Option 1: Q-space loss throughout (default, `use_z_based_loss=False`)**
+
+```python
+loss = (value_pred - value_target)²  # In original space (Q, V_r, or y)
+```
+
+Benefits:
+- Large outliers get strong gradients and are corrected quickly
+- No sudden discontinuity when transitioning between training phases
+- Simpler training dynamics (single loss function throughout)
+- Still benefits from z-space prediction range for network stability
+
+**Option 2: Phase-based loss (legacy, `use_z_based_loss=True`)**
+
 **Phase A (constant LR, exploring the value space):**
 ```python
 loss = (z_pred - z_target)²  where z_target = f(target)
 ```
-The z-space MSE gives balanced gradients across all scales, allowing the network to quickly find the right ballpark.
+The z-space MSE gives balanced gradients across all scales, allowing the network to quickly find the right ballpark. However, this **compresses large negative outliers**, making them less influential in the minibatch gradient, which can cause them to persist uncorrected.
 
 **Phase B (1/t decay, converging to expectations):**
 ```python
 loss = (value_pred - value_target)²  # In original space (Q or y)
 ```
-Switch to original-space MSE for proper Robbins-Monro convergence to arithmetic means.
+Switch to original-space MSE for proper Robbins-Monro convergence to arithmetic means. This causes a **sudden gradient landscape change** as previously-tolerated outliers now dominate the loss and get corrected rapidly.
 
-**Phase detection**:
+**Recommendation:** Use the default `use_z_based_loss=False` for smoother training. The main benefit of z-space (bounded network outputs) is preserved regardless of which loss is used.
+
+**Phase detection** (for legacy mode):
 ```python
 def is_in_decay_phase(step):
     total_warmup = get_total_warmup_steps()
@@ -120,8 +139,9 @@ def is_in_decay_phase(step):
 ### Configuration
 
 ```python
-use_z_space_transform: bool = True  # Enable theory-grounded z-space
-# Uses lr_constant_fraction and constant_lr_then_1_over_t to determine phases
+use_z_space_transform: bool = True   # Enable theory-grounded z-space predictions
+use_z_based_loss: bool = False       # Loss function: False=Q-space (recommended), True=z-space then Q-space
+# Uses lr_constant_fraction and constant_lr_then_1_over_t to determine phases when use_z_based_loss=True
 ```
 
 ### Policy Computation with z-Space
@@ -257,12 +277,15 @@ Maps: -400 → -6.0, -1 → -0.69, 0 → 0
 
 2. **`src/empo/nn_based/phase2/config.py`**:
    - `use_z_space_transform: bool = False` - Enable z-space transformations
-   - `is_in_decay_phase(step)` - Determine which loss phase
+   - `use_z_based_loss: bool = False` - Use z-space MSE loss (legacy) vs Q-space MSE loss (default)
+   - `should_use_z_loss(step)` - Check if z-space loss should be used at given step
+   - `is_in_decay_phase(step)` - Determine which loss phase (only used when `use_z_based_loss=True`)
 
 3. **`src/empo/nn_based/phase2/trainer.py`**:
-   - Q_r loss: z-space MSE in Phase A, Q-space MSE in Phase B
-   - V_r loss: z-space MSE in Phase A, V_r-space MSE in Phase B
-   - U_r loss: z-space MSE in Phase A, y-space MSE in Phase B
+   - Uses `config.should_use_z_loss(step)` to determine loss function
+   - Q_r loss: z-space MSE or Q-space MSE depending on config
+   - V_r loss: z-space MSE or V_r-space MSE depending on config
+   - U_r loss: z-space MSE or y-space MSE depending on config
 
 ### Network Architecture
 

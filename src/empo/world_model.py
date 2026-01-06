@@ -198,6 +198,20 @@ class WorldModel(gym.Env):
         self.set_state(saved_state)
         
         return init_state
+
+    # DAG cache: stores computed DAG to avoid redundant computation
+    # Key: return_probabilities (bool), Value: the DAG tuple
+    _dag_cache: Optional[Dict[bool, tuple]] = None
+    
+    def clear_dag_cache(self) -> None:
+        """
+        Clear the cached DAG.
+        
+        Call this method if the environment's transition dynamics have changed
+        (e.g., after modifying max_steps or other parameters that affect the DAG).
+        The DAG will be recomputed on the next call to get_dag().
+        """
+        self._dag_cache = None
     
     def get_human_agent_indices(self) -> List[int]:
         """
@@ -383,6 +397,9 @@ class WorldModel(gym.Env):
         This ensures that successor states always come after their predecessors,
         even when a state is reachable via multiple paths of different lengths.
         
+        Results are cached and reused on subsequent calls. Use clear_dag_cache()
+        to invalidate the cache if the environment's dynamics have changed.
+        
         Time Complexity: O(|S| + |T|) where |S| is the number of states and |T| is the
         total number of transitions. Phase 1 visits each state once and examines each
         transition once. Phase 2 (topological sort) also runs in O(|S| + |T|).
@@ -420,6 +437,29 @@ class WorldModel(gym.Env):
             >>> states, state_to_idx, successors, transitions = env.get_dag(return_probabilities=True)
             >>> # transitions[i] = [(action, probs, succ_indices), ...]
         """
+        # Check cache first
+        if self._dag_cache is None:
+            self._dag_cache = {}
+        
+        # If we have cached result with probabilities, we can derive the non-prob version
+        if return_probabilities:
+            if True in self._dag_cache:
+                if not quiet:
+                    print("Using cached DAG (with probabilities)")
+                return self._dag_cache[True]
+        else:
+            # Can use either cached version for non-prob request
+            if False in self._dag_cache:
+                if not quiet:
+                    print("Using cached DAG")
+                return self._dag_cache[False]
+            if True in self._dag_cache:
+                # Extract non-prob version from prob version
+                if not quiet:
+                    print("Using cached DAG (extracting from full version)")
+                states, state_to_idx, successors, _ = self._dag_cache[True]
+                return states, state_to_idx, successors
+        
         # Reset environment to get root state
         self.reset()
         root_state = self.get_state()
@@ -568,7 +608,10 @@ class WorldModel(gym.Env):
                 successors[new_idx].append(new_succ_idx)
         
         if not return_probabilities:
-            return states, state_to_idx, successors
+            # Cache and return
+            result = (states, state_to_idx, successors)
+            self._dag_cache[False] = result
+            return result
         
         # PHASE 4: Convert transitions to use new indices
         assert temp_transitions is not None
@@ -580,7 +623,10 @@ class WorldModel(gym.Env):
                 succ_indices = [state_to_idx[s] for s in trans_succ_states]
                 transitions[new_idx].append((action_prof, trans_probs, succ_indices))
         
-        return states, state_to_idx, successors, transitions
+        # Cache and return
+        result_with_prob = (states, state_to_idx, successors, transitions)
+        self._dag_cache[True] = result_with_prob
+        return result_with_prob
     
     @overload
     def get_dag_parallel(

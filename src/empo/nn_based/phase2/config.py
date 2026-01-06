@@ -206,6 +206,13 @@ class Phase2Config:
     # See docs/plans/learning_qr_scale.md for full rationale.
     use_z_space_transform: bool = False  # Enable z-space transformation
     
+    # Loss function mode when z-space transform is enabled:
+    # - True: Use z-based loss in constant LR phase, Q-based loss in decay phase (legacy)
+    # - False (default): Use Q-based loss throughout (recommended for faster outlier correction)
+    # Only has effect when use_z_space_transform=True.
+    # See docs/VALUE_TRANSFORMATIONS.md for rationale.
+    use_z_based_loss: bool = False
+    
     # Legacy 1/t decay settings (DEPRECATED - use use_sqrt_lr_decay instead)
     # These flags take precedence over use_sqrt_lr_decay if enabled.
     lr_x_h_warmup_steps: int = 1000  # Steps before 1/t decay starts (0 = always 1/t)
@@ -460,6 +467,17 @@ class Phase2Config:
                 stacklevel=2
             )
         
+        # Validate z-based loss settings
+        if self.use_z_based_loss and not self.use_z_space_transform:
+            warnings.warn(
+                "use_z_based_loss=True but use_z_space_transform=False. "
+                "Z-based loss requires z-space transformation to be enabled. "
+                "Setting use_z_based_loss=False.",
+                UserWarning,
+                stacklevel=2
+            )
+            self.use_z_based_loss = False
+        
         # Validate RND-based adaptive learning rate settings
         if self.rnd_use_adaptive_lr and not self.use_rnd:
             warnings.warn(
@@ -538,16 +556,23 @@ class Phase2Config:
     # Recommended: Set to 10000-50000 for long runs to avoid losing progress.
     checkpoint_interval: int = 10000
     
-    # Maximum memory usage as a fraction of total system memory (0.0-1.0).
-    # When exceeded, training stops gracefully (like Ctrl-C) and saves checkpoint.
+    # Minimum free memory as a fraction of total system memory (0.0-1.0).
+    # When free memory falls below this threshold:
+    # 1. Training pauses for memory_pause_duration seconds
+    # 2. If still low, training stops gracefully (like Ctrl-C) and saves checkpoint.
     # Set to 0.0 to disable memory monitoring.
-    # Recommended: 0.95 (95%) to leave some headroom for other processes.
-    max_memory_fraction: float = 0.95
+    # Recommended: 0.1 (10%) to leave headroom for other processes.
+    min_free_memory_fraction: float = 0.1
     
     # How often to check memory usage (in training steps).
     # Lower values catch memory issues faster but add overhead.
     # Recommended: 100-1000 depending on training speed.
     memory_check_interval: int = 100
+    
+    # How long to pause (seconds) when memory is low before checking again.
+    # If memory is still low after this pause, training stops.
+    # Recommended: 60 seconds to give other processes time to release memory.
+    memory_pause_duration: float = 60.0
     
     # Network architecture
     hidden_dim: int = 256
@@ -675,6 +700,32 @@ class Phase2Config:
             int(self.lr_constant_fraction * self.num_training_steps)
         )
         return step >= decay_start_step and self.constant_lr_then_1_over_t
+    
+    def should_use_z_loss(self, step: int) -> bool:
+        """
+        Check if z-space loss should be used at the given step.
+        
+        Z-space loss is only used when:
+        1. use_z_space_transform=True (z-space predictions enabled)
+        2. use_z_based_loss=True (legacy mode for z-based loss in constant LR phase)
+        3. Not in decay phase (switch to Q-space loss for Robbins-Monro)
+        
+        When use_z_based_loss=False (default), Q-space loss is used throughout,
+        which corrects large outliers faster while still benefiting from the
+        bounded network output range that z-space predictions provide.
+        
+        Args:
+            step: Current training step.
+            
+        Returns:
+            True if z-space MSE loss should be used, False for Q-space MSE loss.
+        """
+        if not self.use_z_space_transform:
+            return False
+        if not self.use_z_based_loss:
+            return False
+        # In legacy mode, use z-loss only during constant LR phase
+        return not self.is_in_decay_phase(step)
     
     def is_in_warmup(self, step: int) -> bool:
         """Check if we're still in the warm-up phase (before all networks active)."""
@@ -899,8 +950,8 @@ class Phase2Config:
                 2: "Stage 3: V_h^e + X_h + U_r",
                 3: "Stage 4: V_h^e + X_h + U_r + Q_r",
                 4: "Stage 5: V_h^e + X_h + U_r + Q_r + V_r",
-                5: "β_r ramping (constant LR)",
-                6: "Full training (LR decay)",
+                5: "β_r ramping",
+                6: "Full training",
             }
         elif self.x_h_use_network and self.u_r_use_network and not self.v_r_use_network:
             names = {
@@ -908,8 +959,8 @@ class Phase2Config:
                 1: "Stage 2: V_h^e + X_h",
                 2: "Stage 3: V_h^e + X_h + U_r",
                 3: "Stage 4: V_h^e + X_h + U_r + Q_r",
-                5: "β_r ramping (constant LR)",
-                6: "Full training (LR decay)",
+                5: "β_r ramping",
+                6: "Full training",
             }
         elif self.x_h_use_network and not self.u_r_use_network:
             # U_r computed directly from X_h, not trained (U_r stage skipped)
@@ -917,16 +968,16 @@ class Phase2Config:
                 0: "Stage 1: V_h^e only",
                 1: "Stage 2: V_h^e + X_h",
                 3: "Stage 3: V_h^e + X_h + Q_r",
-                5: "β_r ramping (constant LR)",
-                6: "Full training (LR decay)",
+                5: "β_r ramping",
+                6: "Full training",
             }
         else:
             # X_h computed directly from V_h^e samples, not trained (X_h stage skipped)
             names = {
                 0: "Stage 1: V_h^e only",
                 3: "Stage 2: V_h^e + Q_r",
-                5: "β_r ramping (constant LR)",
-                6: "Full training (LR decay)",
+                5: "β_r ramping",
+                6: "Full training",
             }
         return names.get(stage, "Unknown")
     
@@ -1389,8 +1440,9 @@ class Phase2Config:
             },
             'checkpointing_and_memory': {
                 'checkpoint_interval': self.checkpoint_interval,
-                'max_memory_fraction': self.max_memory_fraction,
+                'min_free_memory_fraction': self.min_free_memory_fraction,
                 'memory_check_interval': self.memory_check_interval,
+                'memory_pause_duration': self.memory_pause_duration,
             },
         }
         
