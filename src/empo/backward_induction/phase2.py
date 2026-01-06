@@ -40,10 +40,6 @@ from empo.world_model import WorldModel
 from empo.shared_dag import (
     init_shared_dag, get_shared_dag, attach_shared_dag, cleanup_shared_dag
 )
-from empo.shared_attainment_cache import (
-    init_shared_attainment_cache, attach_shared_attainment_cache,
-    get_shared_attainment_cache, cleanup_shared_attainment_cache
-)
 
 from .helpers import (
     State, TransitionData,
