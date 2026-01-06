@@ -98,7 +98,6 @@ def _rp_process_single_state(
     eta: float,
     terminal_Vr: float,
     slice_cache: Optional[SliceCache] = None,
-    sliced_cache: Optional[SlicedAttainmentCache] = None,
 ) -> Tuple[
     Dict[int, Dict[PossibleGoal, float]],  # vh_results: agent -> goal -> value
     float,  # vr_result
@@ -133,8 +132,6 @@ def _rp_process_single_state(
         terminal_Vr: Value for terminal states
         slice_cache: Optional SliceCache for this worker's batch (for writing).
             Structure: Dict[state_index, List[Dict[goal, array]]]
-        sliced_cache: Optional SlicedAttainmentCache for reading from previous slices.
-            Used to read attainment values from states processed in other batches.
     
     Returns:
         Tuple of:
@@ -142,6 +139,9 @@ def _rp_process_single_state(
         - vr_result: float - V_r value for this state
         - robot_policy: Dict[RobotActionProfile, float] or None (None for terminal states)
     """
+    if slice_cache is not None:
+        this_state_cache = slice_cache[state_index]
+
     vh_results: Dict[int, Dict[PossibleGoal, float]] = {agent_idx: {} for agent_idx in human_agent_indices}
     action_profile: npt.NDArray[np.int64] = np.zeros(num_agents, dtype=np.int64)
     
@@ -214,8 +214,8 @@ def _rp_process_single_state(
                     # The slice_cache is pre-populated with all values for this batch from Phase 1
                     cached = None
                     
-                    if slice_cache is not None and state_index in slice_cache:
-                        cached = slice_cache[state_index][action_profile_index].get(possible_goal)
+                    if slice_cache is not None:
+                        cached = this_state_cache[action_profile_index].get(possible_goal)
                     
                     if cached is not None:
                         attainment_values_array = cached
@@ -331,7 +331,6 @@ def _rp_compute_sequential(
             possible_goal_generator, num_agents, num_actions, action_powers,
             human_policy_prior, beta_r, gamma_h, gamma_r, zeta, xi, eta, terminal_Vr,
             slice_cache=slice_cache,
-            sliced_cache=None,  # No need to search sliced_cache - slice_cache has all Phase 1 data
         )
         
         # Store results
@@ -476,7 +475,6 @@ def _rp_process_state_batch(
             possible_goal_generator, num_agents, num_actions, action_powers,
             human_policy_prior, beta_r, gamma_h, gamma_r, zeta, xi, eta, terminal_Vr,
             slice_cache=slice_cache,
-            sliced_cache=None,  # No need to search sliced_cache - slice_cache has all Phase 1 data
         )
         
         vh_results[state_index] = vh_results_state
@@ -880,7 +878,6 @@ def compute_robot_policy(
                         possible_goal_generator, num_agents, num_actions, action_powers,
                         human_policy_prior, beta_r, gamma_h, gamma_r, zeta, xi, eta, terminal_Vr,
                         slice_cache=inline_slice_cache,
-                        sliced_cache=sliced_cache,
                     )
                     
                     # Store results
@@ -908,8 +905,15 @@ def compute_robot_policy(
                     futures = [executor.submit(_rp_process_state_batch, batch) 
                                for batch in batches if batch]
                     
+                    batches_completed = 0
                     for future in as_completed(futures):
+                        # Check memory BEFORE collecting result to catch pressure early
+                        # Use force=True to bypass interval check since we check per-batch
+                        if memory_monitor is not None:
+                            memory_monitor.check(batches_completed, force=True)
+                        
                         vh_results, vr_results, p_results, slice_id, slice_cache, batch_time = future.result()
+                        batches_completed += 1
                         
                         # Merge Vh-values back
                         for state_idx, state_results in vh_results.items():
@@ -922,6 +926,10 @@ def compute_robot_policy(
                         
                         # Merge robot policies back
                         robot_policy_values.update(p_results)
+                        
+                        # Check memory AFTER merging results (this is when memory actually increases)
+                        if memory_monitor is not None:
+                            memory_monitor.check(batches_completed, force=True)
                         
                         # Note: slice_cache is retrieved from Phase 1, no need to store it again
             

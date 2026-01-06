@@ -157,29 +157,17 @@ def _hpp_process_single_state(
                             action_profile_index = (action_profile @ action_powers).item()
                             _, next_state_probabilities, next_state_indices = transitions[state_index][action_profile_index]
 
-                            # Check caches first, compute and store if not found
-                            cached = None
+                            # Compute attainment values
+                            attainment_values_array = np.fromiter(
+                                (possible_goal.is_achieved(states[next_state_index]) 
+                                    for next_state_index in next_state_indices),
+                                dtype=np.int8,
+                                count=len(next_state_indices)
+                            )
                             
-                            # Try to read from caches:
-                            # 1. slice_cache (this worker's local cache for current batch)
-                            # 2. sliced_cache (master cache with slices from previous levels)
+                            # Store in slice_cache if available
                             if this_state_cache is not None:
-                                cached = this_state_cache[action_profile_index].get(possible_goal)
-                            
-                            if cached is not None:
-                                attainment_values_array = cached
-                            else:
-                                # Compute attainment values
-                                attainment_values_array = np.fromiter(
-                                    (possible_goal.is_achieved(states[next_state_index]) 
-                                     for next_state_index in next_state_indices),
-                                    dtype=np.int8,
-                                    count=len(next_state_indices)
-                                )
-                                
-                                # Store in slice_cache if available
-                                if this_state_cache is not None:
-                                    this_state_cache[action_profile_index][possible_goal] = attainment_values_array
+                                this_state_cache[action_profile_index][possible_goal] = attainment_values_array
 
                             # Get V values from successors (use .get for parallel safety)
                             v_values_array = np.fromiter(
@@ -821,10 +809,17 @@ def compute_human_policy_prior(
                         prof_submit_time += time.perf_counter() - _submit_t0
                     
                     # Collect results and store slices
+                    batches_completed = 0
                     for future in as_completed(futures):
+                        # Check memory BEFORE collecting result to catch pressure early
+                        # Use force=True to bypass interval check since we check per-batch
+                        if memory_monitor is not None:
+                            memory_monitor.check(batches_completed, force=True)
+                        
                         if PROFILE_PARALLEL:
                             _wait_t0 = time.perf_counter()
                         v_results, p_results, slice_id, slice_cache, batch_time = future.result()
+                        batches_completed += 1
                         if PROFILE_PARALLEL:
                             prof_wait_time += time.perf_counter() - _wait_t0
                             prof_batch_times.append(batch_time)
@@ -854,6 +849,10 @@ def compute_human_policy_prior(
                         # Store slice cache (no merging needed - each slice is stored separately)
                         if sliced_cache is not None:
                             sliced_cache.store_slice(slice_id, slice_cache)
+                        
+                        # Check memory AFTER merging results (this is when memory actually increases)
+                        if memory_monitor is not None:
+                            memory_monitor.check(batches_completed, force=True)
                 
                 if PROFILE_PARALLEL:
                     prof_total_parallel_time += time.perf_counter() - _level_t0
