@@ -36,6 +36,7 @@ Output:
 """
 
 import argparse
+import inspect
 import itertools
 import os
 import random
@@ -58,6 +59,7 @@ from empo.backward_induction import (
     compute_robot_policy,
     TabularRobotPolicy
 )
+from empo import backward_induction as backward_induction_pkg
 from empo.human_policy_prior import TabularHumanPolicyPrior
 from empo.multigrid import ReachCellGoal
 
@@ -455,6 +457,51 @@ def run_policy_rollout(
 # Main
 # =============================================================================
 
+def get_all_functions_from_module(module, _seen=None):
+    """
+    Recursively get all functions from a module and its submodules.
+    
+    Returns a list of (function_object, qualified_name) tuples.
+    Tracks already seen functions to avoid duplicates from re-exports.
+    """
+    if _seen is None:
+        _seen = set()
+    
+    functions = []
+    
+    # Recursively process submodules FIRST so we get functions from their source modules
+    if hasattr(module, '__path__'):
+        import pkgutil
+        for importer, modname, ispkg in pkgutil.iter_modules(module.__path__):
+            submodule_name = f"{module.__name__}.{modname}"
+            try:
+                submodule = __import__(submodule_name, fromlist=[modname])
+                functions.extend(get_all_functions_from_module(submodule, _seen))
+            except ImportError:
+                pass
+    
+    # Get functions defined directly in this module (not re-exports)
+    for name, obj in inspect.getmembers(module):
+        if inspect.isfunction(obj):
+            # Only include functions actually defined in this specific module
+            if hasattr(obj, '__module__') and obj.__module__ == module.__name__:
+                func_id = id(obj)
+                if func_id not in _seen:
+                    _seen.add(func_id)
+                    functions.append((obj, f"{obj.__module__}.{obj.__name__}"))
+        elif inspect.isclass(obj):
+            # Get methods from classes defined in this module
+            if hasattr(obj, '__module__') and obj.__module__ == module.__name__:
+                for method_name, method in inspect.getmembers(obj, predicate=inspect.isfunction):
+                    if not method_name.startswith('_') or method_name in ('__init__', '__call__'):
+                        func_id = id(method)
+                        if func_id not in _seen:
+                            _seen.add(func_id)
+                            functions.append((method, f"{obj.__module__}.{obj.__name__}.{method_name}"))
+    
+    return functions
+
+
 def main(
     max_steps: int = 5,
     num_rollouts: int = 20,
@@ -476,6 +523,7 @@ def main(
     world_path: Optional[str] = None,
     human_idx: Optional[int] = None,
     robot_idx: Optional[int] = None,
+    profile: bool = False,
 ):
     """Run Phase 2 backward induction demo."""
     # Set random seeds
@@ -487,6 +535,27 @@ def main(
     print("Computing exact robot policy using DAG backward induction")
     print("=" * 70)
     print()
+    
+    # Set up line profiler if requested
+    profiler = None
+    if profile:
+        try:
+            from line_profiler import LineProfiler
+            profiler = LineProfiler()
+            
+            # Get all functions from the backward_induction package
+            functions_to_profile = get_all_functions_from_module(backward_induction_pkg)
+            
+            print(f"Line profiling enabled. Profiling {len(functions_to_profile)} functions:")
+            for func, name in functions_to_profile:
+                profiler.add_function(func)
+                print(f"  - {name}")
+            print()
+        except ImportError:
+            print("WARNING: line_profiler not installed. Install with: pip install line_profiler")
+            print("Continuing without profiling...")
+            print()
+            profile = False
     
     # Create output directory
     if output_dir is None:
@@ -564,6 +633,8 @@ def main(
     print()
     
     t0 = time.time()
+    if profiler:
+        profiler.enable()
     human_policy_prior, Vh_phase1 = compute_human_policy_prior(
         world_model=env,
         human_agent_indices=env.human_agent_indices,
@@ -617,6 +688,8 @@ def main(
         num_workers=num_workers,
         return_values=True,
     )
+    if profiler:
+        profiler.disable()
     t1 = time.time()
     
     print(f"Robot policy computed in {t1 - t0:.2f} seconds")
@@ -763,9 +836,49 @@ def main(
     env.save_video(movie_path, fps=movie_fps)
     
     print()
+    
+    # Write profiling results if enabled
+    if profiler:
+        profile_path = os.path.join(output_dir, 'line_profile_results.txt')
+        print("=" * 70)
+        print("Writing line profiling results...")
+        print("=" * 70)
+        
+        with open(profile_path, 'w') as f:
+            profiler.print_stats(stream=f)
+        
+        print(f"  Profile saved to: {os.path.abspath(profile_path)}")
+        print()
+        
+        # Also print summary to console
+        print("Top functions by total time (see file for line-by-line details):")
+        import io
+        stats_buffer = io.StringIO()
+        profiler.print_stats(stream=stats_buffer)
+        stats_text = stats_buffer.getvalue()
+        
+        # Extract and show summary (first few function headers)
+        lines = stats_text.split('\n')
+        in_header = False
+        func_count = 0
+        for line in lines:
+            if 'Total time:' in line:
+                in_header = True
+                func_count += 1
+                if func_count <= 5:  # Show top 5 function summaries
+                    print(f"  {line.strip()}")
+            elif in_header and 'Function:' in line:
+                if func_count <= 5:
+                    print(f"  {line.strip()}")
+                    print()
+                in_header = False
+        print()
+    
     print("=" * 70)
     print("Demo completed!")
     print(f"  Movie saved to: {os.path.abspath(movie_path)}")
+    if profiler:
+        print(f"  Profile saved to: {os.path.abspath(profile_path)}")
     print("=" * 70)
 
 
@@ -833,6 +946,9 @@ if __name__ == "__main__":
                         help='Frames per second for video')
     parser.add_argument('--seed', type=int, default=42,
                         help='Random seed')
+    parser.add_argument('--profile', action='store_true',
+                        help='Enable line profiling of backward_induction package '
+                             '(requires line_profiler: pip install line_profiler)')
     
     args = parser.parse_args()
     
@@ -872,4 +988,5 @@ if __name__ == "__main__":
         world_path=args.world,
         human_idx=args.human_idx,
         robot_idx=args.robot_idx,
+        profile=args.profile,
     )
