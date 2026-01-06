@@ -413,7 +413,16 @@ def combine_profile_distributions_to_indices(
         ...     _, next_probs, next_states = transitions[state_index][idx]
         ...     # ... compute expected values
     """
-    if num_agents is None:
+    # Validate or infer the total number of agents.
+    if num_agents is not None:
+        inferred_num_agents = len(human_agent_indices) + len(robot_agent_indices)
+        if num_agents != inferred_num_agents:
+            raise ValueError(
+                f"Inconsistent num_agents: expected {inferred_num_agents} "
+                f"from agent indices, but got {num_agents}."
+            )
+    else:
+        # Infer num_agents for potential future use or debugging.
         num_agents = len(human_agent_indices) + len(robot_agent_indices)
     
     n_human = len(human_probs)
