@@ -209,33 +209,23 @@ def _rp_process_single_state(
                     action_profile_index = int(np.dot(action_profile, action_powers))
                     _, next_state_probabilities, next_state_indices = transitions[state_index][action_profile_index]
                     
-                    # Check attainment cache first, compute and store if not found
+                    # Look up attainment values from Phase 1 cache
+                    # The slice_cache is pre-populated with all values for this batch from Phase 1
                     attainment_values_array: npt.NDArray[np.floating[Any]]
                     cached: Optional[npt.NDArray[np.int8]] = None
                     
-                    # Try to read from caches:
-                    # 1. slice_cache (this worker's batch - for states already processed in this batch)
-                    # 2. sliced_cache (previous levels - for states in other batches)
                     if slice_cache is not None and state_index in slice_cache:
                         cached = slice_cache[state_index][action_profile_index].get(possible_goal)
-                    if cached is None and sliced_cache is not None:
-                        cached = sliced_cache.get(state_index, action_profile_index, possible_goal)
                     
                     if cached is not None:
                         attainment_values_array = cached
                     else:
-                        # Compute attainment values
+                        # Cache miss - compute attainment values
+                        # This should rarely happen if Phase 1 populated the cache correctly
                         attainment_values_array = np.array([
                             possible_goal.is_achieved(states[next_state_index]) 
                             for next_state_index in next_state_indices
                         ], dtype=np.int8)
-                        
-                        # Store in slice_cache if provided
-                        if slice_cache is not None:
-                            if state_index not in slice_cache:
-                                # Should not happen if slice_cache was pre-allocated for this batch
-                                slice_cache[state_index] = [{} for _ in range(len(slice_cache[next(iter(slice_cache))]))]
-                            slice_cache[state_index][action_profile_index][possible_goal] = attainment_values_array
                     
                     if float(np.dot(next_state_probabilities, attainment_values_array)) > 0.0:
                         some_goal_achieved_with_positive_prob = True
@@ -316,17 +306,15 @@ def _rp_compute_sequential(
     total_states = len(states)
     
     # In sequential mode, we use a single slice containing all states
-    # Create slice cache for all states
+    # Retrieve the slice cache populated by Phase 1 (not create a new empty one!)
     slice_cache: Optional[SliceCache] = None
     if sliced_cache is not None:
         all_state_indices = list(range(len(states)))
-        slice_cache = sliced_cache.create_slice_cache(all_state_indices)
+        slice_id = make_slice_id(all_state_indices)
+        slice_cache = sliced_cache.get_slice(slice_id)
     
     # loop over the nodes in reverse topological order:
     for state_index in range(len(states)-1, -1, -1):
-        if DEBUG:
-            print(f"Processing state {state_index}")
-        
         state = states[state_index]
         
         # Use unified helper
@@ -336,7 +324,7 @@ def _rp_compute_sequential(
             possible_goal_generator, num_agents, num_actions, action_powers,
             human_policy_prior, beta_r, gamma_h, gamma_r, zeta, xi, eta, terminal_Vr,
             slice_cache=slice_cache,
-            sliced_cache=sliced_cache,
+            sliced_cache=None,  # No need to search sliced_cache - slice_cache has all Phase 1 data
         )
         
         # Store results
@@ -355,10 +343,7 @@ def _rp_compute_sequential(
         if progress_callback is not None:
             progress_callback(states_processed, total_states)
     
-    # Store the slice in the sliced cache (sequential mode only)
-    if sliced_cache is not None and slice_cache is not None:
-        slice_id = make_slice_id(list(range(len(states))))
-        sliced_cache.store_slice(slice_id, slice_cache)
+    # Note: slice_cache was retrieved from Phase 1, no need to store it again
 
 
 def _rp_init_shared_data(
@@ -411,7 +396,7 @@ def _rp_process_state_batch(
            Dict[int, float],
            Dict[State, Dict[RobotActionProfile, float]],
            SliceId,  # slice_id for this batch
-           SliceCache,  # slice cache for this batch
+           Optional[SliceCache],  # slice cache for this batch (None if not available)
            float]:
     """Process a batch of states for robot policy computation.
     
@@ -466,27 +451,25 @@ def _rp_process_state_batch(
     vr_results: Dict[int, float] = {}
     p_results: Dict[State, Dict[RobotActionProfile, float]] = {}
     
-    # Create slice cache for this batch
+    # Retrieve slice cache pre-populated by Phase 1 for this batch
     # Structure: Dict[state_index, List[Dict[goal, array]]]
     slice_id = make_slice_id(state_indices)
-    slice_cache: SliceCache = {
-        state_idx: [{} for _ in range(_shared_num_action_profiles)]
-        for state_idx in state_indices
-    }
+    slice_cache: Optional[SliceCache] = None
+    if _shared_sliced_cache is not None:
+        slice_cache = _shared_sliced_cache.get_slice(slice_id)
     
     for state_index in state_indices:
         state = states[state_index]
         
-        # Use unified helper with:
-        # - slice_cache for writing (this worker's cache for current batch)
-        # - _shared_sliced_cache for reading (populated by Phase 1 and previous levels)
+        # Use unified helper with slice_cache pre-populated by Phase 1
+        # The sliced_cache is no longer needed for lookup since slice_cache has all data
         vh_results_state, vr_result, p_result = _rp_process_single_state(
             state_index, state, states, transitions, Vh_values, Vr_values,
             human_agent_indices, robot_agent_indices, robot_action_profiles,
             possible_goal_generator, num_agents, num_actions, action_powers,
             human_policy_prior, beta_r, gamma_h, gamma_r, zeta, xi, eta, terminal_Vr,
             slice_cache=slice_cache,
-            sliced_cache=_shared_sliced_cache,
+            sliced_cache=None,  # No need to search sliced_cache - slice_cache has all Phase 1 data
         )
         
         vh_results[state_index] = vh_results_state
@@ -933,8 +916,7 @@ def compute_robot_policy(
                         # Merge robot policies back
                         robot_policy_values.update(p_results)
                         
-                        # Store slice cache (no merging needed - each worker has its own slice)
-                        sliced_cache.store_slice(slice_id, slice_cache)
+                        # Note: slice_cache is retrieved from Phase 1, no need to store it again
             
             # Report progress after each level
             if progress_callback:

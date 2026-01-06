@@ -124,6 +124,25 @@ class PossibleGoal(ABC):
             )
         object.__delattr__(self, name)
 
+    def __getstate__(self):
+        """Exclude env from pickling (it may contain unpicklable objects like thread locks)."""
+        state = self.__dict__.copy()
+        state['env'] = None
+        return state
+    
+    def __setstate__(self, state):
+        """Restore state after unpickling.
+        
+        Temporarily unfreeze to allow setting attributes, then re-freeze.
+        The env/world_model will need to be set separately after unpickling
+        if needed.
+        """
+        # Must set _frozen to False first to allow attribute setting
+        object.__setattr__(self, '_frozen', False)
+        self.__dict__.update(state)
+        # Re-freeze the object
+        object.__setattr__(self, '_frozen', True)
+
     @abstractmethod
     def is_achieved(self, state) -> int:
         """
