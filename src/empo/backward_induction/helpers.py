@@ -19,11 +19,114 @@ State: TypeAlias = Any  # State is typically a hashable tuple from WorldModel.ge
 ActionProfile = List[int]
 TransitionData = Tuple[Tuple[int, ...], List[float], List[State]]  # (action_profile, probs, successor_states)
 
-# Cache for goal attainment values computed during phase 1 and reused in phase 2.
-# Structure: state_index -> action_profile_index -> goal -> array of attainment values for successor states.
-# Using nested dicts for fast O(1) lookups. The innermost value is an ndarray of 0/1 values
-# indicating whether each successor state achieves the goal.
-AttainmentCache: TypeAlias = Dict[int, Dict[int, Dict["PossibleGoal", npt.NDArray[np.int8]]]]
+# Slice cache for a worker's batch of states.
+# Structure: slice_cache[state_index][action_profile_index][goal] -> array of attainment values.
+# - Dict keyed by state_index (states in a batch are not consecutive)
+# - List indexed by action_profile_index (consecutive 0..num_action_profiles-1, O(1) access)
+# - Dict keyed by goal (flexible set of goals)
+SliceCache: TypeAlias = Dict[int, List[Dict["PossibleGoal", npt.NDArray[np.int8]]]]
+
+# Sliced attainment cache: stores worker slice caches indexed by slice_id.
+# slice_id is typically a tuple identifying the batch (e.g., batch contents hash or first state index).
+# This avoids merging overhead - each slice stays separate and Phase 2 workers access by slice_id.
+SliceId: TypeAlias = Tuple[int, ...]  # Tuple of state indices in the slice
+
+
+class SlicedAttainmentCache:
+    """Cache for goal attainment values organized by worker slices.
+    
+    Each worker in parallel mode creates a SliceCache for its batch of states.
+    These are stored separately (not merged) and accessed by slice_id.
+    Both Phase 1 and Phase 2 use the same slice assignments for consistency.
+    
+    Structure:
+        slices[slice_id] = SliceCache
+        SliceCache[state_index][action_profile_index][goal] = attainment_array
+    """
+    
+    def __init__(self, num_action_profiles: int):
+        """Initialize empty sliced cache.
+        
+        Args:
+            num_action_profiles: Number of action profiles (needed to create lists)
+        """
+        self.num_action_profiles = num_action_profiles
+        self.slices: Dict[SliceId, SliceCache] = {}
+    
+    def create_slice_cache(self, state_indices: List[int]) -> SliceCache:
+        """Create an empty slice cache for given state indices.
+        
+        Args:
+            state_indices: List of state indices this slice will contain
+            
+        Returns:
+            Empty SliceCache with pre-allocated lists for each state
+        """
+        return {
+            state_idx: [{} for _ in range(self.num_action_profiles)]
+            for state_idx in state_indices
+        }
+    
+    def store_slice(self, slice_id: SliceId, cache: SliceCache) -> None:
+        """Store a worker's completed slice cache.
+        
+        Args:
+            slice_id: Identifier for this slice (tuple of state indices)
+            cache: The worker's completed slice cache
+        """
+        self.slices[slice_id] = cache
+    
+    def get_slice(self, slice_id: SliceId) -> Optional[SliceCache]:
+        """Get a slice cache by ID.
+        
+        Args:
+            slice_id: The slice identifier
+            
+        Returns:
+            The slice cache if found, None otherwise
+        """
+        return self.slices.get(slice_id)
+    
+    def get(self, state_index: int, action_profile_index: int, goal: "PossibleGoal") -> Optional[npt.NDArray[np.int8]]:
+        """Look up a cached attainment array across all slices.
+        
+        Args:
+            state_index: Global state index
+            action_profile_index: Action profile index
+            goal: The goal to look up
+            
+        Returns:
+            Cached attainment array if found, None otherwise
+        """
+        for slice_cache in self.slices.values():
+            if state_index in slice_cache:
+                return slice_cache[state_index][action_profile_index].get(goal)
+        return None
+    
+    def total_entries(self) -> int:
+        """Count total number of cached entries across all slices."""
+        count = 0
+        for slice_cache in self.slices.values():
+            for state_idx, ap_list in slice_cache.items():
+                for goal_dict in ap_list:
+                    count += len(goal_dict)
+        return count
+    
+    def num_states(self) -> int:
+        """Count total number of states across all slices."""
+        return sum(len(slice_cache) for slice_cache in self.slices.values())
+
+
+def make_slice_id(state_indices: List[int]) -> SliceId:
+    """Create a slice ID from a list of state indices.
+    
+    Args:
+        state_indices: List of state indices in the slice
+        
+    Returns:
+        Tuple that uniquely identifies this slice
+    """
+    return tuple(sorted(state_indices))
 
 
 def default_believed_others_policy(

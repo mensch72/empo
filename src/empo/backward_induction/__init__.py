@@ -67,7 +67,10 @@ from .helpers import (
     compute_dependency_levels_general,
     compute_dependency_levels_fast,
     split_into_batches,
-    AttainmentCache,
+    SliceCache,
+    SliceId,
+    SlicedAttainmentCache,
+    make_slice_id,
 )
 
 from .phase1 import compute_human_policy_prior
@@ -84,7 +87,9 @@ __all__ = [
     'compute_robot_policy',
     'TabularRobotPolicy',
     # Types
-    'AttainmentCache',
+    'SliceCache',
+    'SliceId',
+    'SlicedAttainmentCache',
     # Helpers
     'default_believed_others_policy',
     'combine_action_profiles',
@@ -94,4 +99,5 @@ __all__ = [
     'compute_dependency_levels_general',
     'compute_dependency_levels_fast',
     'split_into_batches',
+    'make_slice_id',
 ]

@@ -14,6 +14,7 @@ The algorithm works by:
 Key features:
 - Supports parallel computation for large state spaces
 - Returns both the policy (prior) and optionally value functions
+- Automatically stores attainment cache on world_model for reuse in Phase 2
 
 Parameters:
     beta_h: Human inverse temperature (β). Higher = more deterministic, inf = argmax.
@@ -39,13 +40,17 @@ from empo.world_model import WorldModel
 from empo.shared_dag import (
     init_shared_dag, get_shared_dag, attach_shared_dag, cleanup_shared_dag
 )
+from empo.shared_attainment_cache import (
+    init_shared_attainment_cache, cleanup_shared_attainment_cache
+)
 
 from .helpers import (
-    State, TransitionData, AttainmentCache,
+    State, TransitionData, SliceCache, SliceId, SlicedAttainmentCache,
     default_believed_others_policy,
     compute_dependency_levels_general,
     compute_dependency_levels_fast,
     split_into_batches,
+    make_slice_id,
 )
 
 # Type aliases
@@ -60,7 +65,8 @@ PROFILE_PARALLEL = os.environ.get('PROFILE_PARALLEL', '').lower() in ('1', 'true
 _shared_states: Optional[List[State]] = None
 _shared_transitions: Optional[List[List[TransitionData]]] = None
 _shared_Vh_values: Optional[VhValues] = None
-_shared_attainment_cache: Optional[AttainmentCache] = None  # Cache for goal attainment arrays
+_shared_sliced_cache: Optional[SlicedAttainmentCache] = None  # Sliced cache for goal attainment arrays
+_shared_num_action_profiles: int = 0  # Needed to create slice caches in workers
 _shared_params: Optional[Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], List[int], List[List[int]], float, float]] = None
 _shared_believed_others_policy_pickle: Optional[bytes] = None  # cloudpickle'd believed_others_policy function
 
@@ -80,7 +86,8 @@ def _hpp_process_single_state(
     robot_action_profiles: List[List[int]],
     beta_h: float,
     gamma_h: float,
-    attainment_cache: Optional[AttainmentCache] = None,
+    slice_cache: Optional[SliceCache] = None,
+    sliced_cache: Optional[SlicedAttainmentCache] = None,
 ) -> Tuple[Dict[int, Dict[PossibleGoal, float]], Optional[Dict[int, Dict[PossibleGoal, npt.NDArray[np.floating[Any]]]]]]:
     """Process a single state, returning (v_results, p_results).
     
@@ -99,9 +106,10 @@ def _hpp_process_single_state(
         believed_others_policy: Function for beliefs about other agents
         beta_h: Inverse temperature (can be float('inf') for argmax)
         gamma_h: Discount factor
-        attainment_cache: Optional cache to store/retrieve goal attainment arrays.
-            If provided, caches attainment_values_array keyed by 
-            (state_index, action_profile_index, goal) for reuse in phase 2.
+        slice_cache: Optional slice cache to WRITE to (worker's local cache for this batch).
+            Structure: Dict[state_index, List[Dict[goal, array]]]
+        sliced_cache: Optional SlicedAttainmentCache to READ from (populated by previous levels).
+            Workers read from here but write to slice_cache.
     
     Returns:
         Tuple of:
@@ -148,43 +156,30 @@ def _hpp_process_single_state(
                             action_profile_index = int(np.dot(action_profile, action_powers))
                             _, next_state_probabilities, next_state_indices = transitions[state_index][action_profile_index]
 
-                            # Check attainment cache first, compute and store if not found
+                            # Check caches first, compute and store if not found
                             attainment_values_array: npt.NDArray[np.int8]
-                            if attainment_cache is not None:
-                                state_cache = attainment_cache.get(state_index)
-                                if state_cache is not None:
-                                    ap_cache = state_cache.get(action_profile_index)
-                                    if ap_cache is not None:
-                                        cached = ap_cache.get(possible_goal)
-                                        if cached is not None:
-                                            attainment_values_array = cached
-                                        else:
-                                            # Compute and cache
-                                            attainment_values_array = np.array([
-                                                possible_goal.is_achieved(states[next_state_index]) 
-                                                for next_state_index in next_state_indices
-                                            ], dtype=np.int8)
-                                            ap_cache[possible_goal] = attainment_values_array
-                                    else:
-                                        # Compute and cache
-                                        attainment_values_array = np.array([
-                                            possible_goal.is_achieved(states[next_state_index]) 
-                                            for next_state_index in next_state_indices
-                                        ], dtype=np.int8)
-                                        state_cache[action_profile_index] = {possible_goal: attainment_values_array}
-                                else:
-                                    # Compute and cache
-                                    attainment_values_array = np.array([
-                                        possible_goal.is_achieved(states[next_state_index]) 
-                                        for next_state_index in next_state_indices
-                                    ], dtype=np.int8)
-                                    attainment_cache[state_index] = {action_profile_index: {possible_goal: attainment_values_array}}
+                            cached: Optional[npt.NDArray[np.int8]] = None
+                            
+                            # Try to read from caches:
+                            # 1. slice_cache (this worker's local cache for current batch)
+                            # 2. sliced_cache (master cache with slices from previous levels)
+                            if slice_cache is not None and state_index in slice_cache:
+                                cached = slice_cache[state_index][action_profile_index].get(possible_goal)
+                            if cached is None and sliced_cache is not None:
+                                cached = sliced_cache.get(state_index, action_profile_index, possible_goal)
+                            
+                            if cached is not None:
+                                attainment_values_array = cached
                             else:
-                                # No cache, compute directly
+                                # Compute attainment values
                                 attainment_values_array = np.array([
                                     possible_goal.is_achieved(states[next_state_index]) 
                                     for next_state_index in next_state_indices
                                 ], dtype=np.int8)
+                                
+                                # Store in slice_cache if available
+                                if slice_cache is not None and state_index in slice_cache:
+                                    slice_cache[state_index][action_profile_index][possible_goal] = attainment_values_array
 
                             # Get V values from successors (use .get for parallel safety)
                             v_values_array: npt.NDArray[np.floating[Any]] = np.array([
@@ -238,7 +233,7 @@ def _hpp_compute_sequential(
     gamma_h: float,
     progress_callback: Optional[Callable[[int, int], None]] = None,
     memory_monitor: Optional[MemoryMonitor] = None,
-    attainment_cache: Optional[AttainmentCache] = None,
+    sliced_cache: Optional[SlicedAttainmentCache] = None,
 ) -> None:
     """Sequential backward induction algorithm.
     
@@ -246,6 +241,14 @@ def _hpp_compute_sequential(
     _process_single_state helper.
     """
     total_states = len(states)
+    num_action_profiles = num_actions ** num_agents
+    
+    # In sequential mode, we use a single slice containing all states
+    # Create slice cache for all states
+    slice_cache: Optional[SliceCache] = None
+    if sliced_cache is not None:
+        all_state_indices = list(range(len(states)))
+        slice_cache = sliced_cache.create_slice_cache(all_state_indices)
     
     # loop over the nodes in reverse topological order:
     for state_index in range(len(states)-1, -1, -1):
@@ -268,7 +271,8 @@ def _hpp_compute_sequential(
             num_actions, action_powers, believed_others_policy,
             robot_agent_indices, robot_action_profiles,
             beta_h, gamma_h,
-            attainment_cache,
+            slice_cache=slice_cache,
+            sliced_cache=sliced_cache,
         )
         
         # Store results back into Vh_values and system2_policies
@@ -277,6 +281,11 @@ def _hpp_compute_sequential(
         
         if p_results is not None:
             system2_policies[state] = p_results
+    
+    # Store the slice in the sliced cache
+    if sliced_cache is not None and slice_cache is not None:
+        slice_id = make_slice_id(list(range(len(states))))
+        sliced_cache.store_slice(slice_id, slice_cache)
 
 
 def _hpp_init_shared_data(
@@ -286,7 +295,8 @@ def _hpp_init_shared_data(
     params: Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], float, float],
     believed_others_policy_pickle: Optional[bytes] = None,
     use_shared_memory: bool = False,
-    attainment_cache: Optional[AttainmentCache] = None,
+    sliced_cache: Optional[SlicedAttainmentCache] = None,
+    num_action_profiles: int = 0,
 ) -> None:
     """Initialize shared data for worker processes.
     
@@ -297,9 +307,11 @@ def _hpp_init_shared_data(
         params: Parameters tuple
         believed_others_policy_pickle: Pickled policy function
         use_shared_memory: If True, store states and transitions in shared memory
-        attainment_cache: Optional cache for goal attainment arrays
+        sliced_cache: Optional SlicedAttainmentCache for goal attainment arrays
+        num_action_profiles: Number of action profiles (needed to create slice caches)
     """
-    global _shared_states, _shared_transitions, _shared_Vh_values, _shared_params, _shared_believed_others_policy_pickle, _shared_attainment_cache
+    global _shared_states, _shared_transitions, _shared_Vh_values, _shared_params
+    global _shared_believed_others_policy_pickle, _shared_sliced_cache, _shared_num_action_profiles
     
     if use_shared_memory:
         # Store DAG in shared memory to avoid copy-on-write
@@ -313,19 +325,21 @@ def _hpp_init_shared_data(
     _shared_Vh_values = Vh_values
     _shared_params = params
     _shared_believed_others_policy_pickle = believed_others_policy_pickle
-    _shared_attainment_cache = attainment_cache
+    _shared_sliced_cache = sliced_cache
+    _shared_num_action_profiles = num_action_profiles
 
 
 def _hpp_process_state_batch(
     state_indices: List[int]
 ) -> Tuple[Dict[int, Dict[int, Dict[PossibleGoal, float]]], 
            Dict[State, Dict[int, Dict[PossibleGoal, npt.NDArray[np.floating[Any]]]]], 
-           Dict[int, Dict[int, Dict[PossibleGoal, npt.NDArray[np.int8]]]],  # attainment cache updates
+           SliceId,  # slice_id for storing the cache
+           SliceCache,  # slice cache for this batch
            float]:
     """Process a batch of states that can be computed in parallel.
     
     Uses module-level shared data (inherited via fork) to avoid copying.
-    Returns V-values, policies for non-terminal states, attainment cache updates, plus timing.
+    Returns V-values, policies, slice_id, slice_cache, plus timing.
     """
     batch_start = time.perf_counter()
     
@@ -358,8 +372,13 @@ def _hpp_process_state_batch(
     v_results: Dict[int, Dict[int, Dict[PossibleGoal, float]]] = {}
     p_results: Dict[State, Dict[int, Dict[PossibleGoal, npt.NDArray[np.floating[Any]]]]] = {}
     
-    # Create local attainment cache for this batch if caching is enabled
-    local_attainment_cache: Optional[AttainmentCache] = {} if _shared_attainment_cache is not None else None
+    # Create slice cache for this batch
+    # Structure: Dict[state_index, List[Dict[goal, array]]]
+    slice_id = make_slice_id(state_indices)
+    slice_cache: SliceCache = {
+        state_idx: [{} for _ in range(_shared_num_action_profiles)]
+        for state_idx in state_indices
+    }
     
     # Deserialize believed_others_policy if custom one was provided via cloudpickle
     if _shared_believed_others_policy_pickle is not None:
@@ -372,14 +391,17 @@ def _hpp_process_state_batch(
     for state_index in state_indices:
         state = states[state_index]
         
-        # Use unified helper
+        # Use unified helper with:
+        # - slice_cache for writing (this worker's cache for current batch)
+        # - _shared_sliced_cache for reading (populated by previous levels)
         state_v_results, state_p_results = _hpp_process_single_state(
             state_index, state, states, transitions, Vh_values,
             human_agent_indices, possible_goal_generator,
             num_actions, action_powers, believed_others_policy,
             robot_agent_indices, robot_action_profiles,
             beta_h, gamma_h,
-            local_attainment_cache,
+            slice_cache=slice_cache,
+            sliced_cache=_shared_sliced_cache,
         )
         
         v_results[state_index] = state_v_results
@@ -387,7 +409,7 @@ def _hpp_process_state_batch(
             p_results[state] = state_p_results
     
     batch_time = time.perf_counter() - batch_start
-    return v_results, p_results, local_attainment_cache or {}, batch_time
+    return v_results, p_results, slice_id, slice_cache, batch_time
 
 
 @overload
@@ -453,7 +475,7 @@ def compute_human_policy_prior(
     min_free_memory_fraction: float = 0.1,
     memory_check_interval: int = 100,
     memory_pause_duration: float = 60.0
-) -> Tuple[TabularHumanPolicyPrior, AttainmentCache]: ...
+) -> Tuple[TabularHumanPolicyPrior, SlicedAttainmentCache]: ...
 
 
 @overload
@@ -475,7 +497,7 @@ def compute_human_policy_prior(
     min_free_memory_fraction: float = 0.1,
     memory_check_interval: int = 100,
     memory_pause_duration: float = 60.0
-) -> Tuple[TabularHumanPolicyPrior, Dict[State, Dict[int, Dict[PossibleGoal, float]]], AttainmentCache]: ...
+) -> Tuple[TabularHumanPolicyPrior, Dict[State, Dict[int, Dict[PossibleGoal, float]]], SlicedAttainmentCache]: ...
 
 
 def compute_human_policy_prior(
@@ -498,8 +520,8 @@ def compute_human_policy_prior(
     memory_pause_duration: float = 60.0
 ) -> Union[TabularHumanPolicyPrior, 
            Tuple[TabularHumanPolicyPrior, Dict[State, Dict[int, Dict[PossibleGoal, float]]]],
-           Tuple[TabularHumanPolicyPrior, AttainmentCache],
-           Tuple[TabularHumanPolicyPrior, Dict[State, Dict[int, Dict[PossibleGoal, float]]], AttainmentCache]]:
+           Tuple[TabularHumanPolicyPrior, SlicedAttainmentCache],
+           Tuple[TabularHumanPolicyPrior, Dict[State, Dict[int, Dict[PossibleGoal, float]]], SlicedAttainmentCache]]:
     """
     Compute human policy prior via backward induction on the state DAG.
     
@@ -640,8 +662,18 @@ def compute_human_policy_prior(
     # Initialize V_values as nested lists for faster access
     Vh_values: VhValues = [[{} for _ in range(num_agents)] for _ in range(len(states))]
     
-    # Initialize attainment cache if requested
-    attainment_cache: Optional[AttainmentCache] = {} if return_attainment_cache else None
+    # Always create sliced attainment cache - it will be stored on world_model for reuse in Phase 2.
+    # This avoids redundant is_achieved() computation between phases.
+    # Structure: SlicedAttainmentCache holds slices indexed by slice_id
+    # Each slice is Dict[state_index, List[Dict[goal, array]]] for efficient access.
+    num_action_profiles = num_actions ** num_agents
+    existing_cache = getattr(world_model, '_attainment_cache', None)
+    if existing_cache is not None and isinstance(existing_cache, SlicedAttainmentCache):
+        # Reuse existing sliced cache
+        sliced_cache: SlicedAttainmentCache = existing_cache
+    else:
+        # Create new sliced cache
+        sliced_cache = SlicedAttainmentCache(num_action_profiles)
     
     if parallel and len(states) > 1:
         # Parallel execution using shared memory via fork
@@ -706,6 +738,9 @@ def compute_human_policy_prior(
                 enabled=True
             )
         
+        # For inline fallback, we need a slice cache for small levels processed sequentially
+        inline_slice_cache: Optional[SliceCache] = None
+        
         # Process each level sequentially, but parallelize within each level
         for level_idx, level in enumerate(dependency_levels):
             # Check memory at the start of each level
@@ -720,17 +755,26 @@ def compute_human_policy_prior(
                 if PROFILE_PARALLEL:
                     _t0 = time.perf_counter()
                     prof_states_sequential += len(level)
+                
+                # Create/extend inline slice cache for these states
+                if inline_slice_cache is None:
+                    inline_slice_cache = {}
+                for state_index in level:
+                    if state_index not in inline_slice_cache:
+                        inline_slice_cache[state_index] = [{} for _ in range(num_action_profiles)]
+                
                 for state_index in level:
                     state = states[state_index]
                     
-                    # Use unified helper
+                    # Use unified helper with inline slice cache
                     v_results, p_results = _hpp_process_single_state(
                         state_index, state, states, transitions, Vh_values,
                         human_agent_indices, possible_goal_generator,
                         num_actions, action_powers, believed_others_policy,
                         robot_agent_indices, robot_action_profiles,
                         beta_h, gamma_h,
-                        attainment_cache,
+                        slice_cache=inline_slice_cache,
+                        sliced_cache=sliced_cache,
                     )
                     
                     # Store results
@@ -751,7 +795,9 @@ def compute_human_policy_prior(
                 # Re-initialize shared data so new workers see updated Vh_values from previous levels
                 # Also pass the cloudpickle'd believed_others_policy for custom policy support
                 # DAG (states, transitions) is already in shared memory, only update Vh_values
-                _hpp_init_shared_data(states, transitions, Vh_values, params, believed_others_policy_pickle, use_shared_memory=True, attainment_cache=attainment_cache)
+                _hpp_init_shared_data(states, transitions, Vh_values, params, believed_others_policy_pickle, 
+                                      use_shared_memory=True, sliced_cache=sliced_cache, 
+                                      num_action_profiles=num_action_profiles)
                 
                 # Only pass state indices - workers access shared data via globals
                 batches = split_into_batches(level, num_workers)
@@ -773,11 +819,11 @@ def compute_human_policy_prior(
                     if PROFILE_PARALLEL:
                         prof_submit_time += time.perf_counter() - _submit_t0
                     
-                    # Collect results and merge back
+                    # Collect results and store slices
                     for future in as_completed(futures):
                         if PROFILE_PARALLEL:
                             _wait_t0 = time.perf_counter()
-                        v_results, p_results, batch_attainment_cache, batch_time = future.result()
+                        v_results, p_results, slice_id, slice_cache, batch_time = future.result()
                         if PROFILE_PARALLEL:
                             prof_wait_time += time.perf_counter() - _wait_t0
                             prof_batch_times.append(batch_time)
@@ -804,15 +850,9 @@ def compute_human_policy_prior(
                         if PROFILE_PARALLEL:
                             prof_merge_p_time += time.perf_counter() - _merge_p_t0
                         
-                        # Merge attainment cache back
-                        if attainment_cache is not None and batch_attainment_cache:
-                            for state_idx, ap_dict in batch_attainment_cache.items():
-                                if state_idx not in attainment_cache:
-                                    attainment_cache[state_idx] = {}
-                                for ap_idx, goal_dict in ap_dict.items():
-                                    if ap_idx not in attainment_cache[state_idx]:
-                                        attainment_cache[state_idx][ap_idx] = {}
-                                    attainment_cache[state_idx][ap_idx].update(goal_dict)
+                        # Store slice cache (no merging needed - each slice is stored separately)
+                        if sliced_cache is not None:
+                            sliced_cache.store_slice(slice_id, slice_cache)
                 
                 if PROFILE_PARALLEL:
                     prof_total_parallel_time += time.perf_counter() - _level_t0
@@ -858,6 +898,11 @@ def compute_human_policy_prior(
                     print(f"  Load imbalance (max/mean):  {max_batch/mean_batch:.2f}x")
             print("=========================================")
         
+        # Store inline slice cache in sliced_cache (states processed sequentially in parallel mode)
+        if inline_slice_cache:
+            inline_slice_id = make_slice_id(list(inline_slice_cache.keys()))
+            sliced_cache.store_slice(inline_slice_id, inline_slice_cache)
+        
         # Clean up shared memory after parallel processing
         cleanup_shared_dag()
     
@@ -879,7 +924,11 @@ def compute_human_policy_prior(
                          believed_others_policy, robot_agent_indices, robot_action_profiles,
                          beta_h, gamma_h,
                          progress_callback, memory_monitor,
-                         attainment_cache)
+                         sliced_cache)
+    
+    # Store sliced attainment cache on world_model for automatic reuse in Phase 2.
+    # This avoids redundant is_achieved() computation between phases.
+    world_model._attainment_cache = sliced_cache  # type: ignore[attr-defined]
     
     human_policy_priors = system2_policies # TODO: mix with system-1 policies!
 
@@ -891,6 +940,9 @@ def compute_human_policy_prior(
     if _pbar is not None:
         _pbar.close()
     
+    # Clean up shared attainment cache memory (parallel mode only)
+    cleanup_shared_attainment_cache()
+    
     if return_Vh:
         # Convert V_values from list-indexed to state-indexed dict
         Vh_values_dict = {}
@@ -900,12 +952,10 @@ def compute_human_policy_prior(
                                         for agent_idx in human_agent_indices
                                         if Vh_values[state_idx][agent_idx]}
         if return_attainment_cache:
-            assert attainment_cache is not None
-            return policy_prior, Vh_values_dict, attainment_cache
+            return policy_prior, Vh_values_dict, sliced_cache
         return policy_prior, Vh_values_dict
     
     if return_attainment_cache:
-        assert attainment_cache is not None
-        return policy_prior, attainment_cache
+        return policy_prior, sliced_cache
     
     return policy_prior

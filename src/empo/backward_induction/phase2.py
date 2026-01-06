@@ -13,6 +13,11 @@ The algorithm computes the robot's power-law policy by:
 3. Computing robot Q-values based on expected future robot values
 4. Computing robot policy as power-law distribution over Q-values
 5. Computing human expected goal achievement values under robot policy
+
+Attainment Cache:
+    Phase 2 automatically reuses the attainment cache computed in Phase 1 if it's
+    stored on the world_model (via world_model._attainment_cache). This avoids
+    redundant is_achieved() computation between phases.
 """
 
 import numpy as np
@@ -35,9 +40,14 @@ from empo.world_model import WorldModel
 from empo.shared_dag import (
     init_shared_dag, get_shared_dag, attach_shared_dag, cleanup_shared_dag
 )
+from empo.shared_attainment_cache import (
+    init_shared_attainment_cache, attach_shared_attainment_cache,
+    get_shared_attainment_cache, cleanup_shared_attainment_cache
+)
 
 from .helpers import (
-    State, TransitionData, AttainmentCache,
+    State, TransitionData,
+    SliceCache, SliceId, SlicedAttainmentCache, make_slice_id,
     compute_dependency_levels_general,
     compute_dependency_levels_fast,
     split_into_batches,
@@ -59,7 +69,8 @@ _shared_Vh_values: Optional[VhValues] = None
 _shared_Vr_values: Optional[VrValues] = None
 _shared_robot_agent_indices: Optional[List[int]] = None
 _shared_human_policy_prior_pickle: Optional[bytes] = None
-_shared_attainment_cache: Optional[AttainmentCache] = None
+_shared_sliced_cache: Optional[SlicedAttainmentCache] = None
+_shared_num_action_profiles: int = 0
 _shared_rp_params: Optional[Tuple[List[int], List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], float, float, float, float, float, float, float]] = None
 
 
@@ -85,7 +96,8 @@ def _rp_process_single_state(
     xi: float,
     eta: float,
     terminal_Vr: float,
-    attainment_cache: Optional[AttainmentCache] = None,
+    slice_cache: Optional[SliceCache] = None,
+    sliced_cache: Optional[SlicedAttainmentCache] = None,
 ) -> Tuple[
     Dict[int, Dict[PossibleGoal, float]],  # vh_results: agent -> goal -> value
     float,  # vr_result
@@ -118,8 +130,10 @@ def _rp_process_single_state(
         xi: Inter-human power-inequality aversion
         eta: Intertemporal power-inequality aversion
         terminal_Vr: Value for terminal states
-        attainment_cache: Optional cache of precomputed goal attainment arrays from Phase 1.
-            If provided, avoids recomputing is_achieved() for successor states.
+        slice_cache: Optional SliceCache for this worker's batch (for writing).
+            Structure: Dict[state_index, List[Dict[goal, array]]]
+        sliced_cache: Optional SlicedAttainmentCache for reading from previous slices.
+            Used to read attainment values from states processed in other batches.
     
     Returns:
         Tuple of:
@@ -195,40 +209,33 @@ def _rp_process_single_state(
                     action_profile_index = int(np.dot(action_profile, action_powers))
                     _, next_state_probabilities, next_state_indices = transitions[state_index][action_profile_index]
                     
-                    # Try to get attainment values from cache if available
+                    # Check attainment cache first, compute and store if not found
                     attainment_values_array: npt.NDArray[np.floating[Any]]
-                    if attainment_cache is not None:
-                        state_cache = attainment_cache.get(state_index)
-                        if state_cache is not None:
-                            ap_cache = state_cache.get(action_profile_index)
-                            if ap_cache is not None:
-                                cached = ap_cache.get(possible_goal)
-                                if cached is not None:
-                                    attainment_values_array = cached
-                                else:
-                                    # Not in cache, compute
-                                    attainment_values_array = np.array([
-                                        possible_goal.is_achieved(states[next_state_index]) 
-                                        for next_state_index in next_state_indices
-                                    ], dtype=np.int8)
-                            else:
-                                # Not in cache, compute
-                                attainment_values_array = np.array([
-                                    possible_goal.is_achieved(states[next_state_index]) 
-                                    for next_state_index in next_state_indices
-                                ], dtype=np.int8)
-                        else:
-                            # Not in cache, compute
-                            attainment_values_array = np.array([
-                                possible_goal.is_achieved(states[next_state_index]) 
-                                for next_state_index in next_state_indices
-                            ], dtype=np.int8)
+                    cached: Optional[npt.NDArray[np.int8]] = None
+                    
+                    # Try to read from caches:
+                    # 1. slice_cache (this worker's batch - for states already processed in this batch)
+                    # 2. sliced_cache (previous levels - for states in other batches)
+                    if slice_cache is not None and state_index in slice_cache:
+                        cached = slice_cache[state_index][action_profile_index].get(possible_goal)
+                    if cached is None and sliced_cache is not None:
+                        cached = sliced_cache.get(state_index, action_profile_index, possible_goal)
+                    
+                    if cached is not None:
+                        attainment_values_array = cached
                     else:
-                        # No cache, compute directly
+                        # Compute attainment values
                         attainment_values_array = np.array([
                             possible_goal.is_achieved(states[next_state_index]) 
                             for next_state_index in next_state_indices
                         ], dtype=np.int8)
+                        
+                        # Store in slice_cache if provided
+                        if slice_cache is not None:
+                            if state_index not in slice_cache:
+                                # Should not happen if slice_cache was pre-allocated for this batch
+                                slice_cache[state_index] = [{} for _ in range(len(slice_cache[next(iter(slice_cache))]))]
+                            slice_cache[state_index][action_profile_index][possible_goal] = attainment_values_array
                     
                     if float(np.dot(next_state_probabilities, attainment_values_array)) > 0.0:
                         some_goal_achieved_with_positive_prob = True
@@ -294,7 +301,7 @@ def _rp_compute_sequential(
     terminal_Vr: float = -1e-10,  # must be strictly negative !
     progress_callback: Optional[Callable[[int, int], None]] = None,
     memory_monitor: Optional[MemoryMonitor] = None,
-    attainment_cache: Optional[AttainmentCache] = None,
+    sliced_cache: Optional[SlicedAttainmentCache] = None,
 ) -> None:
     """Sequential Phase 2 backward induction algorithm.
     
@@ -307,6 +314,13 @@ def _rp_compute_sequential(
     ]
     
     total_states = len(states)
+    
+    # In sequential mode, we use a single slice containing all states
+    # Create slice cache for all states
+    slice_cache: Optional[SliceCache] = None
+    if sliced_cache is not None:
+        all_state_indices = list(range(len(states)))
+        slice_cache = sliced_cache.create_slice_cache(all_state_indices)
     
     # loop over the nodes in reverse topological order:
     for state_index in range(len(states)-1, -1, -1):
@@ -321,7 +335,8 @@ def _rp_compute_sequential(
             human_agent_indices, robot_agent_indices, robot_action_profiles,
             possible_goal_generator, num_agents, num_actions, action_powers,
             human_policy_prior, beta_r, gamma_h, gamma_r, zeta, xi, eta, terminal_Vr,
-            attainment_cache,
+            slice_cache=slice_cache,
+            sliced_cache=sliced_cache,
         )
         
         # Store results
@@ -339,6 +354,11 @@ def _rp_compute_sequential(
             memory_monitor.check(states_processed)
         if progress_callback is not None:
             progress_callback(states_processed, total_states)
+    
+    # Store the slice in the sliced cache (sequential mode only)
+    if sliced_cache is not None and slice_cache is not None:
+        slice_id = make_slice_id(list(range(len(states))))
+        sliced_cache.store_slice(slice_id, slice_cache)
 
 
 def _rp_init_shared_data(
@@ -349,7 +369,8 @@ def _rp_init_shared_data(
     params: Tuple[List[int], List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], float, float, float, float, float, float, float],
     human_policy_prior_pickle: bytes,
     use_shared_memory: bool = False,
-    attainment_cache: Optional[AttainmentCache] = None,
+    sliced_cache: Optional[SlicedAttainmentCache] = None,
+    num_action_profiles: int = 0,
 ) -> None:
     """Initialize shared data for robot policy worker processes.
     
@@ -361,10 +382,12 @@ def _rp_init_shared_data(
         params: Parameters tuple
         human_policy_prior_pickle: Pickled human policy prior
         use_shared_memory: If True, states and transitions are already in shared memory
-        attainment_cache: Optional cache of precomputed goal attainment values from Phase 1
+        sliced_cache: Optional SlicedAttainmentCache from Phase 1 for reading
+        num_action_profiles: Number of action profiles (needed for slice cache creation)
     """
     global _shared_states, _shared_transitions, _shared_Vh_values, _shared_Vr_values
-    global _shared_rp_params, _shared_human_policy_prior_pickle, _shared_attainment_cache
+    global _shared_rp_params, _shared_human_policy_prior_pickle
+    global _shared_sliced_cache, _shared_num_action_profiles
     
     if use_shared_memory:
         # DAG is already in shared memory, just store refs as None
@@ -378,19 +401,22 @@ def _rp_init_shared_data(
     _shared_Vr_values = Vr_values
     _shared_rp_params = params
     _shared_human_policy_prior_pickle = human_policy_prior_pickle
-    _shared_attainment_cache = attainment_cache
+    _shared_sliced_cache = sliced_cache
+    _shared_num_action_profiles = num_action_profiles
 
 
 def _rp_process_state_batch(
     state_indices: List[int]
 ) -> Tuple[Dict[int, Dict[int, Dict[PossibleGoal, float]]], 
            Dict[int, float],
-           Dict[State, Dict[RobotActionProfile, float]], 
+           Dict[State, Dict[RobotActionProfile, float]],
+           SliceId,  # slice_id for this batch
+           SliceCache,  # slice cache for this batch
            float]:
     """Process a batch of states for robot policy computation.
     
     Uses module-level shared data (inherited via fork) to avoid copying.
-    Returns Vh-values, Vr-values, and robot policies for the batch, plus timing.
+    Returns Vh-values, Vr-values, robot policies, slice_id, slice_cache, plus timing.
     """
     batch_start = time.perf_counter()
     
@@ -420,7 +446,7 @@ def _rp_process_state_batch(
     
     Vh_values = _shared_Vh_values
     Vr_values = _shared_Vr_values
-    attainment_cache = _shared_attainment_cache
+    
     (human_agent_indices, robot_agent_indices, possible_goal_generator, 
      num_agents, num_actions, action_powers, beta_r, gamma_h, gamma_r, 
      zeta, xi, eta, terminal_Vr) = _shared_rp_params
@@ -440,16 +466,27 @@ def _rp_process_state_batch(
     vr_results: Dict[int, float] = {}
     p_results: Dict[State, Dict[RobotActionProfile, float]] = {}
     
+    # Create slice cache for this batch
+    # Structure: Dict[state_index, List[Dict[goal, array]]]
+    slice_id = make_slice_id(state_indices)
+    slice_cache: SliceCache = {
+        state_idx: [{} for _ in range(_shared_num_action_profiles)]
+        for state_idx in state_indices
+    }
+    
     for state_index in state_indices:
         state = states[state_index]
         
-        # Use unified helper
+        # Use unified helper with:
+        # - slice_cache for writing (this worker's cache for current batch)
+        # - _shared_sliced_cache for reading (populated by Phase 1 and previous levels)
         vh_results_state, vr_result, p_result = _rp_process_single_state(
             state_index, state, states, transitions, Vh_values, Vr_values,
             human_agent_indices, robot_agent_indices, robot_action_profiles,
             possible_goal_generator, num_agents, num_actions, action_powers,
             human_policy_prior, beta_r, gamma_h, gamma_r, zeta, xi, eta, terminal_Vr,
-            attainment_cache,
+            slice_cache=slice_cache,
+            sliced_cache=_shared_sliced_cache,
         )
         
         vh_results[state_index] = vh_results_state
@@ -458,7 +495,7 @@ def _rp_process_state_batch(
             p_results[state] = p_result
     
     batch_time = time.perf_counter() - batch_start
-    return vh_results, vr_results, p_results, batch_time
+    return vh_results, vr_results, p_results, slice_id, slice_cache, batch_time
 
 
 class TabularRobotPolicy:
@@ -570,7 +607,7 @@ def compute_robot_policy(
     min_free_memory_fraction: float = 0.1,
     memory_check_interval: int = 100,
     memory_pause_duration: float = 60.0,
-    attainment_cache: Optional[AttainmentCache] = None,
+    sliced_cache: Optional[SlicedAttainmentCache] = None,
 ) -> TabularRobotPolicy: ...
 
 
@@ -598,7 +635,7 @@ def compute_robot_policy(
     min_free_memory_fraction: float = 0.1,
     memory_check_interval: int = 100,
     memory_pause_duration: float = 60.0,
-    attainment_cache: Optional[AttainmentCache] = None,
+    sliced_cache: Optional[SlicedAttainmentCache] = None,
 ) -> Tuple[TabularRobotPolicy, Dict[State, float], Dict[State, Dict[int, Dict[PossibleGoal, float]]]]: ...
 
 
@@ -625,7 +662,7 @@ def compute_robot_policy(
     min_free_memory_fraction: float = 0.1,
     memory_check_interval: int = 100,
     memory_pause_duration: float = 60.0,
-    attainment_cache: Optional[AttainmentCache] = None,
+    sliced_cache: Optional[SlicedAttainmentCache] = None,
 ) -> Union[TabularRobotPolicy, Tuple[TabularRobotPolicy, Dict[State, float], Dict[State, Dict[int, Dict[PossibleGoal, float]]]]]:
     """
     Compute robot policy via backward induction on the state DAG.
@@ -678,9 +715,15 @@ def compute_robot_policy(
             KeyboardInterrupt for graceful shutdown. Set to 0.0 to disable (default).
         memory_check_interval: How often to check memory, in states processed.
         memory_pause_duration: How long to pause (seconds) when memory is low.
-        attainment_cache: Optional cache of precomputed goal attainment arrays from Phase 1.
-            If provided, avoids recomputing is_achieved() for successor states.
-            Can be obtained from compute_human_policy_prior() with return_attainment_cache=True.
+        sliced_cache: Optional SlicedAttainmentCache of precomputed goal attainment arrays.
+            If not provided, Phase 2 automatically looks for the cache on world_model
+            (stored automatically by Phase 1 at world_model._attainment_cache).
+            
+            **Automatic caching**: Phase 1 now automatically stores its sliced attainment 
+            cache on the world_model, so Phase 2 will reuse it without any extra configuration.
+            You don't need to pass return_attainment_cache=True to Phase 1 anymore.
+            
+            The sliced cache structure allows efficient read access without merging overhead.
     
     Returns:
         TabularRobotPolicy: Robot policy that can be called as policy(state).
@@ -690,10 +733,10 @@ def compute_robot_policy(
         - Vh_dict maps state -> agent_idx -> goal -> float (human goal achievement values)
     
     Example:
-        >>> # First compute human policy prior
+        >>> # Phase 1 automatically stores attainment cache on world_model
         >>> human_policy = compute_human_policy_prior(env, [0], goal_gen)
-        >>> 
-        >>> # Then compute robot policy
+        >>>
+        >>> # Phase 2 automatically reuses the cache - no extra parameters needed!
         >>> robot_policy = compute_robot_policy(
         ...     env,
         ...     human_agent_indices=[0],
@@ -752,6 +795,20 @@ def compute_robot_policy(
     # Initialize value arrays
     Vh_values: VhValues = [[{} for _ in range(num_agents)] for _ in range(len(states))]
     Vr_values: VrValues = np.zeros(len(states))
+    
+    # Get sliced attainment cache: prioritize explicit parameter, then world_model cache, then create new
+    num_action_profiles = num_actions ** num_agents
+    if sliced_cache is None:
+        # Try to get cache from world_model (automatically stored by Phase 1)
+        sliced_cache = getattr(world_model, '_attainment_cache', None)
+        if sliced_cache is not None and isinstance(sliced_cache, SlicedAttainmentCache):
+            if not quiet:
+                print(f"Using sliced attainment cache from world_model ({sliced_cache.num_states()} state entries)")
+        else:
+            sliced_cache = None  # Wrong type or not set
+    if sliced_cache is None:
+        # Create empty sliced cache for Phase 2 internal use
+        sliced_cache = SlicedAttainmentCache(num_action_profiles)
     
     if parallel and len(states) > 1:
         # Parallel execution using shared memory via fork
@@ -817,6 +874,12 @@ def compute_robot_policy(
             
             if len(level) <= num_workers:
                 # Few states - process sequentially to avoid overhead
+                # Create a slice cache for inline processing
+                inline_slice_cache: SliceCache = {
+                    state_idx: [{} for _ in range(num_action_profiles)]
+                    for state_idx in level
+                }
+                
                 for state_index in level:
                     state = states[state_index]
                     
@@ -826,7 +889,8 @@ def compute_robot_policy(
                         human_agent_indices, robot_agent_indices, robot_action_profiles,
                         possible_goal_generator, num_agents, num_actions, action_powers,
                         human_policy_prior, beta_r, gamma_h, gamma_r, zeta, xi, eta, terminal_Vr,
-                        attainment_cache,
+                        slice_cache=inline_slice_cache,
+                        sliced_cache=sliced_cache,
                     )
                     
                     # Store results
@@ -837,10 +901,15 @@ def compute_robot_policy(
                     
                     if p_result is not None:
                         robot_policy_values[state] = p_result
+                
+                # Store inline slice cache in sliced_cache (states processed sequentially in parallel mode)
+                if inline_slice_cache:
+                    inline_slice_id = make_slice_id(list(inline_slice_cache.keys()))
+                    sliced_cache.store_slice(inline_slice_id, inline_slice_cache)
             else:
                 # Many states - parallelize
                 # Re-initialize shared data so new workers see updated values from previous levels
-                _rp_init_shared_data(states, transitions, Vh_values, Vr_values, params, human_policy_prior_pickle, use_shared_memory=True, attainment_cache=attainment_cache)
+                _rp_init_shared_data(states, transitions, Vh_values, Vr_values, params, human_policy_prior_pickle, use_shared_memory=True, sliced_cache=sliced_cache, num_action_profiles=num_action_profiles)
                 
                 batches = split_into_batches(level, num_workers)
                 
@@ -850,7 +919,7 @@ def compute_robot_policy(
                                for batch in batches if batch]
                     
                     for future in as_completed(futures):
-                        vh_results, vr_results, p_results, batch_time = future.result()
+                        vh_results, vr_results, p_results, slice_id, slice_cache, batch_time = future.result()
                         
                         # Merge Vh-values back
                         for state_idx, state_results in vh_results.items():
@@ -863,6 +932,9 @@ def compute_robot_policy(
                         
                         # Merge robot policies back
                         robot_policy_values.update(p_results)
+                        
+                        # Store slice cache (no merging needed - each worker has its own slice)
+                        sliced_cache.store_slice(slice_id, slice_cache)
             
             # Report progress after each level
             if progress_callback:
@@ -890,7 +962,7 @@ def compute_robot_policy(
             num_agents, num_actions, action_powers,
             human_policy_prior, beta_r, gamma_h, gamma_r, zeta, xi, eta, terminal_Vr,
             progress_callback, memory_monitor,
-            attainment_cache,
+            sliced_cache,
         )
 
     robot_policy = TabularRobotPolicy(
