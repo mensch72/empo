@@ -241,7 +241,6 @@ def _hpp_compute_sequential(
     _process_single_state helper.
     """
     total_states = len(states)
-    num_action_profiles = num_actions ** num_agents
     
     # In sequential mode, we use a single slice containing all states
     # Create slice cache for all states
