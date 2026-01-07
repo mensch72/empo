@@ -230,7 +230,7 @@ def init_shared_dag(states: List[State], transitions: Optional[List[List[Transit
         try:
             _shared_dag.cleanup()
         except Exception:
-            pass
+            pass  # TODO: log warning?
     
     _shared_dag = SharedDAG.from_dag(states, transitions)
     names = _shared_dag.get_shm_names()
@@ -274,6 +274,6 @@ def cleanup_shared_dag() -> None:
         try:
             _shared_dag.cleanup()
         except Exception:
-            pass
+            pass  # TODO: log warning?
         _shared_dag = None
         _shared_dag_info = None

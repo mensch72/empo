@@ -4854,14 +4854,6 @@ class MultiGridEnv(WorldModel):
         """Set the robot agent indices explicitly."""
         self._robot_agent_indices = value
     
-    def get_human_agent_indices(self):
-        """Deprecated: Use human_agent_indices property instead."""
-        return self.human_agent_indices
-    
-    def get_robot_agent_indices(self):
-        """Deprecated: Use robot_agent_indices property instead."""
-        return self.robot_agent_indices
-    
     def set_state(self, state):
         """
         Set the environment to a compact state.

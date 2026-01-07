@@ -463,12 +463,12 @@ class TestAgentIndices:
         ]
         env.grid = Grid(5, 5)
         
-        # Test get_human_agent_indices
-        human_indices = env.get_human_agent_indices()
+        # Test human_agent_indices property
+        human_indices = env.human_agent_indices
         assert set(human_indices) == {0, 2}, f"Expected {{0, 2}}, got {human_indices}"
         
-        # Test get_robot_agent_indices
-        robot_indices = env.get_robot_agent_indices()
+        # Test robot_agent_indices property
+        robot_indices = env.robot_agent_indices
         assert set(robot_indices) == {1}, f"Expected {{1}}, got {robot_indices}"
         
         # Verify indices match actual agent colors
@@ -489,16 +489,16 @@ class TestAgentIndices:
         ]
         env.grid = Grid(5, 5)
         
-        assert env.get_human_agent_indices() == []
-        assert set(env.get_robot_agent_indices()) == {0, 1}
+        assert env.human_agent_indices == []
+        assert set(env.robot_agent_indices) == {0, 1}
         
         # All humans, no robots
         env.agents = [
             MockAgent(color='yellow'),
         ]
         
-        assert set(env.get_human_agent_indices()) == {0}
-        assert env.get_robot_agent_indices() == []
+        assert set(env.human_agent_indices) == {0}
+        assert env.robot_agent_indices == []
 
 
 # =============================================================================

@@ -211,45 +211,47 @@ class WorldModel(gym.Env):
         """
         self._dag_cache = None
     
-    def get_human_agent_indices(self) -> List[int]:
+    @property
+    def human_agent_indices(self) -> List[int]:
         """
         Get the indices of human agents in the environment.
         
         Returns a list of agent indices that represent human agents.
         The indices correspond to positions in the action list passed to step().
         
-        Subclasses should override this to identify human agents based on
+        Subclasses should override this property to identify human agents based on
         environment-specific criteria (e.g., color, type, name).
         
         Returns:
             List of indices for human agents.
         
         Raises:
-            NotImplementedError: If the subclass doesn't implement this method.
+            NotImplementedError: If the subclass doesn't implement this property.
         """
         raise NotImplementedError(
-            "Subclasses must implement get_human_agent_indices() to identify human agents. "
+            "Subclasses must implement human_agent_indices property to identify human agents. "
             "This is required for Phase 2 training."
         )
     
-    def get_robot_agent_indices(self) -> List[int]:
+    @property
+    def robot_agent_indices(self) -> List[int]:
         """
         Get the indices of robot agents in the environment.
         
         Returns a list of agent indices that represent robot agents.
         The indices correspond to positions in the action list passed to step().
         
-        Subclasses should override this to identify robot agents based on
+        Subclasses should override this property to identify robot agents based on
         environment-specific criteria (e.g., color, type, name).
         
         Returns:
             List of indices for robot agents.
         
         Raises:
-            NotImplementedError: If the subclass doesn't implement this method.
+            NotImplementedError: If the subclass doesn't implement this property.
         """
         raise NotImplementedError(
-            "Subclasses must implement get_robot_agent_indices() to identify robot agents. "
+            "Subclasses must implement robot_agent_indices property to identify robot agents. "
             "This is required for Phase 2 training."
         )
     

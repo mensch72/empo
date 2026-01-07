@@ -121,7 +121,7 @@ class BasePhase2Trainer(ABC):
         world_model_factory: Optional factory for creating world models. Required for
             async training where the environment cannot be pickled. In ensemble mode,
             agent indices are automatically updated by calling the env's
-            get_human_agent_indices() and get_robot_agent_indices() methods.
+            human_agent_indices and robot_agent_indices properties.
         checkpoint_interval: Save checkpoint every N training steps (0 to disable).
         checkpoint_path: Path for checkpoint file (default: output_dir/checkpoint.pt).
     """
@@ -805,20 +805,20 @@ class BasePhase2Trainer(ABC):
                 self.networks.v_r_target.load_state_dict(self.networks.v_r.state_dict())
                 self.networks.v_r_target.eval()
     
-    # NOTE: tensorize_state commented out - never called anywhere in codebase
-    # @abstractmethod
-    # def tensorize_state(self, state: Any) -> Dict[str, torch.Tensor]:
-    #     """
-    #     Convert raw state to tensors (preprocessing, NOT neural network encoding).
-    #     
-    #     Args:
-    #         state: Raw environment state.
-    #     
-    #     Returns:
-    #         Dict of input tensors.
-    #     """
-    #     pass
-    
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     def _update_num_agents(self):
         """Update num_agents from current human_agent_indices and robot_agent_indices."""
         all_indices = self.human_agent_indices + self.robot_agent_indices
@@ -847,16 +847,16 @@ class BasePhase2Trainer(ABC):
         reset_environment() for ensemble mode (new env each episode).
         
         Automatically updates human_agent_indices and robot_agent_indices
-        by calling the env's get_human_agent_indices() and get_robot_agent_indices()
-        methods (important for ensemble mode where agent positions/indices can vary).
+        by accessing the env's human_agent_indices and robot_agent_indices
+        properties (important for ensemble mode where agent positions/indices can vary).
         """
         # Create env from factory
         self.env = self.world_model_factory.create()
         
         # Update agent indices from the new environment using WorldModel API
-        if hasattr(self.env, 'get_human_agent_indices') and hasattr(self.env, 'get_robot_agent_indices'):
-            self.human_agent_indices = self.env.get_human_agent_indices()
-            self.robot_agent_indices = self.env.get_robot_agent_indices()
+        if hasattr(self.env, 'human_agent_indices') and hasattr(self.env, 'robot_agent_indices'):
+            self.human_agent_indices = self.env.human_agent_indices
+            self.robot_agent_indices = self.env.robot_agent_indices
             self._update_num_agents()
         
         # Update goal_sampler and human_policy_prior with new env
@@ -2569,7 +2569,7 @@ class BasePhase2Trainer(ABC):
                     self._position_visit_counts[position_key] = self._position_visit_counts.get(position_key, 0) + 1
         except TypeError:
             # State not hashable - skip tracking
-            pass
+            pass  # TODO: log warning?
         
         if self.config.use_count_based_curiosity and self.networks.count_curiosity is not None:
             # Use same transformed state for count-based curiosity
@@ -3662,7 +3662,7 @@ class BasePhase2Trainer(ABC):
                         shared_env_steps.value += 1
                 except Exception:
                     # Queue full or serialization error - skip transition
-                    pass
+                    pass  # TODO: revisit!
 
     def _learner_loop(
         self,

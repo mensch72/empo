@@ -1161,7 +1161,8 @@ class parallel_env(ParallelEnv):
             self.fig = None
             self.ax = None
 
-    def get_human_agent_indices(self):
+    @property
+    def human_agent_indices(self):
         """
         Get the indices of human agents in the environment.
         
@@ -1172,7 +1173,8 @@ class parallel_env(ParallelEnv):
         """
         return [self.agent_name_mapping[name] for name in self.human_agents]
     
-    def get_robot_agent_indices(self):
+    @property
+    def robot_agent_indices(self):
         """
         Get the indices of robot/vehicle agents in the environment.
         

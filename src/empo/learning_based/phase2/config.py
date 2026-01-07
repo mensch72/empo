@@ -213,13 +213,6 @@ class Phase2Config:
     # See docs/VALUE_TRANSFORMATIONS.md for rationale.
     use_z_based_loss: bool = False
     
-    # Legacy 1/t decay settings (DEPRECATED - use use_sqrt_lr_decay instead)
-    # These flags take precedence over use_sqrt_lr_decay if enabled.
-    lr_x_h_warmup_steps: int = 1000  # Steps before 1/t decay starts (0 = always 1/t)
-    lr_u_r_warmup_steps: int = 1000  # Steps before 1/t decay starts (0 = always 1/t)
-    lr_x_h_use_1_over_t: bool = False  # DEPRECATED: Whether to use legacy 1/t decay for X_h
-    lr_u_r_use_1_over_t: bool = False  # DEPRECATED: Whether to use legacy 1/t decay for U_r
-    
     # Target network updates
     q_r_target_update_interval: int = 100
     v_r_target_update_interval: int = 100
@@ -391,16 +384,6 @@ class Phase2Config:
     
     def __post_init__(self):
         """Compute cumulative warmup thresholds and apply network flags."""
-        # Warn about deprecated legacy LR decay flags
-        if self.lr_x_h_use_1_over_t or self.lr_u_r_use_1_over_t:
-            warnings.warn(
-                "lr_x_h_use_1_over_t and lr_u_r_use_1_over_t are deprecated. "
-                "Use use_sqrt_lr_decay=True instead for 1/√t decay. "
-                "Legacy 1/t flags take precedence if enabled.",
-                DeprecationWarning,
-                stacklevel=2
-            )
-        
         # Override X_h warmup duration to 0 if not using X_h network
         if not self.x_h_use_network:
             self.warmup_x_h_steps = 0
@@ -599,38 +582,6 @@ class Phase2Config:
         # Linear decay
         decay_rate = (self.epsilon_h_start - self.epsilon_h_end) / self.epsilon_h_decay_steps
         return self.epsilon_h_start - decay_rate * step
-    
-    def get_lr_x_h(self, update_count: int) -> float:
-        """Get X_h learning rate with optional 1/t decay.
-        
-        After warmup, decays as lr_base * warmup / t to satisfy Robbins-Monro
-        conditions for converging to true expectation.
-        """
-        if not self.lr_x_h_use_1_over_t:
-            return self.lr_x_h
-        
-        warmup = max(1, self.lr_x_h_warmup_steps)
-        if update_count <= warmup:
-            return self.lr_x_h
-        
-        # 1/t decay: lr = lr_base * warmup / t
-        return self.lr_x_h * warmup / update_count
-    
-    def get_lr_u_r(self, update_count: int) -> float:
-        """Get U_r learning rate with optional 1/t decay.
-        
-        After warmup, decays as lr_base * warmup / t to satisfy Robbins-Monro
-        conditions for converging to true expectation.
-        """
-        if not self.lr_u_r_use_1_over_t:
-            return self.lr_u_r
-        
-        warmup = max(1, self.lr_u_r_warmup_steps)
-        if update_count <= warmup:
-            return self.lr_u_r
-        
-        # 1/t decay: lr = lr_base * warmup / t
-        return self.lr_u_r * warmup / update_count
     
     def get_effective_grad_clip(self, network_name: str, current_lr: float) -> Optional[float]:
         """
@@ -858,12 +809,6 @@ class Phase2Config:
             'q_r': self.lr_q_r,
             'v_r': self.lr_v_r,
         }.get(network_name, 1e-4)
-        
-        # Check legacy 1/t decay for X_h and U_r
-        if network_name == 'x_h' and self.lr_x_h_use_1_over_t:
-            return self.get_lr_x_h(update_count)
-        if network_name == 'u_r' and self.lr_u_r_use_1_over_t:
-            return self.get_lr_u_r(update_count)
         
         # During warm-up and beta_r ramp-up: constant learning rate
         full_warmup_end = self._warmup_v_r_end + self.beta_r_rampup_steps
@@ -1311,10 +1256,6 @@ class Phase2Config:
                     'use_sqrt_lr_decay': self.use_sqrt_lr_decay,
                     'lr_constant_fraction': self.lr_constant_fraction,
                     'constant_lr_then_1_over_t': self.constant_lr_then_1_over_t,
-                    'lr_x_h_use_1_over_t': self.lr_x_h_use_1_over_t,
-                    'lr_u_r_use_1_over_t': self.lr_u_r_use_1_over_t,
-                    'lr_x_h_warmup_steps': self.lr_x_h_warmup_steps,
-                    'lr_u_r_warmup_steps': self.lr_u_r_warmup_steps,
                 },
                 'adaptive_lookup': {
                     'lookup_use_adaptive_lr': self.lookup_use_adaptive_lr,

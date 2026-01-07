@@ -81,8 +81,8 @@ class MultiGridRobotExplorationPolicy(RobotPolicy):
         """
         self._world_model = world_model
         # Auto-detect robot indices from world model if not provided
-        if self._robot_agent_indices is None and hasattr(world_model, 'get_robot_agent_indices'):
-            self._robot_agent_indices = world_model.get_robot_agent_indices()
+        if self._robot_agent_indices is None and hasattr(world_model, 'robot_agent_indices'):
+            self._robot_agent_indices = world_model.robot_agent_indices
     
     @property
     def robot_agent_indices(self) -> List[int]:
@@ -469,10 +469,10 @@ class MultiGridMultiStepExplorationPolicy(RobotPolicy, HumanPolicyPrior):
         
         # Auto-detect agent indices if not provided
         if self._agent_indices is None:
-            if hasattr(world_model, 'get_robot_agent_indices'):
-                self._agent_indices = world_model.get_robot_agent_indices()
-            elif hasattr(world_model, 'get_human_agent_indices'):
-                self._agent_indices = world_model.get_human_agent_indices()
+            if hasattr(world_model, 'robot_agent_indices'):
+                self._agent_indices = world_model.robot_agent_indices
+            elif hasattr(world_model, 'human_agent_indices'):
+                self._agent_indices = world_model.human_agent_indices
     
     def set_world_model(self, world_model: Any) -> None:
         """
