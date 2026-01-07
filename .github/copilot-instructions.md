@@ -22,11 +22,20 @@ EMPO ("Human Empowerment AI Agents") implements a framework for computing AI pol
 src/empo/                      # Core framework
 ├── world_model.py             # WorldModel base: get_state(), set_state(), transition_probabilities()
 ├── possible_goal.py           # PossibleGoal, PossibleGoalGenerator, PossibleGoalSampler
-├── backward_induction.py      # compute_human_policy_prior() - Phase 1
-├── human_policy_prior.py      # TabularHumanPolicyPrior
-└── nn_based/                  # Neural network implementations
-    ├── phase2/                # Base classes for Phase 2 networks
-    └── multigrid/phase2/      # MultiGrid-specific Phase 2 implementations
+├── human_policy_prior.py      # HumanPolicyPrior, TabularHumanPolicyPrior
+├── robot_policy.py            # RobotPolicy base class
+├── backward_induction/        # Backward induction (tabular)
+│   ├── phase1.py              # compute_human_policy_prior()
+│   └── phase2.py              # compute_robot_policy(), TabularRobotPolicy
+├── learning_based/            # Neural network implementations
+│   ├── phase1/                # Base classes for Phase 1 (human policy priors)
+│   ├── phase2/                # Base classes for Phase 2 (robot policies)
+│   ├── multigrid/             # MultiGrid-specific implementations
+│   │   ├── phase1/            # MultiGrid Phase 1 networks
+│   │   └── phase2/            # MultiGrid Phase 2 networks
+│   └── transport/             # Transport-specific implementations
+│       └── phase1/            # Transport Phase 1 networks
+└── util/                      # Utilities (memory_monitor, etc.)
 
 src/envs/                      # Environment configurations
 vendor/multigrid/              # Extended MultiGrid with state management
@@ -55,7 +64,7 @@ class MyGoal(PossibleGoal):
 
 ### Encoder Synchronization
 When modifying `vendor/multigrid/gym_multigrid/multigrid.py` (object types, agent attributes), update:
-- `src/empo/nn_based/neural_policy_prior.py` (OBJECT_TYPE_TO_CHANNEL)
+- `src/empo/learning_based/multigrid/constants.py` (OBJECT_TYPE_TO_CHANNEL)
 - `docs/ENCODER_ARCHITECTURE.md`
 
 ## Terminology (Follow Precisely)
@@ -79,7 +88,7 @@ make test        # Run tests
 Always use `PYTHONPATH` to avoid import errors:
 ```bash
 # Outside Docker container:
-PYTHONPATH=src:vendor/multigrid:vendor/ai_transport python examples/human_policy_prior_example.py
+PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds python examples/human_policy_prior_example.py
 
 # Inside Docker container (make shell):
 python examples/human_policy_prior_example.py
@@ -88,7 +97,7 @@ python examples/human_policy_prior_example.py
 ### Tests
 ```bash
 make test                           # All tests (inside container)
-PYTHONPATH=src:vendor/multigrid:vendor/ai_transport python -m pytest tests/test_phase2.py  # Outside container
+PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds python -m pytest tests/test_phase2.py  # Outside container
 ```
 
 ## Phase 2 Network Warm-up

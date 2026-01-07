@@ -2,11 +2,9 @@
 Tests for PathDistanceCalculator rectangle support and passing cost shaping.
 """
 
-import sys
-import os
 
-from empo.nn_based.multigrid import PathDistanceCalculator
-from empo.nn_based.multigrid.path_distance import DEFAULT_PASSING_COSTS
+from empo.learning_based.multigrid import PathDistanceCalculator
+from empo.learning_based.multigrid.path_distance import DEFAULT_PASSING_COSTS
 
 
 class MockGrid:

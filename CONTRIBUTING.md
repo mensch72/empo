@@ -88,6 +88,65 @@ python tests/test_structure.py
 - maybe format code with `black`
 - maybe lint with `ruff`
 
+### Import Conventions
+
+The codebase uses a **hybrid import strategy** combining absolute and relative imports:
+
+#### Use Absolute Imports for:
+
+- **Cross-package imports** (different top-level `empo` subpackages):
+  ```python
+  from empo.possible_goal import PossibleGoal
+  from empo.learning_based.phase1.neural_policy_prior import BaseNeuralHumanPolicyPrior
+  ```
+
+- **All imports in tests and examples**:
+  ```python
+  from empo.world_model import WorldModel
+  from empo.backward_induction.phase1 import compute_human_policy_prior
+  ```
+
+- **Imports from parent packages or base classes**:
+  ```python
+  from empo.robot_policy import RobotPolicy
+  ```
+
+- **All vendor package imports** (`gym_multigrid`, `ai_transport`):
+  ```python
+  from gym_multigrid.multigrid import MultiGridEnv
+  from ai_transport.transport_env import TransportEnv
+  ```
+
+#### Use Relative Imports for:
+
+- **Sibling modules in the same directory**:
+  ```python
+  # In __init__.py files
+  from .q_network import BaseQNetwork
+  from .policy_prior_network import BasePolicyPriorNetwork
+  ```
+
+- **Closely related modules within the same subpackage**:
+  ```python
+  # Within empo/learning_based/multigrid/phase1/
+  from .constants import OBJECT_TYPE_TO_CHANNEL
+  ```
+
+#### Why This Pattern?
+
+- **Absolute imports** are more explicit and easier for IDE navigation
+- **Relative imports** reduce verbosity for intra-package references
+- This hybrid approach balances readability with practicality
+
+#### Note on PYTHONPATH
+
+When running examples outside Docker, always set `PYTHONPATH`:
+```bash
+PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds python examples/script.py
+```
+
+Inside the Docker container (via `make shell`), `PYTHONPATH` is pre-configured.
+
 ## Testing
 
 ### Writing Tests

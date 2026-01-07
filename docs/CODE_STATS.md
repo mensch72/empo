@@ -3,6 +3,8 @@
 *Generated: January 2, 2026*  
 *Based on commit: `dc08a0d59d930f1112628a952308a440be3d7557`*
 
+**Note:** This document reflects the codebase structure at the time of generation. Since then, files have been reorganized (e.g., `nn_based` → `learning_based`, `backward_induction.py` split into `phase1.py` and `phase2.py`). File paths in this document may not reflect current structure.
+
 This document provides a comprehensive statistical overview of the EMPO codebase, including lines of code, complexity metrics, and defect density estimates based on established software engineering research.
 
 ## Summary

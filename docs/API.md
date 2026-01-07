@@ -147,12 +147,12 @@ Created by `compute_human_policy_prior()` function.
 
 ---
 
-### compute_human_policy_prior (empo.backward_induction)
+### compute_human_policy_prior (empo.backward_induction.phase1)
 
 Compute human policy prior via backward induction (only tractable in very small world models).
 
 ```python
-from empo import compute_human_policy_prior
+from empo.backward_induction.phase1 import compute_human_policy_prior
 ```
 
 #### Signature

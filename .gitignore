@@ -219,6 +219,7 @@ logs/
 checkpoints/
 wandb/
 runs/
+tmp/
 
 # Graphviz generated files
 *.gv

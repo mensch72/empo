@@ -20,11 +20,9 @@ The compact state representation only stores mutable/mobile objects,
 avoiding serialization of the entire grid (walls are not stored).
 """
 
-import sys
-import os
 import time
 
-from envs.one_or_three_chambers import SmallOneOrTwoChambersMapEnv
+from multigrid_worlds.one_or_three_chambers import SmallOneOrTwoChambersMapEnv
 
 
 def profile_state_operations():
@@ -46,7 +44,7 @@ def profile_state_operations():
     # Profile get_state
     start = time.time()
     for _ in range(n_iter):
-        s = env.get_state()
+        env.get_state()
     get_time = (time.time() - start) / n_iter * 1000
     
     # Profile set_state

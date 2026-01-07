@@ -1,13 +1,10 @@
 """
 Test map parsing functionality for MultiGridEnv.
 """
-import sys
-import os
 
 import numpy as np
 from gym_multigrid.multigrid import (
-    MultiGridEnv, Grid, Agent, Block, Rock, Wall, World,
-    parse_map_string, create_object_from_spec
+    MultiGridEnv, World, parse_map_string
 )
 
 
@@ -337,7 +334,7 @@ def test_environment_reset():
 
 def test_one_or_three_chambers_map_env():
     """Test that OneOrThreeChambersMapEnv produces the same layout as the original."""
-    from envs.one_or_three_chambers import OneOrThreeChambersEnv, OneOrThreeChambersMapEnv
+    from multigrid_worlds.one_or_three_chambers import OneOrThreeChambersEnv, OneOrThreeChambersMapEnv
     
     # Create both environments
     env_original = OneOrThreeChambersEnv()

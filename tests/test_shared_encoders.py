@@ -12,7 +12,6 @@ import sys
 import os
 
 import torch
-import torch.nn as nn
 
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
@@ -76,8 +75,8 @@ def test_shared_state_encoder():
     """Test that all networks share the same state encoder instance."""
     print("\n=== Testing shared state encoder ===")
     
-    from empo.nn_based.multigrid.phase2.trainer import create_phase2_networks
-    from empo.nn_based.phase2.config import Phase2Config
+    from empo.learning_based.multigrid.phase2.trainer import create_phase2_networks
+    from empo.learning_based.phase2.config import Phase2Config
     
     # Create mock environment
     world_model = MockWorldModel(width=6, height=6, num_agents=2)
@@ -130,8 +129,8 @@ def test_encoder_caching():
     """Test that encoder caching works correctly."""
     print("\n=== Testing encoder caching ===")
     
-    from empo.nn_based.multigrid.phase2.trainer import create_phase2_networks
-    from empo.nn_based.phase2.config import Phase2Config
+    from empo.learning_based.multigrid.phase2.trainer import create_phase2_networks
+    from empo.learning_based.phase2.config import Phase2Config
     
     world_model = MockWorldModel(width=6, height=6, num_agents=2)
     config = Phase2Config()
@@ -176,7 +175,7 @@ def test_encoder_caching():
     # Test with different state (should be a new cache entry)
     # Note: With content-based caching, we need states with DIFFERENT content
     state2 = create_mock_state(num_agents=2, step_count=1)  # Different step_count
-    enc3 = state_encoder.tensorize_state(state2, world_model, 'cpu')
+    state_encoder.tensorize_state(state2, world_model, 'cpu')
     stats = state_encoder.get_cache_stats()
     hits, misses = stats
     print(f"  Cache stats after encode of different state: hits={hits}, misses={misses}")
@@ -198,8 +197,8 @@ def test_gradient_flow():
     """Test that gradients flow correctly through shared encoders."""
     print("\n=== Testing gradient flow through shared encoders ===")
     
-    from empo.nn_based.multigrid.phase2.trainer import create_phase2_networks
-    from empo.nn_based.phase2.config import Phase2Config
+    from empo.learning_based.multigrid.phase2.trainer import create_phase2_networks
+    from empo.learning_based.phase2.config import Phase2Config
     
     world_model = MockWorldModel(width=6, height=6, num_agents=2)
     config = Phase2Config()

@@ -6,14 +6,13 @@ Tests that policies trained on larger grids can be loaded and used on smaller gr
 with automatic padding using grey walls.
 """
 
-import sys
 import os
 
 import numpy as np
 import torch
 import tempfile
 
-from empo.nn_based.multigrid import (
+from empo.learning_based.multigrid import (
     MultiGridStateEncoder,
     MultiGridQNetwork,
     MultiGridNeuralHumanPolicyPrior,

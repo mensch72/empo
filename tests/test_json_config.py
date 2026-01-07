@@ -1,13 +1,11 @@
 """
 Test config file loading for MultiGridEnv (JSON and YAML).
 """
-import sys
 import os
 import json
 import tempfile
 
-import numpy as np
-from gym_multigrid.multigrid import MultiGridEnv, World
+from gym_multigrid.multigrid import MultiGridEnv
 
 
 def test_load_config_file_basic():

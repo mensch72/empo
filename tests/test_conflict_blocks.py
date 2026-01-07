@@ -7,7 +7,6 @@ that the conflict block partitioning produces correct probabilities.
 """
 
 import sys
-from pathlib import Path
 import numpy as np
 import time
 
@@ -15,7 +14,7 @@ import time
 import gymnasium as gym
 sys.modules['gym'] = gym
 
-from gym_multigrid.multigrid import MultiGridEnv, Agent, World, Actions, Grid, Wall, Ball
+from gym_multigrid.multigrid import MultiGridEnv, Agent, World, Actions, Grid
 from gym_multigrid.envs import CollectGame4HEnv10x10N2
 
 
@@ -47,7 +46,7 @@ def test_conflict_block_efficiency():
     # Time the computation
     start_time = time.time()
     result = env.transition_probabilities(state, actions)
-    elapsed_time = time.time() - start_time
+    time.time() - start_time
     
     # Verify probabilities still sum to 1.0
     total_prob = sum(prob for prob, _ in result)

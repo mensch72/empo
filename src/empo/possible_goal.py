@@ -42,7 +42,7 @@ from abc import ABC, abstractmethod
 from typing import Tuple, Iterator, Callable, TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    import gymnasium as gym
+    pass
 
 
 class PossibleGoal(ABC):
@@ -155,17 +155,14 @@ class PossibleGoal(ABC):
         Returns:
             int: 1 if the goal is achieved in this state, 0 otherwise.
         """
-        pass
     
     @abstractmethod
     def __hash__(self) -> int:
         """Return hash for use as dictionary key."""
-        pass
     
     @abstractmethod
     def __eq__(self, other) -> bool:
         """Check equality with another goal."""
-        pass
 
 
 class PossibleGoalSampler(ABC):
@@ -231,7 +228,6 @@ class PossibleGoalSampler(ABC):
                 - goal: A PossibleGoal instance
                 - weight: Weight for this goal in X_h computation (float > 0)
         """
-        pass
 
 
 def approx_integral_over_possible_goals(
@@ -346,7 +342,6 @@ class PossibleGoalGenerator(ABC):
         Yields:
             Tuple[PossibleGoal, float]: Pairs of (goal, aggregation_weight).
         """
-        pass
 
 
 class DeterministicGoalSampler(PossibleGoalSampler):

@@ -303,7 +303,7 @@ Pop-Art remains a solid option if we need exact arithmetic means:
 
 ### Phase 1: Add Theory-Grounded Power Transformation
 
-1. **Helper functions** in `src/empo/nn_based/phase2/value_transforms.py`:
+1. **Helper functions** in `src/empo/learning_based/phase2/value_transforms.py`:
    ```python
    def to_z_space(q: Tensor, eta: float, xi: float, eps: float = 1e-8) -> Tensor:
        """Transform Q < 0 to z-space: z = (-Q)^{-1/(ηξ)} ∈ (0, ∞)."""
@@ -394,21 +394,21 @@ def compute_q_r_loss(z_pred, q_target, config, training_step):
 
 ### Files to Modify
 
-1. **New file**: `src/empo/nn_based/phase2/value_transforms.py`
+1. **New file**: `src/empo/learning_based/phase2/value_transforms.py`
    - `to_z_space(q, eta, xi)` - Q to z transformation
    - `from_z_space(z, eta, xi)` - z to Q transformation
    
-2. **Modify**: `src/empo/nn_based/phase2/config.py`
+2. **Modify**: `src/empo/learning_based/phase2/config.py`
    - Add `use_z_space_transform: bool = True`
    
-3. **Modify**: `src/empo/nn_based/phase2/robot_q_network.py`
+3. **Modify**: `src/empo/learning_based/phase2/robot_q_network.py`
    - Change `ensure_negative()` to output z ∈ (0, 1) when z-space enabled
    - Add method to convert z to Q
    
-4. **Modify**: `src/empo/nn_based/phase2/robot_value_network.py`
+4. **Modify**: `src/empo/learning_based/phase2/robot_value_network.py`
    - Same changes for V_r
    
-5. **Modify**: `src/empo/nn_based/phase2/trainer.py`
+5. **Modify**: `src/empo/learning_based/phase2/trainer.py`
    - Use phase-dependent loss computation
    - Log both z and Q values
 

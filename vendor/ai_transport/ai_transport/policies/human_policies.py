@@ -35,12 +35,10 @@ class HumanPolicy(ABC):
         Returns:
             Tuple of (action_index, justification_string)
         """
-        pass
     
     @abstractmethod
     def reset(self):
         """Reset policy state (e.g., target destination)."""
-        pass
 
 
 class RandomHumanPolicy(HumanPolicy):
@@ -121,7 +119,6 @@ class RandomHumanPolicy(HumanPolicy):
     
     def reset(self):
         """Reset policy state (no state to reset for random policy)."""
-        pass
 
 
 class TargetDestinationHumanPolicy(HumanPolicy):

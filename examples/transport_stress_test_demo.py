@@ -16,7 +16,6 @@ Usage:
     python transport_stress_test_demo.py
 """
 
-import sys
 import os
 import time
 import cProfile
@@ -46,7 +45,7 @@ class Timer:
 # Global timing accumulator
 timing_stats = {}
 
-from empo.transport import (
+from empo.world_specific_helpers.transport import (
     TransportEnvWrapper,
     TransportActions,
 )

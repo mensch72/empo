@@ -8,7 +8,6 @@ This demonstrates how to:
 3. Visualize the DAG using plot_dag()
 """
 
-import sys
 from pathlib import Path
 
 from empo.world_model import WorldModel

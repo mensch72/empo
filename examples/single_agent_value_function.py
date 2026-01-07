@@ -11,7 +11,6 @@ It loops over different beta values (1, 2, 4, 8, 16) and compares parallel
 vs sequential computation to verify correctness.
 """
 
-import sys
 import os
 import time
 import numpy as np

@@ -9,7 +9,6 @@ Tests for:
 """
 
 import sys
-from pathlib import Path
 import numpy as np
 
 # Patch gym import for compatibility

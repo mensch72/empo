@@ -18,14 +18,14 @@ import pytest
 import torch
 import torch.nn as nn
 
-from empo.nn_based.phase2.config import Phase2Config
-from empo.nn_based.phase2.replay_buffer import Phase2ReplayBuffer, Phase2Transition
-from empo.nn_based.phase2.robot_q_network import BaseRobotQNetwork
-from empo.nn_based.phase2.human_goal_ability import BaseHumanGoalAchievementNetwork
-from empo.nn_based.phase2.aggregate_goal_ability import BaseAggregateGoalAbilityNetwork
-from empo.nn_based.phase2.intrinsic_reward_network import BaseIntrinsicRewardNetwork
-from empo.nn_based.phase2.robot_value_network import BaseRobotValueNetwork
-from empo.nn_based.phase2.trainer import Phase2Networks
+from empo.learning_based.phase2.config import Phase2Config
+from empo.learning_based.phase2.replay_buffer import Phase2ReplayBuffer, Phase2Transition
+from empo.learning_based.phase2.robot_q_network import BaseRobotQNetwork
+from empo.learning_based.phase2.human_goal_ability import BaseHumanGoalAchievementNetwork
+from empo.learning_based.phase2.aggregate_goal_ability import BaseAggregateGoalAbilityNetwork
+from empo.learning_based.phase2.intrinsic_reward_network import BaseIntrinsicRewardNetwork
+from empo.learning_based.phase2.robot_value_network import BaseRobotValueNetwork
+from empo.learning_based.phase2.trainer import Phase2Networks
 
 
 # =============================================================================
@@ -292,7 +292,6 @@ class TestTensorBoardLogging:
     def test_tensorboard_import(self):
         """TensorBoard should be importable."""
         try:
-            from torch.utils.tensorboard import SummaryWriter
             has_tensorboard = True
         except ImportError:
             has_tensorboard = False
@@ -464,12 +463,12 @@ class TestAgentIndices:
         ]
         env.grid = Grid(5, 5)
         
-        # Test get_human_agent_indices
-        human_indices = env.get_human_agent_indices()
+        # Test human_agent_indices property
+        human_indices = env.human_agent_indices
         assert set(human_indices) == {0, 2}, f"Expected {{0, 2}}, got {human_indices}"
         
-        # Test get_robot_agent_indices
-        robot_indices = env.get_robot_agent_indices()
+        # Test robot_agent_indices property
+        robot_indices = env.robot_agent_indices
         assert set(robot_indices) == {1}, f"Expected {{1}}, got {robot_indices}"
         
         # Verify indices match actual agent colors
@@ -490,16 +489,16 @@ class TestAgentIndices:
         ]
         env.grid = Grid(5, 5)
         
-        assert env.get_human_agent_indices() == []
-        assert set(env.get_robot_agent_indices()) == {0, 1}
+        assert env.human_agent_indices == []
+        assert set(env.robot_agent_indices) == {0, 1}
         
         # All humans, no robots
         env.agents = [
             MockAgent(color='yellow'),
         ]
         
-        assert set(env.get_human_agent_indices()) == {0}
-        assert env.get_robot_agent_indices() == []
+        assert set(env.human_agent_indices) == {0}
+        assert env.robot_agent_indices == []
 
 
 # =============================================================================
@@ -518,7 +517,7 @@ class TestModelBasedTargets:
         )
         
         # Create a mock transition like what the trainer would create
-        from empo.nn_based.phase2.replay_buffer import Phase2Transition
+        from empo.learning_based.phase2.replay_buffer import Phase2Transition
         
         # This mimics what the trainer does when model_based is enabled
         stored_next_state = None if config.use_model_based_targets else 'some_state'
@@ -590,7 +589,7 @@ class TestModelBasedTargets:
         
         This ensures memory efficiency and forces correct model-based computation.
         """
-        from empo.nn_based.phase2.replay_buffer import Phase2Transition
+        from empo.learning_based.phase2.replay_buffer import Phase2Transition
         
         # Create transitions mimicking what collect_transition does
         config = Phase2Config(use_model_based_targets=True)
@@ -657,7 +656,7 @@ class TestAsyncRNDSync:
         
         This verifies that _get_policy_state_dict() includes RND when enabled.
         """
-        from empo.nn_based.phase2.rnd import RNDModule
+        from empo.learning_based.phase2.rnd import RNDModule
         
         # Create config with RND enabled
         config = Phase2Config(
@@ -732,7 +731,7 @@ class TestAsyncRNDSync:
         
         This verifies that _load_policy_state_dict() correctly restores RND.
         """
-        from empo.nn_based.phase2.rnd import RNDModule
+        from empo.learning_based.phase2.rnd import RNDModule
         
         # Create source networks with trained values
         source_rnd = RNDModule(input_dim=64, feature_dim=32, hidden_dim=64)
@@ -833,7 +832,7 @@ class TestAsyncRNDSync:
         """
         Test that _rnd_enabled() correctly detects when RND is in use.
         """
-        from empo.nn_based.phase2.rnd import RNDModule
+        from empo.learning_based.phase2.rnd import RNDModule
         
         # Test with robot RND only
         config1 = Phase2Config(use_rnd=True, use_human_action_rnd=False)

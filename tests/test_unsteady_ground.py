@@ -8,7 +8,6 @@ compete for the same target cell.
 """
 
 import sys
-from pathlib import Path
 import numpy as np
 
 # Patch gym import for compatibility

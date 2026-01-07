@@ -18,27 +18,22 @@ This is a minimal example to verify that the learning infrastructure works.
 No vehicles or complex routing - just a human learning to navigate to a goal.
 """
 
-import sys
 import os
 import time
 import random
 import argparse
 
-import numpy as np
 import torch
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import networkx as nx
 
-from empo.transport import (
-    create_transport_env,
+from empo.world_specific_helpers.transport import (
     TransportEnvWrapper,
     TransportGoal,
     TransportGoalSampler,
-    TransportActions,
 )
-from empo.nn_based.transport import (
-    TransportNeuralHumanPolicyPrior,
+from empo.learning_based.transport import (
     train_transport_neural_policy_prior,
 )
 

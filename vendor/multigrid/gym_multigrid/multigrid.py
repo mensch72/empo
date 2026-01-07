@@ -1,15 +1,13 @@
 import math
 import json
-from abc import ABC, abstractmethod
+from abc import ABC
 try:
     import yaml
     YAML_AVAILABLE = True
 except ImportError:
     YAML_AVAILABLE = False
-import gymnasium as gym
-from enum import IntEnum
 import numpy as np
-from gymnasium import error, spaces, utils
+from gymnasium import spaces
 from gymnasium.utils import seeding
 from .rendering import *
 from .window import Window
@@ -87,7 +85,7 @@ def _load_goal_classes():
     global _ReachCellGoal, _ReachRectangleGoal, _TabularGoalGenerator, _TabularGoalSampler
     global _PossibleGoalGenerator, _PossibleGoalSampler
     if _ReachCellGoal is None:
-        from empo.multigrid import ReachCellGoal, ReachRectangleGoal
+        from empo.world_specific_helpers.multigrid import ReachCellGoal, ReachRectangleGoal
         from empo.possible_goal import (
             TabularGoalGenerator, TabularGoalSampler,
             PossibleGoalGenerator, PossibleGoalSampler
@@ -3201,7 +3199,6 @@ class MultiGridEnv(WorldModel):
         }
 
         # Short string for opened door
-        OPENDED_DOOR_IDS = '_'
 
         # Map agent's direction to short string
         AGENT_DIR_TO_STR = {
@@ -4361,7 +4358,6 @@ class MultiGridEnv(WorldModel):
     
     def _draw_line_segment(self, img, x1, y1, x2, y2, color, thickness=1):
         """Draw a simple line segment on the image using Bresenham-like approach."""
-        import math
         dx = abs(x2 - x1)
         dy = abs(y2 - y1)
         steps = max(dx, dy, 1)
@@ -4858,14 +4854,6 @@ class MultiGridEnv(WorldModel):
         """Set the robot agent indices explicitly."""
         self._robot_agent_indices = value
     
-    def get_human_agent_indices(self):
-        """Deprecated: Use human_agent_indices property instead."""
-        return self.human_agent_indices
-    
-    def get_robot_agent_indices(self):
-        """Deprecated: Use robot_agent_indices property instead."""
-        return self.robot_agent_indices
-    
     def set_state(self, state):
         """
         Set the environment to a compact state.
@@ -5279,7 +5267,7 @@ class MultiGridEnv(WorldModel):
             else:
                 return 1
         
-        block_sizes = [get_block_size(block) for block in all_blocks]
+        [get_block_size(block) for block in all_blocks]
         
         # Compute successor state for each outcome
         successor_states = {}

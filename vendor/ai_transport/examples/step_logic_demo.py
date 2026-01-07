@@ -8,7 +8,6 @@ This example shows:
 4. Departing step: agents move along edges with time advancing
 """
 
-import numpy as np
 import networkx as nx
 from ai_transport import parallel_env
 

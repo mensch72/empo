@@ -27,7 +27,7 @@
   "postCreateCommand": "pip install -e . --no-deps || echo 'Note: Editable install skipped, using pre-installed packages'",
   "remoteUser": "appuser",
   "containerEnv": {
-    "PYTHONPATH": "/workspaces/empo/src:/workspaces/empo/vendor/multigrid:/workspaces/empo/vendor/ai_transport"
+    "PYTHONPATH": "/workspaces/empo/src:/workspaces/empo/vendor/multigrid:/workspaces/empo/vendor/ai_transport:/workspaces/empo/multigrid_worlds"
   },
   "mounts": [],
   "forwardPorts": [8888, 6006, 5678]

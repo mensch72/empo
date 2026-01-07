@@ -4,8 +4,6 @@ Test parallel DAG computation.
 Verifies that parallel and sequential DAG computation produce identical results.
 """
 
-import sys
-import os
 
 import numpy as np
 from gym_multigrid.multigrid import (

@@ -1,5 +1,4 @@
 import sys
-import numpy as np
 
 # Only ask users to install matplotlib if they actually need it
 try:

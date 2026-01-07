@@ -31,27 +31,25 @@ Requirements:
     - ffmpeg (optional, for MP4 output; falls back to GIF)
 """
 
-import sys
 import os
 import random
 import argparse
 from typing import List, Tuple, Dict, Optional
 
 import numpy as np
-import matplotlib.pyplot as plt
 
 from gym_multigrid.multigrid import (
     MultiGridEnv, Grid, Agent, Wall, World, Actions, #SmallActions,
     Key, Ball, Box, Door, Lava, Block, Goal
 )
 from empo.possible_goal import PossibleGoal, PossibleGoalSampler
-from empo.multigrid import (
+from empo.world_specific_helpers.multigrid import (
     ReachRectangleGoal,
     RandomPolicy,
     render_goals_on_frame,
 )
 from empo.human_policy_prior import HeuristicPotentialPolicy
-from empo.nn_based.multigrid.path_distance import PathDistanceCalculator
+from empo.learning_based.multigrid.path_distance import PathDistanceCalculator
 
 
 # ============================================================================

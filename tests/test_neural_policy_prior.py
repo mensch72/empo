@@ -7,33 +7,25 @@ Tests the modular architecture with:
 - Multigrid-specific implementations in nn_based/multigrid/
 """
 
-import sys
 import os
 
 import numpy as np
 import torch
 import tempfile
 
-from empo.nn_based import (
-    BaseStateEncoder,
-    BaseGoalEncoder,
-    BaseQNetwork,
-    BasePolicyPriorNetwork,
-    BaseNeuralHumanPolicyPrior,
+from empo.learning_based import (
     ReplayBuffer,
     Trainer,
 )
-from empo.nn_based.multigrid import (
+from empo.learning_based.multigrid import (
     MultiGridStateEncoder,
     MultiGridGoalEncoder,
     MultiGridQNetwork,
-    MultiGridPolicyPriorNetwork,
     MultiGridNeuralHumanPolicyPrior,
-    NUM_OBJECT_TYPE_CHANNELS,
     AGENT_FEATURE_SIZE,
 )
-from empo.possible_goal import PossibleGoal, PossibleGoalSampler, PossibleGoalGenerator
-from typing import Iterator, Tuple
+from empo.possible_goal import PossibleGoal, PossibleGoalSampler
+from typing import Tuple
 
 
 class SimpleReachGoal(PossibleGoal):
@@ -516,7 +508,7 @@ def test_load_action_conflict():
 
 def test_soft_clamp():
     """Test the SoftClamp module."""
-    from empo.nn_based.soft_clamp import SoftClamp
+    from empo.learning_based.util.soft_clamp import SoftClamp
 
     print("Testing SoftClamp...")    # Test with default range [0.5, 1.5]
     soft_clamp = SoftClamp(a=0.5, b=1.5)

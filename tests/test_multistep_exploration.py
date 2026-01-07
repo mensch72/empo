@@ -20,9 +20,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'mult
 import pytest
 
 from gym_multigrid.multigrid import (
-    MultiGridEnv, Grid, Wall, Rock, Block, World, Agent, SmallActions
+    MultiGridEnv, Grid, Wall, World, Agent, SmallActions
 )
-from empo.nn_based.multigrid.phase2.robot_policy import MultiGridMultiStepExplorationPolicy
+from empo.learning_based.multigrid.phase2.robot_policy import MultiGridMultiStepExplorationPolicy
 
 
 def create_robot_agent():

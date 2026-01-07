@@ -7,7 +7,6 @@ This example shows the three observation modes:
 3. Statistical: As local, plus counts at all locations
 """
 
-import numpy as np
 import networkx as nx
 from ai_transport import parallel_env
 

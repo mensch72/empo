@@ -6,15 +6,13 @@ Tests the get_state, set_state, and transition_probabilities methods.
 """
 
 import sys
-from pathlib import Path
-import numpy as np
 import pytest
 
 # Patch gym import for compatibility
 import gymnasium as gym
 sys.modules['gym'] = gym
 
-from gym_multigrid.multigrid import MultiGridEnv, Agent, World, Actions, SmallActions, SmallWorld, Wall, Ball, Goal
+from gym_multigrid.multigrid import Actions
 from gym_multigrid.envs import CollectGame4HEnv10x10N2
 
 

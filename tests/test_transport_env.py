@@ -11,9 +11,6 @@ Run with: pytest tests/test_transport_env.py -v
 """
 
 import pytest
-import sys
-import os
-from pathlib import Path
 
 
 def test_import_ai_transport():
@@ -203,7 +200,7 @@ def test_observation_scenarios():
 
 def test_wrapper_action_mask_in_observation():
     """Test that action mask is included in observations."""
-    from empo.transport import create_transport_env, TransportActions
+    from empo.world_specific_helpers.transport import create_transport_env, TransportActions
     import numpy as np
     
     env = create_transport_env(num_humans=2, num_vehicles=1, num_nodes=5, seed=42)
@@ -222,7 +219,7 @@ def test_wrapper_action_mask_in_observation():
 
 def test_wrapper_action_mask_matches_method():
     """Test that action mask in observation matches action_masks() method."""
-    from empo.transport import create_transport_env
+    from empo.world_specific_helpers.transport import create_transport_env
     import numpy as np
     
     env = create_transport_env(num_humans=2, num_vehicles=1, num_nodes=5, seed=42)
@@ -238,7 +235,7 @@ def test_wrapper_action_mask_matches_method():
 
 def test_transport_goal():
     """Test TransportGoal class."""
-    from empo.transport import create_transport_env, TransportGoal
+    from empo.world_specific_helpers.transport import create_transport_env, TransportGoal
     
     env = create_transport_env(num_humans=2, num_vehicles=1, num_nodes=5, seed=42)
     env.reset(seed=42)
@@ -261,7 +258,7 @@ def test_transport_goal():
 
 def test_transport_goal_generator():
     """Test TransportGoalGenerator class."""
-    from empo.transport import create_transport_env, TransportGoalGenerator, TransportGoal
+    from empo.world_specific_helpers.transport import create_transport_env, TransportGoalGenerator, TransportGoal
     
     env = create_transport_env(num_humans=2, num_vehicles=1, num_nodes=5, seed=42)
     env.reset(seed=42)
@@ -281,7 +278,7 @@ def test_transport_goal_generator():
 
 def test_transport_goal_sampler():
     """Test TransportGoalSampler class."""
-    from empo.transport import create_transport_env, TransportGoalSampler, TransportGoal
+    from empo.world_specific_helpers.transport import create_transport_env, TransportGoalSampler, TransportGoal
     
     env = create_transport_env(num_humans=2, num_vehicles=1, num_nodes=5, seed=42)
     env.reset(seed=42)
@@ -442,7 +439,7 @@ def test_cluster_k_larger_than_nodes():
 
 def test_wrapper_cluster_routing_enabled():
     """Test wrapper with cluster-based routing enabled."""
-    from empo.transport import create_transport_env
+    from empo.world_specific_helpers.transport import create_transport_env
     
     env = create_transport_env(
         num_humans=2, 
@@ -468,8 +465,7 @@ def test_wrapper_cluster_routing_enabled():
 
 def test_wrapper_cluster_action_mask():
     """Test action mask with cluster-based routing."""
-    from empo.transport import create_transport_env, TransportActions
-    import numpy as np
+    from empo.world_specific_helpers.transport import create_transport_env, TransportActions
     
     env = create_transport_env(
         num_humans=2, 
@@ -512,7 +508,7 @@ def test_wrapper_cluster_action_mask():
 
 def test_cluster_goal():
     """Test TransportClusterGoal class."""
-    from empo.transport import create_transport_env, TransportClusterGoal
+    from empo.world_specific_helpers.transport import create_transport_env, TransportClusterGoal
     
     env = create_transport_env(
         num_humans=2, 
@@ -540,7 +536,7 @@ def test_cluster_goal():
 
 def test_cluster_goal_generator():
     """Test TransportClusterGoalGenerator class."""
-    from empo.transport import (
+    from empo.world_specific_helpers.transport import (
         create_transport_env, 
         TransportClusterGoalGenerator, 
         TransportClusterGoal
@@ -570,7 +566,7 @@ def test_cluster_goal_generator():
 
 def test_cluster_goal_sampler():
     """Test TransportClusterGoalSampler class."""
-    from empo.transport import (
+    from empo.world_specific_helpers.transport import (
         create_transport_env, 
         TransportClusterGoalSampler, 
         TransportClusterGoal
@@ -599,7 +595,7 @@ def test_cluster_goal_sampler():
 
 def test_wrapper_cluster_vs_node_routing():
     """Test that cluster and node routing work differently."""
-    from empo.transport import create_transport_env
+    from empo.world_specific_helpers.transport import create_transport_env
     
     # Node-based routing
     env_nodes = create_transport_env(
@@ -636,7 +632,7 @@ def test_wrapper_cluster_vs_node_routing():
 
 def test_import_transport_encoders():
     """Test that transport neural network encoders can be imported."""
-    from empo.nn_based.transport import (
+    from empo.learning_based.transport import (
         TransportStateEncoder,
         TransportGoalEncoder,
         TransportQNetwork,
@@ -657,7 +653,7 @@ def test_import_transport_encoders():
 
 def test_transport_state_encoder_creation():
     """Test TransportStateEncoder can be created."""
-    from empo.nn_based.transport import TransportStateEncoder
+    from empo.learning_based.transport import TransportStateEncoder
     
     encoder = TransportStateEncoder(
         num_clusters=10,
@@ -675,7 +671,7 @@ def test_transport_state_encoder_creation():
 
 def test_transport_goal_encoder_creation():
     """Test TransportGoalEncoder can be created."""
-    from empo.nn_based.transport import TransportGoalEncoder
+    from empo.learning_based.transport import TransportGoalEncoder
     
     encoder = TransportGoalEncoder(
         max_nodes=100,
@@ -690,8 +686,8 @@ def test_transport_goal_encoder_creation():
 
 def test_observation_to_graph_data():
     """Test observation_to_graph_data extracts features correctly."""
-    from empo.transport import create_transport_env
-    from empo.nn_based.transport import (
+    from empo.world_specific_helpers.transport import create_transport_env
+    from empo.learning_based.transport import (
         observation_to_graph_data,
         NODE_FEATURE_DIM,
         EDGE_FEATURE_DIM,
@@ -723,8 +719,8 @@ def test_observation_to_graph_data():
 def test_transport_q_network_forward():
     """Test TransportQNetwork forward pass."""
     import torch
-    from empo.transport import create_transport_env
-    from empo.nn_based.transport import (
+    from empo.world_specific_helpers.transport import create_transport_env
+    from empo.learning_based.transport import (
         TransportStateEncoder,
         TransportGoalEncoder,
         TransportQNetwork,
@@ -779,7 +775,7 @@ def test_render_clusters():
     import matplotlib
     matplotlib.use('Agg')  # Non-interactive backend
     
-    from empo.transport import create_transport_env
+    from empo.world_specific_helpers.transport import create_transport_env
     
     env = create_transport_env(
         num_humans=2, 
@@ -797,7 +793,7 @@ def test_render_clusters():
 
 def test_render_clusters_without_clustering_raises():
     """Test that render_clusters raises error when clustering not enabled."""
-    from empo.transport import create_transport_env
+    from empo.world_specific_helpers.transport import create_transport_env
     import pytest
     
     env = create_transport_env(
@@ -814,8 +810,8 @@ def test_render_clusters_without_clustering_raises():
 
 def test_transport_policy_prior_network():
     """Test TransportPolicyPriorNetwork computes marginal correctly."""
-    from empo.transport import create_transport_env, TransportGoal
-    from empo.nn_based.transport import (
+    from empo.world_specific_helpers.transport import create_transport_env, TransportGoal
+    from empo.learning_based.transport import (
         TransportQNetwork,
         TransportPolicyPriorNetwork,
     )
@@ -862,8 +858,8 @@ def test_transport_policy_prior_network():
 
 def test_transport_neural_policy_prior():
     """Test TransportNeuralHumanPolicyPrior basic functionality."""
-    from empo.transport import create_transport_env, TransportGoal, TransportGoalSampler
-    from empo.nn_based.transport import TransportNeuralHumanPolicyPrior
+    from empo.world_specific_helpers.transport import create_transport_env, TransportGoal, TransportGoalSampler
+    from empo.learning_based.transport import TransportNeuralHumanPolicyPrior
     
     env = create_transport_env(
         num_humans=2,
@@ -907,8 +903,8 @@ def test_transport_neural_policy_prior_save_load():
     """Test TransportNeuralHumanPolicyPrior save and load."""
     import tempfile
     import os
-    from empo.transport import create_transport_env, TransportGoal, TransportGoalSampler
-    from empo.nn_based.transport import TransportNeuralHumanPolicyPrior
+    from empo.world_specific_helpers.transport import create_transport_env, TransportGoal, TransportGoalSampler
+    from empo.learning_based.transport import TransportNeuralHumanPolicyPrior
     
     env = create_transport_env(
         num_humans=2,
@@ -955,8 +951,8 @@ def test_transport_neural_policy_prior_save_load():
 
 def test_train_transport_neural_policy_prior():
     """Test train_transport_neural_policy_prior function (minimal training)."""
-    from empo.transport import create_transport_env, TransportGoalSampler, TransportGoal
-    from empo.nn_based.transport import train_transport_neural_policy_prior
+    from empo.world_specific_helpers.transport import create_transport_env, TransportGoalSampler, TransportGoal
+    from empo.learning_based.transport import train_transport_neural_policy_prior
     
     env = create_transport_env(
         num_humans=2,

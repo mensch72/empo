@@ -9,7 +9,6 @@ This example shows:
 
 import os
 import numpy as np
-import networkx as nx
 from ai_transport import parallel_env
 
 

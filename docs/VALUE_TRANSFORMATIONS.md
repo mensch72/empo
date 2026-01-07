@@ -269,19 +269,19 @@ Maps: -400 → -6.0, -1 → -0.69, 0 → 0
 
 ### Files
 
-1. **`src/empo/nn_based/phase2/value_transforms.py`** - All transformation functions:
+1. **`src/empo/learning_based/phase2/value_transforms.py`** - All transformation functions:
    - `to_z_space(q, eta, xi)` - Q → z for Q_r, V_r
    - `from_z_space(z, eta, xi)` - z → Q for Q_r, V_r
    - `y_to_z_space(y, xi)` - y → z for U_r
    - `z_to_y_space(z, xi)` - z → y for U_r
 
-2. **`src/empo/nn_based/phase2/config.py`**:
+2. **`src/empo/learning_based/phase2/config.py`**:
    - `use_z_space_transform: bool = False` - Enable z-space transformations
    - `use_z_based_loss: bool = False` - Use z-space MSE loss (legacy) vs Q-space MSE loss (default)
    - `should_use_z_loss(step)` - Check if z-space loss should be used at given step
    - `is_in_decay_phase(step)` - Determine which loss phase (only used when `use_z_based_loss=True`)
 
-3. **`src/empo/nn_based/phase2/trainer.py`**:
+3. **`src/empo/learning_based/phase2/trainer.py`**:
    - Uses `config.should_use_z_loss(step)` to determine loss function
    - Q_r loss: z-space MSE or Q-space MSE depending on config
    - V_r loss: z-space MSE or V_r-space MSE depending on config

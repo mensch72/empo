@@ -13,14 +13,14 @@ import pytest
 import torch
 import torch.nn as nn
 
-from empo.nn_based.phase2.lookup import (
+from empo.learning_based.phase2.lookup import (
     LookupTableRobotQNetwork,
     LookupTableRobotValueNetwork,
     LookupTableHumanGoalAbilityNetwork,
     LookupTableAggregateGoalAbilityNetwork,
     LookupTableIntrinsicRewardNetwork,
 )
-from empo.nn_based.phase2.config import Phase2Config
+from empo.learning_based.phase2.config import Phase2Config
 
 
 # =============================================================================
@@ -660,7 +660,7 @@ class TestLookupTableUtilities:
     
     def test_is_lookup_table_network_with_lookup_tables(self):
         """Test is_lookup_table_network returns True for lookup tables."""
-        from empo.nn_based.phase2.lookup import is_lookup_table_network
+        from empo.learning_based.phase2.lookup import is_lookup_table_network
         
         q_r = LookupTableRobotQNetwork(num_actions=2, num_robots=1)
         v_r = LookupTableRobotValueNetwork()
@@ -676,7 +676,7 @@ class TestLookupTableUtilities:
     
     def test_is_lookup_table_network_with_other_objects(self):
         """Test is_lookup_table_network returns False for other objects."""
-        from empo.nn_based.phase2.lookup import is_lookup_table_network
+        from empo.learning_based.phase2.lookup import is_lookup_table_network
         
         assert is_lookup_table_network(nn.Linear(10, 10)) is False
         assert is_lookup_table_network(None) is False
@@ -684,8 +684,8 @@ class TestLookupTableUtilities:
     
     def test_get_all_lookup_tables_all_lookup(self):
         """Test get_all_lookup_tables with all lookup table networks."""
-        from empo.nn_based.phase2.lookup import get_all_lookup_tables
-        from empo.nn_based.phase2.trainer import Phase2Networks
+        from empo.learning_based.phase2.lookup import get_all_lookup_tables
+        from empo.learning_based.phase2.trainer import Phase2Networks
         
         networks = Phase2Networks(
             q_r=LookupTableRobotQNetwork(num_actions=2, num_robots=1),
@@ -706,8 +706,8 @@ class TestLookupTableUtilities:
     
     def test_get_all_lookup_tables_mixed(self):
         """Test get_all_lookup_tables with mixed network types."""
-        from empo.nn_based.phase2.lookup import get_all_lookup_tables
-        from empo.nn_based.phase2.trainer import Phase2Networks
+        from empo.learning_based.phase2.lookup import get_all_lookup_tables
+        from empo.learning_based.phase2.trainer import Phase2Networks
         
         # Create a mock neural network (not a lookup table)
         class MockQNetwork(nn.Module):
@@ -730,8 +730,8 @@ class TestLookupTableUtilities:
     
     def test_get_total_table_size(self, simple_states):
         """Test get_total_table_size counts entries correctly."""
-        from empo.nn_based.phase2.lookup import get_total_table_size
-        from empo.nn_based.phase2.trainer import Phase2Networks
+        from empo.learning_based.phase2.lookup import get_total_table_size
+        from empo.learning_based.phase2.trainer import Phase2Networks
         
         q_r = LookupTableRobotQNetwork(num_actions=2, num_robots=1)
         v_h_e = LookupTableHumanGoalAbilityNetwork()
@@ -756,7 +756,7 @@ class TestNetworkFactory:
     
     def test_create_all_phase2_lookup_networks(self):
         """Test creating all lookup networks at once."""
-        from empo.nn_based.phase2.network_factory import create_all_phase2_lookup_networks
+        from empo.learning_based.phase2.network_factory import create_all_phase2_lookup_networks
         
         config = Phase2Config(
             use_lookup_tables=True,
@@ -781,7 +781,7 @@ class TestNetworkFactory:
     
     def test_create_all_lookup_without_optional_networks(self):
         """Test creating lookup networks with u_r and v_r disabled."""
-        from empo.nn_based.phase2.network_factory import create_all_phase2_lookup_networks
+        from empo.learning_based.phase2.network_factory import create_all_phase2_lookup_networks
         
         config = Phase2Config(
             use_lookup_tables=True,
@@ -801,7 +801,7 @@ class TestNetworkFactory:
     
     def test_create_all_lookup_without_x_h_network(self):
         """Test creating lookup networks with x_h disabled."""
-        from empo.nn_based.phase2.network_factory import create_all_phase2_lookup_networks
+        from empo.learning_based.phase2.network_factory import create_all_phase2_lookup_networks
         
         config = Phase2Config(
             use_lookup_tables=True,
@@ -822,7 +822,7 @@ class TestNetworkFactory:
     
     def test_create_all_lookup_requires_flag(self):
         """Test that factory raises error if use_lookup_tables is False."""
-        from empo.nn_based.phase2.network_factory import create_all_phase2_lookup_networks
+        from empo.learning_based.phase2.network_factory import create_all_phase2_lookup_networks
         
         config = Phase2Config(use_lookup_tables=False)
         
@@ -831,7 +831,7 @@ class TestNetworkFactory:
     
     def test_create_robot_q_network_lookup(self):
         """Test create_robot_q_network with lookup tables."""
-        from empo.nn_based.phase2.network_factory import create_robot_q_network
+        from empo.learning_based.phase2.network_factory import create_robot_q_network
         
         config = Phase2Config(use_lookup_tables=True, use_lookup_q_r=True)
         
@@ -843,7 +843,7 @@ class TestNetworkFactory:
     
     def test_create_robot_q_network_neural_requires_factory(self):
         """Test that neural Q_r requires a factory function."""
-        from empo.nn_based.phase2.network_factory import create_robot_q_network
+        from empo.learning_based.phase2.network_factory import create_robot_q_network
         
         config = Phase2Config(use_lookup_tables=False)
         
@@ -852,7 +852,7 @@ class TestNetworkFactory:
     
     def test_create_human_goal_ability_network_lookup(self):
         """Test create_human_goal_ability_network with lookup tables."""
-        from empo.nn_based.phase2.network_factory import create_human_goal_ability_network
+        from empo.learning_based.phase2.network_factory import create_human_goal_ability_network
         
         config = Phase2Config(use_lookup_tables=True, use_lookup_v_h_e=True)
         
@@ -862,7 +862,7 @@ class TestNetworkFactory:
     
     def test_create_aggregate_goal_ability_network_lookup(self):
         """Test create_aggregate_goal_ability_network with lookup tables."""
-        from empo.nn_based.phase2.network_factory import create_aggregate_goal_ability_network
+        from empo.learning_based.phase2.network_factory import create_aggregate_goal_ability_network
         
         config = Phase2Config(use_lookup_tables=True, use_lookup_x_h=True)
         
@@ -872,7 +872,7 @@ class TestNetworkFactory:
     
     def test_create_intrinsic_reward_network_when_disabled(self):
         """Test that U_r factory returns None when u_r_use_network=False."""
-        from empo.nn_based.phase2.network_factory import create_intrinsic_reward_network
+        from empo.learning_based.phase2.network_factory import create_intrinsic_reward_network
         
         config = Phase2Config(u_r_use_network=False)
         
@@ -882,7 +882,7 @@ class TestNetworkFactory:
     
     def test_create_robot_value_network_when_disabled(self):
         """Test that V_r factory returns None when v_r_use_network=False."""
-        from empo.nn_based.phase2.network_factory import create_robot_value_network
+        from empo.learning_based.phase2.network_factory import create_robot_value_network
         
         config = Phase2Config(v_r_use_network=False)
         

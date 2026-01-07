@@ -1,7 +1,5 @@
 """Test the _process_state_actions worker function directly."""
 
-import sys
-import os
 import pickle
 
 from gym_multigrid.multigrid import MultiGridEnv, World

@@ -23,7 +23,6 @@ Attainment Cache:
 import numpy as np
 import numpy.typing as npt
 import time
-import os
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from itertools import product
@@ -33,11 +32,12 @@ import cloudpickle
 from tqdm import tqdm
 from scipy.special import logsumexp
 
-from empo.memory_monitor import MemoryMonitor
+from empo.util.memory_monitor import MemoryMonitor
 from empo.possible_goal import PossibleGoal, PossibleGoalGenerator
 from empo.human_policy_prior import TabularHumanPolicyPrior
+from empo.robot_policy import RobotPolicy
 from empo.world_model import WorldModel
-from empo.shared_dag import (
+from empo.backward_induction.shared_dag import (
     init_shared_dag, get_shared_dag, attach_shared_dag, cleanup_shared_dag
 )
 
@@ -481,13 +481,15 @@ def _rp_process_state_batch(
     return vh_results, vr_results, p_results, slice_id, slice_cache, batch_time
 
 
-class TabularRobotPolicy:
+class TabularRobotPolicy(RobotPolicy):
     """
     Tabular (lookup-table) implementation of robot policy.
     
     This implementation stores precomputed robot policy distributions in a dictionary
     structure, indexed by state. The policy maps each state to a distribution over
     robot action profiles (joint actions for all robot agents).
+    
+    Computed via backward induction on the state DAG in Phase 2.
     
     Attributes:
         world_model: The world model (environment) this policy applies to.
@@ -546,6 +548,19 @@ class TabularRobotPolicy:
         probs = probs / probs.sum()  # normalize
         idx = np.random.choice(len(profiles), p=probs)
         return profiles[idx]
+    
+    def reset(self, world_model: WorldModel) -> None:
+        """
+        Reset the policy at the start of an episode.
+        
+        Updates the world model reference. For tabular policies, this allows
+        the same policy to be used across different instances of the same
+        environment type.
+        
+        Args:
+            world_model: The environment/world model for this episode.
+        """
+        self.world_model = world_model
     
     def get_action(self, state, robot_agent_index: int) -> int:
         """

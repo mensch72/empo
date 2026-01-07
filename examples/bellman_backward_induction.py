@@ -19,17 +19,15 @@ Usage:
 Run with --profile to enable line-by-line profiling of multigrid.py.
 """
 
-import sys
 import os
 import time
 import argparse
 
 import numpy as np
-import matplotlib.pyplot as plt
 from itertools import product
 from tqdm import tqdm
 
-from envs.one_or_three_chambers import SmallOneOrTwoChambersMapEnv
+from multigrid_worlds.one_or_three_chambers import SmallOneOrTwoChambersMapEnv
 
 # Line profiler global
 line_profiler = None

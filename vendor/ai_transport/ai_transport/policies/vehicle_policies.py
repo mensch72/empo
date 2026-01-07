@@ -7,7 +7,7 @@ Provides abstract base class and concrete implementations for vehicle decision-m
 from abc import ABC, abstractmethod
 import numpy as np
 import networkx as nx
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional
 
 
 class VehiclePolicy(ABC):
@@ -36,12 +36,10 @@ class VehiclePolicy(ABC):
         Returns:
             Tuple of (action_index, justification_string)
         """
-        pass
     
     @abstractmethod
     def reset(self):
         """Reset policy state (e.g., current destination)."""
-        pass
 
 
 class RandomVehiclePolicy(VehiclePolicy):
@@ -125,7 +123,6 @@ class RandomVehiclePolicy(VehiclePolicy):
     
     def reset(self):
         """Reset policy state (no state to reset for random policy)."""
-        pass
 
 
 class ShortestPathVehiclePolicy(VehiclePolicy):

@@ -5,8 +5,6 @@ Compares performance of get_dag() vs get_dag_parallel() on environments
 of varying complexity to measure parallelization speedup.
 """
 
-import sys
-import os
 import time
 
 from gym_multigrid.multigrid import MultiGridEnv, World

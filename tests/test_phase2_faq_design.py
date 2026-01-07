@@ -13,7 +13,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from empo.nn_based.phase2.config import Phase2Config
+from empo.learning_based.phase2.config import Phase2Config
 
 
 # =============================================================================

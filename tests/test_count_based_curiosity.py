@@ -12,7 +12,7 @@ Tests cover:
 import pytest
 import math
 
-from empo.nn_based.phase2.count_based_curiosity import CountBasedCuriosity
+from empo.learning_based.phase2.count_based_curiosity import CountBasedCuriosity
 
 
 class TestCountBasedCuriosity:
@@ -362,7 +362,7 @@ class TestCountBasedCuriosityConfig:
     
     def test_config_default_values(self):
         """Test default config values for count-based curiosity."""
-        from empo.nn_based.phase2.config import Phase2Config
+        from empo.learning_based.phase2.config import Phase2Config
         
         config = Phase2Config()
         
@@ -375,7 +375,7 @@ class TestCountBasedCuriosityConfig:
     
     def test_config_with_curiosity_enabled(self):
         """Test config with count-based curiosity enabled."""
-        from empo.nn_based.phase2.config import Phase2Config
+        from empo.learning_based.phase2.config import Phase2Config
         
         config = Phase2Config(
             use_count_based_curiosity=True,
@@ -397,8 +397,8 @@ class TestCountBasedCuriosityFactory:
     
     def test_create_count_based_curiosity(self):
         """Test creating curiosity module from config."""
-        from empo.nn_based.phase2.config import Phase2Config
-        from empo.nn_based.phase2.network_factory import create_count_based_curiosity
+        from empo.learning_based.phase2.config import Phase2Config
+        from empo.learning_based.phase2.network_factory import create_count_based_curiosity
         
         config = Phase2Config(
             use_count_based_curiosity=True,
@@ -414,8 +414,8 @@ class TestCountBasedCuriosityFactory:
     
     def test_create_returns_none_when_disabled(self):
         """Test factory returns None when curiosity is disabled."""
-        from empo.nn_based.phase2.config import Phase2Config
-        from empo.nn_based.phase2.network_factory import create_count_based_curiosity
+        from empo.learning_based.phase2.config import Phase2Config
+        from empo.learning_based.phase2.network_factory import create_count_based_curiosity
         
         config = Phase2Config(use_count_based_curiosity=False)
         curiosity = create_count_based_curiosity(config)
@@ -428,7 +428,7 @@ class TestCountBasedCuriosityIntegration:
     
     def test_phase2_networks_with_count_curiosity(self):
         """Test Phase2Networks can hold count_curiosity field."""
-        from empo.nn_based.phase2.trainer import Phase2Networks
+        from empo.learning_based.phase2.trainer import Phase2Networks
         
         curiosity = CountBasedCuriosity(scale=1.0)
         
@@ -446,15 +446,15 @@ class TestCountBasedCuriosityIntegration:
     
     def test_curiosity_module_export(self):
         """Test CountBasedCuriosity is exported from phase2 module."""
-        from empo.nn_based.phase2 import CountBasedCuriosity as ExportedClass
+        from empo.learning_based.phase2 import CountBasedCuriosity as ExportedClass
         
         curiosity = ExportedClass(scale=1.0)
         assert curiosity.scale == 1.0
     
     def test_factory_export(self):
         """Test create_count_based_curiosity is exported."""
-        from empo.nn_based.phase2 import create_count_based_curiosity
-        from empo.nn_based.phase2.config import Phase2Config
+        from empo.learning_based.phase2 import create_count_based_curiosity
+        from empo.learning_based.phase2.config import Phase2Config
         
         config = Phase2Config(use_count_based_curiosity=True)
         curiosity = create_count_based_curiosity(config)

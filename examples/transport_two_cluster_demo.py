@@ -23,7 +23,6 @@ Usage:
     python transport_two_cluster_demo.py --quick   # Quick test run
 """
 
-import sys
 import os
 import time
 import random
@@ -32,14 +31,13 @@ import argparse
 import numpy as np
 import networkx as nx
 
-from empo.transport import (
+from empo.world_specific_helpers.transport import (
     TransportEnvWrapper,
     TransportGoal,
     TransportGoalSampler,
     TransportActions,
 )
-from empo.nn_based.transport import (
-    TransportNeuralHumanPolicyPrior,
+from empo.learning_based.transport import (
     train_transport_neural_policy_prior,
 )
 

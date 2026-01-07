@@ -1,10 +1,7 @@
-import functools
-from typing import Optional, Union, Tuple, Dict, Any
-import os
 
 import gymnasium
 import numpy as np
-from gymnasium.spaces import Box, Dict as DictSpace, Discrete, Tuple as TupleSpace
+from gymnasium.spaces import Box, Dict as DictSpace, Discrete
 from gymnasium.utils import seeding
 import networkx as nx
 from scipy.spatial import Delaunay
@@ -656,7 +653,6 @@ class parallel_env(ParallelEnv):
         
         # Import needed modules
         from matplotlib.transforms import Affine2D
-        import matplotlib.pyplot as plt
         
         pos = self._network_pos
         
@@ -919,8 +915,6 @@ class parallel_env(ParallelEnv):
             import matplotlib
             matplotlib.use('Agg')
             import matplotlib.pyplot as plt
-            from matplotlib.patches import Rectangle, Circle
-            from matplotlib.lines import Line2D
         except ImportError:
             print("matplotlib is required for graphical rendering")
             return
@@ -1167,7 +1161,8 @@ class parallel_env(ParallelEnv):
             self.fig = None
             self.ax = None
 
-    def get_human_agent_indices(self):
+    @property
+    def human_agent_indices(self):
         """
         Get the indices of human agents in the environment.
         
@@ -1178,7 +1173,8 @@ class parallel_env(ParallelEnv):
         """
         return [self.agent_name_mapping[name] for name in self.human_agents]
     
-    def get_robot_agent_indices(self):
+    @property
+    def robot_agent_indices(self):
         """
         Get the indices of robot/vehicle agents in the environment.
         
@@ -1658,7 +1654,7 @@ class parallel_env(ParallelEnv):
             
             # For smooth video, subdivide movement into multiple substeps when recording
             num_substeps = 5 if getattr(self, '_recording', False) else 1
-            substep_dt = delta_t / num_substeps
+            delta_t / num_substeps
             
             # Store starting positions and compute target positions
             start_positions = {}

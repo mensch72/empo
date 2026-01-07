@@ -34,31 +34,27 @@ NOTE FOR FUTURE EXAMPLES:
     without waiting for the full training run.
 """
 
-import sys
 import os
 import time
 import random
 import argparse
-from typing import List, Tuple, Dict, Any, Optional
+from typing import List, Tuple, Dict, Optional
 
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
-from matplotlib.colors import Normalize
 
 from gym_multigrid.multigrid import (
-    MultiGridEnv, Grid, Agent, Wall, World, SmallActions,
-    Key, Ball, Box, Door, Lava, Block, Goal
+    MultiGridEnv, World, SmallActions
 )
 from empo.possible_goal import PossibleGoal, PossibleGoalSampler
-from empo.multigrid import (
+from empo.world_specific_helpers.multigrid import (
     ReachRectangleGoal,
-    MultiGridGoalSampler,
     RandomPolicy,
     render_goal_overlay,
 )
-from empo.nn_based.multigrid import (
+from empo.learning_based.multigrid import (
     MultiGridNeuralHumanPolicyPrior,
     train_multigrid_neural_policy_prior as train_neural_policy_prior,
 )

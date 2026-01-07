@@ -13,12 +13,10 @@ It then:
 2. Saves one sample episode as a GIF animation
 """
 
-import sys
 import os
 
 import numpy as np
-import matplotlib.pyplot as plt
-from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, Block, Rock, Wall, World
+from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, Block, Rock, World
 
 
 class SmallDAGEnv(MultiGridEnv):

@@ -20,13 +20,11 @@ Training features demonstrated:
 - button_toggle_bias: State-dependent exploration biasing toggle near buttons
 """
 
-import sys
 import os
-import random
 
 from gym_multigrid.multigrid import MultiGridEnv, World, Actions
 from empo.possible_goal import PossibleGoal, PossibleGoalSampler
-from empo.nn_based.multigrid import train_multigrid_neural_policy_prior
+from empo.learning_based.multigrid import train_multigrid_neural_policy_prior
 
 # Output directory
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))

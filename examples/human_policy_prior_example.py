@@ -7,7 +7,6 @@ using backward induction. Each initially empty cell is treated as a possible goa
 Includes line profiling of backward_induction.py, possible_goal.py, and multigrid.py.
 """
 
-import sys
 import os
 import time
 import numpy as np
@@ -23,7 +22,7 @@ except ImportError:
 
 LINE_PROFILER_AVAILABLE = False
 
-from envs.one_or_three_chambers import SmallOneOrThreeChambersMapEnv
+from multigrid_worlds.one_or_three_chambers import SmallOneOrThreeChambersMapEnv
 from empo.possible_goal import PossibleGoal, PossibleGoalGenerator
 from empo.backward_induction import compute_human_policy_prior
 
@@ -113,7 +112,6 @@ def setup_line_profiler():
     
     # Import modules to profile
     import empo.backward_induction as backward_induction_module
-    import empo.possible_goal as possible_goal_module
     
     # Import multigrid
     import gym_multigrid.multigrid as multigrid_module

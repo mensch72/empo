@@ -26,32 +26,27 @@ Requirements:
     - ffmpeg (optional, for MP4 output; falls back to GIF)
 """
 
-import sys
 import os
 import time
 import random
 import argparse
-from typing import List, Tuple, Dict, Optional, Any
+from typing import List, Tuple, Dict, Optional
 
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
-import matplotlib.patches as patches
 
 from gym_multigrid.multigrid import (
-    MultiGridEnv, Grid, Agent, Wall, World, SmallActions,
+    MultiGridEnv, World, SmallActions,
 )
-from empo.possible_goal import PossibleGoal, PossibleGoalSampler
-from empo.multigrid import (
+from empo.world_specific_helpers.multigrid import (
     ReachRectangleGoal,
     MultiGridGoalSampler,
     render_goal_overlay,
 )
-from empo.nn_based.multigrid import (
-    MultiGridQNetwork as QNetwork,
+from empo.learning_based.multigrid import (
     train_multigrid_neural_policy_prior as train_neural_policy_prior,
-    PathDistanceCalculator,
 )
 
 

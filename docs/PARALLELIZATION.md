@@ -7,8 +7,8 @@ This document describes the different forms of pickling and data passing used in
 EMPO uses Python's `multiprocessing` module with `ProcessPoolExecutor` for parallel computation, in addition to the parallelization that pytorch does internally. There are currently three such non-pytorch parallelization sites:
 
 1. **DAG Construction** (`src/empo/world_model.py`) - Parallelizes BFS exploration of the state space
-2. **Backward Induction** (`src/empo/backward_induction.py`) - Parallelizes policy computation across states
-3. **Async Phase 2 Training** (`src/empo/nn_based/phase2/trainer.py`) - Parallel actor-learner architecture
+2. **Backward Induction** (`src/empo/backward_induction/phase1.py` and `src/empo/backward_induction/phase2.py`) - Parallelizes policy computation across states
+3. **Async Phase 2 Training** (`src/empo/learning_based/phase2/trainer.py`) - Parallel actor-learner architecture
 
 Each site uses different data passing strategies optimized for its specific workload.
 
@@ -84,7 +84,7 @@ Main Process                    Worker Processes
 
 ## 2. Backward Induction (`compute_human_policy_prior`)
 
-**Location:** `src/empo/backward_induction.py`
+**Location:** `src/empo/backward_induction/phase1.py` and `src/empo/backward_induction/phase2.py`
 
 ### Multiprocessing Context: `fork`
 
@@ -307,7 +307,7 @@ result = restored_fn(21)  # Returns 42
 
 ## 3. Async Actor-Learner Training (Phase 2)
 
-**Location:** `src/empo/nn_based/phase2/trainer.py`
+**Location:** `src/empo/learning_based/phase2/trainer.py`
 
 ### Overview
 
@@ -316,7 +316,7 @@ collect environment transitions in parallel while the main learner process updat
 the neural networks on the GPU.
 
 ```python
-from empo.nn_based.phase2.config import Phase2Config
+from empo.learning_based.phase2.config import Phase2Config
 
 config = Phase2Config(
     async_training=True,
@@ -563,7 +563,7 @@ The learner sets `stop_event` when training completes, and actors exit gracefull
 ### Example Usage
 
 ```python
-from empo.nn_based.multigrid.phase2.trainer import train_multigrid_phase2
+from empo.learning_based.multigrid.phase2.trainer import train_multigrid_phase2
 
 # Define factory for actors (creates fresh environments)
 def world_model_factory():

@@ -11,7 +11,6 @@ The visualization shows:
 - Comparison between path-based distance (with passing costs) and simple Manhattan distance
 """
 
-import sys
 import os
 
 import numpy as np
@@ -20,8 +19,8 @@ import matplotlib.patches as mpatches
 from matplotlib.colors import Normalize
 from matplotlib.cm import ScalarMappable
 
-from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, Wall, World, SmallActions, Block, Rock, Door
-from empo.nn_based import PathDistanceCalculator
+from gym_multigrid.multigrid import MultiGridEnv, World, SmallActions
+from empo.learning_based import PathDistanceCalculator
 
 
 # ============================================================================

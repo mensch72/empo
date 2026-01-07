@@ -52,7 +52,6 @@ Output:
 - Movie of rollouts with the learned policy (loaded from disk to verify save/restore)
 - Profiler output (with --profile): Detailed timing breakdown by component printed at end
 """
-import sys
 import os
 import time
 import random
@@ -62,19 +61,18 @@ import numpy as np
 import torch
 
 from gym_multigrid.multigrid import (
-    MultiGridEnv, Grid, Agent, Wall, World, SmallActions,
-    Key, Ball, Box, Door, Lava, Block, Goal
+    MultiGridEnv, World, SmallActions
 )
-from empo.multigrid import MultiGridGoalSampler, ReachCellGoal, ReachRectangleGoal, render_test_map_values
+from empo.world_specific_helpers.multigrid import ReachCellGoal, ReachRectangleGoal, render_test_map_values
 from empo.possible_goal import TabularGoalSampler, PossibleGoalSampler
 from empo.human_policy_prior import HeuristicPotentialPolicy
-from empo.nn_based.multigrid import PathDistanceCalculator
-from empo.nn_based.phase2.config import Phase2Config
-from empo.nn_based.phase2.profiler import TrainingProfiler
-from empo.nn_based.phase2.world_model_factory import CachedWorldModelFactory, EnsembleWorldModelFactory
-from empo.nn_based.multigrid.phase2 import train_multigrid_phase2
-from empo.nn_based.multigrid.phase2.robot_policy import (
-    MultiGridRobotPolicy, MultiGridRobotExplorationPolicy, MultiGridMultiStepExplorationPolicy
+from empo.learning_based.multigrid import PathDistanceCalculator
+from empo.learning_based.phase2.config import Phase2Config
+from empo.learning_based.phase2.profiler import TrainingProfiler
+from empo.learning_based.phase2.world_model_factory import CachedWorldModelFactory, EnsembleWorldModelFactory
+from empo.learning_based.multigrid.phase2 import train_multigrid_phase2
+from empo.learning_based.multigrid.phase2.robot_policy import (
+    MultiGridRobotPolicy, MultiGridMultiStepExplorationPolicy
 )
 
 
@@ -705,7 +703,7 @@ def run_policy_rollout(
             networks.x_h.eval()
     
     env.reset()
-    num_actions = env.action_space.n
+    env.action_space.n
     steps_taken = 0
     
     # Sample initial goals for humans

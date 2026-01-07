@@ -5,7 +5,6 @@ Run with: pytest tests/
 """
 
 import pytest
-import sys
 from pathlib import Path
 
 

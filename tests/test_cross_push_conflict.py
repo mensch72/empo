@@ -4,7 +4,6 @@ Test for conflict between stumbling agent moving to a cell and another pushing b
 """
 
 import sys
-from pathlib import Path
 import numpy as np
 
 import gymnasium as gym

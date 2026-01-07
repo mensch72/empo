@@ -19,7 +19,6 @@ The demo uses the nn_based module to:
    - All cells color-coded by the first human's value function for alternative goals
 """
 
-import sys
 import os
 import time
 import random
@@ -30,22 +29,17 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 from matplotlib.colors import Normalize
-from typing import Iterator, Tuple, Dict, List, Any, Optional
+from typing import Tuple, Dict, List, Any, Optional
 
-from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, Wall, World, SmallActions
-from empo.possible_goal import PossibleGoal, PossibleGoalSampler
-from empo.multigrid import ReachCellGoal, MultiGridGoalSampler, RandomPolicy, render_goal_overlay
-from empo.nn_based.multigrid import (
-    MultiGridStateEncoder as StateEncoder,
-    MultiGridGoalEncoder as GoalEncoder,
+from gym_multigrid.multigrid import MultiGridEnv, World, SmallActions
+from empo.world_specific_helpers.multigrid import ReachCellGoal, MultiGridGoalSampler, RandomPolicy, render_goal_overlay
+from empo.learning_based.multigrid import (
     MultiGridQNetwork as QNetwork,
-    MultiGridPolicyPriorNetwork as PolicyPriorNetwork,
     MultiGridNeuralHumanPolicyPrior as NeuralHumanPolicyPrior,
     train_multigrid_neural_policy_prior as train_neural_policy_prior,
     NUM_OBJECT_TYPE_CHANNELS,
     OBJECT_TYPE_TO_CHANNEL,
     OVERLAPPABLE_OBJECTS,
-    NON_OVERLAPPABLE_IMMOBILE_OBJECTS,
     NON_OVERLAPPABLE_MOBILE_OBJECTS,
 )
 
@@ -625,7 +619,7 @@ def main(quick_mode=False):
                 other_goal_pos = random.choice(goal_cells)
                 human_goals[h_idx] = ReachCellGoal(env, h_idx, other_goal_pos)
         
-        first_goal = human_goals[first_human_idx]
+        human_goals[first_human_idx]
         other_goals_str = {h: human_goals[h].target_pos for h in human_agent_indices if h != first_human_idx}
         print(f"  Rollout {i + 1}/{n_rollouts}: Human 0 goal = {goal_pos}, Others = {other_goals_str}")
         

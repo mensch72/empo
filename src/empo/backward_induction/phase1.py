@@ -34,15 +34,15 @@ from typing import Optional, Callable, List, Tuple, Dict, Any, Union, overload, 
 import cloudpickle
 from tqdm import tqdm
 
-from empo.memory_monitor import MemoryMonitor
+from empo.util.memory_monitor import MemoryMonitor
 from empo.possible_goal import PossibleGoal, PossibleGoalGenerator
 from empo.human_policy_prior import TabularHumanPolicyPrior
 from empo.world_model import WorldModel
-from empo.shared_dag import (
+from empo.backward_induction.shared_dag import (
     init_shared_dag, get_shared_dag, attach_shared_dag, cleanup_shared_dag
 )
-from empo.shared_attainment_cache import (
-    init_shared_attainment_cache, cleanup_shared_attainment_cache
+from empo.backward_induction.shared_attainment_cache import (
+    cleanup_shared_attainment_cache
 )
 
 from .helpers import (
