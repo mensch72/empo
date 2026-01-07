@@ -87,7 +87,7 @@ def _load_goal_classes():
     global _ReachCellGoal, _ReachRectangleGoal, _TabularGoalGenerator, _TabularGoalSampler
     global _PossibleGoalGenerator, _PossibleGoalSampler
     if _ReachCellGoal is None:
-        from empo.multigrid import ReachCellGoal, ReachRectangleGoal
+        from empo.world_specific_helpers.multigrid import ReachCellGoal, ReachRectangleGoal
         from empo.possible_goal import (
             TabularGoalGenerator, TabularGoalSampler,
             PossibleGoalGenerator, PossibleGoalSampler

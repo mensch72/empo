@@ -202,7 +202,7 @@ where $\mu_\text{running}$ and $\sigma_\text{running}$ are exponential moving av
 
 ### Phase 1: Configuration and Module
 
-1. **Create `src/empo/nn_based/phase2/rnd.py`** (new file)
+1. **Create `src/empo/learning_based/phase2/rnd.py`** (new file)
    
    Implement `RNDModule` class:
    - Frozen random target network (2-layer MLP)
@@ -211,7 +211,7 @@ where $\mu_\text{running}$ and $\sigma_\text{running}$ are exponential moving av
    - `compute_loss(state_features) -> Tensor` method
    - Optional: running mean/std tracking for normalization
 
-2. **Extend `src/empo/nn_based/phase2/config.py`**
+2. **Extend `src/empo/learning_based/phase2/config.py`**
    
    Add configuration parameters:
    ```python
@@ -227,20 +227,20 @@ where $\mu_\text{running}$ and $\sigma_\text{running}$ are exponential moving av
 
 ### Phase 2: Network Integration
 
-3. **Modify `src/empo/nn_based/phase2/networks.py`**
+3. **Modify `src/empo/learning_based/phase2/networks.py`**
    
    Add optional RND module to `Phase2Networks` dataclass:
    ```python
    rnd: Optional[RNDModule] = None
    ```
 
-4. **Modify `src/empo/nn_based/multigrid/phase2/networks.py`**
+4. **Modify `src/empo/learning_based/multigrid/phase2/networks.py`**
    
    Update `create_multigrid_phase2_networks()` to instantiate RND module when `config.use_rnd=True`, using shared encoder's `feature_dim` as input dimension.
 
 ### Phase 3: Training Integration
 
-5. **Modify `src/empo/nn_based/phase2/trainer.py`**
+5. **Modify `src/empo/learning_based/phase2/trainer.py`**
    
    Key integration points:
    - `_init_optimizers()` (~L306): Add RND optimizer

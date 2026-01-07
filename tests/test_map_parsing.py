@@ -337,7 +337,7 @@ def test_environment_reset():
 
 def test_one_or_three_chambers_map_env():
     """Test that OneOrThreeChambersMapEnv produces the same layout as the original."""
-    from envs.one_or_three_chambers import OneOrThreeChambersEnv, OneOrThreeChambersMapEnv
+    from multigrid_worlds.one_or_three_chambers import OneOrThreeChambersEnv, OneOrThreeChambersMapEnv
     
     # Create both environments
     env_original = OneOrThreeChambersEnv()

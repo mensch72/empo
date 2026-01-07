@@ -15,7 +15,7 @@ import warnings
 import torch
 import numpy as np
 
-from empo.nn_based.phase2.config import Phase2Config
+from empo.learning_based.phase2.config import Phase2Config
 
 
 class TestZBasedLossConfig:
@@ -215,7 +215,7 @@ class TestValueTransformImports:
     
     def test_import_transforms(self):
         """Test that transform functions are importable."""
-        from empo.nn_based.phase2.value_transforms import (
+        from empo.learning_based.phase2.value_transforms import (
             to_z_space, from_z_space, y_to_z_space, z_to_y_space
         )
         

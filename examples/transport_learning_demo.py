@@ -30,14 +30,14 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import networkx as nx
 
-from empo.transport import (
+from empo.world_specific_helpers.transport import (
     create_transport_env,
     TransportEnvWrapper,
     TransportGoal,
     TransportGoalSampler,
     TransportActions,
 )
-from empo.nn_based.transport import (
+from empo.learning_based.transport import (
     TransportNeuralHumanPolicyPrior,
     train_transport_neural_policy_prior,
 )

@@ -43,8 +43,8 @@ from gym_multigrid.multigrid import (
     Key, Ball, Box, Door, Lava, Block, Goal
 )
 from empo.possible_goal import PossibleGoal, PossibleGoalSampler
-from empo.multigrid import ReachCellGoal, MultiGridGoalSampler
-from empo.nn_based.multigrid import (
+from empo.world_specific_helpers.multigrid import ReachCellGoal, MultiGridGoalSampler
+from empo.learning_based.multigrid import (
     MultiGridQNetwork as QNetwork,
     DirectPhiNetwork,
     train_multigrid_neural_policy_prior as train_neural_policy_prior,

@@ -76,8 +76,8 @@ def test_shared_state_encoder():
     """Test that all networks share the same state encoder instance."""
     print("\n=== Testing shared state encoder ===")
     
-    from empo.nn_based.multigrid.phase2.trainer import create_phase2_networks
-    from empo.nn_based.phase2.config import Phase2Config
+    from empo.learning_based.multigrid.phase2.trainer import create_phase2_networks
+    from empo.learning_based.phase2.config import Phase2Config
     
     # Create mock environment
     world_model = MockWorldModel(width=6, height=6, num_agents=2)
@@ -130,8 +130,8 @@ def test_encoder_caching():
     """Test that encoder caching works correctly."""
     print("\n=== Testing encoder caching ===")
     
-    from empo.nn_based.multigrid.phase2.trainer import create_phase2_networks
-    from empo.nn_based.phase2.config import Phase2Config
+    from empo.learning_based.multigrid.phase2.trainer import create_phase2_networks
+    from empo.learning_based.phase2.config import Phase2Config
     
     world_model = MockWorldModel(width=6, height=6, num_agents=2)
     config = Phase2Config()
@@ -198,8 +198,8 @@ def test_gradient_flow():
     """Test that gradients flow correctly through shared encoders."""
     print("\n=== Testing gradient flow through shared encoders ===")
     
-    from empo.nn_based.multigrid.phase2.trainer import create_phase2_networks
-    from empo.nn_based.phase2.config import Phase2Config
+    from empo.learning_based.multigrid.phase2.trainer import create_phase2_networks
+    from empo.learning_based.phase2.config import Phase2Config
     
     world_model = MockWorldModel(width=6, height=6, num_agents=2)
     config = Phase2Config()

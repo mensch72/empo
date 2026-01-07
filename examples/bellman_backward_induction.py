@@ -29,7 +29,7 @@ import matplotlib.pyplot as plt
 from itertools import product
 from tqdm import tqdm
 
-from envs.one_or_three_chambers import SmallOneOrTwoChambersMapEnv
+from multigrid_worlds.one_or_three_chambers import SmallOneOrTwoChambersMapEnv
 
 # Line profiler global
 line_profiler = None

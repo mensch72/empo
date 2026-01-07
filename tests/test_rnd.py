@@ -12,7 +12,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from empo.nn_based.phase2.rnd import RNDModule, RNDModuleWithEncoder
+from empo.learning_based.phase2.rnd import RNDModule, RNDModuleWithEncoder
 
 
 class TestRNDModule:

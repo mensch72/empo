@@ -22,7 +22,7 @@ import pytest
 from gym_multigrid.multigrid import (
     MultiGridEnv, Grid, Wall, Rock, Block, World, Agent, SmallActions
 )
-from empo.nn_based.multigrid.phase2.robot_policy import MultiGridMultiStepExplorationPolicy
+from empo.learning_based.multigrid.phase2.robot_policy import MultiGridMultiStepExplorationPolicy
 
 
 def create_robot_agent():

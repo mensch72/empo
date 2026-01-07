@@ -32,13 +32,13 @@ import argparse
 import numpy as np
 import networkx as nx
 
-from empo.transport import (
+from empo.world_specific_helpers.transport import (
     TransportEnvWrapper,
     TransportGoal,
     TransportGoalSampler,
     TransportActions,
 )
-from empo.nn_based.transport import (
+from empo.learning_based.transport import (
     TransportNeuralHumanPolicyPrior,
     train_transport_neural_policy_prior,
 )

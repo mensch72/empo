@@ -114,7 +114,7 @@ All tests pass:
 ## Example Usage
 
 ```python
-from empo.nn_based.multigrid import MultiGridNeuralHumanPolicyPrior
+from empo.learning_based.multigrid import MultiGridNeuralHumanPolicyPrior
 
 # Train on large grid (15x15)
 large_world = create_world(15, 15)

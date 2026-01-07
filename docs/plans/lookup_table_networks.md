@@ -358,7 +358,7 @@ class LookupTableOptimizer:
 Extend existing base classes with lookup table variants:
 
 ```python
-# src/empo/nn_based/lookup/q_network.py
+# src/empo/learning_based/lookup/q_network.py
 
 class LookupTableQNetwork(BaseQNetwork):
     """
@@ -477,7 +477,7 @@ class LookupTableQNetwork(BaseQNetwork):
 Create lookup table versions for each domain:
 
 ```python
-# src/empo/nn_based/multigrid/lookup/q_network.py
+# src/empo/learning_based/multigrid/lookup/q_network.py
 
 class MultiGridLookupTableQNetwork(LookupTableQNetwork):
     """
@@ -516,7 +516,7 @@ class MultiGridLookupTableQNetwork(LookupTableQNetwork):
 Similar structure for Phase 2 networks:
 
 ```python
-# src/empo/nn_based/phase2/lookup/robot_q_network.py
+# src/empo/learning_based/phase2/lookup/robot_q_network.py
 
 class LookupTableRobotQNetwork(BaseRobotQNetwork):
     """Lookup table for Q_r(s, a_r)."""
@@ -912,7 +912,7 @@ def lookup_batch(table: Dict[int, Tensor], keys: List[int]) -> Tensor:
 ### 7.1 Directory Structure
 
 ```
-src/empo/nn_based/
+src/empo/learning_based/
 ├── lookup/                          # NEW: Lookup table implementations
 │   ├── __init__.py
 │   ├── q_network.py                 # LookupTableQNetwork
@@ -940,7 +940,7 @@ src/empo/nn_based/
 Add factory functions to create networks based on configuration:
 
 ```python
-# src/empo/nn_based/factory.py
+# src/empo/learning_based/factory.py
 
 def create_q_network(
     use_lookup_table: bool = False,
@@ -1122,9 +1122,9 @@ def test_lookup_table_saves_and_loads():
 ```python
 # examples/lookup_table_phase1_demo.py
 
-from empo.nn_based.lookup.q_network import LookupTableQNetwork
-from empo.nn_based.lookup.policy_prior_network import LookupTablePolicyPriorNetwork
-from empo.nn_based.multigrid.lookup.neural_policy_prior import MultiGridLookupTablePolicyPrior
+from empo.learning_based.lookup.q_network import LookupTableQNetwork
+from empo.learning_based.lookup.policy_prior_network import LookupTablePolicyPriorNetwork
+from empo.learning_based.multigrid.lookup.neural_policy_prior import MultiGridLookupTablePolicyPrior
 
 # Create lookup table networks
 q_network = LookupTableQNetwork(
@@ -1164,8 +1164,8 @@ action_probs = policy_prior(state, agent_idx=0, goal=some_goal)
 ```python
 # examples/lookup_table_phase2_demo.py
 
-from empo.nn_based.phase2.lookup.robot_q_network import LookupTableRobotQNetwork
-from empo.nn_based.phase2.config import Phase2Networks
+from empo.learning_based.phase2.lookup.robot_q_network import LookupTableRobotQNetwork
+from empo.learning_based.phase2.config import Phase2Networks
 
 # Create hybrid architecture (some lookup, some neural)
 networks = Phase2Networks(

@@ -40,12 +40,12 @@ from gym_multigrid.multigrid import (
     MultiGridEnv, Grid, Agent, Wall, World, SmallActions,
     Ball, Block
 )
-from empo.multigrid import MultiGridGoalSampler, ReachCellGoal
+from empo.world_specific_helpers.multigrid import MultiGridGoalSampler, ReachCellGoal
 from empo.possible_goal import TabularGoalSampler
-from empo.nn_based.phase2.config import Phase2Config
-from empo.nn_based.phase2.trainer import Phase2Networks
-from empo.nn_based.phase2.network_factory import create_all_phase2_lookup_networks
-from empo.nn_based.phase2.lookup import (
+from empo.learning_based.phase2.config import Phase2Config
+from empo.learning_based.phase2.trainer import Phase2Networks
+from empo.learning_based.phase2.network_factory import create_all_phase2_lookup_networks
+from empo.learning_based.phase2.lookup import (
     is_lookup_table_network,
     get_all_lookup_tables,
     get_total_table_size,

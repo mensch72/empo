@@ -6,20 +6,20 @@ This document describes the backward induction algorithms used to compute exact 
 
 Backward induction computes all quantities by working backwards from terminal states through a Directed Acyclic Graph (DAG) of reachable states. This provides **exact solutions** (no approximation) but is only feasible for small state spaces due to computational complexity.
 
-For larger state spaces, use the learning-based neural network approximations in `src/empo/nn_based/`.
+For larger state spaces, use the learning-based neural network approximations in `src/empo/learning_based/`.
 
 Backward induction is possible because the current game time (step number) is part of the state and so the game tree is acyclic (one cannot return to the same state) and finite, hence it has terminal states, and because we do not assume the agents play best responses to each others' policies (which would introduce a different type of cyclic dependency).
 
 ## Implementation
 
-### Core Module: `src/empo/backward_induction.py`
+### Core Modules
 
-#### `compute_human_policy_prior()`
+#### Phase 1: `src/empo/backward_induction/phase1.py`
 
-Computes goal-conditioned Boltzmann policies for all human agents.
+Contains `compute_human_policy_prior()` which computes goal-conditioned Boltzmann policies for all human agents.
 
 ```python
-from empo.backward_induction import compute_human_policy_prior
+from empo.backward_induction.phase1 import compute_human_policy_prior
 
 policy_prior, Vh_values = compute_human_policy_prior(
     world_model=env,
@@ -45,12 +45,12 @@ action_probs = policy_prior(state, agent_idx=0, goal=my_goal)
 
 **TODO:** check if $V_h$ equals $V_h^m$ from the theory paper, especially whether it is based on $\min_{a_r}$ rather than $E_{a_r}$, and whether it accounts for goal attainment correctly in the successor state rather than the source state.  
 
-#### `compute_robot_policy()`
+#### Phase 2: `src/empo/backward_induction/phase2.py`
 
-Computes the robot's power-law policy that maximizes human empowerment.
+Contains `compute_robot_policy()` which computes the robot's power-law policy that maximizes human empowerment.
 
 ```python
-from empo.backward_induction import compute_robot_policy
+from empo.backward_induction.phase2 import compute_robot_policy
 
 robot_policy, Vr_values, Vh_values = compute_robot_policy(
     world_model=env,
@@ -89,6 +89,8 @@ where $Z$ is computed via `scipy.special.logsumexp`.
 
 #### `TabularHumanPolicyPrior`
 
+Located in `src/empo/human_policy_prior.py`.
+
 Stores precomputed human policies indexed by (state, agent, goal).
 
 - `__call__(state, agent_idx, goal)` → numpy array of action probabilities
@@ -96,6 +98,8 @@ Stores precomputed human policies indexed by (state, agent, goal).
 - `profile_distribution_with_fixed_goal(state, agent_idx, goal)` → same but using goal-specific policy for one agent
 
 #### `TabularRobotPolicy`
+
+Located in `src/empo/backward_induction/phase2.py`.
 
 Stores precomputed robot policy indexed by state.
 

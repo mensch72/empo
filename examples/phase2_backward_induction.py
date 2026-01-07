@@ -61,7 +61,7 @@ from empo.backward_induction import (
 )
 from empo import backward_induction as backward_induction_pkg
 from empo.human_policy_prior import TabularHumanPolicyPrior
-from empo.multigrid import ReachCellGoal
+from empo.world_specific_helpers.multigrid import ReachCellGoal
 
 
 # =============================================================================

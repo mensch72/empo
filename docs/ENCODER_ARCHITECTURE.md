@@ -10,7 +10,7 @@ The neural systems use a modular architecture with base classes and domain-speci
 
 ## Phase 1: Human Policy Priors
 
-### Base Classes (nn_based/)
+### Base Classes (learning_based/phase1/)
 
 - **BaseStateEncoder** - Abstract base for encoding complete world state
 - **BaseGoalEncoder** - Abstract base for encoding goals (separate from world state)
@@ -19,7 +19,7 @@ The neural systems use a modular architecture with base classes and domain-speci
 - **BaseNeuralHumanPolicyPrior** - Base class with save/load, action remapping
 - **Trainer** - Generic training loop with TD loss computation
 
-### Multigrid Implementation (nn_based/multigrid/)
+### Multigrid Implementation (learning_based/multigrid/phase1/)
 
 - **MultiGridStateEncoder** - Unified encoder for complete multigrid world state:
   - Grid-based CNN for spatial information
@@ -417,4 +417,4 @@ config = Phase2Config(
 - Debugging and interpretability
 - Baseline comparisons
 
-See `src/empo/nn_based/phase2/lookup/` for implementations and [BATCHED_COMPUTATION.md](BATCHED_COMPUTATION.md#alternative-modes-disabling-encoders-and-lookup-tables) for more details.
+See `src/empo/learning_based/phase2/lookup/` for implementations and [BATCHED_COMPUTATION.md](BATCHED_COMPUTATION.md#alternative-modes-disabling-encoders-and-lookup-tables) for more details.

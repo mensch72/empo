@@ -34,8 +34,8 @@ from typing import Iterator, Tuple, Dict, List, Any, Optional
 
 from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, Wall, World, SmallActions
 from empo.possible_goal import PossibleGoal, PossibleGoalSampler
-from empo.multigrid import ReachCellGoal, MultiGridGoalSampler, RandomPolicy, render_goal_overlay
-from empo.nn_based.multigrid import (
+from empo.world_specific_helpers.multigrid import ReachCellGoal, MultiGridGoalSampler, RandomPolicy, render_goal_overlay
+from empo.learning_based.multigrid import (
     MultiGridStateEncoder as StateEncoder,
     MultiGridGoalEncoder as GoalEncoder,
     MultiGridQNetwork as QNetwork,

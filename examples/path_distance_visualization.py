@@ -21,7 +21,7 @@ from matplotlib.colors import Normalize
 from matplotlib.cm import ScalarMappable
 
 from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, Wall, World, SmallActions, Block, Rock, Door
-from empo.nn_based import PathDistanceCalculator
+from empo.learning_based import PathDistanceCalculator
 
 
 # ============================================================================

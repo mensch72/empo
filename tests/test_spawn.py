@@ -26,8 +26,8 @@ def worker_test(q_r):
 
 if __name__ == '__main__':
     from gym_multigrid.multigrid import MultiGridEnv, World, SmallActions
-    from empo.nn_based.phase2.config import Phase2Config
-    from empo.nn_based.multigrid.phase2.trainer import create_phase2_networks
+    from empo.learning_based.phase2.config import Phase2Config
+    from empo.learning_based.multigrid.phase2.trainer import create_phase2_networks
     
     GRID_MAP = '''
     We We We We We We

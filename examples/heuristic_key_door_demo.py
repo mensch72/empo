@@ -57,12 +57,12 @@ import numpy as np
 from gym_multigrid.multigrid import (
     MultiGridEnv, World, Actions
 )
-from empo.multigrid import (
+from empo.world_specific_helpers.multigrid import (
     ReachRectangleGoal,
     render_goals_on_frame,
 )
 from empo.human_policy_prior import HeuristicPotentialPolicy
-from empo.nn_based.multigrid.path_distance import PathDistanceCalculator
+from empo.learning_based.multigrid.path_distance import PathDistanceCalculator
 
 
 # ============================================================================

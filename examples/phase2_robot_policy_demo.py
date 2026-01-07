@@ -65,15 +65,15 @@ from gym_multigrid.multigrid import (
     MultiGridEnv, Grid, Agent, Wall, World, SmallActions,
     Key, Ball, Box, Door, Lava, Block, Goal
 )
-from empo.multigrid import MultiGridGoalSampler, ReachCellGoal, ReachRectangleGoal, render_test_map_values
+from empo.world_specific_helpers.multigrid import MultiGridGoalSampler, ReachCellGoal, ReachRectangleGoal, render_test_map_values
 from empo.possible_goal import TabularGoalSampler, PossibleGoalSampler
 from empo.human_policy_prior import HeuristicPotentialPolicy
-from empo.nn_based.multigrid import PathDistanceCalculator
-from empo.nn_based.phase2.config import Phase2Config
-from empo.nn_based.phase2.profiler import TrainingProfiler
-from empo.nn_based.phase2.world_model_factory import CachedWorldModelFactory, EnsembleWorldModelFactory
-from empo.nn_based.multigrid.phase2 import train_multigrid_phase2
-from empo.nn_based.multigrid.phase2.robot_policy import (
+from empo.learning_based.multigrid import PathDistanceCalculator
+from empo.learning_based.phase2.config import Phase2Config
+from empo.learning_based.phase2.profiler import TrainingProfiler
+from empo.learning_based.phase2.world_model_factory import CachedWorldModelFactory, EnsembleWorldModelFactory
+from empo.learning_based.multigrid.phase2 import train_multigrid_phase2
+from empo.learning_based.multigrid.phase2.robot_policy import (
     MultiGridRobotPolicy, MultiGridRobotExplorationPolicy, MultiGridMultiStepExplorationPolicy
 )
 

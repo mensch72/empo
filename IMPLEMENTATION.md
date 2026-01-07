@@ -41,11 +41,20 @@ This repository provides:
 src/empo/                      # Core framework
 ├── world_model.py             # WorldModel base class
 ├── possible_goal.py           # Goals, generators, samplers
-├── backward_induction.py      # Phase 1 computation
+├── robot_policy.py            # RobotPolicy base class
+├── backward_induction/        # Backward induction (tabular)
+│   ├── phase1.py              # Phase 1 computation (human policies)
+│   └── phase2.py              # Phase 2 computation (robot policies)
 ├── human_policy_prior.py      # Human policy implementations
-└── nn_based/                  # Neural network implementations
-    ├── phase2/                # Phase 2 training (trainer, config, networks)
-    └── multigrid/phase2/      # MultiGrid-specific Phase 2
+├── learning_based/            # Neural network implementations
+│   ├── phase1/                # Base classes for Phase 1
+│   ├── phase2/                # Phase 2 training (trainer, config, networks)
+│   ├── multigrid/             # MultiGrid-specific implementations
+│   │   ├── phase1/            # MultiGrid Phase 1 networks
+│   │   └── phase2/            # MultiGrid Phase 2 networks
+│   └── transport/             # Transport-specific implementations
+│       └── phase1/            # Transport Phase 1 networks
+└── util/                      # Utilities (memory_monitor, etc.)
 
 vendor/multigrid/              # Extended MultiGrid environment
 vendor/ai_transport/           # Transport environment

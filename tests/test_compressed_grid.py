@@ -16,8 +16,8 @@ import os
 import torch
 import numpy as np
 
-from empo.nn_based.multigrid.state_encoder import MultiGridStateEncoder
-from empo.nn_based.multigrid.constants import (
+from empo.learning_based.multigrid.state_encoder import MultiGridStateEncoder
+from empo.learning_based.multigrid.constants import (
     NUM_OBJECT_TYPE_CHANNELS,
     NUM_STANDARD_COLORS,
     OBJECT_TYPE_TO_CHANNEL,

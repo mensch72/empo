@@ -24,7 +24,7 @@ import sys
 import os
 import time
 
-from envs.one_or_three_chambers import SmallOneOrTwoChambersMapEnv
+from multigrid_worlds.one_or_three_chambers import SmallOneOrTwoChambersMapEnv
 
 
 def profile_state_operations():

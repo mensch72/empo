@@ -220,7 +220,7 @@ class Phase2Config:
 
 ### Phase 1: Base Infrastructure
 
-1. [ ] Create `BaseDuelingRobotQNetwork` in `src/empo/nn_based/phase2/robot_q_network.py`
+1. [ ] Create `BaseDuelingRobotQNetwork` in `src/empo/learning_based/phase2/robot_q_network.py`
    - Add `v_stream` and `a_stream` abstract methods
    - Implement `combine_v_a()` method with mean-centering
    - Ensure `ensure_negative()` is applied correctly
@@ -231,7 +231,7 @@ class Phase2Config:
 
 ### Phase 2: MultiGrid Implementation
 
-4. [ ] Create `MultiGridDuelingRobotQNetwork` in `src/empo/nn_based/multigrid/phase2/robot_q_network.py`
+4. [ ] Create `MultiGridDuelingRobotQNetwork` in `src/empo/learning_based/multigrid/phase2/robot_q_network.py`
    - Inherit from both `BaseDuelingRobotQNetwork` and reuse MultiGrid encoding
    - Handle shared vs. own state encoders for both streams
 

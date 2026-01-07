@@ -12,7 +12,7 @@ import torch
 import numpy as np
 from unittest.mock import MagicMock
 
-from empo.nn_based.phase2.rnd import HumanActionRNDModule
+from empo.learning_based.phase2.rnd import HumanActionRNDModule
 
 
 class TestHumanActionRNDModule:
@@ -217,7 +217,7 @@ class TestHumanRNDIntegration:
         
     def test_human_rnd_called_when_enabled(self):
         """Test that human RND's compute method is called when enabled."""
-        from empo.nn_based.phase2.config import Phase2Config
+        from empo.learning_based.phase2.config import Phase2Config
         
         # Create minimal mock trainer
         mock_trainer = MagicMock()
@@ -253,7 +253,7 @@ class TestHumanRNDIntegration:
         mock_trainer.human_policy_prior.sample.return_value = 0
         
         # Import and call the actual method with the mock
-        from empo.nn_based.phase2.trainer import BasePhase2Trainer
+        from empo.learning_based.phase2.trainer import BasePhase2Trainer
         
         # Call sample_human_actions using the mock as self
         state = "mock_state"
@@ -268,7 +268,7 @@ class TestHumanRNDIntegration:
         
     def test_human_rnd_not_called_when_disabled(self):
         """Test that human RND is not called when disabled."""
-        from empo.nn_based.phase2.config import Phase2Config
+        from empo.learning_based.phase2.config import Phase2Config
         
         mock_trainer = MagicMock()
         mock_trainer.config = Phase2Config(
@@ -286,7 +286,7 @@ class TestHumanRNDIntegration:
         
         mock_trainer.human_policy_prior.sample.return_value = 0
         
-        from empo.nn_based.phase2.trainer import BasePhase2Trainer
+        from empo.learning_based.phase2.trainer import BasePhase2Trainer
         
         state = "mock_state"
         goals = {0: "mock_goal"}

@@ -230,7 +230,7 @@ Per state stored in replay buffer:
 
 ### Implementation
 
-See `MultiGridStateEncoder` in `src/empo/nn_based/multigrid/state_encoder.py` for the split tensorization methods:
+See `MultiGridStateEncoder` in `src/empo/learning_based/multigrid/phase1/state_encoder.py` for the split tensorization methods:
 - `tensorize_state_compact()` - **[NOT IMPLEMENTED]** Returns (global, agent, interactive) tensors without grid
 - `compress_grid()` - **[NOT IMPLEMENTED]** Returns (H, W) int32 tensor with all grid info
 - `decompress_grid_to_tensor()` - **[NOT IMPLEMENTED]** Unpacks single grid to (1, C, H, W) tensor
@@ -1076,4 +1076,4 @@ config = Phase2Config(
 - They accept optional `state_encoder` arguments for API compatibility but don't use them
 - Can be mixed: some networks neural, others lookup tables
 
-See `src/empo/nn_based/phase2/lookup/` for the lookup table implementations and `examples/lookup_table_phase2_demo.py` for usage examples.
+See `src/empo/learning_based/phase2/lookup/` for the lookup table implementations and `examples/lookup_table_phase2_demo.py` for usage examples.

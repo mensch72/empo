@@ -52,13 +52,13 @@ from gym_multigrid.multigrid import (
     Key, Ball, Box, Door, Lava, Block, Goal
 )
 from empo.possible_goal import PossibleGoal, PossibleGoalSampler
-from empo.multigrid import (
+from empo.world_specific_helpers.multigrid import (
     ReachRectangleGoal,
     MultiGridGoalSampler,
     RandomPolicy,
     render_goal_overlay,
 )
-from empo.nn_based.multigrid import (
+from empo.learning_based.multigrid import (
     MultiGridNeuralHumanPolicyPrior,
     train_multigrid_neural_policy_prior as train_neural_policy_prior,
 )

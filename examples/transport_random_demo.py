@@ -43,7 +43,7 @@ from ai_transport.policies import (
 )
 
 # Import the EMPO wrapper for gym-style interface
-from empo.transport import (
+from empo.world_specific_helpers.transport import (
     TransportEnvWrapper,
     TransportActions,
     StepType,

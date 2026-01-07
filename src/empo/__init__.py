@@ -42,12 +42,13 @@ Example usage:
 from empo.world_model import WorldModel
 from empo.possible_goal import PossibleGoal, PossibleGoalGenerator, PossibleGoalSampler
 from empo.human_policy_prior import HumanPolicyPrior, TabularHumanPolicyPrior
-from empo.backward_induction import compute_human_policy_prior
-from empo.memory_monitor import MemoryMonitor, check_memory
+from empo.robot_policy import RobotPolicy
+from empo.backward_induction import compute_human_policy_prior, TabularRobotPolicy
+from empo.util.memory_monitor import MemoryMonitor, check_memory
 
 # Transport environment wrapper (optional import - requires ai_transport)
 try:
-    from empo.transport import (
+    from empo.world_specific_helpers.transport import (
         TransportEnvWrapper,
         TransportActions,
         StepType,
@@ -72,6 +73,9 @@ __all__ = [
     # Human Policy Prior
     "HumanPolicyPrior",
     "TabularHumanPolicyPrior",
+    # Robot Policy
+    "RobotPolicy",
+    "TabularRobotPolicy",
     # Backward Induction
     "compute_human_policy_prior",
     # Memory Monitoring

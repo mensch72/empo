@@ -368,7 +368,7 @@ Metrics to compare:
 
 ### Core Changes
 
-1. [ ] Create `src/empo/nn_based/phase2/initialization.py`
+1. [ ] Create `src/empo/learning_based/phase2/initialization.py`
    - Define initialization functions for each network type
    - Provide `initialize_phase2_networks()` entry point
 

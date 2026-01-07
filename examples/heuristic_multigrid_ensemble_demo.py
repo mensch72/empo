@@ -45,13 +45,13 @@ from gym_multigrid.multigrid import (
     Key, Ball, Box, Door, Lava, Block, Goal
 )
 from empo.possible_goal import PossibleGoal, PossibleGoalSampler
-from empo.multigrid import (
+from empo.world_specific_helpers.multigrid import (
     ReachRectangleGoal,
     RandomPolicy,
     render_goals_on_frame,
 )
 from empo.human_policy_prior import HeuristicPotentialPolicy
-from empo.nn_based.multigrid.path_distance import PathDistanceCalculator
+from empo.learning_based.multigrid.path_distance import PathDistanceCalculator
 
 
 # ============================================================================

@@ -242,7 +242,7 @@ class TestExplorationPolicies:
     
     def test_robot_exploration_allows_rock_push(self):
         """Robot exploration policy should allow forward when facing pushable rock."""
-        from empo.nn_based.multigrid.phase2.robot_policy import MultiGridRobotExplorationPolicy
+        from empo.learning_based.multigrid.phase2.robot_policy import MultiGridRobotExplorationPolicy
         
         env = RockPushTestEnv(is_robot=True)
         env.reset()
@@ -326,7 +326,7 @@ class TestExplorationPolicies:
     
     def test_robot_exploration_allows_magic_wall(self):
         """Robot exploration policy should allow forward when facing magic wall."""
-        from empo.nn_based.multigrid.phase2.robot_policy import MultiGridRobotExplorationPolicy
+        from empo.learning_based.multigrid.phase2.robot_policy import MultiGridRobotExplorationPolicy
         
         env = MagicWallTestEnv(is_robot=True)
         env.reset()

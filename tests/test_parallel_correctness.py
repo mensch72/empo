@@ -7,7 +7,7 @@ import sys
 import os
 import numpy as np
 
-from envs.one_or_three_chambers import SmallOneOrThreeChambersMapEnv
+from multigrid_worlds.one_or_three_chambers import SmallOneOrThreeChambersMapEnv
 from empo.possible_goal import PossibleGoal, PossibleGoalGenerator
 from empo.backward_induction import compute_human_policy_prior
 

@@ -35,15 +35,15 @@ def actor_entry(trainer, actor_id, queue, stop_event, shared_steps, shared_env, 
 
 if __name__ == '__main__':
     from gym_multigrid.multigrid import MultiGridEnv, World, SmallActions
-    from empo.nn_based.phase2.config import Phase2Config
-    from empo.nn_based.phase2.world_model_factory import CachedWorldModelFactory
-    from empo.nn_based.multigrid.phase2.trainer import (
+    from empo.learning_based.phase2.config import Phase2Config
+    from empo.learning_based.phase2.world_model_factory import CachedWorldModelFactory
+    from empo.learning_based.multigrid.phase2.trainer import (
         MultiGridPhase2Trainer, create_phase2_networks
     )
     from empo.possible_goal import TabularGoalSampler
-    from empo.multigrid import ReachCellGoal
+    from empo.world_specific_helpers.multigrid import ReachCellGoal
     from empo.human_policy_prior import HeuristicPotentialPolicy
-    from empo.nn_based.multigrid import PathDistanceCalculator
+    from empo.learning_based.multigrid import PathDistanceCalculator
     
     GRID_MAP = '''
     We We We We We We

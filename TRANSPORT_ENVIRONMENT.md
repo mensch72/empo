@@ -13,7 +13,7 @@ empo/
 ├── vendor/
 │   ├── multigrid/          # existing
 │   └── ai_transport/       # NEW: vendored transport env
-└── nn_based/
+└── learning_based/
     ├── minigrid/           # existing
     └── transport/          # NEW: parallel structure
         ├── __init__.py
@@ -236,12 +236,12 @@ def decode_action(action_idx: int, agent_id: str, observation: Dict, env) -> Dic
 
 ---
 
-## Phase 4: Create nn_based/transport
+## Phase 4: Create learning_based/transport
 
 ### 4.1 Directory Structure
 
 ```
-nn_based/transport/
+learning_based/transport/
 ├── __init__.py
 ├── config.py          # Hyperparameters
 ├── encoder.py         # GNN encoder
@@ -254,7 +254,7 @@ nn_based/transport/
 
 example code:
 
-**File:** `nn_based/transport/encoder.py`
+**File:** `learning_based/transport/phase1/state_encoder.py`
 
 ```python
 import torch

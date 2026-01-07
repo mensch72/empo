@@ -17,7 +17,7 @@ import os
 
 import tempfile
 import torch
-from empo.nn_based.multigrid import (
+from empo.learning_based.multigrid import (
     MultiGridQNetwork,
     MultiGridNeuralHumanPolicyPrior,
     train_multigrid_neural_policy_prior,

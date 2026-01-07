@@ -43,12 +43,12 @@ from gym_multigrid.multigrid import (
     MultiGridEnv, Grid, Agent, Wall, World, SmallActions,
 )
 from empo.possible_goal import PossibleGoal, PossibleGoalSampler
-from empo.multigrid import (
+from empo.world_specific_helpers.multigrid import (
     ReachRectangleGoal,
     MultiGridGoalSampler,
     render_goal_overlay,
 )
-from empo.nn_based.multigrid import (
+from empo.learning_based.multigrid import (
     MultiGridQNetwork as QNetwork,
     train_multigrid_neural_policy_prior as train_neural_policy_prior,
     PathDistanceCalculator,

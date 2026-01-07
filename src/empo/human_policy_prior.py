@@ -587,7 +587,7 @@ class HeuristicPotentialPolicy(HumanPolicyPrior):
         
         # Recreate path calculator for new environment
         # Import here to avoid circular dependency
-        from empo.nn_based.multigrid import PathDistanceCalculator
+        from empo.learning_based.multigrid import PathDistanceCalculator
         
         self.path_calculator = PathDistanceCalculator(
             grid_height=world_model.height,
@@ -1129,7 +1129,7 @@ class HeuristicPotentialPolicy(HumanPolicyPrior):
 
 # Import PathDistanceCalculator for type hints (optional, avoids circular import)
 try:
-    from empo.nn_based.multigrid.path_distance import PathDistanceCalculator
+    from empo.learning_based.multigrid.path_distance import PathDistanceCalculator
 except ImportError:
     PathDistanceCalculator = None  # type: ignore
 
@@ -1138,7 +1138,7 @@ except ImportError:
 # Lazy import here for backwards compatibility (avoids circular import)
 def __getattr__(name):
     if name == 'MultiGridHumanExplorationPolicy':
-        from empo.nn_based.multigrid.phase2.exploration_policies import (
+        from empo.learning_based.multigrid.phase2.exploration_policies import (
             MultiGridHumanExplorationPolicy,
         )
         return MultiGridHumanExplorationPolicy

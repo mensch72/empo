@@ -13,7 +13,7 @@ import numpy as np
 import torch
 import tempfile
 
-from empo.nn_based.multigrid import (
+from empo.learning_based.multigrid import (
     MultiGridStateEncoder,
     MultiGridQNetwork,
     MultiGridNeuralHumanPolicyPrior,

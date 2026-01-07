@@ -14,7 +14,7 @@ import numpy as np
 import torch
 import tempfile
 
-from empo.nn_based.phase2 import (
+from empo.learning_based.phase2 import (
     Phase2Config,
     BaseRobotQNetwork,
     BaseHumanGoalAchievementNetwork,
@@ -24,14 +24,14 @@ from empo.nn_based.phase2 import (
     Phase2ReplayBuffer,
     Phase2Transition,
 )
-from empo.nn_based.multigrid.phase2 import (
+from empo.learning_based.multigrid.phase2 import (
     MultiGridRobotQNetwork,
     MultiGridHumanGoalAchievementNetwork,
     MultiGridAggregateGoalAbilityNetwork,
     MultiGridIntrinsicRewardNetwork,
     MultiGridRobotValueNetwork,
 )
-from empo.nn_based.soft_clamp import SoftClamp
+from empo.learning_based.util.soft_clamp import SoftClamp
 
 
 class MockWorldModel:

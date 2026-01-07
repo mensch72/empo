@@ -164,12 +164,12 @@ EMPO provides capability-aware exploration policies that bias toward useful acti
 
 #### `MultiGridMultiStepExplorationPolicy` (Recommended)
 
-Located in `empo.nn_based.multigrid.phase2.robot_policy`.
+Located in `empo.learning_based.multigrid.phase2.robot_policy`.
 
 This is a **non-Markovian** exploration policy that samples multi-step action sequences, enabling more directed spatial exploration than simple Markov policies. It can be used for both robots and humans.
 
 ```python
-from empo.nn_based.multigrid.phase2 import MultiGridMultiStepExplorationPolicy
+from empo.learning_based.multigrid.phase2 import MultiGridMultiStepExplorationPolicy
 
 # For robots
 robot_exploration = MultiGridMultiStepExplorationPolicy(
@@ -230,12 +230,12 @@ Multi-step sequences encourage more directed movement:
 
 #### `MultiGridRobotExplorationPolicy` (Simple Markovian)
 
-Located in `empo.nn_based.multigrid.phase2.robot_policy`.
+Located in `empo.learning_based.multigrid.phase2.robot_policy`.
 
 A simpler Markovian exploration policy for robots.
 
 ```python
-from empo.nn_based.multigrid.phase2 import MultiGridRobotExplorationPolicy
+from empo.learning_based.multigrid.phase2 import MultiGridRobotExplorationPolicy
 
 exploration = MultiGridRobotExplorationPolicy(
     action_probs=[0.1, 0.1, 0.2, 0.6],  # [still, left, right, forward]
@@ -291,7 +291,7 @@ This method checks whether an agent can move forward **in principle** (ignoring 
 ## Usage in Training
 
 ```python
-from empo.nn_based.multigrid.phase2 import (
+from empo.learning_based.multigrid.phase2 import (
     MultiGridPhase2Trainer,
     MultiGridMultiStepExplorationPolicy,
 )
@@ -568,8 +568,8 @@ When `rnd_use_adaptive_lr=True` is enabled (using RND as an uncertainty proxy fo
 ### Example Usage
 
 ```python
-from empo.nn_based.phase2 import Phase2Config
-from empo.nn_based.multigrid.phase2 import train_multigrid_phase2
+from empo.learning_based.phase2 import Phase2Config
+from empo.learning_based.multigrid.phase2 import train_multigrid_phase2
 
 config = Phase2Config(
     use_rnd=True,
@@ -763,7 +763,7 @@ If `mse_std ≈ 0`, both curiosity bonus AND adaptive LR will be ineffective bec
 ### Example Usage
 
 ```python
-from empo.nn_based.phase2 import Phase2Config, CountBasedCuriosity
+from empo.learning_based.phase2 import Phase2Config, CountBasedCuriosity
 
 # Create config for tabular mode with curiosity
 config = Phase2Config(
@@ -816,7 +816,7 @@ env.can_forward(state, agent_index: int) -> bool
 ### CountBasedCuriosity Class
 
 ```python
-from empo.nn_based.phase2 import CountBasedCuriosity
+from empo.learning_based.phase2 import CountBasedCuriosity
 
 curiosity = CountBasedCuriosity(
     scale: float = 1.0,        # Bonus scale factor

@@ -133,7 +133,7 @@ def verify_imports() -> dict:
     
     # Environments
     try:
-        from envs.one_or_three_chambers import SmallOneOrThreeChambersMapEnv
+        from multigrid_worlds.one_or_three_chambers import SmallOneOrThreeChambersMapEnv
         results['envs'] = True
     except ImportError as e:
         results['envs'] = str(e)
@@ -142,7 +142,7 @@ def verify_imports() -> dict:
     
     # Phase 2 (neural networks) - may fail due to tensorboard issues
     try:
-        from empo.nn_based.phase2.config import Phase2Config
+        from empo.learning_based.phase2.config import Phase2Config
         results['phase2'] = True
     except ImportError as e:
         results['phase2'] = str(e)

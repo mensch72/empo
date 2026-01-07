@@ -41,7 +41,7 @@ sys.modules['gym'] = gym
 
 from gym_multigrid.multigrid import MultiGridEnv, World, Actions
 from empo.possible_goal import PossibleGoal, PossibleGoalSampler
-from empo.nn_based.multigrid import train_multigrid_neural_policy_prior
+from empo.learning_based.multigrid import train_multigrid_neural_policy_prior
 
 # Output directory for movies and images
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))

@@ -23,7 +23,7 @@ except ImportError:
 
 LINE_PROFILER_AVAILABLE = False
 
-from envs.one_or_three_chambers import SmallOneOrThreeChambersMapEnv
+from multigrid_worlds.one_or_three_chambers import SmallOneOrThreeChambersMapEnv
 from empo.possible_goal import PossibleGoal, PossibleGoalGenerator
 from empo.backward_induction import compute_human_policy_prior
 

@@ -23,7 +23,7 @@ import os
 
 import numpy as np
 
-from envs.one_or_three_chambers import OneOrThreeChambersMapEnv
+from multigrid_worlds.one_or_three_chambers import OneOrThreeChambersMapEnv
 
 
 def create_random_play_video(output_path='one_or_three_chambers_random_play.mp4', num_steps=1000, fps=20):

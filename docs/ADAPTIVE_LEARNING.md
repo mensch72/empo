@@ -36,7 +36,7 @@ This approach works through the optimizer rather than bypassing it, preserving c
 ### Configuration
 
 ```python
-from empo.nn_based.phase2.config import Phase2Config
+from empo.learning_based.phase2.config import Phase2Config
 
 config = Phase2Config(
     use_lookup_tables=True,
@@ -73,7 +73,7 @@ Update counts are persisted in `state_dict()` and restored by `load_state_dict()
 
 ```python
 import torch
-from empo.nn_based.phase2.lookup import LookupTableRobotQNetwork
+from empo.learning_based.phase2.lookup import LookupTableRobotQNetwork
 
 # Create network
 q_r = LookupTableRobotQNetwork(num_actions=4, num_robots=1)
@@ -299,7 +299,7 @@ Unlike ensemble variance or MC Dropout (which have Bayesian interpretations), us
 RND-based adaptive learning rate is **implemented** in EMPO. Configuration:
 
 ```python
-from empo.nn_based.phase2.config import Phase2Config
+from empo.learning_based.phase2.config import Phase2Config
 
 config = Phase2Config(
     # Enable RND (required for RND-based adaptive LR)

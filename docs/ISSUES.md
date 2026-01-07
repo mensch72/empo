@@ -71,7 +71,7 @@ The `_mobile_objects` and `_mutable_objects` caches are only built during reset(
 
 ### RED-003: TODO comment for system-1 policy mixing
 **Priority:** Informational  
-**Location:** `src/empo/backward_induction.py:520`  
+**Location:** `src/empo/backward_induction/phase2.py` (line numbers may have changed)  
 **Description:**  
 There's a TODO comment indicating planned but unimplemented functionality:
 ```python
@@ -90,7 +90,7 @@ The following issues were identified during an extensive review of the Phase 2 r
 
 ### ~~P2-BUG-001: Async training uses undefined `self.buffer` instead of `self.replay_buffer`~~ [FIXED on main]
 **Priority:** High  
-**Location:** `src/empo/nn_based/phase2/trainer.py:1401, 1407, 1415`  
+**Location:** `src/empo/learning_based/phase2/trainer.py` (line numbers may have changed)  
 **Description:**  
 ~~In the async training path (`_learner_loop`), the code references `self.buffer.size()` and `self.buffer`, but the attribute is defined as `self.replay_buffer`. This would cause an `AttributeError` if async training is enabled.~~
 
@@ -111,7 +111,7 @@ All three occurrences (lines 1449, 1455, 1463 on main) have been corrected.
 
 ### ~~P2-BUG-002: Phase2ReplayBuffer lacks `size()` method referenced in async training~~ [FIXED on main]
 **Priority:** High  
-**Location:** `src/empo/nn_based/phase2/replay_buffer.py`  
+**Location:** `src/empo/learning_based/phase2/replay_buffer.py`  
 **Description:**  
 ~~The `Phase2ReplayBuffer` class only has `__len__()` method, but the async training code in `trainer.py` calls `.size()` which doesn't exist on this class.~~
 
