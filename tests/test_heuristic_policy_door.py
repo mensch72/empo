@@ -8,7 +8,6 @@ when the agent is adjacent to an actionable door (locked with key, or closed).
 
 import sys
 import os
-import numpy as np
 
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))

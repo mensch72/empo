@@ -8,8 +8,7 @@ configurations in ensemble mode.
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from typing import Any, Dict, Hashable, List, Optional, Tuple
+from typing import Any, Dict, Hashable, List, Optional
 
 from ..robot_value_network import BaseRobotValueNetwork
 from .robot_q_network import _get_map_hash

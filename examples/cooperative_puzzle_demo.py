@@ -18,7 +18,6 @@ Object types included:
 - Lava, Switch, Block, Rock, UnsteadyGround, MagicWall, Agents
 """
 
-import sys
 import os
 
 import numpy as np

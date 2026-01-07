@@ -7,7 +7,6 @@ This example shows:
 3. How action spaces change based on agent state and step type
 """
 
-import numpy as np
 import networkx as nx
 from ai_transport import parallel_env
 

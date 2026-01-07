@@ -43,23 +43,18 @@ class NoOpProfiler:
     
     def start(self, name: str):
         """No-op start."""
-        pass
     
     def stop(self, name: str):
         """No-op stop."""
-        pass
     
     def step(self):
         """No-op step (compatibility with torch.profiler interface)."""
-        pass
     
     def start_profiling(self):
         """No-op start profiling."""
-        pass
     
     def stop_profiling(self):
         """No-op stop profiling."""
-        pass
     
     def report(self) -> str:
         """Return empty report."""
@@ -67,7 +62,6 @@ class NoOpProfiler:
     
     def reset(self):
         """No-op reset."""
-        pass
     
     def get_summary(self) -> Dict[str, float]:
         """Return empty summary."""
@@ -75,7 +69,6 @@ class NoOpProfiler:
 
     def save_report(self, output_dir: str, basename: str = "profiler_report") -> None:
         """No-op save."""
-        pass
 
 
 class TrainingProfiler:
@@ -220,7 +213,6 @@ class TrainingProfiler:
     
     def step(self):
         """Step marker (compatibility with torch.profiler interface)."""
-        pass
     
     def reset(self):
         """Reset all counters."""

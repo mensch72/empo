@@ -1,7 +1,5 @@
 """Debug parallel DAG computation to find missing states."""
 
-import sys
-import os
 
 from gym_multigrid.multigrid import MultiGridEnv, World
 

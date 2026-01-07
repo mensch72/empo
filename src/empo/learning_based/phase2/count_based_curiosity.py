@@ -18,7 +18,7 @@ Reference:
     (2016). Unifying Count-Based Exploration and Intrinsic Motivation. NeurIPS 2016.
 """
 
-from typing import Dict, Hashable, Tuple, Any, Optional
+from typing import Dict, Hashable, Any
 import math
 
 

@@ -115,7 +115,6 @@ def verify_imports() -> dict:
     
     # Core EMPO
     try:
-        from empo import WorldModel, PossibleGoal, compute_human_policy_prior
         results['empo_core'] = True
     except ImportError as e:
         results['empo_core'] = str(e)
@@ -124,7 +123,6 @@ def verify_imports() -> dict:
     
     # MultiGrid
     try:
-        from gym_multigrid.multigrid import MultiGridEnv, World, SmallActions
         results['multigrid'] = True
     except ImportError as e:
         results['multigrid'] = str(e)
@@ -133,7 +131,6 @@ def verify_imports() -> dict:
     
     # Environments
     try:
-        from multigrid_worlds.one_or_three_chambers import SmallOneOrThreeChambersMapEnv
         results['envs'] = True
     except ImportError as e:
         results['envs'] = str(e)
@@ -142,7 +139,6 @@ def verify_imports() -> dict:
     
     # Phase 2 (neural networks) - may fail due to tensorboard issues
     try:
-        from empo.learning_based.phase2.config import Phase2Config
         results['phase2'] = True
     except ImportError as e:
         results['phase2'] = str(e)

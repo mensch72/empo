@@ -42,7 +42,7 @@ import os
 import random
 import sys
 import time
-from typing import List, Tuple, Dict, Optional, Any
+from typing import List, Tuple, Dict, Optional
 
 import numpy as np
 

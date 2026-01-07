@@ -447,3 +447,399 @@ To import these into GitHub, consider using the GitHub CLI:
 gh issue create --title "BUG-001: Parallel backward induction requires 'fork' context" \
     --body "..." --label "bug"
 ```
+
+---
+---
+
+# Code Quality Issues Report
+
+Generated: 2026-01-07
+
+This document lists code quality issues found in the EMPO codebase. These issues should be reviewed but **NOT automatically fixed** without careful consideration of their context and purpose.
+
+---
+
+## Table of Contents
+
+1. [Stub/Placeholder/Incomplete Code](#stubplaceholderincomplete-code)
+2. [Unused/Deprecated Code](#unuseddeprecated-code)
+3. [Duplicate Code](#duplicate-code)
+4. [Naming Issues](#naming-issues)
+5. [Exception Handling Issues](#exception-handling-issues)
+6. [Potential Memory Leaks](#potential-memory-leaks)
+7. [Debug Code in Production](#debug-code-in-production)
+8. [Other Issues](#other-issues)
+
+---
+
+## Stub/Placeholder/Incomplete Code
+
+### NotImplementedError Stubs
+
+**Files with NotImplementedError (base classes requiring implementation):**
+
+1. [src/empo/world_model.py](src/empo/world_model.py)
+   - Lines 131, 145, 170, 228, 230, 249, 251
+   - **Status**: NORMAL - These are abstract base class methods that subclasses must implement
+   - **Action**: None - this is correct design
+
+2. [src/empo/learning_based/phase2/trainer.py](src/empo/learning_based/phase2/trainer.py)
+   - Line 1373: `get_human_intrinsic_reward_fn` raises NotImplementedError if human RND enabled
+   - **Status**: Intentional - forces subclasses to implement when feature is used
+   - **Action**: None - correct error handling
+
+### Pass Statements and Ellipsis
+
+**Incomplete implementations (may be placeholders):**
+
+1. [src/empo/possible_goal.py](src/empo/possible_goal.py)
+   - Lines 27, 33, 36, 45: Ellipsis (`...`) in abstract class methods
+   - **Status**: NORMAL - part of Python abstract class pattern
+   - **Action**: None
+
+2. [src/empo/learning_based/phase2/trainer.py](src/empo/learning_based/phase2/trainer.py)
+   - Line 821: Commented out `pass` statement with `#     pass`
+   - Line 2484: `pass` in empty except block context
+   - Line 2575: `pass` in conditional block
+   - **Status**: REVIEW - may indicate incomplete error handling
+   - **Action**: Review if these should have logging or actual handling
+
+3. [src/empo/backward_induction/shared_dag.py](src/empo/backward_induction/shared_dag.py)
+   - Lines 233, 277: `pass` in exception handlers
+   - **Status**: REVIEW - silent exception swallowing
+   - **Action**: Consider adding logging
+
+4. [tests/test_json_config.py](tests/test_json_config.py)
+   - Line 115: Empty test function with `pass`
+   - **Status**: INCOMPLETE - test not implemented
+   - **Action**: Implement or remove
+
+### TODO Comments
+
+**Incomplete features marked with TODO:**
+
+1. [src/empo/backward_induction/phase1.py](src/empo/backward_induction/phase1.py)
+   - Line 933: `human_policy_priors = system2_policies # TODO: mix with system-1 policies!`
+   - **Status**: FEATURE REQUEST - system-1/system-2 policy mixing not implemented
+   - **Action**: Track as feature request
+
+2. [vendor/ai_transport/ai_transport/envs/clustering.py](vendor/ai_transport/ai_transport/envs/clustering.py)
+   - Line 53: `'spectral': Spectral clustering on graph structure (TODO)`
+   - **Status**: FEATURE REQUEST - spectral clustering not implemented
+   - **Action**: Track as feature request or remove from docs
+
+---
+
+## Unused/Deprecated Code
+
+### Deprecated Features
+
+1. [src/empo/learning_based/phase2/config.py](src/empo/learning_based/phase2/config.py)
+   - Lines 216, 220-221: DEPRECATED legacy 1/t learning rate decay
+   - `lr_x_h_use_1_over_t` and `lr_u_r_use_1_over_t` flags marked deprecated
+   - Line 397: Warning message for deprecated flags
+   - **Status**: DEPRECATED but retained for backward compatibility
+   - **Action**: Consider removing in major version update
+
+2. [vendor/multigrid/gym_multigrid/multigrid.py](vendor/multigrid/gym_multigrid/multigrid.py)
+   - Line 4858: `get_human_agent_indices()` marked deprecated
+   - Line 4862: `get_robot_agent_indices()` marked deprecated
+   - **Status**: DEPRECATED - use properties instead
+   - **Action**: Update all usages to use properties, then remove
+
+3. [vendor/ai_transport/ai_transport/envs/transport_env.py](vendor/ai_transport/ai_transport/envs/transport_env.py)
+   - Line 89: `action_spaces` and `observation_spaces` attributes deprecated as of v1.18.1
+   - **Status**: DEPRECATED
+   - **Action**: Ensure no code uses these attributes
+
+### Commented Out Code
+
+**Files with significant commented-out code:**
+
+1. [src/empo/world_specific_helpers/multigrid.py](src/empo/world_specific_helpers/multigrid.py)
+   - Line 749: `# if hasattr(trainer, 'networks') and hasattr(trainer.networks, 'v_h_e'):`
+   - Line 750: `#        trainer.networks.v_h_e.debug_all_lookups = True`
+   - Line 780: `#        print(f"\n[DEBUG test_map {map_idx + 1}] Querying V_h^e...)`
+   - **Status**: Debug code left commented out
+   - **Action**: Remove or convert to proper debug flags
+
+2. [examples/phase2_robot_policy_demo.py](examples/phase2_robot_policy_demo.py)
+   - Line 374: `#print(f"[DEBUG _EnsembleEnvCreator] Created new env, grid hash: {grid_hash:016x}")`
+   - **Status**: Debug print statement
+   - **Action**: Remove or use proper logging
+
+---
+
+## Duplicate Code
+
+### Duplicate Module Files
+
+1. **memory_monitor.py duplicated:**
+   - [src/empo/memory_monitor.py](src/empo/memory_monitor.py)
+   - [src/empo/util/memory_monitor.py](src/empo/util/memory_monitor.py)
+   - **Status**: DUPLICATE - same code in two locations
+   - **Action**: CRITICAL - Remove one and update imports. Keep `src/empo/util/memory_monitor.py` as it's in the proper location
+
+2. **Backward compatibility imports:**
+   - Several modules may have backward compatibility imports
+   - **Action**: Audit `__init__.py` files for re-exports of moved modules
+
+---
+
+## Naming Issues
+
+### Strange/Unclear Variable Names
+
+1. **Global variables with underscore prefix:**
+   - [src/empo/world_model.py](src/empo/world_model.py): `_worker_env`, `_worker_num_agents`, `_worker_num_actions`
+   - [src/empo/backward_induction/phase1.py](src/empo/backward_induction/phase1.py): `_shared_states`, `_shared_transitions`, etc.
+   - **Status**: ACCEPTABLE - used for multiprocessing shared state
+   - **Action**: None - this is a common pattern
+
+2. **Generic temporary variables:**
+   - Multiple uses of `temp`, `tmp`, `x`, `foo` throughout codebase
+   - **Status**: MINOR - mostly in local scopes
+   - **Action**: Consider more descriptive names during refactoring
+
+### hasattr Double-Checks
+
+**Files with redundant hasattr checks (may indicate uncertainty about object structure):**
+
+1. [src/empo/learning_based/phase2/trainer.py](src/empo/learning_based/phase2/trainer.py)
+   - Line 858: `if hasattr(self.env, 'get_human_agent_indices') and hasattr(self.env, 'get_robot_agent_indices'):`
+   - Line 3356, 3801: `if hasattr(self.profiler, 'report') and hasattr(self.profiler, '_total_time'):`
+   - **Status**: REVIEW - may indicate unclear interfaces
+   - **Action**: Consider using ABC or Protocol for better type safety
+
+2. [examples/phase2_robot_policy_demo.py](examples/phase2_robot_policy_demo.py)
+   - Line 756: Triple hasattr check on goal_sampler
+   - **Status**: REVIEW - overly defensive programming
+   - **Action**: Use isinstance() with proper types
+
+---
+
+## Exception Handling Issues
+
+### Bare Except Clauses
+
+**Dangerous bare except statements:**
+
+1. [vendor/multigrid/gym_multigrid/window.py](vendor/multigrid/gym_multigrid/window.py)
+   - Line 6: `except:` without specific exception type
+   - **Status**: DANGEROUS - catches SystemExit, KeyboardInterrupt, etc.
+   - **Action**: Change to `except ImportError:`
+
+2. [vendor/multigrid/gym_multigrid/multigrid.py](vendor/multigrid/gym_multigrid/multigrid.py)
+   - Lines 4524, 4527: Bare `except:` statements
+   - **Status**: DANGEROUS
+   - **Action**: Use specific exception types
+
+### Silent Exception Swallowing
+
+**Exceptions caught but not logged:**
+
+1. [src/empo/backward_induction/shared_dag.py](src/empo/backward_induction/shared_dag.py)
+   - Lines 232, 276: `except Exception: pass`
+   - **Status**: REVIEW - may hide real errors
+   - **Action**: Add logging or comments explaining why exceptions are ignored
+
+2. [src/empo/backward_induction/shared_attainment_cache.py](src/empo/backward_induction/shared_attainment_cache.py)
+   - Line 221: `except Exception: pass`
+   - **Status**: REVIEW
+   - **Action**: Add logging
+
+3. [src/empo/learning_based/phase2/trainer.py](src/empo/learning_based/phase2/trainer.py)
+   - Lines 1181, 1338: `except Exception:` without logging
+   - Line 3860: `except Exception:` in queue reading
+   - **Status**: REVIEW - may silently fail
+   - **Action**: Add logging at minimum
+
+### Overly Broad Exception Handlers
+
+**Using Exception instead of specific types:**
+
+Multiple files catch `Exception` broadly:
+- [src/empo/world_model.py](src/empo/world_model.py): Line 695
+- [src/empo/learning_based/phase2/trainer.py](src/empo/learning_based/phase2/trainer.py): Lines 366, 377, 1089, 3581, 3666
+- Various example scripts
+
+**Status**: REVIEW - may catch unexpected errors
+**Action**: Use more specific exception types where possible
+
+---
+
+## Potential Memory Leaks
+
+### Unbounded List Appends
+
+**Lists that grow without bounds (potential memory leaks):**
+
+1. [src/empo/learning_based/phase2/trainer.py](src/empo/learning_based/phase2/trainer.py)
+   - Lines 3324, 3758: `history.append(losses)` in training loops
+   - **Status**: POTENTIAL LEAK - history grows unbounded
+   - **Action**: Implement maximum history size or periodic clearing
+
+2. [src/empo/learning_based/phase2/replay_buffer.py](src/empo/learning_based/phase2/replay_buffer.py)
+   - Line 115: `self.buffer.append(transition)`
+   - **Status**: OK - buffer has max_size enforcement
+   - **Action**: None
+
+3. [src/empo/learning_based/phase1/replay_buffer.py](src/empo/learning_based/phase1/replay_buffer.py)
+   - Line 39: `self.buffer.append(transition)`
+   - **Status**: REVIEW - check if max_size is enforced
+   - **Action**: Verify buffer size limits
+
+### Global State Accumulation
+
+**Global variables that accumulate data:**
+
+Multiple shared global variables in backward_induction modules:
+- `_shared_states`, `_shared_transitions`, `_shared_Vh_values`, etc.
+
+**Status**: OK - cleaned up after computation
+**Action**: Verify cleanup in all code paths
+
+---
+
+## Debug Code in Production
+
+### Debug Flags
+
+**Debug flags scattered throughout code:**
+
+1. [src/empo/backward_induction/phase1.py](src/empo/backward_induction/phase1.py)
+   - Line 61: `DEBUG = False  # Set to True for verbose debugging output`
+   - Used at lines: 128, 145, 206, 254, 740
+   - **Status**: ACCEPTABLE - controlled by flag
+   - **Action**: Consider using Python logging module instead
+
+2. [src/empo/backward_induction/phase2.py](src/empo/backward_induction/phase2.py)
+   - Line 59: `DEBUG = False`
+   - Used at lines: 147, 152, 180, 196, 246, 259, 268, 865
+   - **Status**: ACCEPTABLE
+   - **Action**: Consider using logging module
+
+3. [src/empo/learning_based/phase2/trainer.py](src/empo/learning_based/phase2/trainer.py)
+   - Line 141: `debug: bool = False` parameter
+   - Line 160: `self.debug = debug`
+   - Used extensively throughout trainer
+   - **Status**: ACCEPTABLE - feature for debugging
+   - **Action**: None
+
+4. [src/empo/learning_based/phase2/lookup/human_goal_ability.py](src/empo/learning_based/phase2/lookup/human_goal_ability.py)
+   - Lines 158, 170: `debug_new_keys`, `debug_all_lookups` attributes
+   - **Status**: ACCEPTABLE - controlled debug features
+   - **Action**: None
+
+### Print Statements
+
+**Extensive use of print() for logging (200+ matches):**
+
+Files with heavy print() usage:
+- [src/empo/learning_based/phase2/trainer.py](src/empo/learning_based/phase2/trainer.py)
+- [src/empo/backward_induction/phase1.py](src/empo/backward_induction/phase1.py)
+- [src/empo/backward_induction/phase2.py](src/empo/backward_induction/phase2.py)
+- [src/empo/memory_monitor.py](src/empo/memory_monitor.py)
+- Many example scripts
+
+**Status**: REVIEW - mixing print() with user output and debugging
+**Action**: Consider structured logging with Python logging module:
+- Keep print() for user-facing output in examples
+- Use logging.debug/info/warning for internal diagnostics
+- Allows filtering by severity and module
+
+---
+
+## Other Issues
+
+### Subprocess and Eval Usage
+
+**Potentially unsafe operations:**
+
+1. [scripts/kaggle_setup.py](scripts/kaggle_setup.py)
+   - Line 15: `exec(open('scripts/kaggle_setup.py').read())`
+   - Line 66: Uses `subprocess.CalledProcessError`
+   - **Status**: REVIEW - exec() can be dangerous
+   - **Action**: Document that this is for setup only, not production code
+
+2. **No eval() found** - Good!
+
+### ImportError Handling
+
+**Many try/except ImportError blocks:**
+
+Files checking for optional dependencies:
+- PyTorch, NumPy, Gym, etc.
+
+**Status**: NORMAL - graceful degradation for optional dependencies
+**Action**: None - this is good practice
+
+### Magic Numbers
+
+**Hard-coded constants throughout code:**
+
+Examples:
+- Learning rates
+- Buffer sizes
+- Network dimensions
+- Timeout values
+
+**Status**: MINOR - many are in config objects
+**Action**: Consider extracting remaining magic numbers to constants
+
+### Commented Debug Frame Saving
+
+[vendor/ai_transport/examples/visualization_demo.py](vendor/ai_transport/examples/visualization_demo.py)
+- Lines 71-72, 155-157: Creates debug_frames/ directory and saves individual frames
+- **Status**: ACCEPTABLE - useful for debugging visualization
+- **Action**: None
+
+---
+
+## Summary Statistics
+
+- **Total Python files scanned**: ~190
+- **Unused imports removed**: Multiple (automated via autoflake)
+- **Unused variables removed**: Multiple (automated via autoflake)
+- **TODO comments**: 2 found
+- **DEPRECATED features**: 5 found
+- **Duplicate modules**: 1 critical (memory_monitor.py)
+- **Bare except clauses**: 3 dangerous instances
+- **Debug flags**: Extensive but controlled
+- **Print statements**: 200+ (many intentional)
+
+---
+
+## Recommendations
+
+### High Priority
+
+1. **Remove duplicate memory_monitor.py** - Keep only `src/empo/util/memory_monitor.py`
+2. **Fix bare except clauses** in vendor/multigrid code
+3. **Add logging to silent exception handlers** in shared_dag.py and shared_attainment_cache.py
+4. **Implement max history size** for training loss history to prevent memory leaks
+
+### Medium Priority
+
+1. **Replace print() with logging** in core library code (not examples)
+2. **Remove deprecated code** in next major version
+3. **Review hasattr double-checks** - use ABC/Protocol for clearer interfaces
+4. **Implement or remove incomplete test** in test_json_config.py
+5. **Clean up commented-out debug code**
+
+### Low Priority
+
+1. **Rename generic variable names** during refactoring
+2. **Extract magic numbers** to named constants
+3. **Use more specific exception types** where catching Exception
+
+---
+
+## Notes
+
+- Many "issues" are **intentional design decisions** (e.g., DEBUG flags, abstract methods)
+- **Examples and scripts** appropriately use print() for user interaction
+- **Vendor code** (multigrid, ai_transport) should be updated carefully to avoid breaking changes
+- **Test files** may intentionally have incomplete implementations for testing error conditions
+
+This report should be used as a guide for gradual improvement, not a mandate for immediate fixes.

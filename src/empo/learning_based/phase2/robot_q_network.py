@@ -90,12 +90,10 @@ class BaseRobotQNetwork(nn.Module, ABC):
         Returns:
             Tensor of shape (1, num_action_combinations) with Q_r < 0.
         """
-        pass
     
     @abstractmethod
     def get_config(self) -> Dict[str, Any]:
         """Return configuration dict for save/load."""
-        pass
     
     def raw_to_z(self, raw_values: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
         """

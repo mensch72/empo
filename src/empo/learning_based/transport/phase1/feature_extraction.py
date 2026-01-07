@@ -9,11 +9,9 @@ transport environment observation into a PyTorch Geometric Data object.
 """
 
 import torch
-import numpy as np
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, Tuple
 
 from .constants import (
-    STEP_TYPE_TO_IDX,
     NUM_STEP_TYPES,
     MAX_CLUSTERS,
     MAX_PARKING_SLOTS,
@@ -81,7 +79,7 @@ def extract_node_features(
                     vehicles_at_node[pos].append(agent_name)
     
     for i, node in enumerate(nodes):
-        node_data = network.nodes[node]
+        network.nodes[node]
         
         # Cluster one-hot encoding
         if cluster_info is not None:
@@ -159,7 +157,7 @@ def extract_edge_features(
     # Get agent positions
     agent_positions = env.env.agent_positions
     query_agent = env.agents[query_agent_idx]
-    query_pos = agent_positions.get(query_agent)
+    agent_positions.get(query_agent)
     
     # Pre-compute agents on each edge for efficiency with many agents
     edge_to_key = {(u, v): i for i, (u, v) in enumerate(edges)}

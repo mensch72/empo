@@ -9,10 +9,8 @@ and for each state encountered, performs statistical sampling to verify that:
 """
 
 import sys
-from pathlib import Path
 import numpy as np
 from collections import defaultdict
-import time
 
 # Patch gym import for compatibility
 import gymnasium as gym
@@ -98,7 +96,6 @@ def test_statistical_correctness():
     print(f"  - {samples_per_state} samples per state")
     print()
     
-    all_tests_passed = True
     total_states_tested = 0
     total_chi_squared_tests = 0
     passed_chi_squared_tests = 0
@@ -232,7 +229,6 @@ def test_statistical_correctness():
                 print("✓ PASS")
             else:
                 print("✗ FAIL")
-                all_tests_passed = False
                 
                 # Show details of the mismatch
                 print("    Detailed mismatch:")

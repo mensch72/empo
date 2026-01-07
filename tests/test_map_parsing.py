@@ -1,13 +1,10 @@
 """
 Test map parsing functionality for MultiGridEnv.
 """
-import sys
-import os
 
 import numpy as np
 from gym_multigrid.multigrid import (
-    MultiGridEnv, Grid, Agent, Block, Rock, Wall, World,
-    parse_map_string, create_object_from_spec
+    MultiGridEnv, World, parse_map_string
 )
 
 

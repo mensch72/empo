@@ -7,7 +7,6 @@ Tests the modular architecture with:
 - Multigrid-specific implementations in nn_based/multigrid/
 """
 
-import sys
 import os
 
 import numpy as np
@@ -15,11 +14,6 @@ import torch
 import tempfile
 
 from empo.learning_based import (
-    BaseStateEncoder,
-    BaseGoalEncoder,
-    BaseQNetwork,
-    BasePolicyPriorNetwork,
-    BaseNeuralHumanPolicyPrior,
     ReplayBuffer,
     Trainer,
 )
@@ -27,13 +21,11 @@ from empo.learning_based.multigrid import (
     MultiGridStateEncoder,
     MultiGridGoalEncoder,
     MultiGridQNetwork,
-    MultiGridPolicyPriorNetwork,
     MultiGridNeuralHumanPolicyPrior,
-    NUM_OBJECT_TYPE_CHANNELS,
     AGENT_FEATURE_SIZE,
 )
-from empo.possible_goal import PossibleGoal, PossibleGoalSampler, PossibleGoalGenerator
-from typing import Iterator, Tuple
+from empo.possible_goal import PossibleGoal, PossibleGoalSampler
+from typing import Tuple
 
 
 class SimpleReachGoal(PossibleGoal):

@@ -5,7 +5,6 @@ This module provides the training function for Phase 2 of the EMPO framework
 (equations 4-9) specialized for multigrid environments.
 """
 
-from collections import defaultdict
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
@@ -14,7 +13,6 @@ from gym_multigrid.multigrid import MultiGridEnv
 
 from empo.learning_based.phase2.config import Phase2Config
 from empo.learning_based.phase2.trainer import BasePhase2Trainer, Phase2Networks
-from empo.learning_based.phase2.replay_buffer import Phase2Transition
 from empo.learning_based.phase2.network_factory import create_count_based_curiosity
 from empo.learning_based.multigrid import MultiGridStateEncoder
 from empo.learning_based.multigrid.goal_encoder import MultiGridGoalEncoder
@@ -27,7 +25,6 @@ from .intrinsic_reward_network import MultiGridIntrinsicRewardNetwork
 from .robot_value_network import MultiGridRobotValueNetwork
 
 # Lookup table network imports
-from empo.learning_based.phase2.lookup import is_lookup_table_network
 
 
 class MultiGridPhase2Trainer(BasePhase2Trainer):

@@ -10,7 +10,6 @@ under the actual robot policy π_r (not the worst-case assumption used in Phase 
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional, Tuple
 
@@ -72,12 +71,10 @@ class BaseHumanGoalAchievementNetwork(nn.Module, ABC):
         Returns:
             Tensor of shape (1,) with V_h^e(s, g_h) in [0, 1].
         """
-        pass
     
     @abstractmethod
     def get_config(self) -> Dict[str, Any]:
         """Return configuration dict for save/load."""
-        pass
     
     def apply_clamp(self, values: torch.Tensor) -> torch.Tensor:
         """

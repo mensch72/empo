@@ -33,7 +33,7 @@ Usage:
 
 import pickle
 from multiprocessing import shared_memory
-from typing import Any, Dict, List, Optional, Tuple, TYPE_CHECKING
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 import numpy as np
 import numpy.typing as npt
 

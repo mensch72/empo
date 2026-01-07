@@ -6,10 +6,9 @@ for use in neural network encoding. All values are raw (not normalized).
 """
 
 import torch
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 from .constants import (
-    STANDARD_COLORS,
     COLOR_TO_IDX,
     OBJECT_TYPE_TO_CHANNEL,
     AGENT_FEATURE_SIZE,

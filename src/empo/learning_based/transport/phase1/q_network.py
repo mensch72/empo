@@ -11,7 +11,6 @@ on the action mask from the environment.
 
 import torch
 import torch.nn as nn
-import numpy as np
 from typing import Any, Dict, Optional, Tuple
 
 from empo.learning_based.phase1.q_network import BaseQNetwork

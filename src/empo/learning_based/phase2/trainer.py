@@ -10,7 +10,6 @@ import os
 import random
 import copy
 import multiprocessing as mp
-import shutil
 import tempfile
 import time
 import zipfile
@@ -27,7 +26,6 @@ import torch.optim as optim
 from tqdm import tqdm
 
 try:
-    import psutil
     HAS_PSUTIL = True
 except ImportError:
     HAS_PSUTIL = False
@@ -45,7 +43,7 @@ from .robot_value_network import BaseRobotValueNetwork, compute_v_r_from_compone
 from .lookup import get_all_lookup_tables, get_total_table_size
 from .rnd import RNDModule, HumanActionRNDModule
 from .count_based_curiosity import CountBasedCuriosity
-from .value_transforms import to_z_space, from_z_space, compute_z_space_loss, compute_q_space_loss, y_to_z_space, z_to_y_space
+from .value_transforms import to_z_space, y_to_z_space
 
 # Try to import tensorboard (optional)
 try:
@@ -995,7 +993,6 @@ class BasePhase2Trainer(ABC):
         Returns:
             Tuple of robot actions.
         """
-        from .robot_policy import RobotPolicy
         
         epsilon = self.config.get_epsilon_r(self.training_step_count)
         effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
@@ -1888,7 +1885,7 @@ class BasePhase2Trainer(ABC):
         
         # Check which networks are active in current warmup stage
         active_networks = self.config.get_active_networks(self.training_step_count)
-        v_h_e_active = 'v_h_e' in active_networks
+        'v_h_e' in active_networks
         x_h_active = 'x_h' in active_networks
         u_r_active = 'u_r' in active_networks
         q_r_active = 'q_r' in active_networks
@@ -2482,7 +2479,6 @@ class BasePhase2Trainer(ABC):
             - Feature tensor of shape (batch_size, total_feature_dim)
             - Encoder coefficients used
         """
-        pass
     
     def compute_novelty_for_states(self, states: List[Any]) -> torch.Tensor:
         """
@@ -3664,7 +3660,7 @@ class BasePhase2Trainer(ABC):
                     # Increment shared env steps counter (for TensorBoard logging)
                     with shared_env_steps.get_lock():
                         shared_env_steps.value += 1
-                except Exception as e:
+                except Exception:
                     # Queue full or serialization error - skip transition
                     pass
 

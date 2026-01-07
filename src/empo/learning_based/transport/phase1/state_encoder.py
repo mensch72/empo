@@ -22,7 +22,6 @@ from .constants import (
     DEFAULT_GNN_HIDDEN_DIM,
     DEFAULT_GNN_NUM_LAYERS,
     DEFAULT_OUTPUT_FEATURE_DIM,
-    MAX_CLUSTERS,
 )
 
 
@@ -164,8 +163,8 @@ class TransportStateEncoder(BaseStateEncoder):
             if agent_features.dim() == 1:
                 agent_features = agent_features.unsqueeze(0)
         
-        batch_size = node_features.shape[0]
-        device = node_features.device
+        node_features.shape[0]
+        node_features.device
         
         # Embed node features
         x = self.node_embed(node_features)  # (batch, num_nodes, hidden_dim)
@@ -346,7 +345,7 @@ class GATLayer(nn.Module):
     ) -> torch.Tensor:
         """Simple attention-based message passing."""
         batch_size, num_nodes, in_dim = x.shape
-        device = x.device
+        x.device
         
         # Project queries, keys, values
         q = self.q_proj(x)
@@ -399,7 +398,7 @@ class GINLayer(nn.Module):
     ) -> torch.Tensor:
         """GIN message passing."""
         batch_size, num_nodes, in_dim = x.shape
-        device = x.device
+        x.device
         
         # Aggregate neighbor features
         agg = torch.zeros_like(x)

@@ -9,7 +9,6 @@ This script shows how to use:
 """
 
 import sys
-from pathlib import Path
 
 # Patch gym import for compatibility
 import gymnasium as gym

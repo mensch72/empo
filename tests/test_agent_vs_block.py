@@ -6,7 +6,6 @@ Both should fail.
 """
 
 import sys
-from pathlib import Path
 import numpy as np
 
 import gymnasium as gym

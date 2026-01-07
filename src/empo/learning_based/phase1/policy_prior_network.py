@@ -28,7 +28,6 @@ class BasePolicyPriorNetwork(nn.Module, ABC):
     @abstractmethod
     def forward(self, *args, **kwargs) -> torch.Tensor:
         """Compute marginal action probabilities."""
-        pass
     
     def compute_marginal_from_policies(
         self,

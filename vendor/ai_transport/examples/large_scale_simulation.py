@@ -26,7 +26,6 @@ Run this script to generate:
 import numpy as np
 import matplotlib.pyplot as plt
 from collections import defaultdict
-import os
 
 from ai_transport import parallel_env
 from ai_transport.policies import TargetDestinationHumanPolicy, ShortestPathVehiclePolicy

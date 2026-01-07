@@ -13,7 +13,6 @@ See docs/VALUE_TRANSFORMATIONS.md for full rationale.
 import pytest
 import warnings
 import torch
-import numpy as np
 
 from empo.learning_based.phase2.config import Phase2Config
 

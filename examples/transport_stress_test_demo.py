@@ -16,7 +16,6 @@ Usage:
     python transport_stress_test_demo.py
 """
 
-import sys
 import os
 import time
 import cProfile

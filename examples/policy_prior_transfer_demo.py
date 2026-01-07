@@ -35,30 +35,22 @@ Requirements:
     - matplotlib (for movie output)
 """
 
-import sys
 import os
 import time
 import random
 import argparse
-import tempfile
-from typing import List, Tuple, Dict, Any, Optional
+from typing import Tuple, Optional
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 from gym_multigrid.multigrid import (
-    MultiGridEnv, Grid, Agent, Wall, World, SmallActions, Actions,
-    Key, Ball, Box, Door, Lava, Block, Goal
+    MultiGridEnv, World, SmallActions, Actions
 )
-from empo.possible_goal import PossibleGoal, PossibleGoalSampler
-from empo.world_specific_helpers.multigrid import ReachCellGoal, MultiGridGoalSampler, RandomPolicy
+from empo.world_specific_helpers.multigrid import MultiGridGoalSampler, RandomPolicy
 from empo.learning_based.multigrid import (
     MultiGridNeuralHumanPolicyPrior as NeuralHumanPolicyPrior,
-    MultiGridQNetwork as QNetwork,
     train_multigrid_neural_policy_prior as train_neural_policy_prior,
-    OBJECT_TYPE_TO_CHANNEL,
-    NUM_OBJECT_TYPE_CHANNELS,
 )
 
 

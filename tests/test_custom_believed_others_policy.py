@@ -7,8 +7,6 @@ The fix uses cloudpickle to serialize custom functions (including lambdas and cl
 for use in forked worker processes.
 """
 
-import sys
-import os
 import numpy as np
 from itertools import product
 

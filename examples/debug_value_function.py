@@ -3,8 +3,6 @@
 Debug script to trace exact state transitions and understand value function computation.
 """
 
-import sys
-import os
 
 from gym_multigrid.multigrid import MultiGridEnv, World
 from empo.possible_goal import PossibleGoal

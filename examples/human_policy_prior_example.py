@@ -7,7 +7,6 @@ using backward induction. Each initially empty cell is treated as a possible goa
 Includes line profiling of backward_induction.py, possible_goal.py, and multigrid.py.
 """
 
-import sys
 import os
 import time
 import numpy as np
@@ -113,7 +112,6 @@ def setup_line_profiler():
     
     # Import modules to profile
     import empo.backward_induction as backward_induction_module
-    import empo.possible_goal as possible_goal_module
     
     # Import multigrid
     import gym_multigrid.multigrid as multigrid_module

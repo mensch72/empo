@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """Test full async training setup with use_encoders=False."""
 
-import torch
 import multiprocessing as mp
-import sys
 import traceback
 
 

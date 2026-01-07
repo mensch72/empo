@@ -98,7 +98,6 @@ class BaseNeuralHumanPolicyPrior(HumanPolicyPrior, ABC):
         agent_idx: int
     ) -> torch.Tensor:
         """Compute marginal policy over goals. Domain-specific."""
-        pass
     
     def _remap_infeasible_actions(self, probs: torch.Tensor) -> torch.Tensor:
         """
@@ -185,4 +184,3 @@ class BaseNeuralHumanPolicyPrior(HumanPolicyPrior, ABC):
         
         Subclasses implement domain-specific network reconstruction.
         """
-        pass

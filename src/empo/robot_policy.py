@@ -58,7 +58,6 @@ class RobotPolicy(ABC):
             - For single robot: int (action index)
             - For multiple robots: tuple of ints (action profile)
         """
-        pass
     
     def reset(self, world_model: Any) -> None:
         """

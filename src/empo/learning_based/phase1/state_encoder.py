@@ -30,7 +30,6 @@ class BaseStateEncoder(nn.Module, ABC):
     @abstractmethod
     def forward(self, *args, **kwargs) -> torch.Tensor:
         """Encode state(s) into feature vectors."""
-        pass
     
     @abstractmethod
     def tensorize_state(
@@ -53,9 +52,7 @@ class BaseStateEncoder(nn.Module, ABC):
         Returns:
             Input tensors ready for forward().
         """
-        pass
     
     @abstractmethod
     def get_config(self) -> Dict[str, Any]:
         """Return configuration dict for save/load."""
-        pass

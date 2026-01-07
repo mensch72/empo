@@ -6,7 +6,7 @@ Implements V_r(s) from equation (9) for multigrid environments.
 
 import torch
 import torch.nn as nn
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from ...phase2.robot_value_network import BaseRobotValueNetwork
 from ..state_encoder import MultiGridStateEncoder

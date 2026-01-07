@@ -10,9 +10,8 @@ It implements inequality aversion across humans and time.
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Tuple
 
 
 class BaseIntrinsicRewardNetwork(nn.Module, ABC):
@@ -75,12 +74,10 @@ class BaseIntrinsicRewardNetwork(nn.Module, ABC):
         Returns:
             Tuple of (y, U_r) tensors, each shape (1,).
         """
-        pass
     
     @abstractmethod
     def get_config(self) -> Dict[str, Any]:
         """Return configuration dict for save/load."""
-        pass
     
     def log_y_minus_1_to_y(self, log_y_minus_1: torch.Tensor) -> torch.Tensor:
         """

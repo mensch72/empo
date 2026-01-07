@@ -29,7 +29,6 @@ This maps:
 
 import torch
 import torch.nn.functional as F
-from typing import Optional
 
 
 def to_z_space(

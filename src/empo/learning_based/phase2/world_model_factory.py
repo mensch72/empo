@@ -31,7 +31,6 @@ class WorldModelFactory(ABC):
         Returns:
             A world model (environment) instance.
         """
-        pass
     
     def reset(self) -> None:
         """
@@ -39,7 +38,6 @@ class WorldModelFactory(ABC):
         
         Called when actor process starts to ensure fresh state.
         """
-        pass
 
 
 class CachedWorldModelFactory(WorldModelFactory):

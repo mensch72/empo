@@ -66,7 +66,6 @@ class NullStateEncoder(nn.Module):
     
     def clear_cache(self):
         """No-op (no cache to clear)."""
-        pass
     
     def get_cache_stats(self) -> Tuple[int, int]:
         """Return (0, 0) - no cache stats."""
@@ -74,7 +73,6 @@ class NullStateEncoder(nn.Module):
     
     def reset_cache_stats(self):
         """No-op (no cache stats to reset)."""
-        pass
     
     def get_config(self) -> Dict[str, Any]:
         """Return configuration dict."""
@@ -114,7 +112,6 @@ class NullGoalEncoder(nn.Module):
     
     def clear_cache(self):
         """No-op (no cache to clear)."""
-        pass
     
     def get_cache_stats(self) -> Tuple[int, int]:
         """Return (0, 0) - no cache stats."""
@@ -122,7 +119,6 @@ class NullGoalEncoder(nn.Module):
     
     def reset_cache_stats(self):
         """No-op (no cache stats to reset)."""
-        pass
     
     def get_config(self) -> Dict[str, Any]:
         """Return configuration dict."""
@@ -169,7 +165,6 @@ class NullAgentEncoder(nn.Module):
     
     def clear_cache(self):
         """No-op (no cache to clear)."""
-        pass
     
     def get_cache_stats(self) -> Tuple[int, int]:
         """Return (0, 0) - no cache stats."""
@@ -177,7 +172,6 @@ class NullAgentEncoder(nn.Module):
     
     def reset_cache_stats(self):
         """No-op (no cache stats to reset)."""
-        pass
     
     def get_config(self) -> Dict[str, Any]:
         """Return configuration dict."""

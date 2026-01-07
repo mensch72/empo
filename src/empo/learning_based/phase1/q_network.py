@@ -52,12 +52,10 @@ class BaseQNetwork(nn.Module, ABC):
         device: str = 'cpu'
     ) -> torch.Tensor:
         """Encode state and compute Q-values. Returns (1, num_actions)."""
-        pass
     
     @abstractmethod
     def get_config(self) -> Dict[str, Any]:
         """Return configuration dict for save/load."""
-        pass
     
     def get_policy(self, q_values: torch.Tensor) -> torch.Tensor:
         """

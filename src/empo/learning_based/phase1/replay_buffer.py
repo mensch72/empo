@@ -3,7 +3,7 @@ Replay buffer for experience replay during training.
 """
 
 import random
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 
 class ReplayBuffer:

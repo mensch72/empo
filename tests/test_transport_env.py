@@ -11,9 +11,6 @@ Run with: pytest tests/test_transport_env.py -v
 """
 
 import pytest
-import sys
-import os
-from pathlib import Path
 
 
 def test_import_ai_transport():
@@ -469,7 +466,6 @@ def test_wrapper_cluster_routing_enabled():
 def test_wrapper_cluster_action_mask():
     """Test action mask with cluster-based routing."""
     from empo.world_specific_helpers.transport import create_transport_env, TransportActions
-    import numpy as np
     
     env = create_transport_env(
         num_humans=2, 

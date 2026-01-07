@@ -23,7 +23,6 @@ Requirements:
     - PIL (for GIF generation)
 """
 
-import sys
 import os
 
 import numpy as np
@@ -131,7 +130,6 @@ def run_handcrafted_demo():
     #   - For departing: 0 = wait, 1+ = depart to node index + 1
     
     # Step type cycle index
-    step_types = ['routing', 'unboarding', 'boarding', 'departing']
     
     # Plan:
     # 1. Human walks from 0 to 1 (action 1 from node 0 = edge (0,1))

@@ -22,9 +22,7 @@ Usage:
 
 import pickle
 from multiprocessing import shared_memory
-from typing import Any, Dict, List, Optional, Tuple
-import numpy as np
-import numpy.typing as npt
+from typing import Any, List, Optional, Tuple
 
 
 # Type aliases

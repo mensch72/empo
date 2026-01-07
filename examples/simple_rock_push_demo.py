@@ -20,9 +20,7 @@ Training features demonstrated:
 - button_toggle_bias: State-dependent exploration biasing toggle near buttons
 """
 
-import sys
 import os
-import random
 
 from gym_multigrid.multigrid import MultiGridEnv, World, Actions
 from empo.possible_goal import PossibleGoal, PossibleGoalSampler

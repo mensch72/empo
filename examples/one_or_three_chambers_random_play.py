@@ -18,10 +18,8 @@ Output:
     outputs/one_or_three_chambers_random_play.mp4
 """
 
-import sys
 import os
 
-import numpy as np
 
 from multigrid_worlds.one_or_three_chambers import OneOrThreeChambersMapEnv
 

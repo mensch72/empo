@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict
 
 
 def compute_v_r_from_components(
@@ -103,12 +103,10 @@ class BaseRobotValueNetwork(nn.Module, ABC):
         Returns:
             Tensor of shape (1,) with V_r(s) < 0.
         """
-        pass
     
     @abstractmethod
     def get_config(self) -> Dict[str, Any]:
         """Return configuration dict for save/load."""
-        pass
     
     def raw_to_z(self, raw_values: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
         """Convert raw network output to z ∈ (0, 1)."""

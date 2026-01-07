@@ -118,7 +118,6 @@ class HumanPolicyPrior(ABC):
             np.ndarray: Probability distribution over actions (sums to 1.0).
                        Shape is (num_actions,) where num_actions = action_space.n.
         """
-        pass
 
     @staticmethod
     def _to_probability_array(action_distribution) -> np.ndarray:
@@ -389,7 +388,7 @@ class TabularHumanPolicyPrior(HumanPolicyPrior):
         # General case for 3+ agents (rare)
         # Use indices instead of meshgrid - more memory efficient
         shape = tuple(len(m) for m in marginals)
-        total_combinations = np.prod(shape)
+        np.prod(shape)
         
         # Compute joint probabilities directly using broadcasting
         # Start with first marginal reshaped to broadcast

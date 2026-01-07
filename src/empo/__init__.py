@@ -48,15 +48,6 @@ from empo.util.memory_monitor import MemoryMonitor, check_memory
 
 # Transport environment wrapper (optional import - requires ai_transport)
 try:
-    from empo.world_specific_helpers.transport import (
-        TransportEnvWrapper,
-        TransportActions,
-        StepType,
-        create_transport_env,
-        TransportGoal,
-        TransportGoalGenerator,
-        TransportGoalSampler,
-    )
     _HAS_TRANSPORT = True
 except ImportError:
     _HAS_TRANSPORT = False

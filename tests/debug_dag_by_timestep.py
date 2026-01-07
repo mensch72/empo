@@ -1,7 +1,5 @@
 """Debug parallel DAG with detailed logging."""
 
-import sys
-import os
 
 from gym_multigrid.multigrid import MultiGridEnv, World
 

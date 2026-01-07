@@ -28,7 +28,7 @@ Usage:
 import sys
 import os
 import argparse
-from typing import Dict, List, Tuple, Any
+from typing import Dict, Tuple, Any
 
 import torch
 
@@ -37,16 +37,14 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'vendor', 'multigrid'))
 
 from gym_multigrid.multigrid import (
-    MultiGridEnv, Grid, Agent, Wall, World, SmallActions,
-    Ball, Block
+    MultiGridEnv, World, SmallActions
 )
-from empo.world_specific_helpers.multigrid import MultiGridGoalSampler, ReachCellGoal
+from empo.world_specific_helpers.multigrid import ReachCellGoal
 from empo.possible_goal import TabularGoalSampler
 from empo.learning_based.phase2.config import Phase2Config
 from empo.learning_based.phase2.trainer import Phase2Networks
 from empo.learning_based.phase2.network_factory import create_all_phase2_lookup_networks
 from empo.learning_based.phase2.lookup import (
-    is_lookup_table_network,
     get_all_lookup_tables,
     get_total_table_size,
 )

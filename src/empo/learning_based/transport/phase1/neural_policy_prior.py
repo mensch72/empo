@@ -676,7 +676,7 @@ def train_transport_neural_policy_prior(
             
             # Compute reward
             post_step_positions = dict(env.env.agent_positions)
-            reward = compute_reward(pre_step_positions, post_step_positions, agent_name, goal)
+            compute_reward(pre_step_positions, post_step_positions, agent_name, goal)
             
             # Store transition in replay buffer
             # For transport, we store the full env state snapshot since

@@ -12,13 +12,11 @@ smaller grid by padding the encoded state with walls. This enables transfer
 learning and efficient policy reuse across different grid sizes.
 """
 
-import sys
 import os
 
 import tempfile
 import torch
 from empo.learning_based.multigrid import (
-    MultiGridQNetwork,
     MultiGridNeuralHumanPolicyPrior,
     train_multigrid_neural_policy_prior,
 )

@@ -1,8 +1,6 @@
 """
 Test blocks and rocks pushing mechanics.
 """
-import sys
-import os
 
 import numpy as np
 from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, Block, Rock, Wall, World

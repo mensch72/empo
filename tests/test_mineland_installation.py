@@ -101,7 +101,6 @@ Be specific about positions and distances. Format your response with clear heade
 class TimeoutError(Exception):
     """Raised when an operation times out."""
 
-    pass
 
 
 def timeout_handler(signum, frame):
@@ -174,17 +173,14 @@ def test_mineland_import():
 def test_mineland_dependencies():
     """Test that MineLand's key dependencies are available."""
     # Check gymnasium
-    import gymnasium
     print("✓ gymnasium is available")
 
     # Check numpy
-    import numpy
     print("✓ numpy is available")
 
 
 def test_ollama_import():
     """Test that ollama can be imported."""
-    import ollama
     print("✓ Ollama Python client imported successfully")
 
 
@@ -633,7 +629,6 @@ def test_six_image_llm_description(all_screenshots):
     try:
         import ollama
         from PIL import Image
-        import numpy as np
 
         ollama_host = os.environ.get("OLLAMA_HOST", DEFAULT_OLLAMA_HOST)
         model_name = os.environ.get("OLLAMA_VISION_MODEL", DEFAULT_VISION_MODEL)

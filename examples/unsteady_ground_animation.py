@@ -6,7 +6,6 @@ This script creates a 10x10 multigrid environment with 10 unsteady ground cells
 and 10 agents, simulates their movements, and saves the result as an animation.
 """
 
-import sys
 import os
 
 import numpy as np

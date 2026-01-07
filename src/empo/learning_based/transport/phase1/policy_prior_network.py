@@ -6,7 +6,6 @@ Uses GNN-based encoding for transport network state.
 """
 
 import torch
-import torch.nn as nn
 from typing import Any, Dict, List, Optional
 
 from empo.learning_based.phase1.policy_prior_network import BasePolicyPriorNetwork

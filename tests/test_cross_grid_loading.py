@@ -6,7 +6,6 @@ Tests that policies trained on larger grids can be loaded and used on smaller gr
 with automatic padding using grey walls.
 """
 
-import sys
 import os
 
 import numpy as np

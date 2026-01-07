@@ -548,8 +548,8 @@ def test_departing_step_arrival_at_node():
     
     # Place both agents same distance from end so they arrive together
     # Use a distance that works for both speeds
-    edge_speed = edge_data['speed']
-    human_speed = test_env.agent_attributes['human_0']['speed']
+    edge_data['speed']
+    test_env.agent_attributes['human_0']['speed']
     
     # Place them close enough that both will arrive
     # For edge_speed=5.0, human_speed=1.0, if we place at edge_length-0.05,
@@ -586,7 +586,7 @@ def test_humans_aboard_move_with_vehicle():
     test_env.agent_positions['vehicle_0'] = 0
     test_env.human_aboard['human_0'] = 'vehicle_0'
     
-    outgoing = list(test_env.network.out_edges(0))
+    list(test_env.network.out_edges(0))
     
     # Human tries to walk (but is aboard so shouldn't work)
     # Vehicle departs

@@ -31,14 +31,12 @@ Requirements:
     - ffmpeg (optional, for MP4 output; falls back to GIF)
 """
 
-import sys
 import os
 import random
 import argparse
 from typing import List, Tuple, Dict, Optional
 
 import numpy as np
-import matplotlib.pyplot as plt
 
 from gym_multigrid.multigrid import (
     MultiGridEnv, Grid, Agent, Wall, World, Actions, #SmallActions,

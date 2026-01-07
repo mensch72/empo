@@ -5,7 +5,6 @@ Extends BaseNeuralHumanPolicyPrior with multigrid-specific implementation.
 """
 
 import torch
-import torch.nn.functional as F
 import torch.optim as optim
 from collections import deque
 from typing import Any, Dict, List, Optional

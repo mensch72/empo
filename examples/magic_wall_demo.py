@@ -10,7 +10,6 @@ with a configurable probability. Only agents with can_enter_magic_walls=True
 can attempt to enter them.
 """
 
-import sys
 import os
 
 import numpy as np

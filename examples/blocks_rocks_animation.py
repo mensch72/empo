@@ -6,7 +6,6 @@ This script creates a multigrid environment with blocks and rocks, simulates
 agents pushing them consecutively, and saves the result as an MP4 animation.
 """
 
-import sys
 import os
 
 import numpy as np

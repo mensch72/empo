@@ -12,22 +12,14 @@ Tests:
 """
 
 import sys
-import os
 import torch
-import numpy as np
 
 from empo.learning_based.multigrid.state_encoder import MultiGridStateEncoder
 from empo.learning_based.multigrid.constants import (
-    NUM_OBJECT_TYPE_CHANNELS,
-    NUM_STANDARD_COLORS,
     OBJECT_TYPE_TO_CHANNEL,
     COLOR_TO_IDX,
     DOOR_CHANNEL_START,
     KEY_CHANNEL_START,
-    MAGICWALL_CHANNEL,
-    DOOR_STATE_OPEN,
-    DOOR_STATE_CLOSED,
-    DOOR_STATE_LOCKED,
     COMPRESSED_GRID_OBJECT_TYPE_MASK,
     COMPRESSED_GRID_COLOR_SHIFT,
     COMPRESSED_GRID_COLOR_MASK,
@@ -36,10 +28,6 @@ from empo.learning_based.multigrid.constants import (
     COMPRESSED_GRID_AGENT_COLOR_SHIFT,
     COMPRESSED_GRID_AGENT_COLOR_MASK,
     COMPRESSED_GRID_NO_AGENT,
-    COMPRESSED_GRID_MAGIC_SHIFT,
-    COMPRESSED_GRID_MAGIC_MASK,
-    COMPRESSED_GRID_OTHER_SHIFT,
-    COMPRESSED_GRID_OTHER_MASK,
     COMPRESSED_GRID_DOOR_TYPE,
     COMPRESSED_GRID_KEY_TYPE,
 )

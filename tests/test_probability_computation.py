@@ -7,15 +7,13 @@ multiple permutations leading to the same state are properly aggregated.
 """
 
 import sys
-from pathlib import Path
-import numpy as np
 import pytest
 
 # Patch gym import for compatibility
 import gymnasium as gym
 sys.modules['gym'] = gym
 
-from gym_multigrid.multigrid import MultiGridEnv, Agent, World, Actions, Grid, Wall, Ball
+from gym_multigrid.multigrid import Actions
 from gym_multigrid.envs import CollectGame4HEnv10x10N2
 
 
@@ -160,7 +158,7 @@ def test_state_consistency_across_calls():
     actions = [Actions.forward, Actions.left, Actions.right]
     
     # Call transition_probabilities
-    result = env.transition_probabilities(state_before, actions)
+    env.transition_probabilities(state_before, actions)
     
     # Get state after
     state_after = env.get_state()

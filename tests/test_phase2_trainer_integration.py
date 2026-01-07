@@ -292,7 +292,6 @@ class TestTensorBoardLogging:
     def test_tensorboard_import(self):
         """TensorBoard should be importable."""
         try:
-            from torch.utils.tensorboard import SummaryWriter
             has_tensorboard = True
         except ImportError:
             has_tensorboard = False

@@ -26,7 +26,6 @@ Requirements:
 """
 
 import sys
-import os
 import argparse
 import random
 
@@ -43,12 +42,6 @@ from ai_transport.policies import (
 )
 
 # Import the EMPO wrapper for gym-style interface
-from empo.world_specific_helpers.transport import (
-    TransportEnvWrapper,
-    TransportActions,
-    StepType,
-    create_transport_env,
-)
 
 
 # ============================================================================
@@ -333,7 +326,6 @@ def run_simulation(args):
     obs, info = env.reset(seed=args.seed)
     
     # Initialize frame collection for video
-    frames = []
     
     # Enable graphical rendering if needed for video or display
     if args.save_video or args.render:

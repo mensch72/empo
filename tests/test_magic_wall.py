@@ -1,8 +1,6 @@
 """
 Test magic wall functionality.
 """
-import sys
-import os
 
 import numpy as np
 from gym_multigrid.multigrid import MultiGridEnv, Grid, Agent, MagicWall, Wall, World

@@ -8,7 +8,7 @@ policy networks.
 
 import torch
 import torch.nn as nn
-from typing import Any, Optional
+from typing import Any
 
 from empo.learning_based.phase1.goal_encoder import BaseGoalEncoder
 from .constants import MAX_CLUSTERS

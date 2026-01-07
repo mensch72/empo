@@ -5,8 +5,7 @@ Computes marginal action probabilities by averaging over goals.
 """
 
 import torch
-import torch.nn as nn
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 
 from empo.learning_based.phase1.policy_prior_network import BasePolicyPriorNetwork
 from .q_network import MultiGridQNetwork

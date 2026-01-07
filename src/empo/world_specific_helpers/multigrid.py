@@ -741,7 +741,6 @@ def render_test_map_values(
         >>> env._video_frames = frames
         >>> env.save_video('test_map_values.mp4', fps=1)
     """
-    import torch
     from gym_multigrid.multigrid import MultiGridEnv, World, SmallActions
     
     frames = []

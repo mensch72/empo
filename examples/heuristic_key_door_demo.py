@@ -50,7 +50,7 @@ Requirements:
 
 import sys
 import os
-from typing import List, Dict, Optional
+from typing import List
 
 import numpy as np
 

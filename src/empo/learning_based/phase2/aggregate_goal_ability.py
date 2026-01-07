@@ -10,9 +10,8 @@ which is then used to compute the robot's intrinsic reward U_r.
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Tuple
 
 from empo.learning_based.util.soft_clamp import SoftClamp
 
@@ -77,12 +76,10 @@ class BaseAggregateGoalAbilityNetwork(nn.Module, ABC):
         Returns:
             Tensor of shape (1,) with X_h(s) ∈ (0, 1].
         """
-        pass
     
     @abstractmethod
     def get_config(self) -> Dict[str, Any]:
         """Return configuration dict for save/load."""
-        pass
     
     def apply_clamp(self, raw_values: torch.Tensor) -> torch.Tensor:
         """

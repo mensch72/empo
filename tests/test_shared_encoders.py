@@ -12,7 +12,6 @@ import sys
 import os
 
 import torch
-import torch.nn as nn
 
 # Add src to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
@@ -176,7 +175,7 @@ def test_encoder_caching():
     # Test with different state (should be a new cache entry)
     # Note: With content-based caching, we need states with DIFFERENT content
     state2 = create_mock_state(num_agents=2, step_count=1)  # Different step_count
-    enc3 = state_encoder.tensorize_state(state2, world_model, 'cpu')
+    state_encoder.tensorize_state(state2, world_model, 'cpu')
     stats = state_encoder.get_cache_stats()
     hits, misses = stats
     print(f"  Cache stats after encode of different state: hits={hits}, misses={misses}")
