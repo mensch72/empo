@@ -854,10 +854,10 @@ class BasePhase2Trainer(ABC):
         self.env = self.world_model_factory.create()
         
         # Update agent indices from the new environment using WorldModel API
-        if hasattr(self.env, 'human_agent_indices') and hasattr(self.env, 'robot_agent_indices'):
-            self.human_agent_indices = self.env.human_agent_indices
-            self.robot_agent_indices = self.env.robot_agent_indices
-            self._update_num_agents()
+        # These properties are required by the WorldModel interface for Phase 2 training
+        self.human_agent_indices = self.env.human_agent_indices
+        self.robot_agent_indices = self.env.robot_agent_indices
+        self._update_num_agents()
         
         # Update goal_sampler and human_policy_prior with new env
         if hasattr(self.goal_sampler, 'set_world_model'):

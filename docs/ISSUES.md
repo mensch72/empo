@@ -556,22 +556,6 @@ This document lists code quality issues found in the EMPO codebase. These issues
 
 ---
 
-## Duplicate Code
-
-### Duplicate Module Files
-
-1. **memory_monitor.py duplicated:**
-   - [src/empo/memory_monitor.py](src/empo/memory_monitor.py)
-   - [src/empo/util/memory_monitor.py](src/empo/util/memory_monitor.py)
-   - **Status**: DUPLICATE - same code in two locations
-   - **Action**: CRITICAL - Remove one and update imports. Keep `src/empo/util/memory_monitor.py` as it's in the proper location
-
-2. **Backward compatibility imports:**
-   - Several modules may have backward compatibility imports
-   - **Action**: Audit `__init__.py` files for re-exports of moved modules
-
----
-
 ## Naming Issues
 
 ### Strange/Unclear Variable Names
@@ -591,13 +575,7 @@ This document lists code quality issues found in the EMPO codebase. These issues
 
 **Files with redundant hasattr checks (may indicate uncertainty about object structure):**
 
-1. [src/empo/learning_based/phase2/trainer.py](src/empo/learning_based/phase2/trainer.py)
-   - Line 858: `if hasattr(self.env, 'get_human_agent_indices') and hasattr(self.env, 'get_robot_agent_indices'):`
-   - Line 3356, 3801: `if hasattr(self.profiler, 'report') and hasattr(self.profiler, '_total_time'):`
-   - **Status**: REVIEW - may indicate unclear interfaces
-   - **Action**: Consider using ABC or Protocol for better type safety
-
-2. [examples/phase2_robot_policy_demo.py](examples/phase2_robot_policy_demo.py)
+1. [examples/phase2_robot_policy_demo.py](examples/phase2_robot_policy_demo.py)
    - Line 756: Triple hasattr check on goal_sampler
    - **Status**: REVIEW - overly defensive programming
    - **Action**: Use isinstance() with proper types
@@ -800,18 +778,16 @@ Examples:
 
 ### High Priority
 
-1. **Remove duplicate memory_monitor.py** - Keep only `src/empo/util/memory_monitor.py`
-2. **Fix bare except clauses** in vendor/multigrid code
-3. **Add logging to silent exception handlers** in shared_dag.py and shared_attainment_cache.py
-4. **Implement max history size** for training loss history to prevent memory leaks
+1. **Fix bare except clauses** in vendor/multigrid code
+2. **Add logging to silent exception handlers** in shared_dag.py and shared_attainment_cache.py
+3. **Implement max history size** for training loss history to prevent memory leaks
 
 ### Medium Priority
 
 1. **Replace print() with logging** in core library code (not examples)
-2. **Remove deprecated code** in next major version
-3. **Review hasattr double-checks** - use ABC/Protocol for clearer interfaces
-4. **Implement or remove incomplete test** in test_json_config.py
-5. **Clean up commented-out debug code**
+2. **Review hasattr double-checks** - use ABC/Protocol for clearer interfaces
+3. **Implement or remove incomplete test** in test_json_config.py
+4. **Clean up commented-out debug code**
 
 ### Low Priority
 
