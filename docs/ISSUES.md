@@ -531,24 +531,7 @@ This document lists code quality issues found in the EMPO codebase. These issues
 
 ## Unused/Deprecated Code
 
-### ~~Deprecated Features~~ [REMOVED]
-
-**Status**: The following deprecated features have been removed (2026-01-07):
-
-1. ~~[src/empo/learning_based/phase2/config.py](src/empo/learning_based/phase2/config.py)~~
-   - ~~Lines 216, 220-221: DEPRECATED legacy 1/t learning rate decay~~
-   - ~~`lr_x_h_use_1_over_t` and `lr_u_r_use_1_over_t` flags marked deprecated~~
-   - ~~Line 397: Warning message for deprecated flags~~
-   - **Status**: REMOVED - all legacy 1/t learning rate decay code removed
-   - **Action**: COMPLETED (2026-01-07)
-
-2. ~~[vendor/multigrid/gym_multigrid/multigrid.py](vendor/multigrid/gym_multigrid/multigrid.py)~~
-   - ~~Line 4858: `get_human_agent_indices()` marked deprecated~~
-   - ~~Line 4862: `get_robot_agent_indices()` marked deprecated~~
-   - **Status**: REMOVED - all usages updated to use properties, deprecated methods deleted
-   - **Action**: COMPLETED (2026-01-07)
-
-### Deprecated Features (Still Present)
+### Deprecated Features
 
 3. [vendor/ai_transport/ai_transport/envs/transport_env.py](vendor/ai_transport/ai_transport/envs/transport_env.py)
    - Line 89: `action_spaces` and `observation_spaces` attributes deprecated as of v1.18.1
