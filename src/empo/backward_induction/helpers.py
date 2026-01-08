@@ -554,7 +554,7 @@ def compute_dependency_levels_fast(
     states: List[State], 
     level_fct: Callable[[State], int],
     successors: Optional[List[List[int]]] = None
-) -> Tuple[List[List[int]], Optional[List[int]]]:
+) -> Tuple[List[List[int]], Optional[Dict[int, int]]]:
     """Compute dependency levels using level function for faster computation.
     
     Args:
@@ -566,9 +566,9 @@ def compute_dependency_levels_fast(
     Returns:
         Tuple of:
         - levels: List of levels, where each level is a list of state indices
-        - max_successor_levels: If successors provided, list parallel to levels
-          where each entry is the max level value of any successor of states
-          in that level. None if successors not provided.
+        - max_successor_levels: If successors provided, dict mapping level value
+          to the max level value of any successor of states at that level.
+          None if successors not provided.
     """
     # Compute level values for all states
     level_values: List[int] = [level_fct(state) for state in states]
@@ -584,15 +584,15 @@ def compute_dependency_levels_fast(
     levels = [level_groups[level_val] for level_val in sorted_levels]
     
     # Compute max successor level for each level if successors provided
-    max_successor_levels: Optional[List[int]] = None
+    max_successor_levels: Optional[Dict[int, int]] = None
     if successors is not None:
-        max_successor_levels = []
-        for level in levels:
+        max_successor_levels = {}
+        for level_val in sorted_levels:
             max_succ_level = -1  # Default if no successors
-            for state_idx in level:
+            for state_idx in level_groups[level_val]:
                 for succ_idx in successors[state_idx]:
                     max_succ_level = max(max_succ_level, level_values[succ_idx])
-            max_successor_levels.append(max_succ_level)
+            max_successor_levels[level_val] = max_succ_level
     
     return levels, max_successor_levels
 
