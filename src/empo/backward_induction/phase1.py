@@ -21,6 +21,7 @@ Parameters:
     gamma_h: Human discount factor (γ).
 """
 
+import gc
 import math
 import numpy as np
 import numpy.typing as npt
@@ -382,6 +383,7 @@ def _hpp_compute_sequential(
     
     # Compute max_successor_levels for archival if level_fct and archive_dir provided
     archived_levels: Set[int] = set()  # Track already-archived levels
+    previous_level: Optional[int] = None  # Track level transitions
     if level_fct is not None and archive_dir is not None:
         # Build successors list from transitions
         successors = []
@@ -426,34 +428,24 @@ def _hpp_compute_sequential(
         if p_results is not None:
             system2_policies[state] = p_results
         
-        # Archive if we just completed a level and archive_dir is set
+        # Archive if we just completed a level transition and archive_dir is set
         if archive_dir is not None and level_fct is not None and max_successor_levels is not None:
             current_state_level = level_fct(state)
-            archivable = detect_archivable_levels(current_state_level, max_successor_levels, quiet=False)
-            # Only archive NEW levels (not already archived)
-            new_archivable = [lvl for lvl in archivable if lvl not in archived_levels]
-            if new_archivable:
-                archive_value_slices(
-                    Vh_values, states, level_fct, new_archivable,
-                    filepath=Path(archive_dir) / "vh_values.pkl",
-                    return_values=return_Vh,
-                    quiet=False
-                )
-                archived_levels.update(new_archivable)
-            # Check if we're at the last state of this level (next state will have different level or doesn't exist)
-            if state_index == 0 or (state_index > 0 and level_fct(states[state_index - 1]) != current_state_level):
-                # Just completed this level
+            # Only check for archival when we transition to a new level
+            if previous_level is not None and current_state_level != previous_level:
+                # We just completed processing previous_level, check what can be archived
                 archivable = detect_archivable_levels(current_state_level, max_successor_levels, quiet=False)
-                # Only archive levels not yet archived
-                new_archivable = [l for l in archivable if l not in archived_levels]
+                # Only archive NEW levels (not already archived)
+                new_archivable = [lvl for lvl in archivable if lvl not in archived_levels]
                 if new_archivable:
-                    archive_filepath = Path(archive_dir) / "vh_values.pkl"
                     archive_value_slices(
                         Vh_values, states, level_fct, new_archivable,
-                        archive_filepath, return_values=return_Vh, quiet=False,
-                        archive_dir=Path(archive_dir)
+                        filepath=Path(archive_dir) / "vh_values.pkl",
+                        return_values=return_Vh,
+                        quiet=False
                     )
                     archived_levels.update(new_archivable)
+            previous_level = current_state_level
     
     # Final archival check: archive any remaining levels after loop completes
     if archive_dir is not None and level_fct is not None and max_successor_levels is not None:
@@ -934,6 +926,10 @@ def compute_human_policy_prior(
     # first get the dag of the world model:
     states, state_to_idx, successors, transitions = world_model.get_dag(return_probabilities=True, quiet=quiet)
     
+    # Free state_to_idx immediately - it's not used anywhere after this
+    del state_to_idx
+    gc.collect()
+    
     # Print memory estimate
     if not quiet:
         mem_stats = estimate_dag_memory(states, transitions, num_agents, 
@@ -971,8 +967,27 @@ def compute_human_policy_prior(
         del transitions
         transitions = None  # type: ignore
         
+        # Free successors too if not needed for parallel archival
+        # (will be reconstructed from disk if needed for sequential archival)
+        if not parallel or archive_dir is None:
+            del successors
+            successors = None  # type: ignore
+        
+        # CRITICAL: Clear the world_model's DAG cache to actually free the memory
+        # (otherwise Phase 2 will get the cached DAG defeating disk slicing)
+        world_model.clear_dag_cache()
+        
+        # Store disk_dag on world_model for Phase 2 to reuse
+        world_model._disk_dag = disk_dag  # type: ignore
+        
+        gc.collect()  # Force immediate garbage collection
+        
         if not quiet:
-            print(f"  Disk slicing complete. Transitions freed from memory.")
+            freed_msg = "Transitions"
+            if not parallel or archive_dir is None:
+                freed_msg += " and successors"
+            freed_msg += " freed from memory."
+            print(f"  Disk slicing complete. {freed_msg}")
             print(f"  Loaded DAG memory: {disk_dag.get_loaded_memory_mb():.1f} MB")
             print(f"  Attainment cache will also be saved to disk during computation.")
             est_per_timestep = mem_stats['total_mb'] / (disk_dag.max_timestep + 1)
@@ -1017,150 +1032,29 @@ def compute_human_policy_prior(
         if not quiet:
             print(f"Using parallel execution with {num_workers} workers")
         
-        # Check if using disk slicing + parallel mode
-        if disk_dag is not None:
-            # ========== PARALLEL + DISK SLICING MODE ==========
-            if not quiet:
-                print("Using parallel disk-sliced mode (workers load/save independently)")
-            
-            # Initialize shared data for workers
-            global _shared_disk_dag, _shared_states, _shared_Vh_values, _shared_params, _shared_believed_others_policy_pickle
-            _shared_disk_dag = disk_dag
-            _shared_states = states
-            _shared_Vh_values = Vh_values
-            _shared_params = (
-                human_agent_indices, possible_goal_generator, num_agents, num_actions,
-                action_powers, robot_agent_indices, robot_action_profiles, beta_h, gamma_h
-            )
-            _shared_believed_others_policy_pickle = believed_others_policy_pickle
-            
-            # Use 'fork' context for shared memory
-            ctx = mp.get_context('fork')
-            
-            # Import archival helpers if archive_dir is provided
-            archived_levels: Set[int] = set()  # Track already-archived levels
-            if archive_dir is not None:
-                from .helpers import compute_dependency_levels_fast, detect_archivable_levels, archive_value_slices
-                from pathlib import Path
-            
-            # Compute max successor levels for archival if archive_dir provided
-            max_successor_levels: Optional[Dict[int, int]] = None
-            if archive_dir is not None and level_fct is not None:
-                _, max_successor_levels, _ = compute_dependency_levels_fast(
-                    states, level_fct, successors
-                )
-            
-            with ctx.Pool(processes=num_workers) as pool:
-                # Process timesteps in reverse order
-                futures = []
-                timestep_to_future = {}
-                
-                for timestep in range(disk_dag.max_timestep, -1, -1):
-                    # Get state indices for this timestep (already sorted in Kahn order)
-                    dag_slice = disk_dag.load_slice(timestep)
-                    state_indices = dag_slice.state_indices
-                    disk_dag.unload_slice(timestep)  # Don't need to keep loaded
-                    
-                    # Submit timestep to worker pool
-                    future = pool.apply_async(_hpp_process_timestep_batch_disk, (timestep, state_indices))
-                    futures.append((future, len(state_indices)))
-                    timestep_to_future[timestep] = (future, len(state_indices))
-                
-                # Collect results as they complete (not in submission order)
-                states_processed_count = 0
-                completed = 0
-                total_timesteps = len(futures)
-                
-                while completed < total_timesteps:
-                    # Check all futures for completion
-                    for future, num_states in futures:
-                        if future.ready() and not hasattr(future, '_processed'):
-                            future._processed = True  # type: ignore
-                            v_results, p_results, timestep, batch_time = future.get()
-                            
-                            # Merge results back
-                            for state_idx, state_results in v_results.items():
-                                for agent_idx, agent_results in state_results.items():
-                                    Vh_values[state_idx][agent_idx].update(agent_results)
-                            
-                            for state, state_policies in p_results.items():
-                                if state not in system2_policies:
-                                    system2_policies[state] = {}
-                                for agent_idx, agent_policies in state_policies.items():
-                                    if agent_idx not in system2_policies[state]:
-                                        system2_policies[state][agent_idx] = {}
-                                    system2_policies[state][agent_idx].update(agent_policies)
-                            
-                            # Update progress
-                            states_processed_count += len(v_results)
-                            completed += 1
-                            if progress_callback:
-                                progress_callback(states_processed_count, len(states))
-                            
-                            # Archive completed timestep if archive_dir is set
-                            if archive_dir is not None and max_successor_levels is not None and level_fct is not None:
-                                archivable = detect_archivable_levels(timestep, max_successor_levels, quiet=quiet)
-                                # Only archive NEW levels (not already archived)
-                                new_archivable = [lvl for lvl in archivable if lvl not in archived_levels]
-                                if new_archivable:
-                                    archive_value_slices(
-                                        Vh_values, states, level_fct, new_archivable,
-                                        filepath=Path(archive_dir) / "vh_values.pkl",
-                                        return_values=return_Vh,
-                                        quiet=quiet
-                                    )
-                                    archived_levels.update(new_archivable)
-                    
-                    # Small sleep to avoid busy waiting
-                    if completed < total_timesteps:
-                        import time
-                        time.sleep(0.01)
-            
-            if not quiet:
-                print("Parallel disk-sliced computation complete")
-            
-            # Final archival check for disk-sliced parallel mode: archive any remaining levels
-            if archive_dir is not None and level_fct is not None and max_successor_levels is not None:
-                all_levels = sorted(set(level_fct(s) for s in states))
-                remaining_levels = [lvl for lvl in all_levels if lvl not in archived_levels]
-                if remaining_levels:
-                    archive_value_slices(
-                        Vh_values, states, level_fct, remaining_levels,
-                        filepath=Path(archive_dir) / "vh_values.pkl",
-                        return_values=return_Vh,
-                        quiet=quiet
-                    )
-                    archived_levels.update(remaining_levels)
-            
-            # Store disk_dag reference for Phase 2
-            if sliced_cache is not None:
-                sliced_cache._disk_dag = disk_dag  # type: ignore
+        # Track already-archived levels
+        archived_levels: Set[int] = set()
         
-        else:
-            # ========== REGULAR PARALLEL MODE (IN-MEMORY) ==========
-            # Track already-archived levels
-            archived_levels: Set[int] = set()
-            
-            # Compute dependency levels and max successor levels for archival
-            dependency_levels: List[List[int]]
-            max_successor_levels: Optional[Dict[int, int]] = None
-            level_values_list: Optional[List[int]] = None
-            if level_fct is not None:
-                if not quiet:
-                    print("Using fast level computation with provided level function")
-                # Pass successors to get max_successor_levels for archival
-                dependency_levels, max_successor_levels, level_values_list = compute_dependency_levels_fast(
-                    states, level_fct, successors
-                )
-            else:
-                if not quiet:
-                    print("Using general level computation")
-                dependency_levels = compute_dependency_levels_general(successors)
-                max_successor_levels = None
-                level_values_list = None
-            
+        # Compute dependency levels and max successor levels for archival
+        dependency_levels: List[List[int]]
+        max_successor_levels: Optional[Dict[int, int]] = None
+        level_values_list: Optional[List[int]] = None
+        if level_fct is not None:
             if not quiet:
-                print(f"Computed {len(dependency_levels)} dependency levels")
+                print("Using fast level computation with provided level function")
+            # Pass successors to get max_successor_levels for archival
+            dependency_levels, max_successor_levels, level_values_list = compute_dependency_levels_fast(
+                states, level_fct, successors
+            )
+        else:
+            if not quiet:
+                print("Using general level computation")
+            dependency_levels = compute_dependency_levels_general(successors)
+            max_successor_levels = None
+            level_values_list = None
+        
+        if not quiet:
+            print(f"Computed {len(dependency_levels)} dependency levels")
             
             # Initialize shared data for worker processes
             # On Linux (fork), workers inherit these as copy-on-write
@@ -1173,10 +1067,11 @@ def compute_human_policy_prior(
             ctx = mp.get_context('fork')
             
             # Initialize DAG in shared memory to avoid copy-on-write overhead
-            # This is done once before processing levels
-            if not quiet:
-                print("Storing DAG in shared memory...")
-            init_shared_dag(states, transitions)
+            # Skip if using disk_dag - we'll load slices per level instead
+            if disk_dag is None:
+                if not quiet:
+                    print("Storing DAG in shared memory...")
+                init_shared_dag(states, transitions)
             
             # Profiling counters
             if PROFILE_PARALLEL:
@@ -1208,6 +1103,20 @@ def compute_human_policy_prior(
             
             # Process each level sequentially, but parallelize within each level
             for level_idx, level in enumerate(dependency_levels):
+                # Load disk slice for this level if using disk_dag
+                if disk_dag is not None and level_values_list is not None:
+                    current_level_value = level_values_list[level_idx]
+                    dag_slice = disk_dag.load_slice(current_level_value)
+                    # Build transitions list for this level
+                    transitions = []
+                    for i in range(len(states)):
+                        if i in dag_slice.state_indices:
+                            transitions.append(dag_slice.get_transitions(i))
+                        else:
+                            transitions.append([])  # Empty for states not in this level
+                    # Share the loaded slice with workers
+                    init_shared_dag(states, transitions)
+                
                 # Check memory at the start of each level
                 if memory_monitor is not None:
                     memory_monitor.check(level_idx)
@@ -1274,63 +1183,68 @@ def compute_human_policy_prior(
                     with ProcessPoolExecutor(max_workers=num_workers, mp_context=ctx) as executor:
                         if PROFILE_PARALLEL:
                             prof_fork_time += time.perf_counter() - _fork_t0
-                    
-                    # Submit all batches (just the indices, not the data!)
-                    if PROFILE_PARALLEL:
-                        _submit_t0 = time.perf_counter()
-                    futures = [executor.submit(_hpp_process_state_batch, batch) 
-                               for batch in batches if batch]
-                    if PROFILE_PARALLEL:
-                        prof_submit_time += time.perf_counter() - _submit_t0
-                    
-                    # Collect results and store slices
-                    batches_completed = 0
-                    for future in as_completed(futures):
-                        # Check memory BEFORE collecting result to catch pressure early
-                        # Use force=True to bypass interval check since we check per-batch
-                        if memory_monitor is not None:
-                            memory_monitor.check(batches_completed, force=True)
                         
+                        # Submit all batches (just the indices, not the data!)
                         if PROFILE_PARALLEL:
-                            _wait_t0 = time.perf_counter()
-                        v_results, p_results, slice_id, slice_cache, batch_time = future.result()
-                        batches_completed += 1
+                            _submit_t0 = time.perf_counter()
+                        futures = [executor.submit(_hpp_process_state_batch, batch) 
+                                   for batch in batches if batch]
                         if PROFILE_PARALLEL:
-                            prof_wait_time += time.perf_counter() - _wait_t0
-                            prof_batch_times.append(batch_time)
+                            prof_submit_time += time.perf_counter() - _submit_t0
                         
-                        # Merge Vh-values back into shared Vh_values
-                        if PROFILE_PARALLEL:
-                            _merge_v_t0 = time.perf_counter()
-                        for state_idx, state_results in v_results.items():
-                            for agent_idx, agent_results in state_results.items():
-                                Vh_values[state_idx][agent_idx].update(agent_results)
-                        if PROFILE_PARALLEL:
-                            prof_merge_v_time += time.perf_counter() - _merge_v_t0
-                        
-                        # Merge policies back
-                        if PROFILE_PARALLEL:
-                            _merge_p_t0 = time.perf_counter()
-                        for state, state_policies in p_results.items():
-                            if state not in system2_policies:
-                                system2_policies[state] = {}
-                            for agent_idx, agent_policies in state_policies.items():
-                                if agent_idx not in system2_policies[state]:
-                                    system2_policies[state][agent_idx] = {}
-                                system2_policies[state][agent_idx].update(agent_policies)
-                        if PROFILE_PARALLEL:
-                            prof_merge_p_time += time.perf_counter() - _merge_p_t0
-                        
-                        # Store slice cache (no merging needed - each slice is stored separately)
-                        if sliced_cache is not None:
-                            sliced_cache.store_slice(slice_id, slice_cache)
-                        
-                        # Check memory AFTER merging results (this is when memory actually increases)
-                        if memory_monitor is not None:
-                            memory_monitor.check(batches_completed, force=True)
+                        # Collect results and store slices
+                        batches_completed = 0
+                        for future in as_completed(futures):
+                            # Check memory BEFORE collecting result to catch pressure early
+                            # Use force=True to bypass interval check since we check per-batch
+                            if memory_monitor is not None:
+                                memory_monitor.check(batches_completed, force=True)
+                            
+                            if PROFILE_PARALLEL:
+                                _wait_t0 = time.perf_counter()
+                            v_results, p_results, slice_id, slice_cache, batch_time = future.result()
+                            batches_completed += 1
+                            if PROFILE_PARALLEL:
+                                prof_wait_time += time.perf_counter() - _wait_t0
+                                prof_batch_times.append(batch_time)
+                            
+                            # Merge Vh-values back into shared Vh_values
+                            if PROFILE_PARALLEL:
+                                _merge_v_t0 = time.perf_counter()
+                            for state_idx, state_results in v_results.items():
+                                for agent_idx, agent_results in state_results.items():
+                                    Vh_values[state_idx][agent_idx].update(agent_results)
+                            if PROFILE_PARALLEL:
+                                prof_merge_v_time += time.perf_counter() - _merge_v_t0
+                            
+                            # Merge policies back
+                            if PROFILE_PARALLEL:
+                                _merge_p_t0 = time.perf_counter()
+                            for state, state_policies in p_results.items():
+                                if state not in system2_policies:
+                                    system2_policies[state] = {}
+                                for agent_idx, agent_policies in state_policies.items():
+                                    if agent_idx not in system2_policies[state]:
+                                        system2_policies[state][agent_idx] = {}
+                                    system2_policies[state][agent_idx].update(agent_policies)
+                            if PROFILE_PARALLEL:
+                                prof_merge_p_time += time.perf_counter() - _merge_p_t0
+                            
+                            # Store slice cache (no merging needed - each slice is stored separately)
+                            if sliced_cache is not None:
+                                sliced_cache.store_slice(slice_id, slice_cache)
+                            
+                            # Check memory AFTER merging results (this is when memory actually increases)
+                            if memory_monitor is not None:
+                                memory_monitor.check(batches_completed, force=True)
                 
                 if PROFILE_PARALLEL:
                     prof_total_parallel_time += time.perf_counter() - _level_t0
+                
+                # Unload disk slice and cleanup shared memory if using disk_dag
+                if disk_dag is not None and level_values_list is not None:
+                    disk_dag.unload_slice(current_level_value)
+                    cleanup_shared_dag()  # Free shared memory for this level's transitions
             
             # Report progress after each level
             if progress_callback:

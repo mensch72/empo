@@ -12,6 +12,7 @@ Memory reduction: ~10-20x for typical problems.
 """
 
 import os
+import gc
 import pickle
 import tempfile
 import shutil
@@ -268,7 +269,12 @@ class DiskBasedDAG:
                         trans_list_converted.append((action_profile, probs_f16, succ_indices))
                     slice_transitions.append(trans_list_converted)
                 else:
-                    slice_transitions.append(trans_list)
+                    # Create a COPY of the transitions to avoid keeping references to original
+                    trans_list_copy = [
+                        (action_profile, list(probs), list(succ_indices))
+                        for action_profile, probs, succ_indices in trans_list
+                    ]
+                    slice_transitions.append(trans_list_copy)
             
             # Create slice
             dag_slice = DAGSlice(timestep, state_indices, slice_transitions)
@@ -279,6 +285,13 @@ class DiskBasedDAG:
             if not quiet and timestep % max(1, len(timestep_states) // 10) == 0:
                 print(f"  Saved timestep {timestep}: {len(state_indices)} states, "
                       f"{dag_slice.memory_size_mb():.1f} MB")
+            
+            # Free memory immediately after saving to disk
+            del dag_slice
+            del slice_transitions
+        
+        # Force garbage collection to free memory from transitions
+        gc.collect()
         
         if not quiet:
             total_size_mb = sum(

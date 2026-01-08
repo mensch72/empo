@@ -921,6 +921,7 @@ def main(
         terminal_Vr=terminal_Vr,
         parallel=parallel,
         num_workers=num_workers,
+        use_disk_slicing=True,  # Enable disk slicing (matches Phase 1)
         level_fct=lambda state: state[0],  # Extract timestep from MultiGrid state
         archive_dir=output_dir,  # Save archived values to output directory
     )

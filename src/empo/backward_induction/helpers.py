@@ -594,7 +594,9 @@ def compute_dependency_levels_fast(
     if successors is not None:
         max_successor_levels = {}
         for level_val in sorted_levels:
-            max_succ_level = -1  # Default if no successors
+            # Initialize to level_val + 1 for terminal states (no successors)
+            # This ensures terminal states follow the k→k+1 pattern
+            max_succ_level = level_val + 1
             for state_idx in level_groups[level_val]:
                 for succ_idx in successors[state_idx]:
                     max_succ_level = max(max_succ_level, level_values_array[succ_idx])
@@ -758,20 +760,20 @@ def detect_archivable_levels(
 ) -> List[int]:
     """Detect which levels can be archived based on successor dependencies.
     
-    A level k can be archived when max_successor_levels[l] < k for all l <= current_level_value.
+    A level k can be archived when max_successor_levels[l] < k for all l < current_level_value.
     This means no future computations will need to read from level k.
     
     Args:
-        current_level_value: The level value currently being processed
+        current_level_value: The level value just completed
         max_successor_levels: Dict mapping level value to max successor level value
         quiet: If True, suppress debug output
         
     Returns:
         List of level values that can be safely archived
     """
-    # Get all level values that are <= current level value (not yet processed or current)
+    # Get all level values that are < current level value (not yet processed)
     # Note: backward induction processes in descending order, so smaller values are future
-    future_levels = [l for l in max_successor_levels.keys() if l <= current_level_value]
+    future_levels = [l for l in max_successor_levels.keys() if l < current_level_value]
     
     if not future_levels:
         return []

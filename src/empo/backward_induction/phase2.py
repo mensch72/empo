@@ -280,7 +280,7 @@ def _rp_compute_sequential(
     Vh_values: VhValues,  # result is inserted into this!
     Vr_values: VrValues,  # result is inserted into this!
     robot_policy: RobotPolicyDict,  # result is inserted into this! 
-    transitions: List[List[Tuple[Tuple[int, ...], List[float], List[int]]]],
+    transitions: Optional[List[List[Tuple[Tuple[int, ...], List[float], List[int]]]]],
     human_agent_indices: List[int], 
     robot_agent_indices: List[int], # the AI coordinates all robots 
     possible_goal_generator: PossibleGoalGenerator,
@@ -301,6 +301,7 @@ def _rp_compute_sequential(
     level_fct: Optional[Callable[[State], int]] = None,
     return_values: bool = False,
     archive_dir: Optional[str] = None,
+    disk_dag: Optional[Any] = None,
     quiet: bool = False,
 ) -> None:
     """Sequential Phase 2 backward induction algorithm.
@@ -326,23 +327,68 @@ def _rp_compute_sequential(
     # Compute max_successor_levels for archival if level_fct and archive_dir provided
     max_successor_levels: Optional[Dict[int, int]] = None
     archived_levels: Set[int] = set()  # Track already-archived levels
+    previous_level: Optional[int] = None  # Track level transitions
     if level_fct is not None and archive_dir is not None:
         from .helpers import compute_dependency_levels_fast, detect_archivable_levels, archive_value_slices
         from pathlib import Path
-        # Build successors list from transitions
+        # Build successors list - handle disk_dag case
         successors = []
-        for state_transitions in transitions:
-            succ_set = set()
-            for action_profile, probs, succ_indices in state_transitions:
-                succ_set.update(succ_indices)
-            successors.append(list(succ_set))
+        if disk_dag is not None:
+            # Load first slice to get successors for max_successor_levels computation
+            first_slice = disk_dag.load_slice(disk_dag.max_timestep)
+            for i in range(len(states)):
+                if i in first_slice.state_indices:
+                    state_transitions = first_slice.get_transitions(i)
+                    succ_set = set()
+                    for action_profile, probs, succ_indices in state_transitions:
+                        succ_set.update(succ_indices)
+                    successors.append(list(succ_set))
+                else:
+                    successors.append([])
+            # Continue loading remaining slices to build full successors list
+            for timestep in range(disk_dag.max_timestep - 1, -1, -1):
+                dag_slice = disk_dag.load_slice(timestep)
+                for i in dag_slice.state_indices:
+                    state_transitions = dag_slice.get_transitions(i)
+                    succ_set = set()
+                    for action_profile, probs, succ_indices in state_transitions:
+                        succ_set.update(succ_indices)
+                    successors[i] = list(succ_set)
+                disk_dag.unload_slice(timestep)
+        else:
+            # Build from in-memory transitions
+            assert transitions is not None, "transitions must be provided if disk_dag is None"
+            for state_transitions in transitions:
+                succ_set = set()
+                for action_profile, probs, succ_indices in state_transitions:
+                    succ_set.update(succ_indices)
+                successors.append(list(succ_set))
         _, max_successor_levels, _ = compute_dependency_levels_fast(states, level_fct, successors)
     
     # loop over the nodes in reverse topological order:
     for state_index in range(len(states)-1, -1, -1):
         state = states[state_index]
         
+        # Load disk slice if using disk_dag
+        if disk_dag is not None and level_fct is not None:
+            current_level = level_fct(state)
+            # Check if we need to load a new slice
+            if previous_level is None or current_level != previous_level:
+                # Unload previous slice
+                if previous_level is not None:
+                    disk_dag.unload_slice(previous_level)
+                # Load new slice
+                dag_slice = disk_dag.load_slice(current_level)
+                # Build transitions list for this timestep
+                transitions = []
+                for i in range(len(states)):
+                    if i in dag_slice.state_indices:
+                        transitions.append(dag_slice.get_transitions(i))
+                    else:
+                        transitions.append([])  # Empty for states not in this timestep
+        
         # Use unified helper
+        assert transitions is not None, "transitions must be loaded"
         vh_results, vr_result, p_result = _rp_process_single_state(
             state_index, state, states, transitions, Vh_values, Vr_values,
             human_agent_indices, robot_agent_indices, robot_action_profiles,
@@ -367,29 +413,33 @@ def _rp_compute_sequential(
         if progress_callback is not None:
             progress_callback(states_processed, total_states)
         
-        # Archive if we just completed a level and archive_dir is set
+        # Archive if we just completed a level transition and archive_dir is set
         if archive_dir is not None and level_fct is not None and max_successor_levels is not None:
             current_state_level = level_fct(state)
-            archivable = detect_archivable_levels(current_state_level, max_successor_levels, quiet=quiet)
-            # Only archive NEW levels (not already archived)
-            new_archivable = [lvl for lvl in archivable if lvl not in archived_levels]
-            if new_archivable:
-                # Archive vhe_values (Vh_values in Phase 2 is expected human achievement)
-                archive_value_slices(
-                    Vh_values, states, level_fct, new_archivable,
-                    filepath=Path(archive_dir) / "vhe_values.pkl",
-                    return_values=return_values,
-                    quiet=quiet
-                )
-                # Archive vr_values (robot values) - convert to list structure for archival
-                vr_list = [[Vr_values[i]] for i in range(len(Vr_values))]
-                archive_value_slices(
-                    vr_list, states, level_fct, new_archivable,
-                    filepath=Path(archive_dir) / "vr_values.pkl",
-                    return_values=return_values,
-                    quiet=quiet
-                )
-                archived_levels.update(new_archivable)
+            # Only check for archival when we transition to a new level
+            if previous_level is not None and current_state_level != previous_level:
+                # We just completed processing previous_level, check what can be archived
+                archivable = detect_archivable_levels(current_state_level, max_successor_levels, quiet=quiet)
+                # Only archive NEW levels (not already archived)
+                new_archivable = [lvl for lvl in archivable if lvl not in archived_levels]
+                if new_archivable:
+                    # Archive vhe_values (Vh_values in Phase 2 is expected human achievement)
+                    archive_value_slices(
+                        Vh_values, states, level_fct, new_archivable,
+                        filepath=Path(archive_dir) / "vhe_values.pkl",
+                        return_values=return_values,
+                        quiet=quiet
+                    )
+                    # Archive vr_values (robot values) - convert to list structure for archival
+                    vr_list = [[Vr_values[i]] for i in range(len(Vr_values))]
+                    archive_value_slices(
+                        vr_list, states, level_fct, new_archivable,
+                        filepath=Path(archive_dir) / "vr_values.pkl",
+                        return_values=return_values,
+                        quiet=quiet
+                    )
+                    archived_levels.update(new_archivable)
+            previous_level = current_state_level
     
     # Final archival check: archive any remaining levels after loop completes
     if archive_dir is not None and level_fct is not None:
@@ -705,6 +755,10 @@ def compute_robot_policy(
     memory_check_interval: int = 100,
     memory_pause_duration: float = 60.0,
     sliced_cache: Optional[SlicedAttainmentCache] = None,
+    archive_dir: Optional[str] = None,
+    use_disk_slicing: bool = False,
+    use_compression: bool = False,
+    use_float16: bool = True,
 ) -> Tuple[TabularRobotPolicy, Dict[State, float], Dict[State, Dict[int, Dict[PossibleGoal, float]]]]: ...
 
 
@@ -733,6 +787,9 @@ def compute_robot_policy(
     memory_pause_duration: float = 60.0,
     sliced_cache: Optional[SlicedAttainmentCache] = None,
     archive_dir: Optional[str] = None,
+    use_disk_slicing: bool = False,
+    use_compression: bool = False,
+    use_float16: bool = True,
 ) -> Union[TabularRobotPolicy, Tuple[TabularRobotPolicy, Dict[State, float], Dict[State, Dict[int, Dict[PossibleGoal, float]]]]]:
     """
     Compute robot policy via backward induction on the state DAG.
@@ -850,8 +907,83 @@ def compute_robot_policy(
     # Serialize human_policy_prior using cloudpickle for parallel mode
     human_policy_prior_pickle = cloudpickle.dumps(human_policy_prior)
 
-    # Get the DAG of the world model
-    states, state_to_idx, successors, transitions = world_model.get_dag(return_probabilities=True, quiet=quiet)
+    # Check if disk_dag already exists from Phase 1
+    disk_dag: Optional[Any] = getattr(world_model, '_disk_dag', None)
+    
+    if disk_dag is not None:
+        # Reuse disk_dag from Phase 1
+        if not quiet:
+            print("\n=== Reusing Disk-Based DAG from Phase 1 ===")
+            print(f"  Loaded DAG memory: {disk_dag.get_loaded_memory_mb():.1f} MB")
+        # Get states and state_to_idx from world_model (cached during Phase 1 DAG build)
+        # We need to rebuild these since they were not stored in disk_dag
+        states, state_to_idx, successors, transitions = world_model.get_dag(return_probabilities=True, quiet=True)
+        # Clear the cache again to free transitions
+        world_model.clear_dag_cache()
+        # Free transitions and successors - we'll load from disk_dag instead
+        del transitions
+        transitions = None  # type: ignore
+        if archive_dir is None:
+            del successors
+            successors = None  # type: ignore
+    elif use_disk_slicing:
+        # Create new disk_dag (Phase 1 didn't create one)
+        if level_fct is None:
+            raise ValueError("use_disk_slicing requires level_fct to be provided")
+        
+        from .dag_slicing import DiskBasedDAG, estimate_dag_memory
+        import gc
+        
+        # Get the DAG first
+        states, state_to_idx, successors, transitions = world_model.get_dag(return_probabilities=True, quiet=quiet)
+        
+        if not quiet:
+            print("\n=== Creating Disk-Based DAG ===")
+        
+        # Calculate memory stats before slicing
+        mem_stats = estimate_dag_memory(states, transitions, num_agents,
+                                        num_actions, num_action_profiles)
+        if not quiet:
+            print(f"Full DAG memory: {mem_stats['total_mb']:.1f} MB")
+        
+        # Create disk-based DAG
+        num_action_profiles_for_cache = num_actions ** num_agents
+        disk_dag = DiskBasedDAG.from_dag(
+            states, transitions, level_fct,
+            cache_dir=None,  # Auto-select optimal location
+            use_compression=use_compression,
+            use_float16=use_float16,
+            num_action_profiles=num_action_profiles_for_cache,
+            quiet=quiet
+        )
+        
+        # Free the full transitions from memory (will load slices on demand)
+        del transitions
+        transitions = None  # type: ignore
+        
+        # Free successors too if not needed for archival
+        if archive_dir is None:
+            del successors
+            successors = None  # type: ignore
+        
+        # CRITICAL: Clear the world_model's DAG cache to actually free the memory
+        world_model.clear_dag_cache()
+        
+        # Store on world_model for potential future use
+        world_model._disk_dag = disk_dag  # type: ignore
+        
+        gc.collect()  # Force immediate garbage collection
+        
+        if not quiet:
+            freed_msg = "Transitions"
+            if archive_dir is None:
+                freed_msg += " and successors"
+            freed_msg += " freed from memory."
+            print(f"  Disk slicing complete. {freed_msg}")
+            print(f"  Loaded DAG memory: {disk_dag.get_loaded_memory_mb():.1f} MB")
+    else:
+        # Normal mode: get DAG from world_model
+        states, state_to_idx, successors, transitions = world_model.get_dag(return_probabilities=True, quiet=quiet)
     
     # Set up default tqdm progress bar if no callback provided
     _pbar: Optional[tqdm[int]] = None
@@ -882,6 +1014,9 @@ def compute_robot_policy(
     
     if parallel and len(states) > 1:
         # Parallel execution using shared memory via fork
+        if disk_dag is not None:
+            raise ValueError("Parallel mode does not support disk slicing yet. Use parallel=False with use_disk_slicing=True.")
+        
         if num_workers is None:
             num_workers = mp.cpu_count()
         
@@ -1096,7 +1231,7 @@ def compute_robot_policy(
             human_policy_prior, beta_r, gamma_h, gamma_r, zeta, xi, eta, terminal_Vr,
             progress_callback, memory_monitor,
             sliced_cache,
-            level_fct, return_values, archive_dir, quiet,
+            level_fct, return_values, archive_dir, disk_dag, quiet,
         )
 
     robot_policy = TabularRobotPolicy(
