@@ -126,8 +126,10 @@ def _hpp_process_single_state(
         - v_results: Dict[agent_index, Dict[goal, float]] - V-values for this state
         - p_results: Dict[agent_index, Dict[goal, ndarray]] - policies (None for terminal states)
     """
-    if slice_cache is not None:
+    if slice_cache is not None and state_index in slice_cache:
         this_state_cache = slice_cache[state_index]
+    else:
+        this_state_cache = None
 
     actions = range(num_actions)
     v_results: Dict[int, Dict[PossibleGoal, float]] = {}
@@ -158,7 +160,8 @@ def _hpp_process_single_state(
         for possible_goal, _ in possible_goal_generator.generate(state, agent_index):
             if possible_goal.is_achieved(state):
                 # Goal achieved already in this state: remain still, V=0
-                vres[possible_goal] = 0
+                # Sparse storage: don't store zero values
+                # vres[possible_goal] = np.float16(0)  # Omitted for sparse storage
                 ps = np.zeros(num_actions)
                 ps[0] = 1.0  # Assume action 0 is 'stay still'
                 pres[possible_goal] = ps
@@ -193,10 +196,11 @@ def _hpp_process_single_state(
                             v_values_array = np.fromiter(
                                 (Vh_values[next_state_index][agent_index].get(possible_goal, 0)
                                  for next_state_index in next_state_indices),
-                                dtype=np.float64,
+                                dtype=np.float16,
                                 count=len(next_state_indices)
                             )
                             # Use np.where to avoid intermediate array allocation
+                            # NumPy automatically promotes float16 to float64 during computation
                             expectation = np.dot(
                                 next_state_probabilities,
                                 np.where(attainment_values_array, 1.0, v_values_array)
@@ -220,11 +224,14 @@ def _hpp_process_single_state(
                     p = np.exp(scaled_q)
                     p /= np.sum(p)
                 
-                vres[possible_goal] = float(np.sum(p * q))
+                v_value = float(np.sum(p * q))
+                # Sparse storage: only store non-zero values (convert to float16 only when storing)
+                if v_value != 0.0:
+                    vres[possible_goal] = np.float16(v_value)
                 pres[possible_goal] = p
                 
                 if DEBUG:
-                    print(f"    Agent {agent_index}, goal {possible_goal}: V = {v_results[agent_index][possible_goal]:.4f}")
+                    print(f"    Agent {agent_index}, goal {possible_goal}: V = {v_results[agent_index].get(possible_goal, 0):.4f}")
     
     return v_results, p_results
 
@@ -263,11 +270,18 @@ def _hpp_compute_sequential(
     total_states = len(states)
     
     # In sequential mode, we use a single slice containing all states
-    # Create slice cache for all states
+    # Create slice cache for all states, but only allocate entries for non-terminal states
     slice_cache: Optional[SliceCache] = None
     if sliced_cache is not None:
-        all_state_indices = list(range(len(states)))
-        slice_cache = sliced_cache.create_slice_cache(all_state_indices)
+        # Only create cache entries for non-terminal states (those with transitions)
+        # If using disk_dag, we can't determine terminal states yet, so create for all states
+        if transitions is not None:
+            non_terminal_indices = [i for i in range(len(states)) if transitions[i]]
+            slice_cache = sliced_cache.create_slice_cache(non_terminal_indices)
+        else:
+            # disk_dag mode or transitions not yet loaded - create for all states
+            all_state_indices = list(range(len(states)))
+            slice_cache = sliced_cache.create_slice_cache(all_state_indices)
     
     # Compute max_successor_levels for archival if level_fct and archive_dir provided
     max_successor_levels: Optional[Dict[int, int]] = None
@@ -394,11 +408,32 @@ def _hpp_compute_sequential(
             successors.append(list(succ_set))
         _, max_successor_levels, level_values_list = compute_dependency_levels_fast(states, level_fct, successors)
         
+        # Pre-compute state levels to avoid calling level_fct for every state
+        state_levels = [level_fct(s) for s in states]
+        
         # Track which level we're on
         current_level_idx = len(level_values_list) - 1
     
     # loop over the nodes in reverse topological order:
     for state_index in range(len(states)-1, -1, -1):
+        # Check for level transition BEFORE processing state (for archival)
+        if archive_dir is not None and level_fct is not None and max_successor_levels is not None:
+            current_state_level = state_levels[state_index]
+            if previous_level is not None and current_state_level != previous_level:
+                # We just completed processing previous_level, check what can be archived
+                archivable = detect_archivable_levels(current_state_level, max_successor_levels, quiet=False)
+                # Only archive NEW levels (not already archived)
+                new_archivable = [lvl for lvl in archivable if lvl not in archived_levels]
+                if new_archivable:
+                    archive_value_slices(
+                        Vh_values, states, level_fct, new_archivable,
+                        filepath=Path(archive_dir) / "vh_values.pkl",
+                        return_values=return_Vh,
+                        quiet=False
+                    )
+                    archived_levels.update(new_archivable)
+            previous_level = current_state_level
+        
         # Check memory periodically (using step = states processed)
         states_processed = total_states - state_index
         if memory_monitor is not None:
@@ -427,25 +462,6 @@ def _hpp_compute_sequential(
         
         if p_results is not None:
             system2_policies[state] = p_results
-        
-        # Archive if we just completed a level transition and archive_dir is set
-        if archive_dir is not None and level_fct is not None and max_successor_levels is not None:
-            current_state_level = level_fct(state)
-            # Only check for archival when we transition to a new level
-            if previous_level is not None and current_state_level != previous_level:
-                # We just completed processing previous_level, check what can be archived
-                archivable = detect_archivable_levels(current_state_level, max_successor_levels, quiet=False)
-                # Only archive NEW levels (not already archived)
-                new_archivable = [lvl for lvl in archivable if lvl not in archived_levels]
-                if new_archivable:
-                    archive_value_slices(
-                        Vh_values, states, level_fct, new_archivable,
-                        filepath=Path(archive_dir) / "vh_values.pkl",
-                        return_values=return_Vh,
-                        quiet=False
-                    )
-                    archived_levels.update(new_archivable)
-            previous_level = current_state_level
     
     # Final archival check: archive any remaining levels after loop completes
     if archive_dir is not None and level_fct is not None and max_successor_levels is not None:
@@ -1011,6 +1027,16 @@ def compute_human_policy_prior(
     # Initialize V_values as nested lists for faster access
     Vh_values: VhValues = [[{} for _ in range(num_agents)] for _ in range(len(states))]
     
+    # ============================================================================
+    # WARN if parallel mode was requested
+    # ============================================================================
+    if parallel:
+        if not quiet:
+            print("WARNING: Parallel mode is currently disabled due to bugs.")
+            print("         Running in sequential mode instead.")
+            print("         See docs/plans/bwind_parallel.md for status.")
+        parallel = False  # Force to sequential
+    
     # Always create sliced attainment cache - it will be stored on world_model for reuse in Phase 2.
     # This avoids redundant is_achieved() computation between phases.
     # Structure: SlicedAttainmentCache holds slices indexed by slice_id
@@ -1024,8 +1050,14 @@ def compute_human_policy_prior(
         # Create new sliced cache
         sliced_cache = SlicedAttainmentCache(num_action_profiles)
     
-    if parallel and len(states) > 1:
-        # Parallel execution using shared memory via fork
+    # ============================================================================
+    # PARALLEL CODE TEMPORARILY DISABLED
+    # The parallel implementation is currently broken and needs refactoring.
+    # See docs/plans/bwind_parallel.md for the refactoring plan.
+    # The code below is kept for reference but will not execute.
+    # ============================================================================
+    if False:  # Was: if parallel and len(states) > 1:
+        # DISABLED: Parallel execution using shared memory via fork
         if num_workers is None:
             num_workers = mp.cpu_count()
         
@@ -1335,13 +1367,21 @@ def compute_human_policy_prior(
                 verbose=not quiet,
                 enabled=True
             )
-        _hpp_compute_sequential(states, Vh_values, system2_policies, transitions,
-                         human_agent_indices, possible_goal_generator,
-                         num_agents, num_actions, action_powers,
-                         believed_others_policy, robot_agent_indices, robot_action_profiles,
-                         beta_h, gamma_h,
-                         progress_callback, memory_monitor,
-                         sliced_cache, disk_dag, level_fct, archive_dir, return_Vh)
+        
+        try:
+            _hpp_compute_sequential(states, Vh_values, system2_policies, transitions,
+                             human_agent_indices, possible_goal_generator,
+                             num_agents, num_actions, action_powers,
+                             believed_others_policy, robot_agent_indices, robot_action_profiles,
+                             beta_h, gamma_h,
+                             progress_callback, memory_monitor,
+                             sliced_cache, disk_dag, level_fct, archive_dir, return_Vh)
+        except KeyboardInterrupt:
+            if not quiet:
+                print("\n[Phase1] Computation interrupted (KeyboardInterrupt).")
+                print("         Partial results have been computed.")
+            # Re-raise to allow caller to handle
+            raise
     
     # Store sliced attainment cache on world_model for automatic reuse in Phase 2.
     # This avoids redundant is_achieved() computation between phases.

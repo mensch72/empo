@@ -494,6 +494,13 @@ class WorldModel(gym.Env):
             current_state = queue.popleft()
             current_idx = temp_state_to_idx[current_state]
             
+            # Extract timestep from state (state[0] for most environments like MultiGrid)
+            # Handle states that might not have timestep as first element
+            try:
+                current_timestep = current_state[0] if isinstance(current_state, (tuple, list)) and len(current_state) > 0 else None
+            except (TypeError, IndexError):
+                current_timestep = None
+            
             # Track unique successor states for this current state
             seen_successors: Set[State] = set()
             
@@ -547,6 +554,9 @@ class WorldModel(gym.Env):
             states_processed += 1
             if pbar is not None:
                 pbar.n = states_processed
+                # Update description to show current timestep if available
+                if current_timestep is not None:
+                    pbar.set_description(f"Building DAG (t={current_timestep})")
                 pbar.refresh()
         
         # Close progress bar

@@ -48,6 +48,8 @@ from typing import List, Tuple, Dict, Optional, Any
 
 import numpy as np
 
+from empo.backward_induction.helpers import load_archived_value_slices
+
 # Patch gym import for compatibility
 import gymnasium as gym
 sys.modules['gym'] = gym
@@ -860,7 +862,7 @@ def main(
         num_workers=num_workers,
         use_disk_slicing=True,  # Enable disk-based caching (auto-detects /dev/shm)
         level_fct=lambda state: state[0],  # Extract timestep from MultiGrid state
-        archive_dir=output_dir,  # Save archived values to output directory
+#        archive_dir=output_dir,  # Save archived values to output directory
     )
     t1 = time.time()
     
@@ -923,7 +925,7 @@ def main(
         num_workers=num_workers,
         use_disk_slicing=True,  # Enable disk slicing (matches Phase 1)
         level_fct=lambda state: state[0],  # Extract timestep from MultiGrid state
-        archive_dir=output_dir,  # Save archived values to output directory
+#        archive_dir=output_dir,  # Save archived values to output directory
     )
     if profiler:
         profiler.disable()
@@ -992,22 +994,7 @@ def main(
     # Phase 2 values would be in the same location if Phase 2 archiving is implemented
     
     # Helper function to load archived slices one at a time
-    def load_archived_slices(filepath: str):
-        """Generator that yields (level_value, state_indices, data) from archived file."""
-        from pathlib import Path
-        import pickle
-        
-        filepath = Path(filepath)
-        if not filepath.exists():
-            return
-        
-        with open(filepath, 'rb') as f:
-            while True:
-                try:
-                    slice_data = pickle.load(f)
-                    yield slice_data['level_value'], slice_data['state_indices'], slice_data['data']
-                except EOFError:
-                    break
+    from empo.backward_induction.helpers import load_archived_value_slices
     
     # Compare Vh values slice-by-slice
     differences = []
@@ -1028,8 +1015,8 @@ def main(
             compared_count = 0
             
             # Iterate through both files in parallel, loading one slice from each at a time
-            phase1_gen = load_archived_slices(vh_phase1_path)
-            phase2_gen = load_archived_slices(vhe_phase2_path)
+            phase1_gen = load_archived_value_slices(Path(vh_phase1_path))
+            phase2_gen = load_archived_value_slices(Path(vhe_phase2_path))
             
             for (level_val1, state_indices1, phase1_data), (level_val2, state_indices2, phase2_data) in zip(phase1_gen, phase2_gen):
                 # Verify slices match
@@ -1073,7 +1060,7 @@ def main(
             # Count Phase 1 slices
             slice_count = 0
             total_states = 0
-            for level_val, state_indices, level_data in load_archived_slices(vh_phase1_path):
+            for level_val, state_indices, level_data in load_archived_value_slices(Path(vh_phase1_path)):
                 slice_count += 1
                 total_states += len(state_indices)
             

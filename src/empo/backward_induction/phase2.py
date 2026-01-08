@@ -78,7 +78,7 @@ def _rp_process_single_state(
     state_index: int,
     state: State,
     states: List[State],
-    transitions: List[List[TransitionData]],
+    state_transitions: List[TransitionData],
     Vh_values: VhValues,
     Vr_values: VrValues,
     human_agent_indices: List[int],
@@ -111,7 +111,7 @@ def _rp_process_single_state(
         state_index: Index of the state in the states list
         state: The state to process
         states: Full states list (needed for goal achievement checks)
-        transitions: Full transitions list (indexed by state_index)
+        state_transitions: Transitions for this state only
         Vh_values: Human value function (reads from successors)
         Vr_values: Robot value function (reads from successors)
         human_agent_indices: List of human agent indices
@@ -138,21 +138,24 @@ def _rp_process_single_state(
         - vr_result: float - V_r value for this state
         - robot_policy: Dict[RobotActionProfile, float] or None (None for terminal states)
     """
-    if slice_cache is not None:
+    if slice_cache is not None and state_index in slice_cache:
         this_state_cache = slice_cache[state_index]
-
-    vh_results: Dict[int, Dict[PossibleGoal, float]] = {agent_idx: {} for agent_idx in human_agent_indices}
-    action_profile: npt.NDArray[np.int64] = np.zeros(num_agents, dtype=np.int64)
+    else:
+        this_state_cache = None
     
-    is_terminal = not transitions[state_index]
+    is_terminal = not state_transitions
     
     if is_terminal:
         # Terminal state: V_h^e = 0 for all goals (dict defaults to 0), V_r = terminal_Vr, no robot policy
+        vh_results: Dict[int, Dict[PossibleGoal, float]] = {}
         if DEBUG:
             print(f"  Terminal state {state_index}")
         return vh_results, terminal_Vr, None
     
     # Non-terminal state: compute Q_r, pi_r, V_h^e, X_h, U_r, V_r
+    vh_results: Dict[int, Dict[PossibleGoal, float]] = {}
+    action_profile: npt.NDArray[np.int64] = np.zeros(num_agents, dtype=np.int64)
+    
     if DEBUG:
         print(f"  Transient state {state_index}")
     
@@ -164,7 +167,7 @@ def _rp_process_single_state(
         for human_action_profile_prob, human_action_profile in human_policy_prior.profile_distribution(state):
             action_profile[human_agent_indices] = human_action_profile
             action_profile_index = (action_profile @ action_powers).item()
-            _, next_state_probabilities, next_state_indices = transitions[state_index][action_profile_index]
+            _, next_state_probabilities, next_state_indices = state_transitions[action_profile_index]
             v += human_action_profile_prob * np.dot(next_state_probabilities, Vr_values[next_state_indices])
         Qr_values[robot_action_profile_index] = gamma_r * v
     
@@ -181,6 +184,8 @@ def _rp_process_single_state(
     # Compute V_h^e, X_h, and U_r values
     powersum = 0.0  # sum over humans of X_h^(-xi)
     for agent_index in human_agent_indices:
+        vh_agent = vh_results[agent_index] = {}  # Create agent dict on-demand
+        
         if DEBUG:
             print(f"   Human agent {agent_index}")
             # Check if at least one goal is achieved in this state
@@ -207,7 +212,7 @@ def _rp_process_single_state(
                 for human_action_profile_prob, human_action_profile in human_policy_prior.profile_distribution_with_fixed_goal(state, agent_index, possible_goal):
                     action_profile[human_agent_indices] = human_action_profile
                     action_profile_index = (action_profile @ action_powers).item()
-                    _, next_state_probabilities, next_state_indices = transitions[state_index][action_profile_index]
+                    _, next_state_probabilities, next_state_indices = state_transitions[action_profile_index]
                     
                     # Look up attainment values from Phase 1 cache
                     # The slice_cache is pre-populated with all values for this batch from Phase 1
@@ -234,17 +239,20 @@ def _rp_process_single_state(
                     vhe_values_array = np.fromiter(
                         (Vh_values[next_state_index][agent_index].get(possible_goal, 0)
                          for next_state_index in next_state_indices),
-                        dtype=np.float64,
+                        dtype=np.float16,
                         count=len(next_state_indices)
                     )
                     # Use np.where to avoid intermediate array allocation
+                    # NumPy automatically promotes float16 to float64 during computation
                     v += human_action_profile_prob * np.dot(
                         next_state_probabilities,
                         np.where(attainment_values_array, 1.0, gamma_h * vhe_values_array)
                     )
                 vh += ps[robot_action_profile_index] * v
             
-            vh_results[agent_index][possible_goal] = vh
+            # Sparse storage: only store non-zero values (convert to float16 only when storing)
+            if vh != 0.0:
+                vh_agent[possible_goal] = np.float16(vh)
             xh += possible_goal_weight * vh**zeta
             
             if DEBUG:
@@ -317,9 +325,10 @@ def _rp_compute_sequential(
     total_states = len(states)
     
     # In sequential mode, we use a single slice containing all states
-    # Retrieve the slice cache populated by Phase 1 (not create a new empty one!)
+    # Retrieve the slice cache populated by Phase 1 (only has non-terminal states)
     slice_cache: Optional[SliceCache] = None
     if sliced_cache is not None:
+        # Phase 1 only created entries for non-terminal states
         all_state_indices = list(range(len(states)))
         slice_id = make_slice_id(all_state_indices)
         slice_cache = sliced_cache.get_slice(slice_id)
@@ -329,6 +338,8 @@ def _rp_compute_sequential(
     archived_levels: Set[int] = set()  # Track already-archived levels
     previous_level: Optional[int] = None  # Track level transitions
     if level_fct is not None and archive_dir is not None:
+        if not quiet:
+            print("Computing dependency levels for archival...")
         from .helpers import compute_dependency_levels_fast, detect_archivable_levels, archive_value_slices
         from pathlib import Path
         # Build successors list - handle disk_dag case
@@ -365,58 +376,18 @@ def _rp_compute_sequential(
                 successors.append(list(succ_set))
         _, max_successor_levels, _ = compute_dependency_levels_fast(states, level_fct, successors)
     
+    # Pre-compute state levels if archival is enabled (to avoid calling level_fct for every state)
+    state_levels: Optional[List[int]] = None
+    if level_fct is not None and archive_dir is not None:
+        state_levels = [level_fct(s) for s in states]
+    
     # loop over the nodes in reverse topological order:
     for state_index in range(len(states)-1, -1, -1):
         state = states[state_index]
         
-        # Load disk slice if using disk_dag
-        if disk_dag is not None and level_fct is not None:
-            current_level = level_fct(state)
-            # Check if we need to load a new slice
-            if previous_level is None or current_level != previous_level:
-                # Unload previous slice
-                if previous_level is not None:
-                    disk_dag.unload_slice(previous_level)
-                # Load new slice
-                dag_slice = disk_dag.load_slice(current_level)
-                # Build transitions list for this timestep
-                transitions = []
-                for i in range(len(states)):
-                    if i in dag_slice.state_indices:
-                        transitions.append(dag_slice.get_transitions(i))
-                    else:
-                        transitions.append([])  # Empty for states not in this timestep
-        
-        # Use unified helper
-        assert transitions is not None, "transitions must be loaded"
-        vh_results, vr_result, p_result = _rp_process_single_state(
-            state_index, state, states, transitions, Vh_values, Vr_values,
-            human_agent_indices, robot_agent_indices, robot_action_profiles,
-            possible_goal_generator, num_agents, num_actions, action_powers,
-            human_policy_prior, beta_r, gamma_h, gamma_r, zeta, xi, eta, terminal_Vr,
-            slice_cache=slice_cache,
-        )
-        
-        # Store results
-        for agent_index, agent_vh in vh_results.items():
-            Vh_values[state_index][agent_index].update(agent_vh)
-        
-        Vr_values[state_index] = vr_result
-        
-        if p_result is not None:
-            robot_policy[state] = p_result
-        
-        # Check memory and update progress AFTER processing each state
-        states_processed = total_states - state_index
-        if memory_monitor is not None:
-            memory_monitor.check(states_processed)
-        if progress_callback is not None:
-            progress_callback(states_processed, total_states)
-        
-        # Archive if we just completed a level transition and archive_dir is set
-        if archive_dir is not None and level_fct is not None and max_successor_levels is not None:
-            current_state_level = level_fct(state)
-            # Only check for archival when we transition to a new level
+        # Check for level transition BEFORE processing state (for archival)
+        if state_levels is not None and max_successor_levels is not None:
+            current_state_level = state_levels[state_index]
             if previous_level is not None and current_state_level != previous_level:
                 # We just completed processing previous_level, check what can be archived
                 archivable = detect_archivable_levels(current_state_level, max_successor_levels, quiet=quiet)
@@ -440,6 +411,55 @@ def _rp_compute_sequential(
                     )
                     archived_levels.update(new_archivable)
             previous_level = current_state_level
+        
+        # Load disk slice if using disk_dag
+        if disk_dag is not None and level_fct is not None:
+            current_level = level_fct(state)
+            # Check if we need to load a new slice
+            if previous_level is None or current_level != previous_level:
+                # Unload previous slice
+                if previous_level is not None:
+                    disk_dag.unload_slice(previous_level)
+                # Load new slice
+                dag_slice = disk_dag.load_slice(current_level)
+                previous_level = current_level
+            
+            # Get transitions for current state only (phase1 approach)
+            if state_index in dag_slice.state_indices:
+                state_transitions = dag_slice.get_transitions(state_index)
+            else:
+                state_transitions = []
+        else:
+            # Normal mode: get from transitions list
+            assert transitions is not None, "transitions must be loaded"
+            state_transitions = transitions[state_index]
+        
+        # Use unified helper
+        vh_results, vr_result, p_result = _rp_process_single_state(
+            state_index, state, states, state_transitions, Vh_values, Vr_values,
+            human_agent_indices, robot_agent_indices, robot_action_profiles,
+            possible_goal_generator, num_agents, num_actions, action_powers,
+            human_policy_prior, beta_r, gamma_h, gamma_r, zeta, xi, eta, terminal_Vr,
+            slice_cache=slice_cache,
+        )
+        
+        # Store results
+        for agent_index, agent_vh in vh_results.items():
+            Vh_values[state_index][agent_index].update(agent_vh)
+        
+        Vr_values[state_index] = vr_result
+        
+        if p_result is not None:
+            robot_policy[state] = p_result
+        
+        # Update progress first (lightweight)
+        states_processed = total_states - state_index
+        if progress_callback is not None:
+            progress_callback(states_processed, total_states)
+        
+        # Check memory less frequently to reduce overhead
+        if memory_monitor is not None:
+            memory_monitor.check(states_processed)
     
     # Final archival check: archive any remaining levels after loop completes
     if archive_dir is not None and level_fct is not None:
@@ -582,11 +602,12 @@ def _rp_process_state_batch(
     
     for state_index in state_indices:
         state = states[state_index]
+        state_transitions = transitions[state_index]
         
         # Use unified helper with slice_cache pre-populated by Phase 1
         # The sliced_cache is no longer needed for lookup since slice_cache has all data
         vh_results_state, vr_result, p_result = _rp_process_single_state(
-            state_index, state, states, transitions, Vh_values, Vr_values,
+            state_index, state, states, state_transitions, Vh_values, Vr_values,
             human_agent_indices, robot_agent_indices, robot_action_profiles,
             possible_goal_generator, num_agents, num_actions, action_powers,
             human_policy_prior, beta_r, gamma_h, gamma_r, zeta, xi, eta, terminal_Vr,
@@ -998,6 +1019,16 @@ def compute_robot_policy(
     Vh_values: VhValues = [[{} for _ in range(num_agents)] for _ in range(len(states))]
     Vr_values: VrValues = np.zeros(len(states))
     
+    # ============================================================================
+    # WARN if parallel mode was requested
+    # ============================================================================
+    if parallel:
+        if not quiet:
+            print("WARNING: Parallel mode is currently disabled due to bugs.")
+            print("         Running in sequential mode instead.")
+            print("         See docs/plans/bwind_parallel.md for status.")
+        parallel = False  # Force to sequential
+    
     # Get sliced attainment cache: prioritize explicit parameter, then world_model cache, then create new
     num_action_profiles = num_actions ** num_agents
     if sliced_cache is None:
@@ -1012,8 +1043,14 @@ def compute_robot_policy(
         # Create empty sliced cache for Phase 2 internal use
         sliced_cache = SlicedAttainmentCache(num_action_profiles)
     
-    if parallel and len(states) > 1:
-        # Parallel execution using shared memory via fork
+    # ============================================================================
+    # PARALLEL CODE TEMPORARILY DISABLED
+    # The parallel implementation is currently broken and needs refactoring.
+    # See docs/plans/bwind_parallel.md for the refactoring plan.
+    # The code below is kept for reference but will not execute.
+    # ============================================================================
+    if False:  # Was: if parallel and len(states) > 1:
+        # DISABLED: Parallel execution using shared memory via fork
         if disk_dag is not None:
             raise ValueError("Parallel mode does not support disk slicing yet. Use parallel=False with use_disk_slicing=True.")
         
@@ -1087,18 +1124,20 @@ def compute_robot_policy(
             
             if len(level) <= num_workers:
                 # Few states - process sequentially to avoid overhead
-                # Create a slice cache for inline processing
+                # Create a slice cache for inline processing, but only for non-terminal states
                 inline_slice_cache: SliceCache = {
                     state_idx: [{} for _ in range(num_action_profiles)]
                     for state_idx in level
+                    if transitions[state_idx]  # Skip terminal states (no transitions)
                 }
                 
                 for state_index in level:
                     state = states[state_index]
+                    state_transitions = transitions[state_index]
                     
                     # Use unified helper
                     vh_results, vr_result, p_result = _rp_process_single_state(
-                        state_index, state, states, transitions, Vh_values, Vr_values,
+                        state_index, state, states, state_transitions, Vh_values, Vr_values,
                         human_agent_indices, robot_agent_indices, robot_action_profiles,
                         possible_goal_generator, num_agents, num_actions, action_powers,
                         human_policy_prior, beta_r, gamma_h, gamma_r, zeta, xi, eta, terminal_Vr,
@@ -1224,15 +1263,23 @@ def compute_robot_policy(
                 verbose=not quiet,
                 enabled=True
             )
-        _rp_compute_sequential(
-            states, Vh_values, Vr_values, robot_policy_values, transitions,
-            human_agent_indices, robot_agent_indices, possible_goal_generator,
-            num_agents, num_actions, action_powers,
-            human_policy_prior, beta_r, gamma_h, gamma_r, zeta, xi, eta, terminal_Vr,
-            progress_callback, memory_monitor,
-            sliced_cache,
-            level_fct, return_values, archive_dir, disk_dag, quiet,
-        )
+        
+        try:
+            _rp_compute_sequential(
+                states, Vh_values, Vr_values, robot_policy_values, transitions,
+                human_agent_indices, robot_agent_indices, possible_goal_generator,
+                num_agents, num_actions, action_powers,
+                human_policy_prior, beta_r, gamma_h, gamma_r, zeta, xi, eta, terminal_Vr,
+                progress_callback, memory_monitor,
+                sliced_cache,
+                level_fct, return_values, archive_dir, disk_dag, quiet,
+            )
+        except KeyboardInterrupt:
+            if not quiet:
+                print("\n[Phase2] Computation interrupted (KeyboardInterrupt).")
+                print("         Partial results have been computed.")
+            # Re-raise to allow caller to handle
+            raise
 
     robot_policy = TabularRobotPolicy(
         world_model=world_model, 

@@ -731,10 +731,10 @@ class SlicedList(Generic[T]):
         if slice_data is None:
             return  # Already archived
         
-        # Append to file using pickle
+        # Append to file using pickle protocol 5 for zero-copy of buffers
         filepath.parent.mkdir(parents=True, exist_ok=True)
         with open(filepath, 'ab') as f:
-            pickle.dump({'level_value': level_value, 'data': slice_data}, f)
+            pickle.dump({'level_value': level_value, 'data': slice_data}, f, protocol=5)
         
         # Clear from memory if requested
         if clear_memory:
@@ -801,6 +801,10 @@ def archive_value_slices(
     organized by level value. Used for memory-efficient backward induction
     with disk slicing.
     
+    Memory optimization: Uses pickle protocol 5 and incremental writing (one state at a time)
+    to avoid creating large intermediate copies during serialization. This prevents
+    memory spikes when archiving large value function slices.
+    
     Args:
         values: Value function array indexed by state. Can be List[List[Dict[goal, float]]]
                 for vh_values/vr_values or List[Dict[goal, float]] for vhe_values.
@@ -832,17 +836,20 @@ def archive_value_slices(
         if not state_indices:
             continue
         
-        # Extract values for this level
-        level_data = [values[state_idx] for state_idx in state_indices]
-        
-        # Append to file
+        # Append to file using protocol 5 for zero-copy of buffers
+        # Write incrementally to avoid creating large intermediate dict
         filepath.parent.mkdir(parents=True, exist_ok=True)
         with open(filepath, 'ab') as f:
+            # Write header with metadata
             pickle.dump({
                 'level_value': level_val,
                 'state_indices': state_indices,
-                'data': level_data
-            }, f)
+                'num_states': len(state_indices)
+            }, f, protocol=5)
+            
+            # Write data incrementally (one state at a time) to avoid copying entire slice
+            for state_idx in state_indices:
+                pickle.dump(values[state_idx], f, protocol=5)
         
         total_states += len(state_indices)
         
@@ -859,4 +866,41 @@ def archive_value_slices(
     if not quiet:
         clear_msg = " (cleared from memory)" if not return_values else ""
         print(f"    Archived {total_states} states from {len(archivable_levels)} level(s) to {filepath.name}{clear_msg}")
+
+
+def load_archived_value_slices(filepath: Path):
+    """Generator that yields (level_value, state_indices, data) from archived file.
+    
+    Supports both old format (monolithic 'data' field) and new format (incremental writes).
+    
+    Args:
+        filepath: Path to the archived value slices file
+        
+    Yields:
+        Tuple of (level_value, state_indices, data) where data is a list of values per state
+    """
+    if not filepath.exists():
+        return
+    
+    with open(filepath, 'rb') as f:
+        while True:
+            try:
+                # Load metadata header
+                header = pickle.load(f)
+                level_value = header['level_value']
+                state_indices = header['state_indices']
+                
+                # Check if old format (monolithic) or new format (incremental)
+                if 'data' in header:
+                    # Old format: all data in header
+                    yield level_value, state_indices, header['data']
+                else:
+                    # New format: read num_states individual pickles
+                    num_states = header['num_states']
+                    data = []
+                    for _ in range(num_states):
+                        data.append(pickle.load(f))
+                    yield level_value, state_indices, data
+            except EOFError:
+                break
 
