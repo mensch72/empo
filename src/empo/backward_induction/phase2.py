@@ -47,6 +47,9 @@ from .helpers import (
     compute_dependency_levels_general,
     compute_dependency_levels_fast,
     split_into_batches,
+    SlicedList,
+    detect_archivable_levels,
+    archive_value_slices,
 )
 from .phase1 import compute_human_policy_prior
 
@@ -816,16 +819,24 @@ def compute_robot_policy(
         if not quiet:
             print(f"Using parallel execution with {num_workers} workers")
         
-        # Compute dependency levels
+        # Compute dependency levels and max successor levels for archival
         dependency_levels: List[List[int]]
+        max_successor_levels: Optional[Dict[int, int]] = None
+        level_values_list: Optional[List[int]] = None
         if level_fct is not None:
             if not quiet:
                 print("Using fast level computation with provided level function")
-            dependency_levels = compute_dependency_levels_fast(states, level_fct)
+            # Always pass successors=None for now since phase2 doesn't support disk slicing yet
+            # TODO: Enable successors parameter when disk slicing is implemented for phase2
+            dependency_levels, max_successor_levels, level_values_list = compute_dependency_levels_fast(
+                states, level_fct, successors=None
+            )
         else:
             if not quiet:
                 print("Using general level computation")
             dependency_levels = compute_dependency_levels_general(successors)
+            max_successor_levels = None
+            level_values_list = None
         
         if not quiet:
             print(f"Computed {len(dependency_levels)} dependency levels")
@@ -947,6 +958,19 @@ def compute_robot_policy(
             if progress_callback:
                 states_processed = sum(len(lvl) for lvl in dependency_levels[:level_idx + 1])
                 progress_callback(states_processed, len(states))
+            
+            # TODO: Archive completed levels when disk slicing is implemented for Phase 2
+            # When disk slicing support is added to phase2 (adding use_disk_slicing parameter
+            # and disk_dag initialization like in phase1), enable archival:
+            # if disk_dag is not None and max_successor_levels is not None and level_values_list is not None:
+            #     current_level_value = level_values_list[level_idx]
+            #     archivable = detect_archivable_levels(current_level_value, max_successor_levels)
+            #     if archivable:
+            #         archive_value_slices(Vh_values, states, level_fct, archivable,
+            #                             disk_dag.cache_path / "vh_values.pkl", return_values)
+            #         vr_list = [[Vr_values[i]] for i in range(len(Vr_values))]
+            #         archive_value_slices(vr_list, states, level_fct, archivable,
+            #                             disk_dag.cache_path / "vr_values.pkl", return_values)
         
         # Clean up shared memory after parallel processing
         cleanup_shared_dag()

@@ -848,8 +848,9 @@ def main(
         parallel=parallel,
         num_workers=num_workers,
         return_Vh=True,
-        use_disk_slicing=True,  # Enable RAM-based caching (auto-detects /dev/shm)
+        use_disk_slicing=True,  # Enable disk-based caching (auto-detects /dev/shm)
         level_fct=lambda state: state[0],  # Extract timestep from MultiGrid state
+        archive_dir=output_dir,  # Save archived values to output directory
     )
     t1 = time.time()
     

@@ -358,6 +358,43 @@ The current implementation supports training on multiple gridworld configuration
 
 ---
 
+## Phase 1 Backward Induction Issues
+
+### P1-BUG-001: Parallel disk mode fails with TypeError: 'NoneType' object is not callable
+**Priority:** Medium  
+**Location:** `src/empo/backward_induction/phase1.py` (parallel disk-sliced mode)  
+**Description:**  
+When running backward induction in parallel disk-sliced mode (`parallel=True, use_disk_slicing=True`), workers fail with `TypeError: 'NoneType' object is not callable` when trying to call `believed_others_policy`.
+
+The issue occurs in `_hpp_process_timestep_batch_disk()` where worker processes attempt to use `believed_others_policy`, but the function is not properly shared with workers. The workers receive `None` for the policy, causing the error when it's called in `_hpp_process_single_state()`.
+
+**Error trace:**
+```python
+File "src/empo/backward_induction/phase1.py", line 608, in _hpp_process_timestep_batch_disk
+    state_v_results, state_p_results = _hpp_process_single_state(...)
+File "src/empo/backward_induction/phase1.py", line 170, in _hpp_process_single_state
+    for action_profile_prob, action_profile in believed_others_policy(state, agent_index, action):
+TypeError: 'NoneType' object is not callable
+```
+
+**Impact:**
+- Parallel disk mode is currently broken for backward induction
+- Sequential disk mode works correctly
+- Parallel in-memory mode works correctly
+- Sequential in-memory mode works correctly
+
+**Discovered:** 2026-01-08 during archival mechanism testing
+
+**Workaround:** Use one of the working modes:
+- Sequential with disk slicing: `parallel=False, use_disk_slicing=True`
+- Parallel without disk slicing: `parallel=True, use_disk_slicing=False`
+- Sequential without disk slicing: `parallel=False, use_disk_slicing=False`
+
+**Suggested fix:**
+The `believed_others_policy` (or its pickled version) needs to be properly passed to worker processes in the parallel disk mode, similar to how it's done in the regular parallel mode via `_shared_believed_others_policy_pickle`.
+
+---
+
 ## Review Summary
 
 ### Phase 2 Training Code Review (2024-12-29)
