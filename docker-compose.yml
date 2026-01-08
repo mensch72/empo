@@ -18,6 +18,8 @@ services:
     volumes:
       - .:/workspace
       - pip-cache:/home/appuser/.cache/pip
+      # Mount host's tmpfs for RAM-based DAG slicing (Linux only, ignored on Mac/Windows)
+      - /dev/shm:/dev/shm:rw
     
     stdin_open: true
     tty: true
@@ -46,6 +48,7 @@ services:
     container_name: ollama
     profiles:
       - hierarchical
+    shm_size: '2gb'  # Shared memory for LLM inference
     ports:
       - "11434:11434"
     volumes:

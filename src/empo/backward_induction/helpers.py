@@ -39,6 +39,8 @@ class SlicedAttainmentCache:
     These are stored separately (not merged) and accessed by slice_id.
     Both Phase 1 and Phase 2 use the same slice assignments for consistency.
     
+    Can optionally use disk-based storage via DiskBasedDAG to avoid memory overhead.
+    
     Structure:
         slices[slice_id] = SliceCache
         SliceCache[state_index][action_profile_index][goal] = attainment_array
@@ -52,6 +54,7 @@ class SlicedAttainmentCache:
         """
         self.num_action_profiles = num_action_profiles
         self.slices: Dict[SliceId, SliceCache] = {}
+        self._disk_dag: Optional[Any] = None  # Optional DiskBasedDAG for disk storage
     
     def create_slice_cache(self, state_indices: List[int]) -> SliceCache:
         """Create an empty slice cache for given state indices.
@@ -98,9 +101,20 @@ class SlicedAttainmentCache:
         Returns:
             Cached attainment array if found, None otherwise
         """
+        # First check in-memory slices
         for slice_cache in self.slices.values():
             if state_index in slice_cache:
-                return slice_cache[state_index][action_profile_index].get(goal)
+                result = slice_cache[state_index][action_profile_index].get(goal)
+                if result is not None:
+                    return result
+        
+        # If using disk storage, try loading from disk
+        if self._disk_dag is not None and hasattr(self._disk_dag, 'load_cache_slice'):
+            # Try to find which timestep contains this state
+            # This requires level_fct - for now, just return None
+            # Phase 2 will need to handle disk cache lookup differently
+            pass
+        
         return None
     
     def total_entries(self) -> int:
@@ -538,9 +552,24 @@ def compute_dependency_levels_general(successors: List[List[int]]) -> List[List[
 
 def compute_dependency_levels_fast(
     states: List[State], 
-    level_fct: Callable[[State], int]
-) -> List[List[int]]:
-    """Compute dependency levels using level function for faster computation."""
+    level_fct: Callable[[State], int],
+    successors: Optional[List[List[int]]] = None
+) -> Tuple[List[List[int]], Optional[List[int]]]:
+    """Compute dependency levels using level function for faster computation.
+    
+    Args:
+        states: List of states to compute levels for
+        level_fct: Function mapping state to its level value
+        successors: Optional list of successor state indices for each state.
+                   If provided, also computes max successor levels.
+    
+    Returns:
+        Tuple of:
+        - levels: List of levels, where each level is a list of state indices
+        - max_successor_levels: If successors provided, list parallel to levels
+          where each entry is the max level value of any successor of states
+          in that level. None if successors not provided.
+    """
     # Compute level values for all states
     level_values: List[int] = [level_fct(state) for state in states]
     
@@ -550,8 +579,22 @@ def compute_dependency_levels_fast(
         level_groups[level_val].append(state_idx)
     
     # Sort by level value (highest first for backward induction)
+    # Note: state indices within each level are already sorted by construction
     sorted_levels = sorted(level_groups.keys(), reverse=True)
-    return [level_groups[level_val] for level_val in sorted_levels]
+    levels = [level_groups[level_val] for level_val in sorted_levels]
+    
+    # Compute max successor level for each level if successors provided
+    max_successor_levels: Optional[List[int]] = None
+    if successors is not None:
+        max_successor_levels = []
+        for level in levels:
+            max_succ_level = -1  # Default if no successors
+            for state_idx in level:
+                for succ_idx in successors[state_idx]:
+                    max_succ_level = max(max_succ_level, level_values[succ_idx])
+            max_successor_levels.append(max_succ_level)
+    
+    return levels, max_successor_levels
 
 
 def split_into_batches(items: List[int], num_batches: Optional[int]) -> List[List[int]]:

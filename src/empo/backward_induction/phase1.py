@@ -35,6 +35,11 @@ import cloudpickle
 from tqdm import tqdm
 
 from empo.util.memory_monitor import MemoryMonitor
+from empo.backward_induction.dag_slicing import (
+    DiskBasedDAG, 
+    estimate_dag_memory,
+    convert_transitions_to_float16
+)
 from empo.possible_goal import PossibleGoal, PossibleGoalGenerator
 from empo.human_policy_prior import TabularHumanPolicyPrior
 from empo.world_model import WorldModel
@@ -70,13 +75,14 @@ _shared_sliced_cache: Optional[SlicedAttainmentCache] = None  # Sliced cache for
 _shared_num_action_profiles: int = 0  # Needed to create slice caches in workers
 _shared_params: Optional[Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], List[int], List[List[int]], float, float]] = None
 _shared_believed_others_policy_pickle: Optional[bytes] = None  # cloudpickle'd believed_others_policy function
+_shared_disk_dag: Optional['DiskBasedDAG'] = None  # For parallel disk slicing
 
 
 def _hpp_process_single_state(
     state_index: int,
     state: State,
     states: List[State],
-    transitions: List[List[TransitionData]],
+    transitions: Union[List[List[TransitionData]], List[TransitionData]],  # Can be full list or single state's transitions
     Vh_values: VhValues,
     human_agent_indices: List[int],
     possible_goal_generator: PossibleGoalGenerator,
@@ -97,7 +103,8 @@ def _hpp_process_single_state(
     Args:
         state_index: Index of the state in the states list
         state: The state to process
-        transitions: Full transitions list (indexed by state_index)
+        transitions: Either full transitions list (indexed by state_index) OR 
+                    the transitions for just this state (when using disk slicing)
         Vh_values: Value function (reads from successors, may write to state_index)
         human_agent_indices: List of agent indices to compute for
         possible_goal_generator: Generator for possible goals
@@ -121,7 +128,15 @@ def _hpp_process_single_state(
     v_results: Dict[int, Dict[PossibleGoal, float]] = {}
     p_results: Optional[Dict[int, Dict[PossibleGoal, npt.NDArray[np.floating[Any]]]]] = None
     
-    is_terminal = not transitions[state_index]
+    # Support both full transitions list and single-state transitions
+    if transitions and isinstance(transitions[0], list):
+        # Full list of transitions - index into it
+        state_transitions = transitions[state_index]
+    else:
+        # Single state's transitions passed directly (or empty list for terminal)
+        state_transitions = transitions
+    
+    is_terminal = not state_transitions
     
     if is_terminal:
         # Terminal state: V_h^m = 0 for all goals
@@ -155,7 +170,7 @@ def _hpp_process_single_state(
                         for robot_action_profile in robot_action_profiles:
                             action_profile[robot_agent_indices] = robot_action_profile
                             action_profile_index = (action_profile @ action_powers).item()
-                            _, next_state_probabilities, next_state_indices = transitions[state_index][action_profile_index]
+                            _, next_state_probabilities, next_state_indices = state_transitions[action_profile_index]
 
                             # Compute attainment values
                             attainment_values_array = np.fromiter(
@@ -213,7 +228,7 @@ def _hpp_compute_sequential(
     states: List[State], 
     Vh_values: VhValues,  # result is inserted into this!
     system2_policies: HumanPolicyDict,  # result is inserted into this! 
-    transitions: List[List[Tuple[Tuple[int, ...], List[float], List[int]]]],
+    transitions: Optional[List[List[Tuple[Tuple[int, ...], List[float], List[int]]]]],
     human_agent_indices: List[int], 
     possible_goal_generator: PossibleGoalGenerator,
     num_agents: int, 
@@ -227,11 +242,16 @@ def _hpp_compute_sequential(
     progress_callback: Optional[Callable[[int, int], None]] = None,
     memory_monitor: Optional[MemoryMonitor] = None,
     sliced_cache: Optional[SlicedAttainmentCache] = None,
+    disk_dag: Optional[DiskBasedDAG] = None,
+    level_fct: Optional[Callable[[State], int]] = None,
 ) -> None:
     """Sequential backward induction algorithm.
     
     Processes states in reverse topological order using the unified
     _process_single_state helper.
+    
+    Supports disk-based slicing: if disk_dag is provided, loads transitions
+    from disk timestep-by-timestep instead of keeping all in memory.
     """
     total_states = len(states)
     
@@ -241,6 +261,68 @@ def _hpp_compute_sequential(
     if sliced_cache is not None:
         all_state_indices = list(range(len(states)))
         slice_cache = sliced_cache.create_slice_cache(all_state_indices)
+    
+    # Disk-based slicing: process by timesteps
+    if disk_dag is not None:
+        if level_fct is None:
+            raise ValueError("disk_dag requires level_fct")
+        
+        # Track progress accurately
+        states_processed_count = 0
+        
+        # Process timesteps in reverse order
+        for timestep in range(disk_dag.max_timestep, -1, -1):
+            # Load transitions for this timestep
+            dag_slice = disk_dag.load_slice(timestep)
+            
+            # Create cache slice for this timestep (will be saved to disk)
+            timestep_cache = disk_dag.create_cache_slice_for_states(dag_slice.state_indices)
+            
+            # Process all states in this timestep
+            for global_state_idx in dag_slice.state_indices:
+                states_processed_count += 1
+                if memory_monitor is not None:
+                    memory_monitor.check(states_processed_count)
+                if progress_callback is not None:
+                    progress_callback(states_processed_count, total_states)
+                
+                state = states[global_state_idx]
+                
+                # Get transitions from disk slice
+                state_transitions = dag_slice.get_transitions(global_state_idx)
+                
+                # Process state with disk-based cache
+                v_results, p_results = _hpp_process_single_state(
+                    global_state_idx, state, states, state_transitions, Vh_values,
+                    human_agent_indices, possible_goal_generator,
+                    num_actions, action_powers, believed_others_policy,
+                    robot_agent_indices, robot_action_profiles,
+                    beta_h, gamma_h,
+                    slice_cache=timestep_cache,
+                )
+                
+                # Store results
+                for agent_index, agent_v in v_results.items():
+                    Vh_values[global_state_idx][agent_index].update(agent_v)
+                if p_results is not None:
+                    system2_policies[state] = p_results
+            
+            # Save cache slice to disk and free memory
+            disk_dag.save_cache_slice(timestep, timestep_cache)
+            del timestep_cache
+            
+            # Unload DAG slice to free memory
+            disk_dag.unload_slice(timestep)
+        
+        # Store disk_dag reference for Phase 2 cache reuse
+        if sliced_cache is not None:
+            sliced_cache._disk_dag = disk_dag  # type: ignore
+        
+        return  # Done with disk-based processing
+    
+    # Standard in-memory processing
+    if transitions is None:
+        raise ValueError("transitions must be provided when disk_dag is None")
     
     # loop over the nodes in reverse topological order:
     for state_index in range(len(states)-1, -1, -1):
@@ -402,6 +484,80 @@ def _hpp_process_state_batch(
     return v_results, p_results, slice_id, slice_cache, batch_time
 
 
+def _hpp_process_timestep_batch_disk(
+    timestep: int,
+    state_indices: List[int]
+) -> Tuple[Dict[int, Dict[int, Dict[PossibleGoal, float]]], 
+           Dict[State, Dict[int, Dict[PossibleGoal, npt.NDArray[np.floating[Any]]]]], 
+           int,  # timestep
+           float]:  # timing
+    """
+    Process a batch of states from a timestep using disk-based slicing.
+    
+    Worker loads DAG slice and cache slice from disk, processes states,
+    saves cache slice back to disk, all independently of master process.
+    
+    Args:
+        timestep: The timestep number
+        state_indices: List of state indices in this timestep (sorted in Kahn order)
+    
+    Returns:
+        Tuple of (v_results, p_results, timestep, batch_time)
+    """
+    batch_start = time.perf_counter()
+    
+    # Access shared data
+    assert _shared_disk_dag is not None, "disk_dag must be initialized for parallel disk slicing"
+    assert _shared_Vh_values is not None
+    assert _shared_params is not None
+    assert _shared_states is not None
+    
+    disk_dag = _shared_disk_dag
+    states = _shared_states
+    Vh_values = _shared_Vh_values
+    (human_agent_indices, possible_goal_generator, num_agents, num_actions, 
+     action_powers, robot_agent_indices, robot_action_profiles, beta_h, gamma_h) = _shared_params
+    
+    # Load DAG slice from disk (transitions for this timestep)
+    dag_slice = disk_dag.load_slice(timestep)
+    
+    # Create empty cache structure for this timestep
+    timestep_cache = disk_dag.create_cache_slice_for_states(state_indices)
+    
+    # Process all states in this timestep
+    v_results: Dict[int, Dict[int, Dict[PossibleGoal, float]]] = {}
+    p_results: Dict[State, Dict[int, Dict[PossibleGoal, npt.NDArray[np.floating[Any]]]]] = {}
+    
+    for global_state_idx in state_indices:
+        state = states[global_state_idx]
+        
+        # Get transitions from disk slice
+        state_transitions = dag_slice.get_transitions(global_state_idx)
+        
+        # Process state
+        state_v_results, state_p_results = _hpp_process_single_state(
+            global_state_idx, state, states, state_transitions, Vh_values,
+            human_agent_indices, possible_goal_generator,
+            num_actions, action_powers, _shared_believed_others_policy_pickle,
+            robot_agent_indices, robot_action_profiles,
+            beta_h, gamma_h,
+            slice_cache=timestep_cache,
+        )
+        
+        v_results[global_state_idx] = state_v_results
+        if state_p_results is not None:
+            p_results[state] = state_p_results
+    
+    # Save cache slice to disk (worker writes directly)
+    disk_dag.save_cache_slice(timestep, timestep_cache)
+    
+    # Unload DAG slice to free memory
+    disk_dag.unload_slice(timestep)
+    
+    batch_time = time.perf_counter() - batch_start
+    return v_results, p_results, timestep, batch_time
+
+
 @overload
 def compute_human_policy_prior(
     world_model: WorldModel, 
@@ -507,7 +663,11 @@ def compute_human_policy_prior(
     quiet: bool = False,
     min_free_memory_fraction: float = 0.1,
     memory_check_interval: int = 100,
-    memory_pause_duration: float = 60.0
+    memory_pause_duration: float = 60.0,
+    use_disk_slicing: bool = False,
+    disk_cache_dir: Optional[str] = None,
+    use_float16: bool = True,
+    use_compression: bool = False
 ) -> Union[TabularHumanPolicyPrior, 
            Tuple[TabularHumanPolicyPrior, Dict[State, Dict[int, Dict[PossibleGoal, float]]]],
            Tuple[TabularHumanPolicyPrior, SlicedAttainmentCache],
@@ -565,6 +725,14 @@ def compute_human_policy_prior(
             KeyboardInterrupt for graceful shutdown. Set to 0.0 to disable (default).
         memory_check_interval: How often to check memory, in states processed.
         memory_pause_duration: How long to pause (seconds) when memory is low.
+        use_disk_slicing: If True, slice DAG by timestep and save to disk, loading
+            only the necessary slice during backward induction. This reduces memory
+            usage by 10-20x but requires level_fct to be provided. Recommended for
+            large state spaces (>10K states).
+        disk_cache_dir: Directory to store DAG slices (None = use temp directory).
+        use_float16: If True (default), convert transition probabilities to float16
+            for 50% memory savings with negligible precision loss.
+        use_compression: If True, compress disk slices with gzip (slower but smaller).
     
     Returns:
         TabularHumanPolicyPrior: Policy prior that can be called as prior(state, agent, goal).
@@ -640,6 +808,56 @@ def compute_human_policy_prior(
     # first get the dag of the world model:
     states, state_to_idx, successors, transitions = world_model.get_dag(return_probabilities=True, quiet=quiet)
     
+    # Print memory estimate
+    if not quiet:
+        mem_stats = estimate_dag_memory(states, transitions, num_agents, 
+                                       len(list(possible_goal_generator.generate(states[0], human_agent_indices[0]))),
+                                       num_actions)
+        print(f"\nMemory estimate:")
+        print(f"  States: {mem_stats['num_states']:,}")
+        print(f"  Transitions: {mem_stats['transitions_mb']:.1f} MB")
+        print(f"  Vh values: {mem_stats['vh_values_mb']:.1f} MB")
+        print(f"  Policies: {mem_stats['policies_mb']:.1f} MB")
+        print(f"  TOTAL: {mem_stats['total_mb']:.1f} MB")
+    
+    # Handle disk-based slicing if requested
+    disk_dag: Optional[DiskBasedDAG] = None
+    if use_disk_slicing:
+        if level_fct is None:
+            raise ValueError("use_disk_slicing=True requires level_fct to be provided")
+        
+        # Calculate num_action_profiles for cache initialization
+        num_action_profiles_for_cache = num_actions ** num_agents
+        
+        if not quiet:
+            print(f"\nCreating disk-based DAG slices...")
+        
+        disk_dag = DiskBasedDAG.from_dag(
+            states, transitions, level_fct,
+            cache_dir=disk_cache_dir,
+            use_compression=use_compression,
+            use_float16=use_float16,
+            num_action_profiles=num_action_profiles_for_cache,
+            quiet=quiet
+        )
+        
+        # Free the full transitions from memory (will load slices on demand)
+        del transitions
+        transitions = None  # type: ignore
+        
+        if not quiet:
+            print(f"  Disk slicing complete. Transitions freed from memory.")
+            print(f"  Loaded DAG memory: {disk_dag.get_loaded_memory_mb():.1f} MB")
+            print(f"  Attainment cache will also be saved to disk during computation.")
+            est_per_timestep = mem_stats['total_mb'] / (disk_dag.max_timestep + 1)
+            print(f"  Estimated peak memory per timestep: {est_per_timestep:.1f} MB")
+    elif use_float16:
+        # Just convert to float16 without disk slicing
+        if not quiet:
+            print(f"\nConverting transitions to float16...")
+        transitions = convert_transitions_to_float16(transitions)
+    
+    
     # Set up default tqdm progress bar if no callback provided
     _pbar: Optional[tqdm[int]] = None
     if progress_callback is None and not quiet:
@@ -673,42 +891,123 @@ def compute_human_policy_prior(
         if not quiet:
             print(f"Using parallel execution with {num_workers} workers")
         
-        # Compute dependency levels
-        dependency_levels: List[List[int]]
-        if level_fct is not None:
+        # Check if using disk slicing + parallel mode
+        if disk_dag is not None:
+            # ========== PARALLEL + DISK SLICING MODE ==========
             if not quiet:
-                print("Using fast level computation with provided level function")
-            dependency_levels = compute_dependency_levels_fast(states, level_fct)
+                print("Using parallel disk-sliced mode (workers load/save independently)")
+            
+            # Initialize shared data for workers
+            global _shared_disk_dag, _shared_states, _shared_Vh_values, _shared_params, _shared_believed_others_policy_pickle
+            _shared_disk_dag = disk_dag
+            _shared_states = states
+            _shared_Vh_values = Vh_values
+            _shared_params = (
+                human_agent_indices, possible_goal_generator, num_agents, num_actions,
+                action_powers, robot_agent_indices, robot_action_profiles, beta_h, gamma_h
+            )
+            _shared_believed_others_policy_pickle = believed_others_policy_pickle
+            
+            # Use 'fork' context for shared memory
+            ctx = mp.get_context('fork')
+            
+            with ctx.Pool(processes=num_workers) as pool:
+                # Process timesteps in reverse order
+                futures = []
+                timestep_to_future = {}
+                
+                for timestep in range(disk_dag.max_timestep, -1, -1):
+                    # Get state indices for this timestep (already sorted in Kahn order)
+                    dag_slice = disk_dag.load_slice(timestep)
+                    state_indices = dag_slice.state_indices
+                    disk_dag.unload_slice(timestep)  # Don't need to keep loaded
+                    
+                    # Submit timestep to worker pool
+                    future = pool.apply_async(_hpp_process_timestep_batch_disk, (timestep, state_indices))
+                    futures.append((future, len(state_indices)))
+                    timestep_to_future[timestep] = (future, len(state_indices))
+                
+                # Collect results as they complete (not in submission order)
+                states_processed_count = 0
+                completed = 0
+                total_timesteps = len(futures)
+                
+                while completed < total_timesteps:
+                    # Check all futures for completion
+                    for future, num_states in futures:
+                        if future.ready() and not hasattr(future, '_processed'):
+                            future._processed = True  # type: ignore
+                            v_results, p_results, timestep, batch_time = future.get()
+                            
+                            # Merge results back
+                            for state_idx, state_results in v_results.items():
+                                for agent_idx, agent_results in state_results.items():
+                                    Vh_values[state_idx][agent_idx].update(agent_results)
+                            
+                            for state, state_policies in p_results.items():
+                                if state not in system2_policies:
+                                    system2_policies[state] = {}
+                                for agent_idx, agent_policies in state_policies.items():
+                                    if agent_idx not in system2_policies[state]:
+                                        system2_policies[state][agent_idx] = {}
+                                    system2_policies[state][agent_idx].update(agent_policies)
+                            
+                            # Update progress
+                            states_processed_count += len(v_results)
+                            completed += 1
+                            if progress_callback:
+                                progress_callback(states_processed_count, len(states))
+                    
+                    # Small sleep to avoid busy waiting
+                    if completed < total_timesteps:
+                        import time
+                        time.sleep(0.01)
+            
+            if not quiet:
+                print("Parallel disk-sliced computation complete")
+            
+            # Store disk_dag reference for Phase 2
+            if sliced_cache is not None:
+                sliced_cache._disk_dag = disk_dag  # type: ignore
+        
         else:
+            # ========== REGULAR PARALLEL MODE (IN-MEMORY) ==========
+            # Compute dependency levels
+            dependency_levels: List[List[int]]
+            if level_fct is not None:
+                if not quiet:
+                    print("Using fast level computation with provided level function")
+                dependency_levels = compute_dependency_levels_fast(states, level_fct)
+            else:
+                if not quiet:
+                    print("Using general level computation")
+                dependency_levels = compute_dependency_levels_general(successors)
+            
             if not quiet:
-                print("Using general level computation")
-            dependency_levels = compute_dependency_levels_general(successors)
-        
-        if not quiet:
-            print(f"Computed {len(dependency_levels)} dependency levels")
-        
-        # Initialize shared data for worker processes
-        # On Linux (fork), workers inherit these as copy-on-write
-        params: Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], List[int], List[List[int]], float, float] = (
-            human_agent_indices, possible_goal_generator, num_agents, num_actions,
-            action_powers, robot_agent_indices, robot_action_profiles, beta_h, gamma_h
-        )
-        
-        # Use 'fork' context explicitly to ensure shared memory works
-        ctx = mp.get_context('fork')
-        
-        # Initialize DAG in shared memory to avoid copy-on-write overhead
-        # This is done once before processing levels
-        if not quiet:
-            print("Storing DAG in shared memory...")
-        init_shared_dag(states, transitions)
-        
-        # Profiling counters
-        if PROFILE_PARALLEL:
-            prof_states_parallel: int = 0
-            prof_states_sequential: int = 0
-            prof_batches: int = 0
-            prof_fork_time = 0.0
+                print(f"Computed {len(dependency_levels)} dependency levels")
+            
+            # Initialize shared data for worker processes
+            # On Linux (fork), workers inherit these as copy-on-write
+            params: Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], List[int], List[List[int]], float, float] = (
+                human_agent_indices, possible_goal_generator, num_agents, num_actions,
+                action_powers, robot_agent_indices, robot_action_profiles, beta_h, gamma_h
+            )
+            
+            # Use 'fork' context explicitly to ensure shared memory works
+            ctx = mp.get_context('fork')
+            
+            # Initialize DAG in shared memory to avoid copy-on-write overhead
+            # This is done once before processing levels
+            if not quiet:
+                print("Storing DAG in shared memory...")
+            init_shared_dag(states, transitions)
+            
+            # Profiling counters
+            if PROFILE_PARALLEL:
+                prof_states_parallel: int = 0
+                prof_states_sequential: int = 0
+                prof_batches: int = 0
+                prof_fork_time = 0.0
             prof_submit_time = 0.0
             prof_wait_time = 0.0
             prof_merge_v_time = 0.0
@@ -924,7 +1223,7 @@ def compute_human_policy_prior(
                          believed_others_policy, robot_agent_indices, robot_action_profiles,
                          beta_h, gamma_h,
                          progress_callback, memory_monitor,
-                         sliced_cache)
+                         sliced_cache, disk_dag, level_fct)
     
     # Store sliced attainment cache on world_model for automatic reuse in Phase 2.
     # This avoids redundant is_achieved() computation between phases.

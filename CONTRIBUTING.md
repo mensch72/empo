@@ -138,6 +138,15 @@ The codebase uses a **hybrid import strategy** combining absolute and relative i
 - **Relative imports** reduce verbosity for intra-package references
 - This hybrid approach balances readability with practicality
 
+#### ⚠️ Important: Prefer Absolute Imports When Possible
+
+**When modules are moved or refactored, VS Code/Pylance automatically adjusts absolute imports but fails to adjust relative imports.** This can lead to broken imports after refactoring.
+
+For maximum maintainability:
+- Use **absolute imports** whenever practical, especially for frequently-moved modules
+- Reserve **relative imports** for stable intra-package references (e.g., `__init__.py` files)
+- After moving modules, always search for and manually fix relative imports
+
 #### Note on PYTHONPATH
 
 When running examples outside Docker, always set `PYTHONPATH`:

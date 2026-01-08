@@ -25,7 +25,7 @@ Usage:
 Theory Parameters (from EMPO paper):
     --beta_h    Inverse temperature for human policy (default: 10.0)
     --beta_r    Power-law concentration for robot policy (default: 100.0)
-    --gamma_h   Discount factor for human values (default: 0.99)
+    --gamma_h   Discount factor for human values (default: 0.95)
     --gamma_r   Discount factor for robot values (default: 0.99)
     --zeta      Risk-aversion for goal achievement (default: 2.0)
     --xi        Inter-human inequality aversion (default: 1.0)
@@ -36,13 +36,14 @@ Output:
 """
 
 import argparse
+import gc
 import inspect
 import itertools
 import os
 import random
 import sys
 import time
-from typing import List, Tuple, Dict, Optional
+from typing import List, Tuple, Dict, Optional, Any
 
 import numpy as np
 
@@ -75,6 +76,148 @@ ANNOTATION_FONT_SIZE = 12
 
 # Action names for SmallActions (single agent)
 SINGLE_ACTION_NAMES = ['still', 'left', 'right', 'forward']
+
+
+# =============================================================================
+# Memory Profiling Utilities
+# =============================================================================
+
+class MemoryTracker:
+    """Track peak memory usage across multiple checkpoints."""
+    
+    def __init__(self):
+        self.checkpoints = []  # List of (label, {name: size_mb})
+        self.peak_sizes = {}   # name -> max size_mb seen
+    
+    def checkpoint(self, label: str, objects_dict: Dict[str, Any]):
+        """Record memory usage at a checkpoint."""
+        gc.collect()
+        
+        current_sizes = {}
+        for name, obj in objects_dict.items():
+            if obj is None:
+                continue
+            size_bytes = get_deep_size(obj)
+            size_mb = size_bytes / (1024 ** 2)
+            current_sizes[name] = size_mb
+            
+            # Update peak
+            if name not in self.peak_sizes or size_mb > self.peak_sizes[name]:
+                self.peak_sizes[name] = size_mb
+        
+        self.checkpoints.append((label, current_sizes))
+    
+    def print_peak_summary(self, top_n: int = 15):
+        """Print summary of peak memory usage."""
+        print("=" * 70)
+        print("Peak Memory Usage Summary")
+        print("=" * 70)
+        
+        # Sort by peak size
+        sorted_peaks = sorted(self.peak_sizes.items(), key=lambda x: -x[1])
+        
+        total_peak = sum(size for _, size in sorted_peaks)
+        
+        print(f"Total peak (sum of individual peaks): {total_peak:.1f} MB")
+        print()
+        print(f"Top {top_n} objects by peak memory:")
+        for i, (name, size_mb) in enumerate(sorted_peaks[:top_n], 1):
+            pct = 100 * size_mb / total_peak if total_peak > 0 else 0
+            print(f"  {i:2d}. {name:40s} {size_mb:8.1f} MB ({pct:5.1f}%)")
+        
+        if len(sorted_peaks) > top_n:
+            remaining = sorted_peaks[top_n:]
+            remaining_mb = sum(s[1] for s in remaining)
+            pct = 100 * remaining_mb / total_peak if total_peak > 0 else 0
+            print(f"      ... {len(remaining)} more objects            {remaining_mb:8.1f} MB ({pct:5.1f}%)")
+        print()
+    
+    def print_timeline(self):
+        """Print memory usage over time."""
+        print("=" * 70)
+        print("Memory Usage Timeline")
+        print("=" * 70)
+        
+        for label, sizes in self.checkpoints:
+            total = sum(sizes.values())
+            print(f"{label:40s} {total:8.1f} MB")
+        print()
+
+
+def get_deep_size(obj, seen=None):
+    """
+    Recursively calculate the deep size of an object in bytes.
+    
+    Handles nested dicts, lists, tuples, and basic types.
+    """
+    size = sys.getsizeof(obj)
+    if seen is None:
+        seen = set()
+    
+    obj_id = id(obj)
+    if obj_id in seen:
+        return 0
+    
+    seen.add(obj_id)
+    
+    if isinstance(obj, dict):
+        size += sum(get_deep_size(k, seen) + get_deep_size(v, seen) for k, v in obj.items())
+    elif hasattr(obj, '__dict__'):
+        size += get_deep_size(obj.__dict__, seen)
+    elif hasattr(obj, '__iter__') and not isinstance(obj, (str, bytes, bytearray)):
+        try:
+            size += sum(get_deep_size(i, seen) for i in obj)
+        except TypeError:
+            pass
+    
+    return size
+
+
+def print_memory_profile(label: str, objects_dict: Dict[str, Any], top_n: int = 10):
+    """
+    Print memory usage of objects in a dictionary.
+    
+    Args:
+        label: Description of this profiling point
+        objects_dict: Dict mapping object names to objects to profile
+        top_n: Show top N largest objects
+    """
+    print("=" * 70)
+    print(f"Memory Profile: {label}")
+    print("=" * 70)
+    
+    # Measure each object
+    sizes = []
+    for name, obj in objects_dict.items():
+        if obj is None:
+            continue
+        
+        # Force garbage collection before measurement
+        gc.collect()
+        
+        size_bytes = get_deep_size(obj)
+        size_mb = size_bytes / (1024 ** 2)
+        sizes.append((name, size_mb, size_bytes))
+    
+    # Sort by size descending
+    sizes.sort(key=lambda x: -x[1])
+    
+    total_mb = sum(s[1] for s in sizes)
+    
+    print(f"Total measured: {total_mb:.1f} MB")
+    print()
+    print(f"Top {top_n} largest objects:")
+    for i, (name, size_mb, size_bytes) in enumerate(sizes[:top_n], 1):
+        pct = 100 * size_mb / total_mb if total_mb > 0 else 0
+        print(f"  {i:2d}. {name:30s} {size_mb:8.1f} MB ({pct:5.1f}%)")
+    
+    if len(sizes) > top_n:
+        remaining = sizes[top_n:]
+        remaining_mb = sum(s[1] for s in remaining)
+        pct = 100 * remaining_mb / total_mb if total_mb > 0 else 0
+        print(f"      ... {len(remaining)} more objects    {remaining_mb:8.1f} MB ({pct:5.1f}%)")
+    
+    print()
 
 
 # =============================================================================
@@ -119,14 +262,15 @@ def create_trivial_env(max_steps: int = 5) -> MultiGridEnv:
     return env
 
 
-def create_env_from_world(world_path: str, max_steps: int = 5) -> MultiGridEnv:
+def create_env_from_world(world_path: str, max_steps: Optional[int] = None) -> MultiGridEnv:
     """
     Create an environment from a YAML world file.
     
     Args:
         world_path: Path relative to multigrid_worlds/, e.g., "basic/two_agents"
                    (.yaml extension is optional)
-        max_steps: Maximum steps per episode (overrides config file value)
+        max_steps: Maximum steps per episode (None to use config file value,
+                   or int to override it)
     
     Returns:
         MultiGridEnv loaded from the config file.
@@ -145,12 +289,12 @@ def create_env_from_world(world_path: str, max_steps: int = 5) -> MultiGridEnv:
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"World file not found: {config_path}")
     
-    env = MultiGridEnv(
-        config_file=config_path,
-        max_steps=max_steps,
-        partial_obs=False,
-        actions_set=SmallActions
-    )
+    # Only pass max_steps if explicitly provided (otherwise use config default)
+    kwargs = {'config_file': config_path, 'partial_obs': False, 'actions_set': SmallActions}
+    if max_steps is not None:
+        kwargs['max_steps'] = max_steps
+    
+    env = MultiGridEnv(**kwargs)
     return env
 
 
@@ -506,13 +650,13 @@ def get_all_functions_from_module(module, _seen=None):
 
 
 def main(
-    max_steps: int = 5,
+    max_steps: Optional[int] = None,
     num_rollouts: int = 20,
     parallel: bool = True,
     num_workers: Optional[int] = 4,
     beta_h: float = 10.0,
     beta_r: float = 100.0,
-    gamma_h: float = 0.99,
+    gamma_h: float = 0.95,
     gamma_r: float = 0.99,
     zeta: float = 2.0,
     xi: float = 1.0,
@@ -528,10 +672,39 @@ def main(
     robot_idx: Optional[int] = None,
     profile: bool = False,
 ):
-    """Run Phase 2 backward induction demo."""
+    """
+    Run Phase 2 backward induction demo.
+    
+    Args:
+        max_steps: Maximum timesteps per episode (None to use environment default,
+                   or int to override).
+        num_rollouts: Number of rollout episodes to record.
+        parallel: Use parallel DAG computation.
+        num_workers: Number of worker processes for parallel mode (None for auto).
+        beta_h: Human policy inverse temperature (theory parameter).
+        beta_r: Robot policy power-law concentration (theory parameter).
+        gamma_h: Human discount factor (theory parameter).
+        gamma_r: Robot discount factor (theory parameter).
+        zeta: Risk aversion for goal achievement (theory parameter).
+        xi: Inter-human inequality aversion (theory parameter).
+        eta: Intertemporal inequality aversion (theory parameter).
+        terminal_Vr: Value of terminal states for robot.
+        goal_weights: Optional dict mapping (x, y) coords to sampling weights.
+        seed: Random seed for reproducibility.
+        output_dir: Directory for output files.
+        movie_fps: Frames per second for output video.
+        save_video_path: Optional path to save individual rollout videos.
+        world_path: Path to custom world YAML (relative to multigrid_worlds/).
+        human_idx: Override human agent index (for custom worlds).
+        robot_idx: Override robot agent index (for custom worlds).
+        profile: Enable line profiling of backward induction functions.
+    """
     # Set random seeds
     random.seed(seed)
     np.random.seed(seed)
+    
+    # Initialize memory tracker
+    memory_tracker = MemoryTracker()
     
     print("=" * 70)
     print("Phase 2 Robot Policy via Backward Induction")
@@ -574,16 +747,28 @@ def main(
     
     # Create output directory
     if output_dir is None:
-        output_dir = os.path.join(os.path.dirname(__file__), '..', 'outputs', 'phase2_backward_induction')
+        # Determine world name suffix
+        world_name = world_path if world_path is not None else 'trivial'
+        # Remove .yaml/.yml extension if present
+        if world_name.endswith('.yaml'):
+            world_name = world_name[:-5]
+        elif world_name.endswith('.yml'):
+            world_name = world_name[:-4]
+        output_dir = os.path.join(os.path.dirname(__file__), '..', 'outputs', 'phase2_backward_induction', world_name)
     os.makedirs(output_dir, exist_ok=True)
     
     # Create environment
     print("Creating environment...")
     if world_path is not None:
         print(f"  Loading world from: {world_path}")
-        env = create_env_from_world(world_path, max_steps=max_steps)
+        if max_steps is not None:
+            env = create_env_from_world(world_path, max_steps=max_steps)
+        else:
+            # Use environment's default max_steps from config
+            env = create_env_from_world(world_path)
     else:
-        env = create_trivial_env(max_steps=max_steps)
+        # Trivial env needs a default if not specified
+        env = create_trivial_env(max_steps=max_steps if max_steps is not None else 5)
     env.reset()
     
     # Override agent indices from CLI if specified
@@ -599,7 +784,7 @@ def main(
         print(f"  Robot (agent {r_idx}): pos={tuple(env.agents[r_idx].pos)}, color={env.agents[r_idx].color}")
     
     print(f"  Grid: {env.width}x{env.height}")
-    print(f"  Max steps: {max_steps}")
+    print(f"  Max steps: {env.max_steps}")
     print(f"  Humans: {len(env.human_agent_indices)}, Robots: {len(env.robot_agent_indices)}")
     print()
     
@@ -633,6 +818,9 @@ def main(
             print(f"  Custom goal weights: {goal_weights}")
     print()
     
+    # Memory checkpoint: After environment setup
+    memory_tracker.checkpoint("After environment setup", {"env": env, "goal_generator": goal_generator})
+    
     # =========================================================================
     # Phase 1: Compute Human Policy Prior
     # =========================================================================
@@ -660,13 +848,63 @@ def main(
         parallel=parallel,
         num_workers=num_workers,
         return_Vh=True,
+        use_disk_slicing=True,  # Enable RAM-based caching (auto-detects /dev/shm)
+        level_fct=lambda state: state[0],  # Extract timestep from MultiGrid state
     )
     t1 = time.time()
     
     print(f"Human policy prior computed in {t1 - t0:.2f} seconds")
     print(f"  States in policy: {len(human_policy_prior.values)}")
     print(f"  States with Vh values: {len(Vh_phase1)}")
+    
+    # Measure Vh_phase1 memory usage
+    import sys
+    total_vh_entries = 0
+    for state in Vh_phase1:
+        for agent_idx in Vh_phase1[state]:
+            total_vh_entries += len(Vh_phase1[state][agent_idx])
+    
+    # Estimate memory: dict overhead + float values
+    # Python dict: ~240 bytes overhead + ~80 bytes per entry
+    # Nested structure: outer dict + agent dicts + goal dicts
+    outer_dict_overhead = 240 + len(Vh_phase1) * 80  # state -> {...}
+    agent_dict_overhead = sum(240 + len(Vh_phase1[s]) * 80 for s in Vh_phase1)  # agent_idx -> {...}
+    goal_dict_overhead = sum(
+        sum(240 + len(Vh_phase1[s][a]) * 80 for a in Vh_phase1[s])
+        for s in Vh_phase1
+    )
+    float_size = total_vh_entries * 8  # 8 bytes per float64
+    
+    total_vh_bytes = outer_dict_overhead + agent_dict_overhead + goal_dict_overhead + float_size
+    total_vh_mb = total_vh_bytes / (1024 ** 2)
+    
+    print(f"  Vh memory usage: {total_vh_mb:.1f} MB ({total_vh_entries:,} entries)")
+    print(f"    Dict overhead: {(outer_dict_overhead + agent_dict_overhead + goal_dict_overhead) / (1024**2):.1f} MB")
+    print(f"    Float data: {float_size / (1024**2):.1f} MB")
     print()
+    
+    # Memory checkpoint: After Phase 1
+    memory_tracker.checkpoint(
+        "After Phase 1 (peak during computation may be higher)",
+        {
+            "Vh_phase1": Vh_phase1,
+            "human_policy_prior.values": human_policy_prior.values,
+            "human_policy_prior": human_policy_prior,
+            "env": env,
+            "goal_generator": goal_generator,
+        }
+    )
+    
+    # Detailed memory profile after Phase 1
+    print_memory_profile(
+        "After Phase 1",
+        {
+            "Vh_phase1": Vh_phase1,
+            "human_policy_prior.values": human_policy_prior.values,
+            "human_policy_prior (object)": human_policy_prior,
+        },
+        top_n=10
+    )
     
     # =========================================================================
     # Phase 2: Compute Robot Policy
@@ -712,6 +950,40 @@ def main(
     print(f"  States with Vh values: {len(Vh_phase2)}")
     print()
     
+    # Memory checkpoint: After Phase 2
+    memory_tracker.checkpoint(
+        "After Phase 2 (peak during computation may be higher)",
+        {
+            "robot_policy.values": robot_policy.values,
+            "robot_policy": robot_policy,
+            "Vr_values": Vr_values,
+            "Vh_phase2": Vh_phase2,
+            "Vh_phase1": Vh_phase1,
+            "human_policy_prior.values": human_policy_prior.values,
+            "human_policy_prior": human_policy_prior,
+            "env": env,
+            "goal_generator": goal_generator,
+        }
+    )
+    
+    # Print peak memory summary
+    memory_tracker.print_peak_summary(top_n=20)
+    memory_tracker.print_timeline()
+    
+    # Detailed memory profile after Phase 2
+    print_memory_profile(
+        "After Phase 2",
+        {
+            "robot_policy.values": robot_policy.values,
+            "robot_policy (object)": robot_policy,
+            "Vr_values": Vr_values,
+            "Vh_phase2": Vh_phase2,
+            "Vh_phase1 (still in memory)": Vh_phase1,
+            "human_policy_prior.values": human_policy_prior.values,
+        },
+        top_n=15
+    )
+    
     # Show some V_r values for initial state
     initial_state = env.get_state()
     if initial_state in Vr_values:
@@ -733,8 +1005,8 @@ def main(
     print("Comparing Vh values: Phase 1 vs Phase 2")
     print("=" * 70)
     print()
-    print("Phase 1 computes Vh assuming UNIFORM RANDOM robot action.")
-    print("Phase 2 computes Vh under the COMPUTED robot policy (which maximizes")
+    print("Phase 1 computes Vh assuming ADVERSARIAL robot actions.")
+    print("Phase 2 computes Vh under the COMPUTED empowering robot policy.")
     print("aggregate human power, not individual goal achievement).")
     print()
     print("Differences arise because:")
@@ -904,8 +1176,8 @@ if __name__ == "__main__":
     )
     
     # Environment options
-    parser.add_argument('--steps', '-s', type=int, default=5,
-                        help='Maximum steps per episode (horizon length)')
+    parser.add_argument('--steps', '-s', type=int, default=None,
+                        help='Maximum steps per episode (overrides environment default)')
     parser.add_argument('--rollouts', '-r', type=int, default=20,
                         help='Number of rollouts to generate')
     parser.add_argument('--world', type=str, default=None,
@@ -923,11 +1195,11 @@ if __name__ == "__main__":
                         help='Number of parallel workers (default: auto)')
     
     # Theory parameters
-    parser.add_argument('--beta_h', type=float, default=2.0,
+    parser.add_argument('--beta_h', type=float, default=10.0,
                         help='Inverse temperature for human policy')
     parser.add_argument('--beta_r', type=float, default=100.0,
                         help='Power-law concentration for robot policy (lower values avoid numerical overflow)')
-    parser.add_argument('--gamma_h', type=float, default=0.99,
+    parser.add_argument('--gamma_h', type=float, default=0.95,
                         help='Discount factor for human values')
     parser.add_argument('--gamma_r', type=float, default=0.99,
                         help='Discount factor for robot values')
