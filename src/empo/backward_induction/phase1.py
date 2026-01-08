@@ -29,7 +29,8 @@ import os
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from itertools import product
-from typing import Optional, Callable, List, Tuple, Dict, Any, Union, overload, Literal
+from pathlib import Path
+from typing import Optional, Callable, List, Tuple, Dict, Any, Union, overload, Literal, Set
 
 import cloudpickle
 from tqdm import tqdm
@@ -1109,16 +1110,6 @@ def compute_human_policy_prior(
                                         quiet=quiet
                                     )
                                     archived_levels.update(new_archivable)
-                                # Only archive levels not yet archived
-                                new_archivable = [l for l in archivable if l not in archived_levels]
-                                if new_archivable:
-                                    archive_filepath = Path(archive_dir) / "vh_values.pkl"
-                                    archive_value_slices(
-                                        Vh_values, states, level_fct, new_archivable,
-                                        archive_filepath, return_values=return_Vh, quiet=quiet,
-                                        archive_dir=Path(archive_dir)
-                                    )
-                                    archived_levels.update(new_archivable)
                     
                     # Small sleep to avoid busy waiting
                     if completed < total_timesteps:
@@ -1128,17 +1119,27 @@ def compute_human_policy_prior(
             if not quiet:
                 print("Parallel disk-sliced computation complete")
             
+            # Final archival check for disk-sliced parallel mode: archive any remaining levels
+            if archive_dir is not None and level_fct is not None and max_successor_levels is not None:
+                all_levels = sorted(set(level_fct(s) for s in states))
+                remaining_levels = [lvl for lvl in all_levels if lvl not in archived_levels]
+                if remaining_levels:
+                    archive_value_slices(
+                        Vh_values, states, level_fct, remaining_levels,
+                        filepath=Path(archive_dir) / "vh_values.pkl",
+                        return_values=return_Vh,
+                        quiet=quiet
+                    )
+                    archived_levels.update(remaining_levels)
+            
             # Store disk_dag reference for Phase 2
             if sliced_cache is not None:
                 sliced_cache._disk_dag = disk_dag  # type: ignore
         
         else:
             # ========== REGULAR PARALLEL MODE (IN-MEMORY) ==========
-            # Import archival helpers if archive_dir is provided
-            archived_levels: Set[int] = set()  # Track already-archived levels
-            if archive_dir is not None:
-                from .helpers import compute_dependency_levels_fast, detect_archivable_levels, archive_value_slices
-                from pathlib import Path
+            # Track already-archived levels
+            archived_levels: Set[int] = set()
             
             # Compute dependency levels and max successor levels for archival
             dependency_levels: List[List[int]]
@@ -1348,17 +1349,6 @@ def compute_human_policy_prior(
                         filepath=Path(archive_dir) / "vh_values.pkl",
                         return_values=return_Vh,
                         quiet=quiet
-                    )
-                    archived_levels.update(new_archivable)
-                archivable = detect_archivable_levels(current_level_value, max_successor_levels, quiet=quiet)
-                # Only archive levels not yet archived
-                new_archivable = [l for l in archivable if l not in archived_levels]
-                if new_archivable:
-                    archive_filepath = Path(archive_dir) / "vh_values.pkl"
-                    archive_value_slices(
-                        Vh_values, states, level_fct, new_archivable,
-                        archive_filepath, return_values=return_Vh, quiet=quiet,
-                        archive_dir=Path(archive_dir)
                     )
                     archived_levels.update(new_archivable)
         

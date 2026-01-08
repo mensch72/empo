@@ -1012,15 +1012,14 @@ def main(
     differences = []
     
     vh_phase1_path = os.path.join(output_dir, "vh_values.pkl")
-    # Phase 2 would archive to a different file or subdirectory
-    # For now, check if it exists (it won't until Phase 2 archiving is implemented)
-    vh_phase2_path = os.path.join(output_dir, "vh_values_phase2.pkl")
+    # Phase 2 archives expected human achievement values (vhe) to vhe_values.pkl
+    vhe_phase2_path = os.path.join(output_dir, "vhe_values.pkl")
     
     if os.path.exists(vh_phase1_path):
         print(f"Phase 1 archived Vh values found at: {vh_phase1_path}")
         
-        if os.path.exists(vh_phase2_path):
-            print(f"Phase 2 archived Vh values found at: {vh_phase2_path}")
+        if os.path.exists(vhe_phase2_path):
+            print(f"Phase 2 archived Vhe values found at: {vhe_phase2_path}")
             print("Comparing slice-by-slice to conserve memory...")
             print("(Loading one slice from each file at a time)")
             print()
@@ -1029,7 +1028,7 @@ def main(
             
             # Iterate through both files in parallel, loading one slice from each at a time
             phase1_gen = load_archived_slices(vh_phase1_path)
-            phase2_gen = load_archived_slices(vh_phase2_path)
+            phase2_gen = load_archived_slices(vhe_phase2_path)
             
             for (level_val1, state_indices1, phase1_data), (level_val2, state_indices2, phase2_data) in zip(phase1_gen, phase2_gen):
                 # Verify slices match
@@ -1101,7 +1100,7 @@ def main(
     
     if differences:
         # Compute statistics
-        diffs_only = [d[5] for d in differences]
+        diffs_only = [d[6] for d in differences]  # diff is at index 6
         mean_diff = np.mean(diffs_only)
         max_diff = max(diffs_only)
         min_diff = min(diffs_only)
@@ -1119,19 +1118,19 @@ def main(
         print()
         
         # Show examples with largest improvements
-        sorted_by_diff = sorted(differences, key=lambda x: -x[5])
+        sorted_by_diff = sorted(differences, key=lambda x: -x[6])
         print("Top 5 entries with largest improvement (Phase2 - Phase1):")
-        for i, (state, agent_idx, goal, vh1, vh2, diff) in enumerate(sorted_by_diff[:5]):
-            print(f"  {i+1}. State={state}")
+        for i, (level_val, state_idx, agent_idx, goal, vh1, vh2, diff) in enumerate(sorted_by_diff[:5]):
+            print(f"  {i+1}. Level={level_val}, State={state_idx}, Agent={agent_idx}")
             print(f"      Goal={goal}, Vh1={vh1:.4f}, Vh2={vh2:.4f}, Δ={diff:+.4f}")
         
         # Show entries where Phase 2 is worse (if any)
         if num_worse > 0:
             print()
             print(f"Entries where Phase2 < Phase1 (robot policy hurts this goal):")
-            sorted_worst = sorted(differences, key=lambda x: x[5])
-            for i, (state, agent_idx, goal, vh1, vh2, diff) in enumerate(sorted_worst[:min(5, num_worse)]):
-                print(f"  {i+1}. State={state}")
+            sorted_worst = sorted(differences, key=lambda x: x[6])
+            for i, (level_val, state_idx, agent_idx, goal, vh1, vh2, diff) in enumerate(sorted_worst[:min(5, num_worse)]):
+                print(f"  {i+1}. Level={level_val}, State={state_idx}, Agent={agent_idx}")
                 print(f"      Goal={goal}, Vh1={vh1:.4f}, Vh2={vh2:.4f}, Δ={diff:+.4f}")
         
     else:
