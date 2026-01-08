@@ -352,8 +352,9 @@ def _hpp_compute_sequential(
                 new_archivable = [lvl for lvl in archivable if lvl not in archived_levels]
                 if new_archivable:
                     archive_value_slices(
-                        Vh_values, new_archivable, level_fct,
-                        archive_dir=Path(archive_dir),
+                        Vh_values, states, level_fct, new_archivable,
+                        filepath=Path(archive_dir) / "vh_values.pkl",
+                        return_values=return_Vh,
                         quiet=False
                     )
                     archived_levels.update(new_archivable)
@@ -432,8 +433,9 @@ def _hpp_compute_sequential(
             new_archivable = [lvl for lvl in archivable if lvl not in archived_levels]
             if new_archivable:
                 archive_value_slices(
-                    Vh_values, new_archivable, level_fct,
-                    archive_dir=Path(archive_dir),
+                    Vh_values, states, level_fct, new_archivable,
+                    filepath=Path(archive_dir) / "vh_values.pkl",
+                    return_values=return_Vh,
                     quiet=False
                 )
                 archived_levels.update(new_archivable)
@@ -451,6 +453,21 @@ def _hpp_compute_sequential(
                         archive_dir=Path(archive_dir)
                     )
                     archived_levels.update(new_archivable)
+    
+    # Final archival check: archive any remaining levels after loop completes
+    if archive_dir is not None and level_fct is not None and max_successor_levels is not None:
+        # Check if there are any levels we haven't archived yet
+        # At this point, all states have been processed, so all levels should be archivable
+        all_levels = sorted(set(level_fct(s) for s in states))
+        remaining_levels = [lvl for lvl in all_levels if lvl not in archived_levels]
+        if remaining_levels:
+            archive_value_slices(
+                Vh_values, states, level_fct, remaining_levels,
+                filepath=Path(archive_dir) / "vh_values.pkl",
+                return_values=return_Vh,
+                quiet=False
+            )
+            archived_levels.update(remaining_levels)
     
     # Store the slice in the sliced cache
     if sliced_cache is not None and slice_cache is not None:
@@ -1086,8 +1103,9 @@ def compute_human_policy_prior(
                                 new_archivable = [lvl for lvl in archivable if lvl not in archived_levels]
                                 if new_archivable:
                                     archive_value_slices(
-                                        Vh_values, new_archivable, level_fct,
-                                        archive_dir=Path(archive_dir),
+                                        Vh_values, states, level_fct, new_archivable,
+                                        filepath=Path(archive_dir) / "vh_values.pkl",
+                                        return_values=return_Vh,
                                         quiet=quiet
                                     )
                                     archived_levels.update(new_archivable)
@@ -1326,8 +1344,9 @@ def compute_human_policy_prior(
                 new_archivable = [lvl for lvl in archivable if lvl not in archived_levels]
                 if new_archivable:
                     archive_value_slices(
-                        Vh_values, new_archivable, level_fct,
-                        archive_dir=Path(archive_dir),
+                        Vh_values, states, level_fct, new_archivable,
+                        filepath=Path(archive_dir) / "vh_values.pkl",
+                        return_values=return_Vh,
                         quiet=quiet
                     )
                     archived_levels.update(new_archivable)
@@ -1383,6 +1402,19 @@ def compute_human_policy_prior(
             if inline_slice_cache:
                 inline_slice_id = make_slice_id(list(inline_slice_cache.keys()))
                 sliced_cache.store_slice(inline_slice_id, inline_slice_cache)
+            
+            # Final archival check for parallel mode: archive any remaining levels
+            if archive_dir is not None and level_fct is not None and max_successor_levels is not None:
+                all_levels = sorted(set(level_fct(s) for s in states))
+                remaining_levels = [lvl for lvl in all_levels if lvl not in archived_levels]
+                if remaining_levels:
+                    archive_value_slices(
+                        Vh_values, states, level_fct, remaining_levels,
+                        filepath=Path(archive_dir) / "vh_values.pkl",
+                        return_values=return_Vh,
+                        quiet=quiet
+                    )
+                    archived_levels.update(remaining_levels)
             
             # Clean up shared memory after parallel processing
             cleanup_shared_dag()

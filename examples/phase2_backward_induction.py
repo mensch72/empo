@@ -43,6 +43,7 @@ import os
 import random
 import sys
 import time
+from pathlib import Path
 from typing import List, Tuple, Dict, Optional, Any
 
 import numpy as np
@@ -757,6 +758,16 @@ def main(
         output_dir = os.path.join(os.path.dirname(__file__), '..', 'outputs', 'phase2_backward_induction', world_name)
     os.makedirs(output_dir, exist_ok=True)
     
+    # Clear old archive files to avoid mixing data from different runs
+    archive_files = [
+        Path(output_dir) / "vh_values.pkl",
+        Path(output_dir) / "vhe_values.pkl",
+        Path(output_dir) / "vr_values.pkl"
+    ]
+    for archive_file in archive_files:
+        if archive_file.exists():
+            archive_file.unlink()
+    
     # Create environment
     print("Creating environment...")
     if world_path is not None:
@@ -838,7 +849,7 @@ def main(
     t0 = time.time()
     if profiler:
         profiler.enable()
-    human_policy_prior, Vh_phase1 = compute_human_policy_prior(
+    human_policy_prior = compute_human_policy_prior(
         world_model=env,
         human_agent_indices=env.human_agent_indices,
         possible_goal_generator=goal_generator,
@@ -847,7 +858,6 @@ def main(
         gamma_h=gamma_h,
         parallel=parallel,
         num_workers=num_workers,
-        return_Vh=True,
         use_disk_slicing=True,  # Enable disk-based caching (auto-detects /dev/shm)
         level_fct=lambda state: state[0],  # Extract timestep from MultiGrid state
         archive_dir=output_dir,  # Save archived values to output directory
@@ -856,39 +866,11 @@ def main(
     
     print(f"Human policy prior computed in {t1 - t0:.2f} seconds")
     print(f"  States in policy: {len(human_policy_prior.values)}")
-    print(f"  States with Vh values: {len(Vh_phase1)}")
-    
-    # Measure Vh_phase1 memory usage
-    import sys
-    total_vh_entries = 0
-    for state in Vh_phase1:
-        for agent_idx in Vh_phase1[state]:
-            total_vh_entries += len(Vh_phase1[state][agent_idx])
-    
-    # Estimate memory: dict overhead + float values
-    # Python dict: ~240 bytes overhead + ~80 bytes per entry
-    # Nested structure: outer dict + agent dicts + goal dicts
-    outer_dict_overhead = 240 + len(Vh_phase1) * 80  # state -> {...}
-    agent_dict_overhead = sum(240 + len(Vh_phase1[s]) * 80 for s in Vh_phase1)  # agent_idx -> {...}
-    goal_dict_overhead = sum(
-        sum(240 + len(Vh_phase1[s][a]) * 80 for a in Vh_phase1[s])
-        for s in Vh_phase1
-    )
-    float_size = total_vh_entries * 8  # 8 bytes per float64
-    
-    total_vh_bytes = outer_dict_overhead + agent_dict_overhead + goal_dict_overhead + float_size
-    total_vh_mb = total_vh_bytes / (1024 ** 2)
-    
-    print(f"  Vh memory usage: {total_vh_mb:.1f} MB ({total_vh_entries:,} entries)")
-    print(f"    Dict overhead: {(outer_dict_overhead + agent_dict_overhead + goal_dict_overhead) / (1024**2):.1f} MB")
-    print(f"    Float data: {float_size / (1024**2):.1f} MB")
-    print()
     
     # Memory checkpoint: After Phase 1
     memory_tracker.checkpoint(
         "After Phase 1 (peak during computation may be higher)",
         {
-            "Vh_phase1": Vh_phase1,
             "human_policy_prior.values": human_policy_prior.values,
             "human_policy_prior": human_policy_prior,
             "env": env,
@@ -900,7 +882,6 @@ def main(
     print_memory_profile(
         "After Phase 1",
         {
-            "Vh_phase1": Vh_phase1,
             "human_policy_prior.values": human_policy_prior.values,
             "human_policy_prior (object)": human_policy_prior,
         },
@@ -925,7 +906,7 @@ def main(
     print()
     
     t0 = time.time()
-    robot_policy, Vr_values, Vh_phase2 = compute_robot_policy(
+    robot_policy = compute_robot_policy(
         world_model=env,
         human_agent_indices=env.human_agent_indices,
         robot_agent_indices=env.robot_agent_indices,
@@ -940,7 +921,8 @@ def main(
         terminal_Vr=terminal_Vr,
         parallel=parallel,
         num_workers=num_workers,
-        return_values=True,
+        level_fct=lambda state: state[0],  # Extract timestep from MultiGrid state
+        archive_dir=output_dir,  # Save archived values to output directory
     )
     if profiler:
         profiler.disable()
@@ -948,7 +930,6 @@ def main(
     
     print(f"Robot policy computed in {t1 - t0:.2f} seconds")
     print(f"  States in policy: {len(robot_policy.values)}")
-    print(f"  States with Vh values: {len(Vh_phase2)}")
     print()
     
     # Memory checkpoint: After Phase 2
@@ -957,9 +938,6 @@ def main(
         {
             "robot_policy.values": robot_policy.values,
             "robot_policy": robot_policy,
-            "Vr_values": Vr_values,
-            "Vh_phase2": Vh_phase2,
-            "Vh_phase1": Vh_phase1,
             "human_policy_prior.values": human_policy_prior.values,
             "human_policy_prior": human_policy_prior,
             "env": env,
@@ -977,20 +955,13 @@ def main(
         {
             "robot_policy.values": robot_policy.values,
             "robot_policy (object)": robot_policy,
-            "Vr_values": Vr_values,
-            "Vh_phase2": Vh_phase2,
-            "Vh_phase1 (still in memory)": Vh_phase1,
             "human_policy_prior.values": human_policy_prior.values,
         },
         top_n=15
     )
     
-    # Show some V_r values for initial state
-    initial_state = env.get_state()
-    if initial_state in Vr_values:
-        print(f"  V_r(initial state): {Vr_values[initial_state]:.4f}")
-    
     # Show robot policy for initial state
+    initial_state = env.get_state()
     policy_dist = robot_policy(initial_state)
     if policy_dist:
         print("  Robot policy at initial state:")
@@ -1015,21 +986,118 @@ def main(
     print("  - But optimizing aggregate power may hurt specific goals (decreases Vh)")
     print()
     
-    # Collect all (state, agent, goal) triples that exist in both
+    # Load archived Vh values from disk ONE SLICE AT A TIME
+    # Phase 1 values are in output_dir/vh_values.pkl
+    # Phase 2 values would be in the same location if Phase 2 archiving is implemented
+    
+    # Helper function to load archived slices one at a time
+    def load_archived_slices(filepath: str):
+        """Generator that yields (level_value, state_indices, data) from archived file."""
+        from pathlib import Path
+        import pickle
+        
+        filepath = Path(filepath)
+        if not filepath.exists():
+            return
+        
+        with open(filepath, 'rb') as f:
+            while True:
+                try:
+                    slice_data = pickle.load(f)
+                    yield slice_data['level_value'], slice_data['state_indices'], slice_data['data']
+                except EOFError:
+                    break
+    
+    # Compare Vh values slice-by-slice
     differences = []
-    for state in Vh_phase1:
-        if state not in Vh_phase2:
-            continue
-        for agent_idx in Vh_phase1[state]:
-            if agent_idx not in Vh_phase2[state]:
-                continue
-            for goal in Vh_phase1[state][agent_idx]:
-                if goal not in Vh_phase2[state][agent_idx]:
+    
+    vh_phase1_path = os.path.join(output_dir, "vh_values.pkl")
+    # Phase 2 would archive to a different file or subdirectory
+    # For now, check if it exists (it won't until Phase 2 archiving is implemented)
+    vh_phase2_path = os.path.join(output_dir, "vh_values_phase2.pkl")
+    
+    if os.path.exists(vh_phase1_path):
+        print(f"Phase 1 archived Vh values found at: {vh_phase1_path}")
+        
+        if os.path.exists(vh_phase2_path):
+            print(f"Phase 2 archived Vh values found at: {vh_phase2_path}")
+            print("Comparing slice-by-slice to conserve memory...")
+            print("(Loading one slice from each file at a time)")
+            print()
+            
+            compared_count = 0
+            
+            # Iterate through both files in parallel, loading one slice from each at a time
+            phase1_gen = load_archived_slices(vh_phase1_path)
+            phase2_gen = load_archived_slices(vh_phase2_path)
+            
+            for (level_val1, state_indices1, phase1_data), (level_val2, state_indices2, phase2_data) in zip(phase1_gen, phase2_gen):
+                # Verify slices match
+                if level_val1 != level_val2:
+                    print(f"  Warning: Level value mismatch: {level_val1} != {level_val2}")
                     continue
-                vh1 = Vh_phase1[state][agent_idx][goal]
-                vh2 = Vh_phase2[state][agent_idx][goal]
-                diff = vh2 - vh1
-                differences.append((state, agent_idx, goal, vh1, vh2, diff))
+                
+                if state_indices1 != state_indices2:
+                    print(f"  Warning: State indices mismatch at level {level_val1}")
+                    continue
+                
+                compared_count += 1
+                print(f"  Comparing slice {compared_count}: level={level_val1}, states={len(state_indices1)}", end='\r')
+                
+                # Compare values for each state in this slice
+                for i in range(len(state_indices1)):
+                    vh1_state = phase1_data[i]  # List[Dict[goal, float]] for each agent
+                    vh2_state = phase2_data[i]
+                    
+                    # Compare across agents and goals
+                    for agent_idx in range(len(vh1_state)):
+                        if agent_idx >= len(vh2_state):
+                            continue
+                        
+                        vh1_agent = vh1_state[agent_idx]
+                        vh2_agent = vh2_state[agent_idx]
+                        
+                        for goal in vh1_agent:
+                            if goal not in vh2_agent:
+                                continue
+                            
+                            vh1 = vh1_agent[goal]
+                            vh2 = vh2_agent[goal]
+                            diff = vh2 - vh1
+                            differences.append((level_val1, state_indices1[i], agent_idx, goal, vh1, vh2, diff))
+            
+            print()  # Clear progress line
+            print(f"Compared {compared_count} slices with {len(differences)} (level, state_idx, agent, goal) entries")
+            print()
+        else:
+            # Count Phase 1 slices
+            slice_count = 0
+            total_states = 0
+            for level_val, state_indices, level_data in load_archived_slices(vh_phase1_path):
+                slice_count += 1
+                total_states += len(state_indices)
+            
+            print(f"  Archive contains {slice_count} level slices with {total_states} total states")
+            print()
+            
+            # Check if Phase 2 archives exist
+            vhe_path = Path(output_dir) / "vhe_values.pkl"
+            vr_path = Path(output_dir) / "vr_values.pkl"
+            if vhe_path.exists() and vr_path.exists():
+                print(f"  Phase 2 archives found:")
+                print(f"    vhe_values.pkl (expected human achievement)")
+                print(f"    vr_values.pkl (robot values)")
+                print()
+            else:
+                print("  Note: Phase 2 archives (vhe_values.pkl, vr_values.pkl) not found.")
+                print("  Phase 2 archival is enabled but may not have saved yet.")
+                print()
+            differences = []
+    else:
+        print(f"  Phase 1 archived values not found at: {vh_phase1_path}")
+        print("  Skipping Vh comparison.")
+        print()
+        differences = []
     
     if differences:
         # Compute statistics
@@ -1066,20 +1134,6 @@ def main(
                 print(f"  {i+1}. State={state}")
                 print(f"      Goal={goal}, Vh1={vh1:.4f}, Vh2={vh2:.4f}, Δ={diff:+.4f}")
         
-        # Show initial state comparison
-        print()
-        print("Vh comparison at initial state:")
-        if initial_state in Vh_phase1 and initial_state in Vh_phase2:
-            for agent_idx in Vh_phase1[initial_state]:
-                if agent_idx in Vh_phase2[initial_state]:
-                    print(f"  Agent {agent_idx}:")
-                    for goal in Vh_phase1[initial_state][agent_idx]:
-                        vh1 = Vh_phase1[initial_state][agent_idx].get(goal, 0)
-                        vh2 = Vh_phase2[initial_state][agent_idx].get(goal, 0)
-                        diff = vh2 - vh1
-                        print(f"    {goal}: Phase1={vh1:.4f}, Phase2={vh2:.4f}, Δ={diff:+.4f}")
-        else:
-            print("  (initial state not in both Vh tables)")
     else:
         print("  No common (state, agent, goal) entries found for comparison.")
     print()
@@ -1102,8 +1156,6 @@ def main(
             human_policy_prior=human_policy_prior,
             goal_sampler=goal_sampler,
             goal_generator=goal_generator,
-            Vr_values=Vr_values,
-            Vh_values=Vh_phase2,
             beta_r=beta_r,
             xi=xi,
             eta=eta,

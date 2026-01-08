@@ -297,6 +297,10 @@ def _rp_compute_sequential(
     progress_callback: Optional[Callable[[int, int], None]] = None,
     memory_monitor: Optional[MemoryMonitor] = None,
     sliced_cache: Optional[SlicedAttainmentCache] = None,
+    level_fct: Optional[Callable[[State], int]] = None,
+    return_values: bool = False,
+    archive_dir: Optional[str] = None,
+    quiet: bool = False,
 ) -> None:
     """Sequential Phase 2 backward induction algorithm.
     
@@ -317,6 +321,21 @@ def _rp_compute_sequential(
         all_state_indices = list(range(len(states)))
         slice_id = make_slice_id(all_state_indices)
         slice_cache = sliced_cache.get_slice(slice_id)
+    
+    # Compute max_successor_levels for archival if level_fct and archive_dir provided
+    max_successor_levels: Optional[Dict[int, int]] = None
+    archived_levels: Set[int] = set()  # Track already-archived levels
+    if level_fct is not None and archive_dir is not None:
+        from .helpers import compute_dependency_levels_fast, detect_archivable_levels, archive_value_slices
+        from pathlib import Path
+        # Build successors list from transitions
+        successors = []
+        for state_transitions in transitions:
+            succ_set = set()
+            for action_profile, probs, succ_indices in state_transitions:
+                succ_set.update(succ_indices)
+            successors.append(list(succ_set))
+        _, max_successor_levels, _ = compute_dependency_levels_fast(states, level_fct, successors)
     
     # loop over the nodes in reverse topological order:
     for state_index in range(len(states)-1, -1, -1):
@@ -346,6 +365,54 @@ def _rp_compute_sequential(
             memory_monitor.check(states_processed)
         if progress_callback is not None:
             progress_callback(states_processed, total_states)
+        
+        # Archive if we just completed a level and archive_dir is set
+        if archive_dir is not None and level_fct is not None and max_successor_levels is not None:
+            current_state_level = level_fct(state)
+            archivable = detect_archivable_levels(current_state_level, max_successor_levels, quiet=quiet)
+            # Only archive NEW levels (not already archived)
+            new_archivable = [lvl for lvl in archivable if lvl not in archived_levels]
+            if new_archivable:
+                # Archive vhe_values (Vh_values in Phase 2 is expected human achievement)
+                archive_value_slices(
+                    Vh_values, states, level_fct, new_archivable,
+                    filepath=Path(archive_dir) / "vhe_values.pkl",
+                    return_values=return_values,
+                    quiet=quiet
+                )
+                # Archive vr_values (robot values) - convert to list structure for archival
+                vr_list = [[Vr_values[i]] for i in range(len(Vr_values))]
+                archive_value_slices(
+                    vr_list, states, level_fct, new_archivable,
+                    filepath=Path(archive_dir) / "vr_values.pkl",
+                    return_values=return_values,
+                    quiet=quiet
+                )
+                archived_levels.update(new_archivable)
+    
+    # Final archival check: archive any remaining levels after loop completes
+    if archive_dir is not None and level_fct is not None:
+        # Check if there are any levels we haven't archived yet
+        # At this point, all states have been processed, so all levels should be archivable
+        all_levels = sorted(set(level_fct(s) for s in states))
+        remaining_levels = [lvl for lvl in all_levels if lvl not in archived_levels]
+        if remaining_levels:
+            # Archive vhe_values (Vh_values in Phase 2 is expected human achievement)
+            archive_value_slices(
+                Vh_values, states, level_fct, remaining_levels,
+                filepath=Path(archive_dir) / "vhe_values.pkl",
+                return_values=return_values,
+                quiet=quiet
+            )
+            # Archive vr_values (robot values) - convert to list structure for archival
+            vr_list = [[Vr_values[i]] for i in range(len(Vr_values))]
+            archive_value_slices(
+                vr_list, states, level_fct, remaining_levels,
+                filepath=Path(archive_dir) / "vr_values.pkl",
+                return_values=return_values,
+                quiet=quiet
+            )
+            archived_levels.update(remaining_levels)
     
     # Note: slice_cache was retrieved from Phase 1, no need to store it again
 
@@ -664,6 +731,7 @@ def compute_robot_policy(
     memory_check_interval: int = 100,
     memory_pause_duration: float = 60.0,
     sliced_cache: Optional[SlicedAttainmentCache] = None,
+    archive_dir: Optional[str] = None,
 ) -> Union[TabularRobotPolicy, Tuple[TabularRobotPolicy, Dict[State, float], Dict[State, Dict[int, Dict[PossibleGoal, float]]]]]:
     """
     Compute robot policy via backward induction on the state DAG.
@@ -823,13 +891,13 @@ def compute_robot_policy(
         dependency_levels: List[List[int]]
         max_successor_levels: Optional[Dict[int, int]] = None
         level_values_list: Optional[List[int]] = None
+        archived_levels: Set[int] = set()  # Track already-archived levels
         if level_fct is not None:
             if not quiet:
                 print("Using fast level computation with provided level function")
-            # Always pass successors=None for now since phase2 doesn't support disk slicing yet
-            # TODO: Enable successors parameter when disk slicing is implemented for phase2
+            # Pass successors for archival max_successor_levels computation
             dependency_levels, max_successor_levels, level_values_list = compute_dependency_levels_fast(
-                states, level_fct, successors=None
+                states, level_fct, successors
             )
         else:
             if not quiet:
@@ -959,18 +1027,51 @@ def compute_robot_policy(
                 states_processed = sum(len(lvl) for lvl in dependency_levels[:level_idx + 1])
                 progress_callback(states_processed, len(states))
             
-            # TODO: Archive completed levels when disk slicing is implemented for Phase 2
-            # When disk slicing support is added to phase2 (adding use_disk_slicing parameter
-            # and disk_dag initialization like in phase1), enable archival:
-            # if disk_dag is not None and max_successor_levels is not None and level_values_list is not None:
-            #     current_level_value = level_values_list[level_idx]
-            #     archivable = detect_archivable_levels(current_level_value, max_successor_levels)
-            #     if archivable:
-            #         archive_value_slices(Vh_values, states, level_fct, archivable,
-            #                             disk_dag.cache_path / "vh_values.pkl", return_values)
-            #         vr_list = [[Vr_values[i]] for i in range(len(Vr_values))]
-            #         archive_value_slices(vr_list, states, level_fct, archivable,
-            #                             disk_dag.cache_path / "vr_values.pkl", return_values)
+            # Archive completed levels if archive_dir is set
+            if archive_dir is not None and max_successor_levels is not None and level_values_list is not None:
+                current_level_value = level_values_list[level_idx]
+                archivable = detect_archivable_levels(current_level_value, max_successor_levels, quiet=quiet)
+                # Only archive NEW levels (not already archived)
+                new_archivable = [lvl for lvl in archivable if lvl not in archived_levels]
+                if new_archivable:
+                    # Archive vhe_values (Vh_values in Phase 2 is expected human achievement)
+                    archive_value_slices(
+                        Vh_values, states, level_fct, new_archivable,
+                        filepath=Path(archive_dir) / "vhe_values.pkl",
+                        return_values=return_values,
+                        quiet=quiet
+                    )
+                    # Archive vr_values (robot values) - convert to list structure for archival
+                    vr_list = [[Vr_values[i]] for i in range(len(Vr_values))]
+                    archive_value_slices(
+                        vr_list, states, level_fct, new_archivable,
+                        filepath=Path(archive_dir) / "vr_values.pkl",
+                        return_values=return_values,
+                        quiet=quiet
+                    )
+                    archived_levels.update(new_archivable)
+        
+        # Final archival check for parallel mode: archive any remaining levels
+        if archive_dir is not None and level_fct is not None:
+            all_levels = sorted(set(level_fct(s) for s in states))
+            remaining_levels = [lvl for lvl in all_levels if lvl not in archived_levels]
+            if remaining_levels:
+                # Archive vhe_values (Vh_values in Phase 2 is expected human achievement)
+                archive_value_slices(
+                    Vh_values, states, level_fct, remaining_levels,
+                    filepath=Path(archive_dir) / "vhe_values.pkl",
+                    return_values=return_values,
+                    quiet=quiet
+                )
+                # Archive vr_values (robot values) - convert to list structure for archival
+                vr_list = [[Vr_values[i]] for i in range(len(Vr_values))]
+                archive_value_slices(
+                    vr_list, states, level_fct, remaining_levels,
+                    filepath=Path(archive_dir) / "vr_values.pkl",
+                    return_values=return_values,
+                    quiet=quiet
+                )
+                archived_levels.update(remaining_levels)
         
         # Clean up shared memory after parallel processing
         cleanup_shared_dag()
@@ -994,6 +1095,7 @@ def compute_robot_policy(
             human_policy_prior, beta_r, gamma_h, gamma_r, zeta, xi, eta, terminal_Vr,
             progress_callback, memory_monitor,
             sliced_cache,
+            level_fct, return_values, archive_dir, quiet,
         )
 
     robot_policy = TabularRobotPolicy(
