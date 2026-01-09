@@ -1011,7 +1011,6 @@ def compute_robot_policy(
         # Free successors too if not needed for archival
         if archive_dir is None:
             del successors
-            successors = None  # type: ignore
         
         # CRITICAL: Clear the world_model's DAG cache to actually free the memory
         world_model.clear_dag_cache()
