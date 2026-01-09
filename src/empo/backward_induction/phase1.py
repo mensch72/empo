@@ -439,9 +439,6 @@ def _hpp_compute_sequential(
         
         # Pre-compute state levels to avoid calling level_fct for every state
         state_levels = [level_fct(s) for s in states]
-        
-        # Track which level we're on
-        current_level_idx = len(level_values_list) - 1
     
     # loop over the nodes in reverse topological order:
     for state_index in range(len(states)-1, -1, -1):
