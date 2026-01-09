@@ -1061,7 +1061,6 @@ def compute_robot_policy(
             print("WARNING: Parallel mode is currently disabled due to bugs.")
             print("         Running in sequential mode instead.")
             print("         See docs/plans/bwind_parallel.md for status.")
-        parallel = False  # Force to sequential
     
     # Get sliced attainment cache: prioritize explicit parameter, then world_model cache, then create new
     num_action_profiles = num_actions ** num_agents
