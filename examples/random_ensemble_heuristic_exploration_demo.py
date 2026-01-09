@@ -43,8 +43,9 @@ from typing import List, Tuple, Optional, Dict
 import numpy as np
 
 from gym_multigrid.multigrid import (
-    MultiGridEnv, Grid, Agent, Wall, World, SmallActions,
-    Key, Ball, Box, Door, Lava, Block, Rock, Goal
+    MultiGridEnv,
+    World,
+    SmallActions,
 )
 from empo.possible_goal import PossibleGoal, PossibleGoalSampler
 from empo.world_specific_helpers.multigrid import (
