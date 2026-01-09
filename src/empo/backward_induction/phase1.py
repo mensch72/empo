@@ -285,7 +285,7 @@ def _hpp_compute_sequential(
     total_states = len(states)
     
     # Determine if using indexed goals and initialize templates
-    use_indexed = hasattr(possible_goal_generator, 'indexed') and possible_goal_generator.indexed
+    use_indexed = False # hasattr(possible_goal_generator, 'indexed') and possible_goal_generator.indexed
     if use_indexed:
         n_goals = possible_goal_generator.n_goals
         vres0 = np.zeros(n_goals, dtype=np.float16)
@@ -1058,7 +1058,7 @@ def compute_human_policy_prior(
     
     # Initialize V_values as nested lists for faster access
     # Use VhValuesSmall (ndarray-indexed) if goal generator is indexed, otherwise VhValues (dict-based)
-    use_indexed_goals = hasattr(possible_goal_generator, 'indexed') and possible_goal_generator.indexed
+    use_indexed_goals = False # hasattr(possible_goal_generator, 'indexed') and possible_goal_generator.indexed
     if use_indexed_goals:
         # VhValuesSmall: List[List[NDArray[float16]]] indexed by [state][agent][goal_index]
         n_goals = getattr(possible_goal_generator, 'n_goals', None)

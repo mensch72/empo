@@ -341,7 +341,7 @@ def _rp_compute_sequential(
     total_states = len(states)
     
     # Determine if using indexed goals and initialize templates
-    use_indexed = hasattr(possible_goal_generator, 'indexed') and possible_goal_generator.indexed
+    use_indexed = False #hasattr(possible_goal_generator, 'indexed') and possible_goal_generator.indexed
     if use_indexed:
         n_goals = possible_goal_generator.n_goals
         vres0 = np.zeros(n_goals, dtype=np.float16)
@@ -1043,7 +1043,7 @@ def compute_robot_policy(
                 _pbar.refresh()
     
     # Initialize value arrays - use VhValuesSmall for indexed goals, VhValues for non-indexed
-    if hasattr(possible_goal_generator, 'indexed') and possible_goal_generator.indexed:
+    if False and hasattr(possible_goal_generator, 'indexed') and possible_goal_generator.indexed:
         n_goals = possible_goal_generator.n_goals
         if not quiet:
             print(f"Using indexed goals: VhValuesSmall with numpy arrays (n_goals={n_goals})")
