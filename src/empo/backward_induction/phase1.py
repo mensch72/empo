@@ -1016,7 +1016,6 @@ def compute_human_policy_prior(
         # (will be reconstructed from disk if needed for sequential archival)
         if not parallel or archive_dir is None:
             del successors
-            successors = None  # type: ignore
         
         # CRITICAL: Clear the world_model's DAG cache to actually free the memory
         # (otherwise Phase 2 will get the cached DAG defeating disk slicing)
