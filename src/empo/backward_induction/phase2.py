@@ -973,7 +973,6 @@ def compute_robot_policy(
         transitions = None  # type: ignore
         if archive_dir is None:
             del successors
-            successors = None  # type: ignore
     elif use_disk_slicing:
         # Create new disk_dag (Phase 1 didn't create one)
         if level_fct is None:
