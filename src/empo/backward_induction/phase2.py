@@ -51,11 +51,12 @@ from .helpers import (
     SlicedList,
     detect_archivable_levels,
     archive_value_slices,
+    VhValues,
+    VhValuesSmall,
 )
 from .phase1 import compute_human_policy_prior
 
 # Type aliases
-VhValues = List[List[Dict[PossibleGoal, float]]]  # Indexed as Vh_values[state_index][agent_index][goal]
 VrValues = npt.NDArray[np.floating[Any]]  # Indexed as Vr_values[state_index]
 RobotActionProfile = Tuple[int, ...]
 RobotPolicyDict = Dict[State, Dict[RobotActionProfile, float]]  # state -> robot_action_profile -> prob
@@ -65,7 +66,7 @@ DEBUG = False  # Set to True for verbose debugging output
 # Module-level globals for shared memory in forked processes (Phase 2)
 _shared_states: Optional[List[State]] = None
 _shared_transitions: Optional[List[List[TransitionData]]] = None
-_shared_Vh_values: Optional[VhValues] = None
+_shared_Vh_values: Optional[Union[VhValues, VhValuesSmall]] = None
 _shared_Vr_values: Optional[VrValues] = None
 _shared_robot_agent_indices: Optional[List[int]] = None
 _shared_human_policy_prior_pickle: Optional[bytes] = None
@@ -79,7 +80,7 @@ def _rp_process_single_state(
     state: State,
     states: List[State],
     state_transitions: List[TransitionData],
-    Vh_values: VhValues,
+    Vh_values: Union[VhValues, VhValuesSmall],
     Vr_values: VrValues,
     human_agent_indices: List[int],
     robot_agent_indices: List[int],
@@ -97,6 +98,8 @@ def _rp_process_single_state(
     eta: float,
     terminal_Vr: float,
     slice_cache: Optional[SliceCache] = None,
+    use_indexed: bool = False,
+    vres0: Union[Dict, npt.NDArray] = None,
 ) -> Tuple[
     Dict[int, Dict[PossibleGoal, float]],  # vh_results: agent -> goal -> value
     float,  # vr_result
@@ -153,7 +156,7 @@ def _rp_process_single_state(
         return vh_results, terminal_Vr, None
     
     # Non-terminal state: compute Q_r, pi_r, V_h^e, X_h, U_r, V_r
-    vh_results: Dict[int, Dict[PossibleGoal, float]] = {}
+    vh_results = {}
     action_profile: npt.NDArray[np.int64] = np.zeros(num_agents, dtype=np.int64)
     
     if DEBUG:
@@ -184,7 +187,7 @@ def _rp_process_single_state(
     # Compute V_h^e, X_h, and U_r values
     powersum = 0.0  # sum over humans of X_h^(-xi)
     for agent_index in human_agent_indices:
-        vh_agent = vh_results[agent_index] = {}  # Create agent dict on-demand
+        vh_agent = vh_results[agent_index] = vres0.copy() if use_indexed else {}
         
         if DEBUG:
             print(f"   Human agent {agent_index}")
@@ -205,6 +208,7 @@ def _rp_process_single_state(
             if DEBUG:
                 print(f"    Possible goal: {possible_goal}")
             
+            key = possible_goal.index if use_indexed else possible_goal
             vh = 0.0
             for robot_action_profile_index, robot_action_profile in enumerate(robot_action_profiles):
                 action_profile[robot_agent_indices] = robot_action_profile
@@ -236,12 +240,24 @@ def _rp_process_single_state(
                     if np.dot(next_state_probabilities, attainment_values_array) > 0.0:
                         some_goal_achieved_with_positive_prob = True
                     
-                    vhe_values_array = np.fromiter(
-                        (Vh_values[next_state_index][agent_index].get(possible_goal, 0)
-                         for next_state_index in next_state_indices),
-                        dtype=np.float16,
-                        count=len(next_state_indices)
-                    )
+                    # Read successor values - use goal.index if indexed, else goal as key
+                    if use_indexed:
+                        try:
+                            vhe_values_array = np.fromiter(
+                                (Vh_values[next_state_index][agent_index][key]
+                                for next_state_index in next_state_indices),
+                                dtype=np.float16,
+                                count=len(next_state_indices)
+                            )
+                        except KeyError:
+                            raise KeyError(f"Key error {Vh_values[next_state_indices[0]][agent_index]}")
+                    else:
+                        vhe_values_array = np.fromiter(
+                            (Vh_values[next_state_index][agent_index].get(possible_goal, 0)
+                             for next_state_index in next_state_indices),
+                            dtype=np.float16,
+                            count=len(next_state_indices)
+                        )
                     # Use np.where to avoid intermediate array allocation
                     # NumPy automatically promotes float16 to float64 during computation
                     v += human_action_profile_prob * np.dot(
@@ -250,9 +266,9 @@ def _rp_process_single_state(
                     )
                 vh += ps[robot_action_profile_index] * v
             
-            # Sparse storage: only store non-zero values (convert to float16 only when storing)
+            # Store computed value - use goal.index if indexed, else goal as key
             if vh != 0.0:
-                vh_agent[possible_goal] = np.float16(vh)
+                vh_agent[key] = np.float16(vh)
             xh += possible_goal_weight * vh**zeta
             
             if DEBUG:
@@ -285,7 +301,7 @@ def _rp_process_single_state(
 
 def _rp_compute_sequential(
     states: List[State], 
-    Vh_values: VhValues,  # result is inserted into this!
+    Vh_values: Union[VhValues, VhValuesSmall],  # result is inserted into this!
     Vr_values: VrValues,  # result is inserted into this!
     robot_policy: RobotPolicyDict,  # result is inserted into this! 
     transitions: Optional[List[List[Tuple[Tuple[int, ...], List[float], List[int]]]]],
@@ -324,6 +340,15 @@ def _rp_compute_sequential(
     
     total_states = len(states)
     
+    # Determine if using indexed goals and initialize templates
+    use_indexed = hasattr(possible_goal_generator, 'indexed') and possible_goal_generator.indexed
+    if use_indexed:
+        n_goals = possible_goal_generator.n_goals
+        vres0 = np.zeros(n_goals, dtype=np.float16)
+        print(f"Using indexed goals: VhValuesSmall with numpy arrays (n_goals={n_goals})")
+    else:
+        vres0 = {}
+
     # In sequential mode, we use a single slice containing all states
     # Retrieve the slice cache populated by Phase 1 (only has non-terminal states)
     slice_cache: Optional[SliceCache] = None
@@ -441,11 +466,13 @@ def _rp_compute_sequential(
             possible_goal_generator, num_agents, num_actions, action_powers,
             human_policy_prior, beta_r, gamma_h, gamma_r, zeta, xi, eta, terminal_Vr,
             slice_cache=slice_cache,
+            use_indexed=use_indexed,
+            vres0=vres0,
         )
         
         # Store results
         for agent_index, agent_vh in vh_results.items():
-            Vh_values[state_index][agent_index].update(agent_vh)
+            Vh_values[state_index][agent_index] = agent_vh
         
         Vr_values[state_index] = vr_result
         
@@ -491,7 +518,7 @@ def _rp_compute_sequential(
 def _rp_init_shared_data(
     states: List[State], 
     transitions: List[List[TransitionData]], 
-    Vh_values: VhValues, 
+    Vh_values: Union[VhValues, VhValuesSmall], 
     Vr_values: VrValues,
     params: Tuple[List[int], List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], float, float, float, float, float, float, float],
     human_policy_prior_pickle: bytes,
@@ -1015,8 +1042,17 @@ def compute_robot_policy(
                 _pbar.n = done
                 _pbar.refresh()
     
-    # Initialize value arrays
-    Vh_values: VhValues = [[{} for _ in range(num_agents)] for _ in range(len(states))]
+    # Initialize value arrays - use VhValuesSmall for indexed goals, VhValues for non-indexed
+    if hasattr(possible_goal_generator, 'indexed') and possible_goal_generator.indexed:
+        n_goals = possible_goal_generator.n_goals
+        if not quiet:
+            print(f"Using indexed goals: VhValuesSmall with numpy arrays (n_goals={n_goals})")
+        Vh_values: Union[VhValues, VhValuesSmall] = [
+            [np.zeros(n_goals, dtype=np.float16) for _ in range(num_agents)]
+            for _ in range(len(states))
+        ]
+    else:
+        Vh_values: Union[VhValues, VhValuesSmall] = [[{} for _ in range(num_agents)] for _ in range(len(states))]
     Vr_values: VrValues = np.zeros(len(states))
     
     # ============================================================================

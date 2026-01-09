@@ -862,7 +862,7 @@ def main(
         num_workers=num_workers,
         use_disk_slicing=True,  # Enable disk-based caching (auto-detects /dev/shm)
         level_fct=lambda state: state[0],  # Extract timestep from MultiGrid state
-#        archive_dir=output_dir,  # Save archived values to output directory
+        archive_dir=output_dir,  # Save archived values to output directory
     )
     t1 = time.time()
     
@@ -925,7 +925,7 @@ def main(
         num_workers=num_workers,
         use_disk_slicing=True,  # Enable disk slicing (matches Phase 1)
         level_fct=lambda state: state[0],  # Extract timestep from MultiGrid state
-#        archive_dir=output_dir,  # Save archived values to output directory
+        archive_dir=output_dir,  # Save archived values to output directory
     )
     if profiler:
         profiler.disable()
@@ -1044,14 +1044,12 @@ def main(
                         vh1_agent = vh1_state[agent_idx]
                         vh2_agent = vh2_state[agent_idx]
                         
-                        for goal in vh1_agent:
-                            if goal not in vh2_agent:
-                                continue
+                        for key in range(env.possible_goal_generator.n_goals):
                             
-                            vh1 = vh1_agent[goal]
-                            vh2 = vh2_agent[goal]
+                            vh1 = vh1_agent[key]
+                            vh2 = vh2_agent[key]
                             diff = vh2 - vh1
-                            differences.append((level_val1, state_indices1[i], agent_idx, goal, vh1, vh2, diff))
+                            differences.append((level_val1, state_indices1[i], agent_idx, key, vh1, vh2, diff))
             
             print()  # Clear progress line
             print(f"Compared {compared_count} slices with {len(differences)} (level, state_idx, agent, goal) entries")

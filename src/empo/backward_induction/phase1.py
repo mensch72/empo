@@ -62,10 +62,11 @@ from .helpers import (
     SlicedList,
     detect_archivable_levels,
     archive_value_slices,
+    VhValues,
+    VhValuesSmall,
 )
 
 # Type aliases
-VhValues = List[List[Dict[PossibleGoal, float]]]  # Indexed as Vh_values[state_index][agent_index][goal]
 HumanPolicyDict = Dict[State, Dict[int, Dict[PossibleGoal, npt.NDArray[np.floating[Any]]]]]  # state -> agent -> goal -> probs
 
 DEBUG = False  # Set to True for verbose debugging output
@@ -88,7 +89,7 @@ def _hpp_process_single_state(
     state: State,
     states: List[State],
     transitions: Union[List[List[TransitionData]], List[TransitionData]],  # Can be full list or single state's transitions
-    Vh_values: VhValues,
+    Vh_values: Union[VhValues, VhValuesSmall],
     human_agent_indices: List[int],
     possible_goal_generator: PossibleGoalGenerator,
     num_actions: int,
@@ -99,6 +100,9 @@ def _hpp_process_single_state(
     beta_h: float,
     gamma_h: float,
     slice_cache: Optional[SliceCache] = None,
+    use_indexed: bool = False,
+    vres0: Union[Dict, npt.NDArray] = None,
+    pres0: Union[Dict, npt.NDArray] = None,
 ) -> Tuple[Dict[int, Dict[PossibleGoal, float]], Optional[Dict[int, Dict[PossibleGoal, npt.NDArray[np.floating[Any]]]]]]:
     """Process a single state, returning (v_results, p_results).
     
@@ -132,8 +136,8 @@ def _hpp_process_single_state(
         this_state_cache = None
 
     actions = range(num_actions)
-    v_results: Dict[int, Dict[PossibleGoal, float]] = {}
-    p_results: Optional[Dict[int, Dict[PossibleGoal, npt.NDArray[np.floating[Any]]]]] = None
+    v_results: Dict[int, Any] = {}
+    p_results: Optional[Dict[int, Any]] = None
     
     # Support both full transitions list and single-state transitions
     if transitions and isinstance(transitions[0], list):
@@ -150,21 +154,22 @@ def _hpp_process_single_state(
         if DEBUG:
             print(f"  Terminal state {state_index}")
         return v_results, None
-
+    
     # Non-terminal state: compute both V-values and policies
     p_results = {}
     for agent_index in human_agent_indices:
-        vres = v_results[agent_index] = {}
-        pres = p_results[agent_index] = {}
+        vres = v_results[agent_index] = vres0.copy() if use_indexed else {}
+        pres = p_results[agent_index] = pres0.copy() if use_indexed else {}
         
         for possible_goal, _ in possible_goal_generator.generate(state, agent_index):
+            key = possible_goal.index if use_indexed else possible_goal
             if possible_goal.is_achieved(state):
                 # Goal achieved already in this state: remain still, V=0
                 # Sparse storage: don't store zero values
                 # vres[possible_goal] = np.float16(0)  # Omitted for sparse storage
                 ps = np.zeros(num_actions)
                 ps[0] = 1.0  # Assume action 0 is 'stay still'
-                pres[possible_goal] = ps
+                pres[key] = ps
                 if DEBUG:
                     print(f"    Goal achieved in state, agent {agent_index}: V = 0, remain still policy")
             else:
@@ -193,12 +198,22 @@ def _hpp_process_single_state(
                                 this_state_cache[action_profile_index][possible_goal] = attainment_values_array
 
                             # Get V values from successors (use .get for parallel safety)
-                            v_values_array = np.fromiter(
-                                (Vh_values[next_state_index][agent_index].get(possible_goal, 0)
-                                 for next_state_index in next_state_indices),
-                                dtype=np.float16,
-                                count=len(next_state_indices)
-                            )
+                            if use_indexed:
+                                # VhValuesSmall: indexed by goal.index
+                                v_values_array = np.fromiter(
+                                    (Vh_values[next_state_index][agent_index][key]
+                                     for next_state_index in next_state_indices),
+                                    dtype=np.float16,
+                                    count=len(next_state_indices)
+                                )
+                            else:
+                                # VhValues: dict keyed by goal
+                                v_values_array = np.fromiter(
+                                    (Vh_values[next_state_index][agent_index].get(possible_goal, 0)
+                                     for next_state_index in next_state_indices),
+                                    dtype=np.float16,
+                                    count=len(next_state_indices)
+                                )
                             # Use np.where to avoid intermediate array allocation
                             # NumPy automatically promotes float16 to float64 during computation
                             expectation = np.dot(
@@ -227,8 +242,8 @@ def _hpp_process_single_state(
                 v_value = float(np.sum(p * q))
                 # Sparse storage: only store non-zero values (convert to float16 only when storing)
                 if v_value != 0.0:
-                    vres[possible_goal] = np.float16(v_value)
-                pres[possible_goal] = p
+                    vres[key] = np.float16(v_value)
+                pres[key] = p
                 
                 if DEBUG:
                     print(f"    Agent {agent_index}, goal {possible_goal}: V = {v_results[agent_index].get(possible_goal, 0):.4f}")
@@ -238,7 +253,7 @@ def _hpp_process_single_state(
 
 def _hpp_compute_sequential(
     states: List[State], 
-    Vh_values: VhValues,  # result is inserted into this!
+    Vh_values: Union[VhValues, VhValuesSmall],  # result is inserted into this!
     system2_policies: HumanPolicyDict,  # result is inserted into this! 
     transitions: Optional[List[List[Tuple[Tuple[int, ...], List[float], List[int]]]]],
     human_agent_indices: List[int], 
@@ -268,6 +283,17 @@ def _hpp_compute_sequential(
     from disk timestep-by-timestep instead of keeping all in memory.
     """
     total_states = len(states)
+    
+    # Determine if using indexed goals and initialize templates
+    use_indexed = hasattr(possible_goal_generator, 'indexed') and possible_goal_generator.indexed
+    if use_indexed:
+        n_goals = possible_goal_generator.n_goals
+        vres0 = np.zeros(n_goals, dtype=np.float16)
+        pres0 = np.zeros((n_goals, num_actions), dtype=np.float16)
+        print(f"Using indexed goals: VhValuesSmall with numpy arrays (n_goals={n_goals})")
+    else:
+        vres0 = {}
+        pres0 = {}
     
     # In sequential mode, we use a single slice containing all states
     # Create slice cache for all states, but only allocate entries for non-terminal states
@@ -346,11 +372,14 @@ def _hpp_compute_sequential(
                     robot_agent_indices, robot_action_profiles,
                     beta_h, gamma_h,
                     slice_cache=timestep_cache,
+                    use_indexed=use_indexed,
+                    vres0=vres0,
+                    pres0=pres0,
                 )
                 
                 # Store results
                 for agent_index, agent_v in v_results.items():
-                    Vh_values[global_state_idx][agent_index].update(agent_v)
+                    Vh_values[global_state_idx][agent_index] = agent_v
                 if p_results is not None:
                     system2_policies[state] = p_results
             
@@ -454,11 +483,14 @@ def _hpp_compute_sequential(
             robot_agent_indices, robot_action_profiles,
             beta_h, gamma_h,
             slice_cache=slice_cache,
+            use_indexed=use_indexed,
+            vres0=vres0,
+            pres0=pres0,
         )
         
-        # Store results back into Vh_values and system2_policies
+        # Store results
         for agent_index, agent_v in v_results.items():
-            Vh_values[state_index][agent_index].update(agent_v)
+            Vh_values[state_index][agent_index] = agent_v
         
         if p_results is not None:
             system2_policies[state] = p_results
@@ -1025,7 +1057,20 @@ def compute_human_policy_prior(
                 _pbar.refresh()
     
     # Initialize V_values as nested lists for faster access
-    Vh_values: VhValues = [[{} for _ in range(num_agents)] for _ in range(len(states))]
+    # Use VhValuesSmall (ndarray-indexed) if goal generator is indexed, otherwise VhValues (dict-based)
+    use_indexed_goals = hasattr(possible_goal_generator, 'indexed') and possible_goal_generator.indexed
+    if use_indexed_goals:
+        # VhValuesSmall: List[List[NDArray[float16]]] indexed by [state][agent][goal_index]
+        n_goals = getattr(possible_goal_generator, 'n_goals', None)
+        if n_goals is None:
+            raise ValueError("indexed goal generator must have n_goals attribute")
+        Vh_values: Union[VhValues, VhValuesSmall] = [
+            [np.zeros(n_goals, dtype=np.float16) for _ in range(num_agents)] 
+            for _ in range(len(states))
+        ]
+    else:
+        # VhValues: List[List[Dict[goal, float]]] indexed by [state][agent][goal]
+        Vh_values = [[{} for _ in range(num_agents)] for _ in range(len(states))]
     
     # ============================================================================
     # WARN if parallel mode was requested

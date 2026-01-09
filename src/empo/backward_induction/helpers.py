@@ -15,6 +15,9 @@ from typing import Optional, Callable, List, Tuple, Dict, Any, TypeAlias, TYPE_C
 
 if TYPE_CHECKING:
     from empo.possible_goal import PossibleGoal, PossibleGoalGenerator
+else:
+    # For runtime type aliases that need PossibleGoal
+    from empo.possible_goal import PossibleGoal
 
 T = TypeVar('T')
 
@@ -22,6 +25,8 @@ T = TypeVar('T')
 State: TypeAlias = Any  # State is typically a hashable tuple from WorldModel.get_state()
 ActionProfile = List[int]
 TransitionData = Tuple[Tuple[int, ...], List[float], List[State]]  # (action_profile, probs, successor_states)
+VhValues = List[List[Dict['PossibleGoal', float]]]  # Indexed as Vh_values[state_index][agent_index][goal]
+VhValuesSmall = List[List[npt.NDArray[np.float16]]]  # Indexed as Vh_values[state_index][agent_index][goal_index]
 
 # Slice cache for a worker's batch of states.
 # Structure: slice_cache[state_index][action_profile_index][goal] -> array of attainment values.

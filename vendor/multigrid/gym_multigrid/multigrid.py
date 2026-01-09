@@ -194,12 +194,17 @@ class ConfigGoalGenerator:
         weights: Optional list of weights. If None, uses uniform 1/n weights.
     """
     
-    def __init__(self, env: 'MultiGridEnv', goal_coords: list, weights: list = None):
+    def __init__(self, env: 'MultiGridEnv', goal_coords: list, weights: list = None, indexed: bool = False):
         _load_goal_classes()
+        # Initialize parent class with indexed parameter
+        if _PossibleGoalGenerator is not None:
+            _PossibleGoalGenerator.__init__(self, env, indexed=indexed)
         self.env = self.world_model = env
         self.goal_coords = goal_coords
         n = len(goal_coords)
         self.weights = weights if weights is not None else [1.0 / n] * n
+        self.indexed = indexed
+        self.n_goals = n  # Number of goals
         self._goals_cache = {}  # Cache goals by human_agent_index
     
     @property
@@ -212,11 +217,11 @@ class ConfigGoalGenerator:
         if human_agent_index not in self._goals_cache:
             _load_goal_classes()
             goals = []
-            for coords in self.goal_coords:
+            for idx, coords in enumerate(self.goal_coords):
                 if len(coords) == 2:
-                    goal = _ReachCellGoal(self.env, human_agent_index, coords)
+                    goal = _ReachCellGoal(self.env, human_agent_index, coords, index=idx if self.indexed else None)
                 else:
-                    goal = _ReachRectangleGoal(self.env, human_agent_index, coords)
+                    goal = _ReachRectangleGoal(self.env, human_agent_index, coords, index=idx if self.indexed else None)
                 goals.append(goal)
             self._goals_cache[human_agent_index] = goals
         return self._goals_cache[human_agent_index]
@@ -266,7 +271,7 @@ class ConfigGoalGenerator:
         Returns:
             ConfigGoalSampler with probs = weights (normalized), weights = 1.0.
         """
-        return ConfigGoalSampler(self.env, self.goal_coords, probabilities=self.weights, weights=None)
+        return ConfigGoalSampler(self.env, self.goal_coords, probabilities=self.weights, weights=None, indexed=self.indexed)
     
     def validate_coverage(self, raise_on_error: bool = True) -> list:
         """
@@ -352,8 +357,11 @@ class ConfigGoalSampler:
     """
     
     def __init__(self, env: 'MultiGridEnv', goal_coords: list, 
-                 probabilities: list = None, weights: list = None):
+                 probabilities: list = None, weights: list = None, indexed: bool = False):
         _load_goal_classes()
+        # Initialize parent class with indexed parameter
+        if _PossibleGoalSampler is not None:
+            _PossibleGoalSampler.__init__(self, env, indexed=indexed)
         self.env = self.world_model = env
         self.goal_coords = goal_coords
         n = len(goal_coords)
@@ -365,6 +373,8 @@ class ConfigGoalSampler:
             self.probs = [p / total for p in probabilities]
         
         self.weights = weights if weights is not None else [1.0] * n
+        self.indexed = indexed
+        self.n_goals = n  # Number of goals
         self._goals_cache = {}  # Cache goals by human_agent_index
     
     @property
@@ -377,11 +387,11 @@ class ConfigGoalSampler:
         if human_agent_index not in self._goals_cache:
             _load_goal_classes()
             goals = []
-            for coords in self.goal_coords:
+            for idx, coords in enumerate(self.goal_coords):
                 if len(coords) == 2:
-                    goal = _ReachCellGoal(self.env, human_agent_index, coords)
+                    goal = _ReachCellGoal(self.env, human_agent_index, coords, index=idx if self.indexed else None)
                 else:
-                    goal = _ReachRectangleGoal(self.env, human_agent_index, coords)
+                    goal = _ReachRectangleGoal(self.env, human_agent_index, coords, index=idx if self.indexed else None)
                 goals.append(goal)
             self._goals_cache[human_agent_index] = goals
         return self._goals_cache[human_agent_index]
@@ -433,7 +443,7 @@ class ConfigGoalSampler:
             ConfigGoalGenerator with weights = probs * weights.
         """
         combined_weights = [p * w for p, w in zip(self.probs, self.weights)]
-        return ConfigGoalGenerator(self.env, self.goal_coords, weights=combined_weights)
+        return ConfigGoalGenerator(self.env, self.goal_coords, weights=combined_weights, indexed=self.indexed)
     
     def validate_coverage(self, raise_on_error: bool = True) -> list:
         """
@@ -561,8 +571,8 @@ def create_config_goal_sampler_and_generator(goal_specs: list, env: 'MultiGridEn
     goal_coords = [_parse_goal_spec_to_coords(spec) for spec in goal_specs]
     n = len(goal_coords)
     
-    # Generator: uniform weights = 1/n (for exact integration)
-    generator = ConfigGoalGenerator(env, goal_coords, weights=[1.0 / n] * n)
+    # Generator: uniform weights = 1/n (for exact integration), indexed=True for YAML-loaded goals
+    generator = ConfigGoalGenerator(env, goal_coords, weights=[1.0 / n] * n, indexed=True)
     
     # Validate that goals cover all walkable cells
     generator.validate_coverage(raise_on_error=True)
