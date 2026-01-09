@@ -8,7 +8,8 @@ FROM python:3.11-slim-bookworm
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     LANG=C.UTF-8 \
-    LC_ALL=C.UTF-8
+    LC_ALL=C.UTF-8 \
+    PYTHONPATH=/workspace/src:/workspace/vendor/multigrid:/workspace/vendor/ai_transport:/workspace/multigrid_worlds
 
 # Set working directory
 WORKDIR /workspace
