@@ -50,7 +50,6 @@ from gym_multigrid.multigrid import (
 from empo.possible_goal import PossibleGoal, PossibleGoalSampler
 from empo.world_specific_helpers.multigrid import (
     ReachRectangleGoal,
-    RandomPolicy,
 )
 from empo.human_policy_prior import HeuristicPotentialPolicy
 from empo.learning_based.multigrid.phase2.exploration_policies import (
