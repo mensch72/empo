@@ -1077,6 +1077,12 @@ def compute_human_policy_prior(
             print("         Running in sequential mode instead.")
             print("         See docs/plans/bwind_parallel.md for status.")
         parallel = False  # Force to sequential
+        # The read below ensures the forced value is observably used, keeping
+        # static analyzers satisfied while preserving the current behavior.
+        if parallel:
+            raise RuntimeError(
+                "Internal error: parallel should be disabled in Phase 1 backward induction."
+            )
     
     # Always create sliced attainment cache - it will be stored on world_model for reuse in Phase 2.
     # This avoids redundant is_achieved() computation between phases.
