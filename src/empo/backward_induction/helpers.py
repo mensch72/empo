@@ -7,17 +7,26 @@ and Phase 2 (robot policy) backward induction algorithms.
 
 import numpy as np
 import numpy.typing as npt
+import pickle
 from collections import defaultdict
 from itertools import product
-from typing import Optional, Callable, List, Tuple, Dict, Any, TypeAlias, TYPE_CHECKING
+from pathlib import Path
+from typing import Optional, Callable, List, Tuple, Dict, Any, TypeAlias, TYPE_CHECKING, Generic, TypeVar
 
 if TYPE_CHECKING:
     from empo.possible_goal import PossibleGoal, PossibleGoalGenerator
+else:
+    # For runtime type aliases that need PossibleGoal
+    from empo.possible_goal import PossibleGoal
+
+T = TypeVar('T')
 
 # Type aliases for complex types used throughout
 State: TypeAlias = Any  # State is typically a hashable tuple from WorldModel.get_state()
 ActionProfile = List[int]
 TransitionData = Tuple[Tuple[int, ...], List[float], List[State]]  # (action_profile, probs, successor_states)
+VhValues = List[List[Dict['PossibleGoal', float]]]  # Indexed as Vh_values[state_index][agent_index][goal]
+VhValuesSmall = List[List[npt.NDArray[np.float16]]]  # Indexed as Vh_values[state_index][agent_index][goal_index]
 
 # Slice cache for a worker's batch of states.
 # Structure: slice_cache[state_index][action_profile_index][goal] -> array of attainment values.
@@ -39,6 +48,8 @@ class SlicedAttainmentCache:
     These are stored separately (not merged) and accessed by slice_id.
     Both Phase 1 and Phase 2 use the same slice assignments for consistency.
     
+    Can optionally use disk-based storage via DiskBasedDAG to avoid memory overhead.
+    
     Structure:
         slices[slice_id] = SliceCache
         SliceCache[state_index][action_profile_index][goal] = attainment_array
@@ -52,6 +63,7 @@ class SlicedAttainmentCache:
         """
         self.num_action_profiles = num_action_profiles
         self.slices: Dict[SliceId, SliceCache] = {}
+        self._disk_dag: Optional[Any] = None  # Optional DiskBasedDAG for disk storage
     
     def create_slice_cache(self, state_indices: List[int]) -> SliceCache:
         """Create an empty slice cache for given state indices.
@@ -98,9 +110,20 @@ class SlicedAttainmentCache:
         Returns:
             Cached attainment array if found, None otherwise
         """
+        # First check in-memory slices
         for slice_cache in self.slices.values():
             if state_index in slice_cache:
-                return slice_cache[state_index][action_profile_index].get(goal)
+                result = slice_cache[state_index][action_profile_index].get(goal)
+                if result is not None:
+                    return result
+        
+        # If using disk storage, try loading from disk
+        if self._disk_dag is not None and hasattr(self._disk_dag, 'load_cache_slice'):
+            # Try to find which timestep contains this state
+            # This requires level_fct - for now, just return None
+            # Phase 2 will need to handle disk cache lookup differently
+            pass
+        
         return None
     
     def total_entries(self) -> int:
@@ -538,20 +561,55 @@ def compute_dependency_levels_general(successors: List[List[int]]) -> List[List[
 
 def compute_dependency_levels_fast(
     states: List[State], 
-    level_fct: Callable[[State], int]
-) -> List[List[int]]:
-    """Compute dependency levels using level function for faster computation."""
+    level_fct: Callable[[State], int],
+    successors: Optional[List[List[int]]] = None
+) -> Tuple[List[List[int]], Optional[Dict[int, int]], Optional[List[int]]]:
+    """Compute dependency levels using level function for faster computation.
+    
+    Args:
+        states: List of states to compute levels for
+        level_fct: Function mapping state to its level value
+        successors: Optional list of successor state indices for each state.
+                   If provided, also computes max successor levels.
+    
+    Returns:
+        Tuple of:
+        - levels: List of levels, where each level is a list of state indices
+        - max_successor_levels: If successors provided, dict mapping level value
+          to the max level value of any successor of states at that level.
+          None if successors not provided.
+        - level_values: If successors provided, list of level values parallel to levels.
+          None if successors not provided.
+    """
     # Compute level values for all states
-    level_values: List[int] = [level_fct(state) for state in states]
+    level_values_array: List[int] = [level_fct(state) for state in states]
     
     # Group states by level value (descending order for backward induction)
     level_groups: Dict[int, List[int]] = defaultdict(list)
-    for state_idx, level_val in enumerate(level_values):
+    for state_idx, level_val in enumerate(level_values_array):
         level_groups[level_val].append(state_idx)
     
     # Sort by level value (highest first for backward induction)
+    # Note: state indices within each level are already sorted by construction
     sorted_levels = sorted(level_groups.keys(), reverse=True)
-    return [level_groups[level_val] for level_val in sorted_levels]
+    levels = [level_groups[level_val] for level_val in sorted_levels]
+    
+    # Compute max successor level for each level if successors provided
+    max_successor_levels: Optional[Dict[int, int]] = None
+    if successors is not None:
+        max_successor_levels = {}
+        for level_val in sorted_levels:
+            # Initialize to level_val + 1 for terminal states (no successors)
+            # This ensures terminal states follow the k→k+1 pattern
+            max_succ_level = level_val + 1
+            for state_idx in level_groups[level_val]:
+                for succ_idx in successors[state_idx]:
+                    max_succ_level = max(max_succ_level, level_values_array[succ_idx])
+            max_successor_levels[level_val] = max_succ_level
+        
+        return levels, max_successor_levels, sorted_levels
+    
+    return levels, None, None
 
 
 def split_into_batches(items: List[int], num_batches: Optional[int]) -> List[List[int]]:
@@ -566,3 +624,288 @@ def split_into_batches(items: List[int], num_batches: Optional[int]) -> List[Lis
         if batch:
             batches.append(batch)
     return batches
+
+
+class SlicedList(Generic[T]):
+    """List-like container that organizes values by level for memory-efficient archival.
+    
+    Values are stored in slices grouped by level value (from level_fct). When a slice
+    is no longer needed, it can be archived to disk and removed from memory.
+    
+    Structure:
+        _slices[level_value] = list of values for states at that level
+        _state_to_slice[state_index] = (level_value, offset_in_slice)
+    
+    Usage:
+        # Create from level information
+        sliced_list = SlicedList.from_levels(states, level_fct)
+        
+        # Access by state index
+        sliced_list[state_idx] = value
+        value = sliced_list[state_idx]
+        
+        # Archive a level when no longer needed
+        sliced_list.archive_slice(level_value, filepath, clear_memory=True)
+    """
+    
+    def __init__(self):
+        """Initialize empty sliced list."""
+        self._slices: Dict[int, Optional[List[T]]] = {}
+        self._state_to_slice: List[Tuple[int, int]] = []  # [(level_value, offset), ...]
+        self._level_values: List[int] = []  # All level values in order
+    
+    @classmethod
+    def from_levels(
+        cls,
+        states: List[State],
+        level_fct: Callable[[State], int]
+    ) -> 'SlicedList[T]':
+        """Create a SlicedList organized by level values.
+        
+        Args:
+            states: List of all states
+            level_fct: Function mapping state to its level value
+            
+        Returns:
+            SlicedList instance with allocated slices (values initialized to None)
+        """
+        sliced_list = cls()
+        
+        # Compute level values for all states
+        level_values = [level_fct(state) for state in states]
+        
+        # Group state indices by level value
+        level_groups: Dict[int, List[int]] = defaultdict(list)
+        for state_idx, level_val in enumerate(level_values):
+            level_groups[level_val].append(state_idx)
+        
+        # Store all unique level values
+        sliced_list._level_values = sorted(level_groups.keys())
+        
+        # Create slices and build state_to_slice mapping
+        sliced_list._state_to_slice = [(0, 0)] * len(states)
+        
+        for level_val, state_indices in level_groups.items():
+            # Create slice for this level
+            slice_size = len(state_indices)
+            sliced_list._slices[level_val] = [None] * slice_size  # type: ignore
+            
+            # Map each state to its position in the slice
+            for offset, state_idx in enumerate(state_indices):
+                sliced_list._state_to_slice[state_idx] = (level_val, offset)
+        
+        return sliced_list
+    
+    def __getitem__(self, state_idx: int) -> T:
+        """Get value for a state index."""
+        level_val, offset = self._state_to_slice[state_idx]
+        slice_data = self._slices[level_val]
+        if slice_data is None:
+            raise ValueError(f"Slice for level {level_val} has been archived")
+        return slice_data[offset]
+    
+    def __setitem__(self, state_idx: int, value: T) -> None:
+        """Set value for a state index."""
+        level_val, offset = self._state_to_slice[state_idx]
+        slice_data = self._slices[level_val]
+        if slice_data is None:
+            raise ValueError(f"Slice for level {level_val} has been archived")
+        slice_data[offset] = value
+    
+    def __len__(self) -> int:
+        """Return total number of states."""
+        return len(self._state_to_slice)
+    
+    def archive_slice(
+        self,
+        level_value: int,
+        filepath: Path,
+        clear_memory: bool = True
+    ) -> None:
+        """Archive a slice to disk and optionally clear from memory.
+        
+        Args:
+            level_value: The level value to archive
+            filepath: Path to append the slice data to
+            clear_memory: If True, set slice to None to free memory
+        """
+        if level_value not in self._slices:
+            raise ValueError(f"Level {level_value} not found in slices")
+        
+        slice_data = self._slices[level_value]
+        if slice_data is None:
+            return  # Already archived
+        
+        # Append to file using pickle protocol 5 for zero-copy of buffers
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        with open(filepath, 'ab') as f:
+            pickle.dump({'level_value': level_value, 'data': slice_data}, f, protocol=5)
+        
+        # Clear from memory if requested
+        if clear_memory:
+            self._slices[level_value] = None
+    
+    def get_slice(self, level_value: int) -> Optional[List[T]]:
+        """Get the slice for a level value (may be None if archived)."""
+        return self._slices.get(level_value)
+    
+    def has_level(self, level_value: int) -> bool:
+        """Check if a level exists (even if archived)."""
+        return level_value in self._slices
+    
+    def is_archived(self, level_value: int) -> bool:
+        """Check if a level has been archived."""
+        return self._slices.get(level_value) is None
+
+
+def detect_archivable_levels(
+    current_level_value: int,
+    max_successor_levels: Dict[int, int],
+    quiet: bool = False
+) -> List[int]:
+    """Detect which levels can be archived based on successor dependencies.
+    
+    A level k can be archived when max_successor_levels[l] < k for all l < current_level_value.
+    This means no future computations will need to read from level k.
+    
+    Args:
+        current_level_value: The level value just completed
+        max_successor_levels: Dict mapping level value to max successor level value
+        quiet: If True, suppress debug output
+        
+    Returns:
+        List of level values that can be safely archived
+    """
+    # Get all level values that are < current level value (not yet processed)
+    # Note: backward induction processes in descending order, so smaller values are future
+    future_levels = [l for l in max_successor_levels.keys() if l < current_level_value]
+    
+    if not future_levels:
+        return []
+    
+    # Find the maximum level value among all future successors
+    max_future_successor = max(max_successor_levels[l] for l in future_levels)
+    
+    # All levels > max_future_successor can be archived
+    return sorted([l for l in max_successor_levels.keys() if l > max_future_successor], reverse=True)
+
+
+def archive_value_slices(
+    values: List[Any],
+    states: List[State],
+    level_fct: Callable[[State], int],
+    archivable_levels: List[int],
+    filepath: Path,
+    return_values: bool = True,
+    quiet: bool = False,
+    archive_dir: Optional[Path] = None
+) -> None:
+    """Archive value function slices to disk and optionally clear from memory.
+    
+    This function archives slices of the value function (Vh_values, Vr_values, Vhe_values, etc.)
+    organized by level value. Used for memory-efficient backward induction
+    with disk slicing.
+    
+    Memory optimization: Uses pickle protocol 5 and incremental writing (one state at a time)
+    to avoid creating large intermediate copies during serialization. This prevents
+    memory spikes when archiving large value function slices.
+    
+    Args:
+        values: Value function array indexed by state. Can be List[List[Dict[goal, float]]]
+                for vh_values/vr_values or List[Dict[goal, float]] for vhe_values.
+        states: List of all states
+        level_fct: Function mapping state to its level value
+        archivable_levels: List of level values to archive
+        filepath: Path to append the archived slices
+        return_values: If False, clear archived slices from memory after saving
+        quiet: If True, suppress progress output
+    """
+    if not archivable_levels:
+        return
+    
+    # Use archive_dir if provided, otherwise use filepath's parent
+    if archive_dir is not None:
+        filepath = archive_dir / filepath.name
+    
+    # Group state indices by level value
+    level_to_states: Dict[int, List[int]] = defaultdict(list)
+    for state_idx, state in enumerate(states):
+        level_val = level_fct(state)
+        if level_val in archivable_levels:
+            level_to_states[level_val].append(state_idx)
+    
+    # Archive each level
+    total_states = 0
+    for level_val in archivable_levels:
+        state_indices = level_to_states.get(level_val, [])
+        if not state_indices:
+            continue
+        
+        # Append to file using protocol 5 for zero-copy of buffers
+        # Write incrementally to avoid creating large intermediate dict
+        filepath.parent.mkdir(parents=True, exist_ok=True)
+        with open(filepath, 'ab') as f:
+            # Write header with metadata
+            pickle.dump({
+                'level_value': level_val,
+                'state_indices': state_indices,
+                'num_states': len(state_indices)
+            }, f, protocol=5)
+            
+            # Write data incrementally (one state at a time) to avoid copying entire slice
+            for state_idx in state_indices:
+                pickle.dump(values[state_idx], f, protocol=5)
+        
+        total_states += len(state_indices)
+        
+        # Clear from memory if not returning values
+        if not return_values:
+            for state_idx in state_indices:
+                # Replace with empty structure to free memory
+                # Handle both List[List[Dict]] and List[Dict] structures
+                if isinstance(values[state_idx], list):
+                    values[state_idx] = [{} for _ in range(len(values[state_idx]))]
+                else:
+                    values[state_idx] = {}
+    
+    if not quiet:
+        clear_msg = " (cleared from memory)" if not return_values else ""
+        print(f"    Archived {total_states} states from {len(archivable_levels)} level(s) to {filepath.name}{clear_msg}")
+
+
+def load_archived_value_slices(filepath: Path):
+    """Generator that yields (level_value, state_indices, data) from archived file.
+    
+    Supports both old format (monolithic 'data' field) and new format (incremental writes).
+    
+    Args:
+        filepath: Path to the archived value slices file
+        
+    Yields:
+        Tuple of (level_value, state_indices, data) where data is a list of values per state
+    """
+    if not filepath.exists():
+        return
+    
+    with open(filepath, 'rb') as f:
+        while True:
+            try:
+                # Load metadata header
+                header = pickle.load(f)
+                level_value = header['level_value']
+                state_indices = header['state_indices']
+                
+                # Check if old format (monolithic) or new format (incremental)
+                if 'data' in header:
+                    # Old format: all data in header
+                    yield level_value, state_indices, header['data']
+                else:
+                    # New format: read num_states individual pickles
+                    num_states = header['num_states']
+                    data = []
+                    for _ in range(num_states):
+                        data.append(pickle.load(f))
+                    yield level_value, state_indices, data
+            except EOFError:
+                break
+

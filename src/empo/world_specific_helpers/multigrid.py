@@ -48,9 +48,10 @@ class ReachCellGoal(PossibleGoal):
         self,
         world_model: 'WorldModel',
         human_agent_index: int,
-        target_pos: Tuple[int, int]
+        target_pos: Tuple[int, int],
+        index: Optional[int] = None
     ):
-        super().__init__(world_model)
+        super().__init__(world_model, index=index)
         self.human_agent_index = human_agent_index
         self.target_pos = (int(target_pos[0]), int(target_pos[1]))
         # For consistency with rectangle goals
@@ -98,9 +99,10 @@ class ReachRectangleGoal(PossibleGoal):
         self,
         world_model: 'WorldModel',
         human_agent_index: int,
-        target_rect: Tuple[int, int, int, int]
+        target_rect: Tuple[int, int, int, int],
+        index: Optional[int] = None
     ):
-        super().__init__(world_model)
+        super().__init__(world_model, index=index)
         self.human_agent_index = human_agent_index
         # Normalize rectangle coordinates
         x1, y1, x2, y2 = target_rect

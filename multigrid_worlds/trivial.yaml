@@ -1,0 +1,37 @@
+# Trivial environment - minimal test case for EMPO Phase 2
+# This is the default hardcoded environment from phase2_robot_policy_demo.py
+metadata:
+  name: "Trivial"
+  description: "Small 4x6 grid with 1 robot (grey), 1 human (yellow), and 1 rock. Minimal environment for quick testing of Phase 2 robot policy learning."
+  author: "EMPO Framework"
+  version: "1.0.0"
+  created: "2026-01-09"
+  category: "basic"
+  tags: ["phase2", "minimal", "rock-pushing"]
+
+map: |
+  We We We We We We
+  We Ae Ro .. .. We
+  We We Ay We We We
+  We We We We We We
+
+max_steps: 10
+action_class: "SmallActions"
+
+# Possible goals for the human agent (yellow, agent 1)
+# Probabilities match the original code's goal sampler
+possible_goals:
+  - "2,1"  # Easy once robot has pushed rock (or moved back)
+  - "1,1"  # Medium difficulty
+  - "3,1"  # Hardest - robot must move back after pushing rock
+  - "2,2"  # Already at starting position
+  - "1,2"  # Impossible goal (in wall) - for testing edge cases
+  - "4,1"  # Impossible goal (out of bounds) - included to cover all walkable cells
+
+# Note on state space:
+# With 4 human orientations × 4 robot orientations × (1 + 3 + 12) rock positions
+# Total states = 256
+# In tabular mode, lookup tables should eventually reach:
+#   - x_h: 256 entries
+#   - q_r: 256 entries  
+#   - v_h_e: 256 × 5 goals = 1280 entries

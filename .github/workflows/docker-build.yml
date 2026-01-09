@@ -46,6 +46,12 @@ jobs:
     
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
+      with:
+        driver-opts: |
+          network=host
+      # Retry on failure
+      continue-on-error: false
+      timeout-minutes: 5
     
     - name: Log in to Container Registry
       if: github.event_name != 'pull_request'
@@ -81,7 +87,9 @@ jobs:
     
     - name: Run tests in Docker
       run: |
-        docker run --rm empo:test pytest tests/ -v \
+        docker run --rm \
+          -e PYTHONPATH=/workspace:/workspace/src:/workspace/vendor/multigrid:/workspace/vendor/ai_transport \
+          empo:test pytest tests/ -v \
           --ignore=tests/test_mineland_installation.py \
           --ignore=tests/test_basic.py \
           --ignore=tests/test_neural_policy_prior.py

@@ -9,6 +9,7 @@ Environment options (set env_type variable):
 - "trivial": Small 4x6 grid with 1 human, 1 robot (quick testing)
 - "small": 6x6 grid with 1 human, 1 robot, more space to maneuver
 - "ensemble": Random 7x7 grids with 2 humans, 2 robots, walls, and objects
+- "custom": Load from YAML file via --world parameter
 
 The demo trains:
 - Q_r: Robot state-action value (eq. 4)
@@ -24,6 +25,7 @@ Usage:
     python phase2_robot_policy_demo.py --quick   # Quick test (100 episodes)
     python phase2_robot_policy_demo.py --small   # Use small 6x6 environment
     python phase2_robot_policy_demo.py --ensemble # Use random ensemble environment
+    python phase2_robot_policy_demo.py --world basic/two_agents  # Use custom world from YAML
     python phase2_robot_policy_demo.py --async   # Use async actor-learner training
     python phase2_robot_policy_demo.py --tabular # Use lookup tables instead of neural networks
     python phase2_robot_policy_demo.py --curious # Enable curiosity exploration (RND or count-based)
@@ -56,6 +58,7 @@ import os
 import time
 import random
 import argparse
+from typing import Dict, Tuple, Optional
 
 import numpy as np
 import torch
@@ -64,7 +67,7 @@ from gym_multigrid.multigrid import (
     MultiGridEnv, World, SmallActions
 )
 from empo.world_specific_helpers.multigrid import ReachCellGoal, ReachRectangleGoal, render_test_map_values
-from empo.possible_goal import TabularGoalSampler, PossibleGoalSampler
+from empo.possible_goal import TabularGoalSampler, PossibleGoalSampler, PossibleGoalGenerator
 from empo.human_policy_prior import HeuristicPotentialPolicy
 from empo.learning_based.multigrid import PathDistanceCalculator
 from empo.learning_based.phase2.config import Phase2Config
@@ -74,6 +77,96 @@ from empo.learning_based.multigrid.phase2 import train_multigrid_phase2
 from empo.learning_based.multigrid.phase2.robot_policy import (
     MultiGridRobotPolicy, MultiGridMultiStepExplorationPolicy
 )
+
+
+def create_env_from_world(world_path: str, max_steps: Optional[int] = None) -> MultiGridEnv:
+    """
+    Create an environment from a YAML world file.
+    
+    Args:
+        world_path: Path relative to multigrid_worlds/, e.g., "basic/two_agents"
+                   (.yaml extension is optional)
+        max_steps: Maximum steps per episode (None to use config file value,
+                   or int to override it)
+    
+    Returns:
+        MultiGridEnv loaded from the config file.
+    """
+    # Find the multigrid_worlds directory
+    script_dir = os.path.dirname(__file__)
+    worlds_dir = os.path.join(script_dir, '..', 'multigrid_worlds')
+    
+    # Add .yaml extension if not present
+    if not world_path.endswith('.yaml') and not world_path.endswith('.yml'):
+        world_path = world_path + '.yaml'
+    
+    config_path = os.path.join(worlds_dir, world_path)
+    config_path = os.path.abspath(config_path)
+    
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"World file not found: {config_path}")
+    
+    # Only pass max_steps if explicitly provided (otherwise use config default)
+    kwargs = {'config_file': config_path, 'partial_obs': False, 'actions_set': SmallActions}
+    if max_steps is not None:
+        kwargs['max_steps'] = max_steps
+    
+    env = MultiGridEnv(**kwargs)
+    return env
+
+
+class GenericGoalGenerator(PossibleGoalGenerator):
+    """
+    Goal generator that discovers walkable cells automatically.
+    
+    Generates ReachCellGoal for each empty/walkable cell in the grid.
+    
+    Args:
+        world_model: The environment.
+        goal_weights: Optional dict mapping cell tuples to weights.
+                     Default weight is 1.0 for cells not in the dict.
+    """
+    
+    def __init__(self, world_model: MultiGridEnv,
+                 goal_weights: Optional[Dict[Tuple[int, int], float]] = None):
+        super().__init__(world_model)
+        self.goal_weights = goal_weights or {}
+        self.goal_cells = self._discover_walkable_cells()
+    
+    def _discover_walkable_cells(self):
+        """Find all cells that are empty or contain only agents."""
+        walkable = []
+        grid = self.env.grid
+        for x in range(self.env.width):
+            for y in range(self.env.height):
+                cell = grid.get(x, y)
+                # Cell is walkable if empty or contains only an agent
+                if cell is None:
+                    walkable.append((x, y))
+                elif hasattr(cell, 'can_overlap') and cell.can_overlap():
+                    walkable.append((x, y))
+        
+        # Also include agent starting positions
+        for agent in self.env.agents:
+            pos = tuple(agent.pos)
+            if pos not in walkable:
+                walkable.append(pos)
+        
+        return sorted(walkable)
+    
+    def generate(self, state, human_agent_index: int):
+        """Generate all possible goals with weights."""
+        for cell in self.goal_cells:
+            goal = ReachCellGoal(self.env, human_agent_index, cell)
+            weight = self.goal_weights.get(cell, 1.0)
+            yield (goal, weight)
+    
+    def get_sampler(self):
+        """Create a sampler that samples from this generator's goal cells."""
+        # Create goal sampler with goals for a reference human index (will be regenerated per human)
+        goals = [ReachCellGoal(self.env, 0, cell) for cell in self.goal_cells]
+        weights = [self.goal_weights.get(cell, 1.0) for cell in self.goal_cells]
+        return TabularGoalSampler(goals, probabilities=weights)
 
 
 def load_config_yaml(path: str) -> dict:
@@ -131,6 +224,7 @@ final_beta_r = 1000.0  # Final beta_r for robot policy concentration
 # Default environment type (can be overridden via --ensemble or --small flags)
 # These will be set properly in main() based on command line args
 env_type = "trivial"
+world_path = None  # Path to custom world YAML file
 
 # --- Configuration variables (set based on env_type) ---
 GRID_MAP = None
@@ -153,11 +247,14 @@ UNSTEADY_GROUND_PROBABILITY = 0.08
 DOOR_KEY_COLOR = 'r'
 
 
-def configure_environment(use_ensemble: bool, use_small: bool = False):
+def configure_environment(use_ensemble: bool, use_small: bool = False, world: Optional[str] = None):
     """Configure global environment variables based on mode."""
-    global env_type, GRID_MAP, MAX_STEPS, NUM_ROLLOUTS, MOVIE_FPS, goal_sampler_factory, TEST_MAPS, DEFINED_GOALS
+    global env_type, GRID_MAP, MAX_STEPS, NUM_ROLLOUTS, MOVIE_FPS, goal_sampler_factory, TEST_MAPS, DEFINED_GOALS, world_path
     
-    if use_ensemble:
+    if world is not None:
+        env_type = "custom"
+        world_path = world
+    elif use_ensemble:
         env_type = "ensemble"
         GRID_MAP = None  # Not used for ensemble
         MAX_STEPS = 30
@@ -890,6 +987,7 @@ def main(
     seed: int = 42,
     output_dir_override: str = None,
     config_overrides: dict = None,
+    world: str = None,
 ):
     """Run Phase 2 demo."""
     # Set random seeds for reproducibility (sync mode only - async mode is inherently non-deterministic)
@@ -904,7 +1002,7 @@ def main(
     torch.backends.cudnn.benchmark = False
     
     # Configure environment based on command line option
-    configure_environment(use_ensemble, use_small)
+    configure_environment(use_ensemble, use_small, world)
     
     print("=" * 70)
     print("Phase 2 Robot Policy Learning Demo")
@@ -918,7 +1016,18 @@ def main(
     # This is simpler and faster for small state spaces
     use_x_h_network = True  # Default for larger environments
     
-    if env_type == "trivial":
+    if env_type == "custom":
+        # Custom world from YAML file
+        num_training_steps = 20000  # Default for custom worlds
+        num_rollouts = NUM_ROLLOUTS if num_rollouts_override is None else num_rollouts_override
+        batch_size = 32
+        x_h_batch_size = 64
+        hidden_dim = 64
+        goal_feature_dim = 32
+        agent_embedding_dim = 8
+        use_x_h_network = True
+        print(f"[CUSTOM WORLD] Loading from: {world_path}")
+    elif env_type == "trivial":
         num_training_steps = 1e6 # 10000
         num_rollouts = NUM_ROLLOUTS
         batch_size = 32 # 16
@@ -1017,7 +1126,17 @@ def main(
     if output_dir_override:
         output_dir = output_dir_override
     else:
-        output_dir = os.path.join(os.path.dirname(__file__), '..', 'outputs', f'phase2_demo_{env_type}')
+        # Determine world name suffix for custom worlds
+        if env_type == "custom":
+            world_name = world_path if world_path is not None else 'custom'
+            # Remove .yaml/.yml extension if present
+            if world_name.endswith('.yaml'):
+                world_name = world_name[:-5]
+            elif world_name.endswith('.yml'):
+                world_name = world_name[:-4]
+            output_dir = os.path.join(os.path.dirname(__file__), '..', 'outputs', 'phase2_demo', world_name)
+        else:
+            output_dir = os.path.join(os.path.dirname(__file__), '..', 'outputs', f'phase2_demo_{env_type}')
     os.makedirs(output_dir, exist_ok=True)
     tensorboard_dir = os.path.join(output_dir, 'tensorboard')
     
@@ -1038,7 +1157,44 @@ def main(
     
     # Create environment
     print("Creating environment...")
-    if env_type == "ensemble":
+    if env_type == "custom":
+        # Custom world from YAML file
+        print(f"Loading custom world from: {world_path}")
+        world_model = create_env_from_world(world_path)
+        world_model.reset()
+        
+        # Create goal generator/sampler
+        # First check if env has a goal generator from config (possible_goals in YAML)
+        if hasattr(world_model, 'possible_goal_generator') and world_model.possible_goal_generator is not None:
+            goal_generator = world_model.possible_goal_generator
+            goal_sampler_instance = world_model.possible_goal_sampler
+            print(f"  Using goal generator from config file")
+            print(f"  Goals: {len(goal_generator.goal_coords)} goals from config")
+        else:
+            # Use generic goal generator for custom worlds without possible_goals
+            goal_generator = GenericGoalGenerator(world_model)
+            print(f"  Goals: {len(goal_generator.goal_cells)} possible cell goals (auto-discovered)")
+            print(f"  Goal cells: {goal_generator.goal_cells}")
+            # Create a sampler instance
+            goal_sampler_instance = goal_generator.get_sampler()
+        
+        print(f"  Grid: {world_model.width}x{world_model.height}")
+        print(f"  Max steps: {world_model.max_steps}")
+        print(f"  Humans: {len(world_model.human_agent_indices)}, Robots: {len(world_model.robot_agent_indices)}")
+        
+        # Set env to world_model for consistency with other modes
+        env = world_model
+        goal_sampler = goal_sampler_instance
+        
+        # Create world model factory
+        if use_async:
+            # Use env_creator for async mode
+            env_creator = lambda: create_env_from_world(world_path)
+            world_model_factory = CachedWorldModelFactory(env_creator)
+        else:
+            world_model_factory = None
+        
+    elif env_type == "ensemble":
         # Create world model factory for ensemble mode (used for training AND rollouts)
         # This ensures each episode uses a fresh random environment
         env_creator = _EnsembleEnvCreator(
@@ -1564,6 +1720,9 @@ if __name__ == "__main__":
                         help='Use random ensemble environment (7x7 grids, 2 humans, 2 robots)')
     parser.add_argument('--small', '-s', action='store_true',
                         help='Use small environment (6x6 grid, 1 human, 1 robot, more space)')
+    parser.add_argument('--world', type=str, default=None,
+                        help='Path to world YAML file relative to multigrid_worlds/, '
+                             'e.g., "basic/two_agents" (default: use trivial world)')
     parser.add_argument('--debug', '-d', action='store_true',
                         help='Enable verbose debug output')
     parser.add_argument('--profile', '-p', action='store_true',
@@ -1640,4 +1799,5 @@ if __name__ == "__main__":
         seed=args.seed,
         output_dir_override=args.output_dir,
         config_overrides=config_overrides,
+        world=args.world,
     )

@@ -1,0 +1,36 @@
+# Two humans, one robot - asymmetric starting positions
+# Challenge: Humans start with different levels of freedom, robot can equalize or increase gap
+metadata:
+  name: "Asymmetric Freeing"
+  description: "Two locked-in humans with different levels of potentially quickly attainable goals, one robot that can free them but is closer to the one with less potential."
+  author: "EMPO Framework"
+  version: "1.0.0"
+  created: "2026-01-08"
+  category: "challenges"
+  tags: ["two-humans", "robot", "empowerment", "equity"]
+
+#     1  2  3  4  5  6  7
+map: |
+  We We We We We We We We
+  We We Ay We We Ay We We
+  We .. Ro Ae .. Ro .. We
+  We We We We .. .. .. We
+  We We We We We We We We
+
+max_steps: 20
+
+orientations: ['s','s','s']
+
+possible_goals:  # each walkable cell
+  - 1,2
+  - 2,1
+  - 2,2
+  - 3,2
+  - 4,2
+  - 4,3
+  - 5,1
+  - 5,2
+  - 5,3
+  - 6,2
+  - 6,3
+

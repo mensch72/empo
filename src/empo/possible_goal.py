@@ -39,7 +39,7 @@ Example usage:
 """
 
 from abc import ABC, abstractmethod
-from typing import Tuple, Iterator, Callable, TYPE_CHECKING, Any
+from typing import Tuple, Iterator, Callable, TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     pass
@@ -84,13 +84,15 @@ class PossibleGoal(ABC):
 
     env: Any  # gymnasium.Env or compatible
     _frozen: bool  # Whether the object is frozen (immutable)
+    index: Optional[int]  # Optional index of this goal in a list (set by YAML loader)
     
-    def __init__(self, env: Any):
+    def __init__(self, env: Any, index: Optional[int] = None):
         """
         Initialize the possible goal.
         
         Args:
             env: The gymnasium environment (or compatible) this goal applies to.
+            index: Optional index of this goal in a list (set by YAML loader).
         
         Note:
             Subclasses must call super()._freeze() at the END of their __init__
@@ -98,6 +100,7 @@ class PossibleGoal(ABC):
         """
         object.__setattr__(self, '_frozen', False)
         self.env = env
+        self.index = index
     
     def _freeze(self) -> None:
         """Freeze the object to prevent further modifications.
@@ -176,18 +179,22 @@ class PossibleGoalSampler(ABC):
     
     Attributes:
         env: Reference to the gymnasium environment this sampler applies to.
+        indexed: Boolean indicating whether goals have indices (set by YAML loader).
     """
 
     env: Any  # gymnasium.Env or compatible
+    indexed: bool  # Whether goals have indices
     
-    def __init__(self, env: Any):
+    def __init__(self, env: Any, indexed: bool = False):
         """
         Initialize the goal sampler.
         
         Args:
             env: The gymnasium environment (or compatible) this sampler applies to.
+            indexed: Boolean indicating whether goals have indices (default False).
         """
         self.env = self.world_model = env
+        self.indexed = indexed
     
     def set_world_model(self, world_model: Any) -> None:
         """
@@ -302,6 +309,7 @@ class PossibleGoalGenerator(ABC):
     
     Attributes:
         env: Reference to the gymnasium environment this generator applies to.
+        indexed: Boolean indicating whether goals have indices (set by YAML loader).
     
     Example implementation:
         >>> class AllCellsGenerator(PossibleGoalGenerator):
@@ -315,16 +323,19 @@ class PossibleGoalGenerator(ABC):
 
     env: Any  # gymnasium.Env or compatible
     world_model: Any  # Alias for env for compatibility
+    indexed: bool  # Whether goals have indices
     
-    def __init__(self, env: Any):
+    def __init__(self, env: Any, indexed: bool = False):
         """
         Initialize the goal generator.
         
         Args:
             env: The gymnasium environment (or compatible) this generator applies to.
+            indexed: Boolean indicating whether goals have indices (default False).
         """
         self.env = env
         self.world_model = env  # Alias for compatibility
+        self.indexed = indexed
 
     @abstractmethod
     def generate(self, state, human_agent_index: int) -> Iterator[Tuple['PossibleGoal', float]]:
@@ -356,15 +367,16 @@ class DeterministicGoalSampler(PossibleGoalSampler):
         weight: The weight for X_h computation (default 1.0).
     """
     
-    def __init__(self, goal: 'PossibleGoal', weight: float = 1.0):
+    def __init__(self, goal: 'PossibleGoal', weight: float = 1.0, indexed: bool = False):
         """
         Initialize with a fixed goal.
         
         Args:
             goal: The PossibleGoal instance to always return.
             weight: The weight for X_h computation (default 1.0).
+            indexed: Boolean indicating whether goals have indices (default False).
         """
-        super().__init__(goal.env)
+        super().__init__(goal.env, indexed=indexed)
         self.goal = goal
         self.weight = weight
     
@@ -394,15 +406,16 @@ class DeterministicGoalGenerator(PossibleGoalGenerator):
         weight: The aggregation weight to yield (default 1.0).
     """
     
-    def __init__(self, goal: 'PossibleGoal', weight: float = 1.0):
+    def __init__(self, goal: 'PossibleGoal', weight: float = 1.0, indexed: bool = False):
         """
         Initialize with a fixed goal.
         
         Args:
-            goal: The PossibleGoal instance to always yield.
-            weight: The aggregation weight (default 1.0).
+            goal: The fixed PossibleGoal instance to yield.
+            weight: The aggregation weight to yield (default 1.0).
+            indexed: Boolean indicating whether goals have indices (default False).
         """
-        super().__init__(goal.env)
+        super().__init__(goal.env, indexed=indexed)
         self.goal = goal
         self.weight = weight
     
@@ -433,7 +446,7 @@ class TabularGoalSampler(PossibleGoalSampler):
         weights: Optional iterable of weights for X_h computation. If None, 1.0 is used for all.
     """
     
-    def __init__(self, goals, probabilities=None, weights=None):
+    def __init__(self, goals, probabilities=None, weights=None, indexed: bool = False):
         """
         Initialize with a list of goals and optional probabilities/weights.
         
@@ -443,12 +456,13 @@ class TabularGoalSampler(PossibleGoalSampler):
                           If None, uses uniform 1/n probabilities.
             weights: Optional iterable of weights for X_h computation.
                     If None, uses 1.0 for all goals.
+            indexed: Boolean indicating whether goals have indices (default False).
         """
         self.goals = list(goals)
         if len(self.goals) == 0:
             raise ValueError("TabularGoalSampler requires at least one goal")
         
-        super().__init__(self.goals[0].env)
+        super().__init__(self.goals[0].env, indexed=indexed)
         
         n = len(self.goals)
         
@@ -497,7 +511,7 @@ class TabularGoalSampler(PossibleGoalSampler):
             TabularGoalGenerator with weights = probs * weights.
         """
         combined_weights = [p * w for p, w in zip(self.probs, self.weights)]
-        return TabularGoalGenerator(self.goals, weights=combined_weights)
+        return TabularGoalGenerator(self.goals, weights=combined_weights, indexed=self.indexed)
     
     def validate_coverage(self, raise_on_error: bool = True) -> list:
         """
@@ -577,19 +591,20 @@ class TabularGoalGenerator(PossibleGoalGenerator):
         weights: Optional iterable of weights. If None, uniform 1/n weights are used.
     """
     
-    def __init__(self, goals, weights=None):
+    def __init__(self, goals, weights=None, indexed: bool = False):
         """
         Initialize with a list of goals and optional weights.
         
         Args:
             goals: Iterable of PossibleGoal instances.
             weights: Optional iterable of weights. If None, uses uniform 1/n weights.
+            indexed: Boolean indicating whether goals have indices (default False).
         """
         self.goals = list(goals)
         if len(self.goals) == 0:
             raise ValueError("TabularGoalGenerator requires at least one goal")
         
-        super().__init__(self.goals[0].env)
+        super().__init__(self.goals[0].env, indexed=indexed)
         
         if weights is None:
             n = len(self.goals)
@@ -623,7 +638,7 @@ class TabularGoalGenerator(PossibleGoalGenerator):
         Returns:
             TabularGoalSampler with probs = weights (normalized), weights = 1.0.
         """
-        return TabularGoalSampler(self.goals, probabilities=self.weights, weights=None)
+        return TabularGoalSampler(self.goals, probabilities=self.weights, weights=None, indexed=self.indexed)
     
     def validate_coverage(self, raise_on_error: bool = True) -> list:
         """

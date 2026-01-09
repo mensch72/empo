@@ -269,7 +269,9 @@ class TabularHumanPolicyPrior(HumanPolicyPrior):
             KeyError: If state or agent_index not found in lookup table.
         """
         if possible_goal is not None:
-            return self.values[state][human_agent_index][possible_goal]
+#            key = possible_goal.index if hasattr(possible_goal, 'index') else possible_goal
+            key = possible_goal
+            return self.values[state][human_agent_index][key]
         else:
             # Compute marginal by averaging over goals weighted by their prior
             vs = self.values[state][human_agent_index]
@@ -280,7 +282,9 @@ class TabularHumanPolicyPrior(HumanPolicyPrior):
                 num_actions = self.world_model.action_space.n  # type: ignore[attr-defined]
             total = np.zeros(num_actions)
             for goal, weight in self.possible_goal_generator.generate(state, human_agent_index):
-                total += vs[goal] * weight
+#                key = goal.index if hasattr(goal, 'index') else goal
+                key = goal
+                total += vs[key] * weight
             return total
         
     def profile_distribution(

@@ -80,12 +80,26 @@ from .phase2 import (
     TabularRobotPolicy,
 )
 
+from .dag_slicing import (
+    DiskBasedDAG,
+    DAGSlice,
+    estimate_dag_memory,
+    convert_transitions_to_float16,
+    get_optimal_cache_dir,
+)
+
 __all__ = [
     # Phase 1
     'compute_human_policy_prior',
     # Phase 2
     'compute_robot_policy',
     'TabularRobotPolicy',
+    # DAG utilities
+    'DiskBasedDAG',
+    'DAGSlice',
+    'estimate_dag_memory',
+    'convert_transitions_to_float16',
+    'get_optimal_cache_dir',
     # Types
     'SliceCache',
     'SliceId',

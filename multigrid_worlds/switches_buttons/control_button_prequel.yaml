@@ -1,13 +1,14 @@
 # Control button demo with initial positions
 metadata:
   name: "Control Button Demo (Prequel)"
-  description: "Environment for control button demonstration with human (yellow) and robot (grey) agents. Features 3 control buttons and 3 rocks. Used for demonstrating how robots can program control buttons and humans can trigger them."
+  description: "Environment for control button demonstration with human (Ay) and robot (Ae) agents. Features 3 control buttons and 3 rocks. Used for demonstrating how robots can program control buttons and humans can trigger them. Expected solution: robot programs buttons on 'left', 'forward', 'right', human uses them to make robot move rocks away from goal, then goes to goal."
   author: "EMPO Framework"
   version: "1.0.0"
   created: "2025-01-01T00:00:00Z"
   category: "switches_buttons"
   tags: ["control-button", "human-robot", "programming"]
 
+#     1  2  3  4  5  6
 map: |
   We We We We We We We We
   We Ay .. .. .. .. .. We
@@ -19,3 +20,9 @@ map: |
 
 max_steps: 100
 can_push_rocks: "e"
+
+possible_goals:  # must cover walkable area
+  - 5,2  # where upper rock is
+  - 5,3  # where middle rock is
+  - 5,4  # where lower rock is
+  - 1,1, 6,6  # anywhere (doesn't care)
