@@ -2715,7 +2715,8 @@ class MultiGridEnv(WorldModel):
             config_file=None,
             config=None,
             stumble_probability=0.5,
-            solidify_probability=0.1
+            solidify_probability=0.1,
+            rocks_can_kill=False
     ):
         """
         Initialize a MultiGridEnv.
@@ -2749,6 +2750,8 @@ class MultiGridEnv(WorldModel):
                    If both config and config_file are provided, config_file takes precedence.
             stumble_probability: Default probability of stumbling on UnsteadyGround (0.0 to 1.0)
             solidify_probability: Default probability of MagicWall solidifying on failed entry (0.0 to 1.0)
+            rocks_can_kill: If True, agents with can_push_rocks=True can push rocks onto
+                           agents with can_push_rocks=False, terminating the target. Default: False.
         """
         # Load config from config file or dict if provided
         if config_file is not None:
@@ -2788,6 +2791,8 @@ class MultiGridEnv(WorldModel):
                 stumble_probability = config['stumble_probability']
             if solidify_probability == 0.1 and 'solidify_probability' in config:  # default: 0.1
                 solidify_probability = config['solidify_probability']
+            if rocks_can_kill is False and 'rocks_can_kill' in config:  # default: False
+                rocks_can_kill = config['rocks_can_kill']
             # Handle action_class from config
             if actions_set is Actions and 'action_class' in config:
                 action_class_name = config['action_class']
@@ -2816,13 +2821,17 @@ class MultiGridEnv(WorldModel):
         self._init_can_push_rocks = can_push_rocks
         self._init_stumble_probability = stumble_probability
         self._init_solidify_probability = solidify_probability
-        
+        self._init_rocks_can_kill = rocks_can_kill
+
         # Store stumble_probability for use by UnsteadyGround objects
         self.stumble_probability = stumble_probability
         
         # Store solidify_probability for use by MagicWall objects
         self.solidify_probability = solidify_probability
-        
+
+        # Store rocks_can_kill for use when pushing rocks onto agents
+        self.rocks_can_kill = rocks_can_kill
+
         # Initialize RNG early so we can use it for random orientations
         # This is done before reset() to allow random orientations to be drawn in __init__
         self.np_random, _ = seeding.np_random(seed)
@@ -2982,7 +2991,8 @@ class MultiGridEnv(WorldModel):
             'can_push_rocks': getattr(self, '_init_can_push_rocks', 'e'),
             'config_file': getattr(self, '_config_file', None),
             'stumble_probability': getattr(self, '_init_stumble_probability', 0.5),
-            'solidify_probability': getattr(self, '_init_solidify_probability', 0.1)
+            'solidify_probability': getattr(self, '_init_solidify_probability', 0.1),
+            'rocks_can_kill': getattr(self, '_init_rocks_can_kill', False)
         }
     
     @staticmethod
@@ -3423,14 +3433,14 @@ class MultiGridEnv(WorldModel):
         # Check for pushable objects (blocks/rocks)
         if fwd_cell.type == 'block':
             # All agents can push blocks - check if push is possible
-            can_push, _, _ = self._can_push_objects(agent, np.array([fwd_x, fwd_y]))
+            can_push, _, _, _ = self._can_push_objects(agent, np.array([fwd_x, fwd_y]))
             return can_push
-        
+
         if fwd_cell.type == 'rock':
             # Only agents with can_push_rocks can push rocks
             if not getattr(agent, 'can_push_rocks', False):
                 return False
-            can_push, _, _ = self._can_push_objects(agent, np.array([fwd_x, fwd_y]))
+            can_push, _, _, _ = self._can_push_objects(agent, np.array([fwd_x, fwd_y]))
             return can_push
         
         # Check for magic walls
@@ -3446,20 +3456,31 @@ class MultiGridEnv(WorldModel):
         
         # All other objects (walls, doors, etc.) - cannot pass
         return False
-    
+
+    def _find_agent_at_position(self, pos_tuple):
+        """
+        Find and return the agent at the given position, or None if no agent.
+        Only returns non-terminated agents.
+        """
+        for agent in self.agents:
+            if agent.pos is not None and tuple(agent.pos) == pos_tuple and not agent.terminated:
+                return agent
+        return None
+
     def _can_push_objects(self, agent, start_pos):
         """
         Check if agent can push blocks/rocks starting at start_pos.
-        Returns (can_push, num_objects, end_pos) where:
+        Returns (can_push, num_objects, end_pos, target_agent) where:
         - can_push: True if push is possible
         - num_objects: number of consecutive blocks/rocks
         - end_pos: position where the last object would move to
+        - target_agent: agent that will be killed by the push (or None)
         """
         # Check if there are consecutive blocks/rocks in the direction the agent is facing
         direction = agent.dir_vec
         current_pos = np.array(start_pos)
         num_objects = 0
-        
+
         # Count consecutive blocks/rocks
         while True:
             cell = self.grid.get(*current_pos)
@@ -3469,39 +3490,64 @@ class MultiGridEnv(WorldModel):
                 break
             # For rocks, check if agent can push this rock
             if cell.type == 'rock' and not cell.can_be_pushed_by(agent):
-                return False, 0, None
+                return False, 0, None, None
             num_objects += 1
             current_pos = current_pos + direction
-            
+
             # Bounds check
             if current_pos[0] < 0 or current_pos[0] >= self.grid.width or \
                current_pos[1] < 0 or current_pos[1] >= self.grid.height:
-                return False, 0, None
-        
+                return False, 0, None, None
+
         # current_pos is now the first empty cell after the objects
         # Check if this cell is empty or can be overlapped
         end_cell = self.grid.get(*current_pos)
+        end_pos_tuple = tuple(current_pos)
+
         if end_cell is None or end_cell.can_overlap():
             # Also check if the end position was occupied by another agent at step start.
             # This prevents chain conflicts where pushing depends on execution order.
-            end_pos_tuple = tuple(current_pos)
             if hasattr(self, '_initial_agent_positions') and end_pos_tuple in self._initial_agent_positions:
+                # Check if rocks_can_kill is enabled and we can kill the target agent
+                if self.rocks_can_kill and agent.can_push_rocks:
+                    target_agent = self._find_agent_at_position(end_pos_tuple)
+                    if target_agent is not None and not target_agent.can_push_rocks:
+                        # Can push onto killable agent
+                        return True, num_objects, current_pos, target_agent
                 # Cannot push onto a cell that was occupied by an agent at step start
-                return False, 0, None
-            return True, num_objects, current_pos
+                return False, 0, None, None
+            return True, num_objects, current_pos, None
+        elif end_cell is not None and end_cell.type == 'agent':
+            # Cell has an agent - check if rocks_can_kill allows pushing onto them
+            if self.rocks_can_kill and agent.can_push_rocks:
+                target_agent = end_cell
+                if not target_agent.can_push_rocks:
+                    # Can push onto killable agent
+                    return True, num_objects, current_pos, target_agent
+            return False, 0, None, None
         else:
-            return False, 0, None
+            return False, 0, None, None
     
     def _push_objects(self, agent, start_pos):
         """
         Push blocks/rocks starting at start_pos in the direction agent is facing.
         Returns True if push was successful.
+
+        If rocks_can_kill is enabled and the push lands a rock on a killable agent,
+        that agent will be terminated.
         """
-        can_push, num_objects, end_pos = self._can_push_objects(agent, start_pos)
-        
+        can_push, num_objects, end_pos, target_agent = self._can_push_objects(agent, start_pos)
+
         if not can_push or num_objects == 0:
             return False
-        
+
+        # Handle agent termination if pushing onto a killable agent
+        if target_agent is not None:
+            # Terminate the target agent
+            target_agent.terminated = True
+            # Remove the target agent from the grid (rock will occupy the cell)
+            self.grid.set(*target_agent.pos, None)
+
         # Move objects from back to front to avoid overwriting
         direction = agent.dir_vec
         # Start from the end position and work backwards
@@ -3512,15 +3558,15 @@ class MultiGridEnv(WorldModel):
             self.grid.set(*to_pos, obj)
             if obj:
                 obj.cur_pos = to_pos
-        
+
         # Clear the original start position (now empty)
         self.grid.set(*start_pos, None)
-        
+
         # Now agent can move into start_pos
         self.grid.set(*start_pos, agent)
         self.grid.set(*agent.pos, None)
         agent.pos = np.array(start_pos)
-        
+
         return True
 
     def _move_agent_to_cell(self, agent_idx, target_pos, target_cell):
@@ -3909,7 +3955,7 @@ class MultiGridEnv(WorldModel):
             # Determine contested cell (target or block end position)
             target_cell = self.grid.get(*target_pos)
             if target_cell is not None and target_cell.type in ['block', 'rock']:
-                can_push, num_objects, end_pos = self._can_push_objects(self.agents[i], np.array(target_pos))
+                can_push, num_objects, end_pos, _ = self._can_push_objects(self.agents[i], np.array(target_pos))
                 contested_cells[i] = tuple(end_pos) if can_push else target_pos
             else:
                 contested_cells[i] = target_pos
@@ -5391,7 +5437,7 @@ class MultiGridEnv(WorldModel):
                 
                 # If pushing blocks/rocks, the resource is the final cell where objects land
                 if fwd_cell and fwd_cell.type in ['block', 'rock']:
-                    can_push, num_objects, end_pos = self._can_push_objects(agent, fwd_pos)
+                    can_push, num_objects, end_pos, _ = self._can_push_objects(agent, fwd_pos)
                     if can_push:
                         # Agent will push objects and move into fwd_pos
                         # The contested resource is the end_pos where objects land

@@ -19,6 +19,7 @@ map: |
 
 max_steps: 30
 can_push_rocks: "e"
+rocks_can_kill: True
 possible_goals: 
   - 2,2
   - 2,3
