@@ -3,7 +3,7 @@ metadata:
   description: "The robot must choose between killing one human and leaving three people trapped."
   author: "Berkin"
   version: "1.0.0"
-  created: "2026-01-13"
+  created: "2026-01-13T00:00:00Z"
   category: "berkin_challenges"
   tags: ["four-humans", "robot", "rock", "empowerment", "last-bit-of-power"]
 
