@@ -124,7 +124,12 @@ def sample_parameters(seed: Optional[int] = None) -> ParameterSet:
     )
 
 
-def detect_which_human_freed_first(env: MultiGridEnv, max_steps: int) -> Tuple[int, int, int]:
+def detect_which_human_freed_first(env: MultiGridEnv, 
+                                  human_policy_prior: TabularHumanPolicyPrior,
+                                  robot_policy: RobotPolicy,
+                                  human_agent_indices: List[int],
+                                  robot_agent_indices: List[int],
+                                  max_steps: int) -> Tuple[int, int, int]:
     """
     Run a single rollout and detect which human was freed first.
     
@@ -132,7 +137,11 @@ def detect_which_human_freed_first(env: MultiGridEnv, max_steps: int) -> Tuple[i
     blocked by a rock. This happens when the robot pushes away the rock in front of them.
     
     Args:
-        env: Environment with computed robot policy
+        env: Environment instance
+        human_policy_prior: Computed human policy prior
+        robot_policy: Computed robot policy
+        human_agent_indices: List of human agent indices
+        robot_agent_indices: List of robot agent indices
         max_steps: Maximum steps to run
         
     Returns:
@@ -146,12 +155,11 @@ def detect_which_human_freed_first(env: MultiGridEnv, max_steps: int) -> Tuple[i
     
     # Left human is agent 0 at initial position (2, 1)
     # Right human is agent 1 at initial position (5, 1)
-    # Rock at (1, 2) blocks left human
+    # Rock at (2, 2) blocks left human
     # Rock at (5, 2) blocks right human
     
     # Track which rocks have been moved/removed
-    # Initial rock positions from the YAML: Ro at (1,2) and (5,2)
-    left_rock_pos = (1, 2)
+    left_rock_pos = (2, 2)
     right_rock_pos = (5, 2)
     
     left_freed_step = -1
@@ -174,9 +182,43 @@ def detect_which_human_freed_first(env: MultiGridEnv, max_steps: int) -> Tuple[i
         if left_freed_step != -1 and right_freed_step != -1:
             break
         
+        # Get current state
+        current_state = env.get_state()
+        
         # Sample actions from policies
-        # For now, use random actions (this will be replaced with actual policy rollout)
-        actions = [env.action_space.sample() for _ in range(len(env.agents))]
+        actions = [0] * len(env.agents)
+        
+        # Sample human actions from human policy prior
+        for human_idx in human_agent_indices:
+            # Sample a goal for this human
+            goal_list = list(env.possible_goal_generator.generate(current_state, human_idx))
+            if goal_list and current_state in human_policy_prior.values:
+                sampled_goal, weight = goal_list[np.random.randint(len(goal_list))]
+                
+                # Get human action from policy prior
+                if (human_idx in human_policy_prior.values[current_state] and
+                    sampled_goal in human_policy_prior.values[current_state][human_idx]):
+                    action_dist = human_policy_prior.values[current_state][human_idx][sampled_goal]
+                    # action_dist is a numpy array of probabilities
+                    actions[human_idx] = np.random.choice(len(action_dist), p=action_dist)
+                else:
+                    # If state/goal not in policy, use random action
+                    actions[human_idx] = env.action_space.sample()
+            else:
+                # No goals available or state not in policy, use random action
+                actions[human_idx] = env.action_space.sample()
+        
+        # Sample robot actions from robot policy
+        # robot_policy(state) returns Dict[RobotActionProfile, float]
+        # or we can use robot_policy.sample(state) to directly get a sampled action profile
+        sampled_robot_action_profile = robot_policy.sample(current_state)
+        
+        # Assign robot actions (robot_action_profile is a tuple of actions for each robot)
+        for i, robot_idx in enumerate(robot_agent_indices):
+            if sampled_robot_action_profile and i < len(sampled_robot_action_profile):
+                actions[robot_idx] = sampled_robot_action_profile[i]
+            else:
+                actions[robot_idx] = env.action_space.sample()
         
         # Take step
         obs, rewards, done, info = env.step(actions)
@@ -277,7 +319,7 @@ def run_single_simulation(params: ParameterSet,
         )
         
         # Get number of states
-        params.n_states = len(robot_policy._policy)
+        params.n_states = len(robot_policy.values)
         
         if not quiet:
             print(f"Computed policies for {params.n_states} states")
@@ -288,7 +330,14 @@ def run_single_simulation(params: ParameterSet,
         total_valid_rollouts = 0
         
         for i in range(n_rollouts):
-            left_freed_first, left_step, right_step = detect_which_human_freed_first(env, params.max_steps)
+            left_freed_first, left_step, right_step = detect_which_human_freed_first(
+                env, 
+                human_policy_prior, 
+                robot_policy,
+                human_agent_indices,
+                robot_agent_indices,
+                params.max_steps
+            )
             
             # Only count rollouts where at least one human was freed
             if left_freed_first != -1:
