@@ -113,14 +113,69 @@ When using `--interactions`, the analysis includes terms like:
 
 ### HPC Recommendations
 
-For HPC runs:
+For HPC runs with Singularity/Apptainer (no Docker):
 ```bash
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=16G
 #SBATCH --time=06:00:00
 ```
 
-Use `--parallel --num_workers 8` to leverage multiple cores.
+#### Container Deployment (Recommended for HPC)
+
+Most HPC systems don't support Docker but provide Singularity/Apptainer. The script automatically detects and uses the container runtime.
+
+**Setup (one time):**
+```bash
+# On your local machine: build and push image to Docker Hub
+make up-gpu-docker-hub  # Requires Docker Hub account
+
+# Or build SIF file locally and transfer
+make up-gpu-sif-file
+scp empo-gpu.sif user@cluster:~/bega/empo/
+```
+
+**On HPC cluster:**
+```bash
+# Pull image from Docker Hub
+cd ~/bega/empo
+apptainer pull empo.sif docker://your-docker-hub-username/empo:gpu-latest
+
+# Clone repository
+mkdir -p git
+cd git
+git clone https://github.com/yourusername/empo.git .
+
+# Submit job (image auto-detected)
+sbatch scripts/run_parameter_sweep.sh
+```
+
+The script will automatically:
+- Detect `apptainer` or `singularity` command
+- Find the SIF file in standard locations
+- Bind mount the repository into the container
+- Run Python scripts inside the container
+
+**Custom image location:**
+```bash
+sbatch --export=IMAGE_PATH=/path/to/custom.sif scripts/run_parameter_sweep.sh
+```
+
+**Without container (native Python):**
+```bash
+# If you have Python/dependencies installed natively
+sbatch --export=USE_CONTAINER=false scripts/run_parameter_sweep.sh
+```
+
+See [CLUSTER.md](../CLUSTER.md) for complete deployment instructions.
+
+#### Native Python (Alternative)
+
+If not using containers, install dependencies first:
+```bash
+pip install numpy scipy scikit-learn PyYAML cloudpickle tqdm pandas statsmodels matplotlib gymnasium
+```
+
+Then use `--parallel --num_workers 8` to leverage multiple cores.
 
 ## Example Workflow
 

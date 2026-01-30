@@ -25,13 +25,59 @@ cat outputs/parameter_sweep/test_analysis.txt
 
 ### 2. Production Run (HPC, ~2-6 hours)
 
-For a full scientific study with statistical power:
+For a full scientific study with statistical power, deploy on HPC using Singularity/Apptainer.
+
+#### Option A: Using Container (Recommended - No Docker Needed)
+
+Most HPC clusters provide Singularity/Apptainer instead of Docker. The script automatically uses it.
+
+**One-time setup:**
+```bash
+# On local machine: Build image and push to Docker Hub
+docker login
+make up-gpu-docker-hub  # Or use make up-gpu-sif-file
+
+# On HPC: Pull the image
+cd ~/bega/empo
+apptainer pull empo.sif docker://your-docker-hub-username/empo:gpu-latest
+
+# Clone repository
+mkdir -p git && cd git
+git clone https://github.com/yourusername/empo.git .
+```
+
+**Submit job:**
+```bash
+cd ~/bega/empo/git
+sbatch scripts/run_parameter_sweep.sh
+
+# Or with custom settings
+sbatch --export=N_SAMPLES=200,IMAGE_PATH=../empo.sif scripts/run_parameter_sweep.sh
+```
+
+The script will automatically:
+- Detect if `apptainer` or `singularity` is available
+- Find the SIF file (checks standard locations)
+- Run everything inside the container with proper bind mounts
+
+#### Option B: Native Python (Without Container)
+
+If your HPC has Python installed natively:
+
+```bash
+# Install dependencies (one time)
+pip install --user numpy scipy scikit-learn PyYAML cloudpickle tqdm pandas statsmodels matplotlib gymnasium
+
+# Submit job without container
+sbatch --export=USE_CONTAINER=false scripts/run_parameter_sweep.sh
+```
+
+#### Option C: Manual Run
+
+For full control:
 
 ```bash
 # On HPC cluster with SLURM
-sbatch scripts/run_parameter_sweep.sh
-
-# Or manually with more samples
 python experiments/parameter_sweep_asymmetric_freeing.py \
     --n_samples 100 \
     --n_rollouts 10 \
