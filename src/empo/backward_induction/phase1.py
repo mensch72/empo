@@ -158,9 +158,18 @@ def _hpp_process_single_state(
     # Non-terminal state: compute both V-values and policies
     p_results = {}
     for agent_index in human_agent_indices:
+        agent_state = state[1][agent_index]  # state = (step_count, agent_states, ...)
+        terminated = agent_state[3]
+
+        # Skip terminated agents - they have no agency
+        if terminated:
+            v_results[agent_index] = vres0.copy() if use_indexed else {}
+            p_results[agent_index] = pres0.copy() if use_indexed else {}
+            continue
+
         vres = v_results[agent_index] = vres0.copy() if use_indexed else {}
         pres = p_results[agent_index] = pres0.copy() if use_indexed else {}
-        
+
         for possible_goal, _ in possible_goal_generator.generate(state, agent_index):
             key = possible_goal.index if use_indexed else possible_goal
             if possible_goal.is_achieved(state):

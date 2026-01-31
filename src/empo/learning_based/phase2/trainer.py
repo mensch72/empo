@@ -1952,12 +1952,29 @@ class BasePhase2Trainer(ABC):
         
         if self.config.u_r_use_network and u_r_active:
             for t in batch:
+                # Get agent states from state tuple
+                step_count, agent_states, mobile_objects, mutable_objects = t.state
+
+                # Filter out terminated agents BEFORE sampling
+                alive_humans = [
+                    h for h in self.human_agent_indices
+                    if h < len(agent_states) and not agent_states[h][3]  # Check terminated flag
+                ]
+
+                # Handle edge case: no alive humans in this state
+                if len(alive_humans) == 0:
+                    # Skip this state entirely for U_r computation
+                    # (no human empowerment to compute)
+                    u_r_humans_per_state.append(0)
+                    continue
+
+                # Sample from ALIVE humans only
                 if self.config.u_r_sample_humans is None:
-                    humans_for_u_r = list(self.human_agent_indices)
+                    humans_for_u_r = alive_humans
                 else:
-                    n_sample = min(self.config.u_r_sample_humans, len(self.human_agent_indices))
-                    humans_for_u_r = random.sample(list(self.human_agent_indices), n_sample)
-                
+                    n_sample = min(self.config.u_r_sample_humans, len(alive_humans))
+                    humans_for_u_r = random.sample(alive_humans, n_sample)
+
                 u_r_humans_per_state.append(len(humans_for_u_r))
                 for h in humans_for_u_r:
                     u_r_flat_states.append(t.state)

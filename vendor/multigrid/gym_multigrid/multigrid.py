@@ -3067,6 +3067,7 @@ class MultiGridEnv(WorldModel):
         # Item picked up, being carried, initially nothing
         for a in self.agents:
             a.carrying = None
+            a.terminated = False
 
         # Step count since episode start
         self.step_count = 0

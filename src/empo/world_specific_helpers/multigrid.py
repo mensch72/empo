@@ -21,10 +21,18 @@ area weight (1+x2-x1)*(1+y2-y1), which is required for correct phi network
 training where the marginal policy must account for goal weights.
 """
 
+import sys
 import numpy as np
 from typing import Tuple, Optional, Any, Dict, TYPE_CHECKING
 
-from empo.possible_goal import PossibleGoal, PossibleGoalSampler
+from empo.possible_goal import PossibleGoal, PossibleGoalSampler, TabularGoalGenerator
+
+import gymnasium as gym
+sys.modules['gym'] = gym
+
+from gym_multigrid.multigrid import (
+    MultiGridEnv
+)
 
 if TYPE_CHECKING:
     import matplotlib.axes
@@ -942,3 +950,30 @@ def _overlay_v_h_e_on_goals(
         draw.text((px, py), text, fill=(0, 0, 128), font=font, anchor="mm")
     
     return np.array(pil_img)
+
+def build_tabular_goal_generator(world_model: MultiGridEnv) -> TabularGoalGenerator:
+    goal_cells = []
+    grid = world_model.grid
+    for x in range(world_model.width):
+        for y in range(world_model.height):
+            cell = grid.get(x, y)
+            # Cell is walkable if empty or contains only an agent
+            if cell is None:
+                goal_cells.append((x, y))
+            elif hasattr(cell, 'can_overlap') and cell.can_overlap():
+                goal_cells.append((x, y))
+    
+    # Also include agent starting positions
+    for agent in world_model.agents:
+        pos = tuple(agent.pos)
+        if pos not in goal_cells:
+            goal_cells.append(pos) 
+    
+    goals = []
+    for index, agent in enumerate(world_model.agents):
+        if agent.is_human:
+            for goal_cell in goal_cells:
+                goal = ReachCellGoal(world_model, goal_cell, index=index)
+                goals.append(goal) 
+
+    return TabularGoalGenerator(goals)
