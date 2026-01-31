@@ -234,18 +234,25 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
     ) -> torch.Tensor:
         """
         Encode state and compute X_h for a specific human.
-        
+
         Args:
             state: Multigrid state tuple.
             world_model: Environment with grid.
             human_agent_idx: Index of the human agent.
             device: Torch device.
-        
+
         Returns:
             X_h tensor of shape (1,).
         """
         step_count, agent_states, mobile_objects, mutable_objects = state
-        
+
+        # Check if agent is terminated - early return with X_h = 0
+        if human_agent_idx < len(agent_states):
+            agent_state = agent_states[human_agent_idx]
+            if agent_state[3]:  # terminated = True
+                # Terminated agents have no goal achievement ability
+                return torch.tensor([1e-10], device=device, dtype=torch.float32)
+
         # Encode state (agent-agnostic)
         grid_tensor, global_features, agent_features, interactive_features = \
             self.state_encoder.tensorize_state(state, world_model, device)
