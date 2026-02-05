@@ -75,6 +75,7 @@ from empo.world_model import WorldModel
 # Lazy imports for goal types (loaded on demand to avoid circular imports)
 _ReachCellGoal = None
 _ReachRectangleGoal = None
+_OrientationGoal = None
 _TabularGoalGenerator = None
 _TabularGoalSampler = None
 _PossibleGoalGenerator = None
@@ -82,16 +83,17 @@ _PossibleGoalSampler = None
 
 def _load_goal_classes():
     """Lazy load goal classes to avoid circular imports."""
-    global _ReachCellGoal, _ReachRectangleGoal, _TabularGoalGenerator, _TabularGoalSampler
+    global _ReachCellGoal, _ReachRectangleGoal, _OrientationGoal, _TabularGoalGenerator, _TabularGoalSampler
     global _PossibleGoalGenerator, _PossibleGoalSampler
     if _ReachCellGoal is None:
-        from empo.world_specific_helpers.multigrid import ReachCellGoal, ReachRectangleGoal
+        from empo.world_specific_helpers.multigrid import ReachCellGoal, ReachRectangleGoal, OrientationGoal
         from empo.possible_goal import (
             TabularGoalGenerator, TabularGoalSampler,
             PossibleGoalGenerator, PossibleGoalSampler
         )
         _ReachCellGoal = ReachCellGoal
         _ReachRectangleGoal = ReachRectangleGoal
+        _OrientationGoal = OrientationGoal
         _TabularGoalGenerator = TabularGoalGenerator
         _TabularGoalSampler = TabularGoalSampler
         _PossibleGoalGenerator = PossibleGoalGenerator
@@ -114,7 +116,7 @@ def parse_goal_specs(goal_specs: list, env: 'MultiGridEnv', human_agent_index: i
         human_agent_index: Index of the human agent for these goals
         
     Returns:
-        List of PossibleGoal instances (ReachCellGoal or ReachRectangleGoal)
+        List of PossibleGoal instances (ReachCellGoal, ReachRectangleGoal, or OrientationGoal)
     """
     _load_goal_classes()
     
@@ -218,7 +220,9 @@ class ConfigGoalGenerator:
             _load_goal_classes()
             goals = []
             for idx, coords in enumerate(self.goal_coords):
-                if len(coords) == 2:
+                if len(coords) == 1:
+                    goal = _OrientationGoal(self.env, human_agent_index, coords[0], index=idx if self.indexed else None)
+                elif len(coords) == 2:
                     goal = _ReachCellGoal(self.env, human_agent_index, coords, index=idx if self.indexed else None)
                 else:
                     goal = _ReachRectangleGoal(self.env, human_agent_index, coords, index=idx if self.indexed else None)
@@ -545,41 +549,48 @@ def create_goal_sampler_and_generator(goals: list, env: 'MultiGridEnv'):
 def create_config_goal_sampler_and_generator(goal_specs: list, env: 'MultiGridEnv'):
     """
     Create ConfigGoalSampler and ConfigGoalGenerator from goal specs.
-    
+
     These create goals on-the-fly for any human_agent_index. When generate()
     or sample() is called with a human index, they create goals about THAT
     human (e.g., human h reaching cell X).
-    
+
     Uses uniform weights (1/n) for the generator. The sampler is derived from
     the generator using get_sampler(), which uses the weights as probabilities
     and sets sampler weights to 1.0.
-    
+
+    Orientation goals (4 directions) are automatically added to all worlds.
+
     Args:
         goal_specs: List of goal specifications from config file
         env: The MultiGridEnv instance
-        
+
     Returns:
         Tuple of (ConfigGoalSampler, ConfigGoalGenerator)
-    
+
     Raises:
         ValueError: If the goals don't cover all walkable cells in the grid.
     """
     if not goal_specs:
         return None, None
-    
+
     # Parse specs to coordinates
     goal_coords = [_parse_goal_spec_to_coords(spec) for spec in goal_specs]
+
+    # Automatically add the 4 orientation goals (0=right, 1=down, 2=left, 3=up)
+    for direction in range(4):
+        goal_coords.append((direction,))
+
     n = len(goal_coords)
-    
+
     # Generator: uniform weights = 1/n (for exact integration), indexed=True for YAML-loaded goals
     generator = ConfigGoalGenerator(env, goal_coords, weights=[1.0 / n] * n, indexed=True)
-    
+
     # Validate that goals cover all walkable cells
     generator.validate_coverage(raise_on_error=True)
-    
+
     # Sampler: derived from generator (uses weights as probabilities, sets weights to 1)
     sampler = generator.get_sampler()
-    
+
     return sampler, generator
 
 

@@ -24,6 +24,7 @@ training where the marginal policy must account for goal weights.
 import sys
 import numpy as np
 from typing import Tuple, Optional, Any, Dict, TYPE_CHECKING
+import torch
 
 from empo.possible_goal import PossibleGoal, PossibleGoalSampler, TabularGoalGenerator
 
@@ -91,6 +92,28 @@ class ReachCellGoal(PossibleGoal):
         return (self.human_agent_index == other.human_agent_index and
                 self.target_pos == other.target_pos)
 
+    def encode(self, device: str = 'cpu') -> Tuple:
+        """
+        Encode as bounding box with type discriminator.
+
+        Returns:
+            Tuple of (tensor, cache_key) where tensor is shape (1, 6)
+            Tensor format: [x, y, x, y, 1.0, 0.0]
+                          [features..., spatial_type, orient_type]
+        """
+        x, y = self.target_pos
+        tensor = torch.tensor(
+            [[float(x), float(y), float(x), float(y), 1.0, 0.0]],
+            dtype=torch.float32,
+            device=device
+        )
+        cache_key = ('cell', x, y, 0)
+        return tensor, cache_key
+
+    def compute_weight(self) -> float:
+        """Point goals have unit weight."""
+        return 1.0
+
 
 class ReachRectangleGoal(PossibleGoal):
     """
@@ -147,6 +170,250 @@ class ReachRectangleGoal(PossibleGoal):
             return False
         return (self.human_agent_index == other.human_agent_index and
                 self.target_rect == other.target_rect)
+
+    def encode(self, device: str = 'cpu') -> Tuple:
+        """
+        Encode as bounding box with type discriminator.
+
+        Returns:
+            Tuple of (tensor, cache_key) where tensor is shape (1, 6)
+            Tensor format: [x1, y1, x2, y2, 1.0, 0.0]
+                          [features..., spatial_type, orient_type]
+        """
+        x1, y1, x2, y2 = self.target_rect
+        tensor = torch.tensor(
+            [[float(x1), float(y1), float(x2), float(y2), 1.0, 0.0]],
+            dtype=torch.float32,
+            device=device
+        )
+        cache_key = ('rect', x1, y1, x2, y2)
+        return tensor, cache_key
+
+    def compute_weight(self) -> float:
+        """Weight is the area of the rectangle (number of cells)."""
+        x1, y1, x2, y2 = self.target_rect
+        return float((1 + x2 - x1) * (1 + y2 - y1))
+
+
+class OrientationGoal(PossibleGoal):
+    """
+    A goal where an agent tries to rotate to a specific orientation.
+    Args:
+        world_model: The environment.
+        human_agent_index: Index of the human agent.
+        target_dir: Integer representing the target orientation (0-3).
+    """
+    def __init__(
+        self, 
+        world_model: 'WorldModel', 
+        human_agent_index: int, 
+        target_dir: int, 
+        index = None
+    ):
+        super().__init__(world_model, index=index)
+        self.human_agent_index = human_agent_index
+        self.target_dir = target_dir % 4  # Ensure valid direction
+        self._hash = hash((self.human_agent_index, self.target_dir))
+        super()._freeze()  # Make immutable
+
+    def is_achieved(self, state) -> int:
+        """Check if agent is at the target orientation."""
+        step_count, agent_states, mobile_objects, mutable_objects = state
+        if self.human_agent_index < len(agent_states):
+            agent_state = agent_states[self.human_agent_index]
+            dir = int(agent_state[2]) % 4
+            if dir == self.target_dir:
+                return 1
+        return 0
+    
+    def __str__(self):
+        return f"OrientationGoal({self.target_dir})"
+    
+    def __hash__(self):
+        return self._hash
+    
+    def __eq__(self, other):
+        if not isinstance(other, OrientationGoal):
+            return False
+        return (self.human_agent_index == other.human_agent_index and
+                self.target_dir == other.target_dir)
+
+    def encode(self, device: str = 'cpu') -> Tuple:
+        """
+        Encode as one-hot direction vector with type discriminator.
+
+        Returns:
+            Tuple of (tensor, cache_key) where tensor is shape (1, 6)
+            Tensor format: [d0, d1, d2, d3, 0.0, 1.0]
+                          [one-hot direction, spatial_type, orient_type]
+        """
+        one_hot = torch.zeros(4, dtype=torch.float32, device=device)
+        one_hot[self.target_dir] = 1.0
+        # Append type discriminator: [0.0, 1.0] for orientation
+        type_indicator = torch.tensor([0.0, 1.0], dtype=torch.float32, device=device)
+        tensor = torch.cat([one_hot, type_indicator]).unsqueeze(0)  # Shape: (1, 6)
+        cache_key = ('orient', self.target_dir, 0, 0)
+        return tensor, cache_key
+
+    def compute_weight(self) -> float:
+        """All orientations have equal weight."""
+        return 1.0
+
+
+class SpatialGoalUtils:
+    """
+    Utility functions for spatial goal operations.
+
+    This class contains spatial-specific algorithms that don't belong in the
+    goal encoder, such as weighted rectangle sampling and geometric calculations.
+    These utilities are used by goal samplers and rendering functions.
+    """
+
+    @staticmethod
+    def sample_coordinate_pair_weighted(n: int, rng) -> Tuple[int, int]:
+        """
+        Sample (c1, c2) with c1 <= c2 from [0, n-1] with probability
+        proportional to weight = (1 + c2 - c1).
+
+        Uses inverse transform sampling without rejection:
+        1. Sample c1 from marginal P(c1) ∝ (n - c1)(n - c1 + 1) / 2
+        2. Sample c2 from conditional P(c2 | c1) ∝ (1 + c2 - c1)
+
+        Args:
+            n: Size of coordinate range [0, n-1]
+            rng: numpy random generator
+
+        Returns:
+            Tuple (c1, c2) with 0 <= c1 <= c2 <= n-1
+        """
+        if n <= 0:
+            return (0, 0)
+
+        if n == 1:
+            return (0, 0)
+
+        # Step 1: Sample c1 from marginal distribution
+        # P(c1 = k) ∝ (n - k)(n - k + 1) / 2  for k = 0, ..., n-1
+        marginal_weights = np.zeros(n)
+        for c1 in range(n):
+            k = n - c1
+            marginal_weights[c1] = k * (k + 1) / 2
+
+        cumsum = np.cumsum(marginal_weights)
+        total = cumsum[-1]
+
+        # Sample c1 using inverse transform
+        u1 = rng.uniform(0, total)
+        c1 = int(np.searchsorted(cumsum, u1, side='left'))
+        c1 = min(c1, n - 1)  # Ensure valid index
+
+        # Step 2: Sample c2 from conditional P(c2 | c1) ∝ (1 + c2 - c1)
+        num_options = n - c1
+
+        if num_options <= 1:
+            return (c1, c1)
+
+        # Weights are 1, 2, ..., num_options
+        # Cumulative: 1, 3, 6, 10, ... = k(k+1)/2
+        cond_cumsum = np.zeros(num_options)
+        for i in range(num_options):
+            cond_cumsum[i] = (i + 1) * (i + 2) / 2
+
+        total_cond = cond_cumsum[-1]
+        u2 = rng.uniform(0, total_cond)
+        delta = int(np.searchsorted(cond_cumsum, u2, side='left'))
+        delta = min(delta, num_options - 1)
+
+        c2 = c1 + delta
+
+        return (c1, c2)
+
+    @staticmethod
+    def sample_rectangle_weighted(
+        x_range: Tuple[int, int],
+        y_range: Tuple[int, int],
+        rng
+    ) -> Tuple[int, int, int, int]:
+        """
+        Sample a rectangle (x1, y1, x2, y2) with weight-proportional sampling.
+
+        Weight = (x2 - x1 + 1) * (y2 - y1 + 1), i.e., the area of the rectangle.
+
+        Args:
+            x_range: (x_min, x_max) range for x coordinates.
+            y_range: (y_min, y_max) range for y coordinates.
+            rng: Random number generator with integers() method.
+
+        Returns:
+            Rectangle (x1, y1, x2, y2).
+        """
+        x_min, x_max = x_range
+        y_min, y_max = y_range
+
+        x_size = x_max - x_min + 1
+        x1_offset, x2_offset = SpatialGoalUtils.sample_coordinate_pair_weighted(x_size, rng)
+        x1 = x_min + x1_offset
+        x2 = x_min + x2_offset
+
+        y_size = y_max - y_min + 1
+        y1_offset, y2_offset = SpatialGoalUtils.sample_coordinate_pair_weighted(y_size, rng)
+        y1 = y_min + y1_offset
+        y2 = y_min + y2_offset
+
+        return (x1, y1, x2, y2)
+
+    @staticmethod
+    def closest_point_on_rectangle(
+        rect: Tuple[int, int, int, int],
+        px: float,
+        py: float,
+        tile_size: int,
+        inset: float = 0.08
+    ) -> Tuple[float, float]:
+        """
+        Find the closest point on a rectangle boundary to a given point.
+
+        Args:
+            rect: Rectangle (x1, y1, x2, y2) in grid coordinates.
+            px: x pixel coordinate of the point.
+            py: y pixel coordinate of the point.
+            tile_size: Size of each grid tile in pixels.
+            inset: Inset fraction from tile edges.
+
+        Returns:
+            (cx, cy) pixel coordinates of the closest point on the rectangle boundary.
+        """
+        x1, y1, x2, y2 = rect
+
+        # Convert rectangle to pixel coordinates with inset
+        left = x1 * tile_size + tile_size * inset
+        right = (x2 + 1) * tile_size - tile_size * inset
+        top = y1 * tile_size + tile_size * inset
+        bottom = (y2 + 1) * tile_size - tile_size * inset
+
+        # Clamp point to rectangle bounds
+        cx = max(left, min(right, px))
+        cy = max(top, min(bottom, py))
+
+        # If point is inside, find closest edge
+        if left < px < right and top < py < bottom:
+            dist_left = px - left
+            dist_right = right - px
+            dist_top = py - top
+            dist_bottom = bottom - py
+
+            min_dist = min(dist_left, dist_right, dist_top, dist_bottom)
+
+            if min_dist == dist_left:
+                cx = left
+            elif min_dist == dist_right:
+                cx = right
+            elif min_dist == dist_top:
+                cy = top
+            else:
+                cy = bottom
+
+        return (cx, cy)
 
 
 class MultiGridGoalSampler(PossibleGoalSampler):
@@ -212,90 +479,20 @@ class MultiGridGoalSampler(PossibleGoalSampler):
     def set_seed(self, seed: int):
         """Set random seed for reproducibility."""
         self._rng = np.random.default_rng(seed)
-    
-    @staticmethod
-    def _sample_coordinate_pair_weighted(n: int, rng: np.random.Generator) -> Tuple[int, int]:
-        """
-        Sample (c1, c2) with c1 <= c2 from [0, n-1] with probability
-        proportional to weight = (1 + c2 - c1).
-        
-        Uses inverse transform sampling without rejection:
-        1. Sample c1 from marginal P(c1) ∝ (n - c1)(n - c1 + 1) / 2
-        2. Sample c2 from conditional P(c2 | c1) ∝ (1 + c2 - c1)
-        
-        Args:
-            n: Size of coordinate range [0, n-1]
-            rng: numpy random generator
-        
-        Returns:
-            Tuple (c1, c2) with 0 <= c1 <= c2 <= n-1
-        """
-        if n <= 0:
-            return (0, 0)
-        
-        if n == 1:
-            return (0, 0)
-        
-        # Step 1: Sample c1 from marginal distribution
-        # P(c1 = k) ∝ (n - k)(n - k + 1) / 2  for k = 0, ..., n-1
-        marginal_weights = np.zeros(n)
-        for c1 in range(n):
-            k = n - c1
-            marginal_weights[c1] = k * (k + 1) / 2
-        
-        cumsum = np.cumsum(marginal_weights)
-        total = cumsum[-1]
-        
-        # Sample c1 using inverse transform
-        u1 = rng.uniform(0, total)
-        c1 = int(np.searchsorted(cumsum, u1, side='left'))
-        c1 = min(c1, n - 1)  # Ensure valid index
-        
-        # Step 2: Sample c2 from conditional P(c2 | c1) ∝ (1 + c2 - c1)
-        num_options = n - c1
-        
-        if num_options <= 1:
-            return (c1, c1)
-        
-        # Weights are 1, 2, ..., num_options
-        # Cumulative: 1, 3, 6, 10, ... = k(k+1)/2
-        cond_cumsum = np.zeros(num_options)
-        for i in range(num_options):
-            cond_cumsum[i] = (i + 1) * (i + 2) / 2
-        
-        total_cond = cond_cumsum[-1]
-        u2 = rng.uniform(0, total_cond)
-        delta = int(np.searchsorted(cond_cumsum, u2, side='left'))
-        delta = min(delta, num_options - 1)
-        
-        c2 = c1 + delta
-        
-        return (c1, c2)
-    
+
     def sample_rectangle(self) -> Tuple[int, int, int, int]:
         """
         Sample a rectangle (x1, y1, x2, y2) with probability proportional
         to its area weight (1+x2-x1)*(1+y2-y1).
-        
+
         Returns:
             Tuple (x1, y1, x2, y2) with valid coordinates.
         """
-        x_min, x_max = self._x_range
-        y_min, y_max = self._y_range
-        
-        # Sample (x1, x2) offset within [0, x_max - x_min]
-        nx = x_max - x_min + 1
-        x1_offset, x2_offset = self._sample_coordinate_pair_weighted(nx, self._rng)
-        x1 = x_min + x1_offset
-        x2 = x_min + x2_offset
-        
-        # Sample (y1, y2) offset within [0, y_max - y_min]
-        ny = y_max - y_min + 1
-        y1_offset, y2_offset = self._sample_coordinate_pair_weighted(ny, self._rng)
-        y1 = y_min + y1_offset
-        y2 = y_min + y2_offset
-        
-        return (x1, y1, x2, y2)
+        return SpatialGoalUtils.sample_rectangle_weighted(
+            self._x_range,
+            self._y_range,
+            self._rng
+        )
     
     def sample(self, state, human_agent_index: int) -> Tuple[PossibleGoal, float]:
         """
@@ -321,52 +518,112 @@ class MultiGridGoalSampler(PossibleGoalSampler):
     @staticmethod
     def compute_goal_weight(goal: Any) -> float:
         """
-        Compute the aggregation weight for a goal based on its area.
-        
-        Weight = (1 + x2 - x1) * (1 + y2 - y1)
-        
-        For point goals (x, y, x, y), this returns 1.0.
-        For rectangles, it returns the number of cells in the bounding box.
-        
+        Compute the aggregation weight for a goal.
+
+        Uses polymorphic compute_weight() method if available,
+        otherwise falls back to legacy hasattr checks.
+
         Args:
-            goal: Goal object with target_rect or target_pos.
-        
+            goal: Goal object.
+
         Returns:
-            Aggregation weight (area of bounding box).
+            Aggregation weight.
         """
-        # Extract bounding box coordinates
+        # Use polymorphic method if available
+        if hasattr(goal, 'compute_weight') and callable(goal.compute_weight):
+            return goal.compute_weight()
+
+        # Legacy fallback for non-PossibleGoal objects
         if hasattr(goal, 'target_rect'):
             x1, y1, x2, y2 = goal.target_rect
-            # Normalize
             if x1 > x2:
                 x1, x2 = x2, x1
             if y1 > y2:
                 y1, y2 = y2, y1
+            return float((1 + x2 - x1) * (1 + y2 - y1))
         elif hasattr(goal, 'target_pos'):
-            x, y = goal.target_pos
-            x1, y1, x2, y2 = x, y, x, y
-        elif hasattr(goal, 'position'):
-            x, y = goal.position
-            x1, y1, x2, y2 = x, y, x, y
-        elif isinstance(goal, (tuple, list)):
-            if len(goal) == 4:
-                x1, y1, x2, y2 = goal
-                if x1 > x2:
-                    x1, x2 = x2, x1
-                if y1 > y2:
-                    y1, y2 = y2, y1
-            elif len(goal) >= 2:
-                x1, y1 = goal[0], goal[1]
-                x2, y2 = x1, y1
-            else:
-                return 1.0
+            return 1.0
+        elif isinstance(goal, (tuple, list)) and len(goal) >= 4:
+            x1, y1, x2, y2 = goal[0], goal[1], goal[2], goal[3]
+            if x1 > x2:
+                x1, x2 = x2, x1
+            if y1 > y2:
+                y1, y2 = y2, y1
+            return float((1 + x2 - x1) * (1 + y2 - y1))
         else:
             return 1.0
+
+
+class MixedMultigridGoalSampler(PossibleGoalSampler):
+    """
+    A mixed goal sampler that samples cell, rectangle, and orientation goals.
+
+    Args:
+        world_model: The multigrid environment.
+        goal_type_weights: Optional dictionary specifying the weights for each goal type.
+            Defaults to {'reach_cell': 0.4, 'reach_rectangle': 0.4, 'orientation': 0.2}
+        valid_x_range: Optional (x_min, x_max) for valid goal coordinates.
+        valid_y_range: Optional (y_min, y_max) for valid goal coordinates.
+        seed: Optional random seed for reproducibility.
+    """
+    def __init__(
+        self,
+        world_model: 'WorldModel',
+        goal_type_weights: Optional[Dict[str, float]] = None,
+        valid_x_range: Optional[Tuple[int, int]] = None,
+        valid_y_range: Optional[Tuple[int, int]] = None,
+        seed: Optional[int] = None
+    ):
+        super().__init__(world_model)
+        self._rng = np.random.default_rng(seed)
+
+        if goal_type_weights is None:
+            goal_type_weights = {
+                'reach_cell': 0.4,
+                'reach_rectangle': 0.4,
+                'orientation': 0.2
+            }
+
+        # Normalize weights
+        total = sum(goal_type_weights.values())
+        self.goal_type_weights = {k: v/total for k, v in goal_type_weights.items()}
+        self.goal_types = list(self.goal_type_weights.keys())
+        self.type_probs = [self.goal_type_weights[t] for t in self.goal_types]
+        self._spatial_sampler = MultiGridGoalSampler(world_model, valid_x_range, valid_y_range, seed)
+
+    def sample(self, state, human_agent_index: int) -> Tuple[PossibleGoal, float]:
+        """
+        Sample a goal of mixed type based on specified weights.
+
+        Args:
+            state: Current world state.
+            human_agent_index: Index of the human agent for the goal.
+
+        Returns:
+            Tuple of (goal, weight) where:
+                - goal: Sampled PossibleGoal instance
+                - weight: Aggregation weight for the sampled goal
+        """
+        goal_type = self._rng.choice(self.goal_types, p=self.type_probs)
+        if goal_type == 'reach_cell':
+            x1, y1, x2, y2 = self._spatial_sampler.sample_rectangle()                            
+            # Force to be a point (could also sample just one cell)                              
+            x, y = (x1 + x2) // 2, (y1 + y2) // 2                                                
+            goal = ReachCellGoal(self.world_model, human_agent_index, (x, y))                    
+            # Weight = 1.0 for point goals, adjusted by mixture probability                      
+            return goal, 1.0 * self.goal_type_weights[goal_type] 
+        elif goal_type == 'reach_rectangle':
+            goal, weight = self._spatial_sampler.sample(state, human_agent_index)                                
+              # Adjust weight for mixture probability                                       
+            return goal, weight * self.goal_type_weights[goal_type]   
+        elif goal_type == 'orientation':
+            # Uniform sample over all directions 
+            target_dir = self._rng.integers(0, 4)
+            goal = OrientationGoal(self.world_model, human_agent_index, target_dir)
+            return goal, 1.0 * self.goal_type_weights[goal_type]
+        else:
+            raise ValueError(f"Unknown goal type: {goal_type}")
         
-        # Weight = area = (1 + x2 - x1) * (1 + y2 - y1)
-        return float((1 + x2 - x1) * (1 + y2 - y1))
-
-
 # ============================================================================
 # Goal Rendering Utilities
 # ============================================================================
