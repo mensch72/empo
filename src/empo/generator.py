@@ -12,7 +12,7 @@ Usage:
 import random
 import numpy as np
 from abc import ABC, abstractmethod
-from typing import Tuple, Optional, Dict
+from typing import Optional
 
 from gym_multigrid.multigrid import MultiGridEnv, World, SmallActions
 
