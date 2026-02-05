@@ -216,7 +216,7 @@ def compute_human_policy_prior_distributed(..., ctx: DistributedContext):
 
 ## Dependencies
 
-- `mpi4py>=3.1.0` (already in requirements-hierarchical.txt)
+- `mpi4py>=3.1.0` (already in setup/requirements/hierarchical.txt)
 
 ## Out of Scope (Future Work)
 

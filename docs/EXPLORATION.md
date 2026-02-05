@@ -868,4 +868,4 @@ MultiGridHumanExplorationPolicy(
 
 - [Phase 2 Warm-up Design](WARMUP_DESIGN.md) - How beta_r warm-up affects early exploration
 - [API Reference](API.md) - Full API documentation
-- [examples/phase2_robot_policy_demo.py](../examples/phase2_robot_policy_demo.py) - Working example with exploration
+- [examples/phase2/phase2_robot_policy_demo.py](../examples/phase2/phase2_robot_policy_demo.py) - Working example with exploration

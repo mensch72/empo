@@ -1,0 +1,20 @@
+# EMPO - All Dependencies Combined
+#
+# This file includes all requirements for full development and experimentation.
+# Use this if you want everything installed at once.
+#
+# For production or specific environments, use individual files:
+#   - base.txt: Core dependencies only
+#   - dev.txt: Development tools (includes base.txt)
+#   - colab.txt: Google Colab environment
+#   - kaggle.txt: Kaggle environment
+#   - hierarchical.txt: MineLand/LLM dependencies
+
+# Core production dependencies
+-r base.txt
+
+# Development dependencies
+-r dev.txt
+
+# Optional hierarchical dependencies
+-r hierarchical.txt

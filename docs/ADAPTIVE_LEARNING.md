@@ -436,4 +436,4 @@ ensemble_size: int = 1  # Number of network copies (1 = no ensemble)
 
 - [EXPLORATION.md](EXPLORATION.md) - Curiosity-driven exploration (RND and count-based)
 - [WARMUP_DESIGN.md](WARMUP_DESIGN.md) - Phase 2 warm-up and learning rate schedules
-- [examples/lookup_table_phase2_demo.py](../examples/lookup_table_phase2_demo.py) - Lookup table training example
+- [examples/phase2/lookup_table_phase2_demo.py](../examples/phase2/lookup_table_phase2_demo.py) - Lookup table training example

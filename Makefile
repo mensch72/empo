@@ -16,6 +16,7 @@ DOCKER_USERNAME ?= $(shell whoami)
 DOCKER_IMAGE_NAME ?= empo
 GPU_IMAGE_TAG ?= gpu-latest
 SIF_FILE ?= empo-gpu.sif
+DOCKER_COMPOSE_FILE := setup/docker/docker-compose.yml
 
 # Default target
 help:
@@ -60,78 +61,78 @@ export GROUP_ID ?= $(shell id -g)
 # Docker Compose commands
 build:
 	@echo "Building with USER_ID=$(USER_ID), GROUP_ID=$(GROUP_ID)"
-	@docker compose build
+	@docker compose -f $(DOCKER_COMPOSE_FILE) build
 
 up:
 	@echo "Starting development environment..."
 	@echo "✓ Using USER_ID=$(USER_ID), GROUP_ID=$(GROUP_ID) for file permissions"
 	@if command -v nvidia-smi > /dev/null 2>&1 && nvidia-smi > /dev/null 2>&1; then \
 		echo "✓ GPU detected - GPU will be available in container"; \
-		docker compose up -d --build; \
+		docker compose -f $(DOCKER_COMPOSE_FILE) up -d --build; \
 	else \
 		echo "✓ No GPU detected - running in CPU mode"; \
-		docker compose up -d --build; \
+		docker compose -f $(DOCKER_COMPOSE_FILE) up -d --build; \
 	fi
 	@echo "Development environment started. Use 'make shell' to enter."
 	@echo ""
 	@echo "Port mappings (set HOST_*_PORT env vars to customize):"
-	@docker compose port empo-dev 8888 2>/dev/null | sed 's/^/  Jupyter:     http:\/\//' || true
-	@docker compose port empo-dev 6006 2>/dev/null | sed 's/^/  TensorBoard: http:\/\//' || true
-	@docker compose port empo-dev 5678 2>/dev/null | sed 's/^/  Debugger:    /' || true
+	@docker compose -f $(DOCKER_COMPOSE_FILE) port empo-dev 8888 2>/dev/null | sed 's/^/  Jupyter:     http:\/\//' || true
+	@docker compose -f $(DOCKER_COMPOSE_FILE) port empo-dev 6006 2>/dev/null | sed 's/^/  TensorBoard: http:\/\//' || true
+	@docker compose -f $(DOCKER_COMPOSE_FILE) port empo-dev 5678 2>/dev/null | sed 's/^/  Debugger:    /' || true
 
 down:
 	@# Stop all containers including hierarchical profile services
-	docker compose --profile hierarchical down
+	docker compose -f $(DOCKER_COMPOSE_FILE) --profile hierarchical down
 
 down-dev:
 	@# Stop only the main development container (preserves Ollama if running)
-	docker compose down
+	docker compose -f $(DOCKER_COMPOSE_FILE) down
 
 restart:
-	docker compose restart
+	docker compose -f $(DOCKER_COMPOSE_FILE) restart
 
 # Start development environment with Ollama server for LLM inference
 up-hierarchical:
 	@echo "Starting development environment with Ollama server..."
 	@echo "✓ Using USER_ID=$(USER_ID), GROUP_ID=$(GROUP_ID) for file permissions"
 	@echo "✓ Building with HIERARCHICAL_MODE=true (uses Docker cache for faster rebuilds)"
-	@HIERARCHICAL_MODE=true docker compose --profile hierarchical build
-	@HIERARCHICAL_MODE=true docker compose --profile hierarchical up -d
+	@HIERARCHICAL_MODE=true docker compose -f $(DOCKER_COMPOSE_FILE) --profile hierarchical build
+	@HIERARCHICAL_MODE=true docker compose -f $(DOCKER_COMPOSE_FILE) --profile hierarchical up -d
 	@echo "Development environment with Ollama started."
 	@echo "Use 'make shell' to enter the dev container."
 	@echo "Ollama API available at http://localhost:11434"
 	@echo "Pull a vision model with: docker exec ollama ollama pull qwen2.5vl:7b"
 	@echo ""
 	@echo "Port mappings (set HOST_*_PORT env vars to customize):"
-	@docker compose port empo-dev 8888 2>/dev/null | sed 's/^/  Jupyter:     http:\/\//' || true
-	@docker compose port empo-dev 6006 2>/dev/null | sed 's/^/  TensorBoard: http:\/\//' || true
-	@docker compose port empo-dev 5678 2>/dev/null | sed 's/^/  Debugger:    /' || true
+	@docker compose -f $(DOCKER_COMPOSE_FILE) port empo-dev 8888 2>/dev/null | sed 's/^/  Jupyter:     http:\/\//' || true
+	@docker compose -f $(DOCKER_COMPOSE_FILE) port empo-dev 6006 2>/dev/null | sed 's/^/  TensorBoard: http:\/\//' || true
+	@docker compose -f $(DOCKER_COMPOSE_FILE) port empo-dev 5678 2>/dev/null | sed 's/^/  Debugger:    /' || true
 
 shell:
-	docker compose exec empo-dev bash
+	docker compose -f $(DOCKER_COMPOSE_FILE) exec empo-dev bash
 
 logs:
-	docker compose logs -f
+	docker compose -f $(DOCKER_COMPOSE_FILE) logs -f
 
 # Training commands
 train:
-	docker compose exec empo-dev python train.py --num-episodes 100
+	docker compose -f $(DOCKER_COMPOSE_FILE) exec empo-dev python train.py --num-episodes 100
 
 example:
-	docker compose exec empo-dev python examples/simple_example.py
+	docker compose -f $(DOCKER_COMPOSE_FILE) exec empo-dev python examples/simple_example.py
 
 # Development commands
 test:
 	@echo "Running tests..."
-	docker compose exec empo-dev python -m pytest tests/ -v \
+	docker compose -f $(DOCKER_COMPOSE_FILE) exec empo-dev python -m pytest tests/ -v \
 		--ignore=tests/test_mineland_installation.py \
 		--ignore=tests/debug_dag_by_timestep.py \
 		--ignore=tests/debug_dag_parallel.py
 
 lint:
 	@echo "Running linters..."
-	docker compose exec empo-dev ruff check .
-	docker compose exec empo-dev black --check .
+	docker compose -f $(DOCKER_COMPOSE_FILE) exec empo-dev ruff check .
+	docker compose -f $(DOCKER_COMPOSE_FILE) exec empo-dev black --check .
 
 # Cleanup
 clean:
@@ -144,7 +145,7 @@ clean:
 build-gpu:
 	@echo "Building GPU-enabled Docker image for cluster..."
 	@echo "Image: $(DOCKER_REGISTRY)/$(DOCKER_USERNAME)/$(DOCKER_IMAGE_NAME):$(GPU_IMAGE_TAG)"
-	docker build -f Dockerfile.gpu \
+	docker build -f setup/docker/Dockerfile.gpu \
 		-t $(DOCKER_IMAGE_NAME):$(GPU_IMAGE_TAG) \
 		-t $(DOCKER_REGISTRY)/$(DOCKER_USERNAME)/$(DOCKER_IMAGE_NAME):$(GPU_IMAGE_TAG) \
 		.
@@ -227,7 +228,7 @@ up-gpu-sif-file: build-gpu build-sif
 # These are large packages that require Java JDK 17 and Node.js 18
 build-hierarchical:
 	@echo "Building Docker image with hierarchical dependencies..."
-	docker build --build-arg DEV_MODE=true --build-arg HIERARCHICAL_MODE=true \
+	docker build -f setup/docker/Dockerfile --build-arg DEV_MODE=true --build-arg HIERARCHICAL_MODE=true \
 		-t $(DOCKER_IMAGE_NAME):hierarchical .
 	@echo "✓ Hierarchical image built successfully"
 
@@ -235,7 +236,7 @@ build-hierarchical:
 build-gpu-hierarchical:
 	@echo "Building GPU Docker image with hierarchical dependencies..."
 	@echo "Image: $(DOCKER_IMAGE_NAME):$(GPU_IMAGE_TAG)-hierarchical"
-	docker build -f Dockerfile.gpu \
+	docker build -f setup/docker/Dockerfile.gpu \
 		--build-arg HIERARCHICAL_MODE=true \
 		-t $(DOCKER_IMAGE_NAME):$(GPU_IMAGE_TAG)-hierarchical \
 		-t $(DOCKER_REGISTRY)/$(DOCKER_USERNAME)/$(DOCKER_IMAGE_NAME):$(GPU_IMAGE_TAG)-hierarchical \
@@ -245,7 +246,7 @@ build-gpu-hierarchical:
 # Test MineLand installation (requires hierarchical build)
 test-mineland:
 	@echo "Testing MineLand installation (basic import tests)..."
-	docker compose exec empo-dev python tests/test_mineland_installation.py
+	docker compose -f $(DOCKER_COMPOSE_FILE) exec empo-dev python tests/test_mineland_installation.py
 
 # Validate MineLand setup
 # Note: MineLand spawns Minecraft internally in empo-dev, so there's no separate server
@@ -277,4 +278,4 @@ test-mineland-integration:
 	@echo ""
 	@echo "Note: First run may take 1-2 minutes to download Minecraft"
 	@echo ""
-	docker compose exec empo-dev python tests/test_mineland_installation.py --integration
+	docker compose -f $(DOCKER_COMPOSE_FILE) exec empo-dev python tests/test_mineland_installation.py --integration
