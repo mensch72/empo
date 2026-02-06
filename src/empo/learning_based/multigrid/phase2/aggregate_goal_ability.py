@@ -246,12 +246,12 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         """
         step_count, agent_states, mobile_objects, mutable_objects = state
 
-        # Check if agent is terminated - early return with X_h = 0
+        # Check if agent is terminated - early return
         if human_agent_idx < len(agent_states):
             agent_state = agent_states[human_agent_idx]
             if agent_state[3]:  # terminated = True
-                # Terminated agents have no goal achievement ability
-                return torch.tensor([1e-10], device=device, dtype=torch.float32)
+                # Terminated agents have no goal achievement ability; use trainer's min clamp value
+                return torch.tensor([1e-3], device=device, dtype=torch.float32)
 
         # Encode state (agent-agnostic)
         grid_tensor, global_features, agent_features, interactive_features = \

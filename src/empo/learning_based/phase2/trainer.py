@@ -1964,9 +1964,7 @@ class BasePhase2Trainer(ABC):
                 # Handle edge case: no alive humans in this state
                 if len(alive_humans) == 0:
                     # Skip this state entirely for U_r computation
-                    # (no human empowerment to compute)
                     u_r_humans_per_state.append(0)
-                    continue
 
                 # Sample from ALIVE humans only
                 if self.config.u_r_sample_humans is None:

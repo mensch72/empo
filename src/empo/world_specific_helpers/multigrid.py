@@ -734,16 +734,19 @@ def render_goal_overlay(
 ) -> None:
     """
     Render a goal region on the given matplotlib axes.
-    
-    Draws:
+
+    For spatial goals (ReachCell, ReachRectangle):
     1. A non-filled rectangle with dashed, semi-transparent blue boundary
        lines slightly inside the cell boundaries.
     2. A dashed, semi-transparent line connecting the agent to the closest
        point on the rectangle boundary.
-    
+
+    For orientation goals (OrientationGoal):
+    1. A curved arrow around the agent showing the target direction.
+
     Args:
         ax: Matplotlib axes to draw on.
-        goal: Goal object with target_rect or target_pos.
+        goal: Goal object (spatial or orientation).
         agent_pos: (x, y) position of the agent in cell coordinates.
         agent_idx: Index of the agent (used for color variation if needed).
         tile_size: Size of each grid cell in pixels.
@@ -753,10 +756,17 @@ def render_goal_overlay(
     """
     import matplotlib.patches as patches
     import matplotlib.lines as mlines
-    
+
+    # Check if this is an orientation goal
+    if hasattr(goal, 'target_dir'):
+        # Render orientation goal as a directional arrow
+        _render_orientation_goal(ax, goal, agent_pos, tile_size, goal_color, line_width)
+        return
+
+    # Render spatial goal (existing logic)
     # Get bounding box
     x1, y1, x2, y2 = get_goal_bounding_box(goal)
-    
+
     # Calculate pixel coordinates for rectangle with inset
     # Inset slightly inside the cell boundaries so rectangle lines don't
     # overlay the cell boundary lines
@@ -764,7 +774,7 @@ def render_goal_overlay(
     top = y1 * tile_size + tile_size * inset
     width = (x2 - x1 + 1) * tile_size - 2 * tile_size * inset
     height = (y2 - y1 + 1) * tile_size - 2 * tile_size * inset
-    
+
     # Draw dashed rectangle boundary
     rect = patches.Rectangle(
         (left, top), width, height,
@@ -775,17 +785,17 @@ def render_goal_overlay(
         alpha=goal_color[3] if len(goal_color) > 3 else 0.7
     )
     ax.add_patch(rect)
-    
+
     # Calculate agent pixel position (center of cell)
     agent_px = agent_pos[0] * tile_size + tile_size / 2
     agent_py = agent_pos[1] * tile_size + tile_size / 2
-    
+
     # Find closest point on rectangle boundary to agent
     rect_coords = (x1, y1, x2, y2)
     closest_x, closest_y = closest_point_on_rectangle(
         rect_coords, agent_px, agent_py, tile_size, inset
     )
-    
+
     # Draw dashed line from agent to closest point on rectangle
     line = mlines.Line2D(
         [agent_px, closest_x],
@@ -796,6 +806,65 @@ def render_goal_overlay(
         alpha=goal_color[3] * 0.8 if len(goal_color) > 3 else 0.5
     )
     ax.add_line(line)
+
+
+def _render_orientation_goal(
+    ax: 'matplotlib.axes.Axes',
+    goal: Any,
+    agent_pos: Tuple[float, float],
+    tile_size: int,
+    goal_color: Tuple[float, float, float, float],
+    line_width: float
+) -> None:
+    """
+    Render an orientation goal as a curved arrow showing target direction.
+
+    Args:
+        ax: Matplotlib axes to draw on.
+        goal: OrientationGoal with target_dir attribute.
+        agent_pos: (x, y) position of the agent in cell coordinates.
+        tile_size: Size of each grid cell in pixels.
+        goal_color: RGBA color tuple for the goal visualization.
+        line_width: Width of the arrow.
+    """
+    import matplotlib.patches as mpatches
+    import numpy as np
+
+    # Direction mapping: 0=right, 1=down, 2=left, 3=up
+    direction_angles = {
+        0: 0,      # right
+        1: 90,     # down
+        2: 180,    # left
+        3: 270     # up
+    }
+
+    target_dir = goal.target_dir
+    angle = direction_angles.get(target_dir, 0)
+
+    # Calculate agent pixel position (center of cell)
+    agent_px = agent_pos[0] * tile_size + tile_size / 2
+    agent_py = agent_pos[1] * tile_size + tile_size / 2
+
+    # Draw a curved arrow around the agent
+    # Arrow starts at current position and curves toward target direction
+    arrow_radius = tile_size * 0.35
+
+    # Create fancy arrow patch pointing in target direction
+    arrow = mpatches.FancyArrow(
+        agent_px, agent_py,
+        arrow_radius * np.cos(np.radians(angle)),
+        -arrow_radius * np.sin(np.radians(angle)),  # Negative because y-axis is inverted
+        width=line_width * 2,
+        head_width=line_width * 4,
+        head_length=line_width * 3,
+        length_includes_head=True,
+        edgecolor=goal_color[:3] if len(goal_color) >= 3 else goal_color,
+        facecolor=goal_color[:3] if len(goal_color) >= 3 else goal_color,
+        alpha=goal_color[3] if len(goal_color) > 3 else 0.7,
+        linestyle='--',
+        linewidth=line_width * 0.5
+    )
+    ax.add_patch(arrow)
 
 
 def render_goals_on_frame(
@@ -1230,7 +1299,7 @@ def build_tabular_goal_generator(world_model: MultiGridEnv) -> TabularGoalGenera
     for index, agent in enumerate(world_model.agents):
         if agent.is_human:
             for goal_cell in goal_cells:
-                goal = ReachCellGoal(world_model, goal_cell, index=index)
+                goal = ReachCellGoal(world_model, index, goal_cell)
                 goals.append(goal) 
 
     return TabularGoalGenerator(goals)

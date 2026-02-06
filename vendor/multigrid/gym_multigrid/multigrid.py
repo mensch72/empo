@@ -302,10 +302,13 @@ class ConfigGoalGenerator:
         # Build set of all cells covered by goals
         covered_cells = set()
         for coords in self.goal_coords:
-            if len(coords) == 2:
+            if len(coords) == 1:
+                # Orientation goal: (d,) - skip for coverage validation
+                continue
+            elif len(coords) == 2:
                 # Cell goal: (x, y)
                 covered_cells.add((coords[0], coords[1]))
-            else:
+            elif len(coords) == 4:
                 # Rectangle goal: (x1, y1, x2, y2)
                 x1, y1, x2, y2 = coords
                 if x1 > x2:
@@ -392,10 +395,17 @@ class ConfigGoalSampler:
             _load_goal_classes()
             goals = []
             for idx, coords in enumerate(self.goal_coords):
-                if len(coords) == 2:
+                if len(coords) == 1:
+                    # Orientation goal: (direction,)
+                    goal = _OrientationGoal(self.env, human_agent_index, coords[0], index=idx if self.indexed else None)
+                elif len(coords) == 2:
+                    # Cell goal: (x, y)
                     goal = _ReachCellGoal(self.env, human_agent_index, coords, index=idx if self.indexed else None)
-                else:
+                elif len(coords) == 4:
+                    # Rectangle goal: (x1, y1, x2, y2)
                     goal = _ReachRectangleGoal(self.env, human_agent_index, coords, index=idx if self.indexed else None)
+                else:
+                    raise ValueError(f"Invalid goal coords: {coords}. Must have 1, 2, or 4 elements.")
                 goals.append(goal)
             self._goals_cache[human_agent_index] = goals
         return self._goals_cache[human_agent_index]
@@ -474,10 +484,13 @@ class ConfigGoalSampler:
         # Build set of all cells covered by goals
         covered_cells = set()
         for coords in self.goal_coords:
-            if len(coords) == 2:
+            if len(coords) == 1:
+                # Orientation goal: (d,) - skip for coverage validation
+                continue
+            elif len(coords) == 2:
                 # Cell goal: (x, y)
                 covered_cells.add((coords[0], coords[1]))
-            else:
+            elif len(coords) == 4:
                 # Rectangle goal: (x1, y1, x2, y2)
                 x1, y1, x2, y2 = coords
                 if x1 > x2:
@@ -4454,12 +4467,15 @@ class MultiGridEnv(WorldModel):
                           color=(0, 102, 255), line_thickness=2, dash_len=6, gap_len=4,
                           inset_frac=0.08):
         """
-        Draw a dashed rectangle around a goal region and optionally a line to the agent.
-        
+        Draw goal visualization on the image.
+
+        For spatial goals: dashed rectangle with optional line to agent.
+        For orientation goals: directional arrow from agent position.
+
         Args:
             img: RGB numpy array (H, W, 3) to draw on (modified in place).
-            goal: Goal object with target_rect, target_pos, or (x1, y1, x2, y2) tuple.
-            agent_idx: If provided, draw a dashed line from this agent to the goal.
+            goal: Goal object (spatial or orientation).
+            agent_idx: If provided, draw visualization relative to this agent.
             tile_size: Size of each grid cell in pixels.
             color: RGB tuple for the goal visualization (default: blue).
             line_thickness: Thickness of the dashed lines.
@@ -4467,36 +4483,137 @@ class MultiGridEnv(WorldModel):
             gap_len: Length of gaps between dashes in pixels.
             inset_frac: Fraction of cell to inset rectangle from cell edges (0.08 = 8%).
         """
+        # Check if this is an orientation goal
+        if hasattr(goal, 'target_dir'):
+            # Draw orientation goal as directional arrow
+            if agent_idx is not None and agent_idx < len(self.agents):
+                self._draw_orientation_goal(img, goal, agent_idx, tile_size, color, line_thickness)
+            return
+
+        # Draw spatial goal (existing logic)
         # Extract bounding box from goal
         x1, y1, x2, y2 = self._get_goal_bounding_box(goal)
-        
+
         # Calculate pixel coordinates with inset
         left = int(x1 * tile_size + tile_size * inset_frac)
         top = int(y1 * tile_size + tile_size * inset_frac)
         right = int((x2 + 1) * tile_size - tile_size * inset_frac)
         bottom = int((y2 + 1) * tile_size - tile_size * inset_frac)
-        
+
         # Draw dashed rectangle (4 sides)
         self._draw_dashed_line(img, left, top, right, top, color, dash_len, gap_len, line_thickness)  # Top
         self._draw_dashed_line(img, right, top, right, bottom, color, dash_len, gap_len, line_thickness)  # Right
         self._draw_dashed_line(img, right, bottom, left, bottom, color, dash_len, gap_len, line_thickness)  # Bottom
         self._draw_dashed_line(img, left, bottom, left, top, color, dash_len, gap_len, line_thickness)  # Left
-        
+
         # Draw line from agent to closest point on goal if agent_idx provided
         if agent_idx is not None and agent_idx < len(self.agents):
             agent = self.agents[agent_idx]
             if agent.pos is not None:
                 agent_px = int((agent.pos[0] + 0.5) * tile_size)
                 agent_py = int((agent.pos[1] + 0.5) * tile_size)
-                
+
                 # Find closest point on rectangle boundary
                 closest_x, closest_y = self._closest_point_on_rect(
                     left, top, right, bottom, agent_px, agent_py
                 )
-                
+
                 self._draw_dashed_line(img, agent_px, agent_py, closest_x, closest_y,
                                        color, dash_len, gap_len, max(1, line_thickness - 1))
     
+    def _draw_orientation_goal(self, img, goal, agent_idx, tile_size, color, line_thickness):
+        """
+        Draw an orientation goal as a directional arrow.
+
+        Args:
+            img: RGB numpy array to draw on.
+            goal: OrientationGoal with target_dir attribute.
+            agent_idx: Index of the agent.
+            tile_size: Size of each grid cell in pixels.
+            color: RGB tuple for the arrow color.
+            line_thickness: Thickness of the arrow lines.
+        """
+        agent = self.agents[agent_idx]
+        if agent.pos is None:
+            return
+
+        # Direction mapping: 0=right, 1=down, 2=left, 3=up
+        direction_vectors = {
+            0: (1, 0),    # right
+            1: (0, 1),    # down
+            2: (-1, 0),   # left
+            3: (0, -1)    # up
+        }
+
+        target_dir = goal.target_dir
+        dx, dy = direction_vectors.get(target_dir, (1, 0))
+
+        # Calculate agent pixel position (center of cell)
+        agent_px = int((agent.pos[0] + 0.5) * tile_size)
+        agent_py = int((agent.pos[1] + 0.5) * tile_size)
+
+        # Arrow parameters
+        arrow_length = int(tile_size * 0.4)
+        head_length = int(tile_size * 0.15)
+        head_width = int(tile_size * 0.12)
+
+        # Arrow end point
+        end_px = agent_px + dx * arrow_length
+        end_py = agent_py + dy * arrow_length
+
+        # Draw arrow shaft (dashed line)
+        self._draw_dashed_line(img, agent_px, agent_py, end_px, end_py,
+                               color, dash_len=6, gap_len=4, thickness=line_thickness)
+
+        # Draw arrowhead (solid triangle)
+        # Calculate perpendicular vector for arrowhead wings
+        perp_dx = -dy
+        perp_dy = dx
+
+        # Arrowhead points
+        tip_x, tip_y = end_px, end_py
+        base_x = end_px - dx * head_length
+        base_y = end_py - dy * head_length
+        left_x = base_x + perp_dx * (head_width // 2)
+        left_y = base_y + perp_dy * (head_width // 2)
+        right_x = base_x - perp_dx * (head_width // 2)
+        right_y = base_y - perp_dy * (head_width // 2)
+
+        # Draw filled triangle for arrowhead by filling scanlines
+        self._fill_triangle_numpy(img, tip_x, tip_y, left_x, left_y, right_x, right_y, color)
+
+    def _fill_triangle_numpy(self, img, x1, y1, x2, y2, x3, y3, color):
+        """Fill a triangle on the image using numpy operations."""
+        # Convert to integers
+        x1, y1 = int(x1), int(y1)
+        x2, y2 = int(x2), int(y2)
+        x3, y3 = int(x3), int(y3)
+
+        # Get image bounds
+        height, width = img.shape[:2]
+
+        # Find bounding box
+        min_x = max(0, min(x1, x2, x3))
+        max_x = min(width - 1, max(x1, x2, x3))
+        min_y = max(0, min(y1, y2, y3))
+        max_y = min(height - 1, max(y1, y2, y3))
+
+        # Use barycentric coordinates to fill the triangle
+        for y in range(min_y, max_y + 1):
+            for x in range(min_x, max_x + 1):
+                # Compute barycentric coordinates
+                denom = (y2 - y3) * (x1 - x3) + (x3 - x2) * (y1 - y3)
+                if abs(denom) < 1e-10:
+                    continue
+
+                a = ((y2 - y3) * (x - x3) + (x3 - x2) * (y - y3)) / denom
+                b = ((y3 - y1) * (x - x3) + (x1 - x3) * (y - y3)) / denom
+                c = 1 - a - b
+
+                # Point is inside triangle if all barycentric coords are >= 0
+                if a >= 0 and b >= 0 and c >= 0:
+                    img[y, x] = color
+
     def _get_goal_bounding_box(self, goal):
         """Extract bounding box (x1, y1, x2, y2) from various goal representations."""
         if hasattr(goal, 'target_rect'):
@@ -4517,13 +4634,13 @@ class MultiGridEnv(WorldModel):
                 x1, y1, x2, y2 = 0, 0, 0, 0
         else:
             x1, y1, x2, y2 = 0, 0, 0, 0
-        
+
         # Normalize order
         if x1 > x2:
             x1, x2 = x2, x1
         if y1 > y2:
             y1, y2 = y2, y1
-        
+
         return (x1, y1, x2, y2)
     
     def _closest_point_on_rect(self, left, top, right, bottom, px, py):
