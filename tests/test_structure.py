@@ -32,10 +32,10 @@ def test_import_empo():
 
 def test_requirements_exist():
     """Test that requirement files exist."""
-    req_file = REQUIREMENTS_ROOT / "requirements.txt"
-    req_dev_file = REQUIREMENTS_ROOT / "requirements-dev.txt"
-    assert req_file.exists(), f"requirements.txt not found at {req_file}"
-    assert req_dev_file.exists(), f"requirements-dev.txt not found at {req_dev_file}"
+    req_file = REQUIREMENTS_ROOT / "base.txt"
+    req_dev_file = REQUIREMENTS_ROOT / "dev.txt"
+    assert req_file.exists(), f"requirements not found at {req_file}"
+    assert req_dev_file.exists(), f"requirements not found at {req_dev_file}"
 
 
 def test_dockerfile_exists():
