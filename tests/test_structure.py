@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 # Get the root directory for setup files (resolve to handle symlinks properly)
-SETUP_ROOT = Path(__file__).resolve().parent.parent
+SETUP_ROOT = Path(__file__).resolve().parent.parent / "setup"
 DOCKER_ROOT = SETUP_ROOT / "docker"
 REQUIREMENTS_ROOT = SETUP_ROOT / "requirements"
 
