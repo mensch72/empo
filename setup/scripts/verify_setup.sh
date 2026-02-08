@@ -72,10 +72,11 @@ for file in $python_files; do
 done
 
 # Check Docker Compose syntax
+DOCKER_COMPOSE_FILE="setup/docker/docker-compose.yml"
 echo ""
 echo "5. Checking Docker Compose syntax..."
 if command -v docker &> /dev/null; then
-    if docker compose config --quiet 2>/dev/null; then
+    if docker compose -f "$DOCKER_COMPOSE_FILE" config --quiet 2>/dev/null; then
         echo "   ✓ docker-compose.yml"
     else
         echo "   ✗ docker-compose.yml (syntax error)"
@@ -86,9 +87,10 @@ else
 fi
 
 # Check shell scripts
+SCRIPTS_DIR="setup/scripts"
 echo ""
 echo "6. Checking shell scripts..."
-shell_scripts=$(find scripts -name "*.sh")
+shell_scripts=$(find "$SCRIPTS_DIR" -name "*.sh")
 for script in $shell_scripts; do
     if bash -n "$script" 2>/dev/null; then
         echo "   ✓ $script"
