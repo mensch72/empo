@@ -76,7 +76,8 @@ jobs:
       - name: Build Docker image
         uses: docker/build-push-action@v5
         with:
-          context: setup/docker
+          context: .
+          file: setup/docker/Dockerfile
           push: false
           load: true
           tags: empo:test
@@ -98,7 +99,8 @@ jobs:
         if: github.event_name != 'pull_request'
         uses: docker/build-push-action@v5
         with:
-          context: setup/docker
+          context: .
+          file: setup/docker/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
