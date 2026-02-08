@@ -14,16 +14,16 @@ services:
     container_name: empo-dev
     # Run as the host user to avoid permission issues with mounted volumes
     user: "${USER_ID:-1001}:${GROUP_ID:-1001}"
-    
+
     volumes:
       - ../..:/workspace
       - pip-cache:/home/appuser/.cache/pip
       # Mount host's tmpfs for RAM-based DAG slicing (Linux only, ignored on Mac/Windows)
       - /dev/shm:/dev/shm:rw
-    
+
     stdin_open: true
     tty: true
-    
+
     # Port mappings: host_port:container_port
     # Use HOST_TENSORBOARD_PORT=0 for auto-select, or set a specific port
     # Default 0 means Docker will choose an available port automatically
@@ -31,14 +31,14 @@ services:
       - "${HOST_JUPYTER_PORT:-8888}:8888"
       - "${HOST_TENSORBOARD_PORT:-0}:6006"
       - "${HOST_DEBUG_PORT:-5678}:5678"
-    
+
     working_dir: /workspace
-    
+
     environment:
       - WANDB_API_KEY=${WANDB_API_KEY:-}
-      - PYTHONPATH=/workspace/src:/workspace/vendor:/workspace/multigrid_worlds:/workspace/examples
+      - PYTHONPATH=/workspace/src:/workspace/vendor:/workspace/multigrid_worlds:/workspace/examples:/workspace/tests
       - OLLAMA_HOST=${OLLAMA_HOST:-http://ollama:11434}
-    
+
     command: /bin/bash
 
   # Optional Ollama service for local LLM inference
@@ -48,7 +48,7 @@ services:
     container_name: ollama
     profiles:
       - hierarchical
-    shm_size: '2gb'  # Shared memory for LLM inference
+    shm_size: "2gb" # Shared memory for LLM inference
     ports:
       - "11434:11434"
     volumes:

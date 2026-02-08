@@ -89,7 +89,7 @@ jobs:
       - name: Run tests in Docker
         run: |
           docker run --rm \
-            -e PYTHONPATH=/workspace/src:/workspace/vendor:/workspace/examples \
+            -e PYTHONPATH=/workspace/src:/workspace/vendor:/workspace/examples:/workspace/multigrid_worlds \
             empo:test pytest tests/ -v \
             --ignore=tests/test_mineland_installation.py \
             --ignore=tests/test_basic.py \
