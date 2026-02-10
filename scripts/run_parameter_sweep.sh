@@ -129,7 +129,7 @@ fi
 
 # Run the parameter sweep
 echo "Starting parameter sweep..."
-$PYTHON_CMD experiments/parameter_sweep_asymmetric_freeing.py \
+$PYTHON_CMD experiments/backward_induction_parameter_sweep/parameter_sweep_asymmetric_freeing.py \
     --n_samples "$N_SAMPLES" \
     --n_rollouts "$N_ROLLOUTS" \
     --output "$OUTPUT_FILE" \
@@ -150,7 +150,7 @@ if [ $EXIT_CODE -eq 0 ]; then
     
     # Run analysis
     echo "Running logistic regression analysis..."
-    $PYTHON_CMD experiments/analyze_parameter_sweep.py \
+    $PYTHON_CMD experiments/backward_induction_parameter_sweep/analyze_parameter_sweep.py \
         "$OUTPUT_FILE" \
         --interactions \
         --output "${OUTPUT_DIR}/analysis_${TIMESTAMP}.txt" \

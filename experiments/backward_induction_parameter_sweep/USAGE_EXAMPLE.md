@@ -8,14 +8,14 @@ This document provides a step-by-step example of running the parameter sweep exp
 
 ```bash
 # Run a small test with 10 parameter combinations
-python experiments/parameter_sweep_asymmetric_freeing.py \
+python experiments/backward_induction_parameter_sweep/parameter_sweep_asymmetric_freeing.py \
     --n_samples 10 \
     --n_rollouts 5 \
     --output outputs/parameter_sweep/test_results.csv \
     --seed 42
 
 # Analyze the results
-python experiments/analyze_parameter_sweep.py \
+python experiments/backward_induction_parameter_sweep/analyze_parameter_sweep.py \
     outputs/parameter_sweep/test_results.csv \
     --output outputs/parameter_sweep/test_analysis.txt
 
@@ -78,7 +78,7 @@ For full control:
 
 ```bash
 # On HPC cluster with SLURM
-python experiments/parameter_sweep_asymmetric_freeing.py \
+python experiments/backward_induction_parameter_sweep/parameter_sweep_asymmetric_freeing.py \
     --n_samples 100 \
     --n_rollouts 10 \
     --output outputs/parameter_sweep/full_results.csv \
@@ -168,7 +168,7 @@ The analysis script generates plots in `outputs/parameter_sweep/plots/`:
 
 ### Different Parameter Ranges
 
-Edit `sample_parameters()` in `parameter_sweep_asymmetric_freeing.py`:
+Edit `sample_parameters()` in `experiments/backward_induction_parameter_sweep/parameter_sweep_asymmetric_freeing.py`:
 
 ```python
 def sample_parameters(seed: Optional[int] = None) -> ParameterSet:
@@ -187,14 +187,14 @@ def sample_parameters(seed: Optional[int] = None) -> ParameterSet:
 Use `--world` flag to test other environments:
 
 ```bash
-python experiments/parameter_sweep_asymmetric_freeing.py \
+python experiments/backward_induction_parameter_sweep/parameter_sweep_asymmetric_freeing.py \
     --world multigrid_worlds/jobst_challenges/asymmetric_freeing.yaml \
     --n_samples 50
 ```
 
 ### Custom Analysis
 
-Modify `analyze_parameter_sweep.py` to add:
+Modify `experiments/backward_induction_parameter_sweep/analyze_parameter_sweep.py` to add:
 - Different regression models (probit, complementary log-log)
 - Non-linear effects (polynomial terms, splines)
 - Stratified analysis (subset by max_steps ranges)
