@@ -19,9 +19,10 @@ For each parameter combination, the script:
 1. Loads the asymmetric_freeing_simple.yaml world
 2. Computes human policy prior (Phase 1)
 3. Computes robot policy (Phase 2)
-4. Runs rollouts to measure P(left) - probability of freeing left human first
+4. Reads P(left) directly from the initial state's robot policy as P(turn right),
+   since the south-facing robot turns right to head towards the left (west) human first
 
-The results are saved to a CSV file for subsequent logistic regression analysis.
+The results are saved to a CSV file for subsequent regression analysis.
 
 Usage:
     # Small test run (10 samples)
@@ -91,9 +92,7 @@ class ParameterSet:
     xi: float
     
     # Results (filled after simulation)
-    left_freed_first: Optional[int] = None  # 1 if left freed first, 0 if right, -1 if neither
-    left_freed_step: Optional[int] = None   # Step when left human was freed (-1 if not freed)
-    right_freed_step: Optional[int] = None  # Step when right human was freed (-1 if not freed)
+    p_left: Optional[float] = None          # P(robot turns right first) = P(freeing left human first)
     n_states: Optional[int] = None          # Number of states in DAG
     computation_time: Optional[float] = None  # Time for backward induction (seconds)
 
@@ -148,139 +147,60 @@ def sample_parameters(seed: Optional[int] = None, bounds: Optional[PriorBounds] 
     )
 
 
-def detect_which_human_freed_first(env: MultiGridEnv, 
-                                  human_policy_prior: TabularHumanPolicyPrior,
-                                  robot_policy: RobotPolicy,
-                                  human_agent_indices: List[int],
-                                  robot_agent_indices: List[int],
-                                  max_steps: int) -> Tuple[int, int, int]:
+def compute_p_left_from_policy(env: MultiGridEnv, robot_policy: RobotPolicy) -> float:
     """
-    Run a single rollout and detect which human was freed first.
+    Compute P(left) = probability that robot turns right first from initial state.
     
-    A human is "freed" when they can reach at least one goal cell that was previously
-    blocked by a rock. This happens when the robot pushes away the rock in front of them.
+    In asymmetric_freeing_simple, the robot starts facing south. Turning right (action=2)
+    means it will face west and move towards the left human first.
     
     Args:
-        env: Environment instance
-        human_policy_prior: Computed human policy prior
+        env: Environment instance (reset to initial state)
         robot_policy: Computed robot policy
-        human_agent_indices: List of human agent indices
-        robot_agent_indices: List of robot agent indices
-        max_steps: Maximum steps to run
         
     Returns:
-        Tuple of (left_freed_first, left_freed_step, right_freed_step):
-        - left_freed_first: 1 if left human freed first, 0 if right freed first, -1 if neither
-        - left_freed_step: step when left was freed (-1 if not freed)
-        - right_freed_step: step when right was freed (-1 if not freed)
+        Probability that robot's first action is "turn right" (going left/west)
     """
-    # Reset environment
+    # Get initial state
     env.reset()
+    initial_state = env.get_state()
     
-    # Left human is agent 0 at initial position (2, 1)
-    # Right human is agent 1 at initial position (5, 1)
-    # Rock at (2, 2) blocks left human
-    # Rock at (5, 2) blocks right human
+    # Get robot policy distribution for initial state
+    # robot_policy(state) returns Dict[RobotActionProfile, float]
+    # where RobotActionProfile is a tuple of actions (one per robot)
+    policy_dist = robot_policy(initial_state)
     
-    # Track which rocks have been moved/removed
-    left_rock_pos = (2, 2)
-    right_rock_pos = (5, 2)
+    if not policy_dist:
+        # No policy for initial state - this shouldn't happen
+        return 0.5  # Return 0.5 as uninformative prior
     
-    left_freed_step = -1
-    right_freed_step = -1
+    # Sum probabilities of all action profiles where robot turns right (action=2)
+    # SmallActions: still=0, left=1, right=2, forward=3
+    TURN_RIGHT = 2
     
-    # Check initial state
-    def is_rock_blocking(env, pos):
-        """Check if there's a rock at the given position."""
-        cell = env.grid.get(*pos)
-        return cell is not None and cell.type == 'rock'
+    p_left = 0.0
+    for action_profile, prob in policy_dist.items():
+        # action_profile is a tuple, e.g., (2,) for single robot
+        if action_profile[0] == TURN_RIGHT:
+            p_left += prob
     
-    for step in range(max_steps):
-        # Check if rocks have been moved
-        if left_freed_step == -1 and not is_rock_blocking(env, left_rock_pos):
-            left_freed_step = step
-        if right_freed_step == -1 and not is_rock_blocking(env, right_rock_pos):
-            right_freed_step = step
-        
-        # If both freed, we're done
-        if left_freed_step != -1 and right_freed_step != -1:
-            break
-        
-        # Get current state
-        current_state = env.get_state()
-        
-        # Sample actions from policies
-        actions = [0] * len(env.agents)
-        
-        # Sample human actions from human policy prior
-        for human_idx in human_agent_indices:
-            # Sample a goal for this human
-            goal_list = list(env.possible_goal_generator.generate(current_state, human_idx))
-            if goal_list and current_state in human_policy_prior.values:
-                sampled_goal, weight = goal_list[np.random.randint(len(goal_list))]
-                
-                # Get human action from policy prior
-                if (human_idx in human_policy_prior.values[current_state] and
-                    sampled_goal in human_policy_prior.values[current_state][human_idx]):
-                    action_dist = human_policy_prior.values[current_state][human_idx][sampled_goal]
-                    # action_dist is a numpy array of probabilities
-                    actions[human_idx] = np.random.choice(len(action_dist), p=action_dist)
-                else:
-                    # If state/goal not in policy, use random action
-                    actions[human_idx] = env.action_space.sample()
-            else:
-                # No goals available or state not in policy, use random action
-                actions[human_idx] = env.action_space.sample()
-        
-        # Sample robot actions from robot policy
-        # robot_policy(state) returns Dict[RobotActionProfile, float]
-        # or we can use robot_policy.sample(state) to directly get a sampled action profile
-        sampled_robot_action_profile = robot_policy.sample(current_state)
-        
-        # Assign robot actions (robot_action_profile is a tuple of actions for each robot)
-        for i, robot_idx in enumerate(robot_agent_indices):
-            if sampled_robot_action_profile and i < len(sampled_robot_action_profile):
-                actions[robot_idx] = sampled_robot_action_profile[i]
-            else:
-                actions[robot_idx] = env.action_space.sample()
-        
-        # Take step
-        obs, rewards, done, info = env.step(actions)
-        
-        if done:
-            break
-    
-    # Final check
-    if left_freed_step == -1 and not is_rock_blocking(env, left_rock_pos):
-        left_freed_step = max_steps - 1
-    if right_freed_step == -1 and not is_rock_blocking(env, right_rock_pos):
-        right_freed_step = max_steps - 1
-    
-    # Determine which was freed first
-    if left_freed_step != -1 and right_freed_step != -1:
-        left_freed_first = 1 if left_freed_step < right_freed_step else 0
-    elif left_freed_step != -1:
-        left_freed_first = 1
-    elif right_freed_step != -1:
-        left_freed_first = 0
-    else:
-        left_freed_first = -1  # Neither freed
-    
-    return left_freed_first, left_freed_step, right_freed_step
+    return p_left
 
 
 def run_single_simulation(params: ParameterSet, 
                          world_file: str,
-                         n_rollouts: int = 10,
                          parallel: bool = False,
                          quiet: bool = False) -> ParameterSet:
     """
     Run a single simulation with the given parameters.
     
+    Computes human policy prior (Phase 1) and robot policy (Phase 2),
+    then reads P(left) directly from the initial state's robot policy
+    as P(turn right) - since the south-facing robot turns right to go west/left.
+    
     Args:
         params: Parameter set to use
         world_file: Path to YAML world file
-        n_rollouts: Number of rollouts to average P(left) over
         parallel: Whether to use parallel computation for backward induction
         quiet: Suppress output
         
@@ -345,51 +265,15 @@ def run_single_simulation(params: ParameterSet,
         # Get number of states
         params.n_states = len(robot_policy.values)
         
-        if not quiet:
-            print(f"Computed policies for {params.n_states} states")
-            print(f"Running {n_rollouts} rollouts to measure P(left)...")
-        
-        # Run multiple rollouts to estimate P(left)
-        left_freed_count = 0
-        total_valid_rollouts = 0
-        
-        for i in range(n_rollouts):
-            left_freed_first, left_step, right_step = detect_which_human_freed_first(
-                env, 
-                human_policy_prior, 
-                robot_policy,
-                human_agent_indices,
-                robot_agent_indices,
-                params.max_steps
-            )
-            
-            # Only count rollouts where at least one human was freed
-            if left_freed_first != -1:
-                total_valid_rollouts += 1
-                if left_freed_first == 1:
-                    left_freed_count += 1
-            
-            # Store results from first rollout as representative
-            if i == 0:
-                params.left_freed_first = left_freed_first
-                params.left_freed_step = left_step
-                params.right_freed_step = right_step
-        
-        # If no valid rollouts, mark as -1
-        if total_valid_rollouts == 0:
-            params.left_freed_first = -1
-        else:
-            # Store the proportion as a representative value (0 or 1 based on majority)
-            p_left = left_freed_count / total_valid_rollouts
-            params.left_freed_first = 1 if p_left >= 0.5 else 0
+        # Read P(left) directly from initial state's robot policy
+        # P(left) = P(turn right) since south-facing robot turns right to go west
+        params.p_left = compute_p_left_from_policy(env, robot_policy)
         
         params.computation_time = time.time() - start_time
         
         if not quiet:
-            if total_valid_rollouts > 0:
-                print(f"Results: P(left) = {left_freed_count}/{total_valid_rollouts} = {left_freed_count/total_valid_rollouts:.3f}")
-            else:
-                print("Results: No humans freed in any rollout")
+            print(f"Computed policies for {params.n_states} states")
+            print(f"Results: P(left) = {params.p_left:.4f}")
             print(f"Computation time: {params.computation_time:.1f}s")
         
         return params
@@ -399,7 +283,7 @@ def run_single_simulation(params: ParameterSet,
             print(f"ERROR in simulation: {e}")
         import traceback
         traceback.print_exc()
-        params.left_freed_first = -1
+        params.p_left = None
         params.computation_time = time.time() - start_time
         return params
 
@@ -429,11 +313,11 @@ def save_results_to_csv(results: List[ParameterSet], output_file: str):
     
     print(f"\nResults saved to: {output_file}")
     print(f"Total samples: {len(results)}")
-    valid_results = [r for r in results if r.left_freed_first != -1]
-    print(f"Valid samples (at least one human freed): {len(valid_results)}")
+    valid_results = [r for r in results if r.p_left is not None]
+    print(f"Valid samples: {len(valid_results)}")
     if valid_results:
-        left_freed_count = sum(1 for r in valid_results if r.left_freed_first == 1)
-        print(f"Left freed first: {left_freed_count}/{len(valid_results)} = {left_freed_count/len(valid_results):.3f}")
+        mean_p_left = np.mean([r.p_left for r in valid_results])
+        print(f"Mean P(left): {mean_p_left:.4f}")
 
 
 def main():
@@ -444,8 +328,6 @@ def main():
     )
     parser.add_argument('--n_samples', type=int, default=10,
                        help='Number of parameter combinations to sample (default: 10)')
-    parser.add_argument('--n_rollouts', type=int, default=5,
-                       help='Number of rollouts per parameter set to estimate P(left) (default: 5)')
     parser.add_argument('--output', type=str, default='outputs/parameter_sweep/results.csv',
                        help='Output CSV file (default: outputs/parameter_sweep/results.csv)')
     parser.add_argument('--world', type=str, 
@@ -528,7 +410,6 @@ def main():
     print("="*80)
     print(f"Configuration:")
     print(f"  Number of samples: {args.n_samples}")
-    print(f"  Rollouts per sample: {args.n_rollouts}")
     print(f"  World file: {args.world}")
     print(f"  Output file: {args.output}")
     print(f"  Parallel: {args.parallel}")
@@ -562,7 +443,6 @@ def main():
         result = run_single_simulation(
             params=params,
             world_file=args.world,
-            n_rollouts=args.n_rollouts,
             parallel=args.parallel,
             quiet=args.quiet
         )

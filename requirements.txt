@@ -31,5 +31,9 @@ psutil>=5.9.0
 # Machine learning utilities
 scikit-learn>=1.2.0
 
+# Data analysis and statistics
+pandas>=2.0.0
+statsmodels>=0.14.0
+
 # MPI for distributed training (optional)
 mpi4py>=3.1.0

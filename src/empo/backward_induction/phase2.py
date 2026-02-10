@@ -1034,7 +1034,7 @@ def compute_robot_policy(
     # Set up default tqdm progress bar if no callback provided
     _pbar: Optional[tqdm[int]] = None
     if progress_callback is None and not quiet:
-        _pbar = tqdm(total=len(states), desc="Robot policy backward induction", unit="states")
+        _pbar = tqdm(total=len(states), desc="Robot policy backward induction", unit="states", leave=False)
         def progress_callback(done: int, total: int) -> None:
             if _pbar is not None:
                 _pbar.n = done
