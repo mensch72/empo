@@ -550,7 +550,8 @@ def main():
             append_result_to_csv(result, args.output)
             completed_count += 1
             
-            print(f"  Sample {completed_count}/{args.n_samples} done (p_left={result.p_left:.4f if result.p_left else 'None'})")
+            p_left_str = f"{result.p_left:.4f}" if result.p_left is not None else "None"
+            print(f"  Sample {completed_count}/{args.n_samples} done (p_left={p_left_str})")
             sys.stdout.flush()
         
         # Free DAG memory before processing next max_steps group

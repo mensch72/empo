@@ -233,17 +233,23 @@ if [ "$QUICK_MODE" = "true" ]; then
 fi
 
 # Run the parameter sweep
-echo "Starting parameter sweep..."
-python -u "${PYTHON_ARGS[@]}"
+# Use srun to launch parallel tasks under SLURM, or direct python locally
+if [ -n "$SLURM_JOB_ID" ]; then
+    echo "Starting ${SLURM_NTASKS:-1} parallel tasks via srun..."
+    srun python -u "${PYTHON_ARGS[@]}"
+else
+    echo "Starting parameter sweep (local mode)..."
+    python -u "${PYTHON_ARGS[@]}"
+fi
 
 EXIT_CODE=$?
 
 echo ""
 echo "=================================================="
 if [ $EXIT_CODE -eq 0 ]; then
-    echo "Task completed successfully!"
+    echo "All tasks completed successfully!"
 else
-    echo "ERROR: Task failed with exit code $EXIT_CODE"
+    echo "ERROR: Some tasks failed (exit code $EXIT_CODE)"
 fi
 echo "Finished: $(date)"
 echo "=================================================="
