@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """
-Logistic Regression Analysis for Parameter Sweep Results
+Generalized Linear Model Analysis for Parameter Sweep Results
 
 This script analyzes the results from parameter_sweep_asymmetric_freeing.py
-using logistic regression to understand which parameters influence P(left).
+using GLM with logit link to understand which parameters influence P(left).
+
+Since P(left) is a probability in [0,1], we use a quasi-binomial GLM with
+logit link function (equivalent to beta regression for proportion data).
 
 The analysis includes:
 1. Univariate effects of each parameter
@@ -27,10 +30,14 @@ import numpy as np
 import pandas as pd
 from scipy import stats
 
-# Try to import statsmodels for logistic regression
+# Try to import statsmodels for regression
 try:
     import statsmodels.api as sm
-    from statsmodels.formula.api import logit
+    from statsmodels.genmod.generalized_linear_model import GLM, SET_USE_BIC_LLF
+    from statsmodels.genmod.families import Binomial
+    from statsmodels.genmod.families.links import Logit
+    # Suppress BIC deprecation warning by using LLF-based formula
+    SET_USE_BIC_LLF(True)
     HAVE_STATSMODELS = True
 except ImportError:
     HAVE_STATSMODELS = False
@@ -38,7 +45,10 @@ except ImportError:
     import subprocess
     subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "statsmodels"])
     import statsmodels.api as sm
-    from statsmodels.formula.api import logit
+    from statsmodels.genmod.generalized_linear_model import GLM, SET_USE_BIC_LLF
+    from statsmodels.genmod.families import Binomial
+    from statsmodels.genmod.families.links import Logit
+    SET_USE_BIC_LLF(True)
     HAVE_STATSMODELS = True
 
 # Try to import matplotlib for visualization
@@ -64,12 +74,14 @@ def load_results(csv_file: str) -> pd.DataFrame:
     """
     df = pd.read_csv(csv_file)
     
-    # Filter out invalid results (neither human freed)
-    df_valid = df[df['left_freed_first'] != -1].copy()
+    # Filter out invalid results (p_left is None/NaN)
+    df_valid = df[df['p_left'].notna()].copy()
     
     print(f"Loaded {len(df)} total samples")
-    print(f"Valid samples (at least one human freed): {len(df_valid)}")
-    print(f"Left freed first: {(df_valid['left_freed_first'] == 1).sum()}/{len(df_valid)}")
+    print(f"Valid samples: {len(df_valid)}")
+    if len(df_valid) > 0:
+        print(f"P(left) range: [{df_valid['p_left'].min():.4f}, {df_valid['p_left'].max():.4f}]")
+        print(f"P(left) mean: {df_valid['p_left'].mean():.4f}")
     print()
     
     return df_valid
@@ -77,7 +89,7 @@ def load_results(csv_file: str) -> pd.DataFrame:
 
 def compute_univariate_effects(df: pd.DataFrame, predictors: List[str]) -> pd.DataFrame:
     """
-    Compute univariate logistic regression for each predictor.
+    Compute univariate GLM (logit link) for each predictor.
     
     Args:
         df: DataFrame with results
@@ -88,11 +100,14 @@ def compute_univariate_effects(df: pd.DataFrame, predictors: List[str]) -> pd.Da
     """
     results = []
     
+    # Clamp p_left to avoid exact 0 or 1 (causes GLM issues)
+    y = df['p_left'].clip(0.001, 0.999)
+    
     for pred in predictors:
         try:
-            # Fit simple logistic regression
-            formula = f"left_freed_first ~ {pred}"
-            model = logit(formula, data=df).fit(disp=0)
+            # Fit GLM with binomial family and logit link
+            X = sm.add_constant(df[pred])
+            model = GLM(y, X, family=Binomial(link=Logit())).fit()
             
             # Extract coefficient and stats
             coef = model.params[pred]
@@ -128,7 +143,7 @@ def fit_full_model(df: pd.DataFrame,
                   predictors: List[str],
                   include_interactions: bool = False) -> Tuple[sm.GLM, pd.DataFrame]:
     """
-    Fit full logistic regression model with all predictors.
+    Fit full GLM (logit link) with all predictors.
     
     Args:
         df: DataFrame with results
@@ -138,22 +153,24 @@ def fit_full_model(df: pd.DataFrame,
     Returns:
         Tuple of (fitted model, summary DataFrame)
     """
-    # Build formula
-    if include_interactions:
-        # Include some plausible interactions
-        interactions = [
-            "beta_h:gamma_h",  # Human planning horizon affects beta_h interpretation
-            "gamma_r:gamma_h",  # Discount factors may interact
-            "zeta:xi",          # Risk aversion parameters may interact
-            "max_steps:beta_h"  # Horizon affects planning
-        ]
-        formula = "left_freed_first ~ " + " + ".join(predictors) + " + " + " + ".join(interactions)
-    else:
-        formula = "left_freed_first ~ " + " + ".join(predictors)
+    # Clamp p_left to avoid exact 0 or 1
+    y = df['p_left'].clip(0.001, 0.999)
     
-    print(f"Fitting model: {formula}")
+    # Build design matrix
+    X = df[predictors].copy()
+    
+    if include_interactions:
+        # Add interaction terms
+        X['beta_h_x_gamma_h'] = df['beta_h'] * df['gamma_h']
+        X['gamma_r_x_gamma_h'] = df['gamma_r'] * df['gamma_h']
+        X['zeta_x_xi'] = df['zeta'] * df['xi']
+        X['max_steps_x_beta_h'] = df['max_steps'] * df['beta_h']
+    
+    X = sm.add_constant(X)
+    
+    print(f"Fitting GLM with predictors: {list(X.columns)}")
     try:
-        model = logit(formula, data=df).fit(disp=0)
+        model = GLM(y, X, family=Binomial(link=Logit())).fit()
     except (np.linalg.LinAlgError, ValueError) as e:
         print(f"ERROR: Could not fit model - {e}")
         print("This usually happens when there is no variance in the outcome or predictors.")
@@ -190,17 +207,22 @@ def print_model_summary(model, summary: pd.DataFrame, output_file=None):
     
     try:
         print_or_write("=" * 80, f)
-        print_or_write("LOGISTIC REGRESSION RESULTS", f)
+        print_or_write("GLM RESULTS (Binomial family, logit link)", f)
         print_or_write("=" * 80, f)
         print_or_write("", f)
         
         # Model fit statistics
         print_or_write("Model Fit Statistics:", f)
         print_or_write(f"  Observations: {int(model.nobs)}", f)
+        print_or_write(f"  Deviance: {model.deviance:.4f}", f)
+        print_or_write(f"  Pearson chi2: {model.pearson_chi2:.4f}", f)
         print_or_write(f"  Log-Likelihood: {model.llf:.2f}", f)
         print_or_write(f"  AIC: {model.aic:.2f}", f)
         print_or_write(f"  BIC: {model.bic:.2f}", f)
-        print_or_write(f"  Pseudo R-squared (McFadden): {model.prsquared:.4f}", f)
+        # Compute McFadden's pseudo R-squared manually for GLM
+        if hasattr(model, 'llnull') and model.llnull != 0:
+            pseudo_r2 = 1 - model.llf / model.llnull
+            print_or_write(f"  Pseudo R-squared (McFadden): {pseudo_r2:.4f}", f)
         print_or_write("", f)
         
         # Coefficients table
@@ -315,26 +337,28 @@ def create_visualizations(df: pd.DataFrame,
     for i, pred in enumerate(predictors):
         ax = axes[i]
         
-        # Add jitter to binary outcome for better visualization
-        jitter = np.random.normal(0, 0.02, size=len(df))
-        y_jittered = df['left_freed_first'] + jitter
+        # Plot p_left vs predictor (no jitter needed - it's already continuous)
+        ax.scatter(df[pred], df['p_left'], alpha=0.5, s=20)
         
-        ax.scatter(df[pred], y_jittered, alpha=0.5, s=20)
-        
-        # Add logistic fit curve
+        # Add GLM fit curve
         x_range = np.linspace(df[pred].min(), df[pred].max(), 100)
-        formula = f"left_freed_first ~ {pred}"
-        model = logit(formula, data=df).fit(disp=0)
         
-        # Predict probabilities
-        pred_df = pd.DataFrame({pred: x_range})
-        y_pred = model.predict(sm.add_constant(pred_df, has_constant='add'))
-        
-        ax.plot(x_range, y_pred, 'r-', linewidth=2, label='Logistic fit')
+        # Fit GLM with logit link for this predictor
+        # Clamp p_left to avoid 0/1
+        y = np.clip(df['p_left'].values, 0.001, 0.999)
+        X = sm.add_constant(df[pred].values)
+        try:
+            model = GLM(y, X, family=Binomial(link=Logit())).fit(disp=0)
+            # Predict on the x_range
+            X_pred = sm.add_constant(x_range)
+            y_pred = model.predict(X_pred)
+            ax.plot(x_range, y_pred, 'r-', linewidth=2, label='GLM fit')
+        except Exception:
+            pass  # Skip fit line if model fails
         
         ax.set_xlabel(pred)
-        ax.set_ylabel('P(left freed first)')
-        ax.set_ylim(-0.1, 1.1)
+        ax.set_ylabel('P(left)')
+        ax.set_ylim(-0.05, 1.05)
         ax.legend()
         ax.grid(True, alpha=0.3)
     
@@ -380,17 +404,15 @@ def main():
         print()
     
     # Check for outcome variance
-    n_left = (df['left_freed_first'] == 1).sum()
-    n_right = (df['left_freed_first'] == 0).sum()
-    if n_left == 0 or n_right == 0:
-        print("ERROR: No variance in outcome variable (all samples have same outcome).")
-        print(f"  Left freed first: {n_left}")
-        print(f"  Right freed first: {n_right}")
-        print("\nLogistic regression requires variance in the outcome.")
-        print("Please run with more samples to get variance in outcomes.")
+    p_left_std = df['p_left'].std()
+    if p_left_std < 0.001:
+        print("ERROR: No variance in outcome variable (all p_left values are nearly identical).")
+        print(f"  p_left std: {p_left_std}")
+        print("\nLinear regression requires variance in the outcome.")
+        print("Please run with more samples or different parameter ranges.")
         print()
         print("Parameter summary statistics:")
-        print(df[['max_steps', 'beta_h', 'gamma_h', 'gamma_r', 'zeta', 'eta', 'xi']].describe())
+        print(df[['max_steps', 'beta_h', 'gamma_h', 'gamma_r', 'zeta', 'eta', 'xi', 'p_left']].describe())
         return
     
     # Define predictors (exclude beta_r since it's fixed)

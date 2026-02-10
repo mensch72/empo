@@ -37,6 +37,7 @@ Usage:
 
 import argparse
 import csv
+import gc
 import os
 import random
 import sys
@@ -188,7 +189,7 @@ def compute_p_left_from_policy(env: MultiGridEnv, robot_policy: RobotPolicy) -> 
 
 
 def run_single_simulation(params: ParameterSet, 
-                         world_file: str,
+                         env: MultiGridEnv,
                          parallel: bool = False,
                          quiet: bool = False) -> ParameterSet:
     """
@@ -200,7 +201,7 @@ def run_single_simulation(params: ParameterSet,
     
     Args:
         params: Parameter set to use
-        world_file: Path to YAML world file
+        env: Pre-initialized environment (DAG will be cached/reused)
         parallel: Whether to use parallel computation for backward induction
         quiet: Suppress output
         
@@ -210,13 +211,7 @@ def run_single_simulation(params: ParameterSet,
     start_time = time.time()
     
     try:
-        # Create environment with specified max_steps
-        env = MultiGridEnv(
-            config_file=world_file,
-            partial_obs=False,
-            actions_set=SmallActions
-        )
-        env.max_steps = params.max_steps
+        # Reset environment (DAG is already cached from previous runs with same max_steps)
         env.reset()
         
         # Get agent indices
@@ -433,24 +428,64 @@ def main():
     np.random.seed(args.seed)
     random.seed(args.seed)
     
-    # Run simulations
-    results = []
-    for i in tqdm(range(args.n_samples), desc="Running simulations"):
-        # Sample parameters with deterministic seed for reproducibility
+    # Sample all parameters upfront
+    all_params = []
+    for i in range(args.n_samples):
         params = sample_parameters(seed=args.seed + i, bounds=bounds)
+        all_params.append((i, params))
+    
+    # Group by max_steps to reuse DAG
+    from collections import defaultdict
+    params_by_max_steps: Dict[int, List[Tuple[int, ParameterSet]]] = defaultdict(list)
+    for i, params in all_params:
+        params_by_max_steps[params.max_steps].append((i, params))
+    
+    # Sort max_steps values for deterministic ordering
+    sorted_max_steps = sorted(params_by_max_steps.keys())
+    
+    print(f"Grouped {args.n_samples} samples by max_steps: {dict((k, len(v)) for k, v in params_by_max_steps.items())}")
+    print()
+    
+    # Run simulations, grouped by max_steps to reuse DAG
+    results: List[Tuple[int, ParameterSet]] = []
+    
+    for max_steps in tqdm(sorted_max_steps, desc="Processing max_steps groups"):
+        group = params_by_max_steps[max_steps]
         
-        # Run simulation
-        result = run_single_simulation(
-            params=params,
-            world_file=args.world,
-            parallel=args.parallel,
-            quiet=args.quiet
+        # Create environment once for this max_steps value
+        env = MultiGridEnv(
+            config_file=args.world,
+            partial_obs=False,
+            actions_set=SmallActions
         )
+        env.max_steps = max_steps
+        env.reset()
         
-        results.append(result)
+        # Build DAG once (will be cached for all runs in this group)
+        if not args.quiet:
+            print(f"\nBuilding DAG for max_steps={max_steps} ({len(group)} samples)...")
+        env.get_dag(return_probabilities=True, quiet=args.quiet)
+        
+        # Run all simulations in this group
+        for original_idx, params in group:
+            result = run_single_simulation(
+                params=params,
+                env=env,
+                parallel=args.parallel,
+                quiet=args.quiet
+            )
+            results.append((original_idx, result))
+        
+        # Free DAG memory before processing next max_steps group
+        del env
+        gc.collect()
+    
+    # Sort results back to original order
+    results.sort(key=lambda x: x[0])
+    final_results = [r for _, r in results]
     
     # Save results
-    save_results_to_csv(results, args.output)
+    save_results_to_csv(final_results, args.output)
     
     print("\n" + "="*80)
     print("Parameter sweep complete!")
