@@ -72,9 +72,14 @@ set -e  # Exit on error
 # Option 3: Module system
 # module load python/3.10
 # module load anaconda3
-module load anaconda/2025
-source activate empo
-export PATH="$CONDA_PREFIX/bin:$PATH"
+
+# Only load modules when running under SLURM (sbatch mode)
+# When running locally via bash, assume environment is already set up
+if [ -n "$SLURM_JOB_ID" ]; then
+    module load anaconda/2025
+    source activate empo
+    export PATH="$CONDA_PREFIX/bin:$PATH"
+fi
 #==============================================================================
 
 # Default configuration

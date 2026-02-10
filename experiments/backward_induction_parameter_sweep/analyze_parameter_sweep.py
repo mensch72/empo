@@ -24,7 +24,7 @@ import argparse
 import csv
 import sys
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Any
 
 import numpy as np
 import pandas as pd
@@ -96,9 +96,400 @@ def load_results(csv_file: str) -> pd.DataFrame:
     if len(df_valid) > 0:
         print(f"P(left) range: [{df_valid['p_left'].min():.4f}, {df_valid['p_left'].max():.4f}]")
         print(f"P(left) mean: {df_valid['p_left'].mean():.4f}")
+    
+    # Print human positions if available
+    if 'h1_pos' in df_valid.columns and 'h2_pos' in df_valid.columns:
+        h1_positions = df_valid['h1_pos'].dropna().unique()
+        h2_positions = df_valid['h2_pos'].dropna().unique()
+        print()
+        print("Human positions in initial state:")
+        print(f"  h1 (human_agent_indices[0]): {', '.join(str(p) for p in h1_positions)}")
+        print(f"  h2 (human_agent_indices[1]): {', '.join(str(p) for p in h2_positions)}")
+    
     print()
     
     return df_valid
+
+
+def compute_derived_outcomes(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute derived outcome variables from raw metrics.
+    
+    Adds columns for:
+    - pi_r_ratio: pi_r(turn_left) / (pi_r(turn_left) + pi_r(turn_right)) [proportion in 0,1]
+    - Q_r_ratio: |Q_r(turn_left)| / (|Q_r(turn_left)| + |Q_r(turn_right)|) [proportion in 0,1]
+    - X_h_ratio: X_h1 / (X_h1 + X_h2) [proportion in 0,1]
+    - log2_V_r: log2(|V_r|) (V_r is negative, so we use absolute value)
+    - log2_X_h1: log2(X_h1)
+    - log2_X_h2: log2(X_h2)
+    - log2_X_h_diff: log2(X_h1) - log2(X_h2) = log2(X_h1 / X_h2)
+    
+    Args:
+        df: DataFrame with raw results
+        
+    Returns:
+        DataFrame with additional derived columns
+    """
+    df = df.copy()
+    
+    # pi_r(turn_left) / (pi_r(turn_left) + pi_r(turn_right)) - raw proportion
+    if 'pi_r_turn_left' in df.columns and 'pi_r_turn_right' in df.columns:
+        pi_sum = df['pi_r_turn_left'] + df['pi_r_turn_right']
+        # Avoid division by zero, clamp to (0,1) for GLM
+        pi_ratio = np.where(pi_sum > 0, df['pi_r_turn_left'] / pi_sum, 0.5)
+        df['pi_r_ratio'] = np.clip(pi_ratio, 0.001, 0.999)
+    
+    # For Q_r, both values are negative, so we compute ratio of magnitudes:
+    # |Q_r(turn_left)| / (|Q_r(turn_left)| + |Q_r(turn_right)|)
+    if 'Q_r_turn_left' in df.columns and 'Q_r_turn_right' in df.columns:
+        # Use absolute values since Q_r is always negative
+        Q_left = np.abs(df['Q_r_turn_left'])
+        Q_right = np.abs(df['Q_r_turn_right'])
+        Q_sum = Q_left + Q_right
+        Q_ratio = np.where(Q_sum > 0, Q_left / Q_sum, 0.5)
+        df['Q_r_ratio'] = np.clip(Q_ratio, 0.001, 0.999)
+    
+    # X_h1 / (X_h1 + X_h2)
+    if 'X_h1' in df.columns and 'X_h2' in df.columns:
+        X_sum = df['X_h1'] + df['X_h2']
+        X_ratio = np.where(X_sum > 0, df['X_h1'] / X_sum, 0.5)
+        df['X_h_ratio'] = np.clip(X_ratio, 0.001, 0.999)
+    
+    # log2(|V_r|) - V_r is negative, so use absolute value
+    if 'V_r' in df.columns:
+        # Avoid log of zero
+        V_r_abs = np.abs(df['V_r'])
+        df['log2_V_r'] = np.where(V_r_abs > 0, np.log2(V_r_abs), np.nan)
+    
+    # log2(X_h1) and log2(X_h2)
+    if 'X_h1' in df.columns:
+        df['log2_X_h1'] = np.where(df['X_h1'] > 0, np.log2(df['X_h1']), np.nan)
+    if 'X_h2' in df.columns:
+        df['log2_X_h2'] = np.where(df['X_h2'] > 0, np.log2(df['X_h2']), np.nan)
+    
+    # log2(X_h1) - log2(X_h2) = log2(X_h1 / X_h2)
+    if 'X_h1' in df.columns and 'X_h2' in df.columns:
+        # Only compute where both are positive
+        valid = (df['X_h1'] > 0) & (df['X_h2'] > 0)
+        df['log2_X_h_diff'] = np.where(valid, np.log2(df['X_h1']) - np.log2(df['X_h2']), np.nan)
+    
+    return df
+
+
+def compute_univariate_ols(df: pd.DataFrame, outcome: str, predictors: List[str]) -> pd.DataFrame:
+    """
+    Compute univariate OLS regression for each predictor on a continuous outcome.
+    
+    Args:
+        df: DataFrame with results
+        outcome: Name of the outcome variable column
+        predictors: List of predictor variable names
+        
+    Returns:
+        DataFrame with coefficients, p-values, and confidence intervals
+    """
+    import statsmodels.api as sm
+    
+    results = []
+    
+    # Filter out rows with missing outcome
+    df_valid = df[df[outcome].notna()].copy()
+    if len(df_valid) == 0:
+        print(f"  No valid data for outcome '{outcome}'")
+        return pd.DataFrame()
+    
+    y = df_valid[outcome]
+    
+    for pred in predictors:
+        # Skip predictors with zero variance
+        if df_valid[pred].std() == 0:
+            print(f"  Skipping '{pred}': zero variance")
+            results.append({
+                'predictor': pred,
+                'coefficient': np.nan,
+                'std_err': np.nan,
+                't_value': np.nan,
+                'p_value': np.nan,
+                'ci_low': np.nan,
+                'ci_high': np.nan,
+                'significant': False
+            })
+            continue
+        
+        try:
+            X = sm.add_constant(df_valid[pred])
+            model = sm.OLS(y, X).fit()
+            
+            coef = model.params[pred]
+            pval = model.pvalues[pred]
+            ci_low, ci_high = model.conf_int().loc[pred]
+            
+            results.append({
+                'predictor': pred,
+                'coefficient': coef,
+                'std_err': model.bse[pred],
+                't_value': model.tvalues[pred],
+                'p_value': pval,
+                'ci_low': ci_low,
+                'ci_high': ci_high,
+                'significant': pval < 0.05
+            })
+        except Exception as e:
+            results.append({
+                'predictor': pred,
+                'coefficient': np.nan,
+                'std_err': np.nan,
+                't_value': np.nan,
+                'p_value': np.nan,
+                'ci_low': np.nan,
+                'ci_high': np.nan,
+                'significant': False
+            })
+    
+    return pd.DataFrame(results)
+
+
+def fit_full_ols_model(df: pd.DataFrame, outcome: str, predictors: List[str]) -> Tuple[Any, pd.DataFrame]:
+    """
+    Fit full OLS model with all predictors on a continuous outcome.
+    
+    Args:
+        df: DataFrame with results
+        outcome: Name of the outcome variable column  
+        predictors: List of predictor variable names
+        
+    Returns:
+        Tuple of (fitted model, summary DataFrame)
+    """
+    import statsmodels.api as sm
+    
+    # Filter out rows with missing outcome
+    df_valid = df[df[outcome].notna()].copy()
+    if len(df_valid) == 0:
+        print(f"  No valid data for outcome '{outcome}'")
+        return None, None
+    
+    y = df_valid[outcome]
+    
+    # Filter out zero-variance predictors
+    valid_predictors = [p for p in predictors if df_valid[p].std() > 0]
+    
+    X = sm.add_constant(df_valid[valid_predictors])
+    
+    try:
+        model = sm.OLS(y, X).fit()
+    except Exception as e:
+        print(f"ERROR: Could not fit OLS model - {e}")
+        return None, None
+    
+    summary = pd.DataFrame({
+        'coefficient': model.params,
+        'std_err': model.bse,
+        't_value': model.tvalues,
+        'p_value': model.pvalues,
+        'significant': model.pvalues < 0.05
+    })
+    
+    return model, summary
+
+
+def print_ols_summary(outcome_name: str, model, summary: pd.DataFrame, output_file=None):
+    """
+    Print a formatted summary of an OLS model.
+    """
+    def print_or_write(text, file=None):
+        print(text)
+        if file:
+            file.write(text + '\n')
+    
+    f = open(output_file, 'a') if output_file else None
+    
+    try:
+        print_or_write(f"\n{'='*80}", f)
+        print_or_write(f"OLS REGRESSION: {outcome_name}", f)
+        print_or_write("="*80, f)
+        
+        print_or_write(f"  Observations: {int(model.nobs)}", f)
+        print_or_write(f"  R-squared: {model.rsquared:.4f}", f)
+        print_or_write(f"  Adj. R-squared: {model.rsquared_adj:.4f}", f)
+        print_or_write(f"  F-statistic: {model.fvalue:.4f} (p={model.f_pvalue:.4f})", f)
+        print_or_write("", f)
+        
+        header = f"{'Variable':<20} {'Coef':>10} {'Std Err':>10} {'t':>8} {'P>|t|':>8} {'Sig':>5}"
+        print_or_write(header, f)
+        print_or_write("-" * len(header), f)
+        
+        for var, row in summary.iterrows():
+            sig_marker = "***" if row['p_value'] < 0.001 else \
+                        "**" if row['p_value'] < 0.01 else \
+                        "*" if row['p_value'] < 0.05 else ""
+            line = f"{var:<20} {row['coefficient']:>10.4f} {row['std_err']:>10.4f} " \
+                  f"{row['t_value']:>8.3f} {row['p_value']:>8.4f} {sig_marker:>5}"
+            print_or_write(line, f)
+        
+        print_or_write("", f)
+        print_or_write("Significance: *** p<0.001, ** p<0.01, * p<0.05", f)
+        
+    finally:
+        if f:
+            f.close()
+
+
+def compute_univariate_glm_proportion(df: pd.DataFrame, outcome: str, predictors: List[str]) -> pd.DataFrame:
+    """
+    Compute univariate GLM (binomial family, logit link) for each predictor on a proportion outcome.
+    
+    Args:
+        df: DataFrame with results
+        outcome: Name of the outcome variable column (proportion in [0,1])
+        predictors: List of predictor variable names
+        
+    Returns:
+        DataFrame with coefficients, p-values, and odds ratios
+    """
+    results = []
+    
+    # Filter out rows with missing outcome
+    df_valid = df[df[outcome].notna()].copy()
+    if len(df_valid) == 0:
+        print(f"  No valid data for outcome '{outcome}'")
+        return pd.DataFrame()
+    
+    y = df_valid[outcome]
+    
+    for pred in predictors:
+        # Skip predictors with zero variance
+        if df_valid[pred].std() == 0:
+            print(f"  Skipping '{pred}': zero variance")
+            results.append({
+                'predictor': pred,
+                'coefficient': np.nan,
+                'odds_ratio': np.nan,
+                'std_err': np.nan,
+                'z_value': np.nan,
+                'p_value': np.nan,
+                'significant': False
+            })
+            continue
+        
+        try:
+            X = sm.add_constant(df_valid[pred])
+            model = GLM(y, X, family=Binomial(link=Logit())).fit()
+            
+            coef = model.params[pred]
+            pval = model.pvalues[pred]
+            odds_ratio = np.exp(coef)
+            
+            results.append({
+                'predictor': pred,
+                'coefficient': coef,
+                'odds_ratio': odds_ratio,
+                'std_err': model.bse[pred],
+                'z_value': model.tvalues[pred],
+                'p_value': pval,
+                'significant': pval < 0.05
+            })
+        except Exception as e:
+            results.append({
+                'predictor': pred,
+                'coefficient': np.nan,
+                'odds_ratio': np.nan,
+                'std_err': np.nan,
+                'z_value': np.nan,
+                'p_value': np.nan,
+                'significant': False
+            })
+    
+    return pd.DataFrame(results)
+
+
+def fit_full_glm_proportion(df: pd.DataFrame, outcome: str, predictors: List[str]) -> Tuple[Any, pd.DataFrame]:
+    """
+    Fit full GLM (binomial family, logit link) with all predictors on a proportion outcome.
+    
+    Args:
+        df: DataFrame with results
+        outcome: Name of the outcome variable column (proportion in [0,1])
+        predictors: List of predictor variable names
+        
+    Returns:
+        Tuple of (fitted model, summary DataFrame)
+    """
+    # Filter out rows with missing outcome
+    df_valid = df[df[outcome].notna()].copy()
+    if len(df_valid) == 0:
+        print(f"  No valid data for outcome '{outcome}'")
+        return None, None
+    
+    y = df_valid[outcome]
+    
+    # Filter out zero-variance predictors
+    valid_predictors = [p for p in predictors if df_valid[p].std() > 0]
+    
+    X = sm.add_constant(df_valid[valid_predictors])
+    
+    try:
+        model = GLM(y, X, family=Binomial(link=Logit())).fit()
+    except Exception as e:
+        print(f"ERROR: Could not fit GLM model - {e}")
+        return None, None
+    
+    summary = pd.DataFrame({
+        'coefficient': model.params,
+        'std_err': model.bse,
+        'z_value': model.tvalues,
+        'p_value': model.pvalues,
+        'odds_ratio': np.exp(model.params),
+        'significant': model.pvalues < 0.05
+    })
+    
+    return model, summary
+
+
+def print_glm_summary(outcome_name: str, model, summary: pd.DataFrame, output_file=None):
+    """
+    Print a formatted summary of a GLM model for proportions.
+    """
+    def print_or_write(text, file=None):
+        print(text)
+        if file:
+            file.write(text + '\n')
+    
+    f = open(output_file, 'a') if output_file else None
+    
+    try:
+        print_or_write(f"\n{'='*80}", f)
+        print_or_write(f"GLM (Binomial/Logit): {outcome_name}", f)
+        print_or_write("="*80, f)
+        
+        print_or_write(f"  Observations: {int(model.nobs)}", f)
+        print_or_write(f"  Deviance: {model.deviance:.4f}", f)
+        print_or_write(f"  Pearson chi2: {model.pearson_chi2:.4f}", f)
+        print_or_write(f"  Log-Likelihood: {model.llf:.2f}", f)
+        if hasattr(model, 'llnull') and model.llnull != 0:
+            pseudo_r2 = 1 - model.llf / model.llnull
+            print_or_write(f"  Pseudo R-squared: {pseudo_r2:.4f}", f)
+        print_or_write("", f)
+        
+        header = f"{'Variable':<20} {'Coef':>10} {'Std Err':>10} {'z':>8} {'P>|z|':>8} {'Odds Ratio':>12} {'Sig':>5}"
+        print_or_write(header, f)
+        print_or_write("-" * len(header), f)
+        
+        for var, row in summary.iterrows():
+            sig_marker = "***" if row['p_value'] < 0.001 else \
+                        "**" if row['p_value'] < 0.01 else \
+                        "*" if row['p_value'] < 0.05 else ""
+            line = f"{var:<20} {row['coefficient']:>10.4f} {row['std_err']:>10.4f} " \
+                  f"{row['z_value']:>8.3f} {row['p_value']:>8.4f} {row['odds_ratio']:>12.4f} {sig_marker:>5}"
+            print_or_write(line, f)
+        
+        print_or_write("", f)
+        print_or_write("Significance: *** p<0.001, ** p<0.01, * p<0.05", f)
+        print_or_write("Interpretation: Odds ratio > 1 means increasing predictor increases the proportion", f)
+        
+    finally:
+        if f:
+            f.close()
 
 
 def compute_univariate_effects(df: pd.DataFrame, predictors: List[str]) -> pd.DataFrame:
@@ -453,36 +844,82 @@ def main():
         print(df[['max_steps', 'beta_h', 'gamma_h', 'gamma_r', 'zeta', 'eta', 'xi', 'p_left']].describe())
         return
     
+    # Compute derived outcome variables
+    df = compute_derived_outcomes(df)
+    
     # Define predictors (exclude beta_r since it's fixed)
     predictors = ['max_steps', 'beta_h', 'gamma_h', 'gamma_r', 'zeta', 'eta', 'xi']
     
-    # Univariate analysis
-    print("=" * 80)
-    print("UNIVARIATE ANALYSIS")
-    print("=" * 80)
-    print()
-    univariate_results = compute_univariate_effects(df, predictors)
-    print(univariate_results.to_string(index=False))
-    print()
+    # ========================================================================
+    # ANALYSES: Outcome variables
+    # ========================================================================
     
-    # Full model
-    print("=" * 80)
-    print("FULL MODEL")
-    print("=" * 80)
-    print()
-    model, summary = fit_full_model(df, predictors, include_interactions=args.interactions)
-    if model is None:
-        print("Skipping full model summary due to fitting errors.")
-    else:
-        print_model_summary(model, summary, output_file=args.output)
+    # Define outcomes: (column, description, model_type)
+    # model_type: 'glm' for proportions in [0,1], 'ols' for continuous
+    outcomes = [
+        ('pi_r_ratio', 'pi_r(turn_left) / (pi_r(turn_left) + pi_r(turn_right))', 'glm'),
+        ('Q_r_ratio', '|Q_r(turn_left)| / (|Q_r(turn_left)| + |Q_r(turn_right)|)', 'glm'),
+        ('log2_V_r', 'log2(|V_r|) at initial state', 'ols'),
+        ('log2_X_h1', 'log2(X_h1) for h1 (first human)', 'ols'),
+        ('log2_X_h2', 'log2(X_h2) for h2 (second human)', 'ols'),
+        ('X_h_ratio', 'X_h1 / (X_h1 + X_h2)', 'glm'),
+        ('log2_X_h_diff', 'log2(X_h1) - log2(X_h2) = log2(X_h1/X_h2)', 'ols'),
+    ]
+    
+    for outcome_col, outcome_desc, model_type in outcomes:
+        if outcome_col not in df.columns or df[outcome_col].isna().all():
+            print(f"\n{'='*80}")
+            print(f"SKIPPING: {outcome_desc}")
+            print(f"  (Column '{outcome_col}' not available or all NaN)")
+            print("="*80)
+            continue
+        
+        # Check for variance
+        outcome_std = df[outcome_col].std()
+        if pd.isna(outcome_std) or outcome_std < 1e-10:
+            print(f"\n{'='*80}")
+            print(f"SKIPPING: {outcome_desc}")
+            print(f"  (No variance in outcome: std={outcome_std})")
+            print("="*80)
+            continue
+        
+        print(f"\n{'='*80}")
+        print(f"UNIVARIATE ANALYSIS: {outcome_desc} [{model_type.upper()}]")
+        print("="*80)
+        print()
+        
+        # Summary statistics for this outcome
+        print(f"  N valid: {df[outcome_col].notna().sum()}")
+        print(f"  Mean: {df[outcome_col].mean():.6f}")
+        print(f"  Std: {df[outcome_col].std():.6f}")
+        print(f"  Range: [{df[outcome_col].min():.6f}, {df[outcome_col].max():.6f}]")
+        print()
+        
+        if model_type == 'glm':
+            # GLM for proportion outcomes
+            univar_results = compute_univariate_glm_proportion(df, outcome_col, predictors)
+            if len(univar_results) > 0:
+                print(univar_results.to_string(index=False))
+            print()
+            
+            # Full model
+            model_fit, summary_fit = fit_full_glm_proportion(df, outcome_col, predictors)
+            if model_fit is not None:
+                print_glm_summary(outcome_desc, model_fit, summary_fit, output_file=args.output)
+        else:
+            # OLS for continuous outcomes
+            univar_results = compute_univariate_ols(df, outcome_col, predictors)
+            if len(univar_results) > 0:
+                print(univar_results.to_string(index=False))
+            print()
+            
+            # Full model
+            model_fit, summary_fit = fit_full_ols_model(df, outcome_col, predictors)
+            if model_fit is not None:
+                print_ols_summary(outcome_desc, model_fit, summary_fit, output_file=args.output)
     
     if args.output:
         print(f"\nDetailed results saved to: {args.output}")
-    
-    # Create visualizations
-    if HAVE_MATPLOTLIB:
-        print("\nCreating visualizations...")
-        create_visualizations(df, univariate_results, predictors, args.plots_dir)
     
     print("\nAnalysis complete!")
 

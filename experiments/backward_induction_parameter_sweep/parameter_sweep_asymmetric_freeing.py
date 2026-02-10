@@ -43,11 +43,13 @@ import os
 import random
 import sys
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
+from itertools import product
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
+from scipy.special import logsumexp
 from tqdm import tqdm
 
 # Setup paths
@@ -98,6 +100,17 @@ class ParameterSet:
     p_left: Optional[float] = None          # P(robot turns right first) = P(freeing left human first)
     n_states: Optional[int] = None          # Number of states in DAG
     computation_time: Optional[float] = None  # Time for backward induction (seconds)
+    
+    # Policy metrics at initial state
+    pi_r_turn_left: Optional[float] = None   # pi_r(turn left) at initial state
+    pi_r_turn_right: Optional[float] = None  # pi_r(turn right) at initial state  
+    Q_r_turn_left: Optional[float] = None    # Q_r(turn left) at initial state
+    Q_r_turn_right: Optional[float] = None   # Q_r(turn right) at initial state
+    V_r: Optional[float] = None              # V_r at initial state
+    X_h1: Optional[float] = None             # X_h for human 1 (first in human_agent_indices)
+    X_h2: Optional[float] = None             # X_h for human 2 (second in human_agent_indices)
+    h1_pos: Optional[str] = None             # Position of human 1 (for reference)
+    h2_pos: Optional[str] = None             # Position of human 2 (for reference)
 
 
 def sample_parameters(seed: Optional[int] = None, bounds: Optional[PriorBounds] = None) -> ParameterSet:
@@ -191,6 +204,115 @@ def compute_p_left_from_policy(env: MultiGridEnv, robot_policy: RobotPolicy) -> 
     return p_left
 
 
+def compute_initial_state_metrics(
+    env: MultiGridEnv,
+    robot_policy: RobotPolicy,
+    human_policy_prior: TabularHumanPolicyPrior,
+    Vr_dict: Dict[Any, float],
+    Vh_dict: Dict[Any, Dict[int, Dict[Any, float]]],
+    params: ParameterSet
+) -> Dict[str, Any]:
+    """
+    Compute Q_r, V_r, and X_h values for the initial state only.
+    
+    This extracts policy metrics without storing them for all states.
+    
+    Args:
+        env: Environment instance
+        robot_policy: Computed robot policy
+        human_policy_prior: Human policy prior
+        Vr_dict: V_r values for all states
+        Vh_dict: V_h^e values for all states (state -> agent_idx -> goal -> float)
+        params: Parameters (for zeta, gamma_r, beta_r, xi)
+        
+    Returns:
+        Dict with keys: pi_r_turn_left, pi_r_turn_right, Q_r_turn_left, Q_r_turn_right,
+                       V_r, X_h1, X_h2, h1_pos, h2_pos
+    """
+    # Get initial state
+    env.reset()
+    initial_state = env.get_state()
+    
+    # Get policy distribution and extract pi_r values
+    policy_dist = robot_policy(initial_state)
+    TURN_LEFT = 1
+    TURN_RIGHT = 2
+    
+    pi_r_turn_left = sum(prob for ap, prob in policy_dist.items() if ap[0] == TURN_LEFT)
+    pi_r_turn_right = sum(prob for ap, prob in policy_dist.items() if ap[0] == TURN_RIGHT)
+    
+    # Get V_r at initial state
+    V_r = Vr_dict.get(initial_state, None)
+    
+    # Compute Q_r values for turn_left and turn_right at initial state
+    # Q_r(s, a_r) = gamma_r * E_{a_h ~ human_policy, s' ~ T}[V_r(s')]
+    human_agent_indices = env.human_agent_indices
+    robot_agent_indices = env.robot_agent_indices
+    num_agents = len(env.agents)
+    num_actions = env.action_space.n
+    action_powers = num_actions ** np.arange(num_agents)
+    
+    # Get transitions for initial state
+    states, state_to_idx, successors, transitions = env.get_dag(return_probabilities=True, quiet=True)
+    initial_state_idx = state_to_idx[initial_state]
+    state_transitions = transitions[initial_state_idx]
+    
+    action_profile = np.zeros(num_agents, dtype=np.int64)
+    
+    Q_r_values = {}
+    for robot_action in [TURN_LEFT, TURN_RIGHT]:
+        action_profile[robot_agent_indices] = [robot_action]  # Single robot
+        v = 0.0
+        for human_action_profile_prob, human_action_profile in human_policy_prior.profile_distribution(initial_state):
+            action_profile[human_agent_indices] = human_action_profile
+            action_profile_index = int((action_profile @ action_powers).item())
+            _, next_state_probabilities, next_state_indices = state_transitions[action_profile_index]
+            # Look up V_r values for successor states
+            vr_successors = np.array([Vr_dict.get(states[i], 0) for i in next_state_indices])
+            v += human_action_profile_prob * np.dot(next_state_probabilities, vr_successors)
+        Q_r_values[robot_action] = params.gamma_r * v
+    
+    Q_r_turn_left = Q_r_values[TURN_LEFT]
+    Q_r_turn_right = Q_r_values[TURN_RIGHT]
+    
+    # Compute X_h values from Vh_dict
+    # X_h = sum over goals of (weight * V_h^e^zeta)
+    # Note: possible_goal_generator provides weights
+    X_h_values = {}
+    h_positions = {}
+    
+    Vh_initial = Vh_dict.get(initial_state, {})
+    
+    for agent_idx in human_agent_indices:
+        # Get human position from initial state for reference
+        agent = env.agents[agent_idx]
+        h_positions[agent_idx] = f"({agent.pos[0]},{agent.pos[1]})"
+        
+        # Compute X_h = sum over goals of (weight * V_h^e^zeta)
+        Vh_agent = Vh_initial.get(agent_idx, {})
+        xh = 0.0
+        for possible_goal, weight in env.possible_goal_generator.generate(initial_state, agent_idx):
+            vh = Vh_agent.get(possible_goal, 0.0)
+            xh += weight * (vh ** params.zeta)
+        X_h_values[agent_idx] = xh
+    
+    # Map to h1, h2 (first and second in human_agent_indices)
+    h1_idx = human_agent_indices[0]
+    h2_idx = human_agent_indices[1] if len(human_agent_indices) > 1 else None
+    
+    return {
+        'pi_r_turn_left': pi_r_turn_left,
+        'pi_r_turn_right': pi_r_turn_right,
+        'Q_r_turn_left': Q_r_turn_left,
+        'Q_r_turn_right': Q_r_turn_right,
+        'V_r': V_r,
+        'X_h1': X_h_values.get(h1_idx),
+        'X_h2': X_h_values.get(h2_idx) if h2_idx is not None else None,
+        'h1_pos': h_positions.get(h1_idx),
+        'h2_pos': h_positions.get(h2_idx) if h2_idx is not None else None,
+    }
+
+
 def run_single_simulation(params: ParameterSet, 
                          env: MultiGridEnv,
                          parallel: bool = False,
@@ -246,7 +368,7 @@ def run_single_simulation(params: ParameterSet,
         # Phase 2: Compute robot policy
         if not quiet:
             print("Phase 2: Computing robot policy...")
-        robot_policy = compute_robot_policy(
+        robot_policy, Vr_dict, Vh_dict = compute_robot_policy(
             world_model=env,
             human_agent_indices=human_agent_indices,
             robot_agent_indices=robot_agent_indices,
@@ -259,7 +381,8 @@ def run_single_simulation(params: ParameterSet,
             xi=params.xi,
             eta=params.eta,
             parallel=parallel,
-            quiet=quiet
+            quiet=quiet,
+            return_values=True
         )
         
         # Get number of states
@@ -269,11 +392,32 @@ def run_single_simulation(params: ParameterSet,
         # P(left) = P(turn right) since south-facing robot turns right to go west
         params.p_left = compute_p_left_from_policy(env, robot_policy)
         
+        # Compute detailed metrics for initial state only
+        metrics = compute_initial_state_metrics(
+            env, robot_policy, human_policy_prior, Vr_dict, Vh_dict, params
+        )
+        params.pi_r_turn_left = metrics['pi_r_turn_left']
+        params.pi_r_turn_right = metrics['pi_r_turn_right']
+        params.Q_r_turn_left = metrics['Q_r_turn_left']
+        params.Q_r_turn_right = metrics['Q_r_turn_right']
+        params.V_r = metrics['V_r']
+        params.X_h1 = metrics['X_h1']
+        params.X_h2 = metrics['X_h2']
+        params.h1_pos = metrics['h1_pos']
+        params.h2_pos = metrics['h2_pos']
+        
+        # Free the large dicts to save memory (only needed initial state metrics)
+        del Vr_dict, Vh_dict
+        
         params.computation_time = time.time() - start_time
         
         if not quiet:
             print(f"Computed policies for {params.n_states} states")
             print(f"Results: P(left) = {params.p_left:.4f}")
+            print(f"  pi_r(turn_left)={params.pi_r_turn_left:.4f}, pi_r(turn_right)={params.pi_r_turn_right:.4f}")
+            print(f"  Q_r(turn_left)={params.Q_r_turn_left:.6f}, Q_r(turn_right)={params.Q_r_turn_right:.6f}")
+            print(f"  V_r={params.V_r:.6f}")
+            print(f"  X_h1={params.X_h1:.4f} at {params.h1_pos}, X_h2={params.X_h2:.4f} at {params.h2_pos}")
             print(f"Computation time: {params.computation_time:.1f}s")
         
         return params
@@ -334,6 +478,21 @@ def load_existing_results(output_file: str) -> Dict[int, ParameterSet]:
     if not output_path.exists():
         return {}
     
+    def parse_optional_float(val):
+        if val is None or val == '' or val == 'None':
+            return None
+        return float(val)
+    
+    def parse_optional_int(val):
+        if val is None or val == '' or val == 'None':
+            return None
+        return int(val)
+    
+    def parse_optional_str(val):
+        if val is None or val == '' or val == 'None':
+            return None
+        return str(val)
+    
     existing = {}
     try:
         with open(output_file, 'r', newline='') as f:
@@ -349,9 +508,19 @@ def load_existing_results(output_file: str) -> Dict[int, ParameterSet]:
                     zeta=float(row['zeta']),
                     eta=float(row['eta']),
                     xi=float(row['xi']),
-                    p_left=float(row['p_left']) if row['p_left'] and row['p_left'] != 'None' else None,
-                    n_states=int(row['n_states']) if row['n_states'] and row['n_states'] != 'None' else None,
-                    computation_time=float(row['computation_time']) if row['computation_time'] and row['computation_time'] != 'None' else None
+                    seed=parse_optional_int(row.get('seed')) or 0,
+                    p_left=parse_optional_float(row.get('p_left')),
+                    n_states=parse_optional_int(row.get('n_states')),
+                    computation_time=parse_optional_float(row.get('computation_time')),
+                    pi_r_turn_left=parse_optional_float(row.get('pi_r_turn_left')),
+                    pi_r_turn_right=parse_optional_float(row.get('pi_r_turn_right')),
+                    Q_r_turn_left=parse_optional_float(row.get('Q_r_turn_left')),
+                    Q_r_turn_right=parse_optional_float(row.get('Q_r_turn_right')),
+                    V_r=parse_optional_float(row.get('V_r')),
+                    X_h1=parse_optional_float(row.get('X_h1')),
+                    X_h2=parse_optional_float(row.get('X_h2')),
+                    h1_pos=parse_optional_str(row.get('h1_pos')),
+                    h2_pos=parse_optional_str(row.get('h2_pos')),
                 )
                 existing[idx] = params
         print(f"Loaded {len(existing)} existing results from {output_file}")
