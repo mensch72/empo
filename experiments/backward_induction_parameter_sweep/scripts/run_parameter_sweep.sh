@@ -73,6 +73,7 @@ set -e  # Exit on error
 # module load anaconda3
 module load anaconda/2025
 source activate empo
+export PATH="$CONDA_PREFIX/bin:$PATH"
 #==============================================================================
 
 # Default configuration
@@ -188,7 +189,7 @@ done
 OUTPUT_DIR="outputs/parameter_sweep"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 if [ -z "$OUTPUT_FILE" ]; then
-    OUTPUT_FILE="${OUTPUT_DIR}/results_${TIMESTAMP}_n${N_SAMPLES}.csv"
+    OUTPUT_FILE="${OUTPUT_DIR}/results.csv"
 fi
 
 # Print job info
@@ -233,7 +234,6 @@ PYTHON_ARGS=(
     "--output" "$OUTPUT_FILE"
     "--parallel"
     "--seed" "$SEED"
-    "--quiet"
     "--max_steps_min" "$MAX_STEPS_MIN"
     "--max_steps_max" "$MAX_STEPS_MAX"
     "--beta_h_min" "$BETA_H_MIN"
@@ -260,9 +260,10 @@ if [ "$QUICK_MODE" = "true" ]; then
     PYTHON_ARGS+=("--quick")
 fi
 
-# Run the parameter sweep
+# Run the parameter sweep (use -u for unbuffered output)
 echo "Starting parameter sweep..."
-python "${PYTHON_ARGS[@]}"
+echo "Command: python -u ${PYTHON_ARGS[*]}"
+python -u "${PYTHON_ARGS[@]}"
 
 EXIT_CODE=$?
 
@@ -276,7 +277,7 @@ if [ $EXIT_CODE -eq 0 ]; then
     
     # Run analysis
     echo "Running GLM analysis..."
-    python experiments/backward_induction_parameter_sweep/analyze_parameter_sweep.py \
+    python -u experiments/backward_induction_parameter_sweep/analyze_parameter_sweep.py \
         "$OUTPUT_FILE" \
         --interactions \
         --output "${OUTPUT_DIR}/analysis_${TIMESTAMP}.txt" \

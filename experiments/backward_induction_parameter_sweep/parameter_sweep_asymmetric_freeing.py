@@ -315,6 +315,68 @@ def save_results_to_csv(results: List[ParameterSet], output_file: str):
         print(f"Mean P(left): {mean_p_left:.4f}")
 
 
+def load_existing_results(output_file: str) -> Dict[int, ParameterSet]:
+    """
+    Load existing results from CSV file for resume capability.
+    
+    Args:
+        output_file: Path to output CSV file
+        
+    Returns:
+        Dictionary mapping sample index to ParameterSet
+    """
+    output_path = Path(output_file)
+    if not output_path.exists():
+        return {}
+    
+    existing = {}
+    try:
+        with open(output_file, 'r', newline='') as f:
+            reader = csv.DictReader(f)
+            for idx, row in enumerate(reader):
+                # Convert row to ParameterSet
+                params = ParameterSet(
+                    max_steps=int(row['max_steps']),
+                    beta_h=float(row['beta_h']),
+                    beta_r=float(row['beta_r']),
+                    gamma_h=float(row['gamma_h']),
+                    gamma_r=float(row['gamma_r']),
+                    zeta=float(row['zeta']),
+                    eta=float(row['eta']),
+                    xi=float(row['xi']),
+                    p_left=float(row['p_left']) if row['p_left'] and row['p_left'] != 'None' else None,
+                    n_states=int(row['n_states']) if row['n_states'] and row['n_states'] != 'None' else None,
+                    computation_time=float(row['computation_time']) if row['computation_time'] and row['computation_time'] != 'None' else None
+                )
+                existing[idx] = params
+        print(f"Loaded {len(existing)} existing results from {output_file}")
+    except Exception as e:
+        print(f"Warning: Could not load existing results: {e}")
+        existing = {}
+    
+    return existing
+
+
+def append_result_to_csv(result: ParameterSet, output_file: str, write_header: bool = False):
+    """
+    Append a single result to CSV file.
+    
+    Args:
+        result: ParameterSet to append
+        output_file: Path to output CSV file
+        write_header: Whether to write header row (for new files)
+    """
+    output_path = Path(output_file)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    mode = 'a' if output_path.exists() and not write_header else 'w'
+    with open(output_file, mode, newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=list(asdict(result).keys()))
+        if write_header or mode == 'w':
+            writer.writeheader()
+        writer.writerow(asdict(result))
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Parameter sweep for asymmetric_freeing_simple.yaml',
@@ -428,6 +490,11 @@ def main():
     np.random.seed(args.seed)
     random.seed(args.seed)
     
+    # Load existing results for resume capability
+    existing_results = load_existing_results(args.output)
+    if existing_results:
+        print(f"Resuming from {len(existing_results)} completed samples")
+    
     # Sample all parameters upfront
     all_params = []
     for i in range(args.n_samples):
@@ -444,15 +511,37 @@ def main():
     sorted_max_steps = sorted(params_by_max_steps.keys())
     
     print(f"Grouped {args.n_samples} samples by max_steps: {dict((k, len(v)) for k, v in params_by_max_steps.items())}")
+    sys.stdout.flush()
+    
+    # Check how many are already done
+    remaining_count = sum(1 for i, _ in all_params if i not in existing_results)
+    if remaining_count == 0:
+        print("All samples already completed!")
+        return
+    print(f"Remaining samples to compute: {remaining_count}")
     print()
+    sys.stdout.flush()
+    
+    # Determine if we need to write header (new file or empty)
+    need_header = not Path(args.output).exists() or Path(args.output).stat().st_size == 0
     
     # Run simulations, grouped by max_steps to reuse DAG
-    results: List[Tuple[int, ParameterSet]] = []
+    completed_count = len(existing_results)
     
-    for max_steps in tqdm(sorted_max_steps, desc="Processing max_steps groups"):
+    for max_steps in tqdm(sorted_max_steps, desc="Processing max_steps groups", leave=False, file=sys.stdout):
         group = params_by_max_steps[max_steps]
         
+        # Skip this group if all samples are already done
+        remaining_in_group = [(i, p) for i, p in group if i not in existing_results]
+        if not remaining_in_group:
+            continue
+        
+        print(f"\n[DEBUG] Processing max_steps={max_steps} with {len(remaining_in_group)} samples")
+        sys.stdout.flush()
+        
         # Create environment once for this max_steps value
+        print(f"[DEBUG] Creating environment...")
+        sys.stdout.flush()
         env = MultiGridEnv(
             config_file=args.world,
             partial_obs=False,
@@ -460,32 +549,47 @@ def main():
         )
         env.max_steps = max_steps
         env.reset()
+        print(f"[DEBUG] Environment created, building DAG...")
+        sys.stdout.flush()
         
         # Build DAG once (will be cached for all runs in this group)
         if not args.quiet:
-            print(f"\nBuilding DAG for max_steps={max_steps} ({len(group)} samples)...")
+            print(f"Building DAG for max_steps={max_steps} ({len(remaining_in_group)} samples)...")
+            sys.stdout.flush()
         env.get_dag(return_probabilities=True, quiet=args.quiet)
+        print(f"[DEBUG] DAG built, starting simulations...")
+        sys.stdout.flush()
         
         # Run all simulations in this group
-        for original_idx, params in group:
+        for original_idx, params in remaining_in_group:
+            print(f"[DEBUG] Starting simulation {original_idx + 1}...")
+            sys.stdout.flush()
             result = run_single_simulation(
                 params=params,
                 env=env,
                 parallel=args.parallel,
                 quiet=args.quiet
             )
-            results.append((original_idx, result))
+            
+            # Append result to CSV immediately
+            append_result_to_csv(result, args.output, write_header=need_header)
+            need_header = False  # Only write header once
+            completed_count += 1
+            
+            print(f"  Sample {original_idx + 1}/{args.n_samples} saved (total completed: {completed_count})")
+            sys.stdout.flush()
         
         # Free DAG memory before processing next max_steps group
+        print(f"[DEBUG] Freeing DAG memory...")
+        sys.stdout.flush()
         del env
         gc.collect()
     
-    # Sort results back to original order
-    results.sort(key=lambda x: x[0])
-    final_results = [r for _, r in results]
-    
-    # Save results
-    save_results_to_csv(final_results, args.output)
+    # Print summary
+    print(f"\nResults appended to: {args.output}")
+    print(f"Completed this run: {completed_count - len(existing_results)}")
+    print(f"Total in file: {completed_count}")
+    sys.stdout.flush()
     
     print("\n" + "="*80)
     print("Parameter sweep complete!")
