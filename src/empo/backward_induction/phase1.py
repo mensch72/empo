@@ -36,7 +36,7 @@ from typing import Optional, Callable, List, Tuple, Dict, Any, Union, overload, 
 import cloudpickle
 from tqdm import tqdm
 
-from empo.util.memory_monitor import MemoryMonitor
+from empo.util.memory_monitor import MemoryMonitor, deep_sizeof, get_process_memory_mb
 from empo.backward_induction.dag_slicing import (
     DiskBasedDAG, 
     estimate_dag_memory,
@@ -273,6 +273,7 @@ def _hpp_compute_sequential(
     level_fct: Optional[Callable[[State], int]] = None,
     archive_dir: Optional[str] = None,
     return_Vh: bool = True,
+    quiet: bool = False,
 ) -> None:
     """Sequential backward induction algorithm.
     
@@ -283,6 +284,9 @@ def _hpp_compute_sequential(
     from disk timestep-by-timestep instead of keeping all in memory.
     """
     total_states = len(states)
+    
+    # Memory tracking interval
+    memory_report_interval = max(1, total_states // 10)  # Report ~10 times during computation
     
     # Determine if using indexed goals and initialize templates
     use_indexed = False # hasattr(possible_goal_generator, 'indexed') and possible_goal_generator.indexed
@@ -467,6 +471,15 @@ def _hpp_compute_sequential(
         # Update progress bar
         if progress_callback is not None:
             progress_callback(states_processed, total_states)
+        
+        # Periodic memory reporting
+        if not quiet and states_processed > 0 and states_processed % memory_report_interval == 0:
+            print(f"\n[Memory @ {states_processed}/{total_states} states] RSS: {get_process_memory_mb():.1f} MB")
+            vh_mb = deep_sizeof(Vh_values) / (1024**2)
+            pol_mb = deep_sizeof(system2_policies) / (1024**2)
+            cache_mb = deep_sizeof(slice_cache) / (1024**2) if slice_cache is not None else 0.0
+            print(f"  Vh_values: {vh_mb:.1f} MB, policies: {pol_mb:.1f} MB, cache: {cache_mb:.1f} MB")
+        
         if DEBUG:
             print(f"Processing state {state_index}")
         
@@ -1001,6 +1014,17 @@ def compute_human_policy_prior(
             print(f"  Attainment cache: DISABLED (use_attainment_cache=False)")
         print(f"  Python baseline: {mem_stats['python_baseline_mb']:.0f} MB")
         print(f"  TOTAL (recommended allocation): {mem_stats['total_mb']:.0f} MB")
+        
+        # Measure ACTUAL memory of DAG structures
+        print(f"\nActual memory usage (after DAG build):")
+        print(f"  Process RSS: {get_process_memory_mb():.1f} MB")
+        states_actual = deep_sizeof(states) / (1024**2)
+        print(f"  states: {states_actual:.1f} MB (estimate: {mem_stats['states_mb']:.1f} MB)")
+        transitions_actual = deep_sizeof(transitions) / (1024**2)
+        print(f"  transitions: {transitions_actual:.1f} MB (estimate: {mem_stats['transitions_mb']:.1f} MB)")
+        successors_actual = deep_sizeof(successors) / (1024**2)
+        print(f"  successors: {successors_actual:.1f} MB (not in estimate)")
+        print(f"  Total DAG: {states_actual + transitions_actual + successors_actual:.1f} MB")
     
     # Handle disk-based slicing if requested
     disk_dag: Optional[DiskBasedDAG] = None
@@ -1083,6 +1107,12 @@ def compute_human_policy_prior(
         # VhValues: List[List[Dict[goal, float]]] indexed by [state][agent][goal]
         Vh_values = [[{} for _ in range(num_agents)] for _ in range(len(states))]
     
+    # Measure Vh_values initial structure
+    if not quiet:
+        vh_initial = deep_sizeof(Vh_values) / (1024**2)
+        print(f"\nActual memory (after Vh_values init): Process RSS = {get_process_memory_mb():.1f} MB")
+        print(f"  Vh_values (empty): {vh_initial:.1f} MB")
+    
     # ============================================================================
     # WARN if parallel mode was requested
     # ============================================================================
@@ -1114,6 +1144,12 @@ def compute_human_policy_prior(
         else:
             # Create new sliced cache
             sliced_cache = SlicedAttainmentCache(num_action_profiles)
+    
+    # Measure memory after sliced_cache is initialized
+    if not quiet:
+        cache_initial = deep_sizeof(sliced_cache) / (1024**2) if sliced_cache else 0.0
+        print(f"\nActual memory (after sliced_cache init): Process RSS = {get_process_memory_mb():.1f} MB")
+        print(f"  sliced_cache (empty): {cache_initial:.1f} MB")
     
     # ============================================================================
     # PARALLEL CODE TEMPORARILY DISABLED
@@ -1440,7 +1476,8 @@ def compute_human_policy_prior(
                              believed_others_policy, robot_agent_indices, robot_action_profiles,
                              beta_h, gamma_h,
                              progress_callback, memory_monitor,
-                             sliced_cache, disk_dag, level_fct, archive_dir, return_Vh)
+                             sliced_cache, disk_dag, level_fct, archive_dir, return_Vh,
+                             quiet=quiet)
         except KeyboardInterrupt:
             if not quiet:
                 print("\n[Phase1] Computation interrupted (KeyboardInterrupt).")
@@ -1464,6 +1501,21 @@ def compute_human_policy_prior(
     
     # Clean up shared attainment cache memory (parallel mode only)
     cleanup_shared_attainment_cache()
+    
+    # Print actual memory after backward induction
+    if not quiet:
+        print(f"\nActual memory usage (after Phase 1 backward induction):")
+        print(f"  Process RSS: {get_process_memory_mb():.1f} MB")
+        vh_actual = deep_sizeof(Vh_values) / (1024**2)
+        policies_actual = deep_sizeof(system2_policies) / (1024**2)
+        cache_actual = deep_sizeof(sliced_cache) / (1024**2) if sliced_cache is not None else 0.0
+        print(f"  Vh_values: {vh_actual:.1f} MB")
+        print(f"  system2_policies: {policies_actual:.1f} MB")
+        if sliced_cache is not None:
+            print(f"  sliced_cache: {cache_actual:.1f} MB")
+        else:
+            print(f"  sliced_cache: DISABLED")
+        print(f"  Total measured Phase 1 structures: {vh_actual + policies_actual + cache_actual:.1f} MB")
     
     if return_Vh:
         # Convert V_values from list-indexed to state-indexed dict

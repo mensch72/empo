@@ -541,13 +541,18 @@ def main():
         sys.stdout.flush()
         env.get_dag(return_probabilities=True, quiet=args.quiet)
         
+        cache_status = "disabled" if args.no_attainment_cache else "enabled"
+        print(f"  Attainment cache: {cache_status}")
+        sys.stdout.flush()
+        
         # Run all simulations in this group
         for sample_idx, params in group:
             result = run_single_simulation(
                 params=params,
                 env=env,
                 parallel=False,
-                quiet=args.quiet
+                quiet=args.quiet,
+                use_attainment_cache=not args.no_attainment_cache
             )
             
             # Append result to CSV immediately (with file locking)
