@@ -8,3 +8,4 @@ pre-commit>=3.3.0
 ipython>=8.14.0
 jupyter>=1.0.0
 psutil>=5.9.0
+tqdm>=4.65.0

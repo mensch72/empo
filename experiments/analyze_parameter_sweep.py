@@ -89,25 +89,37 @@ def compute_univariate_effects(df: pd.DataFrame, predictors: List[str]) -> pd.Da
     results = []
     
     for pred in predictors:
-        # Fit simple logistic regression
-        formula = f"left_freed_first ~ {pred}"
-        model = logit(formula, data=df).fit(disp=0)
-        
-        # Extract coefficient and stats
-        coef = model.params[pred]
-        pval = model.pvalues[pred]
-        odds_ratio = np.exp(coef)
-        ci_low, ci_high = np.exp(model.conf_int().loc[pred])
-        
-        results.append({
-            'predictor': pred,
-            'coefficient': coef,
-            'odds_ratio': odds_ratio,
-            'ci_low': ci_low,
-            'ci_high': ci_high,
-            'p_value': pval,
-            'significant': pval < 0.05
-        })
+        try:
+            # Fit simple logistic regression
+            formula = f"left_freed_first ~ {pred}"
+            model = logit(formula, data=df).fit(disp=0)
+            
+            # Extract coefficient and stats
+            coef = model.params[pred]
+            pval = model.pvalues[pred]
+            odds_ratio = np.exp(coef)
+            ci_low, ci_high = np.exp(model.conf_int().loc[pred])
+            
+            results.append({
+                'predictor': pred,
+                'coefficient': coef,
+                'odds_ratio': odds_ratio,
+                'ci_low': ci_low,
+                'ci_high': ci_high,
+                'p_value': pval,
+                'significant': pval < 0.05
+            })
+        except (np.linalg.LinAlgError, ValueError) as e:
+            # Handle singular matrix or other fitting errors
+            results.append({
+                'predictor': pred,
+                'coefficient': np.nan,
+                'odds_ratio': np.nan,
+                'ci_low': np.nan,
+                'ci_high': np.nan,
+                'p_value': np.nan,
+                'significant': False
+            })
     
     return pd.DataFrame(results)
 
@@ -140,7 +152,12 @@ def fit_full_model(df: pd.DataFrame,
         formula = "left_freed_first ~ " + " + ".join(predictors)
     
     print(f"Fitting model: {formula}")
-    model = logit(formula, data=df).fit(disp=0)
+    try:
+        model = logit(formula, data=df).fit(disp=0)
+    except (np.linalg.LinAlgError, ValueError) as e:
+        print(f"ERROR: Could not fit model - {e}")
+        print("This usually happens when there is no variance in the outcome or predictors.")
+        return None, None
     
     # Extract results
     summary = pd.DataFrame({
@@ -362,6 +379,20 @@ def main():
         print("Consider running parameter sweep with more samples.")
         print()
     
+    # Check for outcome variance
+    n_left = (df['left_freed_first'] == 1).sum()
+    n_right = (df['left_freed_first'] == 0).sum()
+    if n_left == 0 or n_right == 0:
+        print("ERROR: No variance in outcome variable (all samples have same outcome).")
+        print(f"  Left freed first: {n_left}")
+        print(f"  Right freed first: {n_right}")
+        print("\nLogistic regression requires variance in the outcome.")
+        print("Please run with more samples to get variance in outcomes.")
+        print()
+        print("Parameter summary statistics:")
+        print(df[['max_steps', 'beta_h', 'gamma_h', 'gamma_r', 'zeta', 'eta', 'xi']].describe())
+        return
+    
     # Define predictors (exclude beta_r since it's fixed)
     predictors = ['max_steps', 'beta_h', 'gamma_h', 'gamma_r', 'zeta', 'eta', 'xi']
     
@@ -380,7 +411,10 @@ def main():
     print("=" * 80)
     print()
     model, summary = fit_full_model(df, predictors, include_interactions=args.interactions)
-    print_model_summary(model, summary, output_file=args.output)
+    if model is None:
+        print("Skipping full model summary due to fitting errors.")
+    else:
+        print_model_summary(model, summary, output_file=args.output)
     
     if args.output:
         print(f"\nDetailed results saved to: {args.output}")

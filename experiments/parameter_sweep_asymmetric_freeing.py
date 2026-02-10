@@ -59,6 +59,26 @@ from empo.robot_policy import RobotPolicy
 
 
 @dataclass
+class PriorBounds:
+    """Bounds for prior distributions of parameters."""
+    max_steps_min: int = 8
+    max_steps_max: int = 14
+    beta_h_min: float = 5.0
+    beta_h_max: float = 100.0
+    gamma_h_min: float = 0.8
+    gamma_h_max: float = 1.0
+    gamma_r_min: float = 0.8
+    gamma_r_max: float = 1.0
+    zeta_min: float = 1.0
+    zeta_max: float = 3.0
+    eta_min: float = 1.0
+    eta_max: float = 2.0
+    xi_min: float = 1.0
+    xi_max: float = 2.0
+    beta_r: float = 50.0  # Fixed value
+
+
+@dataclass
 class ParameterSet:
     """A single set of parameters for one Monte Carlo run."""
     max_steps: int
@@ -78,22 +98,23 @@ class ParameterSet:
     computation_time: Optional[float] = None  # Time for backward induction (seconds)
 
 
-def sample_parameters(seed: Optional[int] = None) -> ParameterSet:
+def sample_parameters(seed: Optional[int] = None, bounds: Optional[PriorBounds] = None) -> ParameterSet:
     """
     Sample a random parameter set from suitable priors.
     
     Priors:
-    - max_steps: uniform discrete from 8 to 14
-    - beta_h: log-uniform from 5 to 100
-    - gamma_h: uniform from 0.8 to 1.0
-    - gamma_r: uniform from 0.8 to 1.0
-    - zeta: uniform from 1 to 3
-    - eta: uniform from 1 to 2
-    - xi: uniform from 1 to 2
-    - beta_r: fixed at 50.0 (robot policy concentration)
+    - max_steps: uniform discrete from max_steps_min to max_steps_max
+    - beta_h: log-uniform from beta_h_min to beta_h_max
+    - gamma_h: uniform from gamma_h_min to gamma_h_max
+    - gamma_r: uniform from gamma_r_min to gamma_r_max
+    - zeta: uniform from zeta_min to zeta_max
+    - eta: uniform from eta_min to eta_max
+    - xi: uniform from xi_min to xi_max
+    - beta_r: fixed value
     
     Args:
         seed: Random seed for reproducibility
+        bounds: Prior bounds for parameters (uses defaults if None)
         
     Returns:
         ParameterSet with sampled values
@@ -102,15 +123,18 @@ def sample_parameters(seed: Optional[int] = None) -> ParameterSet:
         np.random.seed(seed)
         random.seed(seed)
     
+    if bounds is None:
+        bounds = PriorBounds()
+    
     # Sample parameters
-    max_steps = np.random.randint(8, 15)  # 8 to 14 inclusive
-    beta_h = np.exp(np.random.uniform(np.log(5), np.log(100)))  # log-uniform 5 to 100
-    gamma_h = np.random.uniform(0.8, 1.0)
-    gamma_r = np.random.uniform(0.8, 1.0)
-    zeta = np.random.uniform(1.0, 3.0)
-    eta = np.random.uniform(1.0, 2.0)
-    xi = np.random.uniform(1.0, 2.0)
-    beta_r = 50.0  # Fixed
+    max_steps = np.random.randint(bounds.max_steps_min, bounds.max_steps_max + 1)  # inclusive
+    beta_h = np.exp(np.random.uniform(np.log(bounds.beta_h_min), np.log(bounds.beta_h_max)))  # log-uniform
+    gamma_h = np.random.uniform(bounds.gamma_h_min, bounds.gamma_h_max)
+    gamma_r = np.random.uniform(bounds.gamma_r_min, bounds.gamma_r_max)
+    zeta = np.random.uniform(bounds.zeta_min, bounds.zeta_max)
+    eta = np.random.uniform(bounds.eta_min, bounds.eta_max)
+    xi = np.random.uniform(bounds.xi_min, bounds.xi_max)
+    beta_r = bounds.beta_r  # Fixed
     
     return ParameterSet(
         max_steps=max_steps,
@@ -436,7 +460,68 @@ def main():
     parser.add_argument('--quiet', action='store_true',
                        help='Suppress detailed output')
     
+    # Quick mode for fast testing
+    parser.add_argument('--quick', action='store_true',
+                       help='Quick test mode: sets max_steps=8 and n_samples=3')
+    
+    # Prior bounds for parameter sampling
+    parser.add_argument('--max_steps_min', type=int, default=8,
+                       help='Minimum max_steps (default: 8)')
+    parser.add_argument('--max_steps_max', type=int, default=14,
+                       help='Maximum max_steps (default: 14)')
+    parser.add_argument('--beta_h_min', type=float, default=5.0,
+                       help='Minimum beta_h, log-uniform (default: 5.0)')
+    parser.add_argument('--beta_h_max', type=float, default=100.0,
+                       help='Maximum beta_h, log-uniform (default: 100.0)')
+    parser.add_argument('--gamma_h_min', type=float, default=0.8,
+                       help='Minimum gamma_h (default: 0.8)')
+    parser.add_argument('--gamma_h_max', type=float, default=1.0,
+                       help='Maximum gamma_h (default: 1.0)')
+    parser.add_argument('--gamma_r_min', type=float, default=0.8,
+                       help='Minimum gamma_r (default: 0.8)')
+    parser.add_argument('--gamma_r_max', type=float, default=1.0,
+                       help='Maximum gamma_r (default: 1.0)')
+    parser.add_argument('--zeta_min', type=float, default=1.0,
+                       help='Minimum zeta (default: 1.0)')
+    parser.add_argument('--zeta_max', type=float, default=3.0,
+                       help='Maximum zeta (default: 3.0)')
+    parser.add_argument('--eta_min', type=float, default=1.0,
+                       help='Minimum eta (default: 1.0)')
+    parser.add_argument('--eta_max', type=float, default=2.0,
+                       help='Maximum eta (default: 2.0)')
+    parser.add_argument('--xi_min', type=float, default=1.0,
+                       help='Minimum xi (default: 1.0)')
+    parser.add_argument('--xi_max', type=float, default=2.0,
+                       help='Maximum xi (default: 2.0)')
+    parser.add_argument('--beta_r', type=float, default=50.0,
+                       help='Fixed beta_r value (default: 50.0)')
+    
     args = parser.parse_args()
+    
+    # Apply quick mode overrides
+    if args.quick:
+        args.max_steps_min = 8
+        args.max_steps_max = 8
+        args.n_samples = 3
+    
+    # Build prior bounds from arguments
+    bounds = PriorBounds(
+        max_steps_min=args.max_steps_min,
+        max_steps_max=args.max_steps_max,
+        beta_h_min=args.beta_h_min,
+        beta_h_max=args.beta_h_max,
+        gamma_h_min=args.gamma_h_min,
+        gamma_h_max=args.gamma_h_max,
+        gamma_r_min=args.gamma_r_min,
+        gamma_r_max=args.gamma_r_max,
+        zeta_min=args.zeta_min,
+        zeta_max=args.zeta_max,
+        eta_min=args.eta_min,
+        eta_max=args.eta_max,
+        xi_min=args.xi_min,
+        xi_max=args.xi_max,
+        beta_r=args.beta_r
+    )
     
     print("="*80)
     print("Parameter Sweep: Asymmetric Freeing Simple")
@@ -450,6 +535,17 @@ def main():
     if args.parallel and args.num_workers:
         print(f"  Workers: {args.num_workers}")
     print(f"  Random seed: {args.seed}")
+    if args.quick:
+        print(f"  Quick mode: ENABLED")
+    print(f"Prior bounds:")
+    print(f"  max_steps: [{bounds.max_steps_min}, {bounds.max_steps_max}]")
+    print(f"  beta_h: [{bounds.beta_h_min}, {bounds.beta_h_max}] (log-uniform)")
+    print(f"  gamma_h: [{bounds.gamma_h_min}, {bounds.gamma_h_max}]")
+    print(f"  gamma_r: [{bounds.gamma_r_min}, {bounds.gamma_r_max}]")
+    print(f"  zeta: [{bounds.zeta_min}, {bounds.zeta_max}]")
+    print(f"  eta: [{bounds.eta_min}, {bounds.eta_max}]")
+    print(f"  xi: [{bounds.xi_min}, {bounds.xi_max}]")
+    print(f"  beta_r: {bounds.beta_r} (fixed)")
     print()
     
     # Set random seed
@@ -460,7 +556,7 @@ def main():
     results = []
     for i in tqdm(range(args.n_samples), desc="Running simulations"):
         # Sample parameters with deterministic seed for reproducibility
-        params = sample_parameters(seed=args.seed + i)
+        params = sample_parameters(seed=args.seed + i, bounds=bounds)
         
         # Run simulation
         result = run_single_simulation(
