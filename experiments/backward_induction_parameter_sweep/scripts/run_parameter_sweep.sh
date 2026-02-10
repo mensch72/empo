@@ -41,6 +41,7 @@
 #   --eta_max F             Maximum eta (default: 2.0)
 #   --xi_min F              Minimum xi (default: 1.0)
 #   --xi_max F              Maximum xi (default: 2.0)
+#   --no-attainment-cache   Disable attainment cache to save ~2GB memory
 #
 # Examples:
 #   sbatch experiments/backward_induction_parameter_sweep/scripts/run_parameter_sweep.sh
@@ -96,6 +97,7 @@ ETA_MIN=1.0
 ETA_MAX=2.0
 XI_MIN=1.0
 XI_MAX=2.0
+NO_ATTAINMENT_CACHE=false
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
@@ -168,6 +170,10 @@ while [[ $# -gt 0 ]]; do
             XI_MAX="$2"
             shift 2
             ;;
+        --no-attainment-cache)
+            NO_ATTAINMENT_CACHE=true
+            shift
+            ;;
         -h|--help)
             head -n 55 "$0" | tail -n +2
             exit 0
@@ -194,6 +200,7 @@ echo "Samples per task: $N_SAMPLES"
 echo "Total tasks: ${SLURM_NTASKS:-1}"
 echo "Output file: $OUTPUT_FILE"
 echo "Quick mode: $QUICK_MODE"
+echo "Attainment cache: $([ "$NO_ATTAINMENT_CACHE" = "true" ] && echo 'disabled' || echo 'enabled')"
 echo ""
 echo "Prior Bounds:"
 echo "  max_steps: [$MAX_STEPS_MIN, $MAX_STEPS_MAX]"
@@ -233,6 +240,11 @@ PYTHON_ARGS=(
 # Add quick mode flag
 if [ "$QUICK_MODE" = "true" ]; then
     PYTHON_ARGS+=("--quick")
+fi
+
+# Add no-attainment-cache flag
+if [ "$NO_ATTAINMENT_CACHE" = "true" ]; then
+    PYTHON_ARGS+=("--no-attainment-cache")
 fi
 
 # Run the parameter sweep
