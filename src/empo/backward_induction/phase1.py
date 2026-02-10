@@ -828,7 +828,8 @@ def compute_human_policy_prior(
     disk_cache_dir: Optional[str] = None,
     use_float16: bool = True,
     use_compression: bool = False,
-    archive_dir: Optional[str] = None
+    archive_dir: Optional[str] = None,
+    use_attainment_cache: bool = True
 ) -> Union[TabularHumanPolicyPrior, 
            Tuple[TabularHumanPolicyPrior, Dict[State, Dict[int, Dict[PossibleGoal, float]]]],
            Tuple[TabularHumanPolicyPrior, SlicedAttainmentCache],
@@ -896,6 +897,9 @@ def compute_human_policy_prior(
         use_compression: If True, compress disk slices with gzip (slower but smaller).
         archive_dir: Directory to save archived value slices (None = don't archive).
             Separate from disk_cache_dir - this is where final archives go.
+        use_attainment_cache: If True (default), cache is_achieved() results for reuse
+            in Phase 2. Set to False to save ~3GB memory at the cost of recomputing
+            is_achieved() in Phase 2 (negligible for simple goals like ReachCellGoal).
     
     Returns:
         TabularHumanPolicyPrior: Policy prior that can be called as prior(state, agent, goal).
@@ -979,15 +983,24 @@ def compute_human_policy_prior(
     if not quiet:
         mem_stats = estimate_dag_memory(states, transitions, num_agents, 
                                        len(list(possible_goal_generator.generate(states[0], human_agent_indices[0]))),
-                                       num_actions)
+                                       num_actions,
+                                       include_cache=use_attainment_cache,
+                                       num_humans=len(human_agent_indices),
+                                       num_robots=len(robot_agent_indices))
         print(f"\nMemory estimate:")
-        print(f"  States: {mem_stats['num_states']:,}")
-        print(f"  Transitions: {mem_stats['transitions_mb']:.1f} MB")
-        print(f"  Vh values: {mem_stats['vh_values_mb']:.1f} MB")
-        print(f"  Policies: {mem_stats['policies_mb']:.1f} MB")
-        print(f"  Data structures: {mem_stats['total_mb']:.1f} MB")
+        print(f"  States: {mem_stats['num_states']:,} ({mem_stats['states_mb']:.1f} MB)")
+        print(f"  Transitions: {mem_stats['num_transitions']:,} ({mem_stats['transitions_mb']:.1f} MB)")
+        print(f"  Phase 1 Vh_values: {mem_stats['phase1_vh_mb']:.1f} MB")
+        print(f"  Phase 1 policies: {mem_stats['phase1_policies_mb']:.1f} MB")
+        print(f"  Phase 2 Vh_values: {mem_stats['phase2_vh_mb']:.1f} MB")
+        print(f"  Phase 2 Vr_values: {mem_stats['phase2_vr_mb']:.1f} MB")
+        print(f"  Phase 2 robot_policy: {mem_stats['phase2_robot_policy_mb']:.1f} MB")
+        if 'attainment_cache_mb' in mem_stats:
+            print(f"  Attainment cache: {mem_stats['attainment_cache_mb']:.1f} MB")
+        else:
+            print(f"  Attainment cache: DISABLED (use_attainment_cache=False)")
         print(f"  Python baseline: {mem_stats['python_baseline_mb']:.0f} MB")
-        print(f"  WORKING MEMORY (recommended allocation): {mem_stats['working_memory_mb']:.0f} MB")
+        print(f"  TOTAL (recommended allocation): {mem_stats['total_mb']:.0f} MB")
     
     # Handle disk-based slicing if requested
     disk_dag: Optional[DiskBasedDAG] = None
@@ -1086,18 +1099,21 @@ def compute_human_policy_prior(
                 "Internal error: parallel should be disabled in Phase 1 backward induction."
             )
     
-    # Always create sliced attainment cache - it will be stored on world_model for reuse in Phase 2.
+    # Create sliced attainment cache if enabled - it will be stored on world_model for reuse in Phase 2.
     # This avoids redundant is_achieved() computation between phases.
+    # Set use_attainment_cache=False to save ~3GB memory for simple goals.
     # Structure: SlicedAttainmentCache holds slices indexed by slice_id
     # Each slice is Dict[state_index, List[Dict[goal, array]]] for efficient access.
     num_action_profiles = num_actions ** num_agents
-    existing_cache = getattr(world_model, '_attainment_cache', None)
-    if existing_cache is not None and isinstance(existing_cache, SlicedAttainmentCache):
-        # Reuse existing sliced cache
-        sliced_cache: SlicedAttainmentCache = existing_cache
-    else:
-        # Create new sliced cache
-        sliced_cache = SlicedAttainmentCache(num_action_profiles)
+    sliced_cache: Optional[SlicedAttainmentCache] = None
+    if use_attainment_cache:
+        existing_cache = getattr(world_model, '_attainment_cache', None)
+        if existing_cache is not None and isinstance(existing_cache, SlicedAttainmentCache):
+            # Reuse existing sliced cache
+            sliced_cache = existing_cache
+        else:
+            # Create new sliced cache
+            sliced_cache = SlicedAttainmentCache(num_action_profiles)
     
     # ============================================================================
     # PARALLEL CODE TEMPORARILY DISABLED

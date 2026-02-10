@@ -988,11 +988,12 @@ def compute_robot_policy(
             print("\n=== Creating Disk-Based DAG ===")
         
         # Calculate memory stats before slicing
+        # Note: num_goals not available here, use num_action_profiles as proxy
         mem_stats = estimate_dag_memory(states, transitions, num_agents,
-                                        num_actions, num_action_profiles)
+                                        num_goals=num_action_profiles,  # proxy
+                                        num_actions=num_actions)
         if not quiet:
-            print(f"Data structures: {mem_stats['total_mb']:.1f} MB")
-            print(f"WORKING MEMORY (recommended allocation): {mem_stats['working_memory_mb']:.0f} MB")
+            print(f"Estimated memory: {mem_stats['total_mb']:.0f} MB")
         
         # Create disk-based DAG
         num_action_profiles_for_cache = num_actions ** num_agents

@@ -194,7 +194,8 @@ def compute_p_left_from_policy(env: MultiGridEnv, robot_policy: RobotPolicy) -> 
 def run_single_simulation(params: ParameterSet, 
                          env: MultiGridEnv,
                          parallel: bool = False,
-                         quiet: bool = False) -> ParameterSet:
+                         quiet: bool = False,
+                         use_attainment_cache: bool = True) -> ParameterSet:
     """
     Run a single simulation with the given parameters.
     
@@ -238,7 +239,8 @@ def run_single_simulation(params: ParameterSet,
             beta_h=params.beta_h,
             gamma_h=params.gamma_h,
             parallel=parallel,
-            quiet=quiet
+            quiet=quiet,
+            use_attainment_cache=use_attainment_cache
         )
         
         # Phase 2: Compute robot policy
@@ -442,6 +444,8 @@ def main():
                        help='Maximum xi (default: 2.0)')
     parser.add_argument('--beta_r', type=float, default=50.0,
                        help='Fixed beta_r value (default: 50.0)')
+    parser.add_argument('--no-attainment-cache', action='store_true',
+                       help='Disable attainment cache to save ~3GB memory (default: cache enabled)')
     
     args = parser.parse_args()
     

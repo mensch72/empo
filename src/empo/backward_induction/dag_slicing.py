@@ -508,81 +508,135 @@ def estimate_dag_memory(states: List[State],
                        num_agents: int,
                        num_goals: int,
                        num_actions: int,
-                       include_cache: bool = True) -> Dict[str, float]:
+                       include_cache: bool = True,
+                       num_humans: Optional[int] = None,
+                       num_robots: Optional[int] = None) -> Dict[str, float]:
     """
     Estimate memory consumption of DAG and backward induction data structures.
     
-    NOTE: This estimates the final data structures only. Actual peak memory
-    will be higher due to:
-    - Python interpreter baseline (~150 MB)
-    - Intermediate numpy arrays during computation
-    - Phase 1 + Phase 2 data existing simultaneously
-    - Python object/dict overhead not fully captured
-    
-    Use 'working_memory_mb' for a realistic allocation estimate (3-4x data structures).
+    Calculates memory for all major data structures:
+    - States list and transitions (shared)
+    - Phase 1: Vh_values + human policies (system2_policies)
+    - Phase 2: Vh_values (separate!) + Vr_values + robot_policy
+    - Attainment cache (optional)
+    - Python interpreter baseline
     
     Args:
         states: List of states
         transitions: Transition data
-        num_agents: Number of agents
+        num_agents: Total number of agents
         num_goals: Number of goals per agent
         num_actions: Number of actions per agent
         include_cache: If True, include attainment cache estimate
+        num_humans: Number of human agents (default: num_agents - 1)
+        num_robots: Number of robot agents (default: 1)
     
     Returns dict with memory estimates in MB:
+        - states_mb: States list
         - transitions_mb: Transition probability data
-        - vh_values_mb: Value function data (Vh_values)
-        - policies_mb: Policy data (system2_policies)
+        - phase1_vh_mb: Phase 1 Vh_values
+        - phase1_policies_mb: Phase 1 human policies
+        - phase2_vh_mb: Phase 2 Vh_values (expected human achievement)
+        - phase2_vr_mb: Phase 2 Vr_values
+        - phase2_robot_policy_mb: Phase 2 robot policy
         - attainment_cache_mb: Attainment cache (if include_cache=True)
-        - total_mb: Total data structure memory
-        - python_baseline_mb: Python interpreter + imports overhead
-        - working_memory_mb: Realistic peak memory estimate for allocation
+        - python_baseline_mb: Python interpreter + imports
+        - total_mb: Total memory estimate
     """
     num_states = len(states)
     
-    # Count actual transitions
+    # Default agent counts
+    if num_humans is None:
+        num_humans = max(1, num_agents - 1)
+    if num_robots is None:
+        num_robots = 1
+    
+    # Python dict overhead constants (CPython 3.10+)
+    DICT_EMPTY_SIZE = 64  # bytes for empty dict
+    DICT_ENTRY_SIZE = 56  # bytes per entry (hash table overhead)
+    LIST_EMPTY_SIZE = 56  # bytes for empty list
+    LIST_ENTRY_SIZE = 8   # bytes per list element (pointer)
+    NUMPY_HEADER = 128    # bytes numpy array overhead
+    
+    # --- States list ---
+    # Each state is a tuple. Estimate avg 200 bytes per state (grid state tuples)
+    avg_state_size = 200
+    states_mb = (num_states * (avg_state_size + LIST_ENTRY_SIZE)) / (1024**2)
+    
+    # --- Transitions ---
+    # Each transition: (action_profile tuple, probs list, indices list)
     num_transitions = sum(len(t) for t in transitions)
     avg_successors = num_transitions / max(1, sum(1 for t in transitions if t))
+    # tuple: ~56 bytes + 8*num_agents, two lists: ~56 + 8*avg_successors each
+    transition_size = 56 + 8*num_agents + 2*(56 + 8*avg_successors)
+    transitions_mb = (num_transitions * transition_size + num_states * LIST_EMPTY_SIZE) / (1024**2)
     
-    # Transitions: each is (action_profile, probs, indices)
-    # Estimate ~180 bytes per transition with Python overhead
-    transitions_mb = (num_transitions * 180) / (1024**2)
+    # --- Phase 1 Vh_values: List[Dict[agent, Dict[goal, float16]]] ---
+    # Outer list: num_states entries
+    # Middle dict (per state): num_humans entries -> inner dicts
+    # Inner dict (per human): num_goals entries -> float16 values
+    # float16 stored as numpy scalar: ~24 bytes
+    inner_dict_size = DICT_EMPTY_SIZE + num_goals * (DICT_ENTRY_SIZE + 24)
+    middle_dict_size = DICT_EMPTY_SIZE + num_humans * (DICT_ENTRY_SIZE + inner_dict_size)
+    phase1_vh_mb = (num_states * middle_dict_size) / (1024**2)
     
-    # Vh_values: List[List[Dict[goal, float]]]
-    # Each dict entry: ~16 bytes (key + value) + dict overhead
-    vh_values_mb = (num_states * num_agents * (num_goals * 16 + 1000)) / (1024**2)
+    # --- Phase 1 policies: Dict[state, Dict[agent, Dict[goal, ndarray]]] ---
+    # Outermost dict: num_states entries
+    # Middle dict (per state): num_humans entries
+    # Inner dict (per human): num_goals entries -> ndarray[num_actions]
+    policy_array_size = NUMPY_HEADER + num_actions * 8  # float64 array
+    inner_policy_dict_size = DICT_EMPTY_SIZE + num_goals * (DICT_ENTRY_SIZE + policy_array_size)
+    middle_policy_dict_size = DICT_EMPTY_SIZE + num_humans * (DICT_ENTRY_SIZE + inner_policy_dict_size)
+    phase1_policies_mb = (DICT_EMPTY_SIZE + num_states * (DICT_ENTRY_SIZE + avg_state_size + middle_policy_dict_size)) / (1024**2)
     
-    # Policies: Dict[state, Dict[agent, Dict[goal, ndarray[num_actions]]]]
-    # Each ndarray: num_actions * 8 bytes + ~100 bytes overhead
-    policies_mb = (num_states * num_agents * num_goals * (num_actions * 8 + 100)) / (1024**2)
+    # --- Phase 2 Vh_values: List[Dict[agent, Dict[goal, float16]]] ---
+    # Same structure as Phase 1 - BOTH exist simultaneously!
+    phase2_vh_mb = phase1_vh_mb
     
-    data_structures_total = transitions_mb + vh_values_mb + policies_mb
+    # --- Phase 2 Vr_values: ndarray[num_states] ---
+    phase2_vr_mb = (NUMPY_HEADER + num_states * 8) / (1024**2)  # float64
     
-    # Python baseline: interpreter + numpy + scipy + env imports
-    python_baseline_mb = 150.0
+    # --- Phase 2 robot_policy: Dict[RobotActionProfile, float] per state ---
+    # Stored as Dict[state, Dict[RobotActionProfile, float]]
+    num_robot_action_profiles = num_actions ** num_robots
+    robot_policy_per_state = DICT_EMPTY_SIZE + num_robot_action_profiles * (DICT_ENTRY_SIZE + 8)
+    phase2_robot_policy_mb = (DICT_EMPTY_SIZE + num_states * (DICT_ENTRY_SIZE + avg_state_size + robot_policy_per_state)) / (1024**2)
+    
+    # --- Python baseline ---
+    python_baseline_mb = 150.0  # interpreter + numpy + scipy + env imports
+    
+    # --- Totals ---
+    data_structures_total = (states_mb + transitions_mb + 
+                            phase1_vh_mb + phase1_policies_mb +
+                            phase2_vh_mb + phase2_vr_mb + phase2_robot_policy_mb)
     
     result = {
         'num_states': num_states,
         'num_transitions': num_transitions,
         'avg_successors_per_transition': avg_successors,
+        'states_mb': states_mb,
         'transitions_mb': transitions_mb,
-        'vh_values_mb': vh_values_mb,
-        'policies_mb': policies_mb,
-        'total_mb': data_structures_total,
+        'phase1_vh_mb': phase1_vh_mb,
+        'phase1_policies_mb': phase1_policies_mb,
+        'phase2_vh_mb': phase2_vh_mb,
+        'phase2_vr_mb': phase2_vr_mb,
+        'phase2_robot_policy_mb': phase2_robot_policy_mb,
         'python_baseline_mb': python_baseline_mb,
+        'total_mb': data_structures_total + python_baseline_mb,
     }
     
-    # Attainment cache estimate
+    # Attainment cache estimate (if used)
     if include_cache:
         num_action_profiles = num_actions ** num_agents
+        # Cache is per state, per action profile, per goal: stores int8 arrays
+        # But uses dicts, so overhead is significant
         cache_entries = num_states * num_action_profiles * num_goals
-        # Each entry: ~2 bytes (int8 array) + 80 bytes (dict overhead)
-        cache_mb = (cache_entries * 82) / (1024**2)
+        # Each entry: ~2 bytes (int8 value) + dict overhead amortized
+        cache_mb = (num_states * num_action_profiles * (DICT_EMPTY_SIZE + num_goals * (DICT_ENTRY_SIZE + 2))) / (1024**2)
         result['attainment_cache_mb'] = cache_mb
         result['total_mb'] += cache_mb
     
-    # Working memory: data structures + baseline + 2x multiplier for intermediates
-    # (Phase 1 arrays, Phase 2 arrays, temporaries during computation)
-    result['working_memory_mb'] = python_baseline_mb + result['total_mb'] * 3.0
+    # Add 20% overhead for temporaries during computation (Q-value arrays, etc.)
+    result['total_mb'] *= 1.2
     
     return result
