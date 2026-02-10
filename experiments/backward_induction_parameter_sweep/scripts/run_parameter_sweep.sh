@@ -2,12 +2,12 @@
 #SBATCH --qos=short
 #SBATCH --job-name=empo_param_sweep
 #SBATCH --account=bega
-#SBATCH --output=outputs/parameter_sweep/slurm_%j.out
-#SBATCH --error=outputs/parameter_sweep/slurm_%j.err
+#SBATCH --output=outputs/parameter_sweep/logs/slurm_%j.out
+#SBATCH --error=outputs/parameter_sweep/logs/slurm_%j.err
 #SBATCH --time=02:00:00
 #SBATCH --ntasks=100
 #SBATCH --cpus-per-task=1
-#SBATCH --mem=1G
+#SBATCH --mem-per-cpu=2G
 
 # Parameter Sweep HPC Batch Script (Parallel Tasks)
 # 
@@ -178,8 +178,9 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Create output directory
+# Create output directories
 mkdir -p "$(dirname "$OUTPUT_FILE")"
+mkdir -p "outputs/parameter_sweep/logs"
 
 # Print job info
 echo "=================================================="
@@ -237,8 +238,8 @@ fi
 if [ -n "$SLURM_JOB_ID" ]; then
     echo "Starting ${SLURM_NTASKS:-1} parallel tasks via srun..."
     # Each task gets its own output file via srun's --output/--error options
-    srun --output="outputs/parameter_sweep/slurm_${SLURM_JOB_ID}_%t.out" \
-         --error="outputs/parameter_sweep/slurm_${SLURM_JOB_ID}_%t.err" \
+    srun --output="outputs/parameter_sweep/logs/slurm_${SLURM_JOB_ID}_%t.out" \
+         --error="outputs/parameter_sweep/logs/slurm_${SLURM_JOB_ID}_%t.err" \
          python -u "${PYTHON_ARGS[@]}"
 else
     echo "Starting parameter sweep (local mode)..."
