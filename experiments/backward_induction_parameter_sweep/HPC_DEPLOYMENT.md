@@ -100,8 +100,9 @@ The script expects this layout:
 ├── empo-gpu.sif               # (or this name)
 └── git/                       # Repository clone
     ├── experiments/
-    │   ├── parameter_sweep_asymmetric_freeing.py
-    │   └── analyze_parameter_sweep.py
+    │   └── backward_induction_parameter_sweep/
+    │       ├── parameter_sweep_asymmetric_freeing.py
+    │       └── analyze_parameter_sweep.py
     ├── scripts/
     │   └── run_parameter_sweep.sh
     └── outputs/
@@ -166,7 +167,7 @@ pip install --user numpy scipy scikit-learn PyYAML cloudpickle tqdm pandas stats
 #SBATCH --mem=32G  # Increase from 16G
 ```
 
-Or reduce max_steps range to decrease state space size. Edit `experiments/parameter_sweep_asymmetric_freeing.py`:
+Or reduce max_steps range to decrease state space size. Edit `experiments/backward_induction_parameter_sweep/parameter_sweep_asymmetric_freeing.py`:
 ```python
 max_steps = np.random.randint(8, 11)  # Instead of 8, 15
 ```
@@ -244,6 +245,6 @@ scp -r user@cluster:~/bega/empo/git/outputs/parameter_sweep/ ./results/
 
 ## See Also
 
-- [CLUSTER.md](../CLUSTER.md) - Complete cluster deployment guide
-- [experiments/README.md](README.md) - Parameter sweep overview
-- [experiments/USAGE_EXAMPLE.md](USAGE_EXAMPLE.md) - Usage examples
+- [CLUSTER.md](../../CLUSTER.md) - Complete cluster deployment guide
+- [README.md](README.md) - Parameter sweep overview
+- [USAGE_EXAMPLE.md](USAGE_EXAMPLE.md) - Usage examples

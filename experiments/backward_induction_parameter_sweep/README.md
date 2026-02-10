@@ -18,7 +18,7 @@ The parameter sweep studies how EMPO parameters influence robot behavior in the 
 
 ```bash
 # Test with 10 samples (takes ~5-30 minutes depending on hardware)
-python experiments/parameter_sweep_asymmetric_freeing.py \
+python experiments/backward_induction_parameter_sweep/parameter_sweep_asymmetric_freeing.py \
     --n_samples 10 \
     --output outputs/parameter_sweep/test_results.csv \
     --quiet
@@ -28,7 +28,7 @@ python experiments/parameter_sweep_asymmetric_freeing.py \
 
 ```bash
 # Run logistic regression analysis
-python experiments/analyze_parameter_sweep.py \
+python experiments/backward_induction_parameter_sweep/analyze_parameter_sweep.py \
     outputs/parameter_sweep/test_results.csv \
     --interactions \
     --output outputs/parameter_sweep/analysis.txt \
@@ -181,19 +181,19 @@ Then use `--parallel --num_workers 8` to leverage multiple cores.
 
 ```bash
 # 1. Small local test
-python experiments/parameter_sweep_asymmetric_freeing.py \
+python experiments/backward_induction_parameter_sweep/parameter_sweep_asymmetric_freeing.py \
     --n_samples 10 \
     --output outputs/parameter_sweep/test.csv
 
 # 2. Analyze test results
-python experiments/analyze_parameter_sweep.py \
+python experiments/backward_induction_parameter_sweep/analyze_parameter_sweep.py \
     outputs/parameter_sweep/test.csv
 
 # 3. If results look good, run full experiment on HPC
 sbatch scripts/run_parameter_sweep.sh
 
 # 4. After HPC run completes, download results and analyze
-python experiments/analyze_parameter_sweep.py \
+python experiments/backward_induction_parameter_sweep/analyze_parameter_sweep.py \
     outputs/parameter_sweep/full_results.csv \
     --interactions \
     --output outputs/parameter_sweep/full_analysis.txt
