@@ -985,7 +985,9 @@ def compute_human_policy_prior(
         print(f"  Transitions: {mem_stats['transitions_mb']:.1f} MB")
         print(f"  Vh values: {mem_stats['vh_values_mb']:.1f} MB")
         print(f"  Policies: {mem_stats['policies_mb']:.1f} MB")
-        print(f"  TOTAL: {mem_stats['total_mb']:.1f} MB")
+        print(f"  Data structures: {mem_stats['total_mb']:.1f} MB")
+        print(f"  Python baseline: {mem_stats['python_baseline_mb']:.0f} MB")
+        print(f"  WORKING MEMORY (recommended allocation): {mem_stats['working_memory_mb']:.0f} MB")
     
     # Handle disk-based slicing if requested
     disk_dag: Optional[DiskBasedDAG] = None

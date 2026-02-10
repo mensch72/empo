@@ -512,6 +512,15 @@ def estimate_dag_memory(states: List[State],
     """
     Estimate memory consumption of DAG and backward induction data structures.
     
+    NOTE: This estimates the final data structures only. Actual peak memory
+    will be higher due to:
+    - Python interpreter baseline (~150 MB)
+    - Intermediate numpy arrays during computation
+    - Phase 1 + Phase 2 data existing simultaneously
+    - Python object/dict overhead not fully captured
+    
+    Use 'working_memory_mb' for a realistic allocation estimate (3-4x data structures).
+    
     Args:
         states: List of states
         transitions: Transition data
@@ -525,7 +534,9 @@ def estimate_dag_memory(states: List[State],
         - vh_values_mb: Value function data (Vh_values)
         - policies_mb: Policy data (system2_policies)
         - attainment_cache_mb: Attainment cache (if include_cache=True)
-        - total_mb: Total estimated memory
+        - total_mb: Total data structure memory
+        - python_baseline_mb: Python interpreter + imports overhead
+        - working_memory_mb: Realistic peak memory estimate for allocation
     """
     num_states = len(states)
     
@@ -545,6 +556,11 @@ def estimate_dag_memory(states: List[State],
     # Each ndarray: num_actions * 8 bytes + ~100 bytes overhead
     policies_mb = (num_states * num_agents * num_goals * (num_actions * 8 + 100)) / (1024**2)
     
+    data_structures_total = transitions_mb + vh_values_mb + policies_mb
+    
+    # Python baseline: interpreter + numpy + scipy + env imports
+    python_baseline_mb = 150.0
+    
     result = {
         'num_states': num_states,
         'num_transitions': num_transitions,
@@ -552,7 +568,8 @@ def estimate_dag_memory(states: List[State],
         'transitions_mb': transitions_mb,
         'vh_values_mb': vh_values_mb,
         'policies_mb': policies_mb,
-        'total_mb': transitions_mb + vh_values_mb + policies_mb,
+        'total_mb': data_structures_total,
+        'python_baseline_mb': python_baseline_mb,
     }
     
     # Attainment cache estimate
@@ -563,5 +580,9 @@ def estimate_dag_memory(states: List[State],
         cache_mb = (cache_entries * 82) / (1024**2)
         result['attainment_cache_mb'] = cache_mb
         result['total_mb'] += cache_mb
+    
+    # Working memory: data structures + baseline + 2x multiplier for intermediates
+    # (Phase 1 arrays, Phase 2 arrays, temporaries during computation)
+    result['working_memory_mb'] = python_baseline_mb + result['total_mb'] * 3.0
     
     return result

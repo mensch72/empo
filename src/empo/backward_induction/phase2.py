@@ -991,7 +991,8 @@ def compute_robot_policy(
         mem_stats = estimate_dag_memory(states, transitions, num_agents,
                                         num_actions, num_action_profiles)
         if not quiet:
-            print(f"Full DAG memory: {mem_stats['total_mb']:.1f} MB")
+            print(f"Data structures: {mem_stats['total_mb']:.1f} MB")
+            print(f"WORKING MEMORY (recommended allocation): {mem_stats['working_memory_mb']:.0f} MB")
         
         # Create disk-based DAG
         num_action_profiles_for_cache = num_actions ** num_agents

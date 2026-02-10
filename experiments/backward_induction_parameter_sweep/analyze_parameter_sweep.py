@@ -118,6 +118,20 @@ def compute_univariate_effects(df: pd.DataFrame, predictors: List[str]) -> pd.Da
     y = df['p_left'].clip(0.001, 0.999)
     
     for pred in predictors:
+        # Skip predictors with zero variance (constant values)
+        if df[pred].std() == 0:
+            print(f"  Skipping '{pred}': zero variance (all values = {df[pred].iloc[0]})")
+            results.append({
+                'predictor': pred,
+                'coefficient': np.nan,
+                'odds_ratio': np.nan,
+                'ci_low': np.nan,
+                'ci_high': np.nan,
+                'p_value': np.nan,
+                'significant': False
+            })
+            continue
+            
         try:
             # Fit GLM with binomial family and logit link
             X = sm.add_constant(df[pred])
@@ -170,15 +184,25 @@ def fit_full_model(df: pd.DataFrame,
     # Clamp p_left to avoid exact 0 or 1
     y = df['p_left'].clip(0.001, 0.999)
     
+    # Filter out zero-variance predictors
+    valid_predictors = [p for p in predictors if df[p].std() > 0]
+    skipped = set(predictors) - set(valid_predictors)
+    if skipped:
+        print(f"Skipping zero-variance predictors: {skipped}")
+    
     # Build design matrix
-    X = df[predictors].copy()
+    X = df[valid_predictors].copy()
     
     if include_interactions:
-        # Add interaction terms
-        X['beta_h_x_gamma_h'] = df['beta_h'] * df['gamma_h']
-        X['gamma_r_x_gamma_h'] = df['gamma_r'] * df['gamma_h']
-        X['zeta_x_xi'] = df['zeta'] * df['xi']
-        X['max_steps_x_beta_h'] = df['max_steps'] * df['beta_h']
+        # Add interaction terms (only if both predictors have variance)
+        if 'beta_h' in valid_predictors and 'gamma_h' in valid_predictors:
+            X['beta_h_x_gamma_h'] = df['beta_h'] * df['gamma_h']
+        if 'gamma_r' in valid_predictors and 'gamma_h' in valid_predictors:
+            X['gamma_r_x_gamma_h'] = df['gamma_r'] * df['gamma_h']
+        if 'zeta' in valid_predictors and 'xi' in valid_predictors:
+            X['zeta_x_xi'] = df['zeta'] * df['xi']
+        if 'max_steps' in valid_predictors and 'beta_h' in valid_predictors:
+            X['max_steps_x_beta_h'] = df['max_steps'] * df['beta_h']
     
     X = sm.add_constant(X)
     
