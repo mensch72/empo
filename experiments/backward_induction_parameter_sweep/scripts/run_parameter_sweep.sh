@@ -2,27 +2,26 @@
 #SBATCH --qos=short
 #SBATCH --job-name=empo_param_sweep
 #SBATCH --account=bega
-#SBATCH --output=outputs/parameter_sweep/slurm_%j.out
-#SBATCH --error=outputs/parameter_sweep/slurm_%j.err
+#SBATCH --output=outputs/parameter_sweep/slurm_%j_%t.out
+#SBATCH --error=outputs/parameter_sweep/slurm_%j_%t.err
 #SBATCH --time=02:00:00
-#SBATCH --cpus-per-task=8
+#SBATCH --ntasks=100
+#SBATCH --cpus-per-task=1
 #SBATCH --mem=1G
 
-# Parameter Sweep HPC Batch Script (Native Python)
+# Parameter Sweep HPC Batch Script (Parallel Tasks)
 # 
-# This script runs the parameter sweep experiment using the host's Python
-# environment. Edit the "Environment Setup" section below to activate your
-# Python environment.
+# This script runs multiple parallel tasks, each computing n_samples new samples.
+# All tasks append to the same results.csv file (with file locking).
 #
-# Adjust SBATCH directives above according to your cluster's configuration.
+# Total samples = ntasks * n_samples
 #
 # Usage:
 #   sbatch experiments/backward_induction_parameter_sweep/scripts/run_parameter_sweep.sh [OPTIONS]
 #
 # Options:
-#   -n, --n_samples N       Number of samples (default: 100)
-#   -s, --seed SEED         Random seed (default: 42)
-#   -o, --output FILE       Output CSV file (auto-generated if not specified)
+#   -n, --n_samples N       Number of NEW samples PER TASK (default: 10)
+#   -o, --output FILE       Output CSV file (default: outputs/parameter_sweep/results.csv)
 #   --quick                 Quick mode (small max_steps, few samples)
 #
 # Prior bound options:
@@ -42,17 +41,16 @@
 #   --xi_max F              Maximum xi (default: 2.0)
 #
 # Examples:
-#   # Basic run with defaults
 #   sbatch experiments/backward_induction_parameter_sweep/scripts/run_parameter_sweep.sh
 #
 #   # Quick test run
 #   sbatch experiments/backward_induction_parameter_sweep/scripts/run_parameter_sweep.sh --quick
 #
-#   # Custom samples and seed
-#   sbatch experiments/backward_induction_parameter_sweep/scripts/run_parameter_sweep.sh -n 200 -s 123
+#   # 100 samples per task (with 4 tasks = 400 total)
+#   sbatch experiments/backward_induction_parameter_sweep/scripts/run_parameter_sweep.sh -n 100
 #
-#   # Custom prior bounds
-#   sbatch experiments/backward_induction_parameter_sweep/scripts/run_parameter_sweep.sh --beta_h_min 10 --beta_h_max 50
+#   # Run 10 tasks with 50 samples each (500 total)
+#   sbatch --ntasks=10 experiments/backward_induction_parameter_sweep/scripts/run_parameter_sweep.sh -n 50
 
 set -e  # Exit on error
 
@@ -77,9 +75,8 @@ export PATH="$CONDA_PREFIX/bin:$PATH"
 #==============================================================================
 
 # Default configuration
-N_SAMPLES=100
-SEED=42
-OUTPUT_FILE=""
+N_SAMPLES=10
+OUTPUT_FILE="outputs/parameter_sweep/results.csv"
 QUICK_MODE=false
 
 # Prior bound defaults (matching Python script)
@@ -103,10 +100,6 @@ while [[ $# -gt 0 ]]; do
     case $1 in
         -n|--n_samples)
             N_SAMPLES="$2"
-            shift 2
-            ;;
-        -s|--seed)
-            SEED="$2"
             shift 2
             ;;
         -o|--output)
@@ -185,30 +178,19 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Setup output directory and file
-OUTPUT_DIR="outputs/parameter_sweep"
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-if [ -z "$OUTPUT_FILE" ]; then
-    OUTPUT_FILE="${OUTPUT_DIR}/results.csv"
-fi
+# Create output directory
+mkdir -p "$(dirname "$OUTPUT_FILE")"
 
 # Print job info
 echo "=================================================="
-echo "EMPO Parameter Sweep Experiment (Native Python)"
+echo "EMPO Parameter Sweep (Task $SLURM_PROCID of $SLURM_NTASKS)"
 echo "=================================================="
-if [ -n "$SLURM_JOB_ID" ]; then
-    echo "Job ID: $SLURM_JOB_ID"
-    echo "Node: $SLURM_NODELIST"
-    echo "CPUs: $SLURM_CPUS_PER_TASK"
-    echo "Memory: $SLURM_MEM_PER_NODE MB"
-fi
-echo "Started: $(date)"
-echo ""
-echo "Configuration:"
-echo "  N_SAMPLES: $N_SAMPLES"
-echo "  SEED: $SEED"
-echo "  OUTPUT_FILE: $OUTPUT_FILE"
-echo "  QUICK_MODE: $QUICK_MODE"
+echo "Job ID: ${SLURM_JOB_ID:-local}"
+echo "Node: ${SLURM_NODELIST:-$(hostname)}"
+echo "Samples per task: $N_SAMPLES"
+echo "Total tasks: ${SLURM_NTASKS:-1}"
+echo "Output file: $OUTPUT_FILE"
+echo "Quick mode: $QUICK_MODE"
 echo ""
 echo "Prior Bounds:"
 echo "  max_steps: [$MAX_STEPS_MIN, $MAX_STEPS_MAX]"
@@ -220,20 +202,15 @@ echo "  eta:       [$ETA_MIN, $ETA_MAX]"
 echo "  xi:        [$XI_MIN, $XI_MAX]"
 echo ""
 echo "Python: $(which python)"
-echo "Python version: $(python --version 2>&1)"
+echo "Started: $(date)"
 echo "=================================================="
 echo ""
-
-# Create output directory
-mkdir -p "$OUTPUT_DIR"
 
 # Build command arguments
 PYTHON_ARGS=(
     "experiments/backward_induction_parameter_sweep/parameter_sweep_asymmetric_freeing.py"
     "--n_samples" "$N_SAMPLES"
     "--output" "$OUTPUT_FILE"
-    "--parallel"
-    "--seed" "$SEED"
     "--max_steps_min" "$MAX_STEPS_MIN"
     "--max_steps_max" "$MAX_STEPS_MAX"
     "--beta_h_min" "$BETA_H_MIN"
@@ -250,52 +227,25 @@ PYTHON_ARGS=(
     "--xi_max" "$XI_MAX"
 )
 
-# Add num_workers if running in SLURM
-if [ -n "$SLURM_CPUS_PER_TASK" ]; then
-    PYTHON_ARGS+=("--num_workers" "$SLURM_CPUS_PER_TASK")
-fi
-
 # Add quick mode flag
 if [ "$QUICK_MODE" = "true" ]; then
     PYTHON_ARGS+=("--quick")
 fi
 
-# Run the parameter sweep (use -u for unbuffered output)
+# Run the parameter sweep
 echo "Starting parameter sweep..."
-echo "Command: python -u ${PYTHON_ARGS[*]}"
 python -u "${PYTHON_ARGS[@]}"
 
 EXIT_CODE=$?
 
-if [ $EXIT_CODE -eq 0 ]; then
-    echo ""
-    echo "=================================================="
-    echo "Parameter sweep completed successfully!"
-    echo "Results saved to: $OUTPUT_FILE"
-    echo "=================================================="
-    echo ""
-    
-    # Run analysis
-    echo "Running GLM analysis..."
-    python -u experiments/backward_induction_parameter_sweep/analyze_parameter_sweep.py \
-        "$OUTPUT_FILE" \
-        --interactions \
-        --output "${OUTPUT_DIR}/analysis_${TIMESTAMP}.txt" \
-        --plots_dir "${OUTPUT_DIR}/plots_${TIMESTAMP}"
-    
-    echo ""
-    echo "Analysis complete!"
-    echo "  Text results: ${OUTPUT_DIR}/analysis_${TIMESTAMP}.txt"
-    echo "  Plots: ${OUTPUT_DIR}/plots_${TIMESTAMP}/"
-else
-    echo ""
-    echo "=================================================="
-    echo "ERROR: Parameter sweep failed with exit code $EXIT_CODE"
-    echo "Check the log files for details."
-    echo "=================================================="
-fi
-
 echo ""
-echo "Job finished: $(date)"
+echo "=================================================="
+if [ $EXIT_CODE -eq 0 ]; then
+    echo "Task completed successfully!"
+else
+    echo "ERROR: Task failed with exit code $EXIT_CODE"
+fi
+echo "Finished: $(date)"
+echo "=================================================="
 
 exit $EXIT_CODE

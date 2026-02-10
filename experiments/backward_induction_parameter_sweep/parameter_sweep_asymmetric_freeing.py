@@ -37,6 +37,7 @@ Usage:
 
 import argparse
 import csv
+import fcntl
 import gc
 import os
 import random
@@ -91,6 +92,7 @@ class ParameterSet:
     zeta: float
     eta: float
     xi: float
+    seed: int  # Random seed used for sampling this parameter set
     
     # Results (filled after simulation)
     p_left: Optional[float] = None          # P(robot turns right first) = P(freeing left human first)
@@ -144,7 +146,8 @@ def sample_parameters(seed: Optional[int] = None, bounds: Optional[PriorBounds] 
         gamma_r=gamma_r,
         zeta=zeta,
         eta=eta,
-        xi=xi
+        xi=xi,
+        seed=seed
     )
 
 
@@ -359,7 +362,7 @@ def load_existing_results(output_file: str) -> Dict[int, ParameterSet]:
 
 def append_result_to_csv(result: ParameterSet, output_file: str, write_header: bool = False):
     """
-    Append a single result to CSV file.
+    Append a single result to CSV file with file locking for concurrent access.
     
     Args:
         result: ParameterSet to append
@@ -369,12 +372,23 @@ def append_result_to_csv(result: ParameterSet, output_file: str, write_header: b
     output_path = Path(output_file)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     
-    mode = 'a' if output_path.exists() and not write_header else 'w'
-    with open(output_file, mode, newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=list(asdict(result).keys()))
-        if write_header or mode == 'w':
-            writer.writeheader()
-        writer.writerow(asdict(result))
+    # Use file locking for safe concurrent writes
+    with open(output_file, 'a', newline='') as f:
+        # Acquire exclusive lock
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            # Check if file is empty (need header)
+            f.seek(0, 2)  # Seek to end
+            need_header = f.tell() == 0
+            
+            writer = csv.DictWriter(f, fieldnames=list(asdict(result).keys()))
+            if need_header:
+                writer.writeheader()
+            writer.writerow(asdict(result))
+            f.flush()
+        finally:
+            # Release lock
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
 def main():
@@ -384,18 +398,12 @@ def main():
         epilog=__doc__
     )
     parser.add_argument('--n_samples', type=int, default=10,
-                       help='Number of parameter combinations to sample (default: 10)')
+                       help='Number of NEW samples to compute (default: 10)')
     parser.add_argument('--output', type=str, default='outputs/parameter_sweep/results.csv',
                        help='Output CSV file (default: outputs/parameter_sweep/results.csv)')
     parser.add_argument('--world', type=str, 
                        default='multigrid_worlds/jobst_challenges/asymmetric_freeing_simple.yaml',
                        help='Path to world YAML file')
-    parser.add_argument('--parallel', action='store_true',
-                       help='Use parallel computation for backward induction')
-    parser.add_argument('--num_workers', type=int, default=None,
-                       help='Number of parallel workers (default: CPU count)')
-    parser.add_argument('--seed', type=int, default=42,
-                       help='Random seed for reproducibility (default: 42)')
     parser.add_argument('--quiet', action='store_true',
                        help='Suppress detailed output')
     
@@ -462,17 +470,17 @@ def main():
         beta_r=args.beta_r
     )
     
+    # Create unique seed based on time and process ID
+    base_seed = int(time.time() * 1000000) % (2**31) + os.getpid() % 10000
+    
     print("="*80)
-    print("Parameter Sweep: Asymmetric Freeing Simple")
+    print(f"Parameter Sweep: Asymmetric Freeing Simple (PID {os.getpid()})")
     print("="*80)
     print(f"Configuration:")
-    print(f"  Number of samples: {args.n_samples}")
+    print(f"  New samples to compute: {args.n_samples}")
+    print(f"  Base seed: {base_seed}")
     print(f"  World file: {args.world}")
     print(f"  Output file: {args.output}")
-    print(f"  Parallel: {args.parallel}")
-    if args.parallel and args.num_workers:
-        print(f"  Workers: {args.num_workers}")
-    print(f"  Random seed: {args.seed}")
     if args.quick:
         print(f"  Quick mode: ENABLED")
     print(f"Prior bounds:")
@@ -485,20 +493,13 @@ def main():
     print(f"  xi: [{bounds.xi_min}, {bounds.xi_max}]")
     print(f"  beta_r: {bounds.beta_r} (fixed)")
     print()
+    sys.stdout.flush()
     
-    # Set random seed
-    np.random.seed(args.seed)
-    random.seed(args.seed)
-    
-    # Load existing results for resume capability
-    existing_results = load_existing_results(args.output)
-    if existing_results:
-        print(f"Resuming from {len(existing_results)} completed samples")
-    
-    # Sample all parameters upfront
+    # Sample all parameters upfront with unique seeds
     all_params = []
     for i in range(args.n_samples):
-        params = sample_parameters(seed=args.seed + i, bounds=bounds)
+        seed = base_seed + i
+        params = sample_parameters(seed=seed, bounds=bounds)
         all_params.append((i, params))
     
     # Group by max_steps to reuse DAG
@@ -513,35 +514,16 @@ def main():
     print(f"Grouped {args.n_samples} samples by max_steps: {dict((k, len(v)) for k, v in params_by_max_steps.items())}")
     sys.stdout.flush()
     
-    # Check how many are already done
-    remaining_count = sum(1 for i, _ in all_params if i not in existing_results)
-    if remaining_count == 0:
-        print("All samples already completed!")
-        return
-    print(f"Remaining samples to compute: {remaining_count}")
-    print()
-    sys.stdout.flush()
-    
-    # Determine if we need to write header (new file or empty)
-    need_header = not Path(args.output).exists() or Path(args.output).stat().st_size == 0
-    
     # Run simulations, grouped by max_steps to reuse DAG
-    completed_count = len(existing_results)
+    completed_count = 0
     
-    for max_steps in tqdm(sorted_max_steps, desc="Processing max_steps groups", leave=False, file=sys.stdout):
+    for max_steps in sorted_max_steps:
         group = params_by_max_steps[max_steps]
         
-        # Skip this group if all samples are already done
-        remaining_in_group = [(i, p) for i, p in group if i not in existing_results]
-        if not remaining_in_group:
-            continue
-        
-        print(f"\n[DEBUG] Processing max_steps={max_steps} with {len(remaining_in_group)} samples")
+        print(f"\nProcessing max_steps={max_steps} ({len(group)} samples)...")
         sys.stdout.flush()
         
         # Create environment once for this max_steps value
-        print(f"[DEBUG] Creating environment...")
-        sys.stdout.flush()
         env = MultiGridEnv(
             config_file=args.world,
             partial_obs=False,
@@ -549,56 +531,37 @@ def main():
         )
         env.max_steps = max_steps
         env.reset()
-        print(f"[DEBUG] Environment created, building DAG...")
-        sys.stdout.flush()
         
         # Build DAG once (will be cached for all runs in this group)
-        if not args.quiet:
-            print(f"Building DAG for max_steps={max_steps} ({len(remaining_in_group)} samples)...")
-            sys.stdout.flush()
-        env.get_dag(return_probabilities=True, quiet=args.quiet)
-        print(f"[DEBUG] DAG built, starting simulations...")
+        print(f"  Building DAG...")
         sys.stdout.flush()
+        env.get_dag(return_probabilities=True, quiet=args.quiet)
         
         # Run all simulations in this group
-        for original_idx, params in remaining_in_group:
-            print(f"[DEBUG] Starting simulation {original_idx + 1}...")
-            sys.stdout.flush()
+        for sample_idx, params in group:
             result = run_single_simulation(
                 params=params,
                 env=env,
-                parallel=args.parallel,
+                parallel=False,
                 quiet=args.quiet
             )
             
-            # Append result to CSV immediately
-            append_result_to_csv(result, args.output, write_header=need_header)
-            need_header = False  # Only write header once
+            # Append result to CSV immediately (with file locking)
+            append_result_to_csv(result, args.output)
             completed_count += 1
             
-            print(f"  Sample {original_idx + 1}/{args.n_samples} saved (total completed: {completed_count})")
+            print(f"  Sample {completed_count}/{args.n_samples} done (p_left={result.p_left:.4f if result.p_left else 'None'})")
             sys.stdout.flush()
         
         # Free DAG memory before processing next max_steps group
-        print(f"[DEBUG] Freeing DAG memory...")
-        sys.stdout.flush()
         del env
         gc.collect()
     
     # Print summary
-    print(f"\nResults appended to: {args.output}")
-    print(f"Completed this run: {completed_count - len(existing_results)}")
-    print(f"Total in file: {completed_count}")
-    sys.stdout.flush()
-    
-    print("\n" + "="*80)
-    print("Parameter sweep complete!")
+    print(f"\n{'='*80}")
+    print(f"Complete: {completed_count} samples appended to {args.output}")
     print("="*80)
-    print(f"\nNext steps:")
-    print(f"1. Analyze results with logistic regression:")
-    print(f"   python experiments/analyze_parameter_sweep.py {args.output}")
-    print(f"2. Run on HPC for larger sample sizes:")
-    print(f"   sbatch scripts/run_parameter_sweep.sh")
+    sys.stdout.flush()
 
 
 if __name__ == '__main__':

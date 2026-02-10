@@ -74,6 +74,20 @@ def load_results(csv_file: str) -> pd.DataFrame:
     """
     df = pd.read_csv(csv_file)
     
+    # Verify all seeds are unique (detects accidental duplicate runs)
+    if 'seed' in df.columns:
+        n_unique_seeds = df['seed'].nunique()
+        n_total = len(df)
+        if n_unique_seeds < n_total:
+            duplicate_seeds = df[df['seed'].duplicated(keep=False)]['seed'].unique()
+            print(f"WARNING: Found {n_total - n_unique_seeds} duplicate seeds!")
+            print(f"         Duplicate values: {list(duplicate_seeds)[:10]}{'...' if len(duplicate_seeds) > 10 else ''}")
+            print(f"         This may indicate parallel tasks with overlapping seeds.")
+        else:
+            print(f"Seed check: All {n_unique_seeds} seeds are unique.")
+    else:
+        print("Warning: No 'seed' column found in CSV (older format).")
+    
     # Filter out invalid results (p_left is None/NaN)
     df_valid = df[df['p_left'].notna()].copy()
     
