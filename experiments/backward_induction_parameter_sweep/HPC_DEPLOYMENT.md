@@ -48,46 +48,60 @@ git clone https://github.com/yourusername/empo.git .
 
 ### 3. Submit Job
 
+Two scripts are available:
+
+**Native Python (if dependencies installed on cluster):**
 ```bash
 cd ~/bega/empo/git
-sbatch scripts/run_parameter_sweep.sh
+sbatch experiments/backward_induction_parameter_sweep/scripts/run_parameter_sweep.sh
 ```
 
-That's it! The script automatically:
+**With Apptainer/Singularity container:**
+```bash
+cd ~/bega/empo/git
+sbatch experiments/backward_induction_parameter_sweep/scripts/run_parameter_sweep_apptainer.sh
+```
+
+The apptainer script automatically:
 - Detects `apptainer` or `singularity`
 - Finds the SIF file in standard locations
 - Runs everything inside the container
 
 ## Customization
 
+Both scripts accept command-line arguments for all parameters.
+
 ### Change Number of Samples
 
 ```bash
-sbatch --export=N_SAMPLES=200 scripts/run_parameter_sweep.sh
+sbatch .../run_parameter_sweep.sh -n 200
 ```
 
-### Specify Custom Image Path
+### Quick Test Run
 
 ```bash
-sbatch --export=IMAGE_PATH=/path/to/custom.sif scripts/run_parameter_sweep.sh
+sbatch .../run_parameter_sweep.sh --quick
 ```
 
-### Use Native Python (No Container)
-
-If you have Python and dependencies installed:
+### Specify Custom Image Path (apptainer script only)
 
 ```bash
-# Install dependencies first
-pip install --user numpy scipy scikit-learn PyYAML cloudpickle tqdm pandas statsmodels matplotlib gymnasium
+sbatch .../run_parameter_sweep_apptainer.sh --image /path/to/custom.sif
+```
 
-# Submit job
-sbatch --export=USE_CONTAINER=false scripts/run_parameter_sweep.sh
+### Custom Prior Bounds
+
+```bash
+sbatch .../run_parameter_sweep.sh \
+    --beta_h_min 10 --beta_h_max 50 \
+    --gamma_h_min 0.9 --gamma_h_max 1.0
 ```
 
 ### Multiple Parameters
 
 ```bash
-sbatch --export=N_SAMPLES=200,N_ROLLOUTS=10,SEED=123 scripts/run_parameter_sweep.sh
+sbatch .../run_parameter_sweep.sh \
+    -n 200 -s 123 --max_steps_min 10 --max_steps_max 12
 ```
 
 ## Directory Structure
@@ -102,9 +116,10 @@ The script expects this layout:
     ├── experiments/
     │   └── backward_induction_parameter_sweep/
     │       ├── parameter_sweep_asymmetric_freeing.py
-    │       └── analyze_parameter_sweep.py
-    ├── scripts/
-    │   └── run_parameter_sweep.sh
+    │       ├── analyze_parameter_sweep.py
+    │       └── scripts/
+    │           ├── run_parameter_sweep.sh          # Native Python
+    │           └── run_parameter_sweep_apptainer.sh # With container
     └── outputs/
         └── parameter_sweep/   # Results go here
             ├── results_*.csv
@@ -131,7 +146,7 @@ cp /path/to/empo.sif .
 
 Or specify the path explicitly:
 ```bash
-sbatch --export=IMAGE_PATH=/full/path/to/empo.sif scripts/run_parameter_sweep.sh
+sbatch .../run_parameter_sweep_apptainer.sh --image /full/path/to/empo.sif
 ```
 
 ### "Image not found at ..."
@@ -162,14 +177,14 @@ pip install --user numpy scipy scikit-learn PyYAML cloudpickle tqdm pandas stats
 
 ### "Out of memory" errors
 
-**Solution**: Request more memory in SBATCH directives. Edit `scripts/run_parameter_sweep.sh`:
+**Solution**: Request more memory in SBATCH directives. Edit the script:
 ```bash
 #SBATCH --mem=32G  # Increase from 16G
 ```
 
-Or reduce max_steps range to decrease state space size. Edit `experiments/backward_induction_parameter_sweep/parameter_sweep_asymmetric_freeing.py`:
-```python
-max_steps = np.random.randint(8, 11)  # Instead of 8, 15
+Or reduce max_steps range via command line:
+```bash
+sbatch .../run_parameter_sweep.sh --max_steps_min 8 --max_steps_max 11
 ```
 
 ### Very slow execution
