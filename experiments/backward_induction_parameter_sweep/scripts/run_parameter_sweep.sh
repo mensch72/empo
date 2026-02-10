@@ -2,8 +2,8 @@
 #SBATCH --qos=short
 #SBATCH --job-name=empo_param_sweep
 #SBATCH --account=bega
-#SBATCH --output=outputs/parameter_sweep/slurm_%j_%t.out
-#SBATCH --error=outputs/parameter_sweep/slurm_%j_%t.err
+#SBATCH --output=outputs/parameter_sweep/slurm_%j.out
+#SBATCH --error=outputs/parameter_sweep/slurm_%j.err
 #SBATCH --time=02:00:00
 #SBATCH --ntasks=100
 #SBATCH --cpus-per-task=1
@@ -236,7 +236,10 @@ fi
 # Use srun to launch parallel tasks under SLURM, or direct python locally
 if [ -n "$SLURM_JOB_ID" ]; then
     echo "Starting ${SLURM_NTASKS:-1} parallel tasks via srun..."
-    srun python -u "${PYTHON_ARGS[@]}"
+    # Each task gets its own output file via srun's --output/--error options
+    srun --output="outputs/parameter_sweep/slurm_${SLURM_JOB_ID}_%t.out" \
+         --error="outputs/parameter_sweep/slurm_${SLURM_JOB_ID}_%t.err" \
+         python -u "${PYTHON_ARGS[@]}"
 else
     echo "Starting parameter sweep (local mode)..."
     python -u "${PYTHON_ARGS[@]}"
