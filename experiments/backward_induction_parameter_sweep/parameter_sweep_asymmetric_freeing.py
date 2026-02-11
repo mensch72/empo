@@ -643,8 +643,26 @@ def main():
         beta_r=args.beta_r
     )
     
-    # Create unique seed based on time and process ID
-    base_seed = int(time.time() * 1000000) % (2**31) + os.getpid() % 10000
+    # Create unique seed based on SLURM task ID (if available) or time+PID
+    # SLURM_PROCID is unique per task in a job step (0, 1, 2, ...)
+    # SLURM_ARRAY_TASK_ID is unique per array job task
+    slurm_procid = os.environ.get('SLURM_PROCID')
+    slurm_array_task_id = os.environ.get('SLURM_ARRAY_TASK_ID')
+    slurm_job_id = os.environ.get('SLURM_JOB_ID')
+    
+    if slurm_procid is not None:
+        # Use SLURM_PROCID * large_prime + job_id for uniqueness across jobs
+        job_id = int(slurm_job_id) if slurm_job_id else 0
+        base_seed = int(slurm_procid) * 1000003 + (job_id % 1000000)
+    elif slurm_array_task_id is not None:
+        job_id = int(slurm_job_id) if slurm_job_id else 0
+        base_seed = int(slurm_array_task_id) * 1000003 + (job_id % 1000000)
+    else:
+        # Fallback for non-SLURM: use nanoseconds + full PID
+        base_seed = int(time.time_ns() % (2**31)) ^ (os.getpid() * 65537)
+    
+    # Ensure base_seed is positive and within int32 range
+    base_seed = abs(base_seed) % (2**31)
     
     print("="*80)
     print(f"Parameter Sweep: Asymmetric Freeing Simple (PID {os.getpid()})")
@@ -652,6 +670,10 @@ def main():
     print(f"Configuration:")
     print(f"  New samples to compute: {args.n_samples}")
     print(f"  Base seed: {base_seed}")
+    if slurm_procid is not None:
+        print(f"  SLURM_PROCID: {slurm_procid}")
+    if slurm_array_task_id is not None:
+        print(f"  SLURM_ARRAY_TASK_ID: {slurm_array_task_id}")
     print(f"  World file: {args.world}")
     print(f"  Output file: {args.output}")
     if args.quick:
