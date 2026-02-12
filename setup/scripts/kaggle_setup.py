@@ -9,10 +9,10 @@ Usage in Kaggle:
     # First cell - clone and setup
     !git clone --depth 1 https://github.com/mensch72/empo.git
     %cd empo
-    %run scripts/kaggle_setup.py
+    %run setup/scripts/kaggle_setup.py
     
 Or import as module:
-    exec(open('scripts/kaggle_setup.py').read())
+    exec(open('setup/scripts/kaggle_setup.py').read())
 """
 
 import sys
@@ -45,7 +45,7 @@ def setup_empo_paths(repo_root: str = None) -> str:
     return repo_root
 
 
-def install_dependencies(requirements_file: str = 'requirements-kaggle.txt', quiet: bool = True) -> bool:
+def install_dependencies(requirements_file: str = 'setup/requirements-kaggle.txt', quiet: bool = True) -> bool:
     """
     Install EMPO dependencies.
     
@@ -216,9 +216,9 @@ def setup(install_deps: bool = True, quiet: bool = True) -> dict:
     
     # Choose requirements file based on platform
     if os.path.exists('/kaggle'):
-        req_file = 'requirements-kaggle.txt'
+        req_file = 'setup/requirements-kaggle.txt'
     else:
-        req_file = 'requirements-colab.txt'
+        req_file = 'setup/requirements-colab.txt'
     
     if install_deps and os.path.exists(req_file):
         print(f"Installing dependencies from {req_file}...")

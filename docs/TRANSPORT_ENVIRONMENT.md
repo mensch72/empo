@@ -356,7 +356,7 @@ def observation_to_graph(observation: dict, env) -> dict:
 
 ## Integration with EMPO Framework
 
-### 5.1 Update requirements.txt
+### 5.1 Update setup/requirements.txt
 
 Add:
 ```

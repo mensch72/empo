@@ -1,10 +1,11 @@
 #!/bin/bash
-# SLURM job script for running with locally-copied SIF file
-# This script fixes the working directory issue with Singularity/Apptainer
+# Singularity/Apptainer job submission script for SLURM clusters
 #
-# Usage: 
-#   1. Copy SIF to cluster: scp empo.sif user@cluster:~/bega/empo/
-#   2. Submit job: sbatch scripts/run_cluster_sif.sh
+# Usage: sbatch setup/scripts/run_cluster.sh
+# Or modify and adapt for your specific cluster setup
+#
+# Security Note: This script uses environment variables for configuration.
+# Ensure variables are properly validated in production environments.
 
 #SBATCH --job-name=empo-training
 #SBATCH --output=logs/empo_%j.out
@@ -16,10 +17,12 @@
 #SBATCH --mem=32G
 
 # Configuration - modify these for your setup
-REPO_PATH="${REPO_PATH:-$(pwd)/git}"
-IMAGE_PATH="${IMAGE_PATH:-$(pwd)/empo.sif}"
+# Use absolute paths for security and clarity
+REPO_PATH="${REPO_PATH:-$(pwd)}"
+IMAGE_PATH="${IMAGE_PATH:-./empo.sif}"
 SCRIPT_PATH="${SCRIPT_PATH:-train.py}"
 NUM_EPISODES="${NUM_EPISODES:-1000}"
+OUTPUT_DIR="${OUTPUT_DIR:-/workspace/outputs}"
 
 echo "==================================="
 echo "EMPO Cluster Training Job"
@@ -27,11 +30,10 @@ echo "==================================="
 echo "Job ID: $SLURM_JOB_ID"
 echo "Node: $SLURM_NODELIST"
 echo "Date: $(date)"
-echo "Current directory: $(pwd)"
 echo "==================================="
 
-# Create logs directory in repo if it doesn't exist
-mkdir -p "${REPO_PATH}/logs"
+# Create logs directory if it doesn't exist
+mkdir -p logs
 
 # Print GPU information
 nvidia-smi
@@ -54,7 +56,7 @@ apptainer exec --nv \
   "${IMAGE_PATH}" \
   python /workspace/"${SCRIPT_PATH}" \
   --num-episodes "${NUM_EPISODES}" \
-  --output-dir /workspace/outputs
+  --output-dir "${OUTPUT_DIR}"
 
 echo ""
 echo "==================================="

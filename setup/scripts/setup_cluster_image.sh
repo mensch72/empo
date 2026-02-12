@@ -1,7 +1,7 @@
 #!/bin/bash
 # Script to pull Docker image and convert to Singularity/Apptainer format
 #
-# Usage: ./scripts/setup_cluster_image.sh [IMAGE_NAME]
+# Usage: ./setup/scripts/setup_cluster_image.sh [IMAGE_NAME]
 
 set -e
 

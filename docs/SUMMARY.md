@@ -30,8 +30,8 @@ python train.py
 - ✅ Base image: `nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04` (compatible with `--nv`)
 - ✅ Pull command: `apptainer pull empo.sif docker://<registry>/<image>:latest`
 - ✅ Run command: `apptainer exec --nv -B /path/to/repo:/workspace empo.sif python /workspace/train.py`
-- ✅ SLURM script: `scripts/run_cluster.sh`
-- ✅ Setup helper: `scripts/setup_cluster_image.sh`
+- ✅ SLURM script: `setup/scripts/run_cluster.sh`
+- ✅ Setup helper: `setup/scripts/setup_cluster_image.sh`
 
 **Usage**:
 ```bash
@@ -42,7 +42,7 @@ apptainer pull empo.sif docker://youruser/empo:latest
 apptainer exec --nv -B $(pwd):/workspace empo.sif python /workspace/train.py
 
 # Or submit SLURM job
-sbatch scripts/run_cluster.sh
+sbatch setup/scripts/run_cluster.sh
 ```
 
 ### 3. Project Layout
@@ -53,8 +53,8 @@ sbatch scripts/run_cluster.sh
 - ✅ `Dockerfile`: Unified image definition
 - ✅ `docker-compose.yml`: Local development
 - ✅ `README.md`: 393 lines covering both workflows
-- ✅ `requirements.txt`: PyTorch >=2.0.0, JAX (optional), Gymnasium, PettingZoo, Multigrid
-- ✅ `requirements-dev.txt`: pytest, black, ruff, mypy, jupyter
+- ✅ `setup/requirements.txt`: PyTorch >=2.0.0, JAX (optional), Gymnasium, PettingZoo, Multigrid
+- ✅ `setup/requirements-dev.txt`: pytest, black, ruff, mypy, jupyter
 - ✅ MPI: mpi4py in requirements, openmpi in Dockerfile
 - ✅ Reproducible: Version pins, seed setting, Docker layer caching
 - ✅ No duplication: Single Dockerfile, conditional dev dependencies
@@ -64,11 +64,12 @@ sbatch scripts/run_cluster.sh
 empo/
 ├── Dockerfile              # Unified image
 ├── docker-compose.yml      # Local dev
-├── requirements.txt        # Core deps
-├── requirements-dev.txt    # Dev deps
+├── setup/                       # Setup and packaging helpers
+│   ├── requirements.txt        # Core deps
+│   └── requirements-dev.txt    # Dev deps
 ├── train.py                # Training script
 ├── src/empo/              # Package
-├── scripts/               # Deployment helpers
+├── setup/scripts/               # Deployment helpers
 ├── examples/              # Examples
 ├── tests/                 # Tests
 └── docs/                  # Documentation
@@ -90,8 +91,8 @@ empo/
 ### Core Files
 1. **Dockerfile** - CUDA-enabled, supports both Docker and Singularity
 2. **docker-compose.yml** - GPU-enabled local development
-3. **requirements.txt** - Core dependencies (PyTorch, MARL, etc.)
-4. **requirements-dev.txt** - Development tools
+3. **setup/requirements.txt** - Core dependencies (PyTorch, MARL, etc.)
+4. **setup/requirements-dev.txt** - Development tools
 5. **train.py** - Example training script with CLI
 
 ### Documentation
@@ -102,9 +103,9 @@ empo/
 5. This file (**SUMMARY.md**)
 
 ### Scripts
-1. **scripts/run_cluster.sh** - SLURM job submission
-2. **scripts/setup_cluster_image.sh** - Image setup helper
-3. **scripts/verify_setup.sh** - Setup verification
+1. **setup/scripts/run_cluster.sh** - SLURM job submission
+2. **setup/scripts/setup_cluster_image.sh** - Image setup helper
+3. **setup/scripts/verify_setup.sh** - Setup verification
 
 ### Development Tools
 1. **Makefile** - Convenient commands
@@ -187,7 +188,7 @@ docker push youruser/empo:latest
 apptainer pull empo.sif docker://youruser/empo:latest
 
 # 3. Submit job
-sbatch scripts/run_cluster.sh
+sbatch setup/scripts/run_cluster.sh
 ```
 
 ## 🔍 Verification
@@ -202,7 +203,7 @@ All components verified:
 
 Run verification:
 ```bash
-bash scripts/verify_setup.sh
+bash setup/scripts/verify_setup.sh
 python tests/test_structure.py
 ```
 
