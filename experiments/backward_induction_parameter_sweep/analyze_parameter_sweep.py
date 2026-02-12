@@ -119,7 +119,7 @@ def compute_derived_outcomes(df: pd.DataFrame) -> pd.DataFrame:
     - pi_r_ratio: pi_r(turn_left) / (pi_r(turn_left) + pi_r(turn_right)) [proportion in 0,1]
     - Q_r_ratio: |Q_r(turn_left)| / (|Q_r(turn_left)| + |Q_r(turn_right)|) [proportion in 0,1]
     - X_h_ratio: X_h1 / (X_h1 + X_h2) [proportion in 0,1]
-    - log2_V_r: log2(|V_r|) (V_r is negative, so we use absolute value)
+    - -log2(-V_r): -log2(-V_r) (V_r is negative, so -V_r > 0)
     - log2_X_h1: log2(X_h1)
     - log2_X_h2: log2(X_h2)
     - log2_X_h_diff: log2(X_h1) - log2(X_h2) = log2(X_h1 / X_h2)
@@ -155,11 +155,11 @@ def compute_derived_outcomes(df: pd.DataFrame) -> pd.DataFrame:
         X_ratio = np.where(X_sum > 0, df['X_h1'] / X_sum, 0.5)
         df['X_h_ratio'] = np.clip(X_ratio, 0.001, 0.999)
     
-    # log2(|V_r|) - V_r is negative, so use absolute value
+    # -log2(-V_r) - V_r is negative, so -V_r > 0
     if 'V_r' in df.columns:
         # Avoid log of zero
-        V_r_abs = np.abs(df['V_r'])
-        df['log2_V_r'] = np.where(V_r_abs > 0, np.log2(V_r_abs), np.nan)
+        V_r_neg = -df['V_r']
+        df['-log2(-V_r)'] = np.where(V_r_neg > 0, -np.log2(V_r_neg), np.nan)
     
     # log2(X_h1) and log2(X_h2)
     if 'X_h1' in df.columns:
@@ -802,6 +802,237 @@ def create_visualizations(df: pd.DataFrame,
     print(f"Saved scatter plots to {output_path / 'scatter_plots.png'}")
 
 
+def create_scatterplot_matrices(df: pd.DataFrame,
+                                predictors: List[str],
+                                outcomes: List[Tuple[str, str, str]],
+                                output_dir: str):
+    """
+    Create three bivariate scatterplot matrices:
+    1. Regressors vs Regressants
+    2. Regressors vs Regressors
+    3. Regressants vs Regressants
+    
+    Args:
+        df: DataFrame with results
+        predictors: List of predictor (regressor) variable names
+        outcomes: List of (column_name, description, model_type) tuples for regressants
+        output_dir: Directory to save plots
+    """
+    if not HAVE_MATPLOTLIB:
+        print("Skipping scatterplot matrices (matplotlib not available)")
+        return
+    
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    
+    # Extract outcome column names that exist in the dataframe
+    outcome_cols = [col for col, _, _ in outcomes if col in df.columns and df[col].notna().any()]
+    
+    if len(outcome_cols) == 0:
+        print("No valid outcome columns for scatterplot matrices")
+        return
+    
+    # Filter predictors to those with variance
+    valid_predictors = [p for p in predictors if p in df.columns and df[p].std() > 0]
+    
+    if len(valid_predictors) == 0:
+        print("No valid predictors for scatterplot matrices")
+        return
+    
+    print(f"\nCreating scatterplot matrices...")
+    print(f"  Regressors: {valid_predictors}")
+    print(f"  Regressants: {outcome_cols}")
+    
+    # 1. Regressors vs Regressants scatterplot matrix
+    _create_cross_scatterplot_matrix(
+        df, valid_predictors, outcome_cols,
+        "Regressors vs Regressants",
+        output_path / 'scatterplot_matrix_regressors_vs_regressants.png'
+    )
+    
+    # 2. Regressors vs Regressors scatterplot matrix
+    _create_symmetric_scatterplot_matrix(
+        df, valid_predictors,
+        "Regressors vs Regressors",
+        output_path / 'scatterplot_matrix_regressors.png'
+    )
+    
+    # 3. Regressants vs Regressants scatterplot matrix
+    if len(outcome_cols) > 1:
+        _create_symmetric_scatterplot_matrix(
+            df, outcome_cols,
+            "Regressants vs Regressants",
+            output_path / 'scatterplot_matrix_regressants.png'
+        )
+    else:
+        print(f"  Skipping regressants vs regressants (only {len(outcome_cols)} outcome column)")
+
+
+def _create_cross_scatterplot_matrix(df: pd.DataFrame,
+                                      x_vars: List[str],
+                                      y_vars: List[str],
+                                      title: str,
+                                      output_path: Path):
+    """
+    Create a scatterplot matrix with x_vars on columns and y_vars on rows.
+    
+    Args:
+        df: DataFrame with data
+        x_vars: Variables for x-axis (columns)
+        y_vars: Variables for y-axis (rows)
+        title: Plot title
+        output_path: Path to save the figure
+    """
+    n_cols = len(x_vars)
+    n_rows = len(y_vars)
+    
+    # Calculate figure size based on number of variables
+    fig_width = max(12, n_cols * 2)
+    fig_height = max(10, n_rows * 2)
+    
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_width, fig_height))
+    
+    # Handle single row/column case
+    if n_rows == 1 and n_cols == 1:
+        axes = np.array([[axes]])
+    elif n_rows == 1:
+        axes = axes.reshape(1, -1)
+    elif n_cols == 1:
+        axes = axes.reshape(-1, 1)
+    
+    for i, y_var in enumerate(y_vars):
+        for j, x_var in enumerate(x_vars):
+            ax = axes[i, j]
+            
+            # Get valid data (both x and y not NaN)
+            mask = df[x_var].notna() & df[y_var].notna()
+            x_data = df.loc[mask, x_var]
+            y_data = df.loc[mask, y_var]
+            
+            if len(x_data) > 0:
+                ax.scatter(x_data, y_data, alpha=0.1, s=15, c='steelblue')
+                
+                # Add LOWESS nonparametric regression line
+                if len(x_data) > 10:
+                    try:
+                        from statsmodels.nonparametric.smoothers_lowess import lowess
+                        # Sort by x for a clean line
+                        lowess_result = lowess(y_data.values, x_data.values, frac=0.3, it=3)
+                        ax.plot(lowess_result[:, 0], lowess_result[:, 1],
+                               color='red', linewidth=1.5, alpha=0.8)
+                    except Exception:
+                        pass  # Skip if LOWESS fails
+                
+                # Add correlation coefficient
+                if len(x_data) > 2:
+                    corr, pval = stats.pearsonr(x_data, y_data)
+                    sig = '***' if pval < 0.001 else '**' if pval < 0.01 else '*' if pval < 0.05 else ''
+                    ax.text(0.05, 0.95, f'r={corr:.2f}{sig}',
+                           transform=ax.transAxes, fontsize=8,
+                           verticalalignment='top',
+                           bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+            
+            # Only show x-axis label on bottom row
+            if i == n_rows - 1:
+                ax.set_xlabel(x_var, fontsize=8)
+            else:
+                ax.set_xticklabels([])
+            
+            # Only show y-axis label on first column
+            if j == 0:
+                ax.set_ylabel(y_var, fontsize=8)
+            else:
+                ax.set_yticklabels([])
+            
+            ax.tick_params(axis='both', which='major', labelsize=6)
+            ax.grid(True, alpha=0.3)
+    
+    fig.suptitle(title, fontsize=14, fontweight='bold')
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+    
+    print(f"  Saved {title} to {output_path}")
+
+
+def _create_symmetric_scatterplot_matrix(df: pd.DataFrame,
+                                          variables: List[str],
+                                          title: str,
+                                          output_path: Path):
+    """
+    Create a symmetric scatterplot matrix (variables vs themselves).
+    Shows histograms on diagonal and scatterplots with correlations off-diagonal.
+    
+    Args:
+        df: DataFrame with data
+        variables: Variables to plot
+        title: Plot title
+        output_path: Path to save the figure
+    """
+    n_vars = len(variables)
+    
+    # Calculate figure size based on number of variables
+    fig_size = max(10, n_vars * 1.8)
+    
+    fig, axes = plt.subplots(n_vars, n_vars, figsize=(fig_size, fig_size))
+    
+    # Handle single variable case
+    if n_vars == 1:
+        axes = np.array([[axes]])
+    
+    for i, y_var in enumerate(variables):
+        for j, x_var in enumerate(variables):
+            ax = axes[i, j]
+            
+            if i == j:
+                # Diagonal: histogram
+                valid_data = df[x_var].dropna()
+                if len(valid_data) > 0:
+                    ax.hist(valid_data, bins=20, color='steelblue', alpha=0.7, edgecolor='white')
+                ax.set_ylabel('')
+            else:
+                # Off-diagonal: scatterplot
+                mask = df[x_var].notna() & df[y_var].notna()
+                x_data = df.loc[mask, x_var]
+                y_data = df.loc[mask, y_var]
+                
+                if len(x_data) > 0:
+                    ax.scatter(x_data, y_data, alpha=0.1, s=15, c='steelblue')
+                    
+                    # Add correlation coefficient
+                    if len(x_data) > 2:
+                        corr, pval = stats.pearsonr(x_data, y_data)
+                        sig = '***' if pval < 0.001 else '**' if pval < 0.01 else '*' if pval < 0.05 else ''
+                        ax.text(0.05, 0.95, f'r={corr:.2f}{sig}',
+                               transform=ax.transAxes, fontsize=8,
+                               verticalalignment='top',
+                               bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+            
+            # Only show x-axis label on bottom row
+            if i == n_vars - 1:
+                ax.set_xlabel(x_var, fontsize=8)
+            else:
+                ax.set_xticklabels([])
+            
+            # Only show y-axis label on first column
+            if j == 0 and i != j:
+                ax.set_ylabel(y_var, fontsize=8)
+            elif j == 0 and i == j:
+                ax.set_ylabel(y_var, fontsize=8)
+            else:
+                ax.set_yticklabels([])
+            
+            ax.tick_params(axis='both', which='major', labelsize=6)
+            ax.grid(True, alpha=0.3)
+    
+    fig.suptitle(title, fontsize=14, fontweight='bold')
+    plt.tight_layout(rect=[0, 0, 1, 0.97])
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+    
+    print(f"  Saved {title} to {output_path}")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Analyze parameter sweep results with logistic regression',
@@ -847,24 +1078,27 @@ def main():
     # Compute derived outcome variables
     df = compute_derived_outcomes(df)
     
-    # Define predictors (exclude beta_r since it's fixed)
-    predictors = ['max_steps', 'beta_h', 'gamma_h', 'gamma_r', 'zeta', 'eta', 'xi']
+def run_analysis(df: pd.DataFrame, predictors: List[str], outcomes: List[Tuple[str, str, str]],
+                  plots_dir: str, label: str = "FULL SAMPLE", output_file: str = None):
+    """
+    Run regressions and create scatterplot matrices for a given DataFrame.
     
-    # ========================================================================
-    # ANALYSES: Outcome variables
-    # ========================================================================
+    Args:
+        df: DataFrame with results (already has derived columns)
+        predictors: List of predictor variable names
+        outcomes: List of (column, description, model_type) tuples
+        plots_dir: Directory for output plots
+        label: Label for this analysis subset
+        output_file: Optional output file for text results
+    """
+    print()
+    print("#" * 80)
+    print(f"# {label} (N={len(df)})")
+    print("#" * 80)
     
-    # Define outcomes: (column, description, model_type)
-    # model_type: 'glm' for proportions in [0,1], 'ols' for continuous
-    outcomes = [
-        ('pi_r_ratio', 'pi_r(turn_left) / (pi_r(turn_left) + pi_r(turn_right))', 'glm'),
-        ('Q_r_ratio', '|Q_r(turn_left)| / (|Q_r(turn_left)| + |Q_r(turn_right)|)', 'glm'),
-        ('log2_V_r', 'log2(|V_r|) at initial state', 'ols'),
-        ('log2_X_h1', 'log2(X_h1) for h1 (first human)', 'ols'),
-        ('log2_X_h2', 'log2(X_h2) for h2 (second human)', 'ols'),
-        ('X_h_ratio', 'X_h1 / (X_h1 + X_h2)', 'glm'),
-        ('log2_X_h_diff', 'log2(X_h1) - log2(X_h2) = log2(X_h1/X_h2)', 'ols'),
-    ]
+    if len(df) < 10:
+        print(f"WARNING: Only {len(df)} samples in {label}. Skipping.")
+        return
     
     for outcome_col, outcome_desc, model_type in outcomes:
         if outcome_col not in df.columns or df[outcome_col].isna().all():
@@ -884,7 +1118,7 @@ def main():
             continue
         
         print(f"\n{'='*80}")
-        print(f"UNIVARIATE ANALYSIS: {outcome_desc} [{model_type.upper()}]")
+        print(f"UNIVARIATE ANALYSIS [{label}]: {outcome_desc} [{model_type.upper()}]")
         print("="*80)
         print()
         
@@ -905,7 +1139,7 @@ def main():
             # Full model
             model_fit, summary_fit = fit_full_glm_proportion(df, outcome_col, predictors)
             if model_fit is not None:
-                print_glm_summary(outcome_desc, model_fit, summary_fit, output_file=args.output)
+                print_glm_summary(outcome_desc + f' [{label}]', model_fit, summary_fit, output_file=output_file)
         else:
             # OLS for continuous outcomes
             univar_results = compute_univariate_ols(df, outcome_col, predictors)
@@ -916,7 +1150,99 @@ def main():
             # Full model
             model_fit, summary_fit = fit_full_ols_model(df, outcome_col, predictors)
             if model_fit is not None:
-                print_ols_summary(outcome_desc, model_fit, summary_fit, output_file=args.output)
+                print_ols_summary(outcome_desc + f' [{label}]', model_fit, summary_fit, output_file=output_file)
+    
+    # Create scatterplot matrices
+    create_scatterplot_matrices(df, predictors, outcomes, plots_dir)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Analyze parameter sweep results with logistic regression',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__
+    )
+    parser.add_argument('results_csv', type=str,
+                       help='Path to results CSV file from parameter_sweep_asymmetric_freeing.py')
+    parser.add_argument('--interactions', action='store_true',
+                       help='Include interaction terms in the model')
+    parser.add_argument('--output', type=str, default=None,
+                       help='Output file for text results (default: print to stdout)')
+    parser.add_argument('--plots_dir', type=str, default='outputs/parameter_sweep/plots',
+                       help='Directory for output plots (default: outputs/parameter_sweep/plots)')
+    parser.add_argument('--max_steps_threshold', type=int, default=10,
+                       help='Threshold for splitting subsamples by max_steps (default: 10)')
+    
+    args = parser.parse_args()
+    
+    print("=" * 80)
+    print("PARAMETER SWEEP ANALYSIS")
+    print("=" * 80)
+    print()
+    
+    # Load data
+    df = load_results(args.results_csv)
+    
+    if len(df) < 10:
+        print("WARNING: Very few valid samples. Results may not be reliable.")
+        print("Consider running parameter sweep with more samples.")
+        print()
+    
+    # Check for outcome variance
+    p_left_std = df['p_left'].std()
+    if p_left_std < 0.001:
+        print("ERROR: No variance in outcome variable (all p_left values are nearly identical).")
+        print(f"  p_left std: {p_left_std}")
+        print("\nLinear regression requires variance in the outcome.")
+        print("Please run with more samples or different parameter ranges.")
+        print()
+        print("Parameter summary statistics:")
+        print(df[['max_steps', 'beta_h', 'gamma_h', 'gamma_r', 'zeta', 'eta', 'xi', 'p_left']].describe())
+        return
+    
+    # Compute derived outcome variables
+    df = compute_derived_outcomes(df)
+    
+    # Define predictors (exclude beta_r since it's fixed)
+    predictors = ['max_steps', 'beta_h', 'gamma_h', 'gamma_r', 'zeta', 'eta', 'xi']
+    
+    # Define outcomes: (column, description, model_type)
+    # model_type: 'glm' for proportions in [0,1], 'ols' for continuous
+    outcomes = [
+        ('pi_r_ratio', 'pi_r(turn_left) / (pi_r(turn_left) + pi_r(turn_right))', 'glm'),
+        ('Q_r_ratio', '|Q_r(turn_left)| / (|Q_r(turn_left)| + |Q_r(turn_right)|)', 'glm'),
+        ('-log2(-V_r)', '-log2(-V_r) at initial state', 'ols'),
+        ('log2_X_h1', 'log2(X_h1) for h1 (first human)', 'ols'),
+        ('log2_X_h2', 'log2(X_h2) for h2 (second human)', 'ols'),
+        ('X_h_ratio', 'X_h1 / (X_h1 + X_h2)', 'glm'),
+        ('log2_X_h_diff', 'log2(X_h1) - log2(X_h2) = log2(X_h1/X_h2)', 'ols'),
+    ]
+    
+    # ========================================================================
+    # Run analysis on FULL sample
+    # ========================================================================
+    run_analysis(df, predictors, outcomes, args.plots_dir, label="FULL SAMPLE", output_file=args.output)
+    
+    # ========================================================================
+    # Run analysis on subsamples split by max_steps threshold
+    # ========================================================================
+    threshold = args.max_steps_threshold
+    
+    df_low = df[df['max_steps'] < threshold].copy()
+    df_high = df[df['max_steps'] >= threshold].copy()
+    
+    print(f"\n\nSplitting by max_steps threshold = {threshold}:")
+    print(f"  max_steps < {threshold}: {len(df_low)} samples")
+    print(f"  max_steps >= {threshold}: {len(df_high)} samples")
+    
+    plots_dir_low = str(Path(args.plots_dir) / f'max_steps_lt_{threshold}')
+    plots_dir_high = str(Path(args.plots_dir) / f'max_steps_gte_{threshold}')
+    
+    run_analysis(df_low, predictors, outcomes, plots_dir_low,
+                 label=f"max_steps < {threshold}", output_file=args.output)
+    
+    run_analysis(df_high, predictors, outcomes, plots_dir_high,
+                 label=f"max_steps >= {threshold}", output_file=args.output)
     
     if args.output:
         print(f"\nDetailed results saved to: {args.output}")
