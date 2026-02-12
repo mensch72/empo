@@ -1229,20 +1229,20 @@ def main():
     threshold = args.max_steps_threshold
     
     df_low = df[df['max_steps'] < threshold].copy()
-    df_high = df[df['max_steps'] >= threshold].copy()
+    df_high = df[df['max_steps'] > threshold].copy()
     
     print(f"\n\nSplitting by max_steps threshold = {threshold}:")
     print(f"  max_steps < {threshold}: {len(df_low)} samples")
-    print(f"  max_steps >= {threshold}: {len(df_high)} samples")
+    print(f"  max_steps > {threshold}: {len(df_high)} samples")
     
     plots_dir_low = str(Path(args.plots_dir) / f'max_steps_lt_{threshold}')
-    plots_dir_high = str(Path(args.plots_dir) / f'max_steps_gte_{threshold}')
+    plots_dir_high = str(Path(args.plots_dir) / f'max_steps_gt_{threshold}')
     
     run_analysis(df_low, predictors, outcomes, plots_dir_low,
                  label=f"max_steps < {threshold}", output_file=args.output)
     
     run_analysis(df_high, predictors, outcomes, plots_dir_high,
-                 label=f"max_steps >= {threshold}", output_file=args.output)
+                 label=f"max_steps > {threshold}", output_file=args.output)
     
     if args.output:
         print(f"\nDetailed results saved to: {args.output}")
