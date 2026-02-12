@@ -28,6 +28,9 @@ psutil>=5.9.0
 # Note: On Kaggle, graphviz system package is pre-installed
 graphviz>=0.20.0
 
+# Data analysis (pandas pre-installed, statsmodels may not be)
+statsmodels>=0.14.0
+
 # Note: The following are OPTIONAL and NOT included by default:
 # - tensorboard>=2.13.0  (pre-installed on Kaggle, but may need upgrade)
 # - wandb>=0.15.0        (uncomment if needed for experiment tracking)

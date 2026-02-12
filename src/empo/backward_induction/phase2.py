@@ -33,7 +33,7 @@ import cloudpickle
 from tqdm import tqdm
 from scipy.special import logsumexp
 
-from empo.util.memory_monitor import MemoryMonitor
+from empo.util.memory_monitor import MemoryMonitor, deep_sizeof, get_process_memory_mb
 from empo.possible_goal import PossibleGoal, PossibleGoalGenerator
 from empo.human_policy_prior import TabularHumanPolicyPrior
 from empo.robot_policy import RobotPolicy
@@ -340,6 +340,9 @@ def _rp_compute_sequential(
     
     total_states = len(states)
     
+    # Memory tracking interval
+    memory_report_interval = max(1, total_states // 10)  # Report ~10 times during computation
+    
     # Determine if using indexed goals and initialize templates
     use_indexed = False #hasattr(possible_goal_generator, 'indexed') and possible_goal_generator.indexed
     if use_indexed:
@@ -483,6 +486,15 @@ def _rp_compute_sequential(
         states_processed = total_states - state_index
         if progress_callback is not None:
             progress_callback(states_processed, total_states)
+        
+        # Periodic memory reporting
+        if not quiet and states_processed > 0 and states_processed % memory_report_interval == 0:
+            print(f"\n[Phase2 Memory @ {states_processed}/{total_states} states] RSS: {get_process_memory_mb():.1f} MB")
+            vh_mb = deep_sizeof(Vh_values) / (1024**2)
+            vr_mb = deep_sizeof(Vr_values) / (1024**2)
+            pol_mb = deep_sizeof(robot_policy) / (1024**2)
+            cache_mb = deep_sizeof(slice_cache) / (1024**2) if slice_cache is not None else 0.0
+            print(f"  Vh_values: {vh_mb:.1f} MB, Vr_values: {vr_mb:.1f} MB, robot_policy: {pol_mb:.1f} MB, cache: {cache_mb:.1f} MB")
         
         # Check memory less frequently to reduce overhead
         if memory_monitor is not None:
@@ -988,10 +1000,12 @@ def compute_robot_policy(
             print("\n=== Creating Disk-Based DAG ===")
         
         # Calculate memory stats before slicing
+        # Note: num_goals not available here, use num_action_profiles as proxy
         mem_stats = estimate_dag_memory(states, transitions, num_agents,
-                                        num_actions, num_action_profiles)
+                                        num_goals=num_action_profiles,  # proxy
+                                        num_actions=num_actions)
         if not quiet:
-            print(f"Full DAG memory: {mem_stats['total_mb']:.1f} MB")
+            print(f"Estimated memory: {mem_stats['total_mb']:.0f} MB")
         
         # Create disk-based DAG
         num_action_profiles_for_cache = num_actions ** num_agents
@@ -1034,7 +1048,7 @@ def compute_robot_policy(
     # Set up default tqdm progress bar if no callback provided
     _pbar: Optional[tqdm[int]] = None
     if progress_callback is None and not quiet:
-        _pbar = tqdm(total=len(states), desc="Robot policy backward induction", unit="states")
+        _pbar = tqdm(total=len(states), desc="Robot policy backward induction", unit="states", leave=False)
         def progress_callback(done: int, total: int) -> None:
             if _pbar is not None:
                 _pbar.n = done
@@ -1319,6 +1333,21 @@ def compute_robot_policy(
         robot_agent_indices=robot_agent_indices, 
         values=robot_policy_values
     )
+    
+    # Print actual memory after Phase 2 backward induction
+    if not quiet:
+        print(f"\nActual memory usage (after Phase 2 backward induction):")
+        print(f"  Process RSS: {get_process_memory_mb():.1f} MB")
+        vh_actual = deep_sizeof(Vh_values) / (1024**2)
+        vr_actual = deep_sizeof(Vr_values) / (1024**2)
+        policy_actual = deep_sizeof(robot_policy_values) / (1024**2)
+        cache_actual = deep_sizeof(sliced_cache) / (1024**2) if sliced_cache is not None else 0.0
+        print(f"  Vh_values: {vh_actual:.1f} MB")
+        print(f"  Vr_values: {vr_actual:.1f} MB")
+        print(f"  robot_policy_values: {policy_actual:.1f} MB")
+        if sliced_cache is not None:
+            print(f"  sliced_cache: {cache_actual:.1f} MB")
+        print(f"  Total measured Phase 2 structures: {vh_actual + vr_actual + policy_actual + cache_actual:.1f} MB")
     
     if return_values:
         # Convert Vr_values from array to dict
