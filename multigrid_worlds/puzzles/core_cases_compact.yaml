@@ -1,0 +1,27 @@
+# Compact cross-shaped map covering core tradeoff cases
+metadata:
+  name: "Core Cases Compact"
+  description: "A compact cross-shaped layout with four rooms that capture the core design cases: a harm-for-many tradeoff (north), a help-many/no-externalities gate (west), a close-few/open-more tradeoff (east), and a risk corridor (south)."
+  author: "EMPO Framework"
+  version: "1.0.0"
+  created: "2026-01-24T00:00:00Z"
+  category: "puzzles"
+  tags: ["compact", "core-cases", "rock", "risk", "tradeoff", "human-robot"]
+
+map: |
+  We We We We We We We We We We We We We
+  We We We We We .. .. .. We We We We We
+  We We We We We .. Ar .. We We We We We
+  We We We We We .. .. .. We We We We We
+  We We We We We We Ro We We We We We We
+  We .. .. .. We We .. We We .. .. .. We
+  We .. .. .. Ro .. Ae .. .. Ro .. .. We
+  We .. .. .. We We .. We We .. .. .. We
+  We We We We We We Un We We We We We We
+  We We We We We .. .. .. We We We We We
+  We We We We We .. Ag .. We We We We We
+  We We We We We .. .. .. We We We We We
+  We We We We We We We We We We We We We
+
+max_steps: 120
+can_push_rocks: "e"

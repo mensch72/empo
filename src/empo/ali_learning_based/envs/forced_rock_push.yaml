@@ -1,0 +1,31 @@
+# Environment where robot MUST push rock for human to reach goal
+# Wall completely blocks y=2 except where the rock is.
+# Robot starts above rock and can push it down to open the passage.
+metadata:
+  name: "Forced Rock Push"
+  description: "A wall completely blocks the human's path. The only passage is blocked by a rock. The robot MUST push the rock down to let the human reach the goal."
+  author: "EMPO Framework"
+  version: "1.0.0"
+  category: "copilot_challenges"
+  tags: ["human-robot", "rock", "empowerment", "forced-cooperation"]
+
+map: |
+  We We We We We We We
+  We Ay .. .. .. Ae We
+  We We We We We Ro We
+  We .. .. .. .. .. We
+  We .. .. .. .. .. We
+  We We We We We We We
+
+max_steps: 30
+can_push_rocks: "e"
+
+# Multiple goals to cover the grid
+# Top-left (reachable without rock push)
+# Top-right (reachable without rock push)
+# Bottom goals (require rock push to reach)
+possible_goals:
+  - "1,1, 2,1"     # Top-left
+  - "3,1, 5,2"     # Top-right (includes rock position)
+  - "1,3, 2,4"     # Bottom-left (requires rock push)
+  - "3,3, 5,4"     # Bottom-right (requires rock push)

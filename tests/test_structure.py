@@ -29,19 +29,19 @@ def test_import_empo():
 
 def test_requirements_exist():
     """Test that requirement files exist."""
-    req_file = PROJECT_ROOT / "requirements.txt"
-    req_dev_file = PROJECT_ROOT / "requirements-dev.txt"
-    assert req_file.exists(), f"requirements.txt not found at {req_file}"
-    assert req_dev_file.exists(), f"requirements-dev.txt not found at {req_dev_file}"
+    req_file = PROJECT_ROOT / "setup/requirements/base.txt"
+    req_dev_file = PROJECT_ROOT / "setup/requirements/dev.txt"
+    assert req_file.exists(), f"setup/requirements/base.txt not found at {req_file}"
+    assert req_dev_file.exists(), f"setup/requirements/dev.txt not found at {req_dev_file}"
 
 
 def test_dockerfile_exists():
     """Test that Dockerfile exists.
-    
+
     Skip this test when running inside Docker container since
     Docker files are excluded via .dockerignore.
     """
-    dockerfile = PROJECT_ROOT / "Dockerfile"
+    dockerfile = PROJECT_ROOT / "setup/docker/Dockerfile"
     if not dockerfile.exists() and Path("/.dockerenv").exists():
         # Running inside Docker - skip gracefully
         import pytest
@@ -51,11 +51,11 @@ def test_dockerfile_exists():
 
 def test_docker_compose_exists():
     """Test that docker-compose.yml exists.
-    
+
     Skip this test when running inside Docker container since
     Docker files are excluded via .dockerignore.
     """
-    compose_file = PROJECT_ROOT / "docker-compose.yml"
+    compose_file = PROJECT_ROOT / "setup/docker/docker-compose.yml"
     if not compose_file.exists() and Path("/.dockerenv").exists():
         # Running inside Docker - skip gracefully
         import pytest

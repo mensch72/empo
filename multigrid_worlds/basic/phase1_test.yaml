@@ -1,0 +1,25 @@
+# Small 7x7 grid for Phase 1 functional testing.
+# Grey robot (Ae) and yellow human (Ay) in an open grid.
+# Human has room to navigate to various goal cells.
+metadata:
+  name: "Phase 1 Test"
+  description: "Open 7x7 grid with 1 robot and 1 human for testing Phase 1 Q-learning."
+  tags: ["testing", "phase1"]
+
+map: |
+  We We We We We We We
+  We .. .. .. .. .. We
+  We .. Ae .. .. .. We
+  We .. .. .. .. .. We
+  We .. .. .. Ay .. We
+  We .. .. .. .. .. We
+  We We We We We We We
+
+max_steps: 12
+action_class: "SmallActions"
+
+possible_goals:
+  - "1,1, 3,3"
+  - "3,1, 5,3"
+  - "1,3, 3,5"
+  - "3,3, 5,5"

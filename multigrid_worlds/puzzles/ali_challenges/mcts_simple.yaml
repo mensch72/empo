@@ -1,0 +1,23 @@
+# Compact grid for MCTS-style planning with rocks, humans, and a robot
+metadata:
+  name: "MCTS Simple"
+  description: "Compact grid with walls, rocks, yellow agents, and a grey robot for simple planning tests."
+  author: "Ali"
+  version: "1.0.0"
+  created: "2026-01-27T00:00:00Z"
+  category: "puzzles"
+  tags: ["mcts", "simple", "rocks", "humans", "robot"]
+
+map: |
+  We We We We We We We We We We We
+  We We We We We We We We We We We
+  We We We We We We We We We We We
+  We We We We We We .. .. We We We
+  We .. .. Ro .. Ae .. Ro .. .. We
+  We .. .. .. We We We Ay We We We
+  We .. .. Ay We We We .. We We We
+  We We We We We We We We We We We
+
+max_steps: 100
+can_push_rocks: "e"
+rocks_can_kill: true
