@@ -1,7 +1,7 @@
 #!/bin/bash
 # Singularity/Apptainer job submission script for SLURM clusters
 #
-# Usage: sbatch scripts/run_cluster.sh
+# Usage: sbatch setup/scripts/run_cluster.sh
 # Or modify and adapt for your specific cluster setup
 #
 # Security Note: This script uses environment variables for configuration.

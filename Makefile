@@ -194,7 +194,7 @@ build-sif:
 	@echo ""
 	@echo "On cluster, run with:"
 	@echo "  cd ~/bega/empo/git"
-	@echo "  sbatch ../scripts/run_cluster_sif.sh"
+	@echo "  sbatch ../setup/scripts/run_cluster_sif.sh"
 
 # Build and push GPU image to Docker Hub (no Singularity needed locally)
 up-gpu-docker-hub: build-gpu push-gpu
@@ -208,7 +208,7 @@ up-gpu-docker-hub: build-gpu push-gpu
 	@echo "  mkdir -p git"
 	@echo "  cd git && git clone <your-repo-url> . && cd .."
 	@echo "  apptainer pull empo.sif docker://$(DOCKER_REGISTRY)/$(DOCKER_USERNAME)/$(DOCKER_IMAGE_NAME):$(GPU_IMAGE_TAG)"
-	@echo "  cd git && sbatch ../scripts/run_cluster_sif.sh"
+	@echo "  cd git && sbatch ../setup/scripts/run_cluster_sif.sh"
 
 # Build GPU image and convert to SIF file locally
 up-gpu-sif-file: build-gpu build-sif
@@ -221,7 +221,7 @@ up-gpu-sif-file: build-gpu build-sif
 	@echo "  scp $(SIF_FILE) user@cluster:~/bega/empo/"
 	@echo "  ssh user@cluster"
 	@echo "  cd ~/bega/empo/git"
-	@echo "  sbatch ../scripts/run_cluster_sif.sh"
+	@echo "  sbatch ../setup/scripts/run_cluster_sif.sh"
 
 # Build Docker image with hierarchical dependencies (Ollama, MineLand)
 # These are large packages that require Java JDK 17 and Node.js 18

@@ -30,8 +30,8 @@ python train.py
 - ✅ Base image: `nvidia/cuda:12.1.0-cudnn8-runtime-ubuntu22.04` (compatible with `--nv`)
 - ✅ Pull command: `apptainer pull empo.sif docker://<registry>/<image>:latest`
 - ✅ Run command: `apptainer exec --nv -B /path/to/repo:/workspace empo.sif python /workspace/train.py`
-- ✅ SLURM script: `scripts/run_cluster.sh`
-- ✅ Setup helper: `scripts/setup_cluster_image.sh`
+- ✅ SLURM script: `setup/scripts/run_cluster.sh`
+- ✅ Setup helper: `setup/scripts/setup_cluster_image.sh`
 
 **Usage**:
 ```bash
@@ -42,7 +42,7 @@ apptainer pull empo.sif docker://youruser/empo:latest
 apptainer exec --nv -B $(pwd):/workspace empo.sif python /workspace/train.py
 
 # Or submit SLURM job
-sbatch scripts/run_cluster.sh
+sbatch setup/scripts/run_cluster.sh
 ```
 
 ### 3. Project Layout
@@ -69,7 +69,7 @@ empo/
 │   └── requirements-dev.txt    # Dev deps
 ├── train.py                # Training script
 ├── src/empo/              # Package
-├── scripts/               # Deployment helpers
+├── setup/scripts/               # Deployment helpers
 ├── examples/              # Examples
 ├── tests/                 # Tests
 └── docs/                  # Documentation
@@ -103,9 +103,9 @@ empo/
 5. This file (**SUMMARY.md**)
 
 ### Scripts
-1. **scripts/run_cluster.sh** - SLURM job submission
-2. **scripts/setup_cluster_image.sh** - Image setup helper
-3. **scripts/verify_setup.sh** - Setup verification
+1. **setup/scripts/run_cluster.sh** - SLURM job submission
+2. **setup/scripts/setup_cluster_image.sh** - Image setup helper
+3. **setup/scripts/verify_setup.sh** - Setup verification
 
 ### Development Tools
 1. **Makefile** - Convenient commands
@@ -188,7 +188,7 @@ docker push youruser/empo:latest
 apptainer pull empo.sif docker://youruser/empo:latest
 
 # 3. Submit job
-sbatch scripts/run_cluster.sh
+sbatch setup/scripts/run_cluster.sh
 ```
 
 ## 🔍 Verification
@@ -203,7 +203,7 @@ All components verified:
 
 Run verification:
 ```bash
-bash scripts/verify_setup.sh
+bash setup/scripts/verify_setup.sh
 python tests/test_structure.py
 ```
 

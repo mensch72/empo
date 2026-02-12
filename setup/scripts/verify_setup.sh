@@ -35,7 +35,7 @@ echo ""
 echo "2. Checking directory structure..."
 required_dirs=(
     "src/empo"
-    "scripts"
+    "setup/scripts"
     "examples"
 )
 
@@ -85,7 +85,7 @@ fi
 # Check shell scripts
 echo ""
 echo "6. Checking shell scripts..."
-shell_scripts=$(find scripts -name "*.sh")
+shell_scripts=$(find setup/scripts -name "*.sh")
 for script in $shell_scripts; do
     if bash -n "$script" 2>/dev/null; then
         echo "   ✓ $script"

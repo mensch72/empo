@@ -4,7 +4,7 @@
 #
 # Usage: 
 #   1. Copy SIF to cluster: scp empo.sif user@cluster:~/bega/empo/
-#   2. Submit job: sbatch scripts/run_cluster_sif.sh
+#   2. Submit job: sbatch setup/scripts/run_cluster_sif.sh
 
 #SBATCH --job-name=empo-training
 #SBATCH --output=logs/empo_%j.out

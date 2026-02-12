@@ -116,7 +116,7 @@ empo/
 ├── examples/                     # Usage examples
 ├── tests/                        # Test infrastructure
 ├── docs/                         # Detailed documentation
-├── scripts/
+├── setup/scripts/
 │   ├── run_cluster.sh           # SLURM job script
 │   ├── setup_cluster_image.sh   # Cluster setup helper
 │   └── verify_setup.sh          # Verification script
@@ -131,8 +131,8 @@ empo/
 **Singularity/Apptainer Ready**:
 - Same Dockerfile works for both Docker and Singularity
 - CUDA runtime compatible with `--nv` flag
-- Example SLURM job script (`scripts/run_cluster.sh`)
-- Setup helper script (`scripts/setup_cluster_image.sh`)
+- Example SLURM job script (`setup/scripts/run_cluster.sh`)
+- Setup helper script (`setup/scripts/setup_cluster_image.sh`)
 - Bind mount support for repository access
 
 **Workflow**:
@@ -140,7 +140,7 @@ empo/
 2. Push to Docker registry (DockerHub, GHCR, etc.)
 3. Pull on cluster: `apptainer pull empo.sif docker://user/empo:latest`
 4. Run: `apptainer exec --nv -B $(pwd):/workspace empo.sif python /workspace/train.py`
-5. Or submit SLURM job: `sbatch scripts/run_cluster.sh`
+5. Or submit SLURM job: `sbatch setup/scripts/run_cluster.sh`
 
 ### 6. Development Tools
 
@@ -150,7 +150,7 @@ empo/
 - `make train`: Run training
 - `make clean`: Clean outputs
 
-**Verification**: `scripts/verify_setup.sh` checks all components
+**Verification**: `setup/scripts/verify_setup.sh` checks all components
 
 **Testing**: Basic test infrastructure in `tests/`
 
@@ -244,7 +244,7 @@ apptainer exec --nv -B $(pwd):/workspace empo.sif \
   python /workspace/train.py --num-episodes 10000
 
 # Submit job
-sbatch scripts/run_cluster.sh
+sbatch setup/scripts/run_cluster.sh
 ```
 
 ## Testing & Validation
@@ -256,7 +256,7 @@ python tests/test_structure.py
 
 ### Full Verification
 ```bash
-bash scripts/verify_setup.sh
+bash setup/scripts/verify_setup.sh
 ```
 
 ### Docker Build Test

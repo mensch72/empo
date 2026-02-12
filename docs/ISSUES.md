@@ -757,8 +757,8 @@ Files with heavy print() usage:
 
 **Potentially unsafe operations:**
 
-1. [scripts/kaggle_setup.py](scripts/kaggle_setup.py)
-   - Line 15: `exec(open('scripts/kaggle_setup.py').read())`
+1. [setup/scripts/kaggle_setup.py](setup/scripts/kaggle_setup.py)
+   - Line 15: `exec(open('setup/scripts/kaggle_setup.py').read())`
    - Line 66: Uses `subprocess.CalledProcessError`
    - **Status**: REVIEW - exec() can be dangerous
    - **Action**: Document that this is for setup only, not production code

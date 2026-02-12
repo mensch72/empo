@@ -9,10 +9,10 @@ Usage in Kaggle:
     # First cell - clone and setup
     !git clone --depth 1 https://github.com/mensch72/empo.git
     %cd empo
-    %run scripts/kaggle_setup.py
+    %run setup/scripts/kaggle_setup.py
     
 Or import as module:
-    exec(open('scripts/kaggle_setup.py').read())
+    exec(open('setup/scripts/kaggle_setup.py').read())
 """
 
 import sys

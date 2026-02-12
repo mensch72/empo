@@ -75,7 +75,7 @@ apptainer pull empo.sif docker://your-docker-hub-username/empo:gpu-latest
 
 # Submit training job
 cd git
-sbatch ../scripts/run_cluster_sif.sh
+sbatch ../setup/scripts/run_cluster_sif.sh
 ```
 
 ## Method 2: SIF File (Direct Transfer)
@@ -116,7 +116,7 @@ cd ..
 
 # Submit training job (SIF file is in parent directory)
 cd git
-sbatch ../scripts/run_cluster_sif.sh
+sbatch ../setup/scripts/run_cluster_sif.sh
 ```
 
 ## Cluster Job Scripts
@@ -129,7 +129,7 @@ This script is optimized for the directory structure where:
 
 ```bash
 cd ~/bega/empo/git
-sbatch ../scripts/run_cluster_sif.sh
+sbatch ../setup/scripts/run_cluster_sif.sh
 ```
 
 Features:
@@ -142,7 +142,7 @@ Customize with environment variables:
 REPO_PATH=~/bega/empo/git \
 IMAGE_PATH=~/bega/empo/empo-gpu.sif \
 NUM_EPISODES=5000 \
-sbatch ../scripts/run_cluster_sif.sh
+sbatch ../setup/scripts/run_cluster_sif.sh
 ```
 
 ### Using run_cluster.sh (Generic)
@@ -150,7 +150,7 @@ sbatch ../scripts/run_cluster_sif.sh
 For flexible deployment scenarios:
 
 ```bash
-sbatch scripts/run_cluster.sh
+sbatch setup/scripts/run_cluster.sh
 ```
 
 ## Testing GPU Access
@@ -218,11 +218,11 @@ Expected cluster layout:
 ├── git/                       # Your repository clone
 │   ├── train.py
 │   ├── examples/
-│   ├── scripts/
+│   ├── setup/scripts/
 │   │   └── run_cluster_sif.sh
 │   ├── outputs/               # Created by training
 │   └── logs/                  # SLURM logs
-└── scripts/                   # (optional) copy of scripts
+└── setup/scripts/                   # (optional) copy of scripts
 ```
 
 ## Updating the Image
@@ -252,7 +252,7 @@ scp empo-gpu.sif user@cluster:~/bega/empo/
 
 ### Custom job parameters
 
-Edit `scripts/run_cluster_sif.sh` for your cluster:
+Edit `setup/scripts/run_cluster_sif.sh` for your cluster:
 
 ```bash
 #SBATCH --partition=gpu          # Your GPU partition name

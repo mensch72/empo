@@ -301,7 +301,7 @@ make up-gpu-docker-hub
 cd ~/bega/empo
 mkdir -p git && cd git && git clone <your-repo-url> . && cd ..
 apptainer pull empo.sif docker://yourusername/empo:gpu-latest
-cd git && sbatch ../scripts/run_cluster_sif.sh
+cd git && sbatch ../setup/scripts/run_cluster_sif.sh
 ```
 
 #### Method 2: Direct SIF Transfer
@@ -319,7 +319,7 @@ scp empo-gpu.sif user@cluster:~/bega/empo/
 # On cluster:
 # 3. Run training
 cd ~/bega/empo/git
-sbatch ../scripts/run_cluster_sif.sh
+sbatch ../setup/scripts/run_cluster_sif.sh
 ```
 
 ### Key Features
@@ -403,10 +403,10 @@ Edit the provided SLURM script and submit:
 mkdir -p logs
 
 # Edit the script with your parameters
-vim scripts/run_cluster.sh
+vim setup/scripts/run_cluster.sh
 
 # Submit the job
-sbatch scripts/run_cluster.sh
+sbatch setup/scripts/run_cluster.sh
 
 # Check job status
 squeue -u $USER
@@ -458,7 +458,7 @@ empo/
 │   ├── API.md                 # API reference
 │   └── ISSUES.md              # Known issues and improvements
 ├── tests/                     # Test suite
-├── scripts/
+├── setup/scripts/
 │   ├── run_cluster.sh         # SLURM job script
 │   └── setup_cluster_image.sh # Cluster image setup helper
 ├── examples/                  # Example scripts and notebooks
