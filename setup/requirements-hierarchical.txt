@@ -1,6 +1,6 @@
 # Optional dependencies for hierarchical RL with LLMs and Minecraft
 # These are large packages and are not included in the base Docker image by default.
-# Install with: pip install -r requirements-hierarchical.txt
+# Install with: pip install -r setup/requirements-hierarchical.txt
 
 # Ollama - Python client for local LLM inference via Ollama server
 # Note: This is just the client library. The Ollama server runs separately,

@@ -45,7 +45,7 @@ The repository includes a `.devcontainer/devcontainer.json` configuration that a
 - **AI Coding Assistants** (GitHub Copilot Workspace, etc.): The devcontainer configuration is automatically detected
 
 The pre-built image includes:
-- Python 3.11 with all dependencies from `requirements.txt` and `requirements-dev.txt`
+- Python 3.11 with all dependencies from `setup/requirements.txt` and `setup/requirements-dev.txt`
 - Development tools: pytest, black, ruff, mypy, jupyter
 - System dependencies: graphviz, ffmpeg, MPI, etc.
 
@@ -118,7 +118,7 @@ Images are built automatically by the GitHub Actions workflow in `.github/workfl
 
 The image is automatically rebuilt when:
 - Changes are pushed to `main` or `develop`
-- `requirements.txt` or `requirements-dev.txt` are modified
+- `setup/requirements.txt` or `setup/requirements-dev.txt` are modified
 - The `Dockerfile` is updated
 
 To manually trigger a rebuild, use the "workflow_dispatch" trigger in GitHub Actions.

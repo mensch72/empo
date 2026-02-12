@@ -107,8 +107,9 @@ vendor/ai_transport/           # Transport environment
 empo/
 ├── Dockerfile                    # Unified image definition
 ├── docker-compose.yml            # Local development
-├── requirements.txt              # Core dependencies
-├── requirements-dev.txt          # Dev dependencies
+├── setup/                             # Setup and packaging helpers
+│   ├── requirements.txt              # Core dependencies
+│   └── requirements-dev.txt          # Dev dependencies
 ├── src/empo/                     # Core EMPO framework
 ├── vendor/multigrid/             # MultiGrid environment
 ├── vendor/ai_transport/          # Transport environment
@@ -272,7 +273,7 @@ docker compose config --quiet
 
 ### Adding Dependencies
 
-Edit `requirements.txt` or `requirements-dev.txt`, then rebuild:
+Edit `setup/requirements.txt` or `setup/requirements-dev.txt`, then rebuild:
 ```bash
 docker compose up --build
 ```

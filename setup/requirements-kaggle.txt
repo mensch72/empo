@@ -1,10 +1,10 @@
 # EMPO - Minimal requirements for Kaggle Notebooks
 # 
 # This file contains the minimum required dependencies to run EMPO on Kaggle.
-# For full functionality, see requirements.txt.
+# For full functionality, see setup/requirements.txt.
 #
 # Installation in Kaggle:
-#   !pip install -q -r requirements-kaggle.txt
+#   !pip install -q -r setup/requirements-kaggle.txt
 #
 # Note: PyTorch, numpy, matplotlib, scipy are pre-installed on Kaggle.
 # Kaggle also has CUDA-enabled PyTorch by default when using GPU.

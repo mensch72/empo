@@ -53,8 +53,8 @@ sbatch scripts/run_cluster.sh
 - ✅ `Dockerfile`: Unified image definition
 - ✅ `docker-compose.yml`: Local development
 - ✅ `README.md`: 393 lines covering both workflows
-- ✅ `requirements.txt`: PyTorch >=2.0.0, JAX (optional), Gymnasium, PettingZoo, Multigrid
-- ✅ `requirements-dev.txt`: pytest, black, ruff, mypy, jupyter
+- ✅ `setup/requirements.txt`: PyTorch >=2.0.0, JAX (optional), Gymnasium, PettingZoo, Multigrid
+- ✅ `setup/requirements-dev.txt`: pytest, black, ruff, mypy, jupyter
 - ✅ MPI: mpi4py in requirements, openmpi in Dockerfile
 - ✅ Reproducible: Version pins, seed setting, Docker layer caching
 - ✅ No duplication: Single Dockerfile, conditional dev dependencies
@@ -64,8 +64,9 @@ sbatch scripts/run_cluster.sh
 empo/
 ├── Dockerfile              # Unified image
 ├── docker-compose.yml      # Local dev
-├── requirements.txt        # Core deps
-├── requirements-dev.txt    # Dev deps
+├── setup/                       # Setup and packaging helpers
+│   ├── requirements.txt        # Core deps
+│   └── requirements-dev.txt    # Dev deps
 ├── train.py                # Training script
 ├── src/empo/              # Package
 ├── scripts/               # Deployment helpers
@@ -90,8 +91,8 @@ empo/
 ### Core Files
 1. **Dockerfile** - CUDA-enabled, supports both Docker and Singularity
 2. **docker-compose.yml** - GPU-enabled local development
-3. **requirements.txt** - Core dependencies (PyTorch, MARL, etc.)
-4. **requirements-dev.txt** - Development tools
+3. **setup/requirements.txt** - Core dependencies (PyTorch, MARL, etc.)
+4. **setup/requirements-dev.txt** - Development tools
 5. **train.py** - Example training script with CLI
 
 ### Documentation

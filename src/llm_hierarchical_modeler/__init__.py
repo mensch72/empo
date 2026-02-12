@@ -10,7 +10,7 @@ robot-human collaboration.
 
 **Requirements:**
     - Optional dependencies: ollama, mineland
-    - Install with: pip install -r requirements-hierarchical.txt
+    - Install with: pip install -r setup/requirements-hierarchical.txt
     - MineLand requires additional setup from https://github.com/cocacola-lab/MineLand
 
 World Layout:

@@ -17,7 +17,7 @@ For manual Colab setup:
 
 # Install dependencies
 !apt-get update -qq && apt-get install -qq graphviz > /dev/null 2>&1
-!pip install -q -r requirements-colab.txt
+!pip install -q -r setup/requirements-colab.txt
 
 # Configure Python path
 import sys, os

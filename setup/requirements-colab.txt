@@ -1,10 +1,10 @@
 # EMPO - Minimal requirements for Google Colab
 # 
 # This file contains the minimum required dependencies to run EMPO in Google Colab.
-# For full functionality, see requirements.txt.
+# For full functionality, see setup/requirements.txt.
 #
 # Installation in Colab:
-#   !pip install -q -r requirements-colab.txt
+#   !pip install -q -r setup/requirements-colab.txt
 #
 # Note: PyTorch is NOT included here because Colab pre-installs it.
 # For CPU-only environments, you may need to install PyTorch separately:

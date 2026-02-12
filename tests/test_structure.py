@@ -29,8 +29,8 @@ def test_import_empo():
 
 def test_requirements_exist():
     """Test that requirement files exist."""
-    req_file = PROJECT_ROOT / "requirements.txt"
-    req_dev_file = PROJECT_ROOT / "requirements-dev.txt"
+    req_file = PROJECT_ROOT / "setup" / "requirements.txt"
+    req_dev_file = PROJECT_ROOT / "setup" / "requirements-dev.txt"
     assert req_file.exists(), f"requirements.txt not found at {req_file}"
     assert req_dev_file.exists(), f"requirements-dev.txt not found at {req_dev_file}"
 

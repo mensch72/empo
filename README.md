@@ -138,7 +138,7 @@ The fastest way to try EMPO is via Google Colab. Click the badge above or follow
 !apt-get update -qq && apt-get install -qq graphviz > /dev/null 2>&1
 
 # 3. Install Python dependencies
-!pip install -q -r requirements-colab.txt
+!pip install -q -r setup/requirements-colab.txt
 
 # 4. Set up Python paths
 import sys, os
@@ -178,7 +178,7 @@ The setup automatically:
 - **Caches apt and pip packages** for much faster rebuilds
   - First build: ~5-10 minutes (downloads packages)
   - Subsequent builds: ~30 seconds (uses cached packages)
-  - Only rebuilds changed layers (e.g., when requirements.txt changes)
+  - Only rebuilds changed layers (e.g., when setup/requirements.txt changes)
 
 ### 2. Enter the Container
 
@@ -434,8 +434,9 @@ python /workspace/train.py --num-episodes 100
 empo/
 ├── Dockerfile                 # Unified Docker image definition
 ├── docker-compose.yml         # Local development setup
-├── requirements.txt           # Python dependencies
-├── requirements-dev.txt       # Development dependencies
+├── setup/                     # Setup and packaging helpers
+│   ├── requirements.txt           # Python dependencies
+│   └── requirements-dev.txt       # Development dependencies
 ├── train.py                   # Main training script
 ├── src/
 │   ├── empo/                  # Core EMPO package
@@ -576,10 +577,10 @@ apptainer build --fakeroot empo.sif Dockerfile
 
 ### Custom Dependencies
 
-Edit `requirements.txt` to add your dependencies:
+Edit `setup/requirements.txt` to add your dependencies:
 
 ```bash
-# Add to requirements.txt
+# Add to setup/requirements.txt
 your-package>=1.0.0
 
 # Rebuild the image
