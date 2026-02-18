@@ -15,20 +15,18 @@ The analysis includes:
 4. Visualization of coefficients and predictions
 
 Usage:
-    python experiments/analyze_parameter_sweep.py outputs/parameter_sweep/results.csv
-    python experiments/analyze_parameter_sweep.py outputs/parameter_sweep/results.csv --interactions
-    python experiments/analyze_parameter_sweep.py outputs/parameter_sweep/results.csv --output analysis_results.txt
+    python experiments/backward_induction_parameter_sweep/analyze_parameter_sweep.py outputs/parameter_sweep/results.csv
+    python experiments/backward_induction_parameter_sweep/analyze_parameter_sweep.py outputs/parameter_sweep/results.csv --interactions
+    python experiments/backward_induction_parameter_sweep/analyze_parameter_sweep.py outputs/parameter_sweep/results.csv --output analysis_results.txt
 """
 
 import argparse
-import csv
 import sys
 from pathlib import Path
-from typing import List, Dict, Tuple, Any
+from typing import List, Tuple, Any
 
 import numpy as np
 import pandas as pd
-from scipy import stats
 
 # Try to import statsmodels for regression
 try:
@@ -39,17 +37,15 @@ try:
     # Suppress BIC deprecation warning by using LLF-based formula
     SET_USE_BIC_LLF(True)
     HAVE_STATSMODELS = True
-except ImportError:
+except ImportError as exc:
     HAVE_STATSMODELS = False
-    print("Warning: statsmodels not installed. Installing...")
-    import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "-q", "statsmodels"])
-    import statsmodels.api as sm
-    from statsmodels.genmod.generalized_linear_model import GLM, SET_USE_BIC_LLF
-    from statsmodels.genmod.families import Binomial
-    from statsmodels.genmod.families.links import Logit
-    SET_USE_BIC_LLF(True)
-    HAVE_STATSMODELS = True
+    raise ImportError(
+        "statsmodels is required to run analyze_parameter_sweep.py but is not installed. "
+        "Please install dependencies first, for example with:\n"
+        "    pip install -r requirements.txt\n"
+        "or:\n"
+        "    pip install statsmodels"
+    ) from exc
 
 # Try to import matplotlib for visualization
 try:

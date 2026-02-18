@@ -26,31 +26,36 @@ The results are saved to a CSV file for subsequent regression analysis.
 
 Usage:
     # Small test run (10 samples)
-    python experiments/parameter_sweep_asymmetric_freeing.py --n_samples 10 --output outputs/parameter_sweep/results_test.csv
+    python experiments/backward_induction_parameter_sweep/parameter_sweep_asymmetric_freeing.py --n_samples 10 --output outputs/parameter_sweep/results_test.csv
     
     # Full run (100 samples)
-    python experiments/parameter_sweep_asymmetric_freeing.py --n_samples 100 --output outputs/parameter_sweep/results_full.csv
+    python experiments/backward_induction_parameter_sweep/parameter_sweep_asymmetric_freeing.py --n_samples 100 --output outputs/parameter_sweep/results_full.csv
     
     # Parallel with 4 workers
-    python experiments/parameter_sweep_asymmetric_freeing.py --n_samples 100 --parallel --num_workers 4
+    python experiments/backward_induction_parameter_sweep/parameter_sweep_asymmetric_freeing.py --n_samples 100 --parallel --num_workers 4
 """
 
 import argparse
 import csv
-import fcntl
 import gc
 import os
 import random
 import sys
 import time
-from dataclasses import dataclass, asdict, field
-from itertools import product
+from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
-from scipy.special import logsumexp
-from tqdm import tqdm
+
+try:
+    import fcntl
+except ImportError as e:
+    raise RuntimeError(
+        "This experiment script requires a Unix-like operating system because it uses "
+        "the 'fcntl' module for file locking. Please run it on Linux/Unix (or WSL) "
+        "instead of native Windows."
+    ) from e
 
 # Setup paths
 sys.path.insert(0, 'src')
@@ -643,7 +648,7 @@ def main():
         beta_r=args.beta_r
     )
     
-    # Create unique seed based on SLURM task ID (if available) or time+PID
+    # Create unique seed based on SLURM task ID (if available) or secure random
     # SLURM_PROCID is unique per task in a job step (0, 1, 2, ...)
     # SLURM_ARRAY_TASK_ID is unique per array job task
     slurm_procid = os.environ.get('SLURM_PROCID')
@@ -658,8 +663,9 @@ def main():
         job_id = int(slurm_job_id) if slurm_job_id else 0
         base_seed = int(slurm_array_task_id) * 1000003 + (job_id % 1000000)
     else:
-        # Fallback for non-SLURM: use nanoseconds + full PID
-        base_seed = int(time.time_ns() % (2**31)) ^ (os.getpid() * 65537)
+        # Fallback for non-SLURM: use secure random based on system entropy
+        # This is safer for parallel execution than time-based seeds
+        base_seed = random.SystemRandom().randint(0, 2**31 - 1)
     
     # Ensure base_seed is positive and within int32 range
     base_seed = abs(base_seed) % (2**31)

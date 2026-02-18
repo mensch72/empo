@@ -552,6 +552,10 @@ def estimate_dag_memory(states: List[State],
         num_robots = 1
     
     # Python dict overhead constants (CPython 3.10+)
+    # WARNING: These values are specific to CPython 3.10+ implementation and may
+    # be inaccurate on other Python versions (e.g., 3.8, 3.9) or implementations
+    # like PyPy. The estimates should be used as rough guidelines only.
+    # See: https://github.com/python/cpython/blob/main/Objects/dictobject.c
     DICT_EMPTY_SIZE = 64  # bytes for empty dict
     DICT_ENTRY_SIZE = 56  # bytes per entry (hash table overhead)
     LIST_EMPTY_SIZE = 56  # bytes for empty list
