@@ -193,12 +193,12 @@ If you try to use `env.render()` when you should use `env.unwrapped.render()`, y
 See the following example scripts for complete working examples:
 
 1. **Transport Examples**:
-   - `examples/transport_two_cluster_demo.py` - Learning demo with training
-   - `examples/transport_handcrafted_demo.py` - Minimal hand-crafted demo
-   - `examples/transport_stress_test_demo.py` - Large-scale stress test
+   - `examples/transport/transport_two_cluster_demo.py` - Learning demo with training
+   - `examples/transport/transport_handcrafted_demo.py` - Minimal hand-crafted demo
+   - `examples/transport/transport_stress_test_demo.py` - Large-scale stress test
 
 2. **MultiGrid Examples**:
-   - `examples/multiworld_demo.py` - MultiGrid environment demo
+   - `examples/multigrid/one_or_three_chambers_random_play.py` - MultiGrid environment demo
 
 ## Troubleshooting
 

@@ -2,7 +2,7 @@
 
 ## commit ca99cdd
 
-### python examples/phase2_robot_policy_demo.py --tabular --quick
+### python examples/phase2/phase2_robot_policy_demo.py --tabular --quick
 ```
   Rock     Human    Robot      Visits
   -------- -------- -------- --------
@@ -24,7 +24,7 @@
   (4, 1)   (2, 2)   (3, 1)       1325
 ```
 
-### python examples/phase2_robot_policy_demo.py --tabular --quick --curious
+### python examples/phase2/phase2_robot_policy_demo.py --tabular --quick --curious
 ```
   Rock     Human    Robot      Visits
   -------- -------- -------- --------
@@ -47,7 +47,7 @@
 ```
 - better numbers, but still 5 missing.
 
-### python examples/phase2_robot_policy_demo.py --tabular --quick --curious --steps 1e5
+### python examples/phase2/phase2_robot_policy_demo.py --tabular --quick --curious --steps 1e5
 ```
   Rock     Human    Robot      Visits
   -------- -------- -------- --------
@@ -71,7 +71,7 @@
 - found *one* more.
 - runtime: 18 min.
 
-### python examples/phase2_robot_policy_demo.py --tabular --quick --steps 1e5
+### python examples/phase2/phase2_robot_policy_demo.py --tabular --quick --steps 1e5
 ```
   Rock     Human    Robot      Visits
   -------- -------- -------- --------
@@ -94,7 +94,7 @@
 ```
 - runtime also 18 min. --> tabular curiosity has no computational overhead.
 
-### python examples/phase2_robot_policy_demo.py --tabular --curious --steps 1e5
+### python examples/phase2/phase2_robot_policy_demo.py --tabular --curious --steps 1e5
 (longer warmup than with --quick)
 ```
   Rock     Human    Robot      Visits
@@ -117,4 +117,4 @@
   (4, 1)   (2, 1)   (2, 2)          2
 ```
 
-## python examples/phase2_robot_policy_demo.py --curious --steps 1e5
+## python examples/phase2/phase2_robot_policy_demo.py --curious --steps 1e5
