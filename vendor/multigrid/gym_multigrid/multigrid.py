@@ -870,7 +870,8 @@ class KillButton(WorldObj):
                    trigger_idx, target_idx, 1 if self.enabled else 0, 0)
     
     def render(self, img):
-        """Render the kill button as a red floor tile with a skull/X pattern."""
+        """Render the kill button as a red floor tile with a skull/X pattern.
+        When disabled, the button is greyed out but the X is still faintly visible."""
         if self.enabled:
             # Red background for enabled kill button
             c = COLORS['red']
@@ -880,9 +881,12 @@ class KillButton(WorldObj):
             fill_coords(img, point_in_line(0.15, 0.15, 0.85, 0.85, r=0.05), darker_red)
             fill_coords(img, point_in_line(0.15, 0.85, 0.85, 0.15, r=0.05), darker_red)
         else:
-            # Grey background for disabled kill button
+            # Grey background for disabled kill button, with faded X still visible
             c = COLORS['grey']
             fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, _CONTROLBUTTON_CORNER_RADIUS), c / 3)
+            faded = np.array([80, 80, 80])
+            fill_coords(img, point_in_line(0.15, 0.15, 0.85, 0.85, r=0.05), faded)
+            fill_coords(img, point_in_line(0.15, 0.85, 0.85, 0.15, r=0.05), faded)
 
 
 class PauseSwitch(WorldObj):
@@ -964,7 +968,8 @@ class PauseSwitch(WorldObj):
                    1 if self.enabled else 0)
     
     def render(self, img):
-        """Render the pause switch with state indication."""
+        """Render the pause switch with state indication.
+        When disabled, the switch is greyed out but the pause/play icon is still faintly visible."""
         if self.enabled:
             if self.is_on:
                 # Bright blue when on
@@ -981,9 +986,17 @@ class PauseSwitch(WorldObj):
                 fill_coords(img, point_in_triangle((0.3, 0.25), (0.3, 0.75), (0.7, 0.5)), 
                            np.array([200, 200, 200]))
         else:
-            # Grey when disabled
+            # Grey background when disabled, with faded icon still visible
             c = COLORS['grey']
-            fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, _CONTROLBUTTON_CORNER_RADIUS), c / 2)
+            fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, _CONTROLBUTTON_CORNER_RADIUS), c / 3)
+            faded = np.array([80, 80, 80])
+            if self.is_on:
+                # Show faded pause bars
+                fill_coords(img, point_in_rect(0.3, 0.4, 0.25, 0.75), faded)
+                fill_coords(img, point_in_rect(0.6, 0.7, 0.25, 0.75), faded)
+            else:
+                # Show faded play triangle
+                fill_coords(img, point_in_triangle((0.3, 0.25), (0.3, 0.75), (0.7, 0.5)), faded)
 
 
 class DisablingSwitch(WorldObj):
@@ -1077,14 +1090,40 @@ class DisablingSwitch(WorldObj):
                    toggle_idx, target_idx, 0, 0)
     
     def render(self, img):
-        """Render the disabling switch with indication of target type."""
-        c = COLORS['purple']
-        fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, _CONTROLBUTTON_CORNER_RADIUS), c)
-        
-        # Draw a circle with a slash through it (disabled symbol)
+        """Render the disabling switch with target-type-specific visuals.
+
+        dK (target_type='killbutton'):  reddish-purple background + faded X from KillButton + ⊘ overlay
+        dP (target_type='pauseswitch'): bluish-purple background + faded pause bars from PauseSwitch + ⊘ overlay
+        Other targets:                  plain purple + ⊘ overlay
+        """
+        purple = COLORS['purple']
+
+        if self.target_type == 'killbutton':
+            # Reddish-purple tint that visually links to the red KillButton
+            bg = np.clip(purple * 0.5 + COLORS['red'] * 0.25, 0, 255).astype(np.uint8)
+        elif self.target_type == 'pauseswitch':
+            # Bluish-purple tint that visually links to the blue PauseSwitch
+            bg = np.clip(purple * 0.5 + COLORS['blue'] * 0.25, 0, 255).astype(np.uint8)
+        else:
+            bg = purple
+
+        fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, _CONTROLBUTTON_CORNER_RADIUS), bg)
+
+        # Draw the target's characteristic symbol as a faint hint
+        hint = (bg * 0.6).astype(np.uint8)  # slightly darker than background
+        if self.target_type == 'killbutton':
+            # Small X echoing KillButton
+            fill_coords(img, point_in_line(0.2, 0.2, 0.8, 0.8, r=0.04), hint)
+            fill_coords(img, point_in_line(0.2, 0.8, 0.8, 0.2, r=0.04), hint)
+        elif self.target_type == 'pauseswitch':
+            # Small pause bars echoing PauseSwitch
+            fill_coords(img, point_in_rect(0.3, 0.4, 0.3, 0.7), hint)
+            fill_coords(img, point_in_rect(0.6, 0.7, 0.3, 0.7), hint)
+
+        # Overlay the ⊘ (circle-slash) "disable" symbol in white
         white = np.array([255, 255, 255])
         fill_coords(img, point_in_circle(0.5, 0.5, 0.3), white)
-        fill_coords(img, point_in_circle(0.5, 0.5, 0.2), c)
+        fill_coords(img, point_in_circle(0.5, 0.5, 0.2), bg)
         fill_coords(img, point_in_line(0.25, 0.75, 0.75, 0.25, r=0.04), white)
 
 
