@@ -53,7 +53,7 @@ import gymnasium as gym
 sys.modules['gym'] = gym
 
 from gym_multigrid.multigrid import (
-    MultiGridEnv, World, SmallActions
+    MultiGridEnv, World
 )
 from empo.possible_goal import PossibleGoalGenerator, TabularGoalSampler
 from empo.backward_induction import (
@@ -75,8 +75,7 @@ RENDER_TILE_SIZE = 96
 ANNOTATION_PANEL_WIDTH = 380
 ANNOTATION_FONT_SIZE = 12
 
-# Action names for SmallActions (single agent)
-SINGLE_ACTION_NAMES = ['still', 'left', 'right', 'forward']
+# Action names are read dynamically from env.actions.available
 
 
 # =============================================================================
@@ -257,7 +256,6 @@ def create_trivial_env(max_steps: int = 5) -> MultiGridEnv:
         max_steps=max_steps,
         partial_obs=False,
         objects_set=World,
-        actions_set=SmallActions
     )
     # Agent indices are auto-detected via properties (yellow=human, grey=robot)
     return env
@@ -291,7 +289,7 @@ def create_env_from_world(world_path: str, max_steps: Optional[int] = None) -> M
         raise FileNotFoundError(f"World file not found: {config_path}")
     
     # Only pass max_steps if explicitly provided (otherwise use config default)
-    kwargs = {'config_file': config_path, 'partial_obs': False, 'actions_set': SmallActions}
+    kwargs = {'config_file': config_path, 'partial_obs': False}
     if max_steps is not None:
         kwargs['max_steps'] = max_steps
     
@@ -436,7 +434,7 @@ class GenericGoalGenerator(PossibleGoalGenerator):
 # Rollout and Movie Generation
 # =============================================================================
 
-def get_joint_action_names(num_agents: int, num_single_actions: int = 4) -> list:
+def get_joint_action_names(action_names: list, num_agents: int) -> list:
     """
     Generate joint action names for multiple agents.
     
@@ -445,11 +443,14 @@ def get_joint_action_names(num_agents: int, num_single_actions: int = 4) -> list
     
     For 2 agents, generates names like:
     'still, still', 'still, left', etc.
+    
+    Args:
+        action_names: List of single-agent action names (from env.actions.available).
+        num_agents: Number of agents.
     """
-    single_names = SINGLE_ACTION_NAMES[:num_single_actions]
     if num_agents == 1:
-        return single_names
-    combinations = list(itertools.product(single_names, repeat=num_agents))
+        return list(action_names)
+    combinations = list(itertools.product(action_names, repeat=num_agents))
     return [', '.join(combo) for combo in combinations]
 
 def run_policy_rollout(
@@ -477,8 +478,9 @@ def run_policy_rollout(
     human_agent_indices = env.human_agent_indices
     robot_agent_indices = env.robot_agent_indices
     
-    # Generate action names
-    joint_action_names = get_joint_action_names(1)  # Single robot
+    # Get action names from environment
+    action_names = env.actions.available
+    joint_action_names = get_joint_action_names(action_names, 1)  # Single robot
     
     env.reset()
     steps_taken = 0
@@ -538,11 +540,11 @@ def run_policy_rollout(
         
         for action_profile, prob in sorted_actions:
             # Format action names for all robots
-            action_names = []
+            act_names = []
             for action_idx in action_profile:
-                name = SINGLE_ACTION_NAMES[action_idx] if action_idx < len(SINGLE_ACTION_NAMES) else f"a{action_idx}"
-                action_names.append(name)
-            action_str = ', '.join(action_names)
+                name = action_names[action_idx] if action_idx < len(action_names) else f"a{action_idx}"
+                act_names.append(name)
+            action_str = ', '.join(act_names)
             marker = ">" if selected_action is not None and action_profile == selected_action else " "
             lines.append(f"{marker}{action_str}: {prob:.3f}")
         
@@ -795,6 +797,7 @@ def main(
         print(f"  Robot (agent {r_idx}): pos={tuple(env.agents[r_idx].pos)}, color={env.agents[r_idx].color}")
     
     print(f"  Grid: {env.width}x{env.height}")
+    print(f"  Actions: {env.actions.__name__} ({env.actions.available})")
     print(f"  Max steps: {env.max_steps}")
     print(f"  Humans: {len(env.human_agent_indices)}, Robots: {len(env.robot_agent_indices)}")
     print()
@@ -966,9 +969,10 @@ def main(
     policy_dist = robot_policy(initial_state)
     if policy_dist:
         print("  Robot policy at initial state:")
+        single_action_names = env.actions.available
         for action_profile, prob in sorted(policy_dist.items(), key=lambda x: -x[1]):
-            action_names = [SINGLE_ACTION_NAMES[a] if a < len(SINGLE_ACTION_NAMES) else f"a{a}" for a in action_profile]
-            print(f"    {', '.join(action_names)}: {prob:.3f}")
+            act_names = [single_action_names[a] if a < len(single_action_names) else f"a{a}" for a in action_profile]
+            print(f"    {', '.join(act_names)}: {prob:.3f}")
     print()
     
     # =========================================================================
