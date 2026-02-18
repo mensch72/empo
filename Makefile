@@ -118,7 +118,7 @@ train:
 	docker compose exec empo-dev python train.py --num-episodes 100
 
 example:
-	docker compose exec empo-dev python examples/simple_example.py
+	docker compose exec empo-dev python examples/multigrid/simple_example.py
 
 # Development commands
 test:

@@ -514,7 +514,7 @@ During warm-up, `beta_r=0` (uniform random robot policy). Options:
 
 ### 4. Count-Based for Tabular Mode
 
-Should `lookup_table_phase2_demo.py` get count-based curiosity?
+Should `examples/phase2/lookup_table_phase2_demo.py` get count-based curiosity?
 - Simpler than RND for tabular case
 - States are already hashable
 - Natural fit for non-neural training

@@ -32,7 +32,7 @@ Added automatic value function archival during backward induction to reduce memo
 ## Current State
 
 ### ✅ Working in Phase 1
-- `examples/phase2_backward_induction.py` uses `use_disk_slicing=True` in Phase 1
+- `examples/phase2/phase2_backward_induction.py` uses `use_disk_slicing=True` in Phase 1
 - Archival happens automatically during Phase 1 computation
 - Output visible when script runs (quiet defaults to False)
 
@@ -47,7 +47,7 @@ Run the example script:
 
 ```bash
 PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds \
-    python examples/phase2_backward_induction.py --steps 5
+    python examples/phase2/phase2_backward_induction.py --steps 5
 ```
 
 Look for output during Phase 1:
