@@ -277,9 +277,10 @@ class ConfigGoalGenerator:
         """
         Validate that goals cover all walkable cells in the grid.
         
-        A cell is considered walkable if it doesn't contain an immutable object
-        (wall, lava, magicwall). The method checks that every such cell is covered
-        by at least one goal (cell or rectangle).
+        A cell is considered walkable if an agent could potentially stand on it.
+        Cells containing immovable non-overlappable objects (wall, lava, magicwall,
+        pauseswitch, disablingswitch, controlbutton) are excluded since agents
+        can never occupy them.
         
         Args:
             raise_on_error: If True, raises ValueError listing uncovered cells.
@@ -312,8 +313,12 @@ class ConfigGoalGenerator:
                     for y in range(y1, y2 + 1):
                         covered_cells.add((x, y))
         
-        # Find all walkable cells (not containing immutable objects)
-        immutable_types = {'wall', 'lava', 'magicwall'}
+        # Find all walkable cells (not containing immovable non-overlappable objects)
+        # Agents can never stand on these cell types:
+        non_walkable_types = {
+            'wall', 'lava', 'magicwall',
+            'killbutton', 'pauseswitch', 'disablingswitch', 'controlbutton',
+        }
         uncovered = []
         
         for x in range(self.env.width):
@@ -321,8 +326,8 @@ class ConfigGoalGenerator:
                 cell = self.env.grid.get(x, y)
                 cell_type = getattr(cell, 'type', None) if cell else None
                 
-                # Skip cells with immutable objects
-                if cell_type in immutable_types:
+                # Skip cells with non-walkable objects
+                if cell_type in non_walkable_types:
                     continue
                 
                 # Check if this walkable cell is covered
@@ -449,9 +454,10 @@ class ConfigGoalSampler:
         """
         Validate that goals cover all walkable cells in the grid.
         
-        A cell is considered walkable if it doesn't contain an immutable object
-        (wall, lava, magicwall). The method checks that every such cell is covered
-        by at least one goal (cell or rectangle).
+        A cell is considered walkable if an agent could potentially stand on it.
+        Cells containing immovable non-overlappable objects (wall, lava, magicwall,
+        pauseswitch, disablingswitch, controlbutton) are excluded since agents
+        can never occupy them.
         
         Args:
             raise_on_error: If True, raises ValueError listing uncovered cells.
@@ -484,8 +490,12 @@ class ConfigGoalSampler:
                     for y in range(y1, y2 + 1):
                         covered_cells.add((x, y))
         
-        # Find all walkable cells (not containing immutable objects)
-        immutable_types = {'wall', 'lava', 'magicwall'}
+        # Find all walkable cells (not containing immovable non-overlappable objects)
+        # Agents can never stand on these cell types:
+        non_walkable_types = {
+            'wall', 'lava', 'magicwall',
+            'killbutton', 'pauseswitch', 'disablingswitch', 'controlbutton',
+        }
         uncovered = []
         
         for x in range(self.env.width):
@@ -493,8 +503,8 @@ class ConfigGoalSampler:
                 cell = self.env.grid.get(x, y)
                 cell_type = getattr(cell, 'type', None) if cell else None
                 
-                # Skip cells with immutable objects
-                if cell_type in immutable_types:
+                # Skip cells with non-walkable objects
+                if cell_type in non_walkable_types:
                     continue
                 
                 # Check if this walkable cell is covered
@@ -789,15 +799,16 @@ class Switch(WorldObj):
 
 class KillButton(WorldObj):
     """
-    An overlappable floor type that permanently kills agents when stepped on.
+    A non-overlappable switch that permanently kills agents when toggled.
     
-    When an agent of the trigger_color steps onto this button (and it's enabled),
-    all agents of the target_color become permanently "killed" (can only use "still" action).
+    Agents of trigger_color can use the "toggle" action on this switch when facing it.
+    When toggled (and enabled), all agents of target_color become permanently
+    "killed" (terminated, can only use "still" action).
     
     Attributes:
         trigger_color: Color of agents that can activate the button (default: 'yellow')
         target_color: Color of agents that will be killed (default: 'grey')
-        enabled: Whether the button is active (default: True). When disabled, behaves like empty floor.
+        enabled: Whether the button is active (default: True). When disabled, toggling has no effect.
     """
     
     def __init__(self, world, trigger_color='yellow', target_color='grey', enabled=True):
@@ -815,6 +826,35 @@ class KillButton(WorldObj):
         self.enabled = enabled
     
     def can_overlap(self):
+        return False
+    
+    def see_behind(self):
+        return True
+    
+    def toggle(self, env, pos, agent_idx=None):
+        """Toggle the kill effect if enabled and toggled by correct color agent."""
+        if not self.enabled:
+            return False
+        
+        # Get the toggling agent
+        if agent_idx is not None:
+            toggler_agent = env.agents[agent_idx]
+        else:
+            # Fallback: find agent facing this position
+            toggler_agent = None
+            for agent in env.agents:
+                if agent.pos is not None and np.array_equal(agent.front_pos, pos):
+                    toggler_agent = agent
+                    break
+        
+        if toggler_agent is None or toggler_agent.color != self.trigger_color:
+            return False
+        
+        # Kill all agents of the target color
+        for agent in env.agents:
+            if agent.color == self.target_color:
+                agent.terminated = True
+        
         return True
     
     def encode(self, world, current_agent=False):
@@ -2413,6 +2453,12 @@ def parse_map_string(map_spec, objects_set=World):
     - Ms : magic wall with south magic side
     - Mw : magic wall with west magic side
     - Me : magic wall with east magic side
+    - Kb or Ki : KillButton (yellow triggers, grey killed)
+    - Ps or Pa : PauseSwitch (yellow toggles, grey paused)
+    - Dk or dK : DisablingSwitch for KillButtons (grey toggles)
+    - Dp or dP : DisablingSwitch for PauseSwitches (grey toggles)
+    - DC or dC : DisablingSwitch for ControlButtons (grey toggles)
+    - CB : ControlButton (yellow triggers, grey controlled)
     - Ac : agent of color c
     
     Color codes (c):
@@ -3348,20 +3394,11 @@ class MultiGridEnv(WorldModel):
         """
         Handle special effects when an agent moves to a cell.
         
-        This includes handling KillButton effects when an agent steps onto one,
-        and deactivating agents when they step on lava.
+        This includes deactivating agents when they step on lava.
         """
         # Handle Lava effects - agent gets deactivated (terminated)
         if fwd_cell is not None and fwd_cell.type == 'lava':
             self.agents[i].terminated = True
-        
-        # Handle KillButton effects
-        if fwd_cell is not None and fwd_cell.type == 'killbutton':
-            if fwd_cell.enabled and self.agents[i].color == fwd_cell.trigger_color:
-                # Kill all agents of the target color
-                for agent in self.agents:
-                    if agent.color == fwd_cell.target_color:
-                        agent.terminated = True
     
     def can_forward(self, state, agent_index: int) -> bool:
         """

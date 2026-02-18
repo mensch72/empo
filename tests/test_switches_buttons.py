@@ -3,7 +3,7 @@
 Test switches and buttons for Issue #25.
 
 Tests for:
-- KillButton: overlappable floor that kills agents when stepped on
+- KillButton: non-overlappable switch that kills agents when toggled
 - PauseSwitch: non-overlappable switch that pauses agents when toggled
 - DisablingSwitch: non-overlappable switch that disables KillButtons or PauseSwitches
 """
@@ -141,10 +141,10 @@ class DisablingSwitchEnv(MultiGridEnv):
             self.grid.set(0, y, Wall(World))
             self.grid.set(width - 1, y, Wall(World))
         
-        # Place yellow agent at (1, 2)
-        self.agents[0].pos = np.array([1, 2])
-        self.agents[0].dir = 0  # facing right
-        self.grid.set(1, 2, self.agents[0])
+        # Place yellow agent at (2, 2) facing down towards KillButton at (2, 3)
+        self.agents[0].pos = np.array([2, 2])
+        self.agents[0].dir = 1  # facing down
+        self.grid.set(2, 2, self.agents[0])
         
         # Place grey agent at (3, 2)
         self.agents[1].pos = np.array([3, 2])
@@ -161,7 +161,7 @@ class DisablingSwitchEnv(MultiGridEnv):
 
 
 def test_kill_button_kills_target_agents():
-    """Test that KillButton kills target agents when stepped on by trigger agent."""
+    """Test that KillButton kills target agents when toggled by trigger agent."""
     env = KillButtonEnv()
     env.reset()
     
@@ -169,13 +169,13 @@ def test_kill_button_kills_target_agents():
     assert not env.agents[0].terminated, "Yellow agent should not be terminated initially"
     assert not env.agents[1].terminated, "Grey agent should not be terminated initially"
     
-    # Yellow agent moves forward onto kill button
-    actions = [Actions.forward, Actions.still]  # Yellow moves, grey stays
+    # Yellow agent toggles kill button (facing it)
+    actions = [Actions.toggle, Actions.still]  # Yellow toggles, grey stays
     env.step(actions)
     
     # Verify grey agent is now terminated (killed)
     assert not env.agents[0].terminated, "Yellow agent should not be terminated"
-    assert env.agents[1].terminated, "Grey agent should be terminated after yellow stepped on kill button"
+    assert env.agents[1].terminated, "Grey agent should be terminated after yellow toggled kill button"
 
 
 def test_kill_button_disabled():
@@ -186,8 +186,8 @@ def test_kill_button_disabled():
     # Disable the kill button
     env.kill_button.enabled = False
     
-    # Yellow agent moves forward onto kill button
-    actions = [Actions.forward, Actions.still]
+    # Yellow agent toggles kill button (facing it)
+    actions = [Actions.toggle, Actions.still]
     env.step(actions)
     
     # Verify grey agent is NOT terminated
@@ -202,12 +202,12 @@ def test_kill_button_wrong_trigger_color():
     # Set trigger color to something else
     env.kill_button.trigger_color = 'blue'
     
-    # Yellow agent moves forward onto kill button
-    actions = [Actions.forward, Actions.still]
+    # Yellow agent toggles kill button (facing it)
+    actions = [Actions.toggle, Actions.still]
     env.step(actions)
     
     # Grey agent should NOT be terminated because yellow is not the trigger color
-    assert not env.agents[1].terminated, "Grey agent should not be terminated when wrong trigger color steps on button"
+    assert not env.agents[1].terminated, "Grey agent should not be terminated when wrong trigger color toggles button"
 
 
 def test_pause_switch_pauses_target_agents():
@@ -403,8 +403,8 @@ def test_terminated_agent_actions_ignored():
     grey_initial_pos = tuple(env.agents[1].pos)
     grey_initial_dir = env.agents[1].dir
     
-    # Yellow steps on kill button, killing grey
-    actions = [Actions.forward, Actions.still]
+    # Yellow toggles kill button, killing grey
+    actions = [Actions.toggle, Actions.still]
     env.step(actions)
     assert env.agents[1].terminated, "Grey agent should be terminated"
     
