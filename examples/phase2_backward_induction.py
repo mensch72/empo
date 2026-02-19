@@ -53,8 +53,9 @@ import gymnasium as gym
 sys.modules['gym'] = gym
 
 from gym_multigrid.multigrid import (
-    MultiGridEnv, World
+    MultiGridEnv, World, ActionsBase
 )
+import gym_multigrid.multigrid as multigrid_module
 from empo.possible_goal import PossibleGoalGenerator, TabularGoalSampler
 from empo.backward_induction import (
     compute_human_policy_prior, 
@@ -224,7 +225,7 @@ def print_memory_profile(label: str, objects_dict: Dict[str, Any], top_n: int = 
 # Environment Definition (Trivial World Model)
 # =============================================================================
 
-def create_trivial_env(max_steps: int = 5) -> MultiGridEnv:
+def create_trivial_env(max_steps: int = 5, actions_set=None) -> MultiGridEnv:
     """
     Create the trivial environment from phase2_robot_policy_demo.py.
     
@@ -251,17 +252,20 @@ def create_trivial_env(max_steps: int = 5) -> MultiGridEnv:
     We We We We We We
     """
     
-    env = MultiGridEnv(
+    kwargs = dict(
         map=GRID_MAP,
         max_steps=max_steps,
         partial_obs=False,
         objects_set=World,
     )
+    if actions_set is not None:
+        kwargs['actions_set'] = actions_set
+    env = MultiGridEnv(**kwargs)
     # Agent indices are auto-detected via properties (yellow=human, grey=robot)
     return env
 
 
-def create_env_from_world(world_path: str, max_steps: Optional[int] = None) -> MultiGridEnv:
+def create_env_from_world(world_path: str, max_steps: Optional[int] = None, actions_set=None) -> MultiGridEnv:
     """
     Create an environment from a YAML world file.
     
@@ -270,6 +274,7 @@ def create_env_from_world(world_path: str, max_steps: Optional[int] = None) -> M
                    (.yaml extension is optional)
         max_steps: Maximum steps per episode (None to use config file value,
                    or int to override it)
+        actions_set: Action class to use (None to use config/default).
     
     Returns:
         MultiGridEnv loaded from the config file.
@@ -292,6 +297,8 @@ def create_env_from_world(world_path: str, max_steps: Optional[int] = None) -> M
     kwargs = {'config_file': config_path, 'partial_obs': False}
     if max_steps is not None:
         kwargs['max_steps'] = max_steps
+    if actions_set is not None:
+        kwargs['actions_set'] = actions_set
     
     env = MultiGridEnv(**kwargs)
     return env
@@ -674,6 +681,7 @@ def main(
     human_idx: Optional[int] = None,
     robot_idx: Optional[int] = None,
     profile: bool = False,
+    actions_set=None,
 ):
     """
     Run Phase 2 backward induction demo.
@@ -701,6 +709,7 @@ def main(
         human_idx: Override human agent index (for custom worlds).
         robot_idx: Override robot agent index (for custom worlds).
         profile: Enable line profiling of backward induction functions.
+        actions_set: Action class to use (None for default).
     """
     # Set random seeds
     random.seed(seed)
@@ -775,13 +784,13 @@ def main(
     if world_path is not None:
         print(f"  Loading world from: {world_path}")
         if max_steps is not None:
-            env = create_env_from_world(world_path, max_steps=max_steps)
+            env = create_env_from_world(world_path, max_steps=max_steps, actions_set=actions_set)
         else:
             # Use environment's default max_steps from config
-            env = create_env_from_world(world_path)
+            env = create_env_from_world(world_path, actions_set=actions_set)
     else:
         # Trivial env needs a default if not specified
-        env = create_trivial_env(max_steps=max_steps if max_steps is not None else 5)
+        env = create_trivial_env(max_steps=max_steps if max_steps is not None else 5, actions_set=actions_set)
     env.reset()
     
     # Override agent indices from CLI if specified
@@ -1227,6 +1236,9 @@ if __name__ == "__main__":
                         help='Index of human agent (default: auto-detect)')
     parser.add_argument('--robot-idx', type=int, default=None,
                         help='Index of robot agent (default: auto-detect)')
+    parser.add_argument('--actions', type=str, default=None,
+                        help='Action class name from gym_multigrid.multigrid, '
+                             'e.g., SmallActions, Actions, ObjectActions, MinimalActions')
     
     # Computation options
     parser.add_argument('--parallel', '-p', action='store_true',
@@ -1279,6 +1291,15 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     
+    # Resolve actions class if specified
+    actions_set = None
+    if args.actions is not None:
+        actions_cls = getattr(multigrid_module, args.actions, None)
+        if actions_cls is None or not (isinstance(actions_cls, type) and issubclass(actions_cls, ActionsBase)):
+            parser.error(f"Unknown action class '{args.actions}'. "
+                         f"Available: Actions, SmallActions, ObjectActions, MinimalActions, MineActions, etc.")
+        actions_set = actions_cls
+    
     # Build goal_weights dict from command line args (only for trivial world)
     goal_weights = None
     if args.world is None:
@@ -1316,4 +1337,5 @@ if __name__ == "__main__":
         human_idx=args.human_idx,
         robot_idx=args.robot_idx,
         profile=args.profile,
+        actions_set=actions_set,
     )
