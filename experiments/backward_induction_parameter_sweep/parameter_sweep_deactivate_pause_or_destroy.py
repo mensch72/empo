@@ -43,14 +43,11 @@ import os
 import random
 import sys
 import time
-from dataclasses import dataclass, asdict, field
-from itertools import product
+from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
-from scipy.special import logsumexp
-from tqdm import tqdm
 
 # Setup paths
 sys.path.insert(0, 'src')

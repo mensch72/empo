@@ -27,6 +27,7 @@ from typing import List, Tuple, Any
 
 import numpy as np
 import pandas as pd
+from scipy import stats
 
 # Try to import statsmodels for regression
 try:
@@ -1029,51 +1030,6 @@ def _create_symmetric_scatterplot_matrix(df: pd.DataFrame,
     print(f"  Saved {title} to {output_path}")
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description='Analyze parameter sweep results with logistic regression',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__
-    )
-    parser.add_argument('results_csv', type=str,
-                       help='Path to results CSV file from parameter_sweep_asymmetric_freeing.py')
-    parser.add_argument('--interactions', action='store_true',
-                       help='Include interaction terms in the model')
-    parser.add_argument('--output', type=str, default=None,
-                       help='Output file for text results (default: print to stdout)')
-    parser.add_argument('--plots_dir', type=str, default='outputs/parameter_sweep/plots',
-                       help='Directory for output plots (default: outputs/parameter_sweep/plots)')
-    
-    args = parser.parse_args()
-    
-    print("=" * 80)
-    print("PARAMETER SWEEP ANALYSIS")
-    print("=" * 80)
-    print()
-    
-    # Load data
-    df = load_results(args.results_csv)
-    
-    if len(df) < 10:
-        print("WARNING: Very few valid samples. Results may not be reliable.")
-        print("Consider running parameter sweep with more samples.")
-        print()
-    
-    # Check for outcome variance
-    p_left_std = df['p_left'].std()
-    if p_left_std < 0.001:
-        print("ERROR: No variance in outcome variable (all p_left values are nearly identical).")
-        print(f"  p_left std: {p_left_std}")
-        print("\nLinear regression requires variance in the outcome.")
-        print("Please run with more samples or different parameter ranges.")
-        print()
-        print("Parameter summary statistics:")
-        print(df[['max_steps', 'beta_h', 'gamma_h', 'gamma_r', 'zeta', 'eta', 'xi', 'p_left']].describe())
-        return
-    
-    # Compute derived outcome variables
-    df = compute_derived_outcomes(df)
-    
 def run_analysis(df: pd.DataFrame, predictors: List[str], outcomes: List[Tuple[str, str, str]],
                   plots_dir: str, label: str = "FULL SAMPLE", output_file: str = None):
     """
