@@ -76,9 +76,11 @@ set -e  # Exit on error
 # Only load modules when running under SLURM (sbatch mode)
 # When running locally via bash, assume environment is already set up
 if [ -n "$SLURM_JOB_ID" ]; then
-    module load anaconda/2025
-    source activate empo
-    export PATH="$CONDA_PREFIX/bin:$PATH"
+    # Uncomment and customize the lines below for your HPC environment, e.g.:
+    # module load anaconda/2025
+    # conda activate empo
+    # export PATH="$CONDA_PREFIX/bin:$PATH"
+    :  # No-op command (remove this line after uncommenting your configuration above)
 fi
 #==============================================================================
 
@@ -89,7 +91,7 @@ QUICK_MODE=false
 
 # Prior bound defaults (matching Python script)
 MAX_STEPS_MIN=8
-MAX_STEPS_MAX=8
+MAX_STEPS_MAX=14
 BETA_H_MIN=5.0
 BETA_H_MAX=100.0
 GAMMA_H_MIN=0.8
