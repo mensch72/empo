@@ -3139,9 +3139,14 @@ class MultiGridEnv(WorldModel):
             assert a.pos is not None
             assert a.dir is not None
 
-        # Item picked up, being carried, initially nothing
+        # Reset all per-episode agent state
         for a in self.agents:
             a.carrying = None
+            a.terminated = False
+            a.started = True
+            a.paused = False
+            a.on_unsteady_ground = False
+            a.forced_next_action = None
 
         # Step count since episode start
         self.step_count = 0
