@@ -21,7 +21,7 @@ Instead of sampling goals from a fixed distribution, the new `ParameterizedGoalS
 This will be used in **small gridworld environments** with:
 - Two human agents (yellow)
 - One robot agent (grey)
-- `HeuristicHumanPolicyPrior` for modeling human behavior
+- `HeuristicPotentialPolicy` for modeling human behavior
 - A novel `HeuristicRobotPolicy` (to be developed)
 - Eventually, integration with learned robot policies from PR #50
 
@@ -197,15 +197,15 @@ The equation is indeed a valid application of Bayes' rule:
 
 **Variational approximation:**
 
-Since $P(g'|\theta, a')$ may not have a closed form, we approximate it by finding $\theta'$ that minimizes the KL divergence:
+Since $P(g'|\theta, a')$ may not have a closed form, we approximate it by finding parameters $\theta^*$ that (approximately) minimize the KL divergence:
 
-$$\theta' = \arg\min_{\theta'} D_{KL}(P(g'|\theta, a') || P(g'|\theta'))$$
+$$\theta^* \approx \arg\min_{\theta'} D_{KL}(P(g'|\theta, a') \,\|\, P(g'|\theta'))$$
 
-For the Gaussian parameterization, this can be done via **stochastic gradient descent**:
+For the Gaussian parameterization, we perform **stochastic gradient descent/ascent** on the variational parameters. Starting from the current parameters $\theta_t$, we update:
 
-$$\theta' \leftarrow \theta + \alpha \nabla_\theta \mathbb{E}_{g' \sim P(g'|\theta)}[\log P(a'|g')]$$
+$$\theta_{t+1} = \theta_t + \alpha \,\nabla_{\theta}\,\mathbb{E}_{g' \sim P(g'|\theta_t)}\big[\log P(a'|g')\big]$$
 
-This is equivalent to **maximum likelihood estimation** on the "pseudo-likelihood" $P(a'|g')$ weighted by the prior $P(g'|\theta)$.
+where the gradient is evaluated at $\theta = \theta_t$. This is equivalent to **maximum likelihood estimation** on the "pseudo-likelihood" $P(a'|g')$ weighted by the prior $P(g'|\theta_t)$.
 
 **Practical implementation via importance sampling:**
 
@@ -333,8 +333,7 @@ class MultiGridParameterizedGoalSampler(ParameterizedGoalSampler):
         mu_y: float = None,     # y-center mean (None = grid center)
         kappa_y: float = 0.0,   # y-center concentration (0 = uniform)
         # Markov transition parameters (fixed)
-        p_stay: float = 0.9,
-        jump_rate: float = 0.5,
+        p_move: float = 0.1,
         # Learning parameters
         learning_rate: float = 0.1,
         n_samples: int = 100,
