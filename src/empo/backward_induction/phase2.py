@@ -186,9 +186,22 @@ def _rp_process_single_state(
     
     # Compute V_h^e, X_h, and U_r values
     powersum = 0.0  # sum over humans of X_h^(-xi)
+    num_alive_humans = 0  # track how many alive humans for averaging
+
     for agent_index in human_agent_indices:
+        agent_state = state[1][agent_index]  # state = (step_count, agent_states, ...)
+        terminated = agent_state[3]
+
+        # Skip terminated agents - they have no goal achievement ability
+        if terminated:
+            vh_results[agent_index] = vres0.copy() if use_indexed else {}
+            # Don't include terminated agents in powersum
+            # Their X_h is effectively 0 (no goal achievement ability)
+            continue
+
+        num_alive_humans += 1
         vh_agent = vh_results[agent_index] = vres0.copy() if use_indexed else {}
-        
+
         if DEBUG:
             print(f"   Human agent {agent_index}")
             # Check if at least one goal is achieved in this state
@@ -273,24 +286,29 @@ def _rp_process_single_state(
             
             if DEBUG:
                 print(f"      ...Vh = {vh:.4f}")
-        
-        assert some_goal_achieved_with_positive_prob, \
-            f"No goal achievable with positive probability for agent {agent_index} in state {state_index}!"
-        
-        if xh == 0:
-            # xh is zero means no goal has positive expected achievement value
-            raise ValueError(
-                f"xh=0 for agent {agent_index} in state {state_index}: "
-                f"no goal is reachable! State: {state}"
-            )
-        
+
+        # Check if agent is trapped (no goal reachable)
+        if not some_goal_achieved_with_positive_prob or xh == 0:
+            # Agent is trapped - treat like terminated (no goal achievement ability)
+            # This can happen when rocks block all paths or agent is in a corner
+            if DEBUG:
+                print(f"   Agent {agent_index} is trapped in state {state_index} - no goals reachable")
+            # Don't include in powersum - trapped agents have no empowerment
+            continue
+
         if DEBUG:
             print(f"   ...Xh = {xh:.4f}")
-        
+
         powersum += xh**(-xi)
-    
-    y = powersum / len(human_agent_indices)  # average over humans
-    ur = -(y**eta)
+
+    # Handle edge case: all humans terminated
+    if num_alive_humans == 0:
+        # No living humans - set neutral intrinsic reward
+        ur = 0.0
+    else:
+        # Normal case: average over alive humans
+        y = powersum / num_alive_humans
+        ur = -(y**eta)
     vr = ur + float(np.dot(ps, Qr_values))
     
     if DEBUG:

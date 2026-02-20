@@ -248,26 +248,43 @@ class TabularHumanPolicyPrior(HumanPolicyPrior):
         self.possible_goal_generator = possible_goal_generator
 
     def __call__(
-        self, 
-        state, 
-        human_agent_index: int, 
+        self,
+        state,
+        human_agent_index: int,
         possible_goal: Optional['PossibleGoal'] = None
     ) -> np.ndarray:
         """
         Look up or compute the action distribution.
-        
+
         Args:
             state: Current world state (must be a key in self.values).
             human_agent_index: Index of the human agent.
             possible_goal: If provided, return distribution conditioned on this goal.
                           If None, compute marginal by averaging over goals.
-        
+
         Returns:
             np.ndarray: Probability distribution over actions.
-        
+
         Raises:
             KeyError: If state or agent_index not found in lookup table.
         """
+        # Check if agent is terminated
+        step_count, agent_states, mobile_objects, mutable_objects = state
+        if human_agent_index < len(agent_states):
+            agent_state = agent_states[human_agent_index]
+            terminated = agent_state[3]
+
+            if terminated:
+                # Terminated agents can't act - return "stay still" policy
+                if hasattr(self, '_num_actions_override') and self._num_actions_override is not None:
+                    num_actions = self._num_actions_override
+                else:
+                    num_actions = self.world_model.action_space.n  # type: ignore[attr-defined]
+
+                policy = np.zeros(num_actions)
+                policy[0] = 1.0  # All probability on action 0 (stay still)
+                return policy
+
         if possible_goal is not None:
 #            key = possible_goal.index if hasattr(possible_goal, 'index') else possible_goal
             key = possible_goal
@@ -306,10 +323,39 @@ class TabularHumanPolicyPrior(HumanPolicyPrior):
             a list of actions for each human agent in order of human_agent_indices.
         """
         # Pre-compute marginal distributions for all agents
-        marginals = [
-            self._to_probability_array(self(state, agent_index))
-            for agent_index in self.human_agent_indices
-        ]
+        marginals = []
+        step_count, agent_states, mobile_objects, mutable_objects = state
+
+        for agent_index in self.human_agent_indices:
+            # Check if agent is terminated
+            if agent_index < len(agent_states):
+                agent_state = agent_states[agent_index]
+                terminated = agent_state[3]
+
+                if terminated:
+                    # Terminated agents can't act - return "stay still" policy
+                    # Support override for parallel mode where world_model is None
+                    if hasattr(self, '_num_actions_override') and self._num_actions_override is not None:
+                        num_actions = self._num_actions_override
+                    else:
+                        num_actions = self.world_model.action_space.n  # type: ignore[attr-defined]
+
+                    policy = np.zeros(num_actions)
+                    policy[0] = 1.0  # All probability on action 0 (stay still)
+                    marginals.append(policy)
+                else:
+                    # Normal case: look up computed policy
+                    marginals.append(self._to_probability_array(self(state, agent_index)))
+            else:
+                # Agent index out of bounds - shouldn't happen but handle gracefully
+                if hasattr(self, '_num_actions_override') and self._num_actions_override is not None:
+                    num_actions = self._num_actions_override
+                else:
+                    num_actions = self.world_model.action_space.n  # type: ignore[attr-defined]
+
+                policy = np.zeros(num_actions)
+                policy[0] = 1.0
+                marginals.append(policy)
         
         if not marginals:
             return [(1.0, [])]
@@ -348,13 +394,40 @@ class TabularHumanPolicyPrior(HumanPolicyPrior):
         # Pre-compute distributions for all agents
         # For the fixed agent, use goal-conditioned policy; for others, use marginal
         marginals = []
+        step_count, agent_states, mobile_objects, mutable_objects = state
+
         for agent_index in self.human_agent_indices:
-            if agent_index == fixed_agent_index:
-                # Use goal-specific policy for this agent
-                marginals.append(self._to_probability_array(self(state, agent_index, fixed_goal)))
+            # Check if agent is terminated
+            if agent_index < len(agent_states):
+                agent_state = agent_states[agent_index]
+                terminated = agent_state[3]
+
+                if terminated:
+                    # Terminated agents can't act - return "stay still" policy
+                    if hasattr(self, '_num_actions_override') and self._num_actions_override is not None:
+                        num_actions = self._num_actions_override
+                    else:
+                        num_actions = self.world_model.action_space.n  # type: ignore[attr-defined]
+
+                    policy = np.zeros(num_actions)
+                    policy[0] = 1.0  # All probability on action 0 (stay still)
+                    marginals.append(policy)
+                elif agent_index == fixed_agent_index:
+                    # Use goal-specific policy for this agent
+                    marginals.append(self._to_probability_array(self(state, agent_index, fixed_goal)))
+                else:
+                    # Use marginal policy (averaged over goals) for other agents
+                    marginals.append(self._to_probability_array(self(state, agent_index)))
             else:
-                # Use marginal policy (averaged over goals) for other agents
-                marginals.append(self._to_probability_array(self(state, agent_index)))
+                # Agent index out of bounds - shouldn't happen but handle gracefully
+                if hasattr(self, '_num_actions_override') and self._num_actions_override is not None:
+                    num_actions = self._num_actions_override
+                else:
+                    num_actions = self.world_model.action_space.n  # type: ignore[attr-defined]
+
+                policy = np.zeros(num_actions)
+                policy[0] = 1.0
+                marginals.append(policy)
         
         if not marginals:
             return [(1.0, [])]
