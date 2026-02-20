@@ -658,7 +658,7 @@ class HeuristicPotentialPolicy(HumanPolicyPrior):
         cell_type = getattr(cell, 'type', None)
         
         # Impassable obstacles (cannot be moved through even with pushing)
-        if cell_type in ('wall', 'magicwall', 'lava'):
+        if cell_type in ('wall', 'magicwall', 'lava', 'killbutton', 'pauseswitch', 'disablingswitch', 'controlbutton'):
             return False
         
         # Doors: closed/locked doors are obstacles (for simplicity)

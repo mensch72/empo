@@ -259,8 +259,8 @@ Each cell in the grid can contain:
 - **Color**: Red
 - **Appearance**: Red floor tile with X pattern (grey when disabled)
 - **Properties**:
-  - Can be overlapped (agents can walk on it)
-  - When stepped on by `trigger_color` agent (default: yellow), permanently terminates all `target_color` agents (default: grey)
+  - Non-overlappable (agents cannot walk on it, must face and toggle)
+  - When toggled by `trigger_color` agent (default: yellow), permanently terminates all `target_color` agents (default: grey)
   - Terminated agents can only use "still" action
   - Can be enabled/disabled via DisablingSwitch
 - **Attributes**:
@@ -638,7 +638,7 @@ Episodes end when:
 - **Keys are reusable**: Not consumed when unlocking doors
 - **Color matching required**: Keys must match door color
 - **Agent control mechanisms**:
-  - **KillButton**: Permanently terminates target agents when trigger agent steps on it
+  - **KillButton**: Permanently terminates target agents when trigger agent toggles it
   - **PauseSwitch**: Temporarily pauses target agents when toggled on
   - **DisablingSwitch**: Enables/disables KillButtons, PauseSwitches, or ControlButtons
   - **ControlButton**: Allows programming actions that can be triggered later (human-robot control)

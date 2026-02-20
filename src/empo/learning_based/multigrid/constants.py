@@ -66,11 +66,11 @@ NUM_OBJECT_TYPE_CHANNELS = MAGICWALL_CHANNEL + 1  # 29
 # =============================================================================
 
 OVERLAPPABLE_OBJECTS = {
-    'goal', 'floor', 'switch', 'killbutton',
-    'controlbutton', 'unsteadyground', 'objectgoal'
+    'goal', 'floor', 'switch',
+    'unsteadyground', 'objectgoal'
 }
 NON_OVERLAPPABLE_IMMOBILE_OBJECTS = {
-    'wall', 'magicwall', 'lava', 'door', 'pauseswitch', 'disablingswitch'
+    'wall', 'magicwall', 'lava', 'door', 'killbutton', 'pauseswitch', 'disablingswitch', 'controlbutton'
 }
 NON_OVERLAPPABLE_MOBILE_OBJECTS = {'block', 'rock'}
 

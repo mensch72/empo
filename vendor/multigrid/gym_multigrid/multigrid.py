@@ -56,7 +56,7 @@ Examples of attributes that MUST be encoded:
          can_enter_magic_walls, can_push_rocks, carrying
 - Door: is_open, is_locked, color
 - MagicWall: magic_side, active, entry_probability, solidify_probability
-- ControlButton: enabled, trigger_color, target_color, triggered_action, _awaiting_action
+- ControlButton: enabled, trigger_color, target_color, triggered_action, _awaiting_action (in state)
 - UnsteadyGround: stumble_probability
 
 If you add a new object type or feature, update the encoders and documentation!
@@ -277,9 +277,10 @@ class ConfigGoalGenerator:
         """
         Validate that goals cover all walkable cells in the grid.
         
-        A cell is considered walkable if it doesn't contain an immutable object
-        (wall, lava, magicwall). The method checks that every such cell is covered
-        by at least one goal (cell or rectangle).
+        A cell is considered walkable if an agent could potentially stand on it.
+        Cells containing immovable non-overlappable objects (wall, lava, magicwall,
+        pauseswitch, disablingswitch, controlbutton) are excluded since agents
+        can never occupy them.
         
         Args:
             raise_on_error: If True, raises ValueError listing uncovered cells.
@@ -312,8 +313,12 @@ class ConfigGoalGenerator:
                     for y in range(y1, y2 + 1):
                         covered_cells.add((x, y))
         
-        # Find all walkable cells (not containing immutable objects)
-        immutable_types = {'wall', 'lava', 'magicwall'}
+        # Find all walkable cells (not containing immovable non-overlappable objects)
+        # Agents can never stand on these cell types:
+        non_walkable_types = {
+            'wall', 'lava', 'magicwall',
+            'killbutton', 'pauseswitch', 'disablingswitch', 'controlbutton',
+        }
         uncovered = []
         
         for x in range(self.env.width):
@@ -321,8 +326,8 @@ class ConfigGoalGenerator:
                 cell = self.env.grid.get(x, y)
                 cell_type = getattr(cell, 'type', None) if cell else None
                 
-                # Skip cells with immutable objects
-                if cell_type in immutable_types:
+                # Skip cells with non-walkable objects
+                if cell_type in non_walkable_types:
                     continue
                 
                 # Check if this walkable cell is covered
@@ -449,9 +454,10 @@ class ConfigGoalSampler:
         """
         Validate that goals cover all walkable cells in the grid.
         
-        A cell is considered walkable if it doesn't contain an immutable object
-        (wall, lava, magicwall). The method checks that every such cell is covered
-        by at least one goal (cell or rectangle).
+        A cell is considered walkable if an agent could potentially stand on it.
+        Cells containing immovable non-overlappable objects (wall, lava, magicwall,
+        pauseswitch, disablingswitch, controlbutton) are excluded since agents
+        can never occupy them.
         
         Args:
             raise_on_error: If True, raises ValueError listing uncovered cells.
@@ -484,8 +490,12 @@ class ConfigGoalSampler:
                     for y in range(y1, y2 + 1):
                         covered_cells.add((x, y))
         
-        # Find all walkable cells (not containing immutable objects)
-        immutable_types = {'wall', 'lava', 'magicwall'}
+        # Find all walkable cells (not containing immovable non-overlappable objects)
+        # Agents can never stand on these cell types:
+        non_walkable_types = {
+            'wall', 'lava', 'magicwall',
+            'killbutton', 'pauseswitch', 'disablingswitch', 'controlbutton',
+        }
         uncovered = []
         
         for x in range(self.env.width):
@@ -493,8 +503,8 @@ class ConfigGoalSampler:
                 cell = self.env.grid.get(x, y)
                 cell_type = getattr(cell, 'type', None) if cell else None
                 
-                # Skip cells with immutable objects
-                if cell_type in immutable_types:
+                # Skip cells with non-walkable objects
+                if cell_type in non_walkable_types:
                     continue
                 
                 # Check if this walkable cell is covered
@@ -789,15 +799,16 @@ class Switch(WorldObj):
 
 class KillButton(WorldObj):
     """
-    An overlappable floor type that permanently kills agents when stepped on.
+    A non-overlappable switch that permanently kills agents when toggled.
     
-    When an agent of the trigger_color steps onto this button (and it's enabled),
-    all agents of the target_color become permanently "killed" (can only use "still" action).
+    Agents of trigger_color can use the "toggle" action on this switch when facing it.
+    When toggled (and enabled), all agents of target_color become permanently
+    "killed" (terminated, can only use "still" action).
     
     Attributes:
         trigger_color: Color of agents that can activate the button (default: 'yellow')
         target_color: Color of agents that will be killed (default: 'grey')
-        enabled: Whether the button is active (default: True). When disabled, behaves like empty floor.
+        enabled: Whether the button is active (default: True). When disabled, toggling has no effect.
     """
     
     def __init__(self, world, trigger_color='yellow', target_color='grey', enabled=True):
@@ -815,6 +826,35 @@ class KillButton(WorldObj):
         self.enabled = enabled
     
     def can_overlap(self):
+        return False
+    
+    def see_behind(self):
+        return True
+    
+    def toggle(self, env, pos, agent_idx=None):
+        """Toggle the kill effect if enabled and toggled by correct color agent."""
+        if not self.enabled:
+            return False
+        
+        # Get the toggling agent
+        if agent_idx is not None:
+            toggler_agent = env.agents[agent_idx]
+        else:
+            # Fallback: find agent facing this position
+            toggler_agent = None
+            for agent in env.agents:
+                if agent.pos is not None and np.array_equal(agent.front_pos, pos):
+                    toggler_agent = agent
+                    break
+        
+        if toggler_agent is None or toggler_agent.color != self.trigger_color:
+            return False
+        
+        # Kill all agents of the target color
+        for agent in env.agents:
+            if agent.color == self.target_color:
+                agent.terminated = True
+        
         return True
     
     def encode(self, world, current_agent=False):
@@ -830,9 +870,11 @@ class KillButton(WorldObj):
                    trigger_idx, target_idx, 1 if self.enabled else 0, 0)
     
     def render(self, img):
-        """Render the kill button as a red floor tile with a skull/X pattern."""
+        """Render the kill button as a red floor tile with a skull/X pattern.
+        - Enabled: dark red background with darker red X
+        - Disabled (by DisablingSwitch): grey background with faded X"""
         if self.enabled:
-            # Red background for enabled kill button
+            # Red background for enabled kill button (not yet triggered)
             c = COLORS['red']
             fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, _CONTROLBUTTON_CORNER_RADIUS), c / 2)
             # Draw an X pattern in darker red
@@ -840,9 +882,12 @@ class KillButton(WorldObj):
             fill_coords(img, point_in_line(0.15, 0.15, 0.85, 0.85, r=0.05), darker_red)
             fill_coords(img, point_in_line(0.15, 0.85, 0.85, 0.15, r=0.05), darker_red)
         else:
-            # Grey background for disabled kill button
+            # Grey background for disabled kill button, with faded X still visible
             c = COLORS['grey']
             fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, _CONTROLBUTTON_CORNER_RADIUS), c / 3)
+            faded = np.array([80, 80, 80])
+            fill_coords(img, point_in_line(0.15, 0.15, 0.85, 0.85, r=0.05), faded)
+            fill_coords(img, point_in_line(0.15, 0.85, 0.85, 0.15, r=0.05), faded)
 
 
 class PauseSwitch(WorldObj):
@@ -924,7 +969,8 @@ class PauseSwitch(WorldObj):
                    1 if self.enabled else 0)
     
     def render(self, img):
-        """Render the pause switch with state indication."""
+        """Render the pause switch with state indication.
+        When disabled, the switch is greyed out but the pause/play icon is still faintly visible."""
         if self.enabled:
             if self.is_on:
                 # Bright blue when on
@@ -941,9 +987,17 @@ class PauseSwitch(WorldObj):
                 fill_coords(img, point_in_triangle((0.3, 0.25), (0.3, 0.75), (0.7, 0.5)), 
                            np.array([200, 200, 200]))
         else:
-            # Grey when disabled
+            # Grey background when disabled, with faded icon still visible
             c = COLORS['grey']
-            fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, _CONTROLBUTTON_CORNER_RADIUS), c / 2)
+            fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, _CONTROLBUTTON_CORNER_RADIUS), c / 3)
+            faded = np.array([80, 80, 80])
+            if self.is_on:
+                # Show faded pause bars
+                fill_coords(img, point_in_rect(0.3, 0.4, 0.25, 0.75), faded)
+                fill_coords(img, point_in_rect(0.6, 0.7, 0.25, 0.75), faded)
+            else:
+                # Show faded play triangle
+                fill_coords(img, point_in_triangle((0.3, 0.25), (0.3, 0.75), (0.7, 0.5)), faded)
 
 
 class DisablingSwitch(WorldObj):
@@ -1037,14 +1091,40 @@ class DisablingSwitch(WorldObj):
                    toggle_idx, target_idx, 0, 0)
     
     def render(self, img):
-        """Render the disabling switch with indication of target type."""
-        c = COLORS['purple']
-        fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, _CONTROLBUTTON_CORNER_RADIUS), c)
-        
-        # Draw a circle with a slash through it (disabled symbol)
+        """Render the disabling switch with target-type-specific visuals.
+
+        dK (target_type='killbutton'):  reddish-purple background + faded X from KillButton + ⊘ overlay
+        dP (target_type='pauseswitch'): bluish-purple background + faded pause bars from PauseSwitch + ⊘ overlay
+        Other targets:                  plain purple + ⊘ overlay
+        """
+        purple = COLORS['purple']
+
+        if self.target_type == 'killbutton':
+            # Reddish-purple tint that visually links to the red KillButton
+            bg = np.clip(purple * 0.5 + COLORS['red'] * 0.25, 0, 255).astype(np.uint8)
+        elif self.target_type == 'pauseswitch':
+            # Bluish-purple tint that visually links to the blue PauseSwitch
+            bg = np.clip(purple * 0.5 + COLORS['blue'] * 0.25, 0, 255).astype(np.uint8)
+        else:
+            bg = purple
+
+        fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, _CONTROLBUTTON_CORNER_RADIUS), bg)
+
+        # Draw the target's characteristic symbol as a faint hint
+        hint = (bg * 0.6).astype(np.uint8)  # slightly darker than background
+        if self.target_type == 'killbutton':
+            # Small X echoing KillButton
+            fill_coords(img, point_in_line(0.2, 0.2, 0.8, 0.8, r=0.04), hint)
+            fill_coords(img, point_in_line(0.2, 0.8, 0.8, 0.2, r=0.04), hint)
+        elif self.target_type == 'pauseswitch':
+            # Small pause bars echoing PauseSwitch
+            fill_coords(img, point_in_rect(0.3, 0.4, 0.3, 0.7), hint)
+            fill_coords(img, point_in_rect(0.6, 0.7, 0.3, 0.7), hint)
+
+        # Overlay the ⊘ (circle-slash) "disable" symbol in white
         white = np.array([255, 255, 255])
         fill_coords(img, point_in_circle(0.5, 0.5, 0.3), white)
-        fill_coords(img, point_in_circle(0.5, 0.5, 0.2), c)
+        fill_coords(img, point_in_circle(0.5, 0.5, 0.2), bg)
         fill_coords(img, point_in_line(0.25, 0.75, 0.75, 0.25, r=0.04), white)
 
 
@@ -1776,6 +1856,9 @@ class Agent(WorldObj):
 
     def render(self, img):
         c = COLORS[self.color]
+        if self.terminated:
+            # Dim the agent color for terminated agents
+            c = c // 3
         tri_fn = point_in_triangle(
             (0.12, 0.19),
             (0.87, 0.50),
@@ -1784,6 +1867,14 @@ class Agent(WorldObj):
         # Rotate the agent based on its direction
         tri_fn = rotate_fn(tri_fn, cx=0.5, cy=0.5, theta=0.5 * math.pi * self.dir)
         fill_coords(img, tri_fn, c)
+        
+        if self.terminated:
+            # Draw a black dagger (†) overlay on the agent
+            black = np.array([0, 0, 0])
+            # Vertical blade (top to bottom)
+            fill_coords(img, point_in_line(0.50, 0.15, 0.50, 0.85, r=0.04), black)
+            # Horizontal crossguard
+            fill_coords(img, point_in_line(0.35, 0.38, 0.65, 0.38, r=0.04), black)
 
     def encode(self, world, current_agent=False):
         """Encode the a description of this object as a 3-tuple of integers"""
@@ -2042,6 +2133,9 @@ class Grid:
         highlights_tuple = tuple(highlights) if highlights else ()
         key = (*highlights_tuple, tile_size, stumbled, magic_entered)
         key = obj.encode(world) + key if obj else key
+        # Include terminated/paused state for agents (affects rendering but not encode())
+        if obj is not None and obj.type == 'agent':
+            key = key + (getattr(obj, 'terminated', False), getattr(obj, 'paused', False))
         if terrain:
             key = terrain.encode(world) + key
 
@@ -2413,6 +2507,12 @@ def parse_map_string(map_spec, objects_set=World):
     - Ms : magic wall with south magic side
     - Mw : magic wall with west magic side
     - Me : magic wall with east magic side
+    - Kb or Ki : KillButton (yellow triggers, grey killed)
+    - Ps or Pa : PauseSwitch (yellow toggles, grey paused)
+    - Dk or dK : DisablingSwitch for KillButtons (grey toggles)
+    - Dp or dP : DisablingSwitch for PauseSwitches (grey toggles)
+    - DC or dC : DisablingSwitch for ControlButtons (grey toggles)
+    - CB : ControlButton (yellow triggers, grey controlled)
     - Ac : agent of color c
     
     Color codes (c):
@@ -3054,9 +3154,18 @@ class MultiGridEnv(WorldModel):
             assert a.pos is not None
             assert a.dir is not None
 
-        # Item picked up, being carried, initially nothing
+        # Reset all per-episode agent state
         for a in self.agents:
             a.carrying = None
+            a.terminated = False
+            a.started = True
+            a.paused = False
+            a.forced_next_action = None
+            # Derive on_unsteady_ground from terrain grid at agent's position
+            terrain_cell = self.terrain_grid.get(*a.pos)
+            a.on_unsteady_ground = (
+                terrain_cell is not None and terrain_cell.type == 'unsteadyground'
+            )
 
         # Step count since episode start
         self.step_count = 0
@@ -3348,20 +3457,11 @@ class MultiGridEnv(WorldModel):
         """
         Handle special effects when an agent moves to a cell.
         
-        This includes handling KillButton effects when an agent steps onto one,
-        and deactivating agents when they step on lava.
+        This includes deactivating agents when they step on lava.
         """
         # Handle Lava effects - agent gets deactivated (terminated)
         if fwd_cell is not None and fwd_cell.type == 'lava':
             self.agents[i].terminated = True
-        
-        # Handle KillButton effects
-        if fwd_cell is not None and fwd_cell.type == 'killbutton':
-            if fwd_cell.enabled and self.agents[i].color == fwd_cell.trigger_color:
-                # Kill all agents of the target color
-                for agent in self.agents:
-                    if agent.color == fwd_cell.target_color:
-                        agent.terminated = True
     
     def can_forward(self, state, agent_index: int) -> bool:
         """
@@ -3841,6 +3941,20 @@ class MultiGridEnv(WorldModel):
         else:
             assert False, "unknown action"
         
+        # After executing, check if this agent was programming a control button.
+        # Record the action for any control button awaiting this agent's action.
+        for j in range(self.grid.height):
+            for ii in range(self.grid.width):
+                cell = self.grid.get(ii, j)
+                if (cell is not None and cell.type == 'controlbutton' and 
+                    cell._awaiting_action and cell.controlled_agent == agent_idx):
+                    # Skip recording if this is the toggle that just activated programming mode
+                    if cell._just_activated:
+                        cell._just_activated = False  # Clear the flag for next step
+                    else:
+                        # Record any action (including toggle for controlling other switches)
+                        cell.record_action(action)
+        
         return done
 
     def _process_unsteady_forward_agents(self, unsteady_forward_agents, rewards, unsteady_outcomes=None):
@@ -3864,6 +3978,11 @@ class MultiGridEnv(WorldModel):
         occupied_targets = set()
         
         # Determine stumbling outcomes and target cells for all unsteady agents
+        # Filter out agents that were terminated/paused by earlier actions this step
+        unsteady_forward_agents = [
+            i for i in unsteady_forward_agents
+            if not self.agents[i].terminated and not self.agents[i].paused and self.agents[i].started
+        ]
         for i in unsteady_forward_agents:
             # Determine outcome
             if unsteady_outcomes is not None and i in unsteady_outcomes:
@@ -3986,6 +4105,11 @@ class MultiGridEnv(WorldModel):
         done = False
         
         for i in magic_wall_agents:
+            # Skip agents terminated/paused by earlier actions this step
+            if (self.agents[i].terminated or
+                    self.agents[i].paused or
+                    not self.agents[i].started):
+                continue
             fwd_pos = self.agents[i].front_pos
             fwd_cell = self.grid.get(*fwd_pos)
             
@@ -4085,73 +4209,33 @@ class MultiGridEnv(WorldModel):
         return normal_agents, unsteady_forward_agents, magic_wall_agents
 
     def step(self, actions):
-        self.step_count += 1
-        
-        # Clear stumbled cells from previous step (for visual feedback)
+        # Clear visual feedback from previous step
         self.stumbled_cells = set()
-        
-        # Clear magic wall entered cells from previous step (for visual feedback)
         self.magic_wall_entered_cells = set()
-        
-        # Record initial agent positions to prevent chain conflicts.
-        # An agent cannot move into (or push objects onto) a cell that was occupied
-        # by another agent at the beginning of this step. This ensures deterministic
-        # conflict resolution: one can only move onto a cell the step AFTER it was vacated.
-        self._initial_agent_positions = set()
-        for agent in self.agents:
-            if agent.pos is not None and not agent.terminated:
-                self._initial_agent_positions.add(tuple(agent.pos))
-        
-        # Convert to list for potential modification
-        actions = list(actions)
-        
-        # Handle forced actions (e.g., from ControlButton triggers)
-        # If an agent has forced_next_action set, replace their action and clear it
-        for i, agent in enumerate(self.agents):
-            if agent.forced_next_action is not None:
-                actions[i] = agent.forced_next_action
-                agent.forced_next_action = None
 
-        # Categorize agents using shared helper
-        normal_agents, unsteady_forward_agents, magic_wall_agents = self._categorize_agents(actions)
+        # Get current state and delegate transition to _transition_probabilities_impl
+        # with sample_one=True to randomly sample a single outcome.
+        # This guarantees step() and transition_probabilities() produce the same
+        # distribution over successor states, avoiding any divergence.
+        # Note: forced_next_action (from ControlButton triggers) is handled inside
+        # _transition_probabilities_impl, which reads it from the state, overrides
+        # the corresponding action, and clears it in the state.
+        state = self.get_state()
+        result = self._transition_probabilities_impl(state, actions, sample_one=True)
         
-        # Process normal agents in random order (as before)
-        order = np.random.permutation(normal_agents) if normal_agents else []
+        if result is None:
+            # Terminal state — no transition possible, just mark done
+            done = True
+        else:
+            # result is [(1.0, successor_state)]
+            # Note: _compute_successor_state* already left the env in the successor state
+            done = self.step_count >= self.max_steps
+        
+        # Check if all agents are terminated
+        if all(a.terminated for a in self.agents):
+            done = True
 
         rewards = np.zeros(len(actions))
-        done = False
-
-        # Process normal agents using the shared helper
-        for i in order:
-            agent_done = self._execute_single_agent_action(i, actions[i], rewards)
-            done = done or agent_done
-            
-            # After executing, check if this agent was programming a control button
-            # Record the action for any control button awaiting this agent's action
-            for j in range(self.grid.height):
-                for ii in range(self.grid.width):
-                    cell = self.grid.get(ii, j)
-                    if (cell is not None and cell.type == 'controlbutton' and 
-                        cell._awaiting_action and cell.controlled_agent == i):
-                        # Skip recording if this is the toggle that just activated programming mode
-                        if cell._just_activated:
-                            cell._just_activated = False  # Clear the flag for next step
-                        else:
-                            # Record any action (including toggle for controlling other switches)
-                            cell.record_action(actions[i])
-        
-        # Process unsteady-forward agents using the shared helper
-        if unsteady_forward_agents:
-            unsteady_done = self._process_unsteady_forward_agents(unsteady_forward_agents, rewards)
-            done = done or unsteady_done
-        
-        # Process magic wall entry attempts last
-        if magic_wall_agents:
-            magic_done = self._process_magic_wall_agents(magic_wall_agents, rewards)
-            done = done or magic_done
-
-        if self.step_count >= self.max_steps:
-            done = True
 
         if self.partial_obs:
             obs = self.gen_obs()
@@ -4812,6 +4896,7 @@ class MultiGridEnv(WorldModel):
                     obj.enabled,
                     obj.controlled_agent,
                     obj.triggered_action,
+                    obj._awaiting_action,
                 ))
         
         # Sort mobile objects for deterministic ordering (type, x, y)
@@ -5043,14 +5128,22 @@ class MultiGridEnv(WorldModel):
                 enabled = mutable_obj[3]
                 controlled_agent = mutable_obj[4]
                 triggered_action = mutable_obj[5]
+                awaiting_action = mutable_obj[6] if len(mutable_obj) > 6 else False
                 if cell is not None and cell.type == 'controlbutton':
                     cell.enabled = enabled
                     cell.controlled_agent = controlled_agent
                     cell.triggered_action = triggered_action
+                    cell._awaiting_action = awaiting_action
+                    cell._just_activated = False  # Always False between steps
     
-    def transition_probabilities(self, state, actions):
+    def transition_probabilities(self, state, actions, sample_one=False):
         """
         Given a state and vector of actions, return possible transitions with exact probabilities.
+        
+        When sample_one=True, instead of enumerating all possible outcomes, randomly
+        samples a single outcome (permutation winner, unsteady outcome, magic wall outcome)
+        and returns [(1.0, successor_state)]. This is used by step() to guarantee
+        consistency between step() and the full transition_probabilities().
         
         **When transitions are probabilistic vs deterministic:**
         
@@ -5097,10 +5190,13 @@ class MultiGridEnv(WorldModel):
         Args:
             state: A state tuple as returned by get_state()
             actions: List of action indices, one per agent
+            sample_one: If True, randomly sample a single transition instead of
+                       enumerating all possible outcomes. Returns [(1.0, successor_state)].
             
         Returns:
             list: List of (probability, successor_state) tuples describing all
-                  possible transitions. Returns None if the state is terminal
+                  possible transitions (or a single sampled transition if sample_one=True).
+                  Returns None if the state is terminal
                   or if any action is not feasible in the given state.
         """
         # Check if we're in a terminal state (state[0] is step_count in compact format)
@@ -5120,17 +5216,35 @@ class MultiGridEnv(WorldModel):
         self.set_state(state)
         
         try:
-            return self._transition_probabilities_impl(state, actions)
+            return self._transition_probabilities_impl(state, actions, sample_one=sample_one)
         finally:
             # Always restore the original state
             self.set_state(original_state)
     
-    def _transition_probabilities_impl(self, state, actions):
+    def _transition_probabilities_impl(self, state, actions, sample_one=False):
         """
         Internal implementation of transition_probabilities.
         Called after state is set, original state will be restored by caller.
+        
+        When sample_one=True, randomly samples one outcome instead of enumerating all.
         """
         num_agents = len(self.agents)
+        actions = list(actions)  # Copy to avoid modifying caller's list
+        
+        # Handle forced actions (from ControlButton triggers in a previous step):
+        # If any agent has forced_next_action set in the state, override their action
+        # and clear forced_next_action from the state so it doesn't persist into successor states.
+        agent_states = state[1]
+        modified_agent_states = None
+        for i, agent_state in enumerate(agent_states):
+            if len(agent_state) >= 9 and agent_state[8] is not None:
+                actions[i] = agent_state[8]
+                if modified_agent_states is None:
+                    modified_agent_states = list(agent_states)
+                modified_agent_states[i] = agent_state[:8] + (None,)
+        if modified_agent_states is not None:
+            state = (state[0], tuple(modified_agent_states), state[2], state[3])
+            self.set_state(state)  # Re-set state with cleared forced actions
         
         # Identify which agents will actually act
         active_agents = []
@@ -5278,6 +5392,56 @@ class MultiGridEnv(WorldModel):
                 return 1
         
         [get_block_size(block) for block in all_blocks]
+        
+        # --- sample_one mode: randomly sample one outcome per block ---
+        if sample_one:
+            outcome_indices = []
+            for block in all_blocks:
+                size = get_block_size(block)
+                if block[0] == 'conflict':
+                    # Uniform random winner
+                    outcome_indices.append(np.random.randint(size))
+                elif block[0] in ['unsteady', 'magicwall']:
+                    # Sample according to outcome probabilities
+                    probs = [block[2][j][0] for j in range(size)]
+                    outcome_indices.append(np.random.choice(size, p=probs))
+                else:
+                    outcome_indices.append(0)
+            outcome_indices = tuple(outcome_indices)
+            
+            # Process conflict blocks to determine winners
+            conflict_winners = []
+            conflict_block_idx = 0
+            for i, block in enumerate(all_blocks):
+                if block[0] == 'conflict':
+                    winner_idx = outcome_indices[i]
+                    conflict_winners.append((conflict_block_idx, block[1][winner_idx]))
+                    conflict_block_idx += 1
+            
+            # Process unsteady blocks to determine modified actions
+            modified_actions = list(actions)
+            for i, block in enumerate(all_blocks):
+                if block[0] == 'unsteady':
+                    agent_idx = block[1]
+                    _, outcome_type = block[2][outcome_indices[i]]
+                    modified_actions[agent_idx] = (actions[agent_idx], outcome_type)
+            
+            # Process magic wall blocks to determine outcomes
+            magic_wall_outcomes = {}
+            for i, block in enumerate(all_blocks):
+                if block[0] == 'magicwall':
+                    agent_idx = block[1]
+                    _, outcome_type = block[2][outcome_indices[i]]
+                    magic_wall_outcomes[agent_idx] = outcome_type
+            
+            # Compute the single successor state
+            succ_state = self._compute_successor_state_with_unsteady(
+                state, modified_actions, num_agents, active_agents,
+                conflict_blocks, conflict_winners, magic_wall_outcomes
+            )
+            return [(1.0, succ_state)]
+        
+        # --- Full enumeration mode: compute all outcomes ---
         
         # Compute successor state for each outcome
         successor_states = {}
@@ -5448,6 +5612,70 @@ class MultiGridEnv(WorldModel):
                 # Each agent acts independently (singleton blocks)
                 for agent_idx in agent_list:
                     conflict_blocks.append([agent_idx])
+        
+        # Post-processing: detect KillButton/PauseSwitch toggles that create
+        # ordering dependencies with target-color agents.
+        # When an agent toggles a KillButton or PauseSwitch, the outcome depends
+        # on whether target agents act before or after the toggle, so they must
+        # be in the same conflict block.
+        toggle_affected = []  # list of (toggling_agent_idx, set_of_affected_agent_indices)
+        if hasattr(self.actions, 'toggle'):
+            for agent_idx in active_agents:
+                if actions[agent_idx] == self.actions.toggle:
+                    agent = self.agents[agent_idx]
+                    fwd_pos = agent.front_pos
+                    fwd_cell = self.grid.get(*fwd_pos)
+                    if fwd_cell is not None:
+                        affected = set()
+                        if (fwd_cell.type == 'killbutton' and fwd_cell.enabled
+                                and agent.color == fwd_cell.trigger_color):
+                            for other_idx in active_agents:
+                                if other_idx != agent_idx and self.agents[other_idx].color == fwd_cell.target_color:
+                                    affected.add(other_idx)
+                        elif (fwd_cell.type == 'pauseswitch' and fwd_cell.enabled
+                                and agent.color == fwd_cell.toggle_color):
+                            for other_idx in active_agents:
+                                if other_idx != agent_idx and self.agents[other_idx].color == fwd_cell.target_color:
+                                    affected.add(other_idx)
+                        if affected:
+                            toggle_affected.append((agent_idx, affected))
+        
+        # Merge conflict blocks connected by toggle dependencies
+        if toggle_affected:
+            # Build agent -> block index mapping
+            agent_to_block = {}
+            for block_idx, block in enumerate(conflict_blocks):
+                for a in block:
+                    agent_to_block[a] = block_idx
+            
+            # For each toggle dependency, merge blocks using union-find
+            block_parent = list(range(len(conflict_blocks)))
+            
+            def find(x):
+                while block_parent[x] != x:
+                    block_parent[x] = block_parent[block_parent[x]]
+                    x = block_parent[x]
+                return x
+            
+            def union(x, y):
+                rx, ry = find(x), find(y)
+                if rx != ry:
+                    block_parent[rx] = ry
+            
+            for toggler_idx, affected_set in toggle_affected:
+                toggler_block = agent_to_block[toggler_idx]
+                for affected_idx in affected_set:
+                    affected_block = agent_to_block[affected_idx]
+                    union(toggler_block, affected_block)
+            
+            # Rebuild conflict blocks from union-find
+            merged = {}
+            for block_idx, block in enumerate(conflict_blocks):
+                root = find(block_idx)
+                if root not in merged:
+                    merged[root] = []
+                merged[root].extend(block)
+            conflict_blocks = list(merged.values())
         
         return conflict_blocks
     
@@ -5648,6 +5876,11 @@ class MultiGridEnv(WorldModel):
         done = False
         
         for i in ordering:
+            # Re-check: agent may have been terminated/paused by an earlier agent's action
+            if (self.agents[i].terminated or
+                    self.agents[i].paused or
+                    not self.agents[i].started):
+                continue
             action = modified_actions[i]
             if isinstance(action, tuple):
                 action = action[0]  # Extract original action
