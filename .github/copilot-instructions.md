@@ -88,10 +88,10 @@ make test        # Run tests
 Always use `PYTHONPATH` to avoid import errors:
 ```bash
 # Outside Docker container:
-PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds python examples/human_policy_prior_example.py
+PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds python examples/phase1/human_policy_prior_example.py
 
 # Inside Docker container (make shell):
-python examples/human_policy_prior_example.py
+python examples/phase1/human_policy_prior_example.py
 ```
 
 ### Tests
@@ -128,5 +128,5 @@ During warm-up: `beta_r=0` (uniform random robot). After warm-up: `beta_r` ramps
 - [docs/API.md](docs/API.md) - API reference
 - [docs/ENCODER_ARCHITECTURE.md](docs/ENCODER_ARCHITECTURE.md) - Neural encoder design
 - [docs/WARMUP_DESIGN.md](docs/WARMUP_DESIGN.md) - Phase 2 warm-up rationale
-- [examples/human_policy_prior_example.py](examples/human_policy_prior_example.py) - Phase 1 usage
-- [examples/phase2_robot_policy_demo.py](examples/phase2_robot_policy_demo.py) - Phase 2 usage
+- [examples/phase1/human_policy_prior_example.py](examples/phase1/human_policy_prior_example.py) - Phase 1 usage
+- [examples/phase2/phase2_robot_policy_demo.py](examples/phase2/phase2_robot_policy_demo.py) - Phase 2 usage

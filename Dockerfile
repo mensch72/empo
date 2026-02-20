@@ -39,9 +39,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 RUN pip install --upgrade pip setuptools wheel
 
 # Copy requirements files
-COPY requirements.txt /tmp/requirements.txt
-COPY requirements-dev.txt /tmp/requirements-dev.txt
-COPY requirements-hierarchical.txt /tmp/requirements-hierarchical.txt
+COPY setup/requirements.txt /tmp/requirements.txt
+COPY setup/requirements-dev.txt /tmp/requirements-dev.txt
+COPY setup/requirements-hierarchical.txt /tmp/requirements-hierarchical.txt
 
 # Install Python dependencies
 # Use CPU-only PyTorch to avoid downloading large CUDA packages (~2GB vs ~5GB)

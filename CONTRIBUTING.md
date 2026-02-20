@@ -38,7 +38,7 @@ make shell
 
 ```bash
 # Run verification script
-bash scripts/verify_setup.sh
+bash setup/scripts/verify_setup.sh
 
 # Run tests
 python tests/test_structure.py
@@ -59,7 +59,7 @@ python tests/test_structure.py
    make shell
 
    # inside container:
-   python examples/whatever.py
+   python examples/<category>/whatever.py
    ```
 
 3. Run tests from outside the container:
@@ -151,7 +151,7 @@ For maximum maintainability:
 
 When running examples outside Docker, always set `PYTHONPATH`:
 ```bash
-PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds python examples/script.py
+PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds python examples/<category>/script.py
 ```
 
 Inside the Docker container (via `make shell`), `PYTHONPATH` is pre-configured.
@@ -332,10 +332,10 @@ def main():
 Usage:
 ```bash
 # Full run
-python examples/my_demo.py
+python examples/<category>/my_demo.py
 
 # Quick test run
-python examples/my_demo.py --quick
+python examples/<category>/my_demo.py --quick
 ```
 
 This pattern:

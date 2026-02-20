@@ -232,3 +232,4 @@ diamond_dag*
 *_dag.svgoutputs/
 
 outputs/
+.vscode/settings.json

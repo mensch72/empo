@@ -32,7 +32,7 @@ This implementation enables loading policies trained on larger multigrid environ
 ### 4. Documentation
 - Updated `docs/ENCODER_ARCHITECTURE.md` with cross-grid loading section
 - Enhanced `load()` docstring with detailed explanation
-- Created example script `examples/cross_grid_policy_demo.py`
+- Created example script `examples/multigrid/cross_grid_policy_demo.py`
 
 ## Coordinate System Verification
 
@@ -137,4 +137,4 @@ q_values = loaded_prior.q_network.encode_and_forward(
 )
 ```
 
-See `examples/cross_grid_policy_demo.py` for a complete working example.
+See `examples/multigrid/cross_grid_policy_demo.py` for a complete working example.

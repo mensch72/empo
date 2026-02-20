@@ -1003,7 +1003,7 @@ For deeper profiling with `line_profiler`:
 ```bash
 pip install line_profiler
 # Add @profile decorator to methods of interest, then:
-kernprof -l -v examples/phase2_robot_policy_demo.py --quick
+kernprof -l -v examples/phase2/phase2_robot_policy_demo.py --quick
 ```
 ---
 
@@ -1076,4 +1076,4 @@ config = Phase2Config(
 - They accept optional `state_encoder` arguments for API compatibility but don't use them
 - Can be mixed: some networks neural, others lookup tables
 
-See `src/empo/learning_based/phase2/lookup/` for the lookup table implementations and `examples/lookup_table_phase2_demo.py` for usage examples.
+See `src/empo/learning_based/phase2/lookup/` for the lookup table implementations and `examples/phase2/lookup_table_phase2_demo.py` for usage examples.

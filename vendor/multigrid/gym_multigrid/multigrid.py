@@ -2285,7 +2285,7 @@ class Grid:
         return array
 
     def process_vis(grid, agent_pos):
-        mask = np.zeros(shape=(grid.width, grid.height), dtype=np.bool)
+        mask = np.zeros(shape=(grid.width, grid.height), dtype=bool)
 
         mask[agent_pos[0], agent_pos[1]] = True
 
@@ -4270,7 +4270,7 @@ class MultiGridEnv(WorldModel):
             if not self.see_through_walls:
                 vis_mask = grid.process_vis(agent_pos=(a.view_size // 2, a.view_size - 1))
             else:
-                vis_mask = np.ones(shape=(grid.width, grid.height), dtype=np.bool)
+                vis_mask = np.ones(shape=(grid.width, grid.height), dtype=bool)
 
             grids.append(grid)
             vis_masks.append(vis_mask)

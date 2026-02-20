@@ -1119,8 +1119,10 @@ def test_lookup_table_saves_and_loads():
 
 ### 9.1 Phase 1 Example
 
+Practical Phase 1 training example: `examples/phase1/human_policy_prior_example.py`
+
 ```python
-# examples/lookup_table_phase1_demo.py
+# Illustrative Phase 1 lookup-table wiring (standalone demo not included)
 
 from empo.learning_based.lookup.q_network import LookupTableQNetwork
 from empo.learning_based.lookup.policy_prior_network import LookupTablePolicyPriorNetwork
@@ -1162,7 +1164,7 @@ action_probs = policy_prior(state, agent_idx=0, goal=some_goal)
 ### 9.2 Phase 2 Example
 
 ```python
-# examples/lookup_table_phase2_demo.py
+# examples/phase2/lookup_table_phase2_demo.py
 
 from empo.learning_based.phase2.lookup.robot_q_network import LookupTableRobotQNetwork
 from empo.learning_based.phase2.config import Phase2Networks
@@ -1291,7 +1293,7 @@ print(f"V_h^e table size: {len(networks.v_he.table)} (state, goal) pairs")
 - [x] Utility functions (`is_lookup_table_network`, `get_all_lookup_tables`, `get_total_table_size`)
 - [x] Factory functions for network creation (`network_factory.py`)
 - [ ] Save/load functionality
-- [x] Example script: `examples/lookup_table_phase2_demo.py`
+- [x] Example script: `examples/phase2/lookup_table_phase2_demo.py`
 - [ ] Performance benchmarking
 - [ ] API documentation
 
