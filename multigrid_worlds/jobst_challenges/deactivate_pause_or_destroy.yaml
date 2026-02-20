@@ -9,26 +9,26 @@ metadata:
   category: "challenges"
   tags: ["one-human", "robot", "empowerment", "pause", "destroy"]
 
-#     1  2  3  4  5  6  7
+#     1  2  3  4  5
 map: |
-  We We We We We We We We
-  We We We We We Ay We We
-  We .. .. We We .. We We
-  We .. .. We Ki .. Pa We
-  We .. Ro .. .. .. We We
-  We dK Ae dP We We We We
-  We We We We We We We We
+  We We We We We We
+  We .. .. We We We
+  We .. .. We Ki We
+  We .. Ro .. Ay We
+  We dK Ae dP Pa We
+  We We We We We We
 
-max_steps: 13
+max_steps: 8
 
 orientations: ['n','s']  # human faces north, robot faces south
 
 possible_goals:  # each walkable cell the human could stand on
+  - 1,1
   - 1,2
   - 1,3
-  - 1,4
+  - 2,1
   - 2,2
   - 2,3
   - 2,4
-  - 2,5
-  - 3,1, 5,4
+  - 3,3
+  - 4,3

@@ -56,7 +56,7 @@ Examples of attributes that MUST be encoded:
          can_enter_magic_walls, can_push_rocks, carrying
 - Door: is_open, is_locked, color
 - MagicWall: magic_side, active, entry_probability, solidify_probability
-- ControlButton: enabled, trigger_color, target_color, triggered_action, _awaiting_action
+- ControlButton: enabled, trigger_color, target_color, triggered_action, _awaiting_action (in state)
 - UnsteadyGround: stumble_probability
 
 If you add a new object type or feature, update the encoders and documentation!
@@ -871,9 +871,10 @@ class KillButton(WorldObj):
     
     def render(self, img):
         """Render the kill button as a red floor tile with a skull/X pattern.
-        When disabled, the button is greyed out but the X is still faintly visible."""
+        - Enabled: dark red background with darker red X
+        - Disabled (by DisablingSwitch): grey background with faded X"""
         if self.enabled:
-            # Red background for enabled kill button
+            # Red background for enabled kill button (not yet triggered)
             c = COLORS['red']
             fill_coords(img, point_in_rounded_rect(0.05, 0.95, 0.05, 0.95, _CONTROLBUTTON_CORNER_RADIUS), c / 2)
             # Draw an X pattern in darker red
@@ -3933,6 +3934,20 @@ class MultiGridEnv(WorldModel):
         else:
             assert False, "unknown action"
         
+        # After executing, check if this agent was programming a control button.
+        # Record the action for any control button awaiting this agent's action.
+        for j in range(self.grid.height):
+            for ii in range(self.grid.width):
+                cell = self.grid.get(ii, j)
+                if (cell is not None and cell.type == 'controlbutton' and 
+                    cell._awaiting_action and cell.controlled_agent == agent_idx):
+                    # Skip recording if this is the toggle that just activated programming mode
+                    if cell._just_activated:
+                        cell._just_activated = False  # Clear the flag for next step
+                    else:
+                        # Record any action (including toggle for controlling other switches)
+                        cell.record_action(action)
+        
         return done
 
     def _process_unsteady_forward_agents(self, unsteady_forward_agents, rewards, unsteady_outcomes=None):
@@ -4187,79 +4202,33 @@ class MultiGridEnv(WorldModel):
         return normal_agents, unsteady_forward_agents, magic_wall_agents
 
     def step(self, actions):
-        self.step_count += 1
-        
-        # Clear stumbled cells from previous step (for visual feedback)
+        # Clear visual feedback from previous step
         self.stumbled_cells = set()
-        
-        # Clear magic wall entered cells from previous step (for visual feedback)
         self.magic_wall_entered_cells = set()
-        
-        # Record initial agent positions to prevent chain conflicts.
-        # An agent cannot move into (or push objects onto) a cell that was occupied
-        # by another agent at the beginning of this step. This ensures deterministic
-        # conflict resolution: one can only move onto a cell the step AFTER it was vacated.
-        self._initial_agent_positions = set()
-        for agent in self.agents:
-            if agent.pos is not None and not agent.terminated:
-                self._initial_agent_positions.add(tuple(agent.pos))
-        
-        # Convert to list for potential modification
-        actions = list(actions)
-        
-        # Handle forced actions (e.g., from ControlButton triggers)
-        # If an agent has forced_next_action set, replace their action and clear it
-        for i, agent in enumerate(self.agents):
-            if agent.forced_next_action is not None:
-                actions[i] = agent.forced_next_action
-                agent.forced_next_action = None
 
-        # Categorize agents using shared helper
-        normal_agents, unsteady_forward_agents, magic_wall_agents = self._categorize_agents(actions)
+        # Get current state and delegate transition to _transition_probabilities_impl
+        # with sample_one=True to randomly sample a single outcome.
+        # This guarantees step() and transition_probabilities() produce the same
+        # distribution over successor states, avoiding any divergence.
+        # Note: forced_next_action (from ControlButton triggers) is handled inside
+        # _transition_probabilities_impl, which reads it from the state, overrides
+        # the corresponding action, and clears it in the state.
+        state = self.get_state()
+        result = self._transition_probabilities_impl(state, actions, sample_one=True)
         
-        # Process normal agents in random order (as before)
-        order = np.random.permutation(normal_agents) if normal_agents else []
+        if result is None:
+            # Terminal state — no transition possible, just mark done
+            done = True
+        else:
+            # result is [(1.0, successor_state)]
+            # Note: _compute_successor_state* already left the env in the successor state
+            done = self.step_count >= self.max_steps
+        
+        # Check if all agents are terminated
+        if all(a.terminated for a in self.agents):
+            done = True
 
         rewards = np.zeros(len(actions))
-        done = False
-
-        # Process normal agents using the shared helper
-        for i in order:
-            # Re-check: agent may have been terminated/paused by an earlier agent's action
-            # (e.g., another agent toggled a KillButton or PauseSwitch this step)
-            if (self.agents[i].terminated or
-                    self.agents[i].paused or
-                    not self.agents[i].started):
-                continue
-            agent_done = self._execute_single_agent_action(i, actions[i], rewards)
-            done = done or agent_done
-            
-            # After executing, check if this agent was programming a control button
-            # Record the action for any control button awaiting this agent's action
-            for j in range(self.grid.height):
-                for ii in range(self.grid.width):
-                    cell = self.grid.get(ii, j)
-                    if (cell is not None and cell.type == 'controlbutton' and 
-                        cell._awaiting_action and cell.controlled_agent == i):
-                        # Skip recording if this is the toggle that just activated programming mode
-                        if cell._just_activated:
-                            cell._just_activated = False  # Clear the flag for next step
-                        else:
-                            # Record any action (including toggle for controlling other switches)
-                            cell.record_action(actions[i])
-        
-        # Process unsteady-forward agents using the shared helper
-        if unsteady_forward_agents:
-            unsteady_done = self._process_unsteady_forward_agents(unsteady_forward_agents, rewards)
-            done = done or unsteady_done
-        
-        # Process magic wall entry attempts last
-        if magic_wall_agents:
-            magic_done = self._process_magic_wall_agents(magic_wall_agents, rewards)
-            done = done or magic_done
-
-        if self.step_count >= self.max_steps:
-            done = True
 
         if self.partial_obs:
             obs = self.gen_obs()
@@ -4920,6 +4889,7 @@ class MultiGridEnv(WorldModel):
                     obj.enabled,
                     obj.controlled_agent,
                     obj.triggered_action,
+                    obj._awaiting_action,
                 ))
         
         # Sort mobile objects for deterministic ordering (type, x, y)
@@ -5151,14 +5121,22 @@ class MultiGridEnv(WorldModel):
                 enabled = mutable_obj[3]
                 controlled_agent = mutable_obj[4]
                 triggered_action = mutable_obj[5]
+                awaiting_action = mutable_obj[6] if len(mutable_obj) > 6 else False
                 if cell is not None and cell.type == 'controlbutton':
                     cell.enabled = enabled
                     cell.controlled_agent = controlled_agent
                     cell.triggered_action = triggered_action
+                    cell._awaiting_action = awaiting_action
+                    cell._just_activated = False  # Always False between steps
     
-    def transition_probabilities(self, state, actions):
+    def transition_probabilities(self, state, actions, sample_one=False):
         """
         Given a state and vector of actions, return possible transitions with exact probabilities.
+        
+        When sample_one=True, instead of enumerating all possible outcomes, randomly
+        samples a single outcome (permutation winner, unsteady outcome, magic wall outcome)
+        and returns [(1.0, successor_state)]. This is used by step() to guarantee
+        consistency between step() and the full transition_probabilities().
         
         **When transitions are probabilistic vs deterministic:**
         
@@ -5205,10 +5183,13 @@ class MultiGridEnv(WorldModel):
         Args:
             state: A state tuple as returned by get_state()
             actions: List of action indices, one per agent
+            sample_one: If True, randomly sample a single transition instead of
+                       enumerating all possible outcomes. Returns [(1.0, successor_state)].
             
         Returns:
             list: List of (probability, successor_state) tuples describing all
-                  possible transitions. Returns None if the state is terminal
+                  possible transitions (or a single sampled transition if sample_one=True).
+                  Returns None if the state is terminal
                   or if any action is not feasible in the given state.
         """
         # Check if we're in a terminal state (state[0] is step_count in compact format)
@@ -5228,17 +5209,35 @@ class MultiGridEnv(WorldModel):
         self.set_state(state)
         
         try:
-            return self._transition_probabilities_impl(state, actions)
+            return self._transition_probabilities_impl(state, actions, sample_one=sample_one)
         finally:
             # Always restore the original state
             self.set_state(original_state)
     
-    def _transition_probabilities_impl(self, state, actions):
+    def _transition_probabilities_impl(self, state, actions, sample_one=False):
         """
         Internal implementation of transition_probabilities.
         Called after state is set, original state will be restored by caller.
+        
+        When sample_one=True, randomly samples one outcome instead of enumerating all.
         """
         num_agents = len(self.agents)
+        actions = list(actions)  # Copy to avoid modifying caller's list
+        
+        # Handle forced actions (from ControlButton triggers in a previous step):
+        # If any agent has forced_next_action set in the state, override their action
+        # and clear forced_next_action from the state so it doesn't persist into successor states.
+        agent_states = state[1]
+        modified_agent_states = None
+        for i, agent_state in enumerate(agent_states):
+            if len(agent_state) >= 9 and agent_state[8] is not None:
+                actions[i] = agent_state[8]
+                if modified_agent_states is None:
+                    modified_agent_states = list(agent_states)
+                modified_agent_states[i] = agent_state[:8] + (None,)
+        if modified_agent_states is not None:
+            state = (state[0], tuple(modified_agent_states), state[2], state[3])
+            self.set_state(state)  # Re-set state with cleared forced actions
         
         # Identify which agents will actually act
         active_agents = []
@@ -5386,6 +5385,56 @@ class MultiGridEnv(WorldModel):
                 return 1
         
         [get_block_size(block) for block in all_blocks]
+        
+        # --- sample_one mode: randomly sample one outcome per block ---
+        if sample_one:
+            outcome_indices = []
+            for block in all_blocks:
+                size = get_block_size(block)
+                if block[0] == 'conflict':
+                    # Uniform random winner
+                    outcome_indices.append(np.random.randint(size))
+                elif block[0] in ['unsteady', 'magicwall']:
+                    # Sample according to outcome probabilities
+                    probs = [block[2][j][0] for j in range(size)]
+                    outcome_indices.append(np.random.choice(size, p=probs))
+                else:
+                    outcome_indices.append(0)
+            outcome_indices = tuple(outcome_indices)
+            
+            # Process conflict blocks to determine winners
+            conflict_winners = []
+            conflict_block_idx = 0
+            for i, block in enumerate(all_blocks):
+                if block[0] == 'conflict':
+                    winner_idx = outcome_indices[i]
+                    conflict_winners.append((conflict_block_idx, block[1][winner_idx]))
+                    conflict_block_idx += 1
+            
+            # Process unsteady blocks to determine modified actions
+            modified_actions = list(actions)
+            for i, block in enumerate(all_blocks):
+                if block[0] == 'unsteady':
+                    agent_idx = block[1]
+                    _, outcome_type = block[2][outcome_indices[i]]
+                    modified_actions[agent_idx] = (actions[agent_idx], outcome_type)
+            
+            # Process magic wall blocks to determine outcomes
+            magic_wall_outcomes = {}
+            for i, block in enumerate(all_blocks):
+                if block[0] == 'magicwall':
+                    agent_idx = block[1]
+                    _, outcome_type = block[2][outcome_indices[i]]
+                    magic_wall_outcomes[agent_idx] = outcome_type
+            
+            # Compute the single successor state
+            succ_state = self._compute_successor_state_with_unsteady(
+                state, modified_actions, num_agents, active_agents,
+                conflict_blocks, conflict_winners, magic_wall_outcomes
+            )
+            return [(1.0, succ_state)]
+        
+        # --- Full enumeration mode: compute all outcomes ---
         
         # Compute successor state for each outcome
         successor_states = {}

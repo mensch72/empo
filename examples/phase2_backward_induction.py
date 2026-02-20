@@ -472,11 +472,17 @@ def run_policy_rollout(
     xi: float = 1.0,
     eta: float = 1.0,
     zeta: float = 2.0,
+    human_always_toggles: bool = False,
 ) -> int:
     """
     Run a single rollout with the computed robot policy.
     
     Uses env's internal video recording - frames are captured automatically.
+    
+    Args:
+        human_always_toggles: If True, override human action to toggle whenever
+            the human is facing a toggleable object (killbutton, pauseswitch,
+            disablingswitch, controlbutton, door). Only affects rollouts.
     
     Returns:
         Number of steps taken.
@@ -582,6 +588,17 @@ def run_policy_rollout(
             if human_action_dist is not None:
                 actions[h_idx] = np.random.choice(len(human_action_dist), p=human_action_dist)
         
+        # Override: if human_always_toggles, check if any human faces a toggleable object
+        if human_always_toggles and hasattr(env.actions, 'toggle'):
+            TOGGLEABLE_TYPES = {'killbutton', 'pauseswitch', 'disablingswitch', 'controlbutton', 'door'}
+            for h_idx in human_agent_indices:
+                agent = env.agents[h_idx]
+                if agent.pos is not None and not agent.terminated and not agent.paused:
+                    fwd_pos = agent.front_pos
+                    fwd_cell = env.grid.get(*fwd_pos)
+                    if fwd_cell is not None and fwd_cell.type in TOGGLEABLE_TYPES:
+                        actions[h_idx] = env.actions.toggle
+        
         # Each robot uses computed policy
         robot_action = robot_policy.sample(state)
         if robot_action is not None:
@@ -682,6 +699,8 @@ def main(
     robot_idx: Optional[int] = None,
     profile: bool = False,
     actions_set=None,
+    optimistic: bool = False,
+    human_always_toggles: bool = False,
 ):
     """
     Run Phase 2 backward induction demo.
@@ -710,6 +729,10 @@ def main(
         robot_idx: Override robot agent index (for custom worlds).
         profile: Enable line profiling of backward induction functions.
         actions_set: Action class to use (None for default).
+        optimistic: If True, compute best-case (max) over robot actions in Phase 1
+            instead of worst-case (min).
+        human_always_toggles: If True, during rollouts the human always toggles
+            any toggleable object (button, switch, door) in front of it.
     """
     # Set random seeds
     random.seed(seed)
@@ -873,6 +896,7 @@ def main(
         use_disk_slicing=True,  # Enable disk-based caching (auto-detects /dev/shm)
         level_fct=lambda state: state[0],  # Extract timestep from MultiGrid state
 #        archive_dir=output_dir,  # Save archived values to output directory
+        optimistic=optimistic,
     )
     t1 = time.time()
     
@@ -1156,6 +1180,7 @@ def main(
             xi=xi,
             eta=eta,
             zeta=zeta,
+            human_always_toggles=human_always_toggles,
         )
         if (rollout_idx + 1) % 5 == 0:
             print(f"  Completed {rollout_idx + 1}/{num_rollouts} rollouts")
@@ -1288,6 +1313,12 @@ if __name__ == "__main__":
     parser.add_argument('--profile', action='store_true',
                         help='Enable line profiling of backward_induction package '
                              '(requires line_profiler: pip install line_profiler)')
+    parser.add_argument('--optimistic', action='store_true',
+                        help='Use best-case (max) over robot actions in Phase 1 '
+                             'instead of worst-case (min)')
+    parser.add_argument('--human-always-toggles', action='store_true',
+                        help='During rollouts, the human always toggles any '
+                             'toggleable object (button, switch, door) in front of it')
     
     args = parser.parse_args()
     
@@ -1338,4 +1369,6 @@ if __name__ == "__main__":
         robot_idx=args.robot_idx,
         profile=args.profile,
         actions_set=actions_set,
+        optimistic=args.optimistic,
+        human_always_toggles=args.human_always_toggles,
     )

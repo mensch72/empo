@@ -652,6 +652,244 @@ def test_control_button_forced_action_overrides_choice():
     assert tuple(env.agents[1].pos) == robot_pos, "Robot should not have moved"
 
 
+# ============================================================================
+# ControlButton transition_probabilities() consistency tests
+# ============================================================================
+
+
+def _setup_cb_env_facing_button():
+    """Helper: create ControlButtonEnv with grey robot facing the button.
+    
+    Layout (6x5):
+        Walls around perimeter.
+        Yellow (human) at (1,2) facing east.
+        Grey (robot) at (3,2) facing *west* (front_pos = (2,2) = button).
+        ControlButton at (2,2).
+    """
+    env = ControlButtonEnv()
+    env.reset()
+    # Turn robot to face west (towards button)
+    env.step([Actions.still, Actions.left])
+    env.step([Actions.still, Actions.left])
+    assert tuple(env.agents[1].front_pos) == (2, 2), "Robot should face the button"
+    return env
+
+
+def test_control_button_transition_probs_programming():
+    """transition_probabilities() must produce same state as step() for programming toggle."""
+    env = _setup_cb_env_facing_button()
+    
+    state_before = env.get_state()
+    actions = [Actions.still, Actions.toggle]  # Robot toggles → enters programming mode
+    
+    # Get transition_probabilities result
+    tp_result = env.transition_probabilities(state_before, actions)
+    assert len(tp_result) == 1, "Programming toggle is deterministic"
+    tp_prob, tp_state = tp_result[0]
+    assert tp_prob == 1.0
+    
+    # Execute step() to get the actual state
+    env.step(actions)
+    step_state = env.get_state()
+    
+    assert tp_state == step_state, (
+        f"transition_probabilities and step() diverge after programming toggle.\n"
+        f"  tp_state:   {tp_state}\n"
+        f"  step_state: {step_state}"
+    )
+    
+    # Verify the button is awaiting action
+    # ControlButton state: ('controlbutton', x, y, enabled, controlled_agent, triggered_action, _awaiting_action)
+    cb_state = [m for m in step_state[3] if m[0] == 'controlbutton'][0]
+    assert cb_state[4] == 1, "controlled_agent should be 1 (robot)"
+    assert cb_state[6] == True, "_awaiting_action should be True"
+
+
+def test_control_button_transition_probs_recording():
+    """transition_probabilities() must produce same state as step() for action recording."""
+    env = _setup_cb_env_facing_button()
+    
+    # Robot toggles → enters programming mode
+    env.step([Actions.still, Actions.toggle])
+    assert env.control_button._awaiting_action == True
+    
+    state_before = env.get_state()
+    actions = [Actions.still, Actions.forward]  # Robot moves forward → action gets recorded
+    
+    # Get transition_probabilities result
+    tp_result = env.transition_probabilities(state_before, actions)
+    assert len(tp_result) == 1
+    tp_prob, tp_state = tp_result[0]
+    assert tp_prob == 1.0
+    
+    # Execute step()
+    env.step(actions)
+    step_state = env.get_state()
+    
+    assert tp_state == step_state, (
+        f"transition_probabilities and step() diverge after action recording.\n"
+        f"  tp_state:   {tp_state}\n"
+        f"  step_state: {step_state}"
+    )
+    
+    # Verify button recorded the action
+    cb_state = [m for m in step_state[3] if m[0] == 'controlbutton'][0]
+    assert cb_state[5] == Actions.forward, "triggered_action should be forward"
+    assert cb_state[6] == False, "_awaiting_action should be False after recording"
+
+
+def test_control_button_transition_probs_trigger():
+    """transition_probabilities() must produce same state as step() for triggering."""
+    env = _setup_cb_env_facing_button()
+    
+    # Pre-program the button directly
+    env.control_button.controlled_agent = 1
+    env.control_button.triggered_action = Actions.left
+    
+    # Human is at (1,2) facing east → front_pos is (2,2) = button
+    assert tuple(env.agents[0].front_pos) == (2, 2), "Human should face the button"
+    
+    state_before = env.get_state()
+    actions = [Actions.toggle, Actions.still]  # Human triggers the button
+    
+    tp_result = env.transition_probabilities(state_before, actions)
+    assert len(tp_result) == 1
+    tp_prob, tp_state = tp_result[0]
+    assert tp_prob == 1.0
+    
+    env.step(actions)
+    step_state = env.get_state()
+    
+    assert tp_state == step_state, (
+        f"transition_probabilities and step() diverge after trigger.\n"
+        f"  tp_state:   {tp_state}\n"
+        f"  step_state: {step_state}"
+    )
+    
+    # Verify robot has forced_next_action set in the state
+    robot_state = step_state[1][1]  # agent index 1
+    assert robot_state[8] == Actions.left, "Robot should have forced_next_action=left"
+
+
+def test_control_button_transition_probs_forced_override():
+    """transition_probabilities() must correctly apply forced_next_action override."""
+    env = _setup_cb_env_facing_button()
+    
+    # Pre-program and trigger the button
+    env.control_button.controlled_agent = 1
+    env.control_button.triggered_action = Actions.right
+    env.step([Actions.toggle, Actions.still])  # Human triggers → robot gets forced_next_action
+    
+    assert env.agents[1].forced_next_action == Actions.right
+    
+    robot_dir_before = env.agents[1].dir
+    robot_pos_before = tuple(env.agents[1].pos)
+    state_before = env.get_state()
+    
+    # Robot "tries" forward but should be forced to turn right
+    actions = [Actions.still, Actions.forward]
+    
+    tp_result = env.transition_probabilities(state_before, actions)
+    assert len(tp_result) == 1
+    tp_prob, tp_state = tp_result[0]
+    assert tp_prob == 1.0
+    
+    env.step(actions)
+    step_state = env.get_state()
+    
+    assert tp_state == step_state, (
+        f"transition_probabilities and step() diverge after forced override.\n"
+        f"  tp_state:   {tp_state}\n"
+        f"  step_state: {step_state}"
+    )
+    
+    # Verify robot turned right (forced) not moved forward (chosen)
+    expected_dir = (robot_dir_before + 1) % 4
+    robot_state = step_state[1][1]
+    assert robot_state[2] == expected_dir, "Robot should have turned right (forced)"
+    assert (robot_state[0], robot_state[1]) == robot_pos_before, "Robot should not have moved"
+    # forced_next_action should be cleared in successor state
+    assert robot_state[8] is None, "forced_next_action should be cleared after use"
+
+
+def test_control_button_full_lifecycle_via_transition_probs():
+    """Full lifecycle: program → record → trigger → forced override, all via transition_probabilities()."""
+    env = _setup_cb_env_facing_button()
+    
+    # STEP 1: Robot toggles to enter programming mode
+    state = env.get_state()
+    actions_1 = [Actions.still, Actions.toggle]
+    tp1 = env.transition_probabilities(state, actions_1)
+    assert len(tp1) == 1
+    state_after_program = tp1[0][1]
+    
+    # Verify programming mode in state
+    cb = [m for m in state_after_program[3] if m[0] == 'controlbutton'][0]
+    assert cb[4] == 1, "controlled_agent should be robot (1)"
+    assert cb[6] == True, "_awaiting_action should be True"
+    
+    # STEP 2: Robot turns left → recorded as programmed action
+    actions_2 = [Actions.still, Actions.left]
+    tp2 = env.transition_probabilities(state_after_program, actions_2)
+    assert len(tp2) == 1
+    state_after_record = tp2[0][1]
+    
+    # Verify action was recorded
+    cb = [m for m in state_after_record[3] if m[0] == 'controlbutton'][0]
+    assert cb[5] == Actions.left, "triggered_action should be left"
+    assert cb[6] == False, "_awaiting_action should be False after recording"
+    
+    # STEP 3: Human triggers the button
+    # Human is at (1,2) facing east, button at (2,2) — needs to be facing button
+    actions_3 = [Actions.toggle, Actions.still]
+    tp3 = env.transition_probabilities(state_after_record, actions_3)
+    assert len(tp3) == 1
+    state_after_trigger = tp3[0][1]
+    
+    # Verify forced_next_action set on robot
+    robot_state = state_after_trigger[1][1]
+    assert robot_state[8] == Actions.left, "Robot should have forced_next_action=left"
+    
+    # STEP 4: Robot's chosen action (forward) is overridden by forced (left)
+    robot_dir_before = state_after_trigger[1][1][2]
+    actions_4 = [Actions.still, Actions.forward]  # Robot tries forward
+    tp4 = env.transition_probabilities(state_after_trigger, actions_4)
+    assert len(tp4) == 1
+    state_final = tp4[0][1]
+    
+    # Verify robot turned left (forced override), not moved forward
+    robot_state_final = state_final[1][1]
+    expected_dir = (robot_dir_before - 1) % 4
+    assert robot_state_final[2] == expected_dir, (
+        f"Robot should have turned left. Expected dir={expected_dir}, got dir={robot_state_final[2]}"
+    )
+    assert robot_state_final[8] is None, "forced_next_action should be cleared"
+
+
+def test_control_button_awaiting_action_in_state():
+    """Verify that _awaiting_action is included in get_state() and set_state() round-trips."""
+    env = _setup_cb_env_facing_button()
+    
+    # Robot toggles → enters programming mode
+    env.step([Actions.still, Actions.toggle])
+    assert env.control_button._awaiting_action == True
+    
+    state = env.get_state()
+    
+    # Verify _awaiting_action is in state
+    cb_state = [m for m in state[3] if m[0] == 'controlbutton'][0]
+    assert len(cb_state) >= 7, f"ControlButton state should have 7+ elements, got {len(cb_state)}"
+    assert cb_state[6] == True, "_awaiting_action should be True in state"
+    
+    # Modify the live object
+    env.control_button._awaiting_action = False
+    assert env.control_button._awaiting_action == False
+    
+    # Restore state
+    env.set_state(state)
+    assert env.control_button._awaiting_action == True, "_awaiting_action should be restored by set_state"
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

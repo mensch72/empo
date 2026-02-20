@@ -79,7 +79,7 @@ _shared_transitions: Optional[List[List[TransitionData]]] = None
 _shared_Vh_values: Optional[VhValues] = None
 _shared_sliced_cache: Optional[SlicedAttainmentCache] = None  # Sliced cache for goal attainment arrays
 _shared_num_action_profiles: int = 0  # Needed to create slice caches in workers
-_shared_params: Optional[Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], List[int], List[List[int]], float, float]] = None
+_shared_params: Optional[Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], List[int], List[List[int]], float, float, bool]] = None
 _shared_believed_others_policy_pickle: Optional[bytes] = None  # cloudpickle'd believed_others_policy function
 _shared_disk_dag: Optional['DiskBasedDAG'] = None  # For parallel disk slicing
 
@@ -103,6 +103,7 @@ def _hpp_process_single_state(
     use_indexed: bool = False,
     vres0: Union[Dict, npt.NDArray] = None,
     pres0: Union[Dict, npt.NDArray] = None,
+    optimistic: bool = False,
 ) -> Tuple[Dict[int, Dict[PossibleGoal, float]], Optional[Dict[int, Dict[PossibleGoal, npt.NDArray[np.floating[Any]]]]]]:
     """Process a single state, returning (v_results, p_results).
     
@@ -178,7 +179,7 @@ def _hpp_process_single_state(
                 for action in actions:
                     v_accum = 0.0
                     for action_profile_prob, action_profile in believed_others_policy(state, agent_index, action):
-                        worst_expectation = math.inf
+                        anticipated_expectation = -math.inf if optimistic else math.inf
                         action_profile[agent_index] = action
                         for robot_action_profile in robot_action_profiles:
                             action_profile[robot_agent_indices] = robot_action_profile
@@ -220,9 +221,10 @@ def _hpp_process_single_state(
                                 next_state_probabilities,
                                 np.where(attainment_values_array, 1.0, v_values_array)
                             )
-                            if expectation < worst_expectation:
-                                worst_expectation = expectation
-                        v_accum += action_profile_prob * worst_expectation
+                            if ((expectation > anticipated_expectation) if optimistic 
+                                else (expectation < anticipated_expectation)):
+                                anticipated_expectation = expectation
+                        v_accum += action_profile_prob * anticipated_expectation
                     expected_Vs[action] = v_accum
                 
                 q = gamma_h * expected_Vs
@@ -274,6 +276,7 @@ def _hpp_compute_sequential(
     archive_dir: Optional[str] = None,
     return_Vh: bool = True,
     quiet: bool = False,
+    optimistic: bool = False,
 ) -> None:
     """Sequential backward induction algorithm.
     
@@ -379,6 +382,7 @@ def _hpp_compute_sequential(
                     use_indexed=use_indexed,
                     vres0=vres0,
                     pres0=pres0,
+                    optimistic=optimistic,
                 )
                 
                 # Store results
@@ -496,6 +500,7 @@ def _hpp_compute_sequential(
             use_indexed=use_indexed,
             vres0=vres0,
             pres0=pres0,
+            optimistic=optimistic,
         )
         
         # Store results
@@ -530,7 +535,7 @@ def _hpp_init_shared_data(
     states: List[State], 
     transitions: List[List[TransitionData]], 
     Vh_values: VhValues, 
-    params: Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], float, float],
+    params: Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], float, float, bool],
     believed_others_policy_pickle: Optional[bytes] = None,
     use_shared_memory: bool = False,
     sliced_cache: Optional[SlicedAttainmentCache] = None,
@@ -605,7 +610,7 @@ def _hpp_process_state_batch(
     
     Vh_values = _shared_Vh_values
     (human_agent_indices, possible_goal_generator, num_agents, num_actions, 
-     action_powers, robot_agent_indices, robot_action_profiles, beta_h, gamma_h) = _shared_params
+     action_powers, robot_agent_indices, robot_action_profiles, beta_h, gamma_h, optimistic) = _shared_params
     
     v_results: Dict[int, Dict[int, Dict[PossibleGoal, float]]] = {}
     p_results: Dict[State, Dict[int, Dict[PossibleGoal, npt.NDArray[np.floating[Any]]]]] = {}
@@ -639,6 +644,7 @@ def _hpp_process_state_batch(
             robot_agent_indices, robot_action_profiles,
             beta_h, gamma_h,
             slice_cache=slice_cache,
+            optimistic=optimistic,
         )
         
         v_results[state_index] = state_v_results
@@ -681,7 +687,7 @@ def _hpp_process_timestep_batch_disk(
     states = _shared_states
     Vh_values = _shared_Vh_values
     (human_agent_indices, possible_goal_generator, num_agents, num_actions, 
-     action_powers, robot_agent_indices, robot_action_profiles, beta_h, gamma_h) = _shared_params
+     action_powers, robot_agent_indices, robot_action_profiles, beta_h, gamma_h, optimistic) = _shared_params
     
     # Deserialize believed_others_policy if custom one was provided via cloudpickle
     if _shared_believed_others_policy_pickle is not None:
@@ -715,6 +721,7 @@ def _hpp_process_timestep_batch_disk(
             robot_agent_indices, robot_action_profiles,
             beta_h, gamma_h,
             slice_cache=timestep_cache,
+            optimistic=optimistic,
         )
         
         v_results[global_state_idx] = state_v_results
@@ -749,7 +756,8 @@ def compute_human_policy_prior(
     quiet: bool = False,
     min_free_memory_fraction: float = 0.1,
     memory_check_interval: int = 100,
-    memory_pause_duration: float = 60.0
+    memory_pause_duration: float = 60.0,
+    optimistic: bool = False,
 ) -> TabularHumanPolicyPrior: ...
 
 
@@ -771,7 +779,8 @@ def compute_human_policy_prior(
     quiet: bool = False,
     min_free_memory_fraction: float = 0.1,
     memory_check_interval: int = 100,
-    memory_pause_duration: float = 60.0
+    memory_pause_duration: float = 60.0,
+    optimistic: bool = False,
 ) -> Tuple[TabularHumanPolicyPrior, Dict[State, Dict[int, Dict[PossibleGoal, float]]]]: ...
 
 
@@ -793,7 +802,8 @@ def compute_human_policy_prior(
     quiet: bool = False,
     min_free_memory_fraction: float = 0.1,
     memory_check_interval: int = 100,
-    memory_pause_duration: float = 60.0
+    memory_pause_duration: float = 60.0,
+    optimistic: bool = False,
 ) -> Tuple[TabularHumanPolicyPrior, SlicedAttainmentCache]: ...
 
 
@@ -815,7 +825,8 @@ def compute_human_policy_prior(
     quiet: bool = False,
     min_free_memory_fraction: float = 0.1,
     memory_check_interval: int = 100,
-    memory_pause_duration: float = 60.0
+    memory_pause_duration: float = 60.0,
+    optimistic: bool = False,
 ) -> Tuple[TabularHumanPolicyPrior, Dict[State, Dict[int, Dict[PossibleGoal, float]]], SlicedAttainmentCache]: ...
 
 
@@ -842,7 +853,8 @@ def compute_human_policy_prior(
     use_float16: bool = True,
     use_compression: bool = False,
     archive_dir: Optional[str] = None,
-    use_attainment_cache: bool = True
+    use_attainment_cache: bool = True,
+    optimistic: bool = False,
 ) -> Union[TabularHumanPolicyPrior, 
            Tuple[TabularHumanPolicyPrior, Dict[State, Dict[int, Dict[PossibleGoal, float]]]],
            Tuple[TabularHumanPolicyPrior, SlicedAttainmentCache],
@@ -913,6 +925,8 @@ def compute_human_policy_prior(
         use_attainment_cache: If True (default), cache is_achieved() results for reuse
             in Phase 2. Set to False to save ~3GB memory at the cost of recomputing
             is_achieved() in Phase 2 (negligible for simple goals like ReachCellGoal).
+        optimistic: If False (default), compute the min (worst-case) over robot action
+            profiles. If True, compute the max (best-case) over robot action profiles.
     
     Returns:
         TabularHumanPolicyPrior: Policy prior that can be called as prior(state, agent, goal).
@@ -1191,9 +1205,9 @@ def compute_human_policy_prior(
             
             # Initialize shared data for worker processes
             # On Linux (fork), workers inherit these as copy-on-write
-            params: Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], List[int], List[List[int]], float, float] = (
+            params: Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], List[int], List[List[int]], float, float, bool] = (
                 human_agent_indices, possible_goal_generator, num_agents, num_actions,
-                action_powers, robot_agent_indices, robot_action_profiles, beta_h, gamma_h
+                action_powers, robot_agent_indices, robot_action_profiles, beta_h, gamma_h, optimistic
             )
             
             # Use 'fork' context explicitly to ensure shared memory works
@@ -1281,6 +1295,7 @@ def compute_human_policy_prior(
                             robot_agent_indices, robot_action_profiles,
                             beta_h, gamma_h,
                             slice_cache=inline_slice_cache,
+                            optimistic=optimistic,
                         )
                         
                         # Store results
@@ -1477,7 +1492,7 @@ def compute_human_policy_prior(
                              beta_h, gamma_h,
                              progress_callback, memory_monitor,
                              sliced_cache, disk_dag, level_fct, archive_dir, return_Vh,
-                             quiet=quiet)
+                             quiet=quiet, optimistic=optimistic)
         except KeyboardInterrupt:
             if not quiet:
                 print("\n[Phase1] Computation interrupted (KeyboardInterrupt).")
