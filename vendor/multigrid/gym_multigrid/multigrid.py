@@ -2133,6 +2133,9 @@ class Grid:
         highlights_tuple = tuple(highlights) if highlights else ()
         key = (*highlights_tuple, tile_size, stumbled, magic_entered)
         key = obj.encode(world) + key if obj else key
+        # Include terminated/paused state for agents (affects rendering but not encode())
+        if obj is not None and obj.type == 'agent':
+            key = key + (getattr(obj, 'terminated', False), getattr(obj, 'paused', False))
         if terrain:
             key = terrain.encode(world) + key
 
