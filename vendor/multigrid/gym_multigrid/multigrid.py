@@ -1855,6 +1855,9 @@ class Agent(WorldObj):
 
     def render(self, img):
         c = COLORS[self.color]
+        if self.terminated:
+            # Dim the agent color for terminated agents
+            c = c // 3
         tri_fn = point_in_triangle(
             (0.12, 0.19),
             (0.87, 0.50),
@@ -1863,6 +1866,14 @@ class Agent(WorldObj):
         # Rotate the agent based on its direction
         tri_fn = rotate_fn(tri_fn, cx=0.5, cy=0.5, theta=0.5 * math.pi * self.dir)
         fill_coords(img, tri_fn, c)
+        
+        if self.terminated:
+            # Draw a black dagger (†) overlay on the agent
+            black = np.array([0, 0, 0])
+            # Vertical blade (top to bottom)
+            fill_coords(img, point_in_line(0.50, 0.15, 0.50, 0.85, r=0.04), black)
+            # Horizontal crossguard
+            fill_coords(img, point_in_line(0.35, 0.38, 0.65, 0.38, r=0.04), black)
 
     def encode(self, world, current_agent=False):
         """Encode the a description of this object as a 3-tuple of integers"""
@@ -3945,6 +3956,11 @@ class MultiGridEnv(WorldModel):
         occupied_targets = set()
         
         # Determine stumbling outcomes and target cells for all unsteady agents
+        # Filter out agents that were terminated/paused by earlier actions this step
+        unsteady_forward_agents = [
+            i for i in unsteady_forward_agents
+            if not self.agents[i].terminated and not self.agents[i].paused and self.agents[i].started
+        ]
         for i in unsteady_forward_agents:
             # Determine outcome
             if unsteady_outcomes is not None and i in unsteady_outcomes:
@@ -4067,6 +4083,11 @@ class MultiGridEnv(WorldModel):
         done = False
         
         for i in magic_wall_agents:
+            # Skip agents terminated/paused by earlier actions this step
+            if (self.agents[i].terminated or
+                    self.agents[i].paused or
+                    not self.agents[i].started):
+                continue
             fwd_pos = self.agents[i].front_pos
             fwd_cell = self.grid.get(*fwd_pos)
             
@@ -4204,6 +4225,12 @@ class MultiGridEnv(WorldModel):
 
         # Process normal agents using the shared helper
         for i in order:
+            # Re-check: agent may have been terminated/paused by an earlier agent's action
+            # (e.g., another agent toggled a KillButton or PauseSwitch this step)
+            if (self.agents[i].terminated or
+                    self.agents[i].paused or
+                    not self.agents[i].started):
+                continue
             agent_done = self._execute_single_agent_action(i, actions[i], rewards)
             done = done or agent_done
             
@@ -5530,6 +5557,70 @@ class MultiGridEnv(WorldModel):
                 for agent_idx in agent_list:
                     conflict_blocks.append([agent_idx])
         
+        # Post-processing: detect KillButton/PauseSwitch toggles that create
+        # ordering dependencies with target-color agents.
+        # When an agent toggles a KillButton or PauseSwitch, the outcome depends
+        # on whether target agents act before or after the toggle, so they must
+        # be in the same conflict block.
+        toggle_affected = []  # list of (toggling_agent_idx, set_of_affected_agent_indices)
+        if hasattr(self.actions, 'toggle'):
+            for agent_idx in active_agents:
+                if actions[agent_idx] == self.actions.toggle:
+                    agent = self.agents[agent_idx]
+                    fwd_pos = agent.front_pos
+                    fwd_cell = self.grid.get(*fwd_pos)
+                    if fwd_cell is not None:
+                        affected = set()
+                        if (fwd_cell.type == 'killbutton' and fwd_cell.enabled
+                                and agent.color == fwd_cell.trigger_color):
+                            for other_idx in active_agents:
+                                if other_idx != agent_idx and self.agents[other_idx].color == fwd_cell.target_color:
+                                    affected.add(other_idx)
+                        elif (fwd_cell.type == 'pauseswitch' and fwd_cell.enabled
+                                and agent.color == fwd_cell.toggle_color):
+                            for other_idx in active_agents:
+                                if other_idx != agent_idx and self.agents[other_idx].color == fwd_cell.target_color:
+                                    affected.add(other_idx)
+                        if affected:
+                            toggle_affected.append((agent_idx, affected))
+        
+        # Merge conflict blocks connected by toggle dependencies
+        if toggle_affected:
+            # Build agent -> block index mapping
+            agent_to_block = {}
+            for block_idx, block in enumerate(conflict_blocks):
+                for a in block:
+                    agent_to_block[a] = block_idx
+            
+            # For each toggle dependency, merge blocks using union-find
+            block_parent = list(range(len(conflict_blocks)))
+            
+            def find(x):
+                while block_parent[x] != x:
+                    block_parent[x] = block_parent[block_parent[x]]
+                    x = block_parent[x]
+                return x
+            
+            def union(x, y):
+                rx, ry = find(x), find(y)
+                if rx != ry:
+                    block_parent[rx] = ry
+            
+            for toggler_idx, affected_set in toggle_affected:
+                toggler_block = agent_to_block[toggler_idx]
+                for affected_idx in affected_set:
+                    affected_block = agent_to_block[affected_idx]
+                    union(toggler_block, affected_block)
+            
+            # Rebuild conflict blocks from union-find
+            merged = {}
+            for block_idx, block in enumerate(conflict_blocks):
+                root = find(block_idx)
+                if root not in merged:
+                    merged[root] = []
+                merged[root].extend(block)
+            conflict_blocks = list(merged.values())
+        
         return conflict_blocks
     
     def _build_ordering_with_winners(self, num_agents, active_agents, conflict_blocks, winners):
@@ -5729,6 +5820,11 @@ class MultiGridEnv(WorldModel):
         done = False
         
         for i in ordering:
+            # Re-check: agent may have been terminated/paused by an earlier agent's action
+            if (self.agents[i].terminated or
+                    self.agents[i].paused or
+                    not self.agents[i].started):
+                continue
             action = modified_actions[i]
             if isinstance(action, tuple):
                 action = action[0]  # Extract original action
