@@ -36,7 +36,7 @@ from typing import Optional, Callable, List, Tuple, Dict, Any, Union, overload, 
 import cloudpickle
 from tqdm import tqdm
 
-from empo.util.memory_monitor import MemoryMonitor
+from empo.util.memory_monitor import MemoryMonitor, deep_sizeof, get_process_memory_mb
 from empo.backward_induction.dag_slicing import (
     DiskBasedDAG, 
     estimate_dag_memory,
@@ -79,7 +79,7 @@ _shared_transitions: Optional[List[List[TransitionData]]] = None
 _shared_Vh_values: Optional[VhValues] = None
 _shared_sliced_cache: Optional[SlicedAttainmentCache] = None  # Sliced cache for goal attainment arrays
 _shared_num_action_profiles: int = 0  # Needed to create slice caches in workers
-_shared_params: Optional[Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], List[int], List[List[int]], float, float]] = None
+_shared_params: Optional[Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], List[int], List[List[int]], float, float, bool]] = None
 _shared_believed_others_policy_pickle: Optional[bytes] = None  # cloudpickle'd believed_others_policy function
 _shared_disk_dag: Optional['DiskBasedDAG'] = None  # For parallel disk slicing
 
@@ -103,6 +103,7 @@ def _hpp_process_single_state(
     use_indexed: bool = False,
     vres0: Union[Dict, npt.NDArray] = None,
     pres0: Union[Dict, npt.NDArray] = None,
+    optimistic: bool = False,
 ) -> Tuple[Dict[int, Dict[PossibleGoal, float]], Optional[Dict[int, Dict[PossibleGoal, npt.NDArray[np.floating[Any]]]]]]:
     """Process a single state, returning (v_results, p_results).
     
@@ -178,7 +179,7 @@ def _hpp_process_single_state(
                 for action in actions:
                     v_accum = 0.0
                     for action_profile_prob, action_profile in believed_others_policy(state, agent_index, action):
-                        worst_expectation = math.inf
+                        anticipated_expectation = -math.inf if optimistic else math.inf
                         action_profile[agent_index] = action
                         for robot_action_profile in robot_action_profiles:
                             action_profile[robot_agent_indices] = robot_action_profile
@@ -220,9 +221,10 @@ def _hpp_process_single_state(
                                 next_state_probabilities,
                                 np.where(attainment_values_array, 1.0, v_values_array)
                             )
-                            if expectation < worst_expectation:
-                                worst_expectation = expectation
-                        v_accum += action_profile_prob * worst_expectation
+                            if ((expectation > anticipated_expectation) if optimistic 
+                                else (expectation < anticipated_expectation)):
+                                anticipated_expectation = expectation
+                        v_accum += action_profile_prob * anticipated_expectation
                     expected_Vs[action] = v_accum
                 
                 q = gamma_h * expected_Vs
@@ -273,6 +275,9 @@ def _hpp_compute_sequential(
     level_fct: Optional[Callable[[State], int]] = None,
     archive_dir: Optional[str] = None,
     return_Vh: bool = True,
+    quiet: bool = False,
+    memory_profile: bool = False,
+    optimistic: bool = False,
 ) -> None:
     """Sequential backward induction algorithm.
     
@@ -283,6 +288,9 @@ def _hpp_compute_sequential(
     from disk timestep-by-timestep instead of keeping all in memory.
     """
     total_states = len(states)
+    
+    # Memory tracking interval
+    memory_report_interval = max(1, total_states // 10)  # Report ~10 times during computation
     
     # Determine if using indexed goals and initialize templates
     use_indexed = False # hasattr(possible_goal_generator, 'indexed') and possible_goal_generator.indexed
@@ -375,6 +383,7 @@ def _hpp_compute_sequential(
                     use_indexed=use_indexed,
                     vres0=vres0,
                     pres0=pres0,
+                    optimistic=optimistic,
                 )
                 
                 # Store results
@@ -467,6 +476,17 @@ def _hpp_compute_sequential(
         # Update progress bar
         if progress_callback is not None:
             progress_callback(states_processed, total_states)
+        
+        # Periodic memory reporting
+        if not quiet and states_processed > 0 and states_processed % memory_report_interval == 0:
+            print(f"\n[Memory @ {states_processed}/{total_states} states] RSS: {get_process_memory_mb():.1f} MB")
+            if memory_profile:
+                # Detailed profiling with deep_sizeof (adds O(total_size) overhead)
+                vh_mb = deep_sizeof(Vh_values) / (1024**2)
+                pol_mb = deep_sizeof(system2_policies) / (1024**2)
+                cache_mb = deep_sizeof(slice_cache) / (1024**2) if slice_cache is not None else 0.0
+                print(f"  Vh_values: {vh_mb:.1f} MB, policies: {pol_mb:.1f} MB, cache: {cache_mb:.1f} MB")
+        
         if DEBUG:
             print(f"Processing state {state_index}")
         
@@ -483,6 +503,7 @@ def _hpp_compute_sequential(
             use_indexed=use_indexed,
             vres0=vres0,
             pres0=pres0,
+            optimistic=optimistic,
         )
         
         # Store results
@@ -517,7 +538,7 @@ def _hpp_init_shared_data(
     states: List[State], 
     transitions: List[List[TransitionData]], 
     Vh_values: VhValues, 
-    params: Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], float, float],
+    params: Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], float, float, bool],
     believed_others_policy_pickle: Optional[bytes] = None,
     use_shared_memory: bool = False,
     sliced_cache: Optional[SlicedAttainmentCache] = None,
@@ -592,7 +613,7 @@ def _hpp_process_state_batch(
     
     Vh_values = _shared_Vh_values
     (human_agent_indices, possible_goal_generator, num_agents, num_actions, 
-     action_powers, robot_agent_indices, robot_action_profiles, beta_h, gamma_h) = _shared_params
+     action_powers, robot_agent_indices, robot_action_profiles, beta_h, gamma_h, optimistic) = _shared_params
     
     v_results: Dict[int, Dict[int, Dict[PossibleGoal, float]]] = {}
     p_results: Dict[State, Dict[int, Dict[PossibleGoal, npt.NDArray[np.floating[Any]]]]] = {}
@@ -626,6 +647,7 @@ def _hpp_process_state_batch(
             robot_agent_indices, robot_action_profiles,
             beta_h, gamma_h,
             slice_cache=slice_cache,
+            optimistic=optimistic,
         )
         
         v_results[state_index] = state_v_results
@@ -668,7 +690,7 @@ def _hpp_process_timestep_batch_disk(
     states = _shared_states
     Vh_values = _shared_Vh_values
     (human_agent_indices, possible_goal_generator, num_agents, num_actions, 
-     action_powers, robot_agent_indices, robot_action_profiles, beta_h, gamma_h) = _shared_params
+     action_powers, robot_agent_indices, robot_action_profiles, beta_h, gamma_h, optimistic) = _shared_params
     
     # Deserialize believed_others_policy if custom one was provided via cloudpickle
     if _shared_believed_others_policy_pickle is not None:
@@ -702,6 +724,7 @@ def _hpp_process_timestep_batch_disk(
             robot_agent_indices, robot_action_profiles,
             beta_h, gamma_h,
             slice_cache=timestep_cache,
+            optimistic=optimistic,
         )
         
         v_results[global_state_idx] = state_v_results
@@ -736,7 +759,9 @@ def compute_human_policy_prior(
     quiet: bool = False,
     min_free_memory_fraction: float = 0.1,
     memory_check_interval: int = 100,
-    memory_pause_duration: float = 60.0
+    memory_pause_duration: float = 60.0,
+    memory_profile: bool = False,
+    optimistic: bool = False,
 ) -> TabularHumanPolicyPrior: ...
 
 
@@ -758,7 +783,9 @@ def compute_human_policy_prior(
     quiet: bool = False,
     min_free_memory_fraction: float = 0.1,
     memory_check_interval: int = 100,
-    memory_pause_duration: float = 60.0
+    memory_pause_duration: float = 60.0,
+    memory_profile: bool = False,
+    optimistic: bool = False,
 ) -> Tuple[TabularHumanPolicyPrior, Dict[State, Dict[int, Dict[PossibleGoal, float]]]]: ...
 
 
@@ -780,7 +807,9 @@ def compute_human_policy_prior(
     quiet: bool = False,
     min_free_memory_fraction: float = 0.1,
     memory_check_interval: int = 100,
-    memory_pause_duration: float = 60.0
+    memory_pause_duration: float = 60.0,
+    memory_profile: bool = False,
+    optimistic: bool = False,
 ) -> Tuple[TabularHumanPolicyPrior, SlicedAttainmentCache]: ...
 
 
@@ -802,7 +831,9 @@ def compute_human_policy_prior(
     quiet: bool = False,
     min_free_memory_fraction: float = 0.1,
     memory_check_interval: int = 100,
-    memory_pause_duration: float = 60.0
+    memory_pause_duration: float = 60.0,
+    memory_profile: bool = False,
+    optimistic: bool = False,
 ) -> Tuple[TabularHumanPolicyPrior, Dict[State, Dict[int, Dict[PossibleGoal, float]]], SlicedAttainmentCache]: ...
 
 
@@ -824,11 +855,14 @@ def compute_human_policy_prior(
     min_free_memory_fraction: float = 0.1,
     memory_check_interval: int = 100,
     memory_pause_duration: float = 60.0,
+    memory_profile: bool = False,
     use_disk_slicing: bool = False,
     disk_cache_dir: Optional[str] = None,
     use_float16: bool = True,
     use_compression: bool = False,
-    archive_dir: Optional[str] = None
+    archive_dir: Optional[str] = None,
+    use_attainment_cache: bool = True,
+    optimistic: bool = False,
 ) -> Union[TabularHumanPolicyPrior, 
            Tuple[TabularHumanPolicyPrior, Dict[State, Dict[int, Dict[PossibleGoal, float]]]],
            Tuple[TabularHumanPolicyPrior, SlicedAttainmentCache],
@@ -886,6 +920,10 @@ def compute_human_policy_prior(
             KeyboardInterrupt for graceful shutdown. Set to 0.0 to disable (default).
         memory_check_interval: How often to check memory, in states processed.
         memory_pause_duration: How long to pause (seconds) when memory is low.
+        memory_profile: If True, enable detailed memory profiling using deep_sizeof
+            to measure actual sizes of Vh_values, policies, and cache structures.
+            This adds overhead (O(total_size) traversal) so defaults to False.
+            When False, only RSS (process memory) is logged.
         use_disk_slicing: If True, slice DAG by timestep and save to disk, loading
             only the necessary slice during backward induction. This reduces memory
             usage by 10-20x but requires level_fct to be provided. Recommended for
@@ -896,6 +934,11 @@ def compute_human_policy_prior(
         use_compression: If True, compress disk slices with gzip (slower but smaller).
         archive_dir: Directory to save archived value slices (None = don't archive).
             Separate from disk_cache_dir - this is where final archives go.
+        use_attainment_cache: If True (default), cache is_achieved() results for reuse
+            in Phase 2. Set to False to save ~3GB memory at the cost of recomputing
+            is_achieved() in Phase 2 (negligible for simple goals like ReachCellGoal).
+        optimistic: If False (default), compute the min (worst-case) over robot action
+            profiles. If True, compute the max (best-case) over robot action profiles.
     
     Returns:
         TabularHumanPolicyPrior: Policy prior that can be called as prior(state, agent, goal).
@@ -979,13 +1022,35 @@ def compute_human_policy_prior(
     if not quiet:
         mem_stats = estimate_dag_memory(states, transitions, num_agents, 
                                        len(list(possible_goal_generator.generate(states[0], human_agent_indices[0]))),
-                                       num_actions)
+                                       num_actions,
+                                       include_cache=use_attainment_cache,
+                                       num_humans=len(human_agent_indices),
+                                       num_robots=len(robot_agent_indices))
         print(f"\nMemory estimate:")
-        print(f"  States: {mem_stats['num_states']:,}")
-        print(f"  Transitions: {mem_stats['transitions_mb']:.1f} MB")
-        print(f"  Vh values: {mem_stats['vh_values_mb']:.1f} MB")
-        print(f"  Policies: {mem_stats['policies_mb']:.1f} MB")
-        print(f"  TOTAL: {mem_stats['total_mb']:.1f} MB")
+        print(f"  States: {mem_stats['num_states']:,} ({mem_stats['states_mb']:.1f} MB)")
+        print(f"  Transitions: {mem_stats['num_transitions']:,} ({mem_stats['transitions_mb']:.1f} MB)")
+        print(f"  Phase 1 Vh_values: {mem_stats['phase1_vh_mb']:.1f} MB")
+        print(f"  Phase 1 policies: {mem_stats['phase1_policies_mb']:.1f} MB")
+        print(f"  Phase 2 Vh_values: {mem_stats['phase2_vh_mb']:.1f} MB")
+        print(f"  Phase 2 Vr_values: {mem_stats['phase2_vr_mb']:.1f} MB")
+        print(f"  Phase 2 robot_policy: {mem_stats['phase2_robot_policy_mb']:.1f} MB")
+        if 'attainment_cache_mb' in mem_stats:
+            print(f"  Attainment cache: {mem_stats['attainment_cache_mb']:.1f} MB")
+        else:
+            print(f"  Attainment cache: DISABLED (use_attainment_cache=False)")
+        print(f"  Python baseline: {mem_stats['python_baseline_mb']:.0f} MB")
+        print(f"  TOTAL (recommended allocation): {mem_stats['total_mb']:.0f} MB")
+        
+        # Measure ACTUAL memory of DAG structures
+        print(f"\nActual memory usage (after DAG build):")
+        print(f"  Process RSS: {get_process_memory_mb():.1f} MB")
+        states_actual = deep_sizeof(states) / (1024**2)
+        print(f"  states: {states_actual:.1f} MB (estimate: {mem_stats['states_mb']:.1f} MB)")
+        transitions_actual = deep_sizeof(transitions) / (1024**2)
+        print(f"  transitions: {transitions_actual:.1f} MB (estimate: {mem_stats['transitions_mb']:.1f} MB)")
+        successors_actual = deep_sizeof(successors) / (1024**2)
+        print(f"  successors: {successors_actual:.1f} MB (not in estimate)")
+        print(f"  Total DAG: {states_actual + transitions_actual + successors_actual:.1f} MB")
     
     # Handle disk-based slicing if requested
     disk_dag: Optional[DiskBasedDAG] = None
@@ -1046,7 +1111,7 @@ def compute_human_policy_prior(
     # Set up default tqdm progress bar if no callback provided
     _pbar: Optional[tqdm[int]] = None
     if progress_callback is None and not quiet:
-        _pbar = tqdm(total=len(states), desc="Backward induction", unit="states")
+        _pbar = tqdm(total=len(states), desc="Backward induction", unit="states", leave=False)
         def progress_callback(done: int, total: int) -> None:
             if _pbar is not None:
                 _pbar.n = done
@@ -1068,6 +1133,12 @@ def compute_human_policy_prior(
         # VhValues: List[List[Dict[goal, float]]] indexed by [state][agent][goal]
         Vh_values = [[{} for _ in range(num_agents)] for _ in range(len(states))]
     
+    # Measure Vh_values initial structure
+    if not quiet:
+        vh_initial = deep_sizeof(Vh_values) / (1024**2)
+        print(f"\nActual memory (after Vh_values init): Process RSS = {get_process_memory_mb():.1f} MB")
+        print(f"  Vh_values (empty): {vh_initial:.1f} MB")
+    
     # ============================================================================
     # WARN if parallel mode was requested
     # ============================================================================
@@ -1084,18 +1155,27 @@ def compute_human_policy_prior(
                 "Internal error: parallel should be disabled in Phase 1 backward induction."
             )
     
-    # Always create sliced attainment cache - it will be stored on world_model for reuse in Phase 2.
+    # Create sliced attainment cache if enabled - it will be stored on world_model for reuse in Phase 2.
     # This avoids redundant is_achieved() computation between phases.
+    # Set use_attainment_cache=False to save ~3GB memory for simple goals.
     # Structure: SlicedAttainmentCache holds slices indexed by slice_id
     # Each slice is Dict[state_index, List[Dict[goal, array]]] for efficient access.
     num_action_profiles = num_actions ** num_agents
-    existing_cache = getattr(world_model, '_attainment_cache', None)
-    if existing_cache is not None and isinstance(existing_cache, SlicedAttainmentCache):
-        # Reuse existing sliced cache
-        sliced_cache: SlicedAttainmentCache = existing_cache
-    else:
-        # Create new sliced cache
-        sliced_cache = SlicedAttainmentCache(num_action_profiles)
+    sliced_cache: Optional[SlicedAttainmentCache] = None
+    if use_attainment_cache:
+        existing_cache = getattr(world_model, '_attainment_cache', None)
+        if existing_cache is not None and isinstance(existing_cache, SlicedAttainmentCache):
+            # Reuse existing sliced cache
+            sliced_cache = existing_cache
+        else:
+            # Create new sliced cache
+            sliced_cache = SlicedAttainmentCache(num_action_profiles)
+    
+    # Measure memory after sliced_cache is initialized
+    if not quiet:
+        cache_initial = deep_sizeof(sliced_cache) / (1024**2) if sliced_cache else 0.0
+        print(f"\nActual memory (after sliced_cache init): Process RSS = {get_process_memory_mb():.1f} MB")
+        print(f"  sliced_cache (empty): {cache_initial:.1f} MB")
     
     # ============================================================================
     # PARALLEL CODE TEMPORARILY DISABLED
@@ -1137,9 +1217,9 @@ def compute_human_policy_prior(
             
             # Initialize shared data for worker processes
             # On Linux (fork), workers inherit these as copy-on-write
-            params: Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], List[int], List[List[int]], float, float] = (
+            params: Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], List[int], List[List[int]], float, float, bool] = (
                 human_agent_indices, possible_goal_generator, num_agents, num_actions,
-                action_powers, robot_agent_indices, robot_action_profiles, beta_h, gamma_h
+                action_powers, robot_agent_indices, robot_action_profiles, beta_h, gamma_h, optimistic
             )
             
             # Use 'fork' context explicitly to ensure shared memory works
@@ -1227,6 +1307,7 @@ def compute_human_policy_prior(
                             robot_agent_indices, robot_action_profiles,
                             beta_h, gamma_h,
                             slice_cache=inline_slice_cache,
+                            optimistic=optimistic,
                         )
                         
                         # Store results
@@ -1422,7 +1503,8 @@ def compute_human_policy_prior(
                              believed_others_policy, robot_agent_indices, robot_action_profiles,
                              beta_h, gamma_h,
                              progress_callback, memory_monitor,
-                             sliced_cache, disk_dag, level_fct, archive_dir, return_Vh)
+                             sliced_cache, disk_dag, level_fct, archive_dir, return_Vh,
+                             quiet=quiet, memory_profile=memory_profile, optimistic=optimistic)
         except KeyboardInterrupt:
             if not quiet:
                 print("\n[Phase1] Computation interrupted (KeyboardInterrupt).")
@@ -1446,6 +1528,21 @@ def compute_human_policy_prior(
     
     # Clean up shared attainment cache memory (parallel mode only)
     cleanup_shared_attainment_cache()
+    
+    # Print actual memory after backward induction
+    if not quiet:
+        print(f"\nActual memory usage (after Phase 1 backward induction):")
+        print(f"  Process RSS: {get_process_memory_mb():.1f} MB")
+        vh_actual = deep_sizeof(Vh_values) / (1024**2)
+        policies_actual = deep_sizeof(system2_policies) / (1024**2)
+        cache_actual = deep_sizeof(sliced_cache) / (1024**2) if sliced_cache is not None else 0.0
+        print(f"  Vh_values: {vh_actual:.1f} MB")
+        print(f"  system2_policies: {policies_actual:.1f} MB")
+        if sliced_cache is not None:
+            print(f"  sliced_cache: {cache_actual:.1f} MB")
+        else:
+            print(f"  sliced_cache: DISABLED")
+        print(f"  Total measured Phase 1 structures: {vh_actual + policies_actual + cache_actual:.1f} MB")
     
     if return_Vh:
         # Convert V_values from list-indexed to state-indexed dict

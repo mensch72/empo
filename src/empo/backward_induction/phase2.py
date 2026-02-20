@@ -33,7 +33,7 @@ import cloudpickle
 from tqdm import tqdm
 from scipy.special import logsumexp
 
-from empo.util.memory_monitor import MemoryMonitor
+from empo.util.memory_monitor import MemoryMonitor, deep_sizeof, get_process_memory_mb
 from empo.possible_goal import PossibleGoal, PossibleGoalGenerator
 from empo.human_policy_prior import TabularHumanPolicyPrior
 from empo.robot_policy import RobotPolicy
@@ -60,6 +60,7 @@ from .phase1 import compute_human_policy_prior
 VrValues = npt.NDArray[np.floating[Any]]  # Indexed as Vr_values[state_index]
 RobotActionProfile = Tuple[int, ...]
 RobotPolicyDict = Dict[State, Dict[RobotActionProfile, float]]  # state -> robot_action_profile -> prob
+MarkovChain = List[Dict[int, float]]  # state_index -> {successor_state_index -> transition_probability}
 
 DEBUG = False  # Set to True for verbose debugging output
 
@@ -100,12 +101,14 @@ def _rp_process_single_state(
     slice_cache: Optional[SliceCache] = None,
     use_indexed: bool = False,
     vres0: Union[Dict, npt.NDArray] = None,
+    compute_successor_probs: bool = False,
 ) -> Tuple[
     Dict[int, Dict[PossibleGoal, float]],  # vh_results: agent -> goal -> value
     float,  # vr_result
-    Optional[Dict[RobotActionProfile, float]]  # robot_policy (None for terminal)
+    Optional[Dict[RobotActionProfile, float]],  # robot_policy (None for terminal)
+    Dict[int, float],  # successor_probs: successor state_index -> transition probability
 ]:
-    """Process a single state for Phase 2, returning (vh_results, vr_result, robot_policy).
+    """Process a single state for Phase 2, returning (vh_results, vr_result, robot_policy, successor_probs).
     
     Unified implementation for sequential, parallel batch, and inline fallback.
     Handles both terminal and non-terminal states correctly.
@@ -140,6 +143,9 @@ def _rp_process_single_state(
         - vh_results: Dict[agent_index, Dict[goal, float]] - V_h^e values for this state
         - vr_result: float - V_r value for this state
         - robot_policy: Dict[RobotActionProfile, float] or None (None for terminal states)
+        - successor_probs: Dict[successor_state_index, float] - aggregate transition
+          probabilities to successor states under the joint robot+human policy
+          (empty dict for terminal states)
     """
     if slice_cache is not None and state_index in slice_cache:
         this_state_cache = slice_cache[state_index]
@@ -153,7 +159,7 @@ def _rp_process_single_state(
         vh_results: Dict[int, Dict[PossibleGoal, float]] = {}
         if DEBUG:
             print(f"  Terminal state {state_index}")
-        return vh_results, terminal_Vr, None
+        return vh_results, terminal_Vr, None, {}
     
     # Non-terminal state: compute Q_r, pi_r, V_h^e, X_h, U_r, V_r
     vh_results = {}
@@ -183,6 +189,28 @@ def _rp_process_single_state(
     ps = np.exp(log_powers - log_normalizer)
     robot_policy = {robot_action_profile: ps[idx] 
                    for idx, robot_action_profile in enumerate(robot_action_profiles)}
+    
+    # Compute aggregate transition probabilities under joint robot+human policy
+    # (only when requested, to avoid unnecessary overhead):
+    # P(s'|s) = sum_{a_r} pi_r(a_r|s) * sum_{a_h} pi_h(a_h|s) * T(s'|s, a)
+    successor_probs: Dict[int, float] = {}
+    if compute_successor_probs:
+        for robot_action_profile_index, robot_action_profile in enumerate(robot_action_profiles):
+            robot_weight = ps[robot_action_profile_index]
+            if robot_weight == 0.0:
+                continue
+            action_profile[robot_agent_indices] = robot_action_profile
+            for human_action_profile_prob, human_action_profile in human_policy_prior.profile_distribution(state):
+                joint_weight = robot_weight * human_action_profile_prob
+                if joint_weight == 0.0:
+                    continue
+                action_profile[human_agent_indices] = human_action_profile
+                action_profile_index = (action_profile @ action_powers).item()
+                _, next_state_probabilities, next_state_indices = state_transitions[action_profile_index]
+                for prob, succ_idx in zip(next_state_probabilities, next_state_indices):
+                    p = joint_weight * prob
+                    if p > 0.0:
+                        successor_probs[succ_idx] = successor_probs.get(succ_idx, 0.0) + p
     
     # Compute V_h^e, X_h, and U_r values
     powersum = 0.0  # sum over humans of X_h^(-xi)
@@ -296,7 +324,7 @@ def _rp_process_single_state(
     if DEBUG:
         print(f"  ...Ur = {ur:.4f}, Vr = {vr:.4f}")
     
-    return vh_results, vr, robot_policy
+    return vh_results, vr, robot_policy, successor_probs
 
 
 def _rp_compute_sequential(
@@ -327,11 +355,19 @@ def _rp_compute_sequential(
     archive_dir: Optional[str] = None,
     disk_dag: Optional[Any] = None,
     quiet: bool = False,
+    memory_profile: bool = False,
+    markov_chain: Optional[MarkovChain] = None,
 ) -> None:
     """Sequential Phase 2 backward induction algorithm.
     
     Processes states in reverse topological order using the unified
     _process_single_state_phase2 helper.
+    
+    Args:
+        markov_chain: Optional pre-allocated list (len = num_states) to fill with
+            aggregate transition probabilities. Each entry markov_chain[state_index]
+            will be set to a dict mapping successor state_index to transition
+            probability under the joint robot+human policy.
     """
     # Generate all possible robot action profiles (cartesian product of actions for each robot)
     robot_action_profiles: List[RobotActionProfile] = [
@@ -339,6 +375,9 @@ def _rp_compute_sequential(
     ]
     
     total_states = len(states)
+    
+    # Memory tracking interval
+    memory_report_interval = max(1, total_states // 10)  # Report ~10 times during computation
     
     # Determine if using indexed goals and initialize templates
     use_indexed = False #hasattr(possible_goal_generator, 'indexed') and possible_goal_generator.indexed
@@ -460,7 +499,7 @@ def _rp_compute_sequential(
             state_transitions = transitions[state_index]
         
         # Use unified helper
-        vh_results, vr_result, p_result = _rp_process_single_state(
+        vh_results, vr_result, p_result, successor_probs = _rp_process_single_state(
             state_index, state, states, state_transitions, Vh_values, Vr_values,
             human_agent_indices, robot_agent_indices, robot_action_profiles,
             possible_goal_generator, num_agents, num_actions, action_powers,
@@ -468,6 +507,7 @@ def _rp_compute_sequential(
             slice_cache=slice_cache,
             use_indexed=use_indexed,
             vres0=vres0,
+            compute_successor_probs=(markov_chain is not None),
         )
         
         # Store results
@@ -479,10 +519,24 @@ def _rp_compute_sequential(
         if p_result is not None:
             robot_policy[state] = p_result
         
+        if markov_chain is not None:
+            markov_chain[state_index] = successor_probs
+        
         # Update progress first (lightweight)
         states_processed = total_states - state_index
         if progress_callback is not None:
             progress_callback(states_processed, total_states)
+        
+        # Periodic memory reporting
+        if not quiet and states_processed > 0 and states_processed % memory_report_interval == 0:
+            print(f"\n[Phase2 Memory @ {states_processed}/{total_states} states] RSS: {get_process_memory_mb():.1f} MB")
+            if memory_profile:
+                # Detailed profiling with deep_sizeof (adds O(total_size) overhead)
+                vh_mb = deep_sizeof(Vh_values) / (1024**2)
+                vr_mb = deep_sizeof(Vr_values) / (1024**2)
+                pol_mb = deep_sizeof(robot_policy) / (1024**2)
+                cache_mb = deep_sizeof(slice_cache) / (1024**2) if slice_cache is not None else 0.0
+                print(f"  Vh_values: {vh_mb:.1f} MB, Vr_values: {vr_mb:.1f} MB, robot_policy: {pol_mb:.1f} MB, cache: {cache_mb:.1f} MB")
         
         # Check memory less frequently to reduce overhead
         if memory_monitor is not None:
@@ -566,11 +620,13 @@ def _rp_process_state_batch(
            Dict[State, Dict[RobotActionProfile, float]],
            SliceId,  # slice_id for this batch
            Optional[SliceCache],  # slice cache for this batch (None if not available)
-           float]:
+           float,
+           Dict[int, Dict[int, float]]]:
     """Process a batch of states for robot policy computation.
     
     Uses module-level shared data (inherited via fork) to avoid copying.
-    Returns Vh-values, Vr-values, robot policies, slice_id, slice_cache, plus timing.
+    Returns Vh-values, Vr-values, robot policies, slice_id, slice_cache, timing,
+    and aggregate transition probabilities per state.
     """
     batch_start = time.perf_counter()
     
@@ -619,6 +675,7 @@ def _rp_process_state_batch(
     vh_results: Dict[int, Dict[int, Dict[PossibleGoal, float]]] = {}
     vr_results: Dict[int, float] = {}
     p_results: Dict[State, Dict[RobotActionProfile, float]] = {}
+    mc_results: Dict[int, Dict[int, float]] = {}
     
     # Retrieve slice cache pre-populated by Phase 1 for this batch
     # Structure: Dict[state_index, List[Dict[goal, array]]]
@@ -633,7 +690,7 @@ def _rp_process_state_batch(
         
         # Use unified helper with slice_cache pre-populated by Phase 1
         # The sliced_cache is no longer needed for lookup since slice_cache has all data
-        vh_results_state, vr_result, p_result = _rp_process_single_state(
+        vh_results_state, vr_result, p_result, successor_probs = _rp_process_single_state(
             state_index, state, states, state_transitions, Vh_values, Vr_values,
             human_agent_indices, robot_agent_indices, robot_action_profiles,
             possible_goal_generator, num_agents, num_actions, action_powers,
@@ -645,9 +702,10 @@ def _rp_process_state_batch(
         vr_results[state_index] = vr_result
         if p_result is not None:
             p_results[state] = p_result
+        mc_results[state_index] = successor_probs
     
     batch_time = time.perf_counter() - batch_start
-    return vh_results, vr_results, p_results, slice_id, slice_cache, batch_time
+    return vh_results, vr_results, p_results, slice_id, slice_cache, batch_time, mc_results
 
 
 class TabularRobotPolicy(RobotPolicy):
@@ -769,11 +827,13 @@ def compute_robot_policy(
     num_workers: Optional[int] = None, 
     level_fct: Optional[Callable[[State], int]] = None, 
     return_values: Literal[False] = False,
+    return_markov_chain: Literal[False] = False,
     progress_callback: Optional[Callable[[int, int], None]] = None,
     quiet: bool = False,
     min_free_memory_fraction: float = 0.1,
     memory_check_interval: int = 100,
     memory_pause_duration: float = 60.0,
+    memory_profile: bool = False,
     sliced_cache: Optional[SlicedAttainmentCache] = None,
 ) -> TabularRobotPolicy: ...
 
@@ -797,17 +857,49 @@ def compute_robot_policy(
     num_workers: Optional[int] = None, 
     level_fct: Optional[Callable[[State], int]] = None, 
     return_values: Literal[True],
+    return_markov_chain: bool = False,
     progress_callback: Optional[Callable[[int, int], None]] = None,
     quiet: bool = False,
     min_free_memory_fraction: float = 0.1,
     memory_check_interval: int = 100,
     memory_pause_duration: float = 60.0,
+    memory_profile: bool = False,
     sliced_cache: Optional[SlicedAttainmentCache] = None,
     archive_dir: Optional[str] = None,
     use_disk_slicing: bool = False,
     use_compression: bool = False,
     use_float16: bool = True,
 ) -> Tuple[TabularRobotPolicy, Dict[State, float], Dict[State, Dict[int, Dict[PossibleGoal, float]]]]: ...
+
+
+@overload
+def compute_robot_policy(
+    world_model: WorldModel, 
+    human_agent_indices: List[int], 
+    robot_agent_indices: List[int],
+    possible_goal_generator: Optional[PossibleGoalGenerator] = None,
+    human_policy_prior: Optional[TabularHumanPolicyPrior] = None,
+    *,
+    beta_r: float = 10.0,
+    gamma_h: float = 1.0, 
+    gamma_r: float = 1.0,
+    zeta: float = 1.0,
+    xi: float = 1.0,
+    eta: float = 1.0,
+    terminal_Vr: float = -1e-10,
+    parallel: bool = False, 
+    num_workers: Optional[int] = None, 
+    level_fct: Optional[Callable[[State], int]] = None, 
+    return_values: Literal[False] = False,
+    return_markov_chain: Literal[True] = ...,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+    quiet: bool = False,
+    min_free_memory_fraction: float = 0.1,
+    memory_check_interval: int = 100,
+    memory_pause_duration: float = 60.0,
+    memory_profile: bool = False,
+    sliced_cache: Optional[SlicedAttainmentCache] = None,
+) -> Tuple[TabularRobotPolicy, MarkovChain]: ...
 
 
 def compute_robot_policy(
@@ -828,17 +920,24 @@ def compute_robot_policy(
     num_workers: Optional[int] = None, 
     level_fct: Optional[Callable[[State], int]] = None, 
     return_values: bool = False,
+    return_markov_chain: bool = False,
     progress_callback: Optional[Callable[[int, int], None]] = None,
     quiet: bool = False,
     min_free_memory_fraction: float = 0.1,
     memory_check_interval: int = 100,
     memory_pause_duration: float = 60.0,
+    memory_profile: bool = False,
     sliced_cache: Optional[SlicedAttainmentCache] = None,
     archive_dir: Optional[str] = None,
     use_disk_slicing: bool = False,
     use_compression: bool = False,
     use_float16: bool = True,
-) -> Union[TabularRobotPolicy, Tuple[TabularRobotPolicy, Dict[State, float], Dict[State, Dict[int, Dict[PossibleGoal, float]]]]]:
+) -> Union[
+    TabularRobotPolicy,
+    Tuple[TabularRobotPolicy, MarkovChain],
+    Tuple[TabularRobotPolicy, Dict[State, float], Dict[State, Dict[int, Dict[PossibleGoal, float]]]],
+    Tuple[TabularRobotPolicy, Dict[State, float], Dict[State, Dict[int, Dict[PossibleGoal, float]]], MarkovChain],
+]:
     """
     Compute robot policy via backward induction on the state DAG.
     
@@ -882,6 +981,10 @@ def compute_robot_policy(
         num_workers: Number of parallel workers. If None, uses mp.cpu_count().
         level_fct: Optional function(state) -> int for fast dependency computation.
         return_values: If True, also return V_r and V_h^e value functions.
+        return_markov_chain: If True, also return the induced Markov chain as a
+            list indexed by state_index, where each entry is a dict mapping
+            successor state_index to aggregate transition probability under the
+            joint robot+human policy. Terminal states have empty dicts.
         progress_callback: Optional callback(done, total) for progress updates.
         quiet: If True, suppress progress output.
         min_free_memory_fraction: Minimum free memory as fraction of total (0.0-1.0).
@@ -890,6 +993,10 @@ def compute_robot_policy(
             KeyboardInterrupt for graceful shutdown. Set to 0.0 to disable (default).
         memory_check_interval: How often to check memory, in states processed.
         memory_pause_duration: How long to pause (seconds) when memory is low.
+        memory_profile: If True, enable detailed memory profiling using deep_sizeof
+            to measure actual sizes of Vh_values, Vr_values, robot_policy, and cache structures.
+            This adds overhead (O(total_size) traversal) so defaults to False.
+            When False, only RSS (process memory) is logged.
         sliced_cache: Optional SlicedAttainmentCache of precomputed goal attainment arrays.
             If not provided, Phase 2 automatically looks for the cache on world_model
             (stored automatically by Phase 1 at world_model._attainment_cache).
@@ -906,6 +1013,16 @@ def compute_robot_policy(
         If return_values=True, returns tuple (robot_policy, Vr_dict, Vh_dict) where:
         - Vr_dict maps state -> float (robot value function)
         - Vh_dict maps state -> agent_idx -> goal -> float (human goal achievement values)
+        
+        If return_markov_chain=True, a MarkovChain is appended to the return tuple.
+        MarkovChain is a list indexed by state_index where each entry is a dict
+        mapping successor state_index to transition probability.
+        
+        Combined return patterns:
+        - return_values=False, return_markov_chain=False: TabularRobotPolicy
+        - return_values=False, return_markov_chain=True: (TabularRobotPolicy, MarkovChain)
+        - return_values=True, return_markov_chain=False: (TabularRobotPolicy, Vr_dict, Vh_dict)
+        - return_values=True, return_markov_chain=True: (TabularRobotPolicy, Vr_dict, Vh_dict, MarkovChain)
     
     Example:
         >>> # Phase 1 automatically stores attainment cache on world_model
@@ -988,10 +1105,12 @@ def compute_robot_policy(
             print("\n=== Creating Disk-Based DAG ===")
         
         # Calculate memory stats before slicing
+        # Note: num_goals not available here, use num_action_profiles as proxy
         mem_stats = estimate_dag_memory(states, transitions, num_agents,
-                                        num_actions, num_action_profiles)
+                                        num_goals=num_action_profiles,  # proxy
+                                        num_actions=num_actions)
         if not quiet:
-            print(f"Full DAG memory: {mem_stats['total_mb']:.1f} MB")
+            print(f"Estimated memory: {mem_stats['total_mb']:.0f} MB")
         
         # Create disk-based DAG
         num_action_profiles_for_cache = num_actions ** num_agents
@@ -1034,7 +1153,7 @@ def compute_robot_policy(
     # Set up default tqdm progress bar if no callback provided
     _pbar: Optional[tqdm[int]] = None
     if progress_callback is None and not quiet:
-        _pbar = tqdm(total=len(states), desc="Robot policy backward induction", unit="states")
+        _pbar = tqdm(total=len(states), desc="Robot policy backward induction", unit="states", leave=False)
         def progress_callback(done: int, total: int) -> None:
             if _pbar is not None:
                 _pbar.n = done
@@ -1169,7 +1288,7 @@ def compute_robot_policy(
                     state_transitions = transitions[state_index]
                     
                     # Use unified helper
-                    vh_results, vr_result, p_result = _rp_process_single_state(
+                    vh_results, vr_result, p_result, _successor_probs = _rp_process_single_state(
                         state_index, state, states, state_transitions, Vh_values, Vr_values,
                         human_agent_indices, robot_agent_indices, robot_action_profiles,
                         possible_goal_generator, num_agents, num_actions, action_powers,
@@ -1297,6 +1416,11 @@ def compute_robot_policy(
                 enabled=True
             )
         
+        # Allocate markov chain storage if requested
+        markov_chain_data: Optional[MarkovChain] = None
+        if return_markov_chain:
+            markov_chain_data = [{} for _ in range(len(states))]
+        
         try:
             _rp_compute_sequential(
                 states, Vh_values, Vr_values, robot_policy_values, transitions,
@@ -1305,7 +1429,8 @@ def compute_robot_policy(
                 human_policy_prior, beta_r, gamma_h, gamma_r, zeta, xi, eta, terminal_Vr,
                 progress_callback, memory_monitor,
                 sliced_cache,
-                level_fct, return_values, archive_dir, disk_dag, quiet,
+                level_fct, return_values, archive_dir, disk_dag, quiet, memory_profile,
+                markov_chain=markov_chain_data,
             )
         except KeyboardInterrupt:
             if not quiet:
@@ -1319,6 +1444,21 @@ def compute_robot_policy(
         robot_agent_indices=robot_agent_indices, 
         values=robot_policy_values
     )
+    
+    # Print actual memory after Phase 2 backward induction
+    if not quiet:
+        print(f"\nActual memory usage (after Phase 2 backward induction):")
+        print(f"  Process RSS: {get_process_memory_mb():.1f} MB")
+        vh_actual = deep_sizeof(Vh_values) / (1024**2)
+        vr_actual = deep_sizeof(Vr_values) / (1024**2)
+        policy_actual = deep_sizeof(robot_policy_values) / (1024**2)
+        cache_actual = deep_sizeof(sliced_cache) / (1024**2) if sliced_cache is not None else 0.0
+        print(f"  Vh_values: {vh_actual:.1f} MB")
+        print(f"  Vr_values: {vr_actual:.1f} MB")
+        print(f"  robot_policy_values: {policy_actual:.1f} MB")
+        if sliced_cache is not None:
+            print(f"  sliced_cache: {cache_actual:.1f} MB")
+        print(f"  Total measured Phase 2 structures: {vh_actual + vr_actual + policy_actual + cache_actual:.1f} MB")
     
     if return_values:
         # Convert Vr_values from array to dict
@@ -1334,8 +1474,97 @@ def compute_robot_policy(
         
         if _pbar is not None:
             _pbar.close()
+        if return_markov_chain:
+            return robot_policy, Vr_dict, Vh_dict, markov_chain_data
         return robot_policy, Vr_dict, Vh_dict
     
     if _pbar is not None:
         _pbar.close()
+    if return_markov_chain:
+        return robot_policy, markov_chain_data
     return robot_policy
+
+
+def compute_markov_chain_value_function(
+    markov_chain: MarkovChain,
+    rewards: Union[npt.NDArray[np.floating[Any]], Callable[[State], npt.NDArray[np.floating[Any]]]],
+    gamma: float,
+    states: Optional[List[State]] = None,
+) -> npt.NDArray[np.floating[Any]]:
+    """Compute the expected discounted vector-valued value function on a Markov chain DAG.
+    
+    Given a MarkovChain (as returned by compute_robot_policy with
+    return_markov_chain=True), a vector-valued reward function, and a discount
+    factor, computes V(s) = R(s) + gamma * sum_{s'} P(s'|s) * V(s') for every
+    state by backward induction (processing states from last to first, which is
+    reverse topological order in the DAG).
+    
+    Args:
+        markov_chain: List of length num_states, where markov_chain[i] is a dict
+            mapping successor state_index to transition probability.  Terminal
+            states have empty dicts.
+        rewards: Either:
+            - A 2D ndarray of shape (num_states, reward_dim) where rewards[i] is
+              the immediate reward vector for state i, **or**
+            - A callable that takes a state (not a state index!) and returns a 1D
+              ndarray reward vector.  When a callable is used, the ``states``
+              parameter must also be provided.
+        gamma: Discount factor in [0, 1].
+        states: List of states corresponding to the state indices.  Required when
+            ``rewards`` is a callable; ignored when ``rewards`` is an ndarray.
+    
+    Returns:
+        2D ndarray of shape (num_states, reward_dim) where result[i] is the
+        expected discounted value vector for state i.
+    
+    Example:
+        >>> policy, mc = compute_robot_policy(..., return_markov_chain=True)
+        >>> # Scalar reward as 1-column matrix:
+        >>> r = np.array([[1.0], [0.0], [0.5]])  # 3 states, 1 reward dim
+        >>> V = compute_markov_chain_value_function(mc, r, gamma=0.9)
+        >>> V.shape  # (3, 1)
+        >>>
+        >>> # Or use a callable:
+        >>> def reward_fn(state):
+        ...     return np.array([float(state[0] == 'goal'), float(state[1] > 3)])
+        >>> V = compute_markov_chain_value_function(mc, reward_fn, gamma=0.9, states=states_list)
+    """
+    num_states = len(markov_chain)
+    
+    # Materialise reward matrix if a callable was provided
+    if callable(rewards):
+        if states is None:
+            raise ValueError(
+                "states must be provided when rewards is a callable"
+            )
+        reward_vectors = [rewards(states[i]) for i in range(num_states)]
+        reward_matrix = np.stack(reward_vectors, axis=0)  # (num_states, reward_dim)
+    else:
+        reward_matrix = np.asarray(rewards, dtype=np.float64)
+        if reward_matrix.ndim != 2:
+            raise ValueError(
+                f"rewards array must be 2-dimensional, got {reward_matrix.ndim}D"
+            )
+        if reward_matrix.shape[0] != num_states:
+            raise ValueError(
+                f"rewards has {reward_matrix.shape[0]} rows but markov_chain has "
+                f"{num_states} states"
+            )
+    
+    reward_dim = reward_matrix.shape[1]
+    V = np.zeros((num_states, reward_dim), dtype=np.float64)
+    
+    # Backward induction: states are in topological order (highest index = latest / terminal)
+    for i in range(num_states - 1, -1, -1):
+        successors = markov_chain[i]
+        if not successors:
+            # Terminal state: V(s) = R(s)
+            V[i] = reward_matrix[i]
+        else:
+            # V(s) = R(s) + gamma * sum_{s'} P(s'|s) * V(s')
+            future = np.zeros(reward_dim, dtype=np.float64)
+            for succ_idx, prob in successors.items():
+                future += prob * V[succ_idx]
+            V[i] = reward_matrix[i] + gamma * future
+    
+    return V

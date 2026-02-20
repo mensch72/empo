@@ -53,8 +53,9 @@ import gymnasium as gym
 sys.modules['gym'] = gym
 
 from gym_multigrid.multigrid import (
-    MultiGridEnv, World, SmallActions
+    MultiGridEnv, World, ActionsBase
 )
+import gym_multigrid.multigrid as multigrid_module
 from empo.possible_goal import PossibleGoalGenerator, TabularGoalSampler
 from empo.backward_induction import (
     compute_human_policy_prior, 
@@ -75,8 +76,7 @@ RENDER_TILE_SIZE = 96
 ANNOTATION_PANEL_WIDTH = 380
 ANNOTATION_FONT_SIZE = 12
 
-# Action names for SmallActions (single agent)
-SINGLE_ACTION_NAMES = ['still', 'left', 'right', 'forward']
+# Action names are read dynamically from env.actions.available
 
 
 # =============================================================================
@@ -225,7 +225,7 @@ def print_memory_profile(label: str, objects_dict: Dict[str, Any], top_n: int = 
 # Environment Definition (Trivial World Model)
 # =============================================================================
 
-def create_trivial_env(max_steps: int = 5) -> MultiGridEnv:
+def create_trivial_env(max_steps: int = 5, actions_set=None) -> MultiGridEnv:
     """
     Create the trivial environment from examples/phase2/phase2_robot_policy_demo.py.
     
@@ -252,18 +252,20 @@ def create_trivial_env(max_steps: int = 5) -> MultiGridEnv:
     We We We We We We
     """
     
-    env = MultiGridEnv(
+    kwargs = dict(
         map=GRID_MAP,
         max_steps=max_steps,
         partial_obs=False,
         objects_set=World,
-        actions_set=SmallActions
     )
+    if actions_set is not None:
+        kwargs['actions_set'] = actions_set
+    env = MultiGridEnv(**kwargs)
     # Agent indices are auto-detected via properties (yellow=human, grey=robot)
     return env
 
 
-def create_env_from_world(world_path: str, max_steps: Optional[int] = None) -> MultiGridEnv:
+def create_env_from_world(world_path: str, max_steps: Optional[int] = None, actions_set=None) -> MultiGridEnv:
     """
     Create an environment from a YAML world file.
     
@@ -272,6 +274,7 @@ def create_env_from_world(world_path: str, max_steps: Optional[int] = None) -> M
                    (.yaml extension is optional)
         max_steps: Maximum steps per episode (None to use config file value,
                    or int to override it)
+        actions_set: Action class to use (None to use config/default).
     
     Returns:
         MultiGridEnv loaded from the config file.
@@ -291,9 +294,11 @@ def create_env_from_world(world_path: str, max_steps: Optional[int] = None) -> M
         raise FileNotFoundError(f"World file not found: {config_path}")
     
     # Only pass max_steps if explicitly provided (otherwise use config default)
-    kwargs = {'config_file': config_path, 'partial_obs': False, 'actions_set': SmallActions}
+    kwargs = {'config_file': config_path, 'partial_obs': False}
     if max_steps is not None:
         kwargs['max_steps'] = max_steps
+    if actions_set is not None:
+        kwargs['actions_set'] = actions_set
     
     env = MultiGridEnv(**kwargs)
     return env
@@ -436,7 +441,7 @@ class GenericGoalGenerator(PossibleGoalGenerator):
 # Rollout and Movie Generation
 # =============================================================================
 
-def get_joint_action_names(num_agents: int, num_single_actions: int = 4) -> list:
+def get_joint_action_names(action_names: list, num_agents: int) -> list:
     """
     Generate joint action names for multiple agents.
     
@@ -445,11 +450,14 @@ def get_joint_action_names(num_agents: int, num_single_actions: int = 4) -> list
     
     For 2 agents, generates names like:
     'still, still', 'still, left', etc.
+    
+    Args:
+        action_names: List of single-agent action names (from env.actions.available).
+        num_agents: Number of agents.
     """
-    single_names = SINGLE_ACTION_NAMES[:num_single_actions]
     if num_agents == 1:
-        return single_names
-    combinations = list(itertools.product(single_names, repeat=num_agents))
+        return list(action_names)
+    combinations = list(itertools.product(action_names, repeat=num_agents))
     return [', '.join(combo) for combo in combinations]
 
 def run_policy_rollout(
@@ -464,11 +472,17 @@ def run_policy_rollout(
     xi: float = 1.0,
     eta: float = 1.0,
     zeta: float = 2.0,
+    human_always_toggles: bool = False,
 ) -> int:
     """
     Run a single rollout with the computed robot policy.
     
     Uses env's internal video recording - frames are captured automatically.
+    
+    Args:
+        human_always_toggles: If True, override human action to toggle whenever
+            the human is facing a toggleable object (killbutton, pauseswitch,
+            disablingswitch, controlbutton, door). Only affects rollouts.
     
     Returns:
         Number of steps taken.
@@ -477,8 +491,9 @@ def run_policy_rollout(
     human_agent_indices = env.human_agent_indices
     robot_agent_indices = env.robot_agent_indices
     
-    # Generate action names
-    joint_action_names = get_joint_action_names(1)  # Single robot
+    # Get action names from environment
+    action_names = env.actions.available
+    joint_action_names = get_joint_action_names(action_names, 1)  # Single robot
     
     env.reset()
     steps_taken = 0
@@ -538,11 +553,11 @@ def run_policy_rollout(
         
         for action_profile, prob in sorted_actions:
             # Format action names for all robots
-            action_names = []
+            act_names = []
             for action_idx in action_profile:
-                name = SINGLE_ACTION_NAMES[action_idx] if action_idx < len(SINGLE_ACTION_NAMES) else f"a{action_idx}"
-                action_names.append(name)
-            action_str = ', '.join(action_names)
+                name = action_names[action_idx] if action_idx < len(action_names) else f"a{action_idx}"
+                act_names.append(name)
+            action_str = ', '.join(act_names)
             marker = ">" if selected_action is not None and action_profile == selected_action else " "
             lines.append(f"{marker}{action_str}: {prob:.3f}")
         
@@ -572,6 +587,17 @@ def run_policy_rollout(
             human_action_dist = human_policy_prior(state, h_idx, human_goal)
             if human_action_dist is not None:
                 actions[h_idx] = np.random.choice(len(human_action_dist), p=human_action_dist)
+        
+        # Override: if human_always_toggles, check if any human faces a toggleable object
+        if human_always_toggles and hasattr(env.actions, 'toggle'):
+            TOGGLEABLE_TYPES = {'killbutton', 'pauseswitch', 'disablingswitch', 'controlbutton', 'door'}
+            for h_idx in human_agent_indices:
+                agent = env.agents[h_idx]
+                if agent.pos is not None and not agent.terminated and not agent.paused:
+                    fwd_pos = agent.front_pos
+                    fwd_cell = env.grid.get(*fwd_pos)
+                    if fwd_cell is not None and fwd_cell.type in TOGGLEABLE_TYPES:
+                        actions[h_idx] = env.actions.toggle
         
         # Each robot uses computed policy
         robot_action = robot_policy.sample(state)
@@ -672,6 +698,9 @@ def main(
     human_idx: Optional[int] = None,
     robot_idx: Optional[int] = None,
     profile: bool = False,
+    actions_set=None,
+    optimistic: bool = False,
+    human_always_toggles: bool = False,
 ):
     """
     Run Phase 2 backward induction demo.
@@ -699,6 +728,11 @@ def main(
         human_idx: Override human agent index (for custom worlds).
         robot_idx: Override robot agent index (for custom worlds).
         profile: Enable line profiling of backward induction functions.
+        actions_set: Action class to use (None for default).
+        optimistic: If True, compute best-case (max) over robot actions in Phase 1
+            instead of worst-case (min).
+        human_always_toggles: If True, during rollouts the human always toggles
+            any toggleable object (button, switch, door) in front of it.
     """
     # Set random seeds
     random.seed(seed)
@@ -773,13 +807,13 @@ def main(
     if world_path is not None:
         print(f"  Loading world from: {world_path}")
         if max_steps is not None:
-            env = create_env_from_world(world_path, max_steps=max_steps)
+            env = create_env_from_world(world_path, max_steps=max_steps, actions_set=actions_set)
         else:
             # Use environment's default max_steps from config
-            env = create_env_from_world(world_path)
+            env = create_env_from_world(world_path, actions_set=actions_set)
     else:
         # Trivial env needs a default if not specified
-        env = create_trivial_env(max_steps=max_steps if max_steps is not None else 5)
+        env = create_trivial_env(max_steps=max_steps if max_steps is not None else 5, actions_set=actions_set)
     env.reset()
     
     # Override agent indices from CLI if specified
@@ -795,6 +829,7 @@ def main(
         print(f"  Robot (agent {r_idx}): pos={tuple(env.agents[r_idx].pos)}, color={env.agents[r_idx].color}")
     
     print(f"  Grid: {env.width}x{env.height}")
+    print(f"  Actions: {env.actions.__name__} ({env.actions.available})")
     print(f"  Max steps: {env.max_steps}")
     print(f"  Humans: {len(env.human_agent_indices)}, Robots: {len(env.robot_agent_indices)}")
     print()
@@ -861,6 +896,7 @@ def main(
         use_disk_slicing=True,  # Enable disk-based caching (auto-detects /dev/shm)
         level_fct=lambda state: state[0],  # Extract timestep from MultiGrid state
 #        archive_dir=output_dir,  # Save archived values to output directory
+        optimistic=optimistic,
     )
     t1 = time.time()
     
@@ -966,9 +1002,10 @@ def main(
     policy_dist = robot_policy(initial_state)
     if policy_dist:
         print("  Robot policy at initial state:")
+        single_action_names = env.actions.available
         for action_profile, prob in sorted(policy_dist.items(), key=lambda x: -x[1]):
-            action_names = [SINGLE_ACTION_NAMES[a] if a < len(SINGLE_ACTION_NAMES) else f"a{a}" for a in action_profile]
-            print(f"    {', '.join(action_names)}: {prob:.3f}")
+            act_names = [single_action_names[a] if a < len(single_action_names) else f"a{a}" for a in action_profile]
+            print(f"    {', '.join(act_names)}: {prob:.3f}")
     print()
     
     # =========================================================================
@@ -1143,6 +1180,7 @@ def main(
             xi=xi,
             eta=eta,
             zeta=zeta,
+            human_always_toggles=human_always_toggles,
         )
         if (rollout_idx + 1) % 5 == 0:
             print(f"  Completed {rollout_idx + 1}/{num_rollouts} rollouts")
@@ -1223,6 +1261,9 @@ if __name__ == "__main__":
                         help='Index of human agent (default: auto-detect)')
     parser.add_argument('--robot-idx', type=int, default=None,
                         help='Index of robot agent (default: auto-detect)')
+    parser.add_argument('--actions', type=str, default=None,
+                        help='Action class name from gym_multigrid.multigrid, '
+                             'e.g., SmallActions, Actions, ObjectActions, MinimalActions')
     
     # Computation options
     parser.add_argument('--parallel', '-p', action='store_true',
@@ -1272,8 +1313,23 @@ if __name__ == "__main__":
     parser.add_argument('--profile', action='store_true',
                         help='Enable line profiling of backward_induction package '
                              '(requires line_profiler: pip install line_profiler)')
+    parser.add_argument('--optimistic', action='store_true',
+                        help='Use best-case (max) over robot actions in Phase 1 '
+                             'instead of worst-case (min)')
+    parser.add_argument('--human-always-toggles', action='store_true',
+                        help='During rollouts, the human always toggles any '
+                             'toggleable object (button, switch, door) in front of it')
     
     args = parser.parse_args()
+    
+    # Resolve actions class if specified
+    actions_set = None
+    if args.actions is not None:
+        actions_cls = getattr(multigrid_module, args.actions, None)
+        if actions_cls is None or not (isinstance(actions_cls, type) and issubclass(actions_cls, ActionsBase)):
+            parser.error(f"Unknown action class '{args.actions}'. "
+                         f"Available: Actions, SmallActions, ObjectActions, MinimalActions, MineActions, etc.")
+        actions_set = actions_cls
     
     # Build goal_weights dict from command line args (only for trivial world)
     goal_weights = None
@@ -1312,4 +1368,7 @@ if __name__ == "__main__":
         human_idx=args.human_idx,
         robot_idx=args.robot_idx,
         profile=args.profile,
+        actions_set=actions_set,
+        optimistic=args.optimistic,
+        human_always_toggles=args.human_always_toggles,
     )

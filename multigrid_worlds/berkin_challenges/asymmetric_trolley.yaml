@@ -24,10 +24,15 @@ possible_goals:
   - 7,1      # get red key
   - 1,2      # reach red agent 1
   - 2,2      # reach red agent 2
+  - 3,2      # middle area (between lavas)
+  - 4,2      # middle area (between lavas)
+  - 5,2      # middle area (between lavas)
   - 6,2      # reach green agent 1
   - 7,2      # reach green agent 2
   - 8,2      # reach green agent 3
+  - 2,3      # lava left side
   - 4,3      # middle floor position
+  - 6,3      # lava right side
   - 1,4      # bottom left area
   - 2,4      # bottom area
   - 3,4      # bottom center-left

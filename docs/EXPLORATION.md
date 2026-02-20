@@ -283,7 +283,8 @@ can_move = env.can_forward(state, agent_index=0)
 This method checks whether an agent can move forward **in principle** (ignoring multi-agent conflicts):
 - Bounds checking
 - Empty cells → passable
-- Overlappable objects (unsteady ground, buttons) → passable
+- Overlappable objects (unsteady ground, switch) → passable
+- Non-overlappable objects (killbutton, pauseswitch, disablingswitch, controlbutton) → impassable
 - Blocks → passable (all agents can push)
 - Rocks → only if `agent.can_push_rocks == True`
 - Magic walls → only if `agent.can_enter_magic_walls == True` and wall is active

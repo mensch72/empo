@@ -12,16 +12,79 @@ configurable threshold:
 This allows long-running computations to gracefully handle memory pressure,
 either by waiting for other processes to release memory or by triggering
 a clean shutdown with checkpoint saving.
+
+Also provides deep_sizeof() for measuring actual memory usage of nested objects.
 """
 
+import sys
 import time
-from typing import Optional
+from typing import Optional, Any, Set
 
 try:
     import psutil
     HAS_PSUTIL = True
 except ImportError:
     HAS_PSUTIL = False
+
+try:
+    import numpy as np
+    HAS_NUMPY = True
+except ImportError:
+    HAS_NUMPY = False
+
+
+def deep_sizeof(obj: Any, seen: Optional[Set[int]] = None) -> int:
+    """
+    Recursively calculate total memory usage of an object and all its contents.
+    
+    This handles nested dicts, lists, tuples, sets, and numpy arrays properly.
+    Uses id() to avoid counting the same object multiple times.
+    
+    Args:
+        obj: The object to measure
+        seen: Set of already-seen object ids (for internal recursion)
+        
+    Returns:
+        Total size in bytes of obj and all objects it references
+        
+    Example:
+        >>> data = {'a': [1, 2, 3], 'b': {'nested': [4, 5]}}
+        >>> print(f"Size: {deep_sizeof(data) / 1024**2:.2f} MB")
+    """
+    if seen is None:
+        seen = set()
+    
+    obj_id = id(obj)
+    if obj_id in seen:
+        return 0
+    seen.add(obj_id)
+    
+    size = sys.getsizeof(obj)
+    
+    # Handle numpy arrays specially - they have a data buffer
+    if HAS_NUMPY and isinstance(obj, np.ndarray):
+        size = obj.nbytes + 128  # array overhead
+        return size
+    
+    # Recursively add sizes of contents
+    if isinstance(obj, dict):
+        size += sum(deep_sizeof(k, seen) + deep_sizeof(v, seen) for k, v in obj.items())
+    elif isinstance(obj, (list, tuple, set, frozenset)):
+        size += sum(deep_sizeof(item, seen) for item in obj)
+    
+    return size
+
+
+def get_process_memory_mb() -> float:
+    """
+    Get current process memory usage in MB.
+    
+    Returns:
+        Process RSS (Resident Set Size) in MB, or 0 if psutil not available.
+    """
+    if not HAS_PSUTIL:
+        return 0.0
+    return psutil.Process().memory_info().rss / (1024 ** 2)
 
 
 class MemoryMonitor:
