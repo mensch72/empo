@@ -3160,8 +3160,12 @@ class MultiGridEnv(WorldModel):
             a.terminated = False
             a.started = True
             a.paused = False
-            a.on_unsteady_ground = False
             a.forced_next_action = None
+            # Derive on_unsteady_ground from terrain grid at agent's position
+            terrain_cell = self.terrain_grid.get(*a.pos)
+            a.on_unsteady_ground = (
+                terrain_cell is not None and terrain_cell.type == 'unsteadyground'
+            )
 
         # Step count since episode start
         self.step_count = 0
