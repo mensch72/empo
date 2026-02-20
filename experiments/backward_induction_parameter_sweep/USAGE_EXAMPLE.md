@@ -10,9 +10,7 @@ This document provides a step-by-step example of running the parameter sweep exp
 # Run a small test with 10 parameter combinations
 python experiments/backward_induction_parameter_sweep/parameter_sweep_asymmetric_freeing.py \
     --n_samples 10 \
-    --n_rollouts 5 \
-    --output outputs/parameter_sweep/test_results.csv \
-    --seed 42
+    --output outputs/parameter_sweep/test_results.csv
 
 # Analyze the results
 python experiments/backward_induction_parameter_sweep/analyze_parameter_sweep.py \

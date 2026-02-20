@@ -519,7 +519,7 @@ class TabularGoalSampler(PossibleGoalSampler):
         
         A cell is considered walkable if an agent could potentially stand on it.
         Cells containing immovable non-overlappable objects (wall, lava, magicwall,
-        pauseswitch, disablingswitch, controlbutton) are excluded since agents
+        killbutton, pauseswitch, disablingswitch, controlbutton) are excluded since agents
         can never occupy them.
         
         This only works for goals that have a target_rect attribute (ReachCellGoal,
@@ -651,7 +651,7 @@ class TabularGoalGenerator(PossibleGoalGenerator):
         
         A cell is considered walkable if an agent could potentially stand on it.
         Cells containing immovable non-overlappable objects (wall, lava, magicwall,
-        pauseswitch, disablingswitch, controlbutton) are excluded since agents
+        killbutton, pauseswitch, disablingswitch, controlbutton) are excluded since agents
         can never occupy them.
         
         This only works for goals that have a target_rect attribute (ReachCellGoal,

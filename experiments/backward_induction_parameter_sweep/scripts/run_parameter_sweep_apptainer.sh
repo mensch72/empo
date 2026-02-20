@@ -15,7 +15,7 @@
 # Adjust SBATCH directives above according to your cluster's configuration.
 #
 # Usage:
-#   sbatch experiments/backward_induction_parameter_sweep/scripts/run_parameter_sweep.sh [OPTIONS]
+#   sbatch experiments/backward_induction_parameter_sweep/scripts/run_parameter_sweep_apptainer.sh [OPTIONS]
 #
 # Options:
 #   -n, --n_samples N       Number of samples (default: 100)
