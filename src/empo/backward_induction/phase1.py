@@ -276,6 +276,7 @@ def _hpp_compute_sequential(
     archive_dir: Optional[str] = None,
     return_Vh: bool = True,
     quiet: bool = False,
+    memory_profile: bool = False,
     optimistic: bool = False,
 ) -> None:
     """Sequential backward induction algorithm.
@@ -479,10 +480,12 @@ def _hpp_compute_sequential(
         # Periodic memory reporting
         if not quiet and states_processed > 0 and states_processed % memory_report_interval == 0:
             print(f"\n[Memory @ {states_processed}/{total_states} states] RSS: {get_process_memory_mb():.1f} MB")
-            vh_mb = deep_sizeof(Vh_values) / (1024**2)
-            pol_mb = deep_sizeof(system2_policies) / (1024**2)
-            cache_mb = deep_sizeof(slice_cache) / (1024**2) if slice_cache is not None else 0.0
-            print(f"  Vh_values: {vh_mb:.1f} MB, policies: {pol_mb:.1f} MB, cache: {cache_mb:.1f} MB")
+            if memory_profile:
+                # Detailed profiling with deep_sizeof (adds O(total_size) overhead)
+                vh_mb = deep_sizeof(Vh_values) / (1024**2)
+                pol_mb = deep_sizeof(system2_policies) / (1024**2)
+                cache_mb = deep_sizeof(slice_cache) / (1024**2) if slice_cache is not None else 0.0
+                print(f"  Vh_values: {vh_mb:.1f} MB, policies: {pol_mb:.1f} MB, cache: {cache_mb:.1f} MB")
         
         if DEBUG:
             print(f"Processing state {state_index}")
@@ -757,6 +760,7 @@ def compute_human_policy_prior(
     min_free_memory_fraction: float = 0.1,
     memory_check_interval: int = 100,
     memory_pause_duration: float = 60.0,
+    memory_profile: bool = False,
     optimistic: bool = False,
 ) -> TabularHumanPolicyPrior: ...
 
@@ -780,6 +784,7 @@ def compute_human_policy_prior(
     min_free_memory_fraction: float = 0.1,
     memory_check_interval: int = 100,
     memory_pause_duration: float = 60.0,
+    memory_profile: bool = False,
     optimistic: bool = False,
 ) -> Tuple[TabularHumanPolicyPrior, Dict[State, Dict[int, Dict[PossibleGoal, float]]]]: ...
 
@@ -803,6 +808,7 @@ def compute_human_policy_prior(
     min_free_memory_fraction: float = 0.1,
     memory_check_interval: int = 100,
     memory_pause_duration: float = 60.0,
+    memory_profile: bool = False,
     optimistic: bool = False,
 ) -> Tuple[TabularHumanPolicyPrior, SlicedAttainmentCache]: ...
 
@@ -826,6 +832,7 @@ def compute_human_policy_prior(
     min_free_memory_fraction: float = 0.1,
     memory_check_interval: int = 100,
     memory_pause_duration: float = 60.0,
+    memory_profile: bool = False,
     optimistic: bool = False,
 ) -> Tuple[TabularHumanPolicyPrior, Dict[State, Dict[int, Dict[PossibleGoal, float]]], SlicedAttainmentCache]: ...
 
@@ -848,6 +855,7 @@ def compute_human_policy_prior(
     min_free_memory_fraction: float = 0.1,
     memory_check_interval: int = 100,
     memory_pause_duration: float = 60.0,
+    memory_profile: bool = False,
     use_disk_slicing: bool = False,
     disk_cache_dir: Optional[str] = None,
     use_float16: bool = True,
@@ -912,6 +920,10 @@ def compute_human_policy_prior(
             KeyboardInterrupt for graceful shutdown. Set to 0.0 to disable (default).
         memory_check_interval: How often to check memory, in states processed.
         memory_pause_duration: How long to pause (seconds) when memory is low.
+        memory_profile: If True, enable detailed memory profiling using deep_sizeof
+            to measure actual sizes of Vh_values, policies, and cache structures.
+            This adds overhead (O(total_size) traversal) so defaults to False.
+            When False, only RSS (process memory) is logged.
         use_disk_slicing: If True, slice DAG by timestep and save to disk, loading
             only the necessary slice during backward induction. This reduces memory
             usage by 10-20x but requires level_fct to be provided. Recommended for
@@ -1492,7 +1504,7 @@ def compute_human_policy_prior(
                              beta_h, gamma_h,
                              progress_callback, memory_monitor,
                              sliced_cache, disk_dag, level_fct, archive_dir, return_Vh,
-                             quiet=quiet, optimistic=optimistic)
+                             quiet=quiet, memory_profile=memory_profile, optimistic=optimistic)
         except KeyboardInterrupt:
             if not quiet:
                 print("\n[Phase1] Computation interrupted (KeyboardInterrupt).")

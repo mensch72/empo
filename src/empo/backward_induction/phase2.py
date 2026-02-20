@@ -355,6 +355,7 @@ def _rp_compute_sequential(
     archive_dir: Optional[str] = None,
     disk_dag: Optional[Any] = None,
     quiet: bool = False,
+    memory_profile: bool = False,
     markov_chain: Optional[MarkovChain] = None,
 ) -> None:
     """Sequential Phase 2 backward induction algorithm.
@@ -529,11 +530,13 @@ def _rp_compute_sequential(
         # Periodic memory reporting
         if not quiet and states_processed > 0 and states_processed % memory_report_interval == 0:
             print(f"\n[Phase2 Memory @ {states_processed}/{total_states} states] RSS: {get_process_memory_mb():.1f} MB")
-            vh_mb = deep_sizeof(Vh_values) / (1024**2)
-            vr_mb = deep_sizeof(Vr_values) / (1024**2)
-            pol_mb = deep_sizeof(robot_policy) / (1024**2)
-            cache_mb = deep_sizeof(slice_cache) / (1024**2) if slice_cache is not None else 0.0
-            print(f"  Vh_values: {vh_mb:.1f} MB, Vr_values: {vr_mb:.1f} MB, robot_policy: {pol_mb:.1f} MB, cache: {cache_mb:.1f} MB")
+            if memory_profile:
+                # Detailed profiling with deep_sizeof (adds O(total_size) overhead)
+                vh_mb = deep_sizeof(Vh_values) / (1024**2)
+                vr_mb = deep_sizeof(Vr_values) / (1024**2)
+                pol_mb = deep_sizeof(robot_policy) / (1024**2)
+                cache_mb = deep_sizeof(slice_cache) / (1024**2) if slice_cache is not None else 0.0
+                print(f"  Vh_values: {vh_mb:.1f} MB, Vr_values: {vr_mb:.1f} MB, robot_policy: {pol_mb:.1f} MB, cache: {cache_mb:.1f} MB")
         
         # Check memory less frequently to reduce overhead
         if memory_monitor is not None:
@@ -830,6 +833,7 @@ def compute_robot_policy(
     min_free_memory_fraction: float = 0.1,
     memory_check_interval: int = 100,
     memory_pause_duration: float = 60.0,
+    memory_profile: bool = False,
     sliced_cache: Optional[SlicedAttainmentCache] = None,
 ) -> TabularRobotPolicy: ...
 
@@ -859,6 +863,7 @@ def compute_robot_policy(
     min_free_memory_fraction: float = 0.1,
     memory_check_interval: int = 100,
     memory_pause_duration: float = 60.0,
+    memory_profile: bool = False,
     sliced_cache: Optional[SlicedAttainmentCache] = None,
     archive_dir: Optional[str] = None,
     use_disk_slicing: bool = False,
@@ -892,6 +897,7 @@ def compute_robot_policy(
     min_free_memory_fraction: float = 0.1,
     memory_check_interval: int = 100,
     memory_pause_duration: float = 60.0,
+    memory_profile: bool = False,
     sliced_cache: Optional[SlicedAttainmentCache] = None,
 ) -> Tuple[TabularRobotPolicy, MarkovChain]: ...
 
@@ -920,6 +926,7 @@ def compute_robot_policy(
     min_free_memory_fraction: float = 0.1,
     memory_check_interval: int = 100,
     memory_pause_duration: float = 60.0,
+    memory_profile: bool = False,
     sliced_cache: Optional[SlicedAttainmentCache] = None,
     archive_dir: Optional[str] = None,
     use_disk_slicing: bool = False,
@@ -986,6 +993,10 @@ def compute_robot_policy(
             KeyboardInterrupt for graceful shutdown. Set to 0.0 to disable (default).
         memory_check_interval: How often to check memory, in states processed.
         memory_pause_duration: How long to pause (seconds) when memory is low.
+        memory_profile: If True, enable detailed memory profiling using deep_sizeof
+            to measure actual sizes of Vh_values, Vr_values, robot_policy, and cache structures.
+            This adds overhead (O(total_size) traversal) so defaults to False.
+            When False, only RSS (process memory) is logged.
         sliced_cache: Optional SlicedAttainmentCache of precomputed goal attainment arrays.
             If not provided, Phase 2 automatically looks for the cache on world_model
             (stored automatically by Phase 1 at world_model._attainment_cache).
@@ -1418,7 +1429,7 @@ def compute_robot_policy(
                 human_policy_prior, beta_r, gamma_h, gamma_r, zeta, xi, eta, terminal_Vr,
                 progress_callback, memory_monitor,
                 sliced_cache,
-                level_fct, return_values, archive_dir, disk_dag, quiet,
+                level_fct, return_values, archive_dir, disk_dag, quiet, memory_profile,
                 markov_chain=markov_chain_data,
             )
         except KeyboardInterrupt:
