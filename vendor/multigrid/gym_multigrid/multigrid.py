@@ -75,6 +75,7 @@ from empo.world_model import WorldModel
 # Lazy imports for goal types (loaded on demand to avoid circular imports)
 _ReachCellGoal = None
 _ReachRectangleGoal = None
+_OrientationGoal = None
 _TabularGoalGenerator = None
 _TabularGoalSampler = None
 _PossibleGoalGenerator = None
@@ -82,16 +83,17 @@ _PossibleGoalSampler = None
 
 def _load_goal_classes():
     """Lazy load goal classes to avoid circular imports."""
-    global _ReachCellGoal, _ReachRectangleGoal, _TabularGoalGenerator, _TabularGoalSampler
+    global _ReachCellGoal, _ReachRectangleGoal, _OrientationGoal, _TabularGoalGenerator, _TabularGoalSampler
     global _PossibleGoalGenerator, _PossibleGoalSampler
     if _ReachCellGoal is None:
-        from empo.world_specific_helpers.multigrid import ReachCellGoal, ReachRectangleGoal
+        from empo.world_specific_helpers.multigrid import ReachCellGoal, ReachRectangleGoal, OrientationGoal
         from empo.possible_goal import (
             TabularGoalGenerator, TabularGoalSampler,
             PossibleGoalGenerator, PossibleGoalSampler
         )
         _ReachCellGoal = ReachCellGoal
         _ReachRectangleGoal = ReachRectangleGoal
+        _OrientationGoal = OrientationGoal
         _TabularGoalGenerator = TabularGoalGenerator
         _TabularGoalSampler = TabularGoalSampler
         _PossibleGoalGenerator = PossibleGoalGenerator
@@ -114,7 +116,7 @@ def parse_goal_specs(goal_specs: list, env: 'MultiGridEnv', human_agent_index: i
         human_agent_index: Index of the human agent for these goals
         
     Returns:
-        List of PossibleGoal instances (ReachCellGoal or ReachRectangleGoal)
+        List of PossibleGoal instances (ReachCellGoal, ReachRectangleGoal, or OrientationGoal)
     """
     _load_goal_classes()
     
@@ -218,7 +220,9 @@ class ConfigGoalGenerator:
             _load_goal_classes()
             goals = []
             for idx, coords in enumerate(self.goal_coords):
-                if len(coords) == 2:
+                if len(coords) == 1:
+                    goal = _OrientationGoal(self.env, human_agent_index, coords[0], index=idx if self.indexed else None)
+                elif len(coords) == 2:
                     goal = _ReachCellGoal(self.env, human_agent_index, coords, index=idx if self.indexed else None)
                 else:
                     goal = _ReachRectangleGoal(self.env, human_agent_index, coords, index=idx if self.indexed else None)
@@ -298,10 +302,13 @@ class ConfigGoalGenerator:
         # Build set of all cells covered by goals
         covered_cells = set()
         for coords in self.goal_coords:
-            if len(coords) == 2:
+            if len(coords) == 1:
+                # Orientation goal: (d,) - skip for coverage validation
+                continue
+            elif len(coords) == 2:
                 # Cell goal: (x, y)
                 covered_cells.add((coords[0], coords[1]))
-            else:
+            elif len(coords) == 4:
                 # Rectangle goal: (x1, y1, x2, y2)
                 x1, y1, x2, y2 = coords
                 if x1 > x2:
@@ -388,10 +395,17 @@ class ConfigGoalSampler:
             _load_goal_classes()
             goals = []
             for idx, coords in enumerate(self.goal_coords):
-                if len(coords) == 2:
+                if len(coords) == 1:
+                    # Orientation goal: (direction,)
+                    goal = _OrientationGoal(self.env, human_agent_index, coords[0], index=idx if self.indexed else None)
+                elif len(coords) == 2:
+                    # Cell goal: (x, y)
                     goal = _ReachCellGoal(self.env, human_agent_index, coords, index=idx if self.indexed else None)
-                else:
+                elif len(coords) == 4:
+                    # Rectangle goal: (x1, y1, x2, y2)
                     goal = _ReachRectangleGoal(self.env, human_agent_index, coords, index=idx if self.indexed else None)
+                else:
+                    raise ValueError(f"Invalid goal coords: {coords}. Must have 1, 2, or 4 elements.")
                 goals.append(goal)
             self._goals_cache[human_agent_index] = goals
         return self._goals_cache[human_agent_index]
@@ -470,10 +484,13 @@ class ConfigGoalSampler:
         # Build set of all cells covered by goals
         covered_cells = set()
         for coords in self.goal_coords:
-            if len(coords) == 2:
+            if len(coords) == 1:
+                # Orientation goal: (d,) - skip for coverage validation
+                continue
+            elif len(coords) == 2:
                 # Cell goal: (x, y)
                 covered_cells.add((coords[0], coords[1]))
-            else:
+            elif len(coords) == 4:
                 # Rectangle goal: (x1, y1, x2, y2)
                 x1, y1, x2, y2 = coords
                 if x1 > x2:
@@ -545,41 +562,48 @@ def create_goal_sampler_and_generator(goals: list, env: 'MultiGridEnv'):
 def create_config_goal_sampler_and_generator(goal_specs: list, env: 'MultiGridEnv'):
     """
     Create ConfigGoalSampler and ConfigGoalGenerator from goal specs.
-    
+
     These create goals on-the-fly for any human_agent_index. When generate()
     or sample() is called with a human index, they create goals about THAT
     human (e.g., human h reaching cell X).
-    
+
     Uses uniform weights (1/n) for the generator. The sampler is derived from
     the generator using get_sampler(), which uses the weights as probabilities
     and sets sampler weights to 1.0.
-    
+
+    Orientation goals (4 directions) are automatically added to all worlds.
+
     Args:
         goal_specs: List of goal specifications from config file
         env: The MultiGridEnv instance
-        
+
     Returns:
         Tuple of (ConfigGoalSampler, ConfigGoalGenerator)
-    
+
     Raises:
         ValueError: If the goals don't cover all walkable cells in the grid.
     """
     if not goal_specs:
         return None, None
-    
+
     # Parse specs to coordinates
     goal_coords = [_parse_goal_spec_to_coords(spec) for spec in goal_specs]
+
+    # Automatically add the 4 orientation goals (0=right, 1=down, 2=left, 3=up)
+    for direction in range(4):
+        goal_coords.append((direction,))
+
     n = len(goal_coords)
-    
+
     # Generator: uniform weights = 1/n (for exact integration), indexed=True for YAML-loaded goals
     generator = ConfigGoalGenerator(env, goal_coords, weights=[1.0 / n] * n, indexed=True)
-    
+
     # Validate that goals cover all walkable cells
     generator.validate_coverage(raise_on_error=True)
-    
+
     # Sampler: derived from generator (uses weights as probabilities, sets weights to 1)
     sampler = generator.get_sampler()
-    
+
     return sampler, generator
 
 
@@ -2715,7 +2739,8 @@ class MultiGridEnv(WorldModel):
             config_file=None,
             config=None,
             stumble_probability=0.5,
-            solidify_probability=0.1
+            solidify_probability=0.1,
+            rocks_can_kill=False
     ):
         """
         Initialize a MultiGridEnv.
@@ -2749,6 +2774,8 @@ class MultiGridEnv(WorldModel):
                    If both config and config_file are provided, config_file takes precedence.
             stumble_probability: Default probability of stumbling on UnsteadyGround (0.0 to 1.0)
             solidify_probability: Default probability of MagicWall solidifying on failed entry (0.0 to 1.0)
+            rocks_can_kill: If True, agents with can_push_rocks=True can push rocks onto
+                           agents with can_push_rocks=False, terminating the target. Default: False.
         """
         # Load config from config file or dict if provided
         if config_file is not None:
@@ -2788,6 +2815,8 @@ class MultiGridEnv(WorldModel):
                 stumble_probability = config['stumble_probability']
             if solidify_probability == 0.1 and 'solidify_probability' in config:  # default: 0.1
                 solidify_probability = config['solidify_probability']
+            if rocks_can_kill is False and 'rocks_can_kill' in config:  # default: False
+                rocks_can_kill = config['rocks_can_kill']
             # Handle action_class from config
             if actions_set is Actions and 'action_class' in config:
                 action_class_name = config['action_class']
@@ -2816,13 +2845,17 @@ class MultiGridEnv(WorldModel):
         self._init_can_push_rocks = can_push_rocks
         self._init_stumble_probability = stumble_probability
         self._init_solidify_probability = solidify_probability
-        
+        self._init_rocks_can_kill = rocks_can_kill
+
         # Store stumble_probability for use by UnsteadyGround objects
         self.stumble_probability = stumble_probability
         
         # Store solidify_probability for use by MagicWall objects
         self.solidify_probability = solidify_probability
-        
+
+        # Store rocks_can_kill for use when pushing rocks onto agents
+        self.rocks_can_kill = rocks_can_kill
+
         # Initialize RNG early so we can use it for random orientations
         # This is done before reset() to allow random orientations to be drawn in __init__
         self.np_random, _ = seeding.np_random(seed)
@@ -2982,7 +3015,8 @@ class MultiGridEnv(WorldModel):
             'can_push_rocks': getattr(self, '_init_can_push_rocks', 'e'),
             'config_file': getattr(self, '_config_file', None),
             'stumble_probability': getattr(self, '_init_stumble_probability', 0.5),
-            'solidify_probability': getattr(self, '_init_solidify_probability', 0.1)
+            'solidify_probability': getattr(self, '_init_solidify_probability', 0.1),
+            'rocks_can_kill': getattr(self, '_init_rocks_can_kill', False)
         }
     
     @staticmethod
@@ -3057,6 +3091,7 @@ class MultiGridEnv(WorldModel):
         # Item picked up, being carried, initially nothing
         for a in self.agents:
             a.carrying = None
+            a.terminated = False
 
         # Step count since episode start
         self.step_count = 0
@@ -3423,14 +3458,14 @@ class MultiGridEnv(WorldModel):
         # Check for pushable objects (blocks/rocks)
         if fwd_cell.type == 'block':
             # All agents can push blocks - check if push is possible
-            can_push, _, _ = self._can_push_objects(agent, np.array([fwd_x, fwd_y]))
+            can_push, _, _, _ = self._can_push_objects(agent, np.array([fwd_x, fwd_y]))
             return can_push
-        
+
         if fwd_cell.type == 'rock':
             # Only agents with can_push_rocks can push rocks
             if not getattr(agent, 'can_push_rocks', False):
                 return False
-            can_push, _, _ = self._can_push_objects(agent, np.array([fwd_x, fwd_y]))
+            can_push, _, _, _ = self._can_push_objects(agent, np.array([fwd_x, fwd_y]))
             return can_push
         
         # Check for magic walls
@@ -3446,20 +3481,31 @@ class MultiGridEnv(WorldModel):
         
         # All other objects (walls, doors, etc.) - cannot pass
         return False
-    
+
+    def _find_agent_at_position(self, pos_tuple):
+        """
+        Find and return the agent at the given position, or None if no agent.
+        Only returns non-terminated agents.
+        """
+        for agent in self.agents:
+            if agent.pos is not None and tuple(agent.pos) == pos_tuple and not agent.terminated:
+                return agent
+        return None
+
     def _can_push_objects(self, agent, start_pos):
         """
         Check if agent can push blocks/rocks starting at start_pos.
-        Returns (can_push, num_objects, end_pos) where:
+        Returns (can_push, num_objects, end_pos, target_agent) where:
         - can_push: True if push is possible
         - num_objects: number of consecutive blocks/rocks
         - end_pos: position where the last object would move to
+        - target_agent: agent that will be killed by the push (or None)
         """
         # Check if there are consecutive blocks/rocks in the direction the agent is facing
         direction = agent.dir_vec
         current_pos = np.array(start_pos)
         num_objects = 0
-        
+
         # Count consecutive blocks/rocks
         while True:
             cell = self.grid.get(*current_pos)
@@ -3469,39 +3515,64 @@ class MultiGridEnv(WorldModel):
                 break
             # For rocks, check if agent can push this rock
             if cell.type == 'rock' and not cell.can_be_pushed_by(agent):
-                return False, 0, None
+                return False, 0, None, None
             num_objects += 1
             current_pos = current_pos + direction
-            
+
             # Bounds check
             if current_pos[0] < 0 or current_pos[0] >= self.grid.width or \
                current_pos[1] < 0 or current_pos[1] >= self.grid.height:
-                return False, 0, None
-        
+                return False, 0, None, None
+
         # current_pos is now the first empty cell after the objects
         # Check if this cell is empty or can be overlapped
         end_cell = self.grid.get(*current_pos)
+        end_pos_tuple = tuple(current_pos)
+
         if end_cell is None or end_cell.can_overlap():
             # Also check if the end position was occupied by another agent at step start.
             # This prevents chain conflicts where pushing depends on execution order.
-            end_pos_tuple = tuple(current_pos)
             if hasattr(self, '_initial_agent_positions') and end_pos_tuple in self._initial_agent_positions:
+                # Check if rocks_can_kill is enabled and we can kill the target agent
+                if self.rocks_can_kill and agent.can_push_rocks:
+                    target_agent = self._find_agent_at_position(end_pos_tuple)
+                    if target_agent is not None and not target_agent.can_push_rocks:
+                        # Can push onto killable agent
+                        return True, num_objects, current_pos, target_agent
                 # Cannot push onto a cell that was occupied by an agent at step start
-                return False, 0, None
-            return True, num_objects, current_pos
+                return False, 0, None, None
+            return True, num_objects, current_pos, None
+        elif end_cell is not None and end_cell.type == 'agent':
+            # Cell has an agent - check if rocks_can_kill allows pushing onto them
+            if self.rocks_can_kill and agent.can_push_rocks:
+                target_agent = end_cell
+                if not target_agent.can_push_rocks:
+                    # Can push onto killable agent
+                    return True, num_objects, current_pos, target_agent
+            return False, 0, None, None
         else:
-            return False, 0, None
+            return False, 0, None, None
     
     def _push_objects(self, agent, start_pos):
         """
         Push blocks/rocks starting at start_pos in the direction agent is facing.
         Returns True if push was successful.
+
+        If rocks_can_kill is enabled and the push lands a rock on a killable agent,
+        that agent will be terminated.
         """
-        can_push, num_objects, end_pos = self._can_push_objects(agent, start_pos)
-        
+        can_push, num_objects, end_pos, target_agent = self._can_push_objects(agent, start_pos)
+
         if not can_push or num_objects == 0:
             return False
-        
+
+        # Handle agent termination if pushing onto a killable agent
+        if target_agent is not None:
+            # Terminate the target agent
+            target_agent.terminated = True
+            # Remove the target agent from the grid (rock will occupy the cell)
+            self.grid.set(*target_agent.pos, None)
+
         # Move objects from back to front to avoid overwriting
         direction = agent.dir_vec
         # Start from the end position and work backwards
@@ -3512,15 +3583,15 @@ class MultiGridEnv(WorldModel):
             self.grid.set(*to_pos, obj)
             if obj:
                 obj.cur_pos = to_pos
-        
+
         # Clear the original start position (now empty)
         self.grid.set(*start_pos, None)
-        
+
         # Now agent can move into start_pos
         self.grid.set(*start_pos, agent)
         self.grid.set(*agent.pos, None)
         agent.pos = np.array(start_pos)
-        
+
         return True
 
     def _move_agent_to_cell(self, agent_idx, target_pos, target_cell):
@@ -3909,7 +3980,7 @@ class MultiGridEnv(WorldModel):
             # Determine contested cell (target or block end position)
             target_cell = self.grid.get(*target_pos)
             if target_cell is not None and target_cell.type in ['block', 'rock']:
-                can_push, num_objects, end_pos = self._can_push_objects(self.agents[i], np.array(target_pos))
+                can_push, num_objects, end_pos, _ = self._can_push_objects(self.agents[i], np.array(target_pos))
                 contested_cells[i] = tuple(end_pos) if can_push else target_pos
             else:
                 contested_cells[i] = target_pos
@@ -4396,12 +4467,15 @@ class MultiGridEnv(WorldModel):
                           color=(0, 102, 255), line_thickness=2, dash_len=6, gap_len=4,
                           inset_frac=0.08):
         """
-        Draw a dashed rectangle around a goal region and optionally a line to the agent.
-        
+        Draw goal visualization on the image.
+
+        For spatial goals: dashed rectangle with optional line to agent.
+        For orientation goals: directional arrow from agent position.
+
         Args:
             img: RGB numpy array (H, W, 3) to draw on (modified in place).
-            goal: Goal object with target_rect, target_pos, or (x1, y1, x2, y2) tuple.
-            agent_idx: If provided, draw a dashed line from this agent to the goal.
+            goal: Goal object (spatial or orientation).
+            agent_idx: If provided, draw visualization relative to this agent.
             tile_size: Size of each grid cell in pixels.
             color: RGB tuple for the goal visualization (default: blue).
             line_thickness: Thickness of the dashed lines.
@@ -4409,36 +4483,137 @@ class MultiGridEnv(WorldModel):
             gap_len: Length of gaps between dashes in pixels.
             inset_frac: Fraction of cell to inset rectangle from cell edges (0.08 = 8%).
         """
+        # Check if this is an orientation goal
+        if hasattr(goal, 'target_dir'):
+            # Draw orientation goal as directional arrow
+            if agent_idx is not None and agent_idx < len(self.agents):
+                self._draw_orientation_goal(img, goal, agent_idx, tile_size, color, line_thickness)
+            return
+
+        # Draw spatial goal (existing logic)
         # Extract bounding box from goal
         x1, y1, x2, y2 = self._get_goal_bounding_box(goal)
-        
+
         # Calculate pixel coordinates with inset
         left = int(x1 * tile_size + tile_size * inset_frac)
         top = int(y1 * tile_size + tile_size * inset_frac)
         right = int((x2 + 1) * tile_size - tile_size * inset_frac)
         bottom = int((y2 + 1) * tile_size - tile_size * inset_frac)
-        
+
         # Draw dashed rectangle (4 sides)
         self._draw_dashed_line(img, left, top, right, top, color, dash_len, gap_len, line_thickness)  # Top
         self._draw_dashed_line(img, right, top, right, bottom, color, dash_len, gap_len, line_thickness)  # Right
         self._draw_dashed_line(img, right, bottom, left, bottom, color, dash_len, gap_len, line_thickness)  # Bottom
         self._draw_dashed_line(img, left, bottom, left, top, color, dash_len, gap_len, line_thickness)  # Left
-        
+
         # Draw line from agent to closest point on goal if agent_idx provided
         if agent_idx is not None and agent_idx < len(self.agents):
             agent = self.agents[agent_idx]
             if agent.pos is not None:
                 agent_px = int((agent.pos[0] + 0.5) * tile_size)
                 agent_py = int((agent.pos[1] + 0.5) * tile_size)
-                
+
                 # Find closest point on rectangle boundary
                 closest_x, closest_y = self._closest_point_on_rect(
                     left, top, right, bottom, agent_px, agent_py
                 )
-                
+
                 self._draw_dashed_line(img, agent_px, agent_py, closest_x, closest_y,
                                        color, dash_len, gap_len, max(1, line_thickness - 1))
     
+    def _draw_orientation_goal(self, img, goal, agent_idx, tile_size, color, line_thickness):
+        """
+        Draw an orientation goal as a directional arrow.
+
+        Args:
+            img: RGB numpy array to draw on.
+            goal: OrientationGoal with target_dir attribute.
+            agent_idx: Index of the agent.
+            tile_size: Size of each grid cell in pixels.
+            color: RGB tuple for the arrow color.
+            line_thickness: Thickness of the arrow lines.
+        """
+        agent = self.agents[agent_idx]
+        if agent.pos is None:
+            return
+
+        # Direction mapping: 0=right, 1=down, 2=left, 3=up
+        direction_vectors = {
+            0: (1, 0),    # right
+            1: (0, 1),    # down
+            2: (-1, 0),   # left
+            3: (0, -1)    # up
+        }
+
+        target_dir = goal.target_dir
+        dx, dy = direction_vectors.get(target_dir, (1, 0))
+
+        # Calculate agent pixel position (center of cell)
+        agent_px = int((agent.pos[0] + 0.5) * tile_size)
+        agent_py = int((agent.pos[1] + 0.5) * tile_size)
+
+        # Arrow parameters
+        arrow_length = int(tile_size * 0.4)
+        head_length = int(tile_size * 0.15)
+        head_width = int(tile_size * 0.12)
+
+        # Arrow end point
+        end_px = agent_px + dx * arrow_length
+        end_py = agent_py + dy * arrow_length
+
+        # Draw arrow shaft (dashed line)
+        self._draw_dashed_line(img, agent_px, agent_py, end_px, end_py,
+                               color, dash_len=6, gap_len=4, thickness=line_thickness)
+
+        # Draw arrowhead (solid triangle)
+        # Calculate perpendicular vector for arrowhead wings
+        perp_dx = -dy
+        perp_dy = dx
+
+        # Arrowhead points
+        tip_x, tip_y = end_px, end_py
+        base_x = end_px - dx * head_length
+        base_y = end_py - dy * head_length
+        left_x = base_x + perp_dx * (head_width // 2)
+        left_y = base_y + perp_dy * (head_width // 2)
+        right_x = base_x - perp_dx * (head_width // 2)
+        right_y = base_y - perp_dy * (head_width // 2)
+
+        # Draw filled triangle for arrowhead by filling scanlines
+        self._fill_triangle_numpy(img, tip_x, tip_y, left_x, left_y, right_x, right_y, color)
+
+    def _fill_triangle_numpy(self, img, x1, y1, x2, y2, x3, y3, color):
+        """Fill a triangle on the image using numpy operations."""
+        # Convert to integers
+        x1, y1 = int(x1), int(y1)
+        x2, y2 = int(x2), int(y2)
+        x3, y3 = int(x3), int(y3)
+
+        # Get image bounds
+        height, width = img.shape[:2]
+
+        # Find bounding box
+        min_x = max(0, min(x1, x2, x3))
+        max_x = min(width - 1, max(x1, x2, x3))
+        min_y = max(0, min(y1, y2, y3))
+        max_y = min(height - 1, max(y1, y2, y3))
+
+        # Use barycentric coordinates to fill the triangle
+        for y in range(min_y, max_y + 1):
+            for x in range(min_x, max_x + 1):
+                # Compute barycentric coordinates
+                denom = (y2 - y3) * (x1 - x3) + (x3 - x2) * (y1 - y3)
+                if abs(denom) < 1e-10:
+                    continue
+
+                a = ((y2 - y3) * (x - x3) + (x3 - x2) * (y - y3)) / denom
+                b = ((y3 - y1) * (x - x3) + (x1 - x3) * (y - y3)) / denom
+                c = 1 - a - b
+
+                # Point is inside triangle if all barycentric coords are >= 0
+                if a >= 0 and b >= 0 and c >= 0:
+                    img[y, x] = color
+
     def _get_goal_bounding_box(self, goal):
         """Extract bounding box (x1, y1, x2, y2) from various goal representations."""
         if hasattr(goal, 'target_rect'):
@@ -4459,13 +4634,13 @@ class MultiGridEnv(WorldModel):
                 x1, y1, x2, y2 = 0, 0, 0, 0
         else:
             x1, y1, x2, y2 = 0, 0, 0, 0
-        
+
         # Normalize order
         if x1 > x2:
             x1, x2 = x2, x1
         if y1 > y2:
             y1, y2 = y2, y1
-        
+
         return (x1, y1, x2, y2)
     
     def _closest_point_on_rect(self, left, top, right, bottom, px, py):
@@ -5391,7 +5566,7 @@ class MultiGridEnv(WorldModel):
                 
                 # If pushing blocks/rocks, the resource is the final cell where objects land
                 if fwd_cell and fwd_cell.type in ['block', 'rock']:
-                    can_push, num_objects, end_pos = self._can_push_objects(agent, fwd_pos)
+                    can_push, num_objects, end_pos, _ = self._can_push_objects(agent, fwd_pos)
                     if can_push:
                         # Agent will push objects and move into fwd_pos
                         # The contested resource is the end_pos where objects land
