@@ -11,7 +11,7 @@ For running example scripts with minimal setup, use the launcher notebooks:
 Minimal 5-cell notebook for running any example script on Kaggle:
 1. Clone repo
 2. Setup paths
-3. `%run examples/<script>.py`
+3. `%run examples/<category>/<script>.py`
 4. Copy outputs
 5. Download
 
@@ -106,12 +106,12 @@ Use the launcher notebooks to run any script from [examples/](../examples/):
 
 ```python
 # Quick demos
-%run examples/simple_example.py
-%run examples/state_management_demo.py
+%run examples/multigrid/simple_example.py
+%run examples/multigrid/state_management_demo.py
 
 # With flags
-%run examples/phase2_robot_policy_demo.py --quick
-%run examples/phase2_robot_policy_demo.py --ensemble --tabular
+%run examples/phase2/phase2_robot_policy_demo.py --quick
+%run examples/phase2/phase2_robot_policy_demo.py --ensemble --tabular
 ```
 
 See [examples/README.md](../examples/README.md) for the full list.

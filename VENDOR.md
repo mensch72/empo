@@ -328,4 +328,4 @@ The ai_transport environment requires:
 - scipy>=1.7.0
 - matplotlib>=3.5.0
 
-These are already included in the main requirements.txt.
+These are already included in the main setup/requirements.txt.

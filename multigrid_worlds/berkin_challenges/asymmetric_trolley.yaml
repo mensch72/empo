@@ -47,3 +47,4 @@ possible_goals:
   - 1,2, 2,2 # red agents area (2 agents)
   - 6,2, 8,2 # green agents area (3 agents)
   - 1,4, 8,5 # safe zone (entire bottom area)
+  - 0,0, 9,6 # full grid coverage (ensures all walkable cells are covered)

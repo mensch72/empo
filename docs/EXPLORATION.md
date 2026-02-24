@@ -374,7 +374,7 @@ In constrained environments like MultiGrid, expect **√t growth** because:
 
 ### Example: "Trivial" World Model
 
-The `phase2_robot_policy_demo.py` uses a "trivial" world model which has only **256 possible states** (combinations of agent positions and orientations).
+The `examples/phase2/phase2_robot_policy_demo.py` uses a "trivial" world model which has only **256 possible states** (combinations of agent positions and orientations).
 
 **Empirical observation**: Even with high exploration rates (`epsilon_r = epsilon_h = 1.0`), only about **75% of all 256 states** are visited after **250,000 training steps**.
 
@@ -783,20 +783,20 @@ bonus = curiosity.get_bonus(state)
 
 ### Convenience Flag in Demos
 
-The `phase2_robot_policy_demo.py` provides a `--curious` flag that automatically selects the appropriate curiosity mechanism:
+The `examples/phase2/phase2_robot_policy_demo.py` provides a `--curious` flag that automatically selects the appropriate curiosity mechanism:
 
 ```bash
 # Neural network mode → uses RND
-python phase2_robot_policy_demo.py --curious
+python examples/phase2/phase2_robot_policy_demo.py --curious
 
 # Tabular mode → uses count-based curiosity  
-python phase2_robot_policy_demo.py --tabular --curious
+python examples/phase2/phase2_robot_policy_demo.py --tabular --curious
 ```
 
-Similarly, `lookup_table_phase2_demo.py` has a `--curiosity` flag:
+Similarly, `examples/phase2/lookup_table_phase2_demo.py` has a `--curiosity` flag:
 
 ```bash
-python lookup_table_phase2_demo.py --curiosity
+python examples/phase2/lookup_table_phase2_demo.py --curiosity
 ```
 
 ## API Reference
@@ -869,4 +869,4 @@ MultiGridHumanExplorationPolicy(
 
 - [Phase 2 Warm-up Design](WARMUP_DESIGN.md) - How beta_r warm-up affects early exploration
 - [API Reference](API.md) - Full API documentation
-- [examples/phase2_robot_policy_demo.py](../examples/phase2_robot_policy_demo.py) - Working example with exploration
+- [examples/phase2/phase2_robot_policy_demo.py](../examples/phase2/phase2_robot_policy_demo.py) - Working example with exploration

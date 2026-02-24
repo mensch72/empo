@@ -13,7 +13,7 @@ for multi-agent systems using empowerment-based objectives.
 
 **Requirements:**
     Optional dependencies: ollama, mineland
-    Install with: pip install -r requirements-hierarchical.txt
+    Install with: pip install -r setup/requirements-hierarchical.txt
     
     Note: MineLand requires additional setup from https://github.com/cocacola-lab/MineLand
 
