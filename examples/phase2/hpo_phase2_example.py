@@ -22,7 +22,14 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
-import optuna
+
+try:
+    import optuna
+except ImportError as exc:
+    raise ImportError(
+        "The Phase 2 HPO example requires the 'optuna' package. "
+        "Install it with:\n\n    pip install optuna\n"
+    ) from exc
 
 # ---------------------------------------------------------------------------
 # Path setup – mirrors the PYTHONPATH used by the project's examples
@@ -152,8 +159,9 @@ def _aggregate_objective(history: List[Dict[str, float]], window: int = 20) -> f
     """
     Compute HPO objective from trainer loss history (lower = better).
 
-    Centers on v_h_e (human goal-achievement approximation quality) with
-    a small stabilisation term from q_r.
+    Centers on v_h_e (human goal-achievement approximation quality).
+    q_r values are also checked for numerical stability; if any are NaN/inf
+    the trial is penalised.
     """
     if not history:
         return float("inf")
@@ -188,20 +196,40 @@ def _suggest_config(trial: optuna.Trial, total_training_steps: int) -> Phase2Con
 
     Only *training* hyperparameters are tuned here.  Theory parameters
     (beta_r, gamma_h, gamma_r, zeta, xi, eta) are kept at fixed values.
+
+    Hyperparameters are grouped into four categories:
+      1. Learning rates          – how fast networks update
+      2. Warm-up / ramp-up steps – how long each network trains before full use
+      3. Network update schedule – target-network refresh and LR decay shape
+      4. Training efficiency     – replay ratio and replay-buffer batch size
     """
+    # ------------------------------------------------------------------ #
+    # Category 1: Learning rates                                          #
+    # ------------------------------------------------------------------ #
     lr_v_h_e = trial.suggest_float("lr_v_h_e", 1e-4, 1e-2, log=True)
     lr_q_r = trial.suggest_float("lr_q_r", 1e-5, 1e-3, log=True)
 
-    # Cap warm-up ranges to at most 20% of budget; use step=50 for clean ranges.
+    # ------------------------------------------------------------------ #
+    # Category 2: Warm-up / ramp-up steps                                #
+    # Cap at 20 % of budget so the main training phase still runs.       #
+    # ------------------------------------------------------------------ #
     max_warmup = max(50, (total_training_steps // 5 // 50) * 50)
     warmup_v_h_e_steps = trial.suggest_int("warmup_v_h_e_steps", 50, max_warmup, step=50)
     warmup_q_r_steps = trial.suggest_int("warmup_q_r_steps", 50, max_warmup, step=50)
     max_rampup = max(100, (total_training_steps // 3 // 100) * 100)
     beta_r_rampup_steps = trial.suggest_int("beta_r_rampup_steps", 100, max_rampup, step=100)
 
+    # ------------------------------------------------------------------ #
+    # Category 3: Network update schedule                                 #
+    # ------------------------------------------------------------------ #
     target_update_interval = trial.suggest_int("target_update_interval", 10, 200, step=10)
     lr_constant_fraction = trial.suggest_float("lr_constant_fraction", 0.4, 0.95)
-    # Higher range: at 0.5–4.0 each training_step produces ≥0.5 env_steps
+
+    # ------------------------------------------------------------------ #
+    # Category 4: Training efficiency                                     #
+    # ------------------------------------------------------------------ #
+    # training_steps_per_env_step ≥ 0.5 means at least one env step per  #
+    # two training steps, keeping the replay buffer well-populated.       #
     training_steps_per_env_step = trial.suggest_float("training_steps_per_env_step", 0.5, 4.0)
     batch_size = trial.suggest_categorical("batch_size", [32, 64, 128])
 
@@ -215,32 +243,36 @@ def _suggest_config(trial: optuna.Trial, total_training_steps: int) -> Phase2Con
         zeta=ZETA,
         xi=XI,
         eta=ETA,
-        # ---- Tuned training hyperparameters ----
+        # ---- Category 1: Learning rates ----
         lr_v_h_e=lr_v_h_e,
         lr_q_r=lr_q_r,
         lr_x_h=lr_v_h_e,
         lr_u_r=lr_q_r,
         lr_v_r=lr_q_r,
+        # ---- Category 2: Warm-up / ramp-up steps ----
         warmup_v_h_e_steps=warmup_v_h_e_steps,
         warmup_x_h_steps=warmup_v_h_e_steps,
         warmup_q_r_steps=warmup_q_r_steps,
         beta_r_rampup_steps=beta_r_rampup_steps,
+        # ---- Category 3: Network update schedule ----
         v_h_e_target_update_interval=target_update_interval,
         q_r_target_update_interval=target_update_interval,
         x_h_target_update_interval=target_update_interval,
         lr_constant_fraction=lr_constant_fraction,
         constant_lr_then_1_over_t=True,
+        # ---- Category 4: Training efficiency ----
         training_steps_per_env_step=training_steps_per_env_step,
-        num_training_steps=total_training_steps,
-        steps_per_episode=TRIVIAL_MAX_STEPS,
         batch_size=batch_size,
         buffer_size=2_000,
+        # ---- Exploration (derived from total steps, not tuned) ----
         epsilon_r_start=1.0,
         epsilon_r_end=0.0,
         epsilon_r_decay_steps=epsilon_decay_steps,
         epsilon_h_start=1.0,
         epsilon_h_end=0.0,
         epsilon_h_decay_steps=epsilon_decay_steps,
+        num_training_steps=total_training_steps,
+        steps_per_episode=TRIVIAL_MAX_STEPS,
         # ---- Network configuration ----
         x_h_use_network=True,
         u_r_use_network=False,
@@ -293,6 +325,8 @@ def make_objective(settings: HPOSettings):
             # train_multigrid_phase2 creates networks internally and returns
             # (q_r_network, all_networks, history, trainer).
             # First chunk: bootstrap trainer via train_multigrid_phase2.
+            # Clamp to total_training_steps so we never exceed the budget.
+            first_chunk_size = min(settings.chunk_size, settings.total_training_steps)
             _q_r, _networks, first_history, trainer = train_multigrid_phase2(
                 world_model=env,
                 human_agent_indices=human_indices,
@@ -300,7 +334,7 @@ def make_objective(settings: HPOSettings):
                 human_policy_prior=human_policy,
                 goal_sampler=goal_sampler,
                 config=config,
-                num_training_steps=settings.chunk_size,
+                num_training_steps=first_chunk_size,
                 device="cpu",
                 verbose=False,
             )
@@ -308,13 +342,13 @@ def make_objective(settings: HPOSettings):
                 history_accum.extend(first_history)
 
             partial_score = _aggregate_objective(history_accum, window=10)
-            trial.report(partial_score, step=settings.chunk_size)
+            trial.report(partial_score, step=first_chunk_size)
             if trial.should_prune():
                 raise optuna.TrialPruned()
 
-            # Subsequent chunks: trainer.train() is cumulative on training_step_count.
+            # Subsequent chunks up to (but not including) total_training_steps.
             target = settings.chunk_size * 2
-            while target <= settings.total_training_steps:
+            while target < settings.total_training_steps:
                 chunk_history = trainer.train(num_training_steps=target)
                 if chunk_history:
                     history_accum.extend(chunk_history)
@@ -325,6 +359,21 @@ def make_objective(settings: HPOSettings):
                     raise optuna.TrialPruned()
 
                 target += settings.chunk_size
+
+            # Final chunk: always train up to the exact total requested so
+            # the --training-steps CLI flag is respected even when total is
+            # not an exact multiple of chunk_size.
+            if first_chunk_size < settings.total_training_steps:
+                chunk_history = trainer.train(
+                    num_training_steps=settings.total_training_steps
+                )
+                if chunk_history:
+                    history_accum.extend(chunk_history)
+
+                partial_score = _aggregate_objective(history_accum, window=10)
+                trial.report(partial_score, step=settings.total_training_steps)
+                if trial.should_prune():
+                    raise optuna.TrialPruned()
 
             return _aggregate_objective(history_accum, window=20)
 
