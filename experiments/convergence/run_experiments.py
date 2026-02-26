@@ -27,7 +27,7 @@ import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
-from generate_experiments import SIZES
+from generate_experiments import Config
 
 
 REPO_ROOT = Path(__file__).parent.parent.parent
@@ -74,7 +74,7 @@ def run_instance(map_name: str, log_dir: Path, seed: int) -> dict:
 
 def main():
     maps = []
-    for w, h in SIZES:
+    for w, h in Config.freeing_sizes:
         maps.append(f'convergence/freeing{w}x{h}')
 
     num_workers = 4 # os.cpu_count()

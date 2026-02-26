@@ -27,10 +27,20 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).parent.parent.parent
 OUTPUT_DIR = REPO_ROOT / 'multigrid_worlds' / 'convergence'
 
+class Config:
+    freeing_min_width = 5
+    freeing_max_width = 10
+    freeing_min_height = 4
+    freeing_max_height = 10
+    
+    freeing_sizes = []
+    for w in range(freeing_min_width, freeing_max_width):
+        for h in range(freeing_min_height, freeing_max_height):
+            if w >= 5 and h >= 4:
+                freeing_sizes.append((w, h))
+    
 
 def generate_freeing_maps():
-    min_width, max_width = 5, 10
-    min_height, max_height = 4, 10
 
     def generate_freeing_map(width: int, height: int):
         rows = []
@@ -57,20 +67,19 @@ def generate_freeing_maps():
         rows.append(' '.join(['We'] * width))
         return '\n'.join('  ' + row for row in rows)
 
-    for width in range(min_width, max_width):
-        for height in range(min_height, max_height):
-            generated_map = generate_freeing_map(width, height)
+    for width, height in Config.freeing_sizes:
+        generated_map = generate_freeing_map(width, height)
 
-            goals = [(width - 3, 1)]
-            for y in range(2, height - 1):
-                for x in range(1, width - 1):
-                    goals.append((x, y))
+        goals = [(width - 3, 1)]
+        for y in range(2, height - 1):
+            for x in range(1, width - 1):
+                goals.append((x, y))
 
-            out_path = OUTPUT_DIR / f'freeing{width}x{height}.yaml'
-            out_path.write_text(build_yaml(generated_map, width, height, goals))
+        out_path = OUTPUT_DIR / f'freeing{width}x{height}.yaml'
+        out_path.write_text(build_yaml(generated_map, width, height, goals))
 
     print("Generated freeing maps for widths {}-{} and heights {}-{} in {}/".format(
-        min_width, max_width - 1, min_height, max_height - 1, OUTPUT_DIR.relative_to(REPO_ROOT)))
+        Config.freeing_min_width, Config.freeing_max_width - 1, Config.freeing_min_height, Config.freeing_max_height - 1, OUTPUT_DIR.relative_to(REPO_ROOT)))
 
             
 def build_yaml(map: str, width: int, height: int, goals: list[tuple[int, int]]) -> str:
