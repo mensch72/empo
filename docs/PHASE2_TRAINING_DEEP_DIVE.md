@@ -36,7 +36,8 @@ This document details the training process for Phase 2 of the EMPO framework:
 8. [Replay Buffer & Data Flow](#8-replay-buffer--data-flow)
 9. [Curiosity-Driven Exploration](#9-curiosity-driven-exploration)
 10. [Async Training Mode](#10-async-training-mode)
-11. [Quick Start Code](#11-quick-start-code)
+11. [GPU & Parallelization Notes](#11-gpu--parallelization-notes)
+12. [Quick Start Code](#12-quick-start-code)
 
 ---
 
@@ -51,11 +52,15 @@ $$
 U_r(s) = -\left(\mathbb{E}_h\left[X_h(s)^{-\xi}\right]\right)^\eta
 $$
 
+> The negative sign keeps $U_r < 0$, consistent with the range of $Q_r$. Raising to the power $\xi \geq 1$ makes the expectation sensitive to humans with *very low* ability — the larger $\xi$, the more the robot is penalised for leaving any human powerless (inter-human inequality aversion). The outer $\eta \geq 1$ then applies the same logic across states over time (intertemporal inequality aversion).
+
 where $X_h(s)$ is human $h$'s **goal-achievement ability**:
 
 $$
 X_h(s) = \mathbb{E}_g\left[V_h^e(s,g)^\zeta\right]
 $$
+
+> Raising $V_h^e$ to the power $\zeta \geq 1$ introduces a *reliability preference*: a human who can achieve one goal with probability 1 scores higher than one who can achieve two goals with probability 0.5 each. The larger $\zeta$, the more the robot rewards consistently high ability over broad-but-shallow coverage.
 
 and $V_h^e(s,g)$ is the probability that human $h$ can achieve goal $g$ from state $s$
 **under the robot's current policy**.
@@ -85,7 +90,9 @@ class Phase2Networks:
     x_h:  Optional[BaseAggregateGoalAbilityNetwork] = None
     u_r:  Optional[BaseIntrinsicRewardNetwork]       = None
     v_r:  Optional[BaseRobotValueNetwork]            = None
-    # Plus optional RND / count-based curiosity modules
+    # Plus optional curiosity modules:
+    # RND (Random Network Distillation) maintains a fixed random target network and a
+    # trainable predictor; high prediction error signals unexplored states.
     rnd:  Optional[RNDModule]                        = None
     count_curiosity: Optional[CountBasedCuriosity]   = None
     # Target networks (frozen copies, created automatically in __init__)
@@ -174,6 +181,8 @@ constant_lr_then_1_over_t: bool = True  # Use 1/t decay (Robbins-Monro) in late 
 use_sqrt_lr_decay:         bool = True  # Fallback: 1/√t if above is False
 ```
 
+> The $1/t$ schedule satisfies the Robbins-Monro conditions ($\sum_t \alpha_t = \infty$, $\sum_t \alpha_t^2 < \infty$), providing theoretical guarantees of convergence for stochastic fixed-point iteration. The constant phase beforehand ensures networks are already in a reasonable region before the aggressive decay begins.
+
 The method `config.get_learning_rate(network_name, step, update_count)` returns the
 effective LR. The trainer calls it every step and writes it to each optimizer's
 `param_groups[0]['lr']`.
@@ -248,6 +257,8 @@ q_r_dropout:       float = 0.5
 auto_grad_clip:              bool  = True
 auto_grad_clip_reference_lr: float = 1e-4
 # Effective clip = base_clip * (current_lr / reference_lr)
+# As LR decays late in training, the clip tightens proportionally —
+# preventing large gradients from overshooting the increasingly precise solution.
 ```
 
 Target network update intervals (hard copy every N training steps):
@@ -357,61 +368,90 @@ The accumulator pattern means:
 
 ### 4.3 Actor Step — `_actor_step()`
 
+The actor's sole job is to **collect one transition** from the world model and push it to the
+replay buffer. It runs on CPU and never touches network gradients — only forward passes
+through target networks (which are frozen and in eval mode).
+
 ```python
 def _actor_step(self, actor_state):
-    # Determine if episode ends after this step
+    # Mark as terminal so the learner knows not to bootstrap past this step.
     is_terminal = (actor_state.env_step_count + 1) >= config.steps_per_episode
 
-    # Collect transition (incl. pre-computing all transition_probs once)
+    # collect_transition() bundles environment interaction + transition-prob pre-computation.
     transition, next_state = collect_transition(
         actor_state.state, actor_state.goals, actor_state.goal_weights,
         terminal=is_terminal
     )
 
-    # Update state
     actor_state.state = next_state
     actor_state.env_step_count += 1
 
-    # Resample any achieved goals immediately
+    # Immediately replace achieved goals so the next step uses a fresh, non-trivial goal.
     for h, g in actor_state.goals.items():
         if check_goal_achieved(next_state, h, g):
             actor_state.goals[h], actor_state.goal_weights[h] = goal_sampler.sample(...)
 
-    # Probabilistic goal resample (config.goal_resample_prob)
-    # Reset episode when steps_per_episode reached
+    # config.goal_resample_prob allows probabilistic goal replacement even when not achieved,
+    # preventing the agent from over-fitting to a single goal throughout a long episode.
+    # Reset episode counters when steps_per_episode is reached.
     return transition
 ```
 
-Inside `collect_transition()` the order matters — transition probabilities are computed
-**once** and reused for both curiosity-bonus computation and the replay buffer:
+Inside `collect_transition()` the order is critical — transition probabilities are queried
+**once from the world model** and reused for action selection, curiosity bonuses, *and* the
+learner's model-based Bellman targets, avoiding redundant calls to `transition_probabilities()`:
 
 ```
-1. sample_human_actions(state, goals)          # human policy prior + ε_h
-2. _precompute_transition_probs(state, H_actions)  # env.transition_probabilities() for ALL robot actions
-3. sample_robot_action(state, trans_probs)     # q_r_target + ε_r + optional curiosity bonus
-4. step_environment(state, robot_action, H_actions)  # actual env step
+1. sample_human_actions(state, goals)
+   # Draws human actions from the human policy prior, with ε_h exploration.
+   # Human intent is fixed before the robot acts — matching the theory's turn order.
+
+2. _precompute_transition_probs(state, H_actions)
+   # Calls env.transition_probabilities() for ALL robot actions simultaneously.
+   # This is the only environment call in the entire step; result is cached in the transition.
+
+3. sample_robot_action(state, trans_probs)
+   # Evaluates q_r_target over all actions, applies ε_r and optional curiosity bonus,
+   # then samples. Using the target network keeps action selection stable.
+
+4. step_environment(state, robot_action, H_actions)
+   # Advances the environment to the next state for the actor's own trajectory.
+
 5. Build Phase2Transition (stores trans_probs_by_action for the learner)
+   # The pre-computed probs are stored so the learner can compute full Bellman
+   # backups over all actions without re-querying the environment.
 ```
 
 ### 4.4 Learner Step — `_learner_step()`
 
+The learner consumes data from the replay buffer and updates network parameters. It is
+entirely decoupled from the environment — it only sees transitions that were already
+collected and stored.
+
 ```python
 def _learner_step(self, learner_state, pbar):
-    losses, grad_norms, pred_stats = training_step()  # the actual update
+    # training_step() samples a batch, computes all losses, runs backprop, and
+    # updates optimizer states. This is the sole place gradients flow.
+    losses, grad_norms, pred_stats = training_step()
     training_step_count += 1
 
-    # Update tqdm progress bar (v_h_e loss, Δx_h, Δq_r, s/step)
+    # Progress bar shows the most informative signals at a glance:
+    # v_h_e loss (is the human model converging?), Δx_h and Δq_r (are power/Q stable?),
+    # and steps-per-second (throughput).
 
-    # TensorBoard: losses, grad_norms, pred_stats, param_norms,
-    #              ε_r, ε_h, β_r, active networks mask, LRs, stage
+    # TensorBoard logs a full diagnostic snapshot every step:
+    # losses, grad_norms, pred_stats (mean/std of each network's predictions),
+    # param_norms, ε_r, ε_h, β_r (effective), active networks bitmask, per-network LRs, stage.
+    # This lets you detect divergence or stagnation early without reading code.
 
-    # Warmup stage transition check:
-    #   Stage 0→5: clear replay buffer (data collected with wrong β_r)
-    #   Stage 5→6: clear replay buffer again (β_r ramp complete)
+    # Warmup stage transition check — the most consequential side-effect here:
+    # When crossing into stage 5 (β_r ramp) or stage 6 (full training), the replay buffer
+    # is cleared. Data collected under a different β_r would bias Q_r targets, so stale
+    # transitions must be discarded even though it temporarily reduces batch diversity.
 
-    # LR decay transition logging
+    # LR decay transition: logs a one-time message when the constant-LR phase ends.
 
-    # Periodic (every 100 steps): flush TensorBoard, log losses
+    # Every 100 steps: flush TensorBoard writer and log a summary line to stdout.
 
     return losses
 ```
@@ -463,11 +503,15 @@ pass (for prediction stats) but their loss is **excluded from the backward pass*
 **Target (model-based, policy-weighted):**
 
 $$
-V_h^e(s, g)^{\text{target}} = \sum_{a_r} \pi_r(a_r|s) \sum_{s'} P(s'|s, a_r) \left[\mathbf{1}[g \text{ achieved at } s'] + (1-\mathbf{1}) \cdot \gamma_h \cdot V_h^{e,\text{target}}(s', g)\right]
+V_h^e(s, g)^{\text{target}}
+= \sum_{a_r} \pi_r(a_r|s) \sum_{s'} P(s'|s, a_r)
+\begin{cases}
+1 & \text{if } g \text{ achieved at } s' \\
+\gamma_h \cdot V_h^{e,\text{target}}(s', g) & \text{otherwise}
+\end{cases}
 $$
 
-This is policy-weighted because $V_h^e$ represents human ability *under the robot's
-current policy*, not a minimax or average.
+This is a standard discounted-reachability Bellman equation. It is **policy-weighted** — averaged over $\pi_r$ — because $V_h^e$ measures human ability *given that the robot follows its current policy*, not the best or worst case.
 
 **Implementation (batched in 4 phases):**
 
@@ -505,7 +549,7 @@ $$
 X_h(s)^{\text{target}} = w_g \cdot V_h^e(s, g)^\zeta
 $$
 
-where $w_g$ is the goal sampling weight.
+where $w_g$ is the goal sampling weight. Since goals are sampled non-uniformly, multiplying by $w_g$ corrects for sampling bias, making each sample an unbiased Monte Carlo estimate of $\mathbb{E}_g[V_h^e(s,g)^\zeta]$.
 
 ```python
 # Forward pass
@@ -524,7 +568,7 @@ analytically in `_compute_u_r_batch_target()`.
 ### 5.3 U_r Loss — Intrinsic Reward
 
 The network actually predicts an **intermediate variable** $y = \mathbb{E}_h[X_h^{-\xi}]$
-(before the outer $-(\cdot)^\eta$ is applied). This avoids numerical issues near zero.
+(before the outer $-(\cdot)^\eta$ is applied). This avoids numerical issues near zero — directly predicting $U_r = -y^\eta$ would compound any approximation error in $y$ through the non-linear exponent, particularly problematic when $y$ is small and the gradient of $y^\eta$ is large.
 
 **Target:**
 
@@ -558,7 +602,9 @@ Q_r(s, a_r)^{\text{target}} = \sum_{s'} P(s'|s, a_r) \cdot \gamma_r \cdot V_r(s'
 $$
 
 Critically, this is computed for **ALL** robot actions (full Bellman backup), not just
-the action taken:
+the action taken. Since `transition_probs_by_action` is pre-stored for every action,
+there is no additional environment cost — using all actions instead of one reduces
+estimation variance by a factor proportional to the number of actions:
 
 ```python
 # Forward pass: Q-values for all actions
@@ -598,7 +644,7 @@ for batch_idx, action_idx, (unique_idx, prob):
 
 ### 5.5 V_r Loss — Robot Value Function
 
-Only computed when `v_r_use_network=True` (disabled by default).
+Only computed when `v_r_use_network=True` (disabled by default). When disabled, $V_r$ is computed analytically as $U_r + \mathbb{E}_{\pi_r}[Q_r]$, which introduces no additional approximation error beyond what $U_r$ and $Q_r$ already carry. A separate network would compound those errors through an extra bootstrap layer.
 
 **Target (Equation 9):**
 
@@ -656,7 +702,7 @@ for step, name in config.get_stage_transition_steps():
 ## 7. Target Networks
 
 Target networks are **frozen copies** used for computing stable Bellman targets.
-They are hard-copied (not soft-updated) at their own intervals:
+They are hard-copied (not soft-updated) at their own intervals. Hard copies produce targets that are piecewise-constant between updates — predictable and stable — whereas soft (EMA) updates would continuously shift targets, risking oscillation in the dependency chain $V_h^e \to X_h \to U_r \to Q_r$.
 
 ```python
 # In update_target_networks() (called every training_step):
@@ -733,7 +779,47 @@ Communication:
 
 ---
 
-## 11. Quick Start Code
+## 11. GPU & Parallelization Notes
+
+### Device placement
+
+All network parameters and optimizer states live on the device specified by the `device`
+argument to `BasePhase2Trainer` (`'cuda'`, `'cpu'`, or a specific `'cuda:N'`). Batches are
+moved to that device inside `training_step()` before any forward pass.
+
+The **actor always runs on CPU** — environment states are Python objects (tuples), not
+tensors, and `transition_probabilities()` is a Python call that cannot be GPU-accelerated.
+Only the target-network forward passes during action selection are moved to GPU if needed;
+in practice, the overhead rarely justifies it for small networks, so target inference during
+the actor step defaults to CPU as well.
+
+### Batched forward passes
+
+All costly network queries in `compute_losses()` are **batched across the entire replay
+sample**, not called per-transition. The implementation deduplicates successor states before
+any forward pass (see §5.4) so the total number of network evaluations per training step is
+bounded by `batch_size × avg_branching_factor`, not `batch_size × num_actions × branching_factor`.
+
+### Async actor parallelism
+
+When `config.async_training=True` (see §10), multiple actor processes run in parallel on CPU
+while the learner trains on GPU. The number of actors is controlled by `num_actor_processes`.
+Increasing it improves data throughput when `training_steps_per_env_step < 1`, but adds
+latency to policy synchronisation. For `training_steps_per_env_step ≥ 1` (more gradient
+updates than env steps), a single synchronous actor is usually sufficient and avoids the
+overhead of inter-process communication.
+
+### Memory considerations
+
+- The replay buffer stores raw Python objects (hashable states, `PossibleGoal` instances),
+  not tensors. Memory usage scales with `buffer_size × avg_state_size`, not with network
+  width. For large grids, monitor via `MemoryMonitor` which is instantiated automatically.
+- `x_h_batch_size` can be set larger than `batch_size` to improve the $X_h$ target estimate
+  without increasing GPU memory pressure on other networks.
+
+---
+
+## 12. Quick Start Code
 
 ```python
 from empo.learning_based.phase2.config import Phase2Config
@@ -825,5 +911,6 @@ Total training steps: 50,000
 - [`docs/VALUE_TRANSFORMATIONS.md`](VALUE_TRANSFORMATIONS.md) — z-space transforms
 - [`docs/ADAPTIVE_LEARNING.md`](ADAPTIVE_LEARNING.md) — adaptive LR for lookup tables
 - [`docs/EXPLORATION.md`](EXPLORATION.md) — RND and count-based curiosity
+- [`docs/PARALLELIZATION.md`](PARALLELIZATION.md) — async actor detail and cluster setup
 - [`examples/phase2/phase2_robot_policy_demo.py`](../examples/phase2/phase2_robot_policy_demo.py) — runnable demo
 - [`examples/phase2/hpo_phase2_example.py`](../examples/phase2/hpo_phase2_example.py) — Optuna HPO script
