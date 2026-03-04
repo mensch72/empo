@@ -498,6 +498,16 @@ All losses are MSE in value-space (or z-space if `use_z_space_transform=True`).
 Networks that are **not active** in the current warm-up stage still compute a forward
 pass (for prediction stats) but their loss is **excluded from the backward pass**.
 
+> **Why MSE?** Every network approximates a conditional expectation (a probability, an average
+> ability, an average Q-value). MSE is the standard loss for regression to a conditional mean,
+> and it produces sub-gradient signals that are proportional to the prediction error — matching
+> the Bellman-residual minimisation viewpoint.
+
+> **Why independent backward passes?** Each network’s loss is back-propagated separately
+> (with `retain_graph=True` for all but the last). This lets each optimizer apply its own
+> gradient clip *before* any parameter update, preventing a poorly-scaled network from
+> poisoning the shared computation graph and corrupting gradients of upstream networks.
+
 ### 5.1 V_h^e Loss — Human Goal Achievement
 
 **Target (model-based, policy-weighted):**
@@ -513,12 +523,47 @@ $$
 
 This is a standard discounted-reachability Bellman equation. It is **policy-weighted** — averaged over $\pi_r$ — because $V_h^e$ measures human ability *given that the robot follows its current policy*, not the best or worst case.
 
+> **Why doesn't the self-reference cause an infinite loop?**
+> The right-hand side uses `v_h_e_target` — the **frozen** copy of the network — not the live
+> `v_h_e` that is being trained. The target network is held constant for
+> `v_h_e_target_update_interval` steps, so the recursion terminates immediately: the bootstrap
+> value $V_h^{e,\text{target}}(s', g)$ is just a vector lookup into a fixed function, not a
+> further call to the equation being minimised.
+>
+> **Why is this approximation close to the exact tabular result?**
+> The tabular (backward-induction) version solves the same Bellman equation exactly by sweeping
+> from terminal states backward until convergence. Here, repeated application of the Bellman
+> operator is replaced by repeated gradient steps against a slowly-moving target network.
+> Because $\gamma_h < 1$, the Bellman operator is a **contraction** (Banach fixed-point theorem):
+> every application shrinks the gap to the true fixed point by a factor of $\gamma_h$.
+> After many training steps the neural estimate therefore converges to the same unique fixed
+> point as backward induction — just stochastically rather than analytically.
+> In practice, with `v_h_e_target_update_interval` large enough to keep the target stable but
+> small enough to limit lag, the neural $V_h^e$ tracks the tabular solution closely; any
+> residual difference is bounded by the approximation error of the network (its capacity to
+> represent the true function) rather than by the bootstrap scheme itself.
+
 **Implementation (batched in 4 phases):**
+
+> **Why 4 phases instead of a simple loop?** A naïve implementation would call
+> `v_h_e_target.forward()` once per (transition, action, successor-state) triple, i.e.,
+> $O(\text{batch} \times |A_r| \times \text{branching})$ forward passes. The 4-phase approach
+> collects *all* successor states first, then issues a **single batched forward pass** over
+> them. This reduces GPU round-trips from thousands to one per training step, which is the
+> dominant cost for neural implementations.
+
+> **Why `q_r_target` for $\pi_r$ here?** The target policy is used (not the live $Q_r$)
+> so that the $V_h^e$ targets do not co-evolve with $V_h^e$’s own gradient step within the
+> same training step. Without this, the Bellman target would shift simultaneously with the
+> prediction, making the fixed-point unstable.
 
 ```python
 # Phase 1: get π_r(a|s) for all states in batch (one q_r_target forward pass)
 q_r_batch = networks.q_r_target.forward_batch(states, ...)
 robot_policies = networks.q_r_target.get_policy(q_r_batch, beta_r=effective_beta_r)
+# Note: during warmup, effective_beta_r = 0 → uniform π_r.
+# This is intentional: before Q_r is trained, any non-uniform policy would skew V_h^e
+# targets toward actions that happen to look good for random reasons.
 
 # Phase 2: collect ALL successor states (across all actions weighted by π_r)
 for data_idx, (trans_idx, human_idx, goal) in enumerate(v_h_e_data):
@@ -565,6 +610,13 @@ loss_x_h = MSE(x_h_pred, target_x_h)
 When `x_h_use_network=False`, this loss is skipped entirely and $X_h$ is computed
 analytically in `_compute_u_r_batch_target()`.
 
+> **Why a separate `x_h_batch_size`?** The $X_h$ target only requires a `v_h_e_target`
+> forward pass — it does not depend on $Q_r$ or any other network. It is therefore cheap
+> to evaluate with a larger batch, improving the Monte Carlo estimate of
+> $\mathbb{E}_g[V_h^e(s,g)^\zeta]$ without increasing memory pressure on the networks that
+> do depend on each other. A larger $X_h$ batch reduces the variance of the $U_r$ and
+> $Q_r$ targets downstream.
+
 ### 5.3 U_r Loss — Intrinsic Reward
 
 The network actually predicts an **intermediate variable** $y = \mathbb{E}_h[X_h^{-\xi}]$
@@ -583,8 +635,13 @@ y_pred, _ = networks.u_r.forward_batch(states, ...)
 # Target from X_h target network (single batched call)
 x_h_all = networks.x_h_target.forward_batch(flat_states, flat_humans, ...)
 x_h_clamped = clamp(x_h_all, min=1e-3, max=1.0)
+# Clamping before raising to a negative power is essential: X_h → 0 would cause
+# x_h ** (-xi) → +∞, producing NaN gradients. The 1e-3 floor is a soft floor on
+# human ability — it acknowledges that no state is truly hopeless for every goal.
 x_h_power = x_h_clamped ** (-config.xi)
 y_target = scatter_mean(x_h_power, state_indices)
+# scatter_mean (not scatter_sum) keeps y scale-independent of the number of humans |H|,
+# which matters if environments with different human counts share a config.
 
 loss_u_r = MSE(y_pred, y_target)
 # (U_r = -y^eta is only used for logging, not in the loss)
@@ -636,8 +693,11 @@ v_r_all = networks.v_r_target.forward_batch(unique_states, ...)
 #   v_r_all = U_r + E_{π_r}[Q_r] computed from q_r_target
 
 q_targets_all = gamma_r * v_r_all  # V_r already incorporates U_r
+# Because V_r = U_r + E[Q_r], writing Q_r^target = γ_r * V_r already has
+# the power metric baked in. There is no separate U_r addend needed here,
+# unlike a standard actor-critic where reward and bootstrapped value are separate.
 
-# Aggregate back
+# Aggregate back: probability-weighted sum over successor states
 for batch_idx, action_idx, (unique_idx, prob):
     targets[batch_idx, action_idx] += prob * q_targets_all[unique_idx]
 ```
@@ -655,6 +715,9 @@ $$
 ```python
 v_r_pred  = networks.v_r.forward_batch(states, ...)
 u_r_for_v = _compute_u_r_batch_target(states)
+# Uses the U_r *target* network (or analytical computation), not the live network.
+# This keeps the V_r target anchored to a slowly-moving U_r estimate,
+# consistent with how Q_r targets are computed, and avoids a double-moving-target problem.
 q_r_for_v = networks.q_r_target.forward_batch(states, ...)
 pi_r      = networks.q_r_target.get_policy(q_r_for_v, beta_r=effective_beta_r)
 target_v_r = compute_v_r_from_components(u_r_for_v, q_r_for_v, pi_r)
