@@ -51,6 +51,9 @@ from empo.possible_goal import TabularGoalSampler                         # noqa
 from empo.world_specific_helpers.multigrid import ReachCellGoal           # noqa: E402
 
 
+## CUDA
+device = "cuda" if (optuna.integration.pytorch.is_available() and torch.cuda.is_available()) else "cpu"
+
 # ---------------------------------------------------------------------------
 # Default grid map – tiny 4×6 "trivial" world (same as demo's trivial mode)
 # ---------------------------------------------------------------------------
