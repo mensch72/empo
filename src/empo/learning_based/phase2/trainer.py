@@ -34,7 +34,7 @@ from empo.util.memory_monitor import MemoryMonitor
 
 from .config import Phase2Config
 from .profiler import NoOpProfiler
-from .replay_buffer import Phase2Transition, Phase2ReplayBuffer
+from .replay_buffer import Phase2Transition, Phase2ReplayBuffer, PrioritizedPhase2ReplayBuffer, PrioritizedBatch
 from .robot_q_network import BaseRobotQNetwork
 from .human_goal_ability import BaseHumanGoalAchievementNetwork
 from .aggregate_goal_ability import BaseAggregateGoalAbilityNetwork
@@ -241,12 +241,24 @@ class BasePhase2Trainer(ABC):
         if self.debug:
             print("[DEBUG] BasePhase2Trainer.__init__: Creating replay buffer...")
         
-        # Replay buffer
-        self.replay_buffer = Phase2ReplayBuffer(capacity=config.buffer_size)
+        # Replay buffer (uniform or prioritised)
+        if config.use_prioritized_replay:
+            self.replay_buffer = PrioritizedPhase2ReplayBuffer(
+                capacity=config.buffer_size,
+                alpha=config.priority_alpha,
+                beta_start=config.priority_beta_start,
+                beta_end=config.priority_beta_end,
+                epsilon=config.priority_epsilon
+            )
+        else:
+            self.replay_buffer = Phase2ReplayBuffer(capacity=config.buffer_size)
         
         # Training step counters
         self.total_env_steps = 0  # environment interaction steps
         self.training_step_count = 0  # gradient update steps (learning steps)
+        
+        # Per-sample priorities from last compute_losses call (for PER buffer updates)
+        self._last_per_sample_priorities = None
         
         # Shared env_steps counter for async mode (set by _learner_loop)
         # When buffer is cleared, this gets reset to allow actors to resume production
@@ -313,7 +325,16 @@ class BasePhase2Trainer(ABC):
         self.__dict__.update(state)
         # Recreate empty replay buffer if needed
         if self.replay_buffer is None:
-            self.replay_buffer = Phase2ReplayBuffer(capacity=self.config.buffer_size)
+            if self.config.use_prioritized_replay:
+                self.replay_buffer = PrioritizedPhase2ReplayBuffer(
+                    capacity=self.config.buffer_size,
+                    alpha=self.config.priority_alpha,
+                    beta_start=self.config.priority_beta_start,
+                    beta_end=self.config.priority_beta_end,
+                    epsilon=self.config.priority_epsilon
+                )
+            else:
+                self.replay_buffer = Phase2ReplayBuffer(capacity=self.config.buffer_size)
         # Recreate NoOpProfiler if not set
         if self.profiler is None:
             self.profiler = NoOpProfiler()
@@ -1863,7 +1884,8 @@ class BasePhase2Trainer(ABC):
     def compute_losses(
         self,
         batch: List[Phase2Transition],
-        x_h_batch: Optional[List[Phase2Transition]] = None
+        x_h_batch: Optional[List[Phase2Transition]] = None,
+        is_weights: Optional[torch.Tensor] = None
     ) -> Tuple[Dict[str, torch.Tensor], Dict[str, Dict[str, float]]]:
         """
         Compute losses for all networks using batched forward passes.
@@ -1874,6 +1896,10 @@ class BasePhase2Trainer(ABC):
         Args:
             batch: List of transitions for most networks.
             x_h_batch: Optional larger batch for X_h (defaults to batch).
+            is_weights: Optional importance sampling weights for prioritised replay.
+                Shape: (batch_size,) tensor. When provided, losses are weighted
+                by IS weights before mean reduction to correct for non-uniform sampling.
+                Also stores per-sample Q_r errors in self._last_per_sample_priorities.
         
         Returns:
             Tuple of (losses dict, prediction_stats dict).
@@ -2014,7 +2040,14 @@ class BasePhase2Trainer(ABC):
                     print(f"[DEBUG V_h^e]   Goal {goal_key}: n={n}, "
                           f"mean_target={mean_target:.4f}, mean_pred={mean_pred:.4f}")
             
-            losses['v_h_e'] = ((v_h_e_pred.squeeze() - target_v_h_e) ** 2).mean()
+            v_h_e_per_sample_sq = (v_h_e_pred.squeeze() - target_v_h_e) ** 2
+            if is_weights is not None:
+                # Map per-transition IS weights to per-V_h^e-entry weights
+                v_h_e_idx_tensor = torch.tensor(v_h_e_indices, device=self.device, dtype=torch.long)
+                v_h_e_is_weights = is_weights[v_h_e_idx_tensor]
+                losses['v_h_e'] = (v_h_e_is_weights * v_h_e_per_sample_sq).mean()
+            else:
+                losses['v_h_e'] = v_h_e_per_sample_sq.mean()
             
             with torch.no_grad():
                 prediction_stats['v_h_e'] = {
@@ -2097,10 +2130,15 @@ class BasePhase2Trainer(ABC):
                 # Z-space MSE for balanced gradients (legacy mode)
                 z_pred = y_to_z_space(y_pred.squeeze(), self.config.xi)
                 z_target = y_to_z_space(y_target, self.config.xi)
-                losses['u_r'] = ((z_pred - z_target) ** 2).mean()
+                u_r_per_sample_sq = (z_pred - z_target) ** 2
             else:
                 # Y-space MSE (default: faster outlier correction, Robbins-Monro convergence)
-                losses['u_r'] = ((y_pred.squeeze() - y_target) ** 2).mean()
+                u_r_per_sample_sq = (y_pred.squeeze() - y_target) ** 2
+            
+            if is_weights is not None:
+                losses['u_r'] = (is_weights * u_r_per_sample_sq).mean()
+            else:
+                losses['u_r'] = u_r_per_sample_sq.mean()
             
             with torch.no_grad():
                 # U_r = -y^eta (for logging only)
@@ -2138,10 +2176,18 @@ class BasePhase2Trainer(ABC):
                 # Z-space MSE for balanced gradients (legacy mode)
                 z_pred = to_z_space(q_r_all, self.config.eta, self.config.xi)
                 z_target = to_z_space(target_q_r_all, self.config.eta, self.config.xi)
-                losses['q_r'] = ((z_pred - z_target) ** 2).mean()
+                q_r_per_sample_sq = ((z_pred - z_target) ** 2).mean(dim=-1)
             else:
                 # Q-space MSE (default: faster outlier correction, Robbins-Monro convergence)
-                losses['q_r'] = ((q_r_all - target_q_r_all) ** 2).mean()
+                q_r_per_sample_sq = ((q_r_all - target_q_r_all) ** 2).mean(dim=-1)
+            
+            if is_weights is not None:
+                losses['q_r'] = (is_weights * q_r_per_sample_sq).mean()
+                # Store per-sample priorities for buffer update
+                with torch.no_grad():
+                    self._last_per_sample_priorities = q_r_per_sample_sq.detach().sqrt().cpu().numpy().tolist()
+            else:
+                losses['q_r'] = q_r_per_sample_sq.mean()
             
             # Statistics: report for taken actions for comparability
             robot_actions = [t.robot_action for t in batch]
@@ -2191,10 +2237,15 @@ class BasePhase2Trainer(ABC):
                 # Z-space MSE for balanced gradients (legacy mode)
                 z_pred = to_z_space(v_r_pred.squeeze(), self.config.eta, self.config.xi)
                 z_target = to_z_space(target_v_r, self.config.eta, self.config.xi)
-                losses['v_r'] = ((z_pred - z_target) ** 2).mean()
+                v_r_per_sample_sq = (z_pred - z_target) ** 2
             else:
                 # V_r-space MSE (default: faster outlier correction, Robbins-Monro convergence)
-                losses['v_r'] = ((v_r_pred.squeeze() - target_v_r) ** 2).mean()
+                v_r_per_sample_sq = (v_r_pred.squeeze() - target_v_r) ** 2
+            
+            if is_weights is not None:
+                losses['v_r'] = (is_weights * v_r_per_sample_sq).mean()
+            else:
+                losses['v_r'] = v_r_per_sample_sq.mean()
             
             with torch.no_grad():
                 stats = {
@@ -2626,17 +2677,41 @@ class BasePhase2Trainer(ABC):
         
         # Sample batch for most networks
         with self.profiler.section("batch_sampling"):
-            batch = self.replay_buffer.sample(self.config.batch_size)
+            # Prioritised replay: sample with priorities and get IS weights
+            batch_indices = None
+            is_weights_tensor = None
+            
+            if self.config.use_prioritized_replay and isinstance(self.replay_buffer, PrioritizedPhase2ReplayBuffer):
+                beta = self.replay_buffer.get_beta(
+                    self.training_step_count, self.config.num_training_steps
+                )
+                result = self.replay_buffer.sample(self.config.batch_size, beta=beta)
+                batch = result.transitions
+                batch_indices = result.indices
+                is_weights_tensor = torch.tensor(
+                    result.is_weights, device=self.device, dtype=torch.float32
+                )
+            else:
+                batch = self.replay_buffer.sample(self.config.batch_size)
             
             # Sample potentially larger batch for X_h if configured
             if x_h_batch_size > self.config.batch_size:
-                x_h_batch = self.replay_buffer.sample(x_h_batch_size)
+                if self.config.use_prioritized_replay and isinstance(self.replay_buffer, PrioritizedPhase2ReplayBuffer):
+                    x_h_result = self.replay_buffer.sample(x_h_batch_size, beta=beta)
+                    x_h_batch = x_h_result.transitions
+                else:
+                    x_h_batch = self.replay_buffer.sample(x_h_batch_size)
             else:
                 x_h_batch = batch
         
-        # Compute losses (with separate X_h batch)
+        # Reset per-sample priorities storage
+        self._last_per_sample_priorities = None
+        
+        # Compute losses (with separate X_h batch and optional IS weights)
         with self.profiler.section("loss_computation"):
-            losses, prediction_stats = self.compute_losses(batch, x_h_batch)
+            losses, prediction_stats = self.compute_losses(
+                batch, x_h_batch, is_weights=is_weights_tensor
+            )
         
         # Determine which networks are active in this warm-up stage
         active_networks = self.config.get_active_networks(self.training_step_count)
@@ -2740,6 +2815,14 @@ class BasePhase2Trainer(ABC):
         # rnd_lr_scales now contains detailed stats dict per network, not just scale values
         if rnd_lr_scales:
             prediction_stats['rnd_adaptive_lr'] = rnd_lr_scales
+        
+        # Update priorities for prioritised replay after training step
+        if (batch_indices is not None 
+            and self._last_per_sample_priorities is not None
+            and isinstance(self.replay_buffer, PrioritizedPhase2ReplayBuffer)):
+            self.replay_buffer.update_priorities(
+                batch_indices, self._last_per_sample_priorities
+            )
         
         return loss_values, grad_norms, prediction_stats
     
