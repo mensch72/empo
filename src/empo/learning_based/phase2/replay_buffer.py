@@ -219,6 +219,10 @@ class SumTree:
         Args:
             size: Number of active leaves to consider.
         """
+        # Cache assumes min() is always called with the same size between
+        # update() calls.  In practice this holds because sample() always
+        # passes self.size, but callers must not mix different size values
+        # without an intervening update().
         if self._min_cache_valid:
             return self._min_cache_value
         if size == 0:
@@ -282,7 +286,7 @@ class PrioritizedPhase2ReplayBuffer:
         capacity: Maximum number of transitions to store.
         alpha: Priority exponent. 0 = uniform sampling, 1 = full prioritization.
         beta_start: Initial IS correction exponent. 0 = no correction, 1 = full correction.
-        beta_end: Final IS correction exponent (annealed to over training).
+        beta_end: Final IS correction exponent (beta is annealed to beta_end over training).
         epsilon: Small constant added to priorities to prevent zero probability.
     """
     
@@ -359,7 +363,9 @@ class PrioritizedPhase2ReplayBuffer:
             # Keep max_priority consistent with explicitly provided priorities.
             self.max_priority = max(self.max_priority, p)
         else:
-            p = self.max_priority ** self.alpha
+            # max_priority is already stored in alpha-scaled priority space.
+            # New transitions should receive this value directly (PER convention).
+            p = self.max_priority
         
         self.buffer[self.position] = transition
         self.tree.update(self.position, p)

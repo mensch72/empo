@@ -323,6 +323,18 @@ class BasePhase2Trainer(ABC):
     def __setstate__(self, state):
         """Restore state after unpickling for async training."""
         self.__dict__.update(state)
+        # Ensure PER config fields exist for backward compatibility with
+        # checkpoints saved before PER was added.
+        _per_defaults = {
+            'use_prioritized_replay': False,
+            'priority_alpha': 0.6,
+            'priority_beta_start': 0.4,
+            'priority_beta_end': 1.0,
+            'priority_epsilon': 1e-6,
+        }
+        for attr, default in _per_defaults.items():
+            if not hasattr(self.config, attr):
+                object.__setattr__(self.config, attr, default)
         # Recreate empty replay buffer if needed
         if self.replay_buffer is None:
             if self.config.use_prioritized_replay:
