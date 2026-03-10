@@ -274,7 +274,7 @@ The vendored `gym_multigrid` in `vendor/multigrid/` extends the original with:
 | Type | Description |
 |------|-------------|
 | `Switch` | Basic overlappable switch (floor tile) |
-| `KillButton` | Overlappable button that permanently "kills" agents (restricts to "still" action only). Configured with `trigger_color` (agents that activate it) and `target_color` (agents that get killed). Has `enabled` state. Rendered as red tile with X pattern. |
+| `KillButton` | Non-overlappable switch that permanently "kills" agents (terminates them, restricts to "still" action only) when toggled by `trigger_color` agent. Configured with `trigger_color` (agents that can toggle it) and `target_color` (agents that get killed). Has `enabled` state. Rendered as red tile with X pattern. |
 | `PauseSwitch` | Non-overlappable toggle switch that pauses agents while ON. Configured with `toggle_color` (agents that can toggle), `target_color` (agents that get paused), `is_on` state, and `enabled` state. Rendered as blue tile with pause/play symbol. |
 | `DisablingSwitch` | Non-overlappable switch that toggles the `enabled` state of other objects. Configured with `toggle_color` and `target_type` ('killbutton', 'pauseswitch', or 'controlbutton'). Rendered as purple tile with disabled symbol. |
 | `ControlButton` | Non-overlappable button enabling two-step agent control: (1) Programming phase - agent of `controlled_color` toggles then performs action to memorize it; (2) Triggering phase - agent of `trigger_color` toggles to force the controlled agent's next action. Has `enabled` state, `controlled_agent`, and `triggered_action`. Rendered as green tile. |

@@ -1,4 +1,4 @@
-# Memory Analysis: phase2_backward_induction.py
+# Memory Analysis: examples/phase2/phase2_backward_induction.py
 
 ## Problem Summary
 
@@ -79,7 +79,7 @@ human_policy_prior = compute_human_policy_prior(
 
 ```bash
 # The example script will automatically use disk slicing if you provide a level function
-python examples/phase2_backward_induction.py \
+python examples/phase2/phase2_backward_induction.py \
     --world jobst_challenges/asymmetric_freeing \
     --steps 15  # Can now handle larger horizons!
 ```
@@ -117,7 +117,7 @@ The most direct way to reduce memory usage:
 
 ```bash
 # Instead of max_steps=15 (default in config):
-python examples/phase2_backward_induction.py --world jobst_challenges/asymmetric_freeing --steps 6
+python examples/phase2/phase2_backward_induction.py --world jobst_challenges/asymmetric_freeing --steps 6
 # This reduces state space from 70K to ~3-5K states
 # Memory usage: <500 MB instead of >1 GB
 ```
@@ -151,7 +151,7 @@ Converts transition probabilities from float64 to float16, saving ~24 MB with ne
 For large state spaces, backward induction is impractical. Use the neural network approach:
 
 ```bash
-python examples/phase2_robot_policy_demo.py --world jobst_challenges/asymmetric_freeing
+python examples/phase2/phase2_robot_policy_demo.py --world jobst_challenges/asymmetric_freeing
 ```
 
 This uses function approximation and doesn't need to enumerate all states.

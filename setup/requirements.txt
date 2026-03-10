@@ -1,0 +1,39 @@
+# Core ML frameworks
+# Note: Use CPU-only PyTorch to avoid large CUDA downloads
+# GPU will still work via Docker GPU passthrough (--gpus flag)
+torch>=2.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+gymnasium>=0.28.0
+
+# MARL and Multigrid dependencies
+pettingzoo>=1.24.0
+# Note: multigrid is vendored in vendor/multigrid/ and imported via PYTHONPATH
+# This allows live editing without container rebuild. See VENDOR.md for details.
+
+# Optional JAX support
+# To enable JAX with CUDA 12 support, uncomment and install:
+# jax[cuda12_pip]>=0.4.20
+
+# Utilities
+cloudpickle>=3.0.0
+PyYAML>=6.0
+matplotlib>=3.7.0
+imageio>=2.31.0
+imageio-ffmpeg>=0.4.8
+tensorboard>=2.13.0
+wandb>=0.15.0
+graphviz>=0.20.0
+line_profiler>=4.0.0
+tqdm>=4.65.0
+psutil>=5.9.0
+
+# Machine learning utilities
+scikit-learn>=1.2.0
+
+# Data analysis and statistics
+pandas>=2.0.0
+statsmodels>=0.14.0
+
+# MPI for distributed training (optional)
+mpi4py>=3.1.0

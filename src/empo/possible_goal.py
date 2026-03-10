@@ -551,9 +551,10 @@ class TabularGoalSampler(PossibleGoalSampler):
         """
         Validate that goals cover all walkable cells in the grid.
         
-        A cell is considered walkable if it doesn't contain an immutable object
-        (wall, lava, magicwall). The method checks that every such cell is covered
-        by at least one goal (cell or rectangle).
+        A cell is considered walkable if an agent could potentially stand on it.
+        Cells containing immovable non-overlappable objects (wall, lava, magicwall,
+        killbutton, pauseswitch, disablingswitch, controlbutton) are excluded since agents
+        can never occupy them.
         
         This only works for goals that have a target_rect attribute (ReachCellGoal,
         ReachRectangleGoal) which define the cells they cover.
@@ -587,8 +588,12 @@ class TabularGoalSampler(PossibleGoalSampler):
             elif hasattr(goal, 'target_pos'):
                 covered_cells.add(goal.target_pos)
         
-        # Find all walkable cells (not containing immutable objects)
-        immutable_types = {'wall', 'lava', 'magicwall'}
+        # Find all walkable cells (not containing immovable non-overlappable objects)
+        # Agents can never stand on these cell types:
+        non_walkable_types = {
+            'wall', 'lava', 'magicwall',
+            'killbutton', 'pauseswitch', 'disablingswitch', 'controlbutton',
+        }
         uncovered = []
         
         for x in range(self.env.width):
@@ -596,8 +601,8 @@ class TabularGoalSampler(PossibleGoalSampler):
                 cell = self.env.grid.get(x, y)
                 cell_type = getattr(cell, 'type', None) if cell else None
                 
-                # Skip cells with immutable objects
-                if cell_type in immutable_types:
+                # Skip cells with non-walkable objects
+                if cell_type in non_walkable_types:
                     continue
                 
                 # Check if this walkable cell is covered
@@ -678,9 +683,10 @@ class TabularGoalGenerator(PossibleGoalGenerator):
         """
         Validate that goals cover all walkable cells in the grid.
         
-        A cell is considered walkable if it doesn't contain an immutable object
-        (wall, lava, magicwall). The method checks that every such cell is covered
-        by at least one goal (cell or rectangle).
+        A cell is considered walkable if an agent could potentially stand on it.
+        Cells containing immovable non-overlappable objects (wall, lava, magicwall,
+        killbutton, pauseswitch, disablingswitch, controlbutton) are excluded since agents
+        can never occupy them.
         
         This only works for goals that have a target_rect attribute (ReachCellGoal,
         ReachRectangleGoal) which define the cells they cover.
@@ -714,8 +720,12 @@ class TabularGoalGenerator(PossibleGoalGenerator):
             elif hasattr(goal, 'target_pos'):
                 covered_cells.add(goal.target_pos)
         
-        # Find all walkable cells (not containing immutable objects)
-        immutable_types = {'wall', 'lava', 'magicwall'}
+        # Find all walkable cells (not containing immovable non-overlappable objects)
+        # Agents can never stand on these cell types:
+        non_walkable_types = {
+            'wall', 'lava', 'magicwall',
+            'killbutton', 'pauseswitch', 'disablingswitch', 'controlbutton',
+        }
         uncovered = []
         
         for x in range(self.env.width):
@@ -723,8 +733,8 @@ class TabularGoalGenerator(PossibleGoalGenerator):
                 cell = self.env.grid.get(x, y)
                 cell_type = getattr(cell, 'type', None) if cell else None
                 
-                # Skip cells with immutable objects
-                if cell_type in immutable_types:
+                # Skip cells with non-walkable objects
+                if cell_type in non_walkable_types:
                     continue
                 
                 # Check if this walkable cell is covered

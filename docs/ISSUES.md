@@ -86,7 +86,7 @@ This suggests the current implementation only uses "system-2" (deliberate/planni
 
 ## Phase 2 Training Pipeline Issues
 
-The following issues were identified during an extensive review of the Phase 2 robot policy training pipeline (`examples/phase2_robot_policy_demo.py` and related modules) on 2024-12-27.
+The following issues were identified during an extensive review of the Phase 2 robot policy training pipeline (`examples/phase2/phase2_robot_policy_demo.py` and related modules) on 2024-12-27.
 
 ### ~~P2-BUG-001: Async training uses undefined `self.buffer` instead of `self.replay_buffer`~~ [FIXED on main]
 **Priority:** High  
@@ -348,7 +348,7 @@ This provides stability during beta_r ramp-up when the policy changes rapidly.
 
 ### P2-EXPECT-002: "Ensemble" clarification
 **Priority:** Informational  
-**Location:** `examples/phase2_robot_policy_demo.py`  
+**Location:** `examples/phase2/phase2_robot_policy_demo.py`  
 **Description:**  
 "Ensemble" in the Phase 2 training context refers to training on an **ensemble of gridworlds** (multiple environment configurations), not:
 - An ensemble of robot policies (which would require separate implementation)
@@ -586,7 +586,7 @@ This document lists code quality issues found in the EMPO codebase. These issues
    - **Status**: Debug code left commented out
    - **Action**: Remove or convert to proper debug flags
 
-2. [examples/phase2_robot_policy_demo.py](examples/phase2_robot_policy_demo.py)
+2. [examples/phase2/phase2_robot_policy_demo.py](examples/phase2/phase2_robot_policy_demo.py)
    - Line 374: `#print(f"[DEBUG _EnsembleEnvCreator] Created new env, grid hash: {grid_hash:016x}")`
    - **Status**: Debug print statement
    - **Action**: Remove or use proper logging
@@ -612,7 +612,7 @@ This document lists code quality issues found in the EMPO codebase. These issues
 
 **Files with redundant hasattr checks (may indicate uncertainty about object structure):**
 
-1. [examples/phase2_robot_policy_demo.py](examples/phase2_robot_policy_demo.py)
+1. [examples/phase2/phase2_robot_policy_demo.py](examples/phase2/phase2_robot_policy_demo.py)
    - Line 756: Triple hasattr check on goal_sampler
    - **Status**: REVIEW - overly defensive programming
    - **Action**: Use isinstance() with proper types
@@ -757,8 +757,8 @@ Files with heavy print() usage:
 
 **Potentially unsafe operations:**
 
-1. [scripts/kaggle_setup.py](scripts/kaggle_setup.py)
-   - Line 15: `exec(open('scripts/kaggle_setup.py').read())`
+1. [setup/scripts/kaggle_setup.py](setup/scripts/kaggle_setup.py)
+   - Line 15: `exec(open('setup/scripts/kaggle_setup.py').read())`
    - Line 66: Uses `subprocess.CalledProcessError`
    - **Status**: REVIEW - exec() can be dangerous
    - **Action**: Document that this is for setup only, not production code

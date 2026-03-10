@@ -56,7 +56,12 @@ Maps use two-character codes separated by spaces. The `|` syntax in YAML preserv
 - `Xr`, `Xg`, etc. - Box (with color)
 - `Lr`, `Cr`, `Or` - Door (locked, closed, open - with color)
 - `Mn`, `Ms`, `Mw`, `Me` - Magic wall (north, south, west, east entry)
-- `CB` - Control button
+- `Kb` or `Ki` - KillButton (yellow triggers, grey killed)
+- `Ps` or `Pa` - PauseSwitch (yellow toggles, grey paused)
+- `Dk` or `dK` - DisablingSwitch for KillButtons (grey toggles)
+- `Dp` or `dP` - DisablingSwitch for PauseSwitches (grey toggles)
+- `DC` or `dC` - DisablingSwitch for ControlButtons (grey toggles)
+- `CB` - ControlButton (yellow triggers, grey controlled)
 - `Sw` - Switch
 
 ### Orientation Codes

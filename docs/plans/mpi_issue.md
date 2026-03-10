@@ -212,11 +212,11 @@ def compute_human_policy_prior_distributed(..., ctx: DistributedContext):
 - [ ] `src/empo/backward_induction.py` - Add distributed support
 - [ ] `src/empo/world_model.py` - Add distributed support to `get_dag_parallel()`
 - [ ] `train.py` - Add `--mpi` and `--mpi-simulate-nodes` CLI flags
-- [ ] `scripts/run_cluster.sh` - Update for proper MPI + Apptainer invocation
+- [ ] `setup/scripts/run_cluster.sh` - Update for proper MPI + Apptainer invocation
 
 ## Dependencies
 
-- `mpi4py>=3.1.0` (already in requirements-hierarchical.txt)
+- `mpi4py>=3.1.0` (already in setup/requirements-hierarchical.txt)
 
 ## Out of Scope (Future Work)
 
