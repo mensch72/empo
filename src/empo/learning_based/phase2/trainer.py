@@ -338,6 +338,10 @@ class BasePhase2Trainer(ABC):
         # Recreate NoOpProfiler if not set
         if self.profiler is None:
             self.profiler = NoOpProfiler()
+        # Ensure _last_per_sample_priorities exists for backward compatibility
+        # with checkpoints saved before PER was added.
+        if not hasattr(self, '_last_per_sample_priorities'):
+            self._last_per_sample_priorities = None
         # Note: env stays None until _ensure_world_model() is called
     
     @property

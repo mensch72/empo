@@ -10,7 +10,7 @@ changed significantly). See Schaul et al. (2016) for the general PER approach.
 """
 
 import random
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -356,6 +356,8 @@ class PrioritizedPhase2ReplayBuffer:
         # abs() is defensive in case callers provide signed values.
         if priority is not None:
             p = (abs(priority) + self.epsilon) ** self.alpha
+            # Keep max_priority consistent with explicitly provided priorities.
+            self.max_priority = max(self.max_priority, p)
         else:
             p = self.max_priority ** self.alpha
         

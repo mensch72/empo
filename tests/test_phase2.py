@@ -958,6 +958,15 @@ def run_all_tests():
     test_ensure_negative()
     print()
     
+    test_sum_tree()
+    print()
+    
+    test_prioritized_replay_buffer()
+    print()
+    
+    test_prioritized_replay_config()
+    print()
+    
     print("=" * 60)
     print("All Phase 2 tests passed!")
     print("=" * 60)
