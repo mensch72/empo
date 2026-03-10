@@ -313,6 +313,8 @@ def test_prioritized_replay_buffer():
             high_count += 1
     
     # With alpha=1.0 and priorities 10 vs 1, first transition should be sampled ~10x more
+    # Expected proportion: 10/(10+1) ≈ 0.909, so ~909/1000. Using 700 (70%) as a conservative
+    # threshold to avoid flaky failures from random sampling variance.
     assert high_count > 700, f"Expected >700 samples from high-priority transition, got {high_count}"
     print(f"  ✓ Higher priority sampled more: {high_count}/1000 from priority=10")
     

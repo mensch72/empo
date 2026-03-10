@@ -11,7 +11,7 @@ changed significantly). See Schaul et al. (2016) for the general PER approach.
 
 import random
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -352,7 +352,8 @@ class PrioritizedPhase2ReplayBuffer:
             terminal=terminal
         )
         
-        # Use provided priority or max priority for new transitions
+        # Use provided priority or max priority for new transitions.
+        # abs() is defensive in case callers provide signed values.
         if priority is not None:
             p = (abs(priority) + self.epsilon) ** self.alpha
         else:
@@ -435,7 +436,9 @@ class PrioritizedPhase2ReplayBuffer:
             is_weights=is_weights
         )
     
-    def update_priorities(self, indices: List[int], priorities: List[float]) -> None:
+    def update_priorities(
+        self, indices: Sequence[int], priorities: Union[Sequence[float], np.ndarray]
+    ) -> None:
         """
         Update priorities for sampled transitions.
         
@@ -444,9 +447,11 @@ class PrioritizedPhase2ReplayBuffer:
         Args:
             indices: Buffer indices (from PrioritizedBatch.indices).
             priorities: New priority values (e.g., |TD_error| for each transition).
+                Accepts lists, tuples, or numpy arrays. Values are passed through
+                abs() defensively in case callers provide signed errors.
         """
         for idx, priority in zip(indices, priorities):
-            p = (abs(priority) + self.epsilon) ** self.alpha
+            p = (abs(float(priority)) + self.epsilon) ** self.alpha
             self.tree.update(idx, p)
             self.max_priority = max(self.max_priority, p)
     

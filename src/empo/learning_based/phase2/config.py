@@ -232,9 +232,10 @@ class Phase2Config:
     # instead of uniformly. Transitions where network predictions had large
     # errors (indicating informative experiences) are sampled more often.
     #
-    # Priority signal: Per-sample training loss magnitude. Transitions with
-    # large prediction errors across the active networks are prioritised,
-    # as they represent the most informative experiences for learning.
+    # Priority signal: Per-sample Q_r TD error magnitude. Transitions with
+    # large Q_r prediction errors are prioritised, as they represent the
+    # most informative experiences for learning the robot policy. This also
+    # captures the effect of X_h changes, since Q_r targets depend on X_h.
     #
     # Importance sampling (IS) weights correct for the non-uniform sampling
     # distribution. Beta is annealed from priority_beta_start to priority_beta_end

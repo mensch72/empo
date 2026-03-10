@@ -2185,7 +2185,7 @@ class BasePhase2Trainer(ABC):
                 losses['q_r'] = (is_weights * q_r_per_sample_sq).mean()
                 # Store per-sample priorities for buffer update
                 with torch.no_grad():
-                    self._last_per_sample_priorities = q_r_per_sample_sq.detach().sqrt().cpu().numpy().tolist()
+                    self._last_per_sample_priorities = q_r_per_sample_sq.detach().sqrt().cpu().numpy()
             else:
                 losses['q_r'] = q_r_per_sample_sq.mean()
             
