@@ -31,6 +31,7 @@ except ImportError:
     HAS_PSUTIL = False
 
 from empo.util.memory_monitor import MemoryMonitor
+from empo.state_sampler import StateSampler
 
 from .config import Phase2Config
 from .profiler import NoOpProfiler
@@ -145,6 +146,8 @@ class BasePhase2Trainer(ABC):
         human_exploration_policy: Optional[Any] = None,
         checkpoint_interval: Optional[int] = None,
         checkpoint_path: Optional[str] = None,
+        state_sampler: Optional[StateSampler] = None,
+        state_sampling_rate: float = 0.0,
     ):
         self.env = env
         self.world_model_factory = world_model_factory
@@ -161,7 +164,9 @@ class BasePhase2Trainer(ABC):
         self.profiler = profiler if profiler is not None else NoOpProfiler()
         self.robot_exploration_policy = robot_exploration_policy
         self.human_exploration_policy = human_exploration_policy
-        
+        self.state_sampler = state_sampler
+        self.state_sampling_rate = state_sampling_rate
+
         # Store output directory (parent of tensorboard_dir if provided)
         self.output_dir: Optional[str] = None
         if tensorboard_dir is not None:
@@ -303,6 +308,8 @@ class BasePhase2Trainer(ABC):
         state['replay_buffer'] = None
         # Don't pickle env - it may contain thread locks
         state['env'] = None
+        # Don't pickle state sampler - holds a reference to env
+        state['state_sampler'] = None
         # Don't pickle state visit counts dict - large and only needed in learner
         state['_state_visit_counts'] = {}
         state['_position_visit_counts'] = {}
@@ -864,6 +871,9 @@ class BasePhase2Trainer(ABC):
             self.goal_sampler.set_world_model(self.env)
         if hasattr(self.human_policy_prior, 'set_world_model'):
             self.human_policy_prior.set_world_model(self.env)
+        # Re-link state sampler to the new env
+        if self.state_sampler is not None:
+            self.state_sampler.world_model = self.env
     
     def _check_memory_and_maybe_interrupt(self) -> None:
         """
@@ -2827,11 +2837,19 @@ class BasePhase2Trainer(ABC):
         # Check if this will be the last step of the episode BEFORE collecting
         # This is needed so the transition can be marked as terminal
         is_terminal = (actor_state.env_step_count + 1) >= self.config.steps_per_episode
-        
+
         if self.debug and is_terminal:
             print(f"[DEBUG] Terminal transition! env_step={actor_state.env_step_count}, "
                   f"steps_per_episode={self.config.steps_per_episode}")
-        
+
+        # State sampling: stochastically teleport to a random state for better generalization
+        if self.state_sampler is not None and self.state_sampling_rate > 0.0:
+            if random.random() < self.state_sampling_rate:
+                self.state_sampler.sample()  # modifies env in-place
+                actor_state.state = self.env.get_state()
+                with self.profiler.section("goal_sampling"):
+                    actor_state.goals, actor_state.goal_weights = self._sample_goals(actor_state.state)
+
         # Collect one transition
         transition, next_state = self.collect_transition(
             actor_state.state, actor_state.goals, actor_state.goal_weights,

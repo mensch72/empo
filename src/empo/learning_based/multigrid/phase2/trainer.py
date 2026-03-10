@@ -11,6 +11,8 @@ import torch
 
 from gym_multigrid.multigrid import MultiGridEnv
 
+from empo.state_sampler import MultigridStateSampler
+
 from empo.learning_based.phase2.config import Phase2Config
 from empo.learning_based.phase2.trainer import BasePhase2Trainer, Phase2Networks
 from empo.learning_based.phase2.network_factory import create_count_based_curiosity
@@ -114,6 +116,8 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
         human_exploration_policy: Optional[Any] = None,
         checkpoint_interval: Optional[int] = None,
         checkpoint_path: Optional[str] = None,
+        state_sampler: Optional[MultigridStateSampler] = None,
+        state_sampling_rate: float = 0.0,
     ):
         super().__init__(
             env=env,
@@ -133,6 +137,8 @@ class MultiGridPhase2Trainer(BasePhase2Trainer):
             human_exploration_policy=human_exploration_policy,
             checkpoint_interval=checkpoint_interval,
             checkpoint_path=checkpoint_path,
+            state_sampler=state_sampler,
+            state_sampling_rate=state_sampling_rate,
         )
         
         # Caching is now handled internally by the shared encoders.
