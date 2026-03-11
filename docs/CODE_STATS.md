@@ -102,7 +102,7 @@ src/empo/                                    7 files    5,852 lines   (4,354 cod
 | 1 | `vendor/multigrid/gym_multigrid/multigrid.py` | 5,012 |
 | 2 | `src/empo/nn_based/phase2/trainer.py` | 2,960 |
 | 3 | `vendor/ai_transport/ai_transport/envs/transport_env.py` | 1,750 |
-| 4 | `examples/phase2_robot_policy_demo.py` | 1,414 |
+| 4 | `examples/phase2/phase2_robot_policy_demo.py` | 1,414 |
 | 5 | `src/empo/transport.py` | 1,220 |
 | 6 | `src/empo/human_policy_prior.py` | 1,195 |
 | 7 | `src/empo/backward_induction.py` | 1,137 |
@@ -133,13 +133,13 @@ Files with avg cyclomatic complexity ≥ 8.0 (with at least 5 functions):
 |--------|-----------|------|
 | 12.88 | 8 | `src/empo/nn_based/multigrid/neural_policy_prior.py` |
 | 12.00 | 8 | `src/empo/nn_based/multigrid/phase2/trainer.py` |
-| 10.25 | 8 | `examples/bellman_backward_induction.py` |
-| 9.00 | 8 | `examples/transport_stress_test_demo.py` |
-| 8.80 | 5 | `examples/heuristic_key_door_demo.py` |
+| 10.25 | 8 | `examples/diagnostics/bellman_backward_induction.py` |
+| 9.00 | 8 | `examples/transport/transport_stress_test_demo.py` |
+| 8.80 | 5 | `examples/multigrid/heuristic_key_door_demo.py` |
 | 8.75 | 16 | `src/empo/backward_induction.py` |
 | 8.60 | 5 | `src/empo/nn_based/transport/feature_extraction.py` |
-| 8.22 | 9 | `examples/dag_and_episode_example.py` |
-| 8.17 | 6 | `examples/transport_two_cluster_demo.py` |
+| 8.22 | 9 | `examples/diagnostics/dag_and_episode_example.py` |
+| 8.17 | 6 | `examples/transport/transport_two_cluster_demo.py` |
 | 8.00 | 16 | `src/empo/nn_based/multigrid/path_distance.py` |
 
 ### 3.3 Function Length Distribution

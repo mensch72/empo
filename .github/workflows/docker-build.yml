@@ -30,7 +30,7 @@ jobs:
     
     - name: Verify setup
       run: |
-        bash scripts/verify_setup.sh
+        bash setup/scripts/verify_setup.sh
 
   build:
     runs-on: ubuntu-latest

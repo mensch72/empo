@@ -336,10 +336,10 @@ The implementation:
 **Usage with demo:**
 ```bash
 # Tabular mode with 1/n adaptive LR
-python phase2_robot_policy_demo.py --tabular --adaptive
+python examples/phase2/phase2_robot_policy_demo.py --tabular --adaptive
 
 # Neural mode with RND-based adaptive LR (requires --curious for RND)
-python phase2_robot_policy_demo.py --curious --adaptive
+python examples/phase2/phase2_robot_policy_demo.py --curious --adaptive
 ```
 
 ### Option 3: Dropout-Based Uncertainty (MC Dropout)
@@ -436,4 +436,4 @@ ensemble_size: int = 1  # Number of network copies (1 = no ensemble)
 
 - [EXPLORATION.md](EXPLORATION.md) - Curiosity-driven exploration (RND and count-based)
 - [WARMUP_DESIGN.md](WARMUP_DESIGN.md) - Phase 2 warm-up and learning rate schedules
-- [examples/lookup_table_phase2_demo.py](../examples/lookup_table_phase2_demo.py) - Lookup table training example
+- [examples/phase2/lookup_table_phase2_demo.py](../examples/phase2/lookup_table_phase2_demo.py) - Lookup table training example
