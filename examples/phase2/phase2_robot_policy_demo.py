@@ -475,6 +475,16 @@ class _EnsembleEnvCreator:
         return env
 
 
+class _WorldFileEnvCreator:
+    """Picklable callable for creating envs from a world YAML file path."""
+
+    def __init__(self, world_path: str):
+        self.world_path = world_path
+
+    def __call__(self):
+        return create_env_from_world(self.world_path)
+
+
 # ============================================================================
 # Random Ensemble Environment Generator
 # ============================================================================
@@ -1194,7 +1204,7 @@ def main(
         # Create world model factory
         if use_async:
             # Use env_creator for async mode
-            env_creator = lambda: create_env_from_world(world_path)
+            env_creator = _WorldFileEnvCreator(world_path)
             world_model_factory = CachedWorldModelFactory(env_creator)
         else:
             world_model_factory = None
