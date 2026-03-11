@@ -1052,6 +1052,13 @@ class HeuristicPotentialPolicy(HumanPolicyPrior):
             
             return probs
         
+        # Handle orientation goals: just turn to face the target direction
+        if hasattr(possible_goal, 'target_dir'):
+            probs = np.zeros(self.num_actions)
+            turn_action = self._get_turn_action_to_face(agent_dir, possible_goal.target_dir)
+            probs[turn_action] = 1.0
+            return probs
+
         # Get goal coordinates
         goal_tuple = self._get_goal_tuple(possible_goal)
         

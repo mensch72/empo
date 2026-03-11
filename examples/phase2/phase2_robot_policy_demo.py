@@ -30,6 +30,8 @@ Usage:
     python examples/phase2/phase2_robot_policy_demo.py --tabular # Use lookup tables instead of neural networks
     python examples/phase2/phase2_robot_policy_demo.py --curious # Enable curiosity exploration (RND or count-based)
     python examples/phase2/phase2_robot_policy_demo.py --adaptive # Enable adaptive learning rates
+    python examples/phase2/phase2_robot_policy_demo.py --state-sampler  # Enable random state sampling for generalization
+    python examples/phase2/phase2_robot_policy_demo.py --state-sampler --state-sampling-rate 0.2  # 20% of steps teleport to random state
     
     # Adaptive learning rate modes:
     # --tabular --adaptive    Uses 1/n per-entry learning rate for lookup tables
@@ -67,6 +69,7 @@ from gym_multigrid.multigrid import (
     MultiGridEnv, World, SmallActions
 )
 from empo.world_specific_helpers.multigrid import ReachCellGoal, ReachRectangleGoal, render_test_map_values
+from empo.state_sampler import MultigridStateSampler, MultigridStateSamplerConfig
 from empo.possible_goal import TabularGoalSampler, PossibleGoalSampler, PossibleGoalGenerator
 from empo.human_policy_prior import HeuristicPotentialPolicy
 from empo.learning_based.multigrid import PathDistanceCalculator
@@ -988,6 +991,8 @@ def main(
     output_dir_override: str = None,
     config_overrides: dict = None,
     world: str = None,
+    use_state_sampler: bool = False,
+    state_sampling_rate: float = 0.1,
 ):
     """Run Phase 2 demo."""
     # Set random seeds for reproducibility (sync mode only - async mode is inherently non-deterministic)
@@ -1451,8 +1456,21 @@ def main(
             print(f"  Restoring from: {restore_networks_path}")
         print()
         
+        # Create state sampler if requested
+        sampler = None
+        if use_state_sampler:
+            sampler = MultigridStateSampler(
+                world_model=env,
+                config=MultigridStateSamplerConfig(
+                    sample_agent_direction=True,
+                    sample_mutable_objects=True,
+                ),
+            )
+            print(f"[STATE SAMPLER] Enabled with rate={state_sampling_rate} "
+                  f"(sample_agent_direction=True, sample_mutable_objects=True)")
+
         t0 = time.time()
-        
+
         if profile:
             # Use our custom TrainingProfiler for detailed component-level timing
             print("[PROFILE MODE] Using TrainingProfiler for detailed component timing")
@@ -1484,8 +1502,10 @@ def main(
                 robot_exploration_policy=robot_exploration_policy,
                 human_exploration_policy=human_exploration_policy,
                 checkpoint_interval=checkpoint_interval,
+                state_sampler=sampler,
+                state_sampling_rate=state_sampling_rate,
             )
-            
+
             # Note: The profiler report is automatically printed at the end of train()
         else:
             robot_q_network, networks, history, trainer = train_multigrid_phase2(
@@ -1507,6 +1527,8 @@ def main(
                 robot_exploration_policy=robot_exploration_policy,
                 human_exploration_policy=human_exploration_policy,
                 checkpoint_interval=checkpoint_interval,
+                state_sampler=sampler,
+                state_sampling_rate=state_sampling_rate,
             )
         
         elapsed = time.time() - t0
@@ -1762,6 +1784,13 @@ if __name__ == "__main__":
     parser.add_argument('--output-dir', '-o', type=str, default=None, metavar='PATH',
                         help='Output directory for logs, models, and videos (default: outputs/phase2_demo_<env>)')
     
+    # State sampling options
+    parser.add_argument('--state-sampler', action='store_true',
+                        help='Enable MultigridStateSampler for random state teleportation during training '
+                             '(improves generalization by training from diverse states)')
+    parser.add_argument('--state-sampling-rate', type=float, default=0.1, metavar='P',
+                        help='Probability per step of teleporting to a random state (default: 0.1)')
+
     # Rollout options
     parser.add_argument('--rollouts', type=int, default=None, metavar='N',
                         help='Number of rollouts to generate (overrides default)')
@@ -1800,4 +1829,6 @@ if __name__ == "__main__":
         output_dir_override=args.output_dir,
         config_overrides=config_overrides,
         world=args.world,
+        use_state_sampler=args.state_sampler,
+        state_sampling_rate=args.state_sampling_rate,
     )

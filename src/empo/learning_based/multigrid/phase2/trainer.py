@@ -1003,6 +1003,8 @@ def train_multigrid_phase2(
     human_exploration_policy: Optional[Any] = None,
     checkpoint_interval: Optional[int] = None,
     checkpoint_path: Optional[str] = None,
+    state_sampler: Optional[MultigridStateSampler] = None,
+    state_sampling_rate: float = 0.0,
 ) -> Tuple[MultiGridRobotQNetwork, Phase2Networks, List[Dict[str, float]], "MultiGridPhase2Trainer"]:
     """
     Train Phase 2 robot policy for a multigrid environment.
@@ -1121,8 +1123,10 @@ def train_multigrid_phase2(
         human_exploration_policy=human_exploration_policy,
         checkpoint_interval=checkpoint_interval,
         checkpoint_path=checkpoint_path,
+        state_sampler=state_sampler,
+        state_sampling_rate=state_sampling_rate,
     )
-    
+
     # Restore networks if checkpoint provided (skips warmup/rampup since already done)
     if restore_networks_path is not None:
         if verbose:
