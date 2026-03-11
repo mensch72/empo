@@ -133,10 +133,10 @@ RUN if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
 ARG USER_ID=1001
 ARG GROUP_ID=1001
 RUN if getent group ${GROUP_ID} > /dev/null 2>&1; then \
-        useradd -m -u ${USER_ID} -g ${GROUP_ID} -s /bin/bash appuser; \
+        useradd -m -o -u ${USER_ID} -g ${GROUP_ID} -s /bin/bash appuser; \
     else \
-        groupadd -g ${GROUP_ID} appuser && \
-        useradd -m -u ${USER_ID} -g appuser -s /bin/bash appuser; \
+        groupadd -o -g ${GROUP_ID} appuser && \
+        useradd -m -o -u ${USER_ID} -g appuser -s /bin/bash appuser; \
     fi
 
 # Create workspace directory and set permissions
