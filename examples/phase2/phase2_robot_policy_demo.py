@@ -1125,7 +1125,7 @@ def main(
             num_training_steps = min(num_training_steps, 2500)  # 50 episodes * 50 steps/episode
             print(f"  Reduced to {num_training_steps} training steps for profiling")
     
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    device = 'cpu'
     
     # Create output directory (includes env_type in name, or use override)
     if output_dir_override:

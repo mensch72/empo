@@ -44,20 +44,13 @@ COPY setup/requirements-dev.txt /tmp/requirements-dev.txt
 COPY setup/requirements-hierarchical.txt /tmp/requirements-hierarchical.txt
 
 # Install Python dependencies
-# CUDA_SUPPORT=true installs CUDA 12.1 PyTorch (~5GB); false installs CPU-only (~2GB)
-ARG CUDA_SUPPORT=false
+# Use CPU-only PyTorch to avoid downloading large CUDA packages (~2GB vs ~5GB)
+# GPU will still work if available via Docker GPU passthrough (--gpus flag)
 RUN --mount=type=cache,target=/root/.cache/pip,uid=0,gid=0 \
-    if [ "$CUDA_SUPPORT" = "true" ]; then \
-        pip install \
-        --index-url https://download.pytorch.org/whl/cu121 \
-        --extra-index-url https://pypi.org/simple \
-        -r /tmp/requirements.txt; \
-    else \
-        pip install \
-        --index-url https://download.pytorch.org/whl/cpu \
-        --extra-index-url https://pypi.org/simple \
-        -r /tmp/requirements.txt; \
-    fi
+    pip install \
+    --index-url https://download.pytorch.org/whl/cpu \
+    --extra-index-url https://pypi.org/simple \
+    -r /tmp/requirements.txt
 
 # Install dev dependencies only if DEV_MODE is set (for Docker Compose)
 # This allows the same Dockerfile to be used for both dev and production

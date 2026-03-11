@@ -9,14 +9,6 @@ services:
         USER_ID: ${USER_ID:-1001}
         GROUP_ID: ${GROUP_ID:-1001}
         HIERARCHICAL_MODE: ${HIERARCHICAL_MODE:-false}
-        CUDA_SUPPORT: ${CUDA_SUPPORT:-false}
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
     image: empo:dev-${USER_ID:-1001}
     pull_policy: build
     container_name: empo-dev
