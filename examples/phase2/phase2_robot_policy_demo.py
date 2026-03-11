@@ -985,6 +985,7 @@ def main(
     use_ensemble: bool = False,
     use_small: bool = False,
     use_async: bool = False,
+    num_actors: int = 1,
     use_encoders: bool = True,
     use_tabular: bool = False,
     use_curious: bool = False,
@@ -1324,7 +1325,7 @@ def main(
         beta_r_rampup_steps=beta_r_rampup_steps,
         # Async training mode (actor-learner architecture)
         async_training=use_async,
-        num_actors=1,  # 1 actor is usually fast enough
+        num_actors=num_actors,
         async_min_buffer_size=50 if lightningfast_mode else (100 if quick_mode else 500),  # Smaller for quick/lightningfast mode
         # State encoding options
         include_step_count=False,  # Don't include step count in state encoding
@@ -1761,6 +1762,8 @@ if __name__ == "__main__":
                         help='Profile training with detailed component timing (shows time breakdown by category)')
     parser.add_argument('--async', '-a', dest='use_async', action='store_true',
                         help='Use async actor-learner training (tests async mode on CPU)')
+    parser.add_argument('--num-actors', type=int, default=1, metavar='N',
+                        help='Number of parallel actor processes for async training (default: 1)')
     parser.add_argument('--no-encoders', action='store_true',
                         help='Disable neural encoders (use identity function for debugging)')
     parser.add_argument('--tabular', '-t', action='store_true',
@@ -1823,6 +1826,7 @@ if __name__ == "__main__":
         use_ensemble=args.ensemble,
         use_small=args.small,
         use_async=args.use_async,
+        num_actors=args.num_actors,
         use_encoders=not args.no_encoders,
         use_tabular=args.tabular,
         use_curious=args.curious,
