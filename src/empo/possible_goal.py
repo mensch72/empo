@@ -162,10 +162,44 @@ class PossibleGoal(ABC):
     @abstractmethod
     def __hash__(self) -> int:
         """Return hash for use as dictionary key."""
-    
+
     @abstractmethod
     def __eq__(self, other) -> bool:
         """Check equality with another goal."""
+
+    @abstractmethod
+    def encode(self, device: str = 'cpu') -> 'Tuple':
+        """
+        Encode this goal as a tensor for neural network input.
+
+        The tensor includes both goal-specific features and a goal type discriminator
+        to prevent ambiguity between different goal types with the same feature values.
+
+        Encoding format (6 dimensions):
+        - Dimensions 0-3: Goal-specific features
+          * Spatial goals: [x1, y1, x2, y2]
+          * Orientation goals: [d0, d1, d2, d3] (one-hot direction)
+        - Dimensions 4-5: Goal type discriminator
+          * [1.0, 0.0] for spatial goals (ReachCell, ReachRectangle)
+          * [0.0, 1.0] for orientation goals
+
+        Args:
+            device: Torch device to place the tensor on ('cpu', 'cuda', etc.)
+
+        Returns:
+            Tuple of (tensor, cache_key) where:
+                - tensor: torch.Tensor of shape (1, d) containing the goal encoding
+                - cache_key: Hashable tuple for caching this encoding
+        """
+
+    @abstractmethod
+    def compute_weight(self) -> float:
+        """
+        Compute the aggregation weight for this goal.
+        
+        Returns:
+            float: Weight value (must be > 0)
+        """
 
 
 class PossibleGoalSampler(ABC):
