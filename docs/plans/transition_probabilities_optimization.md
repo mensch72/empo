@@ -1,6 +1,6 @@
 # Implementation Plan: Speeding Up `transition_probabilities()`
 
-**Status:** Planning  
+**Status:** Phase 2B implemented (§3.12, §3.13, §3.15)  
 **Date:** 2025-03-12
 
 ## 1. Overview
@@ -918,14 +918,16 @@ overhead.
 Expected speedup: **~1.5× additional** (cumulative ~3×), dominated by avoiding set_state/get_state
 for the majority of deterministic transitions.
 
-### Phase 2B: Low-Medium Risk, High-Impact — Phase 2 Trainer (2–3 days)
+### Phase 2B: Low-Medium Risk, High-Impact — Phase 2 Trainer (2–3 days) ✅ IMPLEMENTED
 
-7. **§3.12** — Batch precompute: single set/restore for all robot actions
-8. **§3.13** — Skip step() by sampling from cached transition probs
-9. **§3.15** — Avoid redundant get_state() in step_environment()
+7. **§3.12** — Batch precompute: single set/restore for all robot actions ✅
+8. **§3.13** — Skip step() by sampling from cached transition probs ✅
+9. **§3.15** — Avoid redundant get_state() in step_environment() ✅
 
-Expected speedup for Phase 2 data collection: **~2–3×** for the actor step, dominated by
-eliminating the redundant step() call and amortizing save/restore overhead across robot actions.
+Measured speedup (A_r=4, CollectGame env):
+- §3.12: 1.18x faster for precompute (~12.6s saved over 100K steps)
+- §3.13: ~19.75x faster for step portion (~66.8s saved over 100K steps)
+- §3.15: Eliminates one get_state() per step() call (~0.02ms/step)
 
 ### Phase 3: Medium-Risk, Medium-Impact (3–5 days)
 
