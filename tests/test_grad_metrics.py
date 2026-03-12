@@ -70,13 +70,13 @@ def test_config_grad_metrics_ema_decay_default():
 
 
 def test_config_grad_metrics_ema_decay_custom():
-    """Test that grad_metrics_ema_decay can be customised."""
+    """Test that grad_metrics_ema_decay can be customized."""
     config = Phase2Config(grad_metrics_ema_decay=0.9)
     assert config.grad_metrics_ema_decay == 0.9
     print("  ✓ Custom grad_metrics_ema_decay == 0.9")
 
 
-def test_update_grad_metrics_ema_initialisation():
+def test_update_grad_metrics_ema_initialization():
     """First call should initialise EMA to the current grad norm value."""
     obj = _make_stub(grad_metrics_ema_decay=0.9)
 
@@ -100,7 +100,7 @@ def test_update_grad_metrics_ema_initialisation():
     # First call: no previous gradient, so cosine_sim should not yet exist
     # (it only appears after the second call)
     assert 'q_r' not in obj._grad_cosine_sim
-    print("  ✓ EMA initialised to first grad norm")
+    print("  ✓ EMA initialized to first grad norm")
     print("  ✓ Cosine similarity not yet available on first step")
 
 
@@ -247,7 +247,7 @@ def test_multiple_networks_tracked():
 
     assert abs(obj._grad_norm_ema['q_r'] - 1.0) < 1e-8
     assert abs(obj._grad_norm_ema['v_h_e'] - 2.0) < 1e-8
-    print("  ✓ q_r EMA initialised to 1.0, v_h_e EMA initialised to 2.0")
+    print("  ✓ q_r EMA initialized to 1.0, v_h_e EMA initialized to 2.0")
 
     # Second step
     for net in [obj.networks.q_r, obj.networks.v_h_e]:
@@ -301,7 +301,7 @@ def run_all_tests():
     test_get_active_network_map()
     print()
 
-    test_update_grad_metrics_ema_initialisation()
+    test_update_grad_metrics_ema_initialization()
     print()
 
     test_update_grad_metrics_ema_decay()
