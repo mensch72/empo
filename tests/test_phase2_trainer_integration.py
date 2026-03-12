@@ -928,6 +928,8 @@ class TestPrioritizedReplayIntegration:
 
     def test_trainer_creates_prioritized_buffer_when_configured(self):
         """Trainer __setstate__ should create PrioritizedPhase2ReplayBuffer when enabled."""
+        from empo.learning_based.phase2.trainer import BasePhase2Trainer
+
         config = Phase2Config(
             use_prioritized_replay=True,
             priority_alpha=0.6,
@@ -937,49 +939,30 @@ class TestPrioritizedReplayIntegration:
             buffer_size=100,
         )
         networks = create_mock_networks()
-        
-        # Simulate the __setstate__ path by pickling the state without the buffer
-        import pickle
-        
-        class _MinimalTrainer:
-            """Minimal stand-in to test __setstate__ replay buffer creation."""
-            pass
-        
-        trainer = _MinimalTrainer()
-        trainer.config = config
-        trainer.replay_buffer = None
-        trainer.profiler = None
-        trainer._last_per_sample_priorities = None
-        
-        state = trainer.__dict__.copy()
-        
-        # Manually invoke __setstate__ logic: when replay_buffer is None,
-        # should create PrioritizedPhase2ReplayBuffer
-        from empo.learning_based.phase2.trainer import BasePhase2Trainer
-        _per_defaults = {
-            'use_prioritized_replay': False,
-            'priority_alpha': 0.6,
-            'priority_beta_start': 0.4,
-            'priority_beta_end': 1.0,
-            'priority_epsilon': 1e-6,
+
+        # Concrete stub so __new__ succeeds (BasePhase2Trainer is abstract)
+        class _ConcreteTrainer(BasePhase2Trainer):
+            def get_state_features_for_rnd(self, states):
+                return None
+
+        # Construct instance without calling __init__
+        trainer = _ConcreteTrainer.__new__(_ConcreteTrainer)
+
+        # Simulate unpickled state: no replay_buffer yet, but config and networks present
+        state = {
+            "config": config,
+            "networks": networks,
+            "replay_buffer": None,
+            "profiler": None,
+            "_last_per_sample_priorities": None,
         }
-        for attr, default in _per_defaults.items():
-            if not hasattr(config, attr):
-                object.__setattr__(config, attr, default)
-        
-        if config.use_prioritized_replay:
-            buffer = PrioritizedPhase2ReplayBuffer(
-                capacity=config.buffer_size,
-                alpha=config.priority_alpha,
-                beta_start=config.priority_beta_start,
-                beta_end=config.priority_beta_end,
-                epsilon=config.priority_epsilon,
-            )
-        else:
-            buffer = Phase2ReplayBuffer(capacity=config.buffer_size)
-        
-        assert isinstance(buffer, PrioritizedPhase2ReplayBuffer)
-        print("✓ PER config creates PrioritizedPhase2ReplayBuffer")
+
+        # Exercise the actual __setstate__ implementation
+        trainer.__setstate__(state)
+
+        # When use_prioritized_replay is True, __setstate__ should create a PrioritizedPhase2ReplayBuffer
+        assert isinstance(trainer.replay_buffer, PrioritizedPhase2ReplayBuffer)
+        print("✓ PER config creates PrioritizedPhase2ReplayBuffer via BasePhase2Trainer.__setstate__")
 
     def test_prioritized_buffer_push_and_priority_update(self):
         """Push transitions, update priorities, and verify higher-priority items sampled more."""
@@ -1066,31 +1049,42 @@ class TestPrioritizedReplayIntegration:
     def test_setstate_backward_compat_missing_per_config(self):
         """__setstate__ should handle old configs missing PER fields gracefully."""
         from dataclasses import dataclass
-        
+        from empo.learning_based.phase2.trainer import BasePhase2Trainer
+
         @dataclass
         class OldConfig:
             """Simulates a pre-PER Phase2Config without PER fields."""
             buffer_size: int = 100
             # Deliberately missing: use_prioritized_replay, priority_alpha, etc.
-        
+
         old_config = OldConfig()
         assert not hasattr(old_config, 'use_prioritized_replay')
-        
-        # Apply the same backward-compat logic the trainer uses
-        _per_defaults = {
-            'use_prioritized_replay': False,
-            'priority_alpha': 0.6,
-            'priority_beta_start': 0.4,
-            'priority_beta_end': 1.0,
-            'priority_epsilon': 1e-6,
+
+        # Concrete stub so __new__ succeeds (BasePhase2Trainer is abstract)
+        class _ConcreteTrainer(BasePhase2Trainer):
+            def get_state_features_for_rnd(self, states):
+                return None
+
+        # Construct instance without calling __init__
+        trainer = _ConcreteTrainer.__new__(_ConcreteTrainer)
+
+        # Simulate unpickled state from a pre-PER checkpoint
+        state = {
+            "config": old_config,
+            "replay_buffer": None,
+            "profiler": None,
         }
-        for attr, default in _per_defaults.items():
-            if not hasattr(old_config, attr):
-                object.__setattr__(old_config, attr, default)
-        
-        assert old_config.use_prioritized_replay is False
-        assert old_config.priority_alpha == 0.6
-        print("✓ Old config without PER fields handled gracefully")
+
+        # Exercise the actual __setstate__ — should not raise AttributeError
+        trainer.__setstate__(state)
+
+        # __setstate__ should have injected PER defaults onto the old config
+        assert trainer.config.use_prioritized_replay is False
+        assert trainer.config.priority_alpha == 0.6
+        # replay_buffer should be a plain (non-prioritized) buffer
+        assert isinstance(trainer.replay_buffer, Phase2ReplayBuffer)
+        assert not isinstance(trainer.replay_buffer, PrioritizedPhase2ReplayBuffer)
+        print("✓ Old config without PER fields handled gracefully via BasePhase2Trainer.__setstate__")
 
 
 # =============================================================================
