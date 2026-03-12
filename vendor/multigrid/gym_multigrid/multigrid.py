@@ -5220,6 +5220,58 @@ class MultiGridEnv(WorldModel):
         finally:
             # Always restore the original state
             self.set_state(original_state)
+
+    def batch_transition_probabilities(self, state, actions_list):
+        """
+        Compute transition probabilities for multiple action vectors from the same state.
+        
+        This is an optimized batch variant of transition_probabilities() that amortizes
+        the state save/restore overhead across all action vectors. Instead of saving and
+        restoring state A_r times (once per call), it saves once, computes A_r times
+        (restoring the query state between iterations), and restores once at the end.
+        
+        This is designed for the Phase 2 trainer's _precompute_transition_probs(), which
+        needs transition probabilities for all robot action variants from the same state
+        (only the robot's action changes between calls; human actions are fixed).
+        
+        Args:
+            state: A state tuple as returned by get_state()
+            actions_list: List of action vectors, each a list of action indices (one per agent).
+            
+        Returns:
+            List of results, one per action vector. Each result is either:
+            - A list of (probability, successor_state) tuples
+            - None if the state is terminal
+        """
+        # Check if we're in a terminal state
+        step_count = state[0]
+        if step_count >= self.max_steps:
+            return [None] * len(actions_list)
+        
+        # Validate all action vectors upfront
+        for actions in actions_list:
+            for action in actions:
+                if action < 0 or action >= self.action_space.n:
+                    raise ValueError(f"Invalid action {action} in batch_transition_probabilities")
+        
+        # Save original state once
+        original_state = self.get_state()
+        
+        # Set to query state once
+        self.set_state(state)
+        
+        try:
+            results = []
+            for actions in actions_list:
+                result = self._transition_probabilities_impl(state, actions)
+                results.append(result)
+                # Restore query state for next iteration
+                # (_transition_probabilities_impl may have modified env as side effect)
+                self.set_state(state)
+            return results
+        finally:
+            # Always restore the original state
+            self.set_state(original_state)
     
     def _transition_probabilities_impl(self, state, actions, sample_one=False):
         """

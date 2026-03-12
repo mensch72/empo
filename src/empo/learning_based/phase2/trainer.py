@@ -1480,7 +1480,9 @@ class BasePhase2Trainer(ABC):
         1. Sample human actions first
         2. Compute transition_probs for all robot actions (with those human actions)
         3. Use transition_probs for robot action selection (with optional curiosity bonus)
-        4. Store transition_probs in replay buffer
+        4. Sample next_state from cached transition probs (§3.13 optimization),
+           falling back to step() when transition probs are not available
+        5. Store transition_probs in replay buffer
         
         Args:
             state: Current state.
@@ -1522,9 +1524,18 @@ class BasePhase2Trainer(ABC):
         if self.debug:
             print(f"[DEBUG] collect_transition: robot_action={robot_action}, stepping environment...")
         
-        # Step 4: Step environment to get the actual next state
+        # Step 4: Get next state
+        # §3.13 optimization: When transition_probs are already cached, sample next_state
+        # directly from the pre-computed distribution instead of calling step().
+        # This eliminates a redundant _transition_probabilities_impl() call inside step()
+        # plus the associated get_state()/set_state() overhead.
         with self.profiler.section("step_environment"):
-            next_state = self.step_environment(state, robot_action, human_actions)
+            if transition_probs_by_action is not None:
+                next_state = self._sample_next_state_from_cached_probs(
+                    state, robot_action, transition_probs_by_action
+                )
+            else:
+                next_state = self.step_environment(state, robot_action, human_actions)
         
         if self.debug:
             print(f"[DEBUG] collect_transition: environment stepped, creating transition...")
@@ -1564,6 +1575,10 @@ class BasePhase2Trainer(ABC):
         This is called once at transition collection time to cache
         results for efficient reuse during training.
         
+        Uses batch_transition_probabilities() when available to amortize
+        the state save/restore overhead across all robot action variants
+        (§3.12 optimization).
+        
         Args:
             state: Current state.
             human_actions: The actual human actions taken.
@@ -1572,8 +1587,9 @@ class BasePhase2Trainer(ABC):
             Dict mapping robot_action_index -> [(prob, next_state), ...].
         """
         num_actions = self.networks.q_r.num_action_combinations
-        result = {}
         
+        # Build all action vectors upfront
+        actions_list = []
         for action_idx in range(num_actions):
             robot_action = self.networks.q_r.action_index_to_tuple(action_idx)
             
@@ -1586,15 +1602,74 @@ class BasePhase2Trainer(ABC):
             for i, robot_idx in enumerate(self.robot_agent_indices):
                 actions[robot_idx] = robot_action[i]
             
-            # Get transition probabilities
+            actions_list.append(actions)
+        
+        # Use batched method if available (single save/restore for all actions)
+        if hasattr(self.env, 'batch_transition_probabilities'):
+            batch_results = self.env.batch_transition_probabilities(state, actions_list)
+            result = {}
+            for action_idx, trans_probs in enumerate(batch_results):
+                result[action_idx] = trans_probs if trans_probs is not None else []
+            return result
+        
+        # Fallback: individual calls (for envs without batch method)
+        result = {}
+        for action_idx, actions in enumerate(actions_list):
             trans_probs = self.env.transition_probabilities(state, actions)
-            
-            if trans_probs is None:
-                result[action_idx] = []  # Terminal state
-            else:
-                result[action_idx] = trans_probs
+            result[action_idx] = trans_probs if trans_probs is not None else []
         
         return result
+    
+    def _sample_next_state_from_cached_probs(
+        self,
+        state: Any,
+        robot_action: Tuple[int, ...],
+        transition_probs_by_action: Dict[int, List[Tuple[float, Any]]]
+    ) -> Any:
+        """
+        Sample the next state from pre-computed transition probabilities.
+        
+        §3.13 optimization: Instead of calling step() (which internally re-runs
+        _transition_probabilities_impl), we sample directly from the already-computed
+        distribution and advance the environment via set_state().
+        
+        This eliminates:
+        - A redundant _transition_probabilities_impl() call inside step()
+        - The get_state() call that step() does to read the current state
+        - The get_state() call in step_environment() to return the next state
+        
+        The sampled distribution is guaranteed to match step() because step() itself
+        delegates to _transition_probabilities_impl(sample_one=True), which produces
+        the same distribution that we pre-computed.
+        
+        Args:
+            state: Current state.
+            robot_action: Tuple of robot actions.
+            transition_probs_by_action: Pre-computed transition probabilities.
+            
+        Returns:
+            The sampled next state.
+        """
+        action_idx = self.networks.q_r.action_tuple_to_index(robot_action)
+        trans_probs = transition_probs_by_action.get(action_idx, [])
+        
+        if not trans_probs:
+            # Terminal state or no transitions — stay in current state
+            next_state = state
+        elif len(trans_probs) == 1:
+            # Deterministic transition (most common case) — no sampling needed
+            next_state = trans_probs[0][1]
+        else:
+            # Probabilistic transition — sample from distribution
+            probs = [p for p, _ in trans_probs]
+            states = [s for _, s in trans_probs]
+            chosen_idx = np.random.choice(len(trans_probs), p=probs)
+            next_state = states[chosen_idx]
+        
+        # Advance environment to the sampled next state
+        self.env.set_state(next_state)
+        
+        return next_state
     
     def _compute_model_based_v_h_e_targets(
         self,
