@@ -31,12 +31,20 @@ class FakeNetworks:
         self.x_h = None
         self.u_r = None
         self.v_r = None
+        self.rnd = None
+        self.human_rnd = None
         # Target nets (unused but required by some trainer paths)
         self.q_r_target = SimpleNet()
         self.v_h_e_target = SimpleNet()
         self.x_h_target = None
         self.u_r_target = None
         self.v_r_target = None
+
+
+class FakeRNDModule:
+    """Minimal stand-in for RNDModule (only exposes .predictor)."""
+    def __init__(self, in_dim=4, out_dim=2):
+        self.predictor = SimpleNet(in_dim, out_dim)
 
 
 class _ConcreteTrainer(BasePhase2Trainer):
@@ -331,11 +339,11 @@ def test_stale_cosine_cleared_on_no_grad():
     print("  ✓ Stale cosine similarity cleared when gradients disappear")
 
 
-def test_rnd_skipped_for_cosine():
-    """RND grad norms update EMA but not cosine similarity (not in configured map)."""
+def test_rnd_absent_skips_cosine():
+    """When no RND module exists, 'rnd' grad norms update EMA but not cosine."""
     obj = _make_stub(grad_metrics_ema_decay=0.9)
+    # obj.networks.rnd is None by default → not in configured map
 
-    # Simulate RND grad norm being passed in
     obj._update_grad_metrics({'rnd': 2.5})
     assert abs(obj._grad_norm_ema['rnd'] - 2.5) < 1e-8
     assert 'rnd' not in obj._grad_cosine_sim
@@ -345,7 +353,74 @@ def test_rnd_skipped_for_cosine():
     expected = 0.9 * 2.5 + 0.1 * 3.0
     assert abs(obj._grad_norm_ema['rnd'] - expected) < 1e-8
     assert 'rnd' not in obj._grad_cosine_sim
-    print("  ✓ RND grad norm tracked via EMA, cosine similarity skipped")
+    print("  ✓ RND absent: grad norm tracked via EMA, cosine similarity skipped")
+
+
+def test_rnd_present_tracks_cosine():
+    """When an RND module IS present, both EMA and cosine similarity are tracked."""
+    obj = _make_stub(grad_metrics_ema_decay=0.9, use_rnd=True)
+    obj.networks.rnd = FakeRNDModule()
+
+    # Verify it appears in configured map
+    configured = obj._get_configured_network_map()
+    assert 'rnd' in configured
+    assert configured['rnd'] is obj.networks.rnd.predictor
+
+    # Step 1: set deterministic gradient on the predictor
+    predictor = obj.networks.rnd.predictor
+    predictor.zero_grad()
+    for p in predictor.parameters():
+        p.grad = torch.ones_like(p.data)
+    norm1 = sum(p.grad.data.norm(2).item() ** 2 for p in predictor.parameters()) ** 0.5
+    obj._update_grad_metrics({'rnd': norm1})
+    assert abs(obj._grad_norm_ema['rnd'] - norm1) < 1e-8
+    assert 'rnd' not in obj._grad_cosine_sim  # first step
+
+    # Step 2: same gradient → cosine should be 1
+    predictor.zero_grad()
+    for p in predictor.parameters():
+        p.grad = torch.ones_like(p.data)
+    obj._update_grad_metrics({'rnd': norm1})
+    assert abs(obj._grad_cosine_sim['rnd'] - 1.0) < 1e-6
+    print("  ✓ RND present: both EMA and cosine similarity tracked correctly")
+
+
+def test_stale_cosine_cleared_on_shape_change():
+    """Cosine similarity is cleared when the gradient shape changes between steps."""
+    obj = _make_stub(grad_metrics_ema_decay=0.99)
+
+    # Step 1: set gradient on a small network (4→2 = 10 params)
+    net = obj.networks.q_r
+    net.zero_grad()
+    for p in net.parameters():
+        p.grad = torch.ones_like(p.data)
+    norm = sum(p.grad.data.norm(2).item() ** 2 for p in net.parameters()) ** 0.5
+    obj._update_grad_metrics({'q_r': norm})
+
+    # Step 2: same gradient → establishes cosine_sim
+    net.zero_grad()
+    for p in net.parameters():
+        p.grad = torch.ones_like(p.data)
+    obj._update_grad_metrics({'q_r': norm})
+    assert 'q_r' in obj._grad_cosine_sim
+    assert abs(obj._grad_cosine_sim['q_r'] - 1.0) < 1e-6
+
+    # Step 3: swap to a differently-sized network → shape changes
+    bigger_net = SimpleNet(in_dim=8, out_dim=4)  # different param count
+    obj.networks.q_r = bigger_net
+    bigger_net.zero_grad()
+    for p in bigger_net.parameters():
+        p.grad = torch.ones_like(p.data)
+    norm_big = sum(p.grad.data.norm(2).item() ** 2 for p in bigger_net.parameters()) ** 0.5
+    obj._update_grad_metrics({'q_r': norm_big})
+
+    # Cosine should have been cleared due to shape mismatch
+    assert 'q_r' not in obj._grad_cosine_sim
+    # But EMA should still be updated
+    assert 'q_r' in obj._grad_norm_ema
+    # The new (flat_grad, norm) tuple should be stored for the next step
+    assert 'q_r' in obj._prev_flat_grads
+    print("  ✓ Cosine similarity cleared on gradient shape change; EMA still tracked")
 
 
 def run_all_tests():
@@ -386,7 +461,13 @@ def run_all_tests():
     test_stale_cosine_cleared_on_no_grad()
     print()
 
-    test_rnd_skipped_for_cosine()
+    test_stale_cosine_cleared_on_shape_change()
+    print()
+
+    test_rnd_absent_skips_cosine()
+    print()
+
+    test_rnd_present_tracks_cosine()
     print()
 
     with tempfile.TemporaryDirectory() as td:

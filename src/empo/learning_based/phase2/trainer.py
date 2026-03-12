@@ -796,8 +796,11 @@ class BasePhase2Trainer(ABC):
         This returns networks that are configured and instantiated, regardless of
         warm-up stage. For warm-up-aware network selection, use
         self.config.get_active_networks(training_step) instead.
+        
+        For RND modules, the trainable *predictor* sub-network is returned
+        (not the full RNDModule which also contains the frozen target network).
         """
-        networks = {
+        networks: Dict[str, nn.Module] = {
             'q_r': self.networks.q_r,
             'v_h_e': self.networks.v_h_e,
         }
@@ -807,6 +810,11 @@ class BasePhase2Trainer(ABC):
             networks['u_r'] = self.networks.u_r
         if self.config.v_r_use_network and self.networks.v_r is not None:
             networks['v_r'] = self.networks.v_r
+        if self.config.use_rnd and self.networks.rnd is not None:
+            networks['rnd'] = self.networks.rnd.predictor
+        if (self.config.use_rnd and self.config.use_human_action_rnd
+                and self.networks.human_rnd is not None):
+            networks['human_rnd'] = self.networks.human_rnd.predictor
         return networks
     
     def _flatten_network_grads(self, net: nn.Module) -> Optional[torch.Tensor]:
@@ -829,9 +837,10 @@ class BasePhase2Trainer(ABC):
         - EMA of gradient L2 norm (tracks gradient scale over time)
         - Cosine similarity between successive gradients (tracks descent direction consistency)
         
-        Networks not in the configured network map (e.g. 'rnd') are skipped for
-        cosine similarity since their parameters aren't accessible here; EMA of
-        their grad norm is still tracked from the provided grad_norms.
+        Networks present in the configured network map get both EMA norm and
+        cosine similarity.  Networks absent from the map (e.g. a network name
+        that appears in grad_norms but whose module is not exposed) still get
+        EMA norm tracking but cosine similarity is skipped.
         
         Results are stored in self._grad_norm_ema and self._grad_cosine_sim.
         """
@@ -846,7 +855,6 @@ class BasePhase2Trainer(ABC):
                 self._grad_norm_ema[name] = norm
             
             # Skip cosine similarity for networks not in the configured map
-            # (e.g. 'rnd' predictor whose module isn't exposed here)
             if name not in configured:
                 continue
             
@@ -2843,17 +2851,21 @@ class BasePhase2Trainer(ABC):
     
     def _compute_single_grad_norm(self, network_name: str) -> float:
         """Compute gradient L2 norm for a single network."""
-        networks = {
+        networks: Dict[str, nn.Module] = {
             'q_r': self.networks.q_r,
             'v_h_e': self.networks.v_h_e,
         }
         if self.config.x_h_use_network and self.networks.x_h is not None:
             networks['x_h'] = self.networks.x_h
-        if self.config.u_r_use_network:
+        if self.config.u_r_use_network and self.networks.u_r is not None:
             networks['u_r'] = self.networks.u_r
-        # Only include V_r if using network mode
-        if self.config.v_r_use_network:
+        if self.config.v_r_use_network and self.networks.v_r is not None:
             networks['v_r'] = self.networks.v_r
+        if self.config.use_rnd and self.networks.rnd is not None:
+            networks['rnd'] = self.networks.rnd.predictor
+        if (self.config.use_rnd and self.config.use_human_action_rnd
+                and self.networks.human_rnd is not None):
+            networks['human_rnd'] = self.networks.human_rnd.predictor
         if network_name not in networks:
             return 0.0
         net = networks[network_name]
