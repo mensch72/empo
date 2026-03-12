@@ -216,18 +216,18 @@ def test_flatten_network_grads():
     print("  ✓ Returns None for unknown network name")
 
 
-def test_get_active_network_map():
-    """_get_active_network_map returns only active networks."""
+def test_get_configured_network_map():
+    """_get_configured_network_map returns only configured/present networks."""
     # Default config: x_h_use_network=True but x_h=None, u_r/v_r_use_network=False
     obj = _make_stub()
 
-    active = obj._get_active_network_map()
-    assert 'q_r' in active
-    assert 'v_h_e' in active
+    configured = obj._get_configured_network_map()
+    assert 'q_r' in configured
+    assert 'v_h_e' in configured
     # x_h_use_network=True by default but networks.x_h is None
-    assert 'x_h' not in active
-    assert 'u_r' not in active
-    assert 'v_r' not in active
+    assert 'x_h' not in configured
+    assert 'u_r' not in configured
+    assert 'v_r' not in configured
     print("  ✓ Default config returns q_r and v_h_e only")
 
 
@@ -282,6 +282,57 @@ def test_config_save_yaml_includes_grad_metrics(tmp_path):
     print("  ✓ save_yaml includes grad_metrics_ema_decay")
 
 
+def test_config_grad_metrics_ema_decay_validation():
+    """grad_metrics_ema_decay must be in [0, 1)."""
+    import pytest
+
+    # Valid boundary values
+    Phase2Config(grad_metrics_ema_decay=0.0)
+    Phase2Config(grad_metrics_ema_decay=0.5)
+    print("  ✓ Accepts valid values 0.0, 0.5")
+
+    # Invalid: >= 1
+    with pytest.raises(ValueError, match="grad_metrics_ema_decay"):
+        Phase2Config(grad_metrics_ema_decay=1.0)
+    print("  ✓ Rejects 1.0")
+
+    with pytest.raises(ValueError, match="grad_metrics_ema_decay"):
+        Phase2Config(grad_metrics_ema_decay=1.5)
+    print("  ✓ Rejects 1.5")
+
+    # Invalid: < 0
+    with pytest.raises(ValueError, match="grad_metrics_ema_decay"):
+        Phase2Config(grad_metrics_ema_decay=-0.1)
+    print("  ✓ Rejects -0.1")
+
+
+def test_stale_cosine_cleared_on_no_grad():
+    """Cosine similarity should be cleared when gradients disappear."""
+    obj = _make_stub(grad_metrics_ema_decay=0.99)
+    net = obj.networks.q_r
+
+    # Step 1: set gradient
+    net.zero_grad()
+    for p in net.parameters():
+        p.grad = torch.ones_like(p.data)
+    obj._update_grad_metrics({'q_r': 1.0})
+
+    # Step 2: same gradient → cosine = 1
+    net.zero_grad()
+    for p in net.parameters():
+        p.grad = torch.ones_like(p.data)
+    obj._update_grad_metrics({'q_r': 1.0})
+    assert 'q_r' in obj._grad_cosine_sim
+    assert abs(obj._grad_cosine_sim['q_r'] - 1.0) < 1e-6
+
+    # Step 3: remove gradients → cosine should be cleared
+    net.zero_grad()
+    obj._update_grad_metrics({'q_r': 0.0})
+    assert 'q_r' not in obj._grad_cosine_sim
+    assert 'q_r' not in obj._prev_flat_grads
+    print("  ✓ Stale cosine similarity cleared when gradients disappear")
+
+
 def run_all_tests():
     """Run all gradient metrics tests."""
     import tempfile
@@ -293,12 +344,13 @@ def run_all_tests():
 
     test_config_grad_metrics_ema_decay_default()
     test_config_grad_metrics_ema_decay_custom()
+    test_config_grad_metrics_ema_decay_validation()
     print()
 
     test_flatten_network_grads()
     print()
 
-    test_get_active_network_map()
+    test_get_configured_network_map()
     print()
 
     test_update_grad_metrics_ema_initialization()
@@ -314,6 +366,9 @@ def run_all_tests():
     print()
 
     test_multiple_networks_tracked()
+    print()
+
+    test_stale_cosine_cleared_on_no_grad()
     print()
 
     with tempfile.TemporaryDirectory() as td:

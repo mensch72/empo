@@ -446,6 +446,12 @@ class Phase2Config:
                 stacklevel=2
             )
         
+        # Validate gradient metrics settings
+        if not (0.0 <= self.grad_metrics_ema_decay < 1.0):
+            raise ValueError(
+                f"grad_metrics_ema_decay must be in [0, 1), got {self.grad_metrics_ema_decay}"
+            )
+        
         # Recommend count-based curiosity for lookup tables
         if self.use_lookup_tables and self.use_rnd and not self.use_count_based_curiosity:
             warnings.warn(

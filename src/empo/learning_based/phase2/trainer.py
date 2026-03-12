@@ -790,8 +790,13 @@ class BasePhase2Trainer(ABC):
             norms[name] = total_norm ** 0.5
         return norms
     
-    def _get_active_network_map(self) -> Dict[str, nn.Module]:
-        """Return dict of active network names to modules."""
+    def _get_configured_network_map(self) -> Dict[str, nn.Module]:
+        """Return dict of configured/present network names to modules.
+        
+        This returns networks that are configured and instantiated, regardless of
+        warm-up stage. For warm-up-aware network selection, use
+        config.get_active_networks(step) instead.
+        """
         networks = {
             'q_r': self.networks.q_r,
             'v_h_e': self.networks.v_h_e,
@@ -809,11 +814,11 @@ class BasePhase2Trainer(ABC):
         
         Returns None if the network has no gradients.
         """
-        networks = self._get_active_network_map()
+        networks = self._get_configured_network_map()
         if network_name not in networks:
             return None
         net = networks[network_name]
-        grads = [p.grad.data.flatten() for p in net.parameters() if p.grad is not None]
+        grads = [p.grad.detach().flatten() for p in net.parameters() if p.grad is not None]
         if not grads:
             return None
         return torch.cat(grads).cpu()
@@ -838,18 +843,25 @@ class BasePhase2Trainer(ABC):
             
             # Compute cosine similarity with previous gradient
             flat_grad = self._flatten_network_grads(name)
-            if flat_grad is not None and name in self._prev_flat_grads:
-                prev = self._prev_flat_grads[name]
-                if prev is not None and prev.shape == flat_grad.shape:
-                    dot = torch.dot(flat_grad, prev).item()
-                    norm_curr = flat_grad.norm().item()
-                    norm_prev = prev.norm().item()
-                    denom = norm_curr * norm_prev
-                    self._grad_cosine_sim[name] = dot / denom if denom > 0 else 0.0
+            if flat_grad is None:
+                # No current gradients: clear stored metrics to avoid stale values
+                self._grad_cosine_sim.pop(name, None)
+                self._prev_flat_grads.pop(name, None)
+                continue
+
+            prev = self._prev_flat_grads.get(name)
+            if prev is not None and prev.shape == flat_grad.shape:
+                dot = torch.dot(flat_grad, prev).item()
+                norm_curr = flat_grad.norm().item()
+                norm_prev = prev.norm().item()
+                denom = norm_curr * norm_prev
+                self._grad_cosine_sim[name] = dot / denom if denom > 0 else 0.0
+            else:
+                # Shape mismatch or missing previous gradient: clear any stale cosine metric
+                self._grad_cosine_sim.pop(name, None)
             
             # Store current gradient for next step
-            if flat_grad is not None:
-                self._prev_flat_grads[name] = flat_grad
+            self._prev_flat_grads[name] = flat_grad
     
     def update_target_networks(self):
         """Update target networks (hard copy) at their individual intervals."""
@@ -2815,8 +2827,10 @@ class BasePhase2Trainer(ABC):
         if rnd_lr_scales:
             prediction_stats['rnd_adaptive_lr'] = rnd_lr_scales
         
-        # Update gradient-based convergence metrics (EMA of grad norm + cosine similarity)
-        self._update_grad_metrics(grad_norms)
+        # Only compute gradient convergence metrics when TensorBoard logging is active;
+        # _update_grad_metrics flattens full gradient vectors to CPU each step.
+        if getattr(self, "writer", None) is not None:
+            self._update_grad_metrics(grad_norms)
         
         return loss_values, grad_norms, prediction_stats
     
