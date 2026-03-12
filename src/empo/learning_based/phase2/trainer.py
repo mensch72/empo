@@ -1654,16 +1654,16 @@ class BasePhase2Trainer(ABC):
         trans_probs = transition_probs_by_action.get(action_idx, [])
         
         if not trans_probs:
-            # Terminal state or no transitions — stay in current state
-            next_state = state
+            # Terminal state or no transitions — stay in current state,
+            # env is already in this state so no set_state() needed
+            return state
         elif len(trans_probs) == 1:
             # Deterministic transition (most common case) — no sampling needed
             next_state = trans_probs[0][1]
         else:
             # Probabilistic transition — sample from distribution
-            probs = [p for p, _ in trans_probs]
-            states = [s for _, s in trans_probs]
-            chosen_idx = np.random.choice(len(trans_probs), p=probs)
+            probs, states = zip(*trans_probs)
+            chosen_idx = np.random.choice(len(probs), p=probs)
             next_state = states[chosen_idx]
         
         # Advance environment to the sampled next state
