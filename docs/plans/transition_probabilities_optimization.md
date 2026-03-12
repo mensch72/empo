@@ -6,11 +6,16 @@
 ## 1. Overview
 
 The `transition_probabilities()` method in `vendor/multigrid/gym_multigrid/multigrid.py` is the
-performance-critical hot path for DAG construction in backward induction (`get_dag()` and
-`get_dag_parallel()`). For an environment with `A` actions and `N` agents, `get_dag()` calls
-`transition_probabilities()` **A^N times per state**—e.g., 36 times per state for a 2-agent
-environment with 6 actions, or 46,656 times for 6 agents. Total calls across DAG construction
-can reach tens of millions.
+performance-critical hot path for two major callers:
+
+1. **Backward induction:** `get_dag()` and `get_dag_parallel()` call it **A^N times per
+   state** (e.g., 36 times per state for a 2-agent, 6-action environment). Total calls across
+   DAG construction can reach tens of millions.
+
+2. **Phase 2 trainer:** `_precompute_transition_probs()` calls it **A_r times per env step**
+   (once per robot action combination) during data collection. Additionally, `step()` is called
+   afterward, which internally re-invokes the same machinery. With ~100K+ training steps, the
+   cumulative cost is substantial.
 
 Current profiling (from `examples/diagnostics/profile_transitions.py`):
 - `get_state()`: ~0.02 ms
@@ -18,10 +23,12 @@ Current profiling (from `examples/diagnostics/profile_transitions.py`):
 - `transition_probabilities()`: ~0.07 ms (includes internal set_state/get_state overhead)
 - `get_dag()` for 5,000 states: ~5 s
 
-This document proposes optimizations organized by expected impact and implementation difficulty.
+This document proposes optimizations organized by expected impact and implementation difficulty,
+covering both callers.
 
 ### 1.1 Architecture Reminder
 
+**Core method:**
 ```
 transition_probabilities(state, actions)          # PUBLIC wrapper: save/set/restore state
   └─ _transition_probabilities_impl(state, actions)  # CORE: optimizations + Cartesian product
@@ -35,6 +42,46 @@ transition_probabilities(state, actions)          # PUBLIC wrapper: save/set/res
 Every call to `_compute_successor_state*()` does a full `set_state()` → execute actions →
 `get_state()` round-trip. The public wrapper adds another `get_state()` (save) + `set_state()`
 (query) + `set_state()` (restore) on top.
+
+### 1.2 Phase 2 Trainer Call Pattern
+
+**Data collection per env step** (`collect_transition()`, trainer.py lines 1466–1554):
+```
+collect_transition(state, goals, goal_weights, terminal)
+  ├─ Step 1: sample_human_actions(state, goals)
+  │    └─ Uses human_policy_prior (no env interaction)
+  │
+  ├─ Step 2: _precompute_transition_probs(state, human_actions)
+  │    └─ for each robot_action_idx in 0..A_r-1:
+  │         └─ transition_probabilities(state, actions)     ← A_r calls, same state
+  │              ├─ get_state()     # save original        ← REDUNDANT (A_r times)
+  │              ├─ set_state(state) # set query state     ← REDUNDANT (env already in state)
+  │              ├─ _transition_probabilities_impl(...)     ← actual work
+  │              └─ set_state(original_state)  # restore   ← needed, but repeated A_r times
+  │
+  ├─ Step 3: sample_robot_action(state, transition_probs_by_action)
+  │    └─ Uses q_r_target network (no env interaction)
+  │
+  └─ Step 4: step_environment(state, robot_action, human_actions)
+       └─ env.step(actions)              ← calls _transition_probabilities_impl AGAIN
+       │    ├─ self.get_state()          ← REDUNDANT (env already in correct state)
+       │    └─ _transition_probabilities_impl(state, actions, sample_one=True)
+       │         └─ _compute_successor_state*()
+       │              ├─ set_state(state)   ← REDUNDANT (env already in state from above)
+       │              ├─ execute actions
+       │              └─ get_state()        ← builds successor state
+       └─ env.get_state()               ← REDUNDANT (successor state already returned above)
+```
+
+**Key observations:**
+- The env is already in state `state` when `_precompute_transition_probs()` starts
+- All A_r calls to `transition_probabilities()` query the SAME state
+- Each call saves/restores, so there are A_r redundant save+restore round-trips
+- After precompute, `step()` re-derives what was already computed (the transition for the
+  chosen robot action is already in `transition_probs_by_action`)
+- `step()` internally calls `get_state()` even though the env is already in the right state
+- `step_environment()` calls `get_state()` to return the next state, but `_compute_successor_state*()`
+  already built and returned it
 
 ## 2. Bottleneck Analysis
 
@@ -157,7 +204,65 @@ case). The sorted order is needed for deterministic hashing.
 
 **Impact:** Low for small object counts, but unnecessary in the common case.
 
+### 2.8 [Phase 2] Redundant Save/Restore Across Batched Precompute Calls
+
+**Location:** `_precompute_transition_probs()` (trainer.py lines 1556–1597)
+
+This method calls `transition_probabilities(state, actions)` in a loop for each of A_r robot
+action combinations. All A_r calls query the **same state**. But each call independently:
+1. Saves the original env state via `get_state()` → ~0.02 ms
+2. Sets the query state via `set_state(state)` → ~0.03 ms
+3. Computes transition probabilities
+4. Restores original state via `set_state(original_state)` → ~0.03 ms
+
+Since the env is already in `state` before the loop starts (the trainer tracks
+`actor_state.state` and the env is kept in sync), step (2) is a no-op that still incurs full
+cost. And step (4) of call *i* is immediately undone by step (2) of call *i+1*. The net result
+is A_r × ~0.08 ms of pure overhead that could be amortized to a single ~0.03 ms restore.
+
+**Impact:** High for Phase 2. With A_r=6 robot actions, this is ~0.48 ms of wasted save/restore
+per env step. Over 100K env steps: ~48 seconds of pure overhead.
+
+### 2.9 [Phase 2] `step()` Duplicates Already-Computed Transition
+
+**Location:** `step_environment()` (trainer.py lines 899–930) → `step()` (multigrid.py lines 4211–4247)
+
+After `_precompute_transition_probs()` computes transition probabilities for ALL robot actions,
+`step_environment()` calls `env.step(actions)` which internally:
+1. Calls `self.get_state()` to capture the current state (~0.02 ms)
+2. Calls `_transition_probabilities_impl(state, actions, sample_one=True)` to sample one outcome
+3. This invokes `_compute_successor_state*()` which does `set_state()` + execute + `get_state()`
+
+But the transition for the chosen (robot_action, human_actions) is **already in**
+`transition_probs_by_action[selected_action_idx]`. For deterministic transitions (the common
+case), the single successor state is already computed and stored. For probabilistic transitions,
+the full distribution is stored—we just need to sample from it.
+
+After step(), `step_environment()` additionally calls `env.get_state()` to return the next
+state, but `_compute_successor_state*()` already computed this inside step().
+
+**Impact:** High for Phase 2. An entire redundant `_transition_probabilities_impl()` call
+(~0.07 ms) + an extra `get_state()` (~0.02 ms) per env step. Over 100K env steps: ~9 seconds.
+
+### 2.10 [Phase 2] Environment Already in Correct State Before Calls
+
+**Location:** Throughout `collect_transition()` (trainer.py lines 1466–1554)
+
+The Phase 2 trainer maintains `actor_state.state` and keeps the environment in sync. At the
+start of `collect_transition()`, the env is already in state `state`. Yet:
+
+- `transition_probabilities()` does `set_state(state)` redundantly
+- `step()` does `get_state()` redundantly (the env is in `state`; `get_state()` returns `state`)
+
+These are instances of the general §2.1 problem but amplified because the Phase 2 trainer
+makes the guarantee that the env is always in the correct state—a guarantee the general
+`transition_probabilities()` wrapper cannot assume.
+
+**Impact:** Medium. ~0.05 ms wasted per env step (1 redundant set_state + 1 redundant get_state).
+
 ## 3. Proposed Optimizations
+
+### Optimizations for `get_dag()` (Backward Induction)
 
 ### 3.1 [HIGH IMPACT] Skip State Save/Restore via Caller Protocol
 
@@ -480,6 +585,282 @@ def get_state_bytes(self):
 
 **Risk:** High. Pervasive API change. Best done as an opt-in parallel representation.
 
+### Optimizations for Phase 2 Trainer (Data Production)
+
+### 3.12 [HIGH IMPACT] Batch Precompute: Single Set/Restore for All Robot Actions
+
+**Approach:** Replace A_r independent `transition_probabilities()` calls with a single batched
+method that shares the save/set/restore overhead.
+
+**Current flow** (`_precompute_transition_probs`, trainer.py lines 1556–1597):
+```python
+for action_idx in range(num_actions):    # A_r iterations
+    ...
+    trans_probs = self.env.transition_probabilities(state, actions)  # save + set + compute + restore
+```
+
+Each call does: save (~0.02 ms) + set (~0.03 ms) + compute + restore (~0.03 ms) = ~0.08 ms overhead.
+
+**Proposed flow:**
+```python
+def _precompute_transition_probs(self, state, human_actions):
+    result = {}
+    # The env is already in `state` (trainer invariant).
+    # Save once, compute A_r times, restore once.
+    original_state = self.env.get_state()   # 1 save
+    self.env.set_state(state)               # 1 set (no-op if env is already in state)
+    try:
+        for action_idx in range(num_actions):
+            ...
+            # Call internal method directly, bypassing save/restore wrapper
+            trans_probs = self.env._transition_probabilities_impl(state, actions)
+            result[action_idx] = trans_probs if trans_probs is not None else []
+            # Restore query state for next iteration (undo side effects of _compute_successor_state*)
+            self.env.set_state(state)
+    finally:
+        self.env.set_state(original_state)  # 1 restore
+    return result
+```
+
+**Savings:** Reduces overhead from A_r × ~0.08 ms to 1 × ~0.05 ms + A_r × ~0.03 ms (one
+restore per iteration, since `_transition_probabilities_impl` modifies env as a side effect).
+For A_r=6: from ~0.48 ms to ~0.23 ms overhead per env step (2× improvement on this path).
+
+**Risk:** Low-medium. Depends on `_transition_probabilities_impl()` being a stable internal API.
+The trainer already tightly couples to the multigrid env; this is an extension of that pattern.
+
+**Alternative (safer):** Add a `batch_transition_probabilities(state, list_of_actions)` method
+to `MultiGridEnv` that implements the batched protocol internally:
+```python
+def batch_transition_probabilities(self, state, actions_list):
+    """Compute transition probabilities for multiple action vectors from the same state."""
+    original_state = self.get_state()
+    self.set_state(state)
+    try:
+        results = []
+        for actions in actions_list:
+            result = self._transition_probabilities_impl(state, actions)
+            results.append(result)
+            self.set_state(state)  # restore between iterations
+        return results
+    finally:
+        self.set_state(original_state)
+```
+
+This keeps the optimization encapsulated in the world model and avoids the trainer calling
+internal methods.
+
+### 3.13 [HIGH IMPACT] Skip `step()` by Sampling from Cached Transition Probs
+
+**Approach:** When `use_model_based_targets=True` and `transition_probs_by_action` has already
+been computed, skip calling `step_environment()` entirely. Instead, sample the next state
+directly from the pre-computed transition probabilities and use `set_state()` to advance the
+environment.
+
+**Current flow:**
+```python
+# In collect_transition():
+transition_probs_by_action = self._precompute_transition_probs(state, human_actions)
+robot_action = self.sample_robot_action(state, transition_probs_by_action)
+next_state = self.step_environment(state, robot_action, human_actions)  # calls step() + get_state()
+```
+
+**Proposed flow:**
+```python
+transition_probs_by_action = self._precompute_transition_probs(state, human_actions)
+robot_action = self.sample_robot_action(state, transition_probs_by_action)
+
+# Sample next_state from cached transition probs instead of calling step()
+action_idx = self.networks.q_r.action_tuple_to_index(robot_action)
+trans_probs = transition_probs_by_action[action_idx]
+
+if not trans_probs:
+    next_state = state  # Terminal state
+else:
+    probs = [p for p, _ in trans_probs]
+    states = [s for _, s in trans_probs]
+    chosen_idx = np.random.choice(len(trans_probs), p=probs)
+    next_state = states[chosen_idx]
+
+# Advance environment to the sampled state
+self.env.set_state(next_state)
+```
+
+**Savings:** Eliminates an entire `step()` call (~0.09 ms: get_state + _transition_probabilities_impl
++ get_state) per env step. Over 100K env steps: ~9 seconds saved.
+
+**Risk:** Medium. Must ensure that:
+1. The sampled distribution matches what `step()` would produce (guaranteed by design, since
+   `step()` delegates to `_transition_probabilities_impl(sample_one=True)`)
+2. The environment is correctly advanced to `next_state` via `set_state()` (standard API)
+3. Any side effects of `step()` that the trainer relies on are preserved—notably the observation
+   generation. Currently `step_environment()` discards `obs, rewards, done, info` from `step()`,
+   so no side effects are lost.
+4. Visual feedback (`stumbled_cells`, `magic_wall_entered_cells`) is not needed during training
+
+**Caveat:** When `use_model_based_targets=False`, transition_probs are NOT precomputed, so we
+must fall back to `step_environment()`. The optimization only applies when model-based targets
+are enabled.
+
+### 3.14 [MEDIUM IMPACT] Skip Initial `set_state()` When Env is Already in Correct State
+
+**Approach:** The Phase 2 trainer guarantees that the env is in state `state` at the start of
+`collect_transition()`. Leverage this to skip the `set_state(state)` call in
+`transition_probabilities()`.
+
+**Option A — State comparison guard:**
+```python
+def transition_probabilities(self, state, actions, sample_one=False, skip_state_setup=False):
+    ...
+    if not skip_state_setup:
+        original_state = self.get_state()
+        self.set_state(state)
+    ...
+```
+
+The trainer would call with `skip_state_setup=True` when it knows the env is in the right state.
+
+**Option B — Cached state check:**
+```python
+# In transition_probabilities:
+current = self.get_state()
+if current == state:
+    # Skip set_state, just compute directly
+    return self._transition_probabilities_impl(state, actions, sample_one=sample_one)
+```
+
+However, this equality check on nested tuples may itself be costly (~0.01 ms for complex states),
+partially negating the savings.
+
+**Option C — Always skip in batched variant:**
+Combined with §3.12, the batched variant already does a single `set_state(state)` and restores
+between iterations. If the env is already in `state`, the first `set_state()` becomes a no-op
+(but still incurs full cost). A `_state_equals_current` fast path could be added.
+
+**Savings:** ~0.03 ms per call. For A_r=6: ~0.18 ms saved per env step.
+
+**Risk:** Low for Option A (explicit caller contract). Medium for Option B (relies on state
+equality being cheap).
+
+### 3.15 [MEDIUM IMPACT] Avoid Redundant `get_state()` in `step_environment()`
+
+**Approach:** `step_environment()` currently calls `self.env.step(actions)` (which internally
+computes the successor state) and then `self.env.get_state()` to return it. But `step()`'s
+internal `_compute_successor_state*()` already computed and returned the successor state—it's
+just not exposed through `step()`'s return value.
+
+**Option A — Expose successor state from step():**
+Add a method to the world model that returns the successor state directly:
+```python
+def step_returning_state(self, actions):
+    """Like step() but also returns the successor state tuple."""
+    state = self.get_state()
+    result = self._transition_probabilities_impl(state, actions, sample_one=True)
+    if result is None:
+        return self.get_state(), None, True
+    return result[0][1], None, self.step_count >= self.max_steps
+```
+
+**Option B — Cache get_state() result after step():**
+After `_compute_successor_state*()` returns, cache the state tuple so that the next
+`get_state()` call returns it without recomputation:
+```python
+def step(self, actions):
+    ...
+    result = self._transition_probabilities_impl(state, actions, sample_one=True)
+    if result is not None:
+        self._cached_state = result[0][1]  # Cache the successor state
+    ...
+
+def get_state(self):
+    if hasattr(self, '_cached_state') and self._cached_state is not None:
+        cached = self._cached_state
+        self._cached_state = None
+        return cached
+    # ...normal get_state logic
+```
+
+**Savings:** ~0.02 ms per env step (one `get_state()` eliminated). Minor individually but
+free improvement.
+
+**Risk:** Low for Option B. Option A changes the WorldModel API.
+
+### 3.16 [MEDIUM IMPACT] Amortize Shared Work Across Robot Actions in Precompute
+
+**Approach:** In `_precompute_transition_probs()`, the A_r calls to
+`transition_probabilities()` share significant common work:
+- Active agent identification (same for all calls if human actions are fixed and only robot
+  action varies)
+- Agent categorization (unsteady, magic wall checks)
+- Forced action handling
+- `_initial_agent_positions` computation (same for all calls)
+
+If the robot is a single agent, only the robot's action changes between calls. All other agents'
+status and front positions remain constant.
+
+**Option A — Pre-compute shared state once:**
+Factor out the common setup into a method that runs once, then iterate over robot actions:
+```python
+def _precompute_transition_probs_fast(self, state, human_actions):
+    self.env.set_state(state)
+    
+    # Pre-compute shared data once
+    num_agents = len(self.env.agents)
+    front_positions = {i: tuple(self.env.agents[i].front_pos) for i in range(num_agents)
+                       if not self.env.agents[i].terminated}
+    
+    for action_idx in range(num_actions):
+        # Only the robot's action changes
+        actions = self._build_action_vector(human_actions, robot_action)
+        # Pass pre-computed data to avoid redundant work
+        trans_probs = self.env._transition_probabilities_impl_fast(
+            state, actions, front_positions=front_positions
+        )
+```
+
+**Option B — Separate determinism check from computation:**
+For many states, ALL robot actions lead to deterministic transitions (e.g., when agents are far
+apart). A fast pre-check could detect this and use the cheaper deterministic path for all A_r
+actions without repeating the check each time.
+
+**Savings:** Reduces per-call overhead within `_transition_probabilities_impl()` by ~30%.
+Most impactful when the number of robot actions is large.
+
+**Risk:** Medium. Requires adding new internal methods that take pre-computed data.
+
+### 3.17 [LOW-MEDIUM IMPACT] Reuse Transition Probs for Training Target Computation
+
+**Approach:** The Phase 2 trainer stores `transition_probs_by_action` in the replay buffer with
+each transition. During training, `_compute_model_based_v_h_e_targets()` and
+`_compute_model_based_q_r_targets()` iterate over these stored transitions to compute targets.
+
+Currently, successor states in these transition probs are raw state tuples that must be
+tensorized during training. If the trainer pre-tensorized the compact features for successor
+states at collection time (when the env is already set up), the training step would avoid
+redundant tensorization.
+
+**Current:**
+```python
+# In _compute_model_based_v_h_e_targets:
+for prob, next_state in trans_probs:
+    # next_state is a raw tuple → needs tensorization at training time
+    all_next_states.append(next_state)
+```
+
+**Proposed:** At collection time, also compute compact features for each unique successor state:
+```python
+# In _precompute_transition_probs:
+for next_state in unique_successor_states:
+    features = self.state_encoder.tensorize_state_compact(next_state, self.env)
+    successor_features[next_state] = features
+```
+
+**Savings:** Moves tensorization cost from the training step (where it's on the critical path
+for gradient computation) to the data collection step (which can be amortized).
+
+**Risk:** Medium. Increases replay buffer memory usage (storing tensors alongside state tuples).
+May not be worthwhile if the tensorization cache hit rate is already high.
+
 ## 4. Behavioral Changes to Consider
 
 ### 4.1 Simplify Chain Conflict Prevention
@@ -519,7 +900,7 @@ This is a pure optimization with no behavioral change—environments without Con
 
 ## 5. Implementation Phases
 
-### Phase 1: Low-Risk, High-Impact (1–2 days)
+### Phase 1: Low-Risk, High-Impact — `get_dag()` Basics (1–2 days)
 
 1. **§3.1** — `_transition_probabilities_no_restore()` for `get_dag()`
 2. **§3.6** — Cache action properties at construction time
@@ -529,7 +910,7 @@ This is a pure optimization with no behavioral change—environments without Con
 Expected speedup: **~2× overall** for `get_dag()`, dominated by eliminating the save/restore
 overhead.
 
-### Phase 2: Medium-Risk, High-Impact (2–3 days)
+### Phase 2A: Medium-Risk, High-Impact — `get_dag()` Fast Paths (2–3 days)
 
 5. **§3.2** — Deterministic fast path for rotations and single-agent forward
 6. **§3.8** — Eliminate mobile object sort in get_state() (dirty flag)
@@ -537,18 +918,30 @@ overhead.
 Expected speedup: **~1.5× additional** (cumulative ~3×), dominated by avoiding set_state/get_state
 for the majority of deterministic transitions.
 
+### Phase 2B: Low-Medium Risk, High-Impact — Phase 2 Trainer (2–3 days)
+
+7. **§3.12** — Batch precompute: single set/restore for all robot actions
+8. **§3.13** — Skip step() by sampling from cached transition probs
+9. **§3.15** — Avoid redundant get_state() in step_environment()
+
+Expected speedup for Phase 2 data collection: **~2–3×** for the actor step, dominated by
+eliminating the redundant step() call and amortizing save/restore overhead across robot actions.
+
 ### Phase 3: Medium-Risk, Medium-Impact (3–5 days)
 
-7. **§3.4** — Replace numpy arrays with tuples for positions in hot path
-8. **§3.3** — Lightweight reset between Cartesian-product outcomes
+10. **§3.4** — Replace numpy arrays with tuples for positions in hot path
+11. **§3.3** — Lightweight reset between Cartesian-product outcomes
+12. **§3.14** — Skip initial set_state when env is already in correct state
+13. **§3.16** — Amortize shared work across robot actions in precompute
 
-Expected speedup: **~1.3× additional** (cumulative ~4×).
+Expected speedup: **~1.3× additional** (cumulative ~4× for get_dag, ~3× for Phase 2 actor).
 
 ### Phase 4: High-Risk, Speculative (1–2 weeks)
 
-9. **§3.10** — Incremental state encoding
-10. **§3.11** — Alternative state encoding (bytes)
-11. **§4.1** — Simplify chain conflict prevention (behavioral change)
+14. **§3.10** — Incremental state encoding
+15. **§3.11** — Alternative state encoding (bytes)
+16. **§3.17** — Pre-tensorize successor states at collection time
+17. **§4.1** — Simplify chain conflict prevention (behavioral change)
 
 Expected speedup: **~1.5× additional** (cumulative ~6×), but high implementation risk.
 
@@ -584,7 +977,26 @@ Extend `examples/diagnostics/profile_transitions.py` to benchmark:
 - `all_agent_colors.yaml` (6 agents, small grid → slow-path dominated)
 - Any environment with ControlButtons (to measure §3.5 impact)
 
-### 6.4 Behavioral Change Validation
+### 6.4 Phase 2 Trainer Integration Tests
+
+For Phase 2B optimizations (§3.12–§3.13):
+
+1. **Distribution equivalence:** Run `collect_transition()` N times with the optimized path and
+   verify the distribution of next_states matches the original `step_environment()` path
+   (chi-squared test)
+2. **Replay buffer contents:** Verify that transitions stored in the replay buffer have correct
+   `transition_probs_by_action`, `state`, `next_state` fields after optimization
+3. **End-to-end training:** Run a short training loop (100 steps) with both original and
+   optimized paths and verify identical loss trajectories (with same random seed)
+4. **Profiler sections:** Use the existing `TrainingProfiler` sections (`transition_probabilities`,
+   `step_environment`, `actor_total`) to measure before/after timing
+5. **Edge cases:** Test with:
+   - `use_model_based_targets=True` AND `False` (§3.13 only applies when True)
+   - Deterministic transitions (single agent) and probabilistic (multi-agent conflicts)
+   - Terminal transitions (step_count >= max_steps)
+   - Environments with stochastic elements (unsteady ground, magic walls)
+
+### 6.5 Behavioral Change Validation
 
 If §4.1 (simplified chain conflict) is implemented, create a dedicated test that:
 1. Sets up a scenario where chain conflict prevention matters
@@ -609,16 +1021,39 @@ If §4.1 (simplified chain conflict) is implemented, create a dedicated test tha
    once per action profile, compute all A^N transitions for a state in a single method that
    shares the set_state overhead.
 
+5. **Should §3.13 (skip step, sample from cached probs) be the default even when
+   `use_model_based_targets=False`?** Currently the optimization only activates when model-based
+   targets are enabled because that's when `_precompute_transition_probs` runs. We could make
+   precomputation unconditional so that step() is always bypassed, but this adds A_r
+   transition_probabilities calls per env step even when not needed for targets.
+
+6. **How should §3.12 (batch precompute) interact with `_transition_probabilities_impl()`'s
+   internal `set_state()` calls?** Each outcome computation in `_compute_successor_state*()`
+   calls `set_state(state)` internally. The batched variant's inter-iteration `set_state(state)`
+   restore may be redundant with the first `set_state(state)` inside the next call's
+   `_compute_successor_state*()`. This could be eliminated if the internal method accepted a
+   "state already set" flag.
+
+7. **Should the batched API (§3.12) be on WorldModel or on the trainer?** Adding
+   `batch_transition_probabilities()` to WorldModel makes it reusable by `get_dag()` too.
+   But it couples the base class to a specific usage pattern. An alternative is a mixin or
+   utility function.
+
 ## 8. References
 
 - `vendor/multigrid/gym_multigrid/multigrid.py` — Main implementation (5,923 lines)
 - `vendor/multigrid/PROBABILISTIC_TRANSITIONS.md` — Conflict block algorithm documentation
 - `src/empo/world_model.py` — `WorldModel` base class and `get_dag()` implementation
+- `src/empo/learning_based/phase2/trainer.py` — Phase 2 trainer (data production + training)
+- `src/empo/learning_based/phase2/replay_buffer.py` — `Phase2Transition` and replay buffer
 - `examples/diagnostics/profile_transitions.py` — Existing profiling script
 - `tests/test_statistical_correctness.py` — Distribution correctness tests
 - `tests/test_state_management.py` — State management tests
+- `tests/test_phase2.py` — Phase 2 trainer tests
 
 ## 9. Summary
+
+### For `get_dag()` (Backward Induction)
 
 The biggest gains come from eliminating redundant state save/restore operations (§3.1) and
 avoiding the full set_state/get_state round-trip for deterministic transitions (§3.2). Together,
@@ -628,5 +1063,21 @@ Additional medium-impact optimizations (caching, numpy→tuple, lightweight rese
 total speedup to ~4–6×. The speculative optimizations (incremental state, alternative encoding)
 offer further gains but carry significant implementation risk.
 
-**Recommended approach:** Implement Phase 1 and 2 first, benchmark, then decide whether Phase 3–4
-are worthwhile based on measured profiles.
+### For Phase 2 Trainer (Data Production)
+
+The biggest gains come from:
+1. **§3.13 — Skip step()**: Eliminates an entire redundant transition computation per env step
+   by sampling from the already-computed `transition_probs_by_action` (~0.09 ms saved/step).
+2. **§3.12 — Batch precompute**: Amortizes save/restore overhead across A_r robot action calls
+   (~0.25 ms saved/step for A_r=6).
+
+Together, these reduce the actor step cost by ~2–3×. Combined with the shared optimizations
+(§3.5, §3.6, §3.7) and the Phase 3 items (§3.14, §3.16), the cumulative improvement for Phase 2
+data collection is estimated at ~3–4×.
+
+### Recommended Approach
+
+1. **Phase 1** (get_dag basics) and **Phase 2B** (Phase 2 trainer) can be implemented in
+   parallel since they affect different callers.
+2. Benchmark after each phase to guide prioritization of subsequent phases.
+3. Phase 3 and 4 should be attempted only if measured profiles justify the risk.
