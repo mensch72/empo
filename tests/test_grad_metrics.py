@@ -113,6 +113,7 @@ def test_update_grad_metrics_ema_decay():
     constant_norm = 5.0
     for step in range(200):
         # Give q_r a synthetic gradient so flatten works
+        obj.networks.q_r.zero_grad()
         x = torch.randn(1, 4)
         out = obj.networks.q_r(x)
         out.sum().backward()
@@ -311,17 +312,18 @@ def test_stale_cosine_cleared_on_no_grad():
     obj = _make_stub(grad_metrics_ema_decay=0.99)
     net = obj.networks.q_r
 
-    # Step 1: set gradient
+    # Step 1: set gradient and compute actual norm
     net.zero_grad()
     for p in net.parameters():
         p.grad = torch.ones_like(p.data)
-    obj._update_grad_metrics({'q_r': 1.0})
+    actual_norm = sum(p.grad.data.norm(2).item() ** 2 for p in net.parameters()) ** 0.5
+    obj._update_grad_metrics({'q_r': actual_norm})
 
     # Step 2: same gradient → cosine = 1
     net.zero_grad()
     for p in net.parameters():
         p.grad = torch.ones_like(p.data)
-    obj._update_grad_metrics({'q_r': 1.0})
+    obj._update_grad_metrics({'q_r': actual_norm})
     assert 'q_r' in obj._grad_cosine_sim
     assert abs(obj._grad_cosine_sim['q_r'] - 1.0) < 1e-6
 
@@ -331,6 +333,23 @@ def test_stale_cosine_cleared_on_no_grad():
     assert 'q_r' not in obj._grad_cosine_sim
     assert 'q_r' not in obj._prev_flat_grads
     print("  ✓ Stale cosine similarity cleared when gradients disappear")
+
+
+def test_rnd_skipped_for_cosine():
+    """RND grad norms update EMA but not cosine similarity (not in configured map)."""
+    obj = _make_stub(grad_metrics_ema_decay=0.9)
+
+    # Simulate RND grad norm being passed in
+    obj._update_grad_metrics({'rnd': 2.5})
+    assert abs(obj._grad_norm_ema['rnd'] - 2.5) < 1e-8
+    assert 'rnd' not in obj._grad_cosine_sim
+    assert 'rnd' not in obj._prev_flat_grads
+
+    obj._update_grad_metrics({'rnd': 3.0})
+    expected = 0.9 * 2.5 + 0.1 * 3.0
+    assert abs(obj._grad_norm_ema['rnd'] - expected) < 1e-8
+    assert 'rnd' not in obj._grad_cosine_sim
+    print("  ✓ RND grad norm tracked via EMA, cosine similarity skipped")
 
 
 def run_all_tests():
@@ -369,6 +388,9 @@ def run_all_tests():
     print()
 
     test_stale_cosine_cleared_on_no_grad()
+    print()
+
+    test_rnd_skipped_for_cosine()
     print()
 
     with tempfile.TemporaryDirectory() as td:

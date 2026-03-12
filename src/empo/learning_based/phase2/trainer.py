@@ -795,7 +795,7 @@ class BasePhase2Trainer(ABC):
         
         This returns networks that are configured and instantiated, regardless of
         warm-up stage. For warm-up-aware network selection, use
-        config.get_active_networks(step) instead.
+        self.config.get_active_networks(training_step) instead.
         """
         networks = {
             'q_r': self.networks.q_r,
@@ -803,9 +803,9 @@ class BasePhase2Trainer(ABC):
         }
         if self.config.x_h_use_network and self.networks.x_h is not None:
             networks['x_h'] = self.networks.x_h
-        if self.config.u_r_use_network:
+        if self.config.u_r_use_network and self.networks.u_r is not None:
             networks['u_r'] = self.networks.u_r
-        if self.config.v_r_use_network:
+        if self.config.v_r_use_network and self.networks.v_r is not None:
             networks['v_r'] = self.networks.v_r
         return networks
     
@@ -818,10 +818,10 @@ class BasePhase2Trainer(ABC):
         if network_name not in networks:
             return None
         net = networks[network_name]
-        grads = [p.grad.detach().flatten() for p in net.parameters() if p.grad is not None]
+        grads = [p.grad.detach().flatten().cpu() for p in net.parameters() if p.grad is not None]
         if not grads:
             return None
-        return torch.cat(grads).cpu()
+        return torch.cat(grads)
     
     def _update_grad_metrics(self, grad_norms: Dict[str, float]) -> None:
         """Update gradient-based convergence metrics.
@@ -830,9 +830,14 @@ class BasePhase2Trainer(ABC):
         - EMA of gradient L2 norm (tracks gradient scale over time)
         - Cosine similarity between successive gradients (tracks descent direction consistency)
         
+        Networks not in the configured network map (e.g. 'rnd') are skipped for
+        cosine similarity since their parameters aren't accessible here; EMA of
+        their grad norm is still tracked from the provided grad_norms.
+        
         Results are stored in self._grad_norm_ema and self._grad_cosine_sim.
         """
         decay = self.config.grad_metrics_ema_decay
+        configured = self._get_configured_network_map()
         
         for name, norm in grad_norms.items():
             # Update EMA of gradient norm
@@ -840,6 +845,11 @@ class BasePhase2Trainer(ABC):
                 self._grad_norm_ema[name] = decay * self._grad_norm_ema[name] + (1 - decay) * norm
             else:
                 self._grad_norm_ema[name] = norm
+            
+            # Skip cosine similarity for networks not in the configured map
+            # (e.g. 'rnd' predictor whose module isn't exposed here)
+            if name not in configured:
+                continue
             
             # Compute cosine similarity with previous gradient
             flat_grad = self._flatten_network_grads(name)
@@ -849,19 +859,17 @@ class BasePhase2Trainer(ABC):
                 self._prev_flat_grads.pop(name, None)
                 continue
 
-            prev = self._prev_flat_grads.get(name)
-            if prev is not None and prev.shape == flat_grad.shape:
-                dot = torch.dot(flat_grad, prev).item()
-                norm_curr = flat_grad.norm().item()
-                norm_prev = prev.norm().item()
-                denom = norm_curr * norm_prev
+            prev_flat, prev_norm = self._prev_flat_grads.get(name, (None, None))
+            if prev_flat is not None and prev_flat.shape == flat_grad.shape:
+                dot = torch.dot(flat_grad, prev_flat).item()
+                denom = norm * prev_norm if prev_norm else 0.0
                 self._grad_cosine_sim[name] = dot / denom if denom > 0 else 0.0
             else:
                 # Shape mismatch or missing previous gradient: clear any stale cosine metric
                 self._grad_cosine_sim.pop(name, None)
             
-            # Store current gradient for next step
-            self._prev_flat_grads[name] = flat_grad
+            # Store current gradient and its norm for next step
+            self._prev_flat_grads[name] = (flat_grad, norm)
     
     def update_target_networks(self):
         """Update target networks (hard copy) at their individual intervals."""
