@@ -205,6 +205,11 @@ class BasePhase2Trainer(ABC):
                 global_step=0
             )
             self.writer.add_text('GradNorm/remark', "Gradients are clipped.", global_step=0)
+            self.writer.add_text('GradMetrics/remark',
+                "EMA of gradient norm tracks scale; cosine similarity of successive "
+                "gradients tracks descent direction consistency (→0 near convergence).",
+                global_step=0
+            )
             if config.async_training:
                 max_steps = config.max_env_steps_per_training_step
                 if max_steps is not None:
@@ -272,6 +277,12 @@ class BasePhase2Trainer(ABC):
         # This provides more detailed insight than hashes alone
         self._position_visit_counts: Dict[tuple, int] = {}
         
+        # Gradient-based convergence metrics (issue #122)
+        # EMA of gradient norm and cosine similarity between successive gradients
+        self._grad_norm_ema: Dict[str, float] = {}
+        self._grad_cosine_sim: Dict[str, float] = {}
+        self._prev_flat_grads: Dict[str, Optional[torch.Tensor]] = {}
+        
         # Initialize memory monitor
         self._memory_monitor = MemoryMonitor(
             min_free_fraction=config.min_free_memory_fraction,
@@ -306,6 +317,8 @@ class BasePhase2Trainer(ABC):
         # Don't pickle state visit counts dict - large and only needed in learner
         state['_state_visit_counts'] = {}
         state['_position_visit_counts'] = {}
+        # Don't pickle gradient metric tensors - only needed in learner
+        state['_prev_flat_grads'] = {}
         return state
     
     def __setstate__(self, state):
@@ -776,6 +789,67 @@ class BasePhase2Trainer(ABC):
                     total_norm += p.grad.data.norm(2).item() ** 2
             norms[name] = total_norm ** 0.5
         return norms
+    
+    def _get_active_network_map(self) -> Dict[str, nn.Module]:
+        """Return dict of active network names to modules."""
+        networks = {
+            'q_r': self.networks.q_r,
+            'v_h_e': self.networks.v_h_e,
+        }
+        if self.config.x_h_use_network and self.networks.x_h is not None:
+            networks['x_h'] = self.networks.x_h
+        if self.config.u_r_use_network:
+            networks['u_r'] = self.networks.u_r
+        if self.config.v_r_use_network:
+            networks['v_r'] = self.networks.v_r
+        return networks
+    
+    def _flatten_network_grads(self, network_name: str) -> Optional[torch.Tensor]:
+        """Flatten all gradient tensors for a network into a single 1D CPU vector.
+        
+        Returns None if the network has no gradients.
+        """
+        networks = self._get_active_network_map()
+        if network_name not in networks:
+            return None
+        net = networks[network_name]
+        grads = [p.grad.data.flatten() for p in net.parameters() if p.grad is not None]
+        if not grads:
+            return None
+        return torch.cat(grads).cpu()
+    
+    def _update_grad_metrics(self, grad_norms: Dict[str, float]) -> None:
+        """Update gradient-based convergence metrics.
+        
+        Computes per-network:
+        - EMA of gradient L2 norm (tracks gradient scale over time)
+        - Cosine similarity between successive gradients (tracks descent direction consistency)
+        
+        Results are stored in self._grad_norm_ema and self._grad_cosine_sim.
+        """
+        decay = self.config.grad_metrics_ema_decay
+        
+        for name, norm in grad_norms.items():
+            # Update EMA of gradient norm
+            if name in self._grad_norm_ema:
+                self._grad_norm_ema[name] = decay * self._grad_norm_ema[name] + (1 - decay) * norm
+            else:
+                self._grad_norm_ema[name] = norm
+            
+            # Compute cosine similarity with previous gradient
+            flat_grad = self._flatten_network_grads(name)
+            if flat_grad is not None and name in self._prev_flat_grads:
+                prev = self._prev_flat_grads[name]
+                if prev is not None and prev.shape == flat_grad.shape:
+                    dot = torch.dot(flat_grad, prev).item()
+                    norm_curr = flat_grad.norm().item()
+                    norm_prev = prev.norm().item()
+                    denom = norm_curr * norm_prev
+                    self._grad_cosine_sim[name] = dot / denom if denom > 0 else 0.0
+            
+            # Store current gradient for next step
+            if flat_grad is not None:
+                self._prev_flat_grads[name] = flat_grad
     
     def update_target_networks(self):
         """Update target networks (hard copy) at their individual intervals."""
@@ -2741,6 +2815,9 @@ class BasePhase2Trainer(ABC):
         if rnd_lr_scales:
             prediction_stats['rnd_adaptive_lr'] = rnd_lr_scales
         
+        # Update gradient-based convergence metrics (EMA of grad norm + cosine similarity)
+        self._update_grad_metrics(grad_norms)
+        
         return loss_values, grad_norms, prediction_stats
     
     def _compute_single_grad_norm(self, network_name: str) -> float:
@@ -2956,6 +3033,14 @@ class BasePhase2Trainer(ABC):
                     if key == 'u_r' and not self.config.u_r_use_network:
                         continue
                     self.writer.add_scalar(f'GradNorm/{key}', value, self.training_step_count)
+                for key, value in self._grad_norm_ema.items():
+                    if key == 'u_r' and not self.config.u_r_use_network:
+                        continue
+                    self.writer.add_scalar(f'GradMetrics/{key}_ema_norm', value, self.training_step_count)
+                for key, value in self._grad_cosine_sim.items():
+                    if key == 'u_r' and not self.config.u_r_use_network:
+                        continue
+                    self.writer.add_scalar(f'GradMetrics/{key}_cosine_sim', value, self.training_step_count)
                 for key, stats in pred_stats.items():
                     # RND stats have different keys (running_mean/std instead of mean/std)
                     if key == 'rnd':
