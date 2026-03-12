@@ -182,19 +182,22 @@ class TestSampleFromCachedTransitionProbs:
         trans_probs = env.transition_probabilities(state, actions)
         assert trans_probs is not None
         
-        # Deterministic: should have exactly 1 outcome
-        if len(trans_probs) == 1:
-            prob, expected_next_state = trans_probs[0]
-            assert abs(prob - 1.0) < 1e-10
+        # Rotation action should always be deterministic
+        assert len(trans_probs) == 1, (
+            "Rotation action (Actions.left) is expected to be deterministic, "
+            "but transition_probabilities() returned multiple successor states"
+        )
+        prob, expected_next_state = trans_probs[0]
+        assert abs(prob - 1.0) < 1e-10
 
-            # step() should produce same state
-            env.set_state(state)
-            env.step(actions)
-            step_next_state = env.get_state()
+        # step() should produce same state
+        env.set_state(state)
+        env.step(actions)
+        step_next_state = env.get_state()
 
-            assert expected_next_state == step_next_state, (
-                "Cached transition prob successor differs from step()"
-            )
+        assert expected_next_state == step_next_state, (
+            "Cached transition prob successor differs from step()"
+        )
 
     def test_sampling_distribution_matches_step_distribution(self):
         """

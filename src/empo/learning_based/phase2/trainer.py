@@ -1534,6 +1534,15 @@ class BasePhase2Trainer(ABC):
                 next_state = self._sample_next_state_from_cached_probs(
                     state, robot_action, transition_probs_by_action
                 )
+                # When we bypass env.step() via cached transition probabilities,
+                # the environment's usual per-step side effects (such as clearing
+                # visual-feedback accumulators) do not run. Explicitly clear any
+                # such accumulators here to match step() semantics and avoid
+                # unbounded memory growth.
+                for attr_name in ("stumbled_cells", "magic_wall_entered_cells"):
+                    acc = getattr(self.env, attr_name, None)
+                    if acc is not None and hasattr(acc, "clear"):
+                        acc.clear()
             else:
                 next_state = self.step_environment(state, robot_action, human_actions)
         
@@ -1651,7 +1660,15 @@ class BasePhase2Trainer(ABC):
             The sampled next state.
         """
         action_idx = self.networks.q_r.action_tuple_to_index(robot_action)
-        trans_probs = transition_probs_by_action.get(action_idx, [])
+        if action_idx not in transition_probs_by_action:
+            raise KeyError(
+                f"action_idx {action_idx} (from robot_action={robot_action}) "
+                f"not found in transition_probs_by_action (keys: "
+                f"{sorted(transition_probs_by_action.keys())}). "
+                f"This indicates an indexing mismatch between q_r action "
+                f"encoding and the precomputed transition probabilities."
+            )
+        trans_probs = transition_probs_by_action[action_idx]
         
         if not trans_probs:
             # Terminal state or no transitions — stay in current state,
