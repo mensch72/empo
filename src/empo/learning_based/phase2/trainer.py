@@ -281,7 +281,7 @@ class BasePhase2Trainer(ABC):
         # EMA of gradient norm and cosine similarity between successive gradients
         self._grad_norm_ema: Dict[str, float] = {}
         self._grad_cosine_sim: Dict[str, float] = {}
-        self._prev_flat_grads: Dict[str, Optional[torch.Tensor]] = {}
+        self._prev_flat_grads: Dict[str, Optional[Tuple[torch.Tensor, float]]] = {}
         
         # Initialize memory monitor
         self._memory_monitor = MemoryMonitor(
@@ -809,15 +809,14 @@ class BasePhase2Trainer(ABC):
             networks['v_r'] = self.networks.v_r
         return networks
     
-    def _flatten_network_grads(self, network_name: str) -> Optional[torch.Tensor]:
+    def _flatten_network_grads(self, net: nn.Module) -> Optional[torch.Tensor]:
         """Flatten all gradient tensors for a network into a single 1D CPU vector.
+        
+        Args:
+            net: The network module whose parameter gradients to flatten.
         
         Returns None if the network has no gradients.
         """
-        networks = self._get_configured_network_map()
-        if network_name not in networks:
-            return None
-        net = networks[network_name]
         grads = [p.grad.detach().flatten().cpu() for p in net.parameters() if p.grad is not None]
         if not grads:
             return None
@@ -852,7 +851,7 @@ class BasePhase2Trainer(ABC):
                 continue
             
             # Compute cosine similarity with previous gradient
-            flat_grad = self._flatten_network_grads(name)
+            flat_grad = self._flatten_network_grads(configured[name])
             if flat_grad is None:
                 # No current gradients: clear stored metrics to avoid stale values
                 self._grad_cosine_sim.pop(name, None)

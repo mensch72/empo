@@ -194,7 +194,7 @@ def test_flatten_network_grads():
     net = obj.networks.q_r
     # No grad yet → should return None
     net.zero_grad()
-    assert obj._flatten_network_grads('q_r') is None
+    assert obj._flatten_network_grads(net) is None
     print("  ✓ Returns None when no gradients present")
 
     # Give it a gradient
@@ -202,7 +202,7 @@ def test_flatten_network_grads():
     out = net(x)
     out.sum().backward()
 
-    flat = obj._flatten_network_grads('q_r')
+    flat = obj._flatten_network_grads(net)
     assert flat is not None
     assert flat.dim() == 1
     assert flat.device.type == 'cpu'
@@ -211,10 +211,6 @@ def test_flatten_network_grads():
     expected_size = sum(p.numel() for p in net.parameters() if p.grad is not None)
     assert flat.shape[0] == expected_size
     print(f"  ✓ Flattened gradient has {flat.shape[0]} elements (expected {expected_size})")
-
-    # Unknown network → None
-    assert obj._flatten_network_grads('nonexistent') is None
-    print("  ✓ Returns None for unknown network name")
 
 
 def test_get_configured_network_map():
