@@ -1,6 +1,6 @@
 # Implementation Plan: Speeding Up `transition_probabilities()`
 
-**Status:** Phase 2B implemented (§3.12, §3.13, §3.15)  
+**Status:** Phase 2B implemented (§3.12, §3.13); §3.15 reverted (correctness issue)  
 **Date:** 2025-03-12
 
 ## 1. Overview
@@ -922,12 +922,15 @@ for the majority of deterministic transitions.
 
 7. **§3.12** — Batch precompute: single set/restore for all robot actions ✅
 8. **§3.13** — Skip step() by sampling from cached transition probs ✅
-9. **§3.15** — Avoid redundant get_state() in step_environment() ✅
+9. **§3.15** — Avoid redundant get_state() in step_environment() ❌ REVERTED (see below)
 
 Measured speedup (A_r=4, CollectGame env):
 - §3.12: 1.18x faster for precompute (~12.6s saved over 100K steps)
 - §3.13: ~19.75x faster for step portion (~66.8s saved over 100K steps)
-- §3.15: Eliminates one get_state() per step() call (~0.02ms/step)
+- §3.15: REVERTED — The _cached_state optimization returned stale state when env
+  objects were directly modified between step() and get_state() (e.g., setting
+  control_button.controlled_agent in tests/setup code). The 0.02ms/step savings
+  does not justify the correctness risk from stale cache.
 
 ### Phase 3: Medium-Risk, Medium-Impact (3–5 days)
 

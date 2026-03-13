@@ -267,75 +267,40 @@ class TestSampleFromCachedTransitionProbs:
 
 
 # ========================
-# §3.15: get_state() cache after step() tests
+# §3.15: get_state() consistency tests
 # ========================
 
-class TestGetStateCacheAfterStep:
-    """Tests for the get_state() cache optimization in step()."""
+class TestGetStateConsistency:
+    """Tests that get_state() returns correct state after step()."""
 
-    def test_step_then_get_state_matches_uncached(self):
-        """get_state() after step() should return the same state as without caching."""
+    def test_step_then_get_state_matches_recomputed(self):
+        """get_state() after step() should return the same state every time."""
         env = CollectGame4HEnv10x10N2()
         env.reset()
         state = env.get_state()
 
         actions = [Actions.forward] * len(env.agents)
         
-        # step() + get_state() (may use cache)
+        # step() + get_state()
         env.set_state(state)
         env.step(actions)
-        cached_result = env.get_state()
+        result1 = env.get_state()
 
-        # step() + forced recompute: invalidate cache then call get_state()
+        # Same again
         env.set_state(state)
         env.step(actions)
-        env._cached_state = None  # Force cache miss
-        recomputed_result = env.get_state()
+        result2 = env.get_state()
 
-        assert cached_result == recomputed_result, "Cached get_state() differs from recomputed"
+        assert result1 == result2, "Repeated step()+get_state() should be consistent"
 
-    def test_cache_invalidated_by_set_state(self):
-        """set_state() should invalidate the get_state() cache."""
-        env = CollectGame4HEnv10x10N2()
-        env.reset()
-        state = env.get_state()
-
-        # Step to populate cache
-        actions = [Actions.left] * len(env.agents)
-        env.step(actions)
-        assert env._cached_state is not None, "Cache should be populated after step()"
-
-        # set_state() should invalidate
-        env.set_state(state)
-        assert env._cached_state is None, "Cache should be invalidated after set_state()"
-
-    def test_cache_invalidated_by_reset(self):
-        """reset() should invalidate the get_state() cache."""
-        env = CollectGame4HEnv10x10N2()
-        env.reset()
-        
-        # Step to populate cache
-        actions = [Actions.left] * len(env.agents)
-        env.step(actions)
-        assert env._cached_state is not None
-
-        # reset() should invalidate
-        env.reset()
-        assert env._cached_state is None, "Cache should be invalidated after reset()"
-
-    def test_cache_consumed_on_first_get_state(self):
-        """get_state() should consume (clear) the cache on first call."""
+    def test_consecutive_get_state_matches(self):
+        """Two consecutive get_state() calls should return the same state."""
         env = CollectGame4HEnv10x10N2()
         env.reset()
 
         actions = [Actions.left] * len(env.agents)
         env.step(actions)
-        assert env._cached_state is not None
 
-        # First get_state() consumes cache
         state1 = env.get_state()
-        assert env._cached_state is None, "Cache should be consumed"
-
-        # Second get_state() recomputes (same result)
         state2 = env.get_state()
         assert state1 == state2, "Second get_state() should match first"

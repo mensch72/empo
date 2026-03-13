@@ -3140,9 +3140,6 @@ class MultiGridEnv(WorldModel):
 
     def reset(self):
 
-        # Invalidate get_state() cache — env is being reset
-        self._cached_state = None
-
         # Create terrain grid first, before _gen_grid
         # This stores overlappable terrain (like unsteady ground) that persists under agents
         self.terrain_grid = Grid(self.width, self.height)
@@ -4229,16 +4226,10 @@ class MultiGridEnv(WorldModel):
         if result is None:
             # Terminal state — no transition possible, just mark done
             done = True
-            self._cached_state = None
         else:
             # result is [(1.0, successor_state)]
             # Note: _compute_successor_state* already left the env in the successor state
             done = self.step_count >= self.max_steps
-            # §3.15 optimization: Cache the successor state so that a subsequent
-            # get_state() call can return it without recomputation. This avoids
-            # redundant get_state() in callers like step_environment() which call
-            # step() then immediately get_state().
-            self._cached_state = result[0][1]
         
         # Check if all agents are terminated
         if all(a.terminated for a in self.agents):
@@ -4807,14 +4798,6 @@ class MultiGridEnv(WorldModel):
         Returns:
             tuple: A hashable compact state representation
         """
-        # §3.15 optimization: Return cached state from step() if available.
-        # step() already computed the successor state via _transition_probabilities_impl;
-        # returning it here avoids redundant recomputation.
-        if hasattr(self, '_cached_state') and self._cached_state is not None:
-            cached = self._cached_state
-            self._cached_state = None
-            return cached
-        
         # Rebuild cache if not present (e.g., objects were added after reset)
         if not hasattr(self, '_mobile_objects') or not hasattr(self, '_mutable_objects'):
             self._build_object_cache()
@@ -4977,9 +4960,6 @@ class MultiGridEnv(WorldModel):
         Args:
             state: A compact state tuple as returned by get_state()
         """
-        # Invalidate get_state() cache — env is being externally modified
-        self._cached_state = None
-        
         step_count, agent_states, mobile_objects, mutable_objects = state
         
         self.step_count = step_count
