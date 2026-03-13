@@ -1535,10 +1535,12 @@ class BasePhase2Trainer(ABC):
                     state, robot_action, transition_probs_by_action
                 )
                 # When we bypass env.step() via cached transition probabilities,
-                # the environment's usual per-step side effects (such as clearing
-                # visual-feedback accumulators) do not run. Explicitly clear any
-                # such accumulators here to match step() semantics and avoid
-                # unbounded memory growth.
+                # the environment is not executing the transition, so visual-feedback
+                # accumulators (stumbled_cells, magic_wall_entered_cells) may contain
+                # stale/hypothetical data from the precompute phase. Clear them to
+                # avoid unbounded memory growth and misleading render() output.
+                # Note: step() clears these at the *start* of a step then repopulates
+                # them; here we simply clear since there is no executed transition.
                 for attr_name in ("stumbled_cells", "magic_wall_entered_cells"):
                     acc = getattr(self.env, attr_name, None)
                     if acc is not None and hasattr(acc, "clear"):

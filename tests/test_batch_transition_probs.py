@@ -234,18 +234,21 @@ class TestSampleFromCachedTransitionProbs:
             next_state = env.get_state()
             step_counts[next_state] = step_counts.get(next_state, 0) + 1
 
-        # Both should produce the same set of successor states
-        assert set(cached_counts.keys()) == set(step_counts.keys()), (
-            "Cached probs and step() produce different successor states"
-        )
-
-        # The distributions should be statistically similar
-        # (we can't check exact counts due to randomness, but the expected probs should be close)
+        # Compare distributions statistically rather than requiring exact key-set
+        # equality, since with finite samples low-probability outcomes may be absent
+        # from one side. Only check outcomes with expected probability above a threshold.
+        min_prob_threshold = 0.01  # Only check outcomes expected to appear
         for (prob, state_key) in trans_probs:
+            if prob < min_prob_threshold:
+                continue
             cached_frac = cached_counts.get(state_key, 0) / n_samples
-            # Allow generous tolerance for statistical comparison
+            step_frac = step_counts.get(state_key, 0) / n_samples
+            # Both sampling methods should be close to the true probability
             assert abs(cached_frac - prob) < 0.1, (
                 f"Cached sampling fraction {cached_frac} too far from expected prob {prob}"
+            )
+            assert abs(step_frac - prob) < 0.1, (
+                f"Step sampling fraction {step_frac} too far from expected prob {prob}"
             )
 
     def test_set_state_advances_env(self):
@@ -444,20 +447,22 @@ class TestSampleNextStateFromCachedProbs:
 
         assert result is state, "Should return the same state object for empty trans_probs"
 
-    def test_side_effects_cleared_after_cached_prob_step(self):
+    def test_accumulator_clearing_pattern(self):
         """
-        When bypassing step() via cached probs, the visual-feedback accumulators
-        (stumbled_cells, magic_wall_entered_cells) should be cleared to match
-        step() semantics and prevent unbounded memory growth.
+        Verify the accumulator clearing pattern used by collect_transition()
+        works correctly: after _sample_next_state_from_cached_probs, the
+        accumulators should be clearable via the same loop used in the trainer.
 
-        This tests the clearing logic in collect_transition(), not in
-        _sample_next_state_from_cached_probs itself (which doesn't clear them).
+        Note: This tests the clearing mechanism in isolation, not via
+        collect_transition() itself (which requires full trainer setup).
+        The clearing is needed because the cached-prob path never executes
+        the transition, so accumulators may contain stale data from precompute.
         """
         harness, env = self._make_harness()
         state = env.get_state()
         num_agents = len(env.agents)
 
-        # Simulate accumulators having data from a previous step
+        # Simulate accumulators having stale data from precompute
         env.stumbled_cells = {(1, 1), (2, 2)}
         env.magic_wall_entered_cells = {(3, 3)}
 
@@ -473,7 +478,7 @@ class TestSampleNextStateFromCachedProbs:
             state, (0,), transition_probs_by_action
         )
 
-        # Now simulate what collect_transition does: clear accumulators
+        # Apply the same clearing pattern used by collect_transition()
         for attr_name in ("stumbled_cells", "magic_wall_entered_cells"):
             acc = getattr(env, attr_name, None)
             if acc is not None and hasattr(acc, "clear"):
