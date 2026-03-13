@@ -97,7 +97,7 @@ def test_update_grad_metrics_ema_initialization():
     norm = 0.0
     for p in obj.networks.q_r.parameters():
         if p.grad is not None:
-            norm += p.grad.data.norm(2).item() ** 2
+            norm += p.grad.detach().norm(2).item() ** 2
     norm = norm ** 0.5
 
     grad_norms = {'q_r': norm}
@@ -117,14 +117,16 @@ def test_update_grad_metrics_ema_decay():
     decay = 0.9
     obj = _make_stub(grad_metrics_ema_decay=decay)
 
-    # Feed constant norm for many steps
+    # Feed constant norm for many steps using deterministic synthetic gradients
+    # so the norm passed to _update_grad_metrics matches the actual gradients.
     constant_norm = 5.0
     for step in range(200):
-        # Give q_r a synthetic gradient so flatten works
+        # Set deterministic gradient whose norm equals constant_norm
         obj.networks.q_r.zero_grad()
-        x = torch.randn(1, 4)
-        out = obj.networks.q_r(x)
-        out.sum().backward()
+        n_params = sum(p.numel() for p in obj.networks.q_r.parameters())
+        fill_val = constant_norm / (n_params ** 0.5)
+        for p in obj.networks.q_r.parameters():
+            p.grad = torch.full_like(p.detach(), fill_val)
         obj._update_grad_metrics({'q_r': constant_norm})
 
     # After many steps with constant input, EMA should converge to that constant
@@ -143,15 +145,15 @@ def test_update_grad_metrics_cosine_similarity():
     # Step 1: set a deterministic gradient
     net.zero_grad()
     for p in net.parameters():
-        p.grad = torch.ones_like(p.data)
-    norm1 = sum(p.grad.data.norm(2).item() ** 2 for p in net.parameters()) ** 0.5
+        p.grad = torch.ones_like(p.detach())
+    norm1 = sum(p.grad.detach().norm(2).item() ** 2 for p in net.parameters()) ** 0.5
     obj._update_grad_metrics({'q_r': norm1})
     assert 'q_r' not in obj._grad_cosine_sim  # first step, no previous
 
     # Step 2: identical gradient → cosine should be 1
     net.zero_grad()
     for p in net.parameters():
-        p.grad = torch.ones_like(p.data)
+        p.grad = torch.ones_like(p.detach())
     norm2 = norm1
     obj._update_grad_metrics({'q_r': norm2})
     assert abs(obj._grad_cosine_sim['q_r'] - 1.0) < 1e-6, (
@@ -162,7 +164,7 @@ def test_update_grad_metrics_cosine_similarity():
     # Step 3: opposing gradient → cosine should be -1
     net.zero_grad()
     for p in net.parameters():
-        p.grad = -torch.ones_like(p.data)
+        p.grad = -torch.ones_like(p.detach())
     norm3 = norm1  # same magnitude
     obj._update_grad_metrics({'q_r': norm3})
     assert abs(obj._grad_cosine_sim['q_r'] - (-1.0)) < 1e-6, (
@@ -319,14 +321,14 @@ def test_stale_cosine_cleared_on_no_grad():
     # Step 1: set gradient and compute actual norm
     net.zero_grad()
     for p in net.parameters():
-        p.grad = torch.ones_like(p.data)
-    actual_norm = sum(p.grad.data.norm(2).item() ** 2 for p in net.parameters()) ** 0.5
+        p.grad = torch.ones_like(p.detach())
+    actual_norm = sum(p.grad.detach().norm(2).item() ** 2 for p in net.parameters()) ** 0.5
     obj._update_grad_metrics({'q_r': actual_norm})
 
     # Step 2: same gradient → cosine = 1
     net.zero_grad()
     for p in net.parameters():
-        p.grad = torch.ones_like(p.data)
+        p.grad = torch.ones_like(p.detach())
     obj._update_grad_metrics({'q_r': actual_norm})
     assert 'q_r' in obj._grad_cosine_sim
     assert abs(obj._grad_cosine_sim['q_r'] - 1.0) < 1e-6
@@ -370,8 +372,8 @@ def test_rnd_present_tracks_cosine():
     predictor = obj.networks.rnd.predictor
     predictor.zero_grad()
     for p in predictor.parameters():
-        p.grad = torch.ones_like(p.data)
-    norm1 = sum(p.grad.data.norm(2).item() ** 2 for p in predictor.parameters()) ** 0.5
+        p.grad = torch.ones_like(p.detach())
+    norm1 = sum(p.grad.detach().norm(2).item() ** 2 for p in predictor.parameters()) ** 0.5
     obj._update_grad_metrics({'rnd': norm1})
     assert abs(obj._grad_norm_ema['rnd'] - norm1) < 1e-8
     assert 'rnd' not in obj._grad_cosine_sim  # first step
@@ -379,7 +381,7 @@ def test_rnd_present_tracks_cosine():
     # Step 2: same gradient → cosine should be 1
     predictor.zero_grad()
     for p in predictor.parameters():
-        p.grad = torch.ones_like(p.data)
+        p.grad = torch.ones_like(p.detach())
     obj._update_grad_metrics({'rnd': norm1})
     assert abs(obj._grad_cosine_sim['rnd'] - 1.0) < 1e-6
     print("  ✓ RND present: both EMA and cosine similarity tracked correctly")
@@ -393,14 +395,14 @@ def test_stale_cosine_cleared_on_shape_change():
     net = obj.networks.q_r
     net.zero_grad()
     for p in net.parameters():
-        p.grad = torch.ones_like(p.data)
-    norm = sum(p.grad.data.norm(2).item() ** 2 for p in net.parameters()) ** 0.5
+        p.grad = torch.ones_like(p.detach())
+    norm = sum(p.grad.detach().norm(2).item() ** 2 for p in net.parameters()) ** 0.5
     obj._update_grad_metrics({'q_r': norm})
 
     # Step 2: same gradient → establishes cosine_sim
     net.zero_grad()
     for p in net.parameters():
-        p.grad = torch.ones_like(p.data)
+        p.grad = torch.ones_like(p.detach())
     obj._update_grad_metrics({'q_r': norm})
     assert 'q_r' in obj._grad_cosine_sim
     assert abs(obj._grad_cosine_sim['q_r'] - 1.0) < 1e-6
@@ -410,8 +412,8 @@ def test_stale_cosine_cleared_on_shape_change():
     obj.networks.q_r = bigger_net
     bigger_net.zero_grad()
     for p in bigger_net.parameters():
-        p.grad = torch.ones_like(p.data)
-    norm_big = sum(p.grad.data.norm(2).item() ** 2 for p in bigger_net.parameters()) ** 0.5
+        p.grad = torch.ones_like(p.detach())
+    norm_big = sum(p.grad.detach().norm(2).item() ** 2 for p in bigger_net.parameters()) ** 0.5
     obj._update_grad_metrics({'q_r': norm_big})
 
     # Cosine should have been cleared due to shape mismatch

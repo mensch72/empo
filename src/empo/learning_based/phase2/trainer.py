@@ -870,7 +870,10 @@ class BasePhase2Trainer(ABC):
             if prev_flat is not None and prev_flat.shape == flat_grad.shape:
                 dot = torch.dot(flat_grad, prev_flat).item()
                 denom = norm * prev_norm if prev_norm else 0.0
-                self._grad_cosine_sim[name] = dot / denom if denom > 0 else 0.0
+                cos = dot / denom if denom > 0 else 0.0
+                # Clamp to [-1, 1] to guard against floating-point drift
+                # (dot product on CPU vs norms from GPU .item() can overshoot)
+                self._grad_cosine_sim[name] = max(-1.0, min(1.0, cos))
             else:
                 # Shape mismatch or missing previous gradient: clear any stale cosine metric
                 self._grad_cosine_sim.pop(name, None)
@@ -2843,7 +2846,7 @@ class BasePhase2Trainer(ABC):
             prediction_stats['rnd_adaptive_lr'] = rnd_lr_scales
         
         # Only compute gradient convergence metrics when TensorBoard logging is active;
-        # _update_grad_metrics flattens full gradient vectors to CPU each step.
+        # _update_grad_metrics flattens full gradient vectors to CPU each training step.
         if getattr(self, "writer", None) is not None:
             self._update_grad_metrics(grad_norms)
         
