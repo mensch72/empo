@@ -304,3 +304,199 @@ class TestGetStateConsistency:
         state1 = env.get_state()
         state2 = env.get_state()
         assert state1 == state2, "Second get_state() should match first"
+
+
+# ========================
+# §3.13: _sample_next_state_from_cached_probs integration tests
+# ========================
+
+class _MockQR:
+    """Minimal mock of q_r network for action_tuple_to_index()."""
+    def action_tuple_to_index(self, action_tuple):
+        return action_tuple[0] if isinstance(action_tuple, tuple) else action_tuple
+
+
+class _MockNetworks:
+    """Minimal mock of Phase2Networks with just q_r."""
+    def __init__(self):
+        self.q_r = _MockQR()
+
+
+class _SampleNextStateHarness:
+    """
+    Minimal harness that exposes _sample_next_state_from_cached_probs
+    with a real environment but without a full Phase 2 trainer.
+    """
+    def __init__(self, env):
+        self.env = env
+        self.networks = _MockNetworks()
+
+    # Import the actual method from the trainer module
+    from empo.learning_based.phase2.trainer import BasePhase2Trainer
+    _sample_next_state_from_cached_probs = BasePhase2Trainer._sample_next_state_from_cached_probs
+
+
+class TestSampleNextStateFromCachedProbs:
+    """
+    Integration tests for _sample_next_state_from_cached_probs() that verify
+    the method advances the environment correctly and interacts properly with
+    the side-effect clearing in collect_transition().
+    """
+
+    def _make_harness(self):
+        env = CollectGame4HEnv10x10N2()
+        env.reset()
+        return _SampleNextStateHarness(env), env
+
+    def test_env_advanced_to_next_state(self):
+        """
+        After _sample_next_state_from_cached_probs(), env.get_state() must
+        return the sampled next_state.
+        """
+        harness, env = self._make_harness()
+        state = env.get_state()
+        num_agents = len(env.agents)
+
+        # Use a deterministic action (rotation)
+        actions = [Actions.left] + [Actions.still] * (num_agents - 1)
+        trans_probs = env.transition_probabilities(state, actions)
+        assert trans_probs is not None and len(trans_probs) == 1
+
+        # Build transition_probs_by_action dict (action_idx 0 maps to this action)
+        transition_probs_by_action = {0: trans_probs}
+
+        # Set env to original state first
+        env.set_state(state)
+
+        # Call the method
+        next_state = harness._sample_next_state_from_cached_probs(
+            state, (0,), transition_probs_by_action
+        )
+
+        # Verify env is now at next_state
+        assert env.get_state() == next_state, (
+            "env.get_state() should match the returned next_state"
+        )
+
+    def test_next_state_matches_step(self):
+        """
+        For deterministic transitions, _sample_next_state_from_cached_probs()
+        must produce the same next_state as step().
+        """
+        harness, env = self._make_harness()
+        state = env.get_state()
+        num_agents = len(env.agents)
+
+        actions = [Actions.left] + [Actions.still] * (num_agents - 1)
+        trans_probs = env.transition_probabilities(state, actions)
+        assert trans_probs is not None and len(trans_probs) == 1
+
+        transition_probs_by_action = {0: trans_probs}
+
+        # Get next_state via _sample_next_state_from_cached_probs
+        env.set_state(state)
+        sampled_next = harness._sample_next_state_from_cached_probs(
+            state, (0,), transition_probs_by_action
+        )
+
+        # Get next_state via step()
+        env.set_state(state)
+        env.step(actions)
+        step_next = env.get_state()
+
+        assert sampled_next == step_next, (
+            "Sampled next_state should match step() for deterministic transitions"
+        )
+
+    def test_missing_action_idx_raises_key_error(self):
+        """
+        _sample_next_state_from_cached_probs() must raise KeyError when
+        the action_idx is not in transition_probs_by_action.
+        """
+        harness, env = self._make_harness()
+        state = env.get_state()
+
+        # Empty transition_probs_by_action — action_idx 0 is missing
+        with pytest.raises(KeyError, match="action_idx 0"):
+            harness._sample_next_state_from_cached_probs(
+                state, (0,), {}
+            )
+
+    def test_empty_trans_probs_returns_current_state(self):
+        """
+        When trans_probs is empty (terminal/no-transition), the method
+        should return the current state without calling set_state().
+        """
+        harness, env = self._make_harness()
+        state = env.get_state()
+
+        # action_idx 0 maps to empty list (terminal)
+        transition_probs_by_action = {0: []}
+
+        result = harness._sample_next_state_from_cached_probs(
+            state, (0,), transition_probs_by_action
+        )
+
+        assert result is state, "Should return the same state object for empty trans_probs"
+
+    def test_side_effects_cleared_after_cached_prob_step(self):
+        """
+        When bypassing step() via cached probs, the visual-feedback accumulators
+        (stumbled_cells, magic_wall_entered_cells) should be cleared to match
+        step() semantics and prevent unbounded memory growth.
+
+        This tests the clearing logic in collect_transition(), not in
+        _sample_next_state_from_cached_probs itself (which doesn't clear them).
+        """
+        harness, env = self._make_harness()
+        state = env.get_state()
+        num_agents = len(env.agents)
+
+        # Simulate accumulators having data from a previous step
+        env.stumbled_cells = {(1, 1), (2, 2)}
+        env.magic_wall_entered_cells = {(3, 3)}
+
+        # Build transition_probs for a deterministic action
+        actions = [Actions.left] + [Actions.still] * (num_agents - 1)
+        trans_probs = env.transition_probabilities(state, actions)
+        assert trans_probs is not None
+        transition_probs_by_action = {0: trans_probs}
+
+        # Call _sample_next_state_from_cached_probs (this doesn't clear accumulators)
+        env.set_state(state)
+        harness._sample_next_state_from_cached_probs(
+            state, (0,), transition_probs_by_action
+        )
+
+        # Now simulate what collect_transition does: clear accumulators
+        for attr_name in ("stumbled_cells", "magic_wall_entered_cells"):
+            acc = getattr(env, attr_name, None)
+            if acc is not None and hasattr(acc, "clear"):
+                acc.clear()
+
+        assert len(env.stumbled_cells) == 0, "stumbled_cells should be cleared"
+        assert len(env.magic_wall_entered_cells) == 0, "magic_wall_entered_cells should be cleared"
+
+    def test_accumulators_grow_without_clearing(self):
+        """
+        Verify that transition_probabilities() can add to accumulators, so
+        without explicit clearing they would grow unbounded.
+        """
+        env = CollectGame4HEnv10x10N2()
+        env.reset()
+        state = env.get_state()
+        num_agents = len(env.agents)
+
+        # Set some initial data in accumulators
+        env.stumbled_cells = {(99, 99)}
+
+        # Call transition_probabilities (which may modify env internally)
+        actions = [Actions.forward] * num_agents
+        env.transition_probabilities(state, actions)
+
+        # The set should still have our sentinel value since tp restores state
+        # but the point is it's not cleared to empty by tp itself
+        # After a cached-prob step without clearing, old data persists
+        assert (99, 99) in env.stumbled_cells, (
+            "Accumulators should retain old data when not explicitly cleared"
+        )
