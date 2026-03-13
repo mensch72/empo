@@ -14,13 +14,13 @@ map: |
   We We We We We We
   We .. .. We We We
   We .. .. We Ki We
-  We .. Ro .. Ay We
+  We .. Ro Ay .. We
   We dK Ae dP Pa We
   We We We We We We
 
-max_steps: 8
+max_steps: 10
 
-orientations: ['n','s']  # human faces north, robot faces south
+orientations: ['e','s']  # human faces east, robot faces south
 
 possible_goals:  # each walkable cell the human could stand on
   - 1,1
