@@ -331,7 +331,8 @@ class _SampleNextStateHarness:
         self.env = env
         self.networks = _MockNetworks()
 
-    # Import the actual method from the trainer module
+    # Bind the actual method from the trainer to this harness class, so we test
+    # the real implementation without instantiating a full Phase 2 trainer.
     from empo.learning_based.phase2.trainer import BasePhase2Trainer
     _sample_next_state_from_cached_probs = BasePhase2Trainer._sample_next_state_from_cached_probs
 
@@ -360,7 +361,9 @@ class TestSampleNextStateFromCachedProbs:
         # Use a deterministic action (rotation)
         actions = [Actions.left] + [Actions.still] * (num_agents - 1)
         trans_probs = env.transition_probabilities(state, actions)
-        assert trans_probs is not None and len(trans_probs) == 1
+        assert trans_probs is not None and len(trans_probs) == 1, (
+            "Rotation action should produce a single deterministic outcome"
+        )
 
         # Build transition_probs_by_action dict (action_idx 0 maps to this action)
         transition_probs_by_action = {0: trans_probs}
@@ -389,7 +392,9 @@ class TestSampleNextStateFromCachedProbs:
 
         actions = [Actions.left] + [Actions.still] * (num_agents - 1)
         trans_probs = env.transition_probabilities(state, actions)
-        assert trans_probs is not None and len(trans_probs) == 1
+        assert trans_probs is not None and len(trans_probs) == 1, (
+            "Rotation action should produce a single deterministic outcome"
+        )
 
         transition_probs_by_action = {0: trans_probs}
 
