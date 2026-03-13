@@ -204,15 +204,18 @@ class TestSampleFromCachedTransitionProbs:
         For probabilistic transitions, sampling from cached probs should
         produce the same distribution as repeated step() calls.
         """
+        # Seed RNGs to make this probabilistic test deterministic across runs
+        seed = 12345
+        np.random.seed(seed)
         env = CollectGame4HEnv10x10N2()
-        env.reset()
+        env.reset(seed=seed)
         state = env.get_state()
         num_agents = len(env.agents)
 
         # Multiple agents forward - may be probabilistic
         actions = [Actions.forward] * num_agents
         trans_probs = env.transition_probabilities(state, actions)
-        
+
         if trans_probs is None or len(trans_probs) <= 1:
             pytest.skip("Need probabilistic transition for this test")
 
