@@ -186,9 +186,8 @@ def _rp_process_single_state(
             _, next_state_probabilities, next_state_indices = state_transitions[action_profile_index]
             if rho_r > 0.0:
                 # Duration-aware discounting: e^{-rho_r * D(s, a, s')} per transition
-                action_profile_tuple = tuple(action_profile.tolist())
                 transitions_list = [(float(p), states[i]) for p, i in zip(next_state_probabilities, next_state_indices)]
-                durations = world_model.transition_durations(state, list(action_profile_tuple), transitions_list)
+                durations = world_model.transition_durations(state, action_profile.tolist(), transitions_list)
                 discount_factors_r = np.exp(-rho_r * np.array(durations))
                 v += human_action_profile_prob * np.dot(next_state_probabilities, discount_factors_r * Vr_values[next_state_indices])
                 # Duration weight: (1 - e^{-rho*D}) / rho for reward term
@@ -313,9 +312,8 @@ def _rp_process_single_state(
                     successor_values = np.where(attainment_values_array, 1.0, vhe_values_array)
                     if rho_h > 0.0:
                         # Duration-aware discounting for human achievement values
-                        action_profile_tuple = tuple(action_profile.tolist())
                         transitions_list = [(float(p), states[i]) for p, i in zip(next_state_probabilities, next_state_indices)]
-                        durations = world_model.transition_durations(state, list(action_profile_tuple), transitions_list)
+                        durations = world_model.transition_durations(state, action_profile.tolist(), transitions_list)
                         discount_factors_h = np.exp(-rho_h * np.array(durations))
                         successor_values = discount_factors_h * successor_values
                     else:

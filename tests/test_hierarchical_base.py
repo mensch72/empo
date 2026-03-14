@@ -72,7 +72,11 @@ class SimpleFineModel(WorldModel):
 # =============================================================================
 
 class SimpleLevelMapper(LevelMapper):
-    """Maps fine states (x, y) to coarse states (x // 3,)."""
+    """Maps fine states (x, y) to coarse states (x // 3,).
+    
+    Assumes fine states are tuples where the first element is a spatial position.
+    The coarse state groups positions into macro-cells of size 3.
+    """
 
     def super_state(self, fine_state):
         return (fine_state[0] // 3,)

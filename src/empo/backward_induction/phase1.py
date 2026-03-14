@@ -226,9 +226,8 @@ def _hpp_process_single_state(
                             successor_values = np.where(attainment_values_array, 1.0, v_values_array)
                             if rho_h > 0.0:
                                 # Duration-aware discounting: e^{-rho_h * D(s, a, s')} per transition
-                                action_profile_tuple = tuple(action_profile.tolist())
                                 transitions_list = [(float(p), states[i]) for p, i in zip(next_state_probabilities, next_state_indices)]
-                                durations = world_model.transition_durations(state, list(action_profile_tuple), transitions_list)
+                                durations = world_model.transition_durations(state, action_profile.tolist(), transitions_list)
                                 discount_factors = np.exp(-rho_h * np.array(durations))
                                 successor_values = discount_factors * successor_values
                             expectation = np.dot(

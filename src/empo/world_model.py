@@ -183,9 +183,8 @@ class WorldModel(gym.Env):
         of the same length.
         
         The duration D(s, a, s') represents the certainty-equivalent expected real-time
-        elapsed between taking the action and regaining control in successor state s',
-        defined as D = -(1/rho) ln E[e^{-rho d}] (eq. from theory gist). For deterministic
-        durations, this reduces to the actual elapsed time.
+        elapsed between taking the action and regaining control in successor state s'.
+        For deterministic durations, this reduces to the actual elapsed time.
         
         The default implementation returns [1.0, ...] (unit duration for every transition),
         preserving backward compatibility with the existing uniform-step assumption.

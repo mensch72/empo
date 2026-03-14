@@ -37,7 +37,9 @@ class DurationTestEnv(MultiGridEnv):
     def __init__(self, durations_map=None):
         """
         Args:
-            durations_map: Optional dict mapping (state, action_tuple) -> list of durations.
+            durations_map: Optional dict mapping (state_tuple, action_tuple) -> list of
+                float durations, one per transition outcome. Keys are (state, tuple(actions))
+                where state is from get_state() and actions is the joint action profile.
                 If None, uses default durations (all 1.0).
         """
         agents = [
