@@ -79,7 +79,7 @@ _shared_transitions: Optional[List[List[TransitionData]]] = None
 _shared_Vh_values: Optional[VhValues] = None
 _shared_sliced_cache: Optional[SlicedAttainmentCache] = None  # Sliced cache for goal attainment arrays
 _shared_num_action_profiles: int = 0  # Needed to create slice caches in workers
-_shared_params: Optional[Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], List[int], List[List[int]], float, float, bool]] = None
+_shared_params: Optional[Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], List[int], List[List[int]], float, float, bool, float]] = None
 _shared_believed_others_policy_pickle: Optional[bytes] = None  # cloudpickle'd believed_others_policy function
 _shared_disk_dag: Optional['DiskBasedDAG'] = None  # For parallel disk slicing
 
@@ -104,6 +104,8 @@ def _hpp_process_single_state(
     vres0: Union[Dict, npt.NDArray] = None,
     pres0: Union[Dict, npt.NDArray] = None,
     optimistic: bool = False,
+    rho_h: float = 0.0,
+    world_model: Optional['WorldModel'] = None,
 ) -> Tuple[Dict[int, Dict[PossibleGoal, float]], Optional[Dict[int, Dict[PossibleGoal, npt.NDArray[np.floating[Any]]]]]]:
     """Process a single state, returning (v_results, p_results).
     
@@ -125,6 +127,10 @@ def _hpp_process_single_state(
         gamma_h: Discount factor
         slice_cache: Optional slice cache to WRITE to (worker's local cache for this batch).
             Structure: Dict[state_index, List[Dict[goal, array]]]
+        rho_h: Continuous-time discount rate = -ln(gamma_h). When > 0, per-transition
+            duration-aware discounting is used via world_model.transition_durations().
+        world_model: WorldModel instance for querying transition_durations(). Required
+            when rho_h > 0.
     
     Returns:
         Tuple of:
@@ -217,9 +223,17 @@ def _hpp_process_single_state(
                                 )
                             # Use np.where to avoid intermediate array allocation
                             # NumPy automatically promotes float16 to float64 during computation
+                            successor_values = np.where(attainment_values_array, 1.0, v_values_array)
+                            if rho_h > 0.0:
+                                # Duration-aware discounting: e^{-rho_h * D(s, a, s')} per transition
+                                action_profile_tuple = tuple(action_profile.tolist())
+                                transitions_list = [(float(p), states[i]) for p, i in zip(next_state_probabilities, next_state_indices)]
+                                durations = world_model.transition_durations(state, list(action_profile_tuple), transitions_list)
+                                discount_factors = np.exp(-rho_h * np.array(durations))
+                                successor_values = discount_factors * successor_values
                             expectation = np.dot(
                                 next_state_probabilities,
-                                np.where(attainment_values_array, 1.0, v_values_array)
+                                successor_values
                             )
                             if ((expectation > anticipated_expectation) if optimistic 
                                 else (expectation < anticipated_expectation)):
@@ -227,7 +241,11 @@ def _hpp_process_single_state(
                         v_accum += action_profile_prob * anticipated_expectation
                     expected_Vs[action] = v_accum
                 
-                q = gamma_h * expected_Vs
+                if rho_h > 0.0:
+                    # Discounting already applied per-transition inside the expectation
+                    q = expected_Vs
+                else:
+                    q = gamma_h * expected_Vs
                 
                 # Boltzmann policy (numerically stable softmax)
                 if beta_h == math.inf:
@@ -278,6 +296,8 @@ def _hpp_compute_sequential(
     quiet: bool = False,
     memory_profile: bool = False,
     optimistic: bool = False,
+    rho_h: float = 0.0,
+    world_model: Optional['WorldModel'] = None,
 ) -> None:
     """Sequential backward induction algorithm.
     
@@ -384,6 +404,8 @@ def _hpp_compute_sequential(
                     vres0=vres0,
                     pres0=pres0,
                     optimistic=optimistic,
+                    rho_h=rho_h,
+                    world_model=world_model,
                 )
                 
                 # Store results
@@ -504,6 +526,8 @@ def _hpp_compute_sequential(
             vres0=vres0,
             pres0=pres0,
             optimistic=optimistic,
+            rho_h=rho_h,
+            world_model=world_model,
         )
         
         # Store results
@@ -613,7 +637,7 @@ def _hpp_process_state_batch(
     
     Vh_values = _shared_Vh_values
     (human_agent_indices, possible_goal_generator, num_agents, num_actions, 
-     action_powers, robot_agent_indices, robot_action_profiles, beta_h, gamma_h, optimistic) = _shared_params
+     action_powers, robot_agent_indices, robot_action_profiles, beta_h, gamma_h, optimistic, rho_h) = _shared_params
     
     v_results: Dict[int, Dict[int, Dict[PossibleGoal, float]]] = {}
     p_results: Dict[State, Dict[int, Dict[PossibleGoal, npt.NDArray[np.floating[Any]]]]] = {}
@@ -648,6 +672,7 @@ def _hpp_process_state_batch(
             beta_h, gamma_h,
             slice_cache=slice_cache,
             optimistic=optimistic,
+            rho_h=rho_h,
         )
         
         v_results[state_index] = state_v_results
@@ -690,7 +715,7 @@ def _hpp_process_timestep_batch_disk(
     states = _shared_states
     Vh_values = _shared_Vh_values
     (human_agent_indices, possible_goal_generator, num_agents, num_actions, 
-     action_powers, robot_agent_indices, robot_action_profiles, beta_h, gamma_h, optimistic) = _shared_params
+     action_powers, robot_agent_indices, robot_action_profiles, beta_h, gamma_h, optimistic, rho_h) = _shared_params
     
     # Deserialize believed_others_policy if custom one was provided via cloudpickle
     if _shared_believed_others_policy_pickle is not None:
@@ -725,6 +750,7 @@ def _hpp_process_timestep_batch_disk(
             beta_h, gamma_h,
             slice_cache=timestep_cache,
             optimistic=optimistic,
+            rho_h=rho_h,
         )
         
         v_results[global_state_idx] = state_v_results
@@ -1011,6 +1037,13 @@ def compute_human_policy_prior(
     # Precompute powers for action profile indexing
     action_powers: npt.NDArray[np.int64] = num_actions ** np.arange(num_agents)
 
+    # Compute continuous-time discount rate for duration-aware discounting
+    # rho_h = -ln(gamma_h). When gamma_h == 1.0, rho_h == 0 (no discounting).
+    if gamma_h == 1.0:
+        rho_h = 0.0
+    else:
+        rho_h = -math.log(gamma_h)
+
     # first get the dag of the world model:
     states, state_to_idx, successors, transitions = world_model.get_dag(return_probabilities=True, quiet=quiet)
     
@@ -1217,9 +1250,9 @@ def compute_human_policy_prior(
             
             # Initialize shared data for worker processes
             # On Linux (fork), workers inherit these as copy-on-write
-            params: Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], List[int], List[List[int]], float, float, bool] = (
+            params: Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], List[int], List[List[int]], float, float, bool, float] = (
                 human_agent_indices, possible_goal_generator, num_agents, num_actions,
-                action_powers, robot_agent_indices, robot_action_profiles, beta_h, gamma_h, optimistic
+                action_powers, robot_agent_indices, robot_action_profiles, beta_h, gamma_h, optimistic, rho_h
             )
             
             # Use 'fork' context explicitly to ensure shared memory works
@@ -1308,6 +1341,8 @@ def compute_human_policy_prior(
                             beta_h, gamma_h,
                             slice_cache=inline_slice_cache,
                             optimistic=optimistic,
+                            rho_h=rho_h,
+                            world_model=world_model,
                         )
                         
                         # Store results
@@ -1504,7 +1539,8 @@ def compute_human_policy_prior(
                              beta_h, gamma_h,
                              progress_callback, memory_monitor,
                              sliced_cache, disk_dag, level_fct, archive_dir, return_Vh,
-                             quiet=quiet, memory_profile=memory_profile, optimistic=optimistic)
+                             quiet=quiet, memory_profile=memory_profile, optimistic=optimistic,
+                             rho_h=rho_h, world_model=world_model)
         except KeyboardInterrupt:
             if not quiet:
                 print("\n[Phase1] Computation interrupted (KeyboardInterrupt).")
