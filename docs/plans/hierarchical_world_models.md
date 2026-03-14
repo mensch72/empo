@@ -18,6 +18,44 @@ This document outlines a plan to extend the EMPO framework to support **hierarch
 
 The initial implementation targets a **two-level hierarchy** for MultiGrid environments. The abstract interfaces are designed for $L$ levels but only $L = 2$ will be implemented and tested.
 
+### 1.3 Testing on the Command Line
+
+**Quick test (Tasks 1–4 only):**
+```bash
+# No Docker required — just pip install and run
+pip install -r setup/requirements.txt pytest
+make test-hierarchical
+```
+
+This runs 30 tests covering:
+- `tests/test_world_model_duration.py` — WorldModel duration API (9 tests)
+- `tests/test_duration_discounting.py` — Phase 1/2 duration-aware discounting (6 tests)
+- `tests/test_hierarchical_base.py` — HierarchicalWorldModel & LevelMapper ABCs (15 tests)
+
+**Full local test suite (no Docker):**
+```bash
+make test-local
+```
+
+**Run a single test file:**
+```bash
+PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds \
+  python -m pytest tests/test_hierarchical_base.py -v
+```
+
+**Run a single test:**
+```bash
+PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds \
+  python -m pytest tests/test_hierarchical_base.py::test_construct_two_level -v
+```
+
+**With Docker (full environment):**
+```bash
+make up          # start dev container
+make shell       # enter container
+python -m pytest tests/test_hierarchical_base.py tests/test_duration_discounting.py tests/test_world_model_duration.py -v
+```
+
 ## 2. Extending WorldModel with Step Duration
 
 ### 2.1 Motivation

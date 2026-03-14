@@ -1,4 +1,4 @@
-.PHONY: help build up down down-dev restart shell logs clean test lint
+.PHONY: help build up down down-dev restart shell logs clean test test-local test-hierarchical lint
 .PHONY: build-gpu push-gpu build-sif up-gpu-docker-hub up-gpu-sif-file
 .PHONY: build-hierarchical build-gpu-hierarchical test-mineland test-mineland-integration up-hierarchical
 
@@ -32,7 +32,9 @@ help:
 	@echo "  make logs           - Show container logs"
 	@echo "  make train          - Run training script"
 	@echo "  make example        - Run simple example"
-	@echo "  make test           - Run tests"
+	@echo "  make test           - Run tests (in Docker)"
+	@echo "  make test-local     - Run tests locally (no Docker needed)"
+	@echo "  make test-hierarchical - Run hierarchical world model tests locally"
 	@echo "  make test-mineland  - Test MineLand installation (basic import tests)"
 	@echo "  make test-mineland-integration - Test MineLand + Ollama vision (full integration)"
 	@echo "  make lint           - Run linters"
@@ -127,6 +129,23 @@ test:
 		--ignore=tests/test_mineland_installation.py \
 		--ignore=tests/debug_dag_by_timestep.py \
 		--ignore=tests/debug_dag_parallel.py
+
+# Run tests locally without Docker (requires: pip install -r setup/requirements.txt pytest)
+test-local:
+	@echo "Running tests locally..."
+	PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds python -m pytest tests/ -v \
+		--ignore=tests/test_mineland_installation.py \
+		--ignore=tests/debug_dag_by_timestep.py \
+		--ignore=tests/debug_dag_parallel.py
+
+# Run only hierarchical world model tests (Tasks 1-4) locally
+test-hierarchical:
+	@echo "Running hierarchical world model tests..."
+	PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds python -m pytest \
+		tests/test_world_model_duration.py \
+		tests/test_duration_discounting.py \
+		tests/test_hierarchical_base.py \
+		-v
 
 lint:
 	@echo "Running linters..."
