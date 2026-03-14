@@ -45,7 +45,7 @@ class WorldModel(gym.Env):
 
         The duration D(s, a, s') represents the certainty-equivalent expected real-time
         elapsed between taking the action and regaining control in successor state s',
-        defined as D = -(1/ρ) ln E[e^{-ρd}] (eq. from theory gist). For deterministic
+        defined as $D = -(1/\rho) \ln E[e^{-\rho d}]$ (eq. from theory gist). For deterministic
         durations, this reduces to the actual elapsed time.
 
         The default implementation returns [1.0, ...] (unit duration for every transition),
@@ -288,7 +288,7 @@ The $M^0$ cells are formed by the **coarsest rectangular partition** of the walk
 - Walls and other impassable permanent structures define the partition boundaries
 - Each partition block is identified by an index $i \in \{0, \dots, N_{\text{cells}}-1\}$
 
-**Open Question 1:** What is the precise definition of "coarsest possible partition"? One natural choice: place partition boundaries at every row/column that contains at least one wall cell, producing a grid of rectangular blocks. Blocks that are entirely wall are removed. This is deterministic and simple to implement. See [Open Questions](#11-open-questions).
+**Open Question 1:** What is the precise definition of "coarsest possible partition"? One natural choice: place partition boundaries at every row/column that contains at least one wall cell, producing a grid of rectangular blocks. Blocks that are entirely wall are removed. This is deterministic and simple to implement. See [Open Questions](#11-open-questions) (Q1).
 
 #### 4.2.2 Adjacency
 
@@ -301,9 +301,11 @@ An $M^0$ state encodes:
 ```python
 macro_state = (
     remaining_time,        # int: remaining real-time steps of the episode
-    passage_flags,         # tuple of bools: for each adjacent cell pair (i,j), whether
-                           #   at least one pair of adjacent M^1 border cells (k∈i, m∈j)
-                           #   are both empty/passable (open door, no blocking object)
+    passage_flags,         # tuple of bools, indexed by the sorted adjacency list:
+                           #   for each adjacent cell pair (i,j) with i < j, ordered
+                           #   lexicographically, whether at least one pair of adjacent
+                           #   M^1 border cells (k∈i, m∈j) are both empty/passable
+                           #   (open door, no blocking object)
     agent_states,          # tuple: for each agent:
                            #   (macro_cell_index, carrying, terminated, started, paused)
                            #   — same as M^1 agent state but position replaced by M^0 cell
@@ -349,7 +351,7 @@ For `TOGGLE(obj)`, `PICKUP(obj)`, etc.:
 - Successor state: object state changed accordingly
 - Duration: estimated steps to navigate to object and perform action
 
-**Open Question 2:** How precisely should $M^0$ transition probabilities be computed? Exact computation would require solving the $M^1$ sub-problem for each $M^0$ transition, which defeats the purpose of hierarchy. Options include: (a) hand-coded heuristic estimates, (b) pre-computed lookup tables from representative sub-problem solves, (c) simple distance-based approximations. See [Open Questions](#11-open-questions).
+**Open Question 2:** How precisely should $M^0$ transition probabilities be computed? Exact computation would require solving the $M^1$ sub-problem for each $M^0$ transition, which defeats the purpose of hierarchy. Options include: (a) hand-coded heuristic estimates, (b) pre-computed lookup tables from representative sub-problem solves, (c) simple distance-based approximations. See [Open Questions](#11-open-questions) (Q2).
 
 #### 4.2.6 Duration Estimates
 
@@ -554,8 +556,8 @@ class MacroGoalGenerator(PossibleGoalGenerator):
 
     def generate(self, state, human_agent_index: int) -> Iterator[Tuple[PossibleGoal, float]]:
         # Yield MacroCellGoal for each cell
-        for cell_idx in range(self.env.num_cells):
-            yield MacroCellGoal(self.env, human_agent_index, cell_idx), 1.0
+        for cell_index in range(self.env.num_cells):
+            yield MacroCellGoal(self.env, human_agent_index, cell_index), 1.0
         # Yield MacroProximityGoal for each other agent
         for other_idx in range(len(self.env.agents)):
             if other_idx != human_agent_index:
@@ -791,7 +793,7 @@ Usage:
 
 def main():
     # 1. Create micro-level environment
-    micro_env = MultiGridEnv(config=..., max_steps=200)
+    micro_env = MultiGridEnv(config_file='multigrid_worlds/hierarchical/two_level_demo.yaml', max_steps=200)
 
     # 2. Build two-level hierarchy
     hierarchy = TwoLevelMultigrid(micro_env)
