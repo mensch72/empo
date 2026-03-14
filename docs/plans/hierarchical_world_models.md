@@ -277,18 +277,17 @@ class TwoLevelMultigrid(HierarchicalWorldModel):
 
 #### 4.2.1 Cell Partitioning
 
-The $M^0$ cells are formed by the **coarsest rectangular partition** of the walkable area of $M^1$:
-1. Identify all walkable cells (non-wall, non-lava) in the $M^1$ grid
-2. Find the coarsest partition into axis-aligned rectangles of width ≥ 1 and height ≥ 1, where every cell in a rectangle is walkable
-3. Each such rectangle becomes one $M^0$ cell
+The $M^0$ cells are formed by an **agglomerative hierarchical clustering** of the walkable cells of $M^1$ into rectangles:
+1. Start with each walkable cell (non-wall, non-lava) in $M^1$ as its own singleton block
+2. Iteratively merge that pair of adjacent blocks for which the merged block is still rectangular and has minimal area among the mergeable pairs (resolve ties at random)
+3. Stop when no further rectangular merges are possible
+4. Each resulting rectangle becomes one $M^0$ cell
 
 **Algorithm sketch:**
-- Start with the full grid minus walls
-- Use a greedy maximal-rectangle decomposition or a grid-line-based partitioning approach
-- Walls and other impassable permanent structures define the partition boundaries
+- Initialize each walkable cell as a 1×1 block
+- Maintain a priority queue of mergeable adjacent block pairs, keyed by merged area
+- At each step, pop the minimal-area merge, verify it is still valid (both blocks still exist and merge is rectangular), merge, and update the queue with new adjacencies
 - Each partition block is identified by an index $i \in \{0, \dots, N_{\text{cells}}-1\}$
-
-**Open Question 1:** What is the precise definition of "coarsest possible partition"? One natural choice: place partition boundaries at every row/column that contains at least one wall cell, producing a grid of rectangular blocks. Blocks that are entirely wall are removed. This is deterministic and simple to implement. See [Open Questions](#11-open-questions) (Q1).
 
 #### 4.2.2 Adjacency
 
@@ -300,7 +299,9 @@ An $M^0$ state encodes:
 
 ```python
 macro_state = (
-    remaining_time,        # int: remaining real-time steps of the episode
+    remaining_time,        # float: expected remaining M^1 steps of the episode,
+                           #   computed as initial max_steps minus the sum of expected
+                           #   durations of all macro-actions taken so far
     passage_flags,         # tuple of bools, indexed by the sorted adjacency list:
                            #   for each adjacent cell pair (i,j) with i < j, ordered
                            #   lexicographically, whether at least one pair of adjacent
@@ -315,10 +316,10 @@ macro_state = (
 ```
 
 **Notes:**
-- `remaining_time` replaces `step_count` from $M^1$ since $M^0$ steps consume variable amounts of real time
+- `remaining_time` is the **expected** remaining $M^1$ step count: successor state's remaining time = previous state's remaining time minus expected action duration. This avoids state-space blow-up from tracking exact step counts.
 - Passage flags encode whether movement between adjacent macro-cells is currently possible
 - Agent positions are abstracted to their containing macro-cell index
-- Object states are preserved in full since they affect passage flags and goal achievement
+- Object states are preserved in full (tracking all objects the micro-state tracks) since they affect passage flags and goal achievement
 
 #### 4.2.4 Action Space
 
@@ -339,19 +340,17 @@ The available actions depend on the current macro-state (which cells are adjacen
 
 #### 4.2.5 Transition Dynamics
 
-$M^0$ transitions are **approximate** since they summarize the outcomes of multi-step $M^1$ sub-problems:
+$M^0$ transitions use **heuristic estimates** since they summarize the outcomes of multi-step $M^1$ sub-problems. The macro model need not be perfectly accurate — the micro-level sub-problem solve provides the actual behavioral fidelity.
 
 For `WALK(j)`:
 - Success probability estimated from passage flags and agent positions
-- Successor state: agent's macro-cell changes to $j$, passage flags updated
+- Successor state: agent's macro-cell changes to $j$, passage flags updated, remaining_time decremented by expected duration
 - Duration: average shortest path length from current positions to $j$
 
 For `TOGGLE(obj)`, `PICKUP(obj)`, etc.:
 - Success probability estimated from reachability within the macro-cell
-- Successor state: object state changed accordingly
+- Successor state: object state changed accordingly, remaining_time decremented by expected duration
 - Duration: estimated steps to navigate to object and perform action
-
-**Open Question 2:** How precisely should $M^0$ transition probabilities be computed? Exact computation would require solving the $M^1$ sub-problem for each $M^0$ transition, which defeats the purpose of hierarchy. Options include: (a) hand-coded heuristic estimates, (b) pre-computed lookup tables from representative sub-problem solves, (c) simple distance-based approximations. See [Open Questions](#11-open-questions) (Q2).
 
 #### 4.2.6 Duration Estimates
 
@@ -621,13 +620,12 @@ The hierarchical algorithm computes policies top-down:
 
 1. **Macro-level ($M^0$):** Compute the full DAG and robot policy using the existing `compute_robot_policy()` algorithm, but with duration-aware discounting. This produces $\pi^0_r(s^0)(a^0_r)$.
 
-2. **Micro-level ($M^1$) sub-problems:** For each macro-state $s^0$ and macro-action profile $a^0$ encountered during rollout, compute a **partial** micro-level robot policy:
+2. **Micro-level ($M^1$) sub-problems:** For each macro-state $s^0$ and macro-action profile $a^0$ encountered during rollout, compute a **partial** micro-level robot policy on demand:
    - The sub-problem starts from the current micro-state $s^1_0$
-   - Only micro-actions satisfying `is_feasible(a^0, s^1, a^1)` are considered
+   - Only micro-actions satisfying `is_feasible(a^0, s^1, a^1)` are considered (action space filtering)
    - States where `return_control(...)` is True are treated as terminal
    - At these terminal states, $M(s^1) = M(\sigma^0(s^1))$ (delegates to macro-level value)
-
-3. **Caching:** Micro-level sub-problem solutions are cached by their defining context $(s^0, a^0, s^1_0)$ and reused across rollouts.
+   - No caching of sub-problem solutions is performed — each sub-problem is solved fresh since it is unlikely to encounter the same sub-problem twice in practice
 
 ### 7.2 API
 
@@ -651,8 +649,8 @@ def compute_hierarchical_robot_policy(
     """Compute a hierarchical robot policy via top-down backward induction.
 
     1. Computes the macro-level (M^0) robot policy fully via compute_robot_policy().
-    2. Returns a HierarchicalRobotPolicy that lazily computes and caches micro-level
-       sub-problem policies on demand during rollouts.
+    2. Returns a HierarchicalRobotPolicy that computes micro-level sub-problem
+       policies on demand during rollouts (no caching).
 
     Args:
         hierarchical_model: The hierarchical world model.
@@ -674,7 +672,7 @@ class HierarchicalRobotPolicy(RobotPolicy):
     """A robot policy that operates across multiple levels of a hierarchical model.
 
     Maintains the current control level and delegates to the appropriate level's
-    policy. Lazily computes and caches micro-level sub-problem policies.
+    policy. Computes micro-level sub-problem policies on demand (no caching).
 
     Usage:
         policy = compute_hierarchical_robot_policy(...)
@@ -696,7 +694,6 @@ class HierarchicalRobotPolicy(RobotPolicy):
         self.macro_policy = macro_policy
         self.macro_Vr = macro_Vr
         self.macro_Xh = macro_Xh
-        self._sub_problem_cache: Dict[Tuple, TabularRobotPolicy] = {}
         self._current_coarse_action: Optional[Tuple[int, ...]] = None
         self._current_coarse_state: Optional[Any] = None
 
@@ -709,7 +706,7 @@ class HierarchicalRobotPolicy(RobotPolicy):
            b. Sample macro-action from macro_policy
            c. Store as current coarse action, transfer control to micro level
         2. If control is at micro level:
-           a. Look up or compute the sub-problem policy for (coarse_state, coarse_action, micro_state)
+           a. Compute the sub-problem policy for (coarse_state, coarse_action, micro_state)
            b. Sample micro-action from sub-problem policy
            c. Check return_control() — if True, return control to macro level
         """
@@ -719,10 +716,13 @@ class HierarchicalRobotPolicy(RobotPolicy):
         self._current_coarse_action = None
         self._current_coarse_state = None
 
-    def _get_or_compute_sub_policy(
+    def _compute_sub_policy(
         self, coarse_state, coarse_action, micro_state
     ) -> TabularRobotPolicy:
-        """Lazily compute and cache a micro-level sub-problem policy.
+        """Compute a micro-level sub-problem policy on demand.
+
+        No caching is performed — each sub-problem is solved fresh since it is
+        unlikely to encounter the same sub-problem twice in practice.
 
         The sub-problem is defined by:
         - Initial state: micro_state
@@ -943,13 +943,13 @@ The following is a numbered sequence of coding agent tasks, ordered by dependenc
 - `src/empo/hierarchical/cell_partition.py`
 
 **Work:**
-1. Implement the algorithm that partitions a MultiGrid's walkable cells into maximal rectangles
+1. Implement the **agglomerative hierarchical clustering** algorithm: start with single-walkable-cell blocks, iteratively merge that pair of adjacent blocks for which the merged block is still rectangular and has minimal area among the mergeable pairs (ties broken at random), stop when no further rectangular merges are possible
 2. Compute adjacency between macro-cells
 3. Compute border cells between adjacent macro-cells (for passage flag computation)
 4. Compute estimated distances between macro-cells (for duration estimates)
 
 **Tests:**
-- `tests/test_cell_partition.py` — test on known grid layouts (single room, two rooms with door, L-shaped room, etc.)
+- `tests/test_cell_partition.py` — test on known grid layouts (single room, two rooms with door, L-shaped room, etc.); verify that the partitioning produces valid non-overlapping rectangular blocks covering all walkable cells
 
 ---
 
@@ -1042,10 +1042,9 @@ The following is a numbered sequence of coding agent tasks, ordered by dependenc
 
 **Work:**
 1. Implement `compute_hierarchical_robot_policy()` — computes macro-level policy via `compute_robot_policy()`
-2. Implement `HierarchicalRobotPolicy(RobotPolicy)` with lazy sub-problem computation
-3. Implement sub-problem DAG construction with feasibility filtering and terminal state handling
-4. Implement sub-problem caching
-5. Implement control transfer logic in `sample()`
+2. Implement `HierarchicalRobotPolicy(RobotPolicy)` with on-demand sub-problem computation (no caching — each sub-problem is solved fresh)
+3. Implement sub-problem DAG construction with feasibility filtering (only feasible action profiles are expanded) and terminal state handling
+4. Implement control transfer logic in `sample()`
 
 **Tests:**
 - `tests/test_hierarchical_backward_induction.py` — test on small two-room environment
@@ -1121,64 +1120,51 @@ The following is a numbered sequence of coding agent tasks, ordered by dependenc
 **Tests:**
 - `tests/test_macro_encoders.py` — test forward pass shapes, gradient flow
 
-## 11. Open Questions
+## 11. Resolved Questions
 
-The following questions need answers before or during implementation. They are flagged here for discussion in the PR.
+The following questions were raised in the initial plan draft and have been resolved via [discussion on issue #125](https://github.com/mensch72/empo/issues/125#issuecomment-4060647060).
 
-### Q1: Cell Partition Algorithm
+### Q1: Cell Partition Algorithm — RESOLVED
 
 **Question:** What precisely defines the "coarsest possible partition" of walkable cells into rectangles?
 
-**Proposed approach:** Place partition boundaries at every row and column that contains at least one wall cell (or other permanent impassable obstacle). This produces a grid of rectangular blocks. Remove blocks that are entirely non-walkable. This is deterministic, simple, and produces rectangles that respect the room structure of typical MultiGrid environments.
+**Answer:** Use an **agglomerative hierarchical clustering** algorithm: start with single-walkable-cell blocks and iteratively merge that pair of adjacent blocks for which the merged block is still rectangular and has a minimal area among the mergeable pairs (resolving ties at random). Stop when no further rectangular merges are possible.
 
-**Alternative:** A more sophisticated approach could merge adjacent blocks that form a larger rectangle, producing fewer but larger cells. This would reduce the macro-level state space but increase the complexity of the partitioning algorithm.
-
-### Q2: Macro-Level Transition Probabilities
+### Q2: Macro-Level Transition Probabilities — RESOLVED
 
 **Question:** How should $M^0$ transition probabilities be computed?
 
-**Proposed approach:** Use **heuristic estimates** based on:
-- Path connectivity (is a passage open?)
-- Distance estimates (Manhattan distance on the macro-cell graph)
-- Simple success/failure probabilities (passage open → high success, passage closed → 0)
+**Answer:** Use **heuristic estimates** based on path connectivity (is a passage open?), distance estimates (Manhattan distance on the macro-cell graph), and simple success/failure probabilities (passage open → high success, passage closed → 0). The macro model need not be perfectly accurate — the micro-level sub-problem solve provides the actual behavioral fidelity.
 
-This avoids the computational cost of solving micro-level sub-problems to determine macro-level transitions. The macro model need not be perfectly accurate — the micro-level sub-problem solve provides the actual behavioral fidelity.
-
-**Alternative:** Pre-compute transition statistics by running Monte Carlo simulations of the micro-level sub-problems for representative states. More accurate but significantly more expensive.
-
-### Q3: Macro-Level "Remaining Time" Granularity
+### Q3: Macro-Level "Remaining Time" Granularity — RESOLVED
 
 **Question:** Should `remaining_time` in the macro-state be the exact remaining $M^1$ step count, or a coarser approximation?
 
-Using the exact step count makes the macro-state space proportional to `max_steps`, which could be large. A coarser encoding (e.g., binned into 5–10 time buckets) would reduce the state space but lose some precision.
+**Answer:** It should be the **expected** remaining $M^1$ step count, based on the initial `max_steps` minus the expected durations of actions taken. In other words: successor state's remaining time = previous state's remaining time minus expected action duration. This avoids the state-space blow-up from tracking exact step counts while maintaining meaningful time information.
 
-### Q4: Agent Grouping for $L > 2$
+### Q4: Agent Grouping for $L > 2$ — RESOLVED
 
-**Question:** The theory gist defines $\H^1$ as a partition of $\H^2$ into groups. For the initial two-level MultiGrid implementation, should we support non-trivial grouping (e.g., team of 2 humans as one macro-agent)?
+**Question:** Should we support non-trivial agent grouping for the initial two-level MultiGrid implementation?
 
-**Proposed approach:** Start with **identity mapping** (each micro-agent is its own macro-agent). Agent grouping can be added later when the framework is extended to $L > 2$ or to environments with natural team structure.
+**Answer:** Start with **identity mapping** (each micro-agent is its own macro-agent). Agent grouping can be added later when the framework is extended to $L > 2$ or to environments with natural team structure.
 
-### Q5: Sub-Problem Caching Granularity
+### Q5: Sub-Problem Caching — RESOLVED
 
 **Question:** What should the cache key be for micro-level sub-problem policies?
 
-**Proposed approach:** Cache by `(coarse_state, coarse_action_profile)`. The micro-level initial state is determined by these, so any micro-state within the same macro-state under the same macro-action can reuse the cached sub-problem policy.
+**Answer:** **Skip caching for now.** It is highly unlikely to encounter the same sub-problem twice in practice, so the complexity of a caching mechanism is not justified at this stage.
 
-**Concern:** Different micro-states within the same macro-state may produce different sub-problem DAGs (different reachable states). May need to cache by `(coarse_state, coarse_action_profile, micro_start_state)` for correctness, accepting more cache misses.
-
-### Q6: Macro-Level Object Tracking
+### Q6: Macro-Level Object Tracking — RESOLVED
 
 **Question:** Should all $M^1$ objects be tracked in the $M^0$ state, or only those that affect passage connectivity and goal achievement?
 
-Tracking all objects preserves full information but inflates the macro-state space. Tracking only "relevant" objects (doors, keys, blocks near passages) reduces the state space but requires defining "relevance."
+**Answer:** **Track all objects** that the micro-state tracks. This preserves full information and avoids the need to define "relevance." Optimization can be considered later if the state space becomes too large.
 
-**Proposed approach:** Track all objects initially for correctness. Optimize later if the state space is too large.
+### Q7: Interaction Between `is_feasible` and Action Space — RESOLVED
 
-### Q7: Interaction Between `is_feasible` and Action Space
+**Question:** Should `is_feasible` filter out infeasible actions from the micro-level action space, or should infeasible actions simply be assigned zero probability in the policy?
 
-**Question:** Should `is_feasible` filter out infeasible actions from the micro-level action space (so `transition_probabilities` only sees feasible actions), or should infeasible actions simply be assigned zero probability in the policy?
-
-**Proposed approach:** Filter the action space — only pass feasible action profiles to the sub-problem DAG construction. This reduces the sub-problem state space and is conceptually cleaner (the sub-problem is defined over a restricted action space).
+**Answer:** **Filter the action space.** Only pass feasible action profiles to the sub-problem DAG construction. This reduces the sub-problem state space and is conceptually cleaner (the sub-problem is defined over a restricted action space).
 
 ## 12. Dependencies and Order
 
@@ -1228,7 +1214,7 @@ This plan extends the EMPO framework with hierarchical world models through:
 
 4. **Macro-level goals and policy** (Tasks 9–10): `MacroCellGoal`, `MacroProximityGoal` goals and a `MacroHeuristicPolicy` that uses shortest-path potentials on the macro-cell graph.
 
-5. **Hierarchical backward induction** (Task 11): Top-down policy computation — exact macro-level solve followed by lazy, cached micro-level sub-problem solves with feasibility constraints and control transfer.
+5. **Hierarchical backward induction** (Task 11): Top-down policy computation — exact macro-level solve followed by on-demand micro-level sub-problem solves with feasibility-filtered action spaces and control transfer.
 
 6. **Demonstration** (Tasks 12–14): An animated visualization of hierarchical decision making with curved-arrow macro-action overlays in a multi-room gridworld.
 
