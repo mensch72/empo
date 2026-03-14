@@ -44,6 +44,7 @@ from empo.possible_goal import PossibleGoal, PossibleGoalGenerator, PossibleGoal
 from empo.human_policy_prior import HumanPolicyPrior, TabularHumanPolicyPrior
 from empo.robot_policy import RobotPolicy
 from empo.backward_induction import compute_human_policy_prior, TabularRobotPolicy
+from empo.hierarchical import HierarchicalWorldModel, LevelMapper
 from empo.util.memory_monitor import MemoryMonitor, check_memory
 
 # Transport environment wrapper (optional import - requires ai_transport)
@@ -69,6 +70,9 @@ __all__ = [
     "TabularRobotPolicy",
     # Backward Induction
     "compute_human_policy_prior",
+    # Hierarchical
+    "HierarchicalWorldModel",
+    "LevelMapper",
     # Memory Monitoring
     "MemoryMonitor",
     "check_memory",

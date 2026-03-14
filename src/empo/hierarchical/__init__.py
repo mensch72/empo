@@ -6,6 +6,10 @@ for multi-agent systems using empowerment-based objectives.
 
 **Status:** Work in progress. This subpackage is under active development.
 
+**Core abstractions:**
+- HierarchicalWorldModel: A sequence of WorldModels connected by LevelMappers.
+- LevelMapper: Abstract base class for mapping between adjacent levels.
+
 **Planned features:**
 - Hierarchical option framework for temporal abstraction
 - Sub-goal discovery for complex environments
@@ -22,4 +26,10 @@ for multi-agent systems using empowerment-based objectives.
 - empo.backward_induction: Base planning algorithms
 """
 
-__all__ = []
+from empo.hierarchical.hierarchical_world_model import HierarchicalWorldModel
+from empo.hierarchical.level_mapper import LevelMapper
+
+__all__ = [
+    "HierarchicalWorldModel",
+    "LevelMapper",
+]
