@@ -181,7 +181,7 @@ def _hpp_process_single_state(
                     print(f"    Goal achieved in state, agent {agent_index}: V = 0, remain still policy")
             else:
                 # Compute Q values as expected future V values
-                expected_Vs = np.zeros(num_actions)
+                q = np.zeros(num_actions)
                 for action in actions:
                     v_accum = 0.0
                     for action_profile_prob, action_profile in believed_others_policy(state, agent_index, action):
@@ -238,13 +238,7 @@ def _hpp_process_single_state(
                                 else (expectation < anticipated_expectation)):
                                 anticipated_expectation = expectation
                         v_accum += action_profile_prob * anticipated_expectation
-                    expected_Vs[action] = v_accum
-                
-                if rho_h > 0.0:
-                    # Discounting already applied per-transition inside the expectation
-                    q = expected_Vs
-                else:
-                    q = gamma_h * expected_Vs
+                    q[action] = v_accum
                 
                 # Boltzmann policy (numerically stable softmax)
                 if beta_h == math.inf:
@@ -774,7 +768,8 @@ def compute_human_policy_prior(
     believed_others_policy: Optional[Callable[[State, int, int], List[Tuple[float, npt.NDArray[np.int64]]]]] = None, 
     *,
     beta_h: float = 10.0, 
-    gamma_h: float = 1.0, 
+    gamma_h: Optional[float] = None, 
+    rho_h: Optional[float] = None,
     parallel: bool = False, 
     num_workers: Optional[int] = None, 
     level_fct: Optional[Callable[[State], int]] = None, 
@@ -798,7 +793,8 @@ def compute_human_policy_prior(
     believed_others_policy: Optional[Callable[[State, int, int], List[Tuple[float, npt.NDArray[np.int64]]]]] = None, 
     *, 
     beta_h: float = 10.0, 
-    gamma_h: float = 1.0, 
+    gamma_h: Optional[float] = None, 
+    rho_h: Optional[float] = None,
     parallel: bool = False, 
     num_workers: Optional[int] = None, 
     level_fct: Optional[Callable[[State], int]] = None, 
@@ -822,7 +818,8 @@ def compute_human_policy_prior(
     believed_others_policy: Optional[Callable[[State, int, int], List[Tuple[float, npt.NDArray[np.int64]]]]] = None, 
     *, 
     beta_h: float = 10.0, 
-    gamma_h: float = 1.0, 
+    gamma_h: Optional[float] = None, 
+    rho_h: Optional[float] = None,
     parallel: bool = False, 
     num_workers: Optional[int] = None, 
     level_fct: Optional[Callable[[State], int]] = None, 
@@ -846,7 +843,8 @@ def compute_human_policy_prior(
     believed_others_policy: Optional[Callable[[State, int, int], List[Tuple[float, npt.NDArray[np.int64]]]]] = None, 
     *, 
     beta_h: float = 10.0, 
-    gamma_h: float = 1.0, 
+    gamma_h: Optional[float] = None, 
+    rho_h: Optional[float] = None,
     parallel: bool = False, 
     num_workers: Optional[int] = None, 
     level_fct: Optional[Callable[[State], int]] = None, 
@@ -869,7 +867,8 @@ def compute_human_policy_prior(
     believed_others_policy: Optional[Callable[[State, int, int], List[Tuple[float, npt.NDArray[np.int64]]]]] = None, 
     *,
     beta_h: float = 10.0, 
-    gamma_h: float = 1.0, 
+    gamma_h: Optional[float] = None, 
+    rho_h: Optional[float] = None,
     parallel: bool = False, 
     num_workers: Optional[int] = None, 
     level_fct: Optional[Callable[[State], int]] = None, 
@@ -925,7 +924,11 @@ def compute_human_policy_prior(
                                If None, uses uniform distribution over all action profiles.
         beta_h: Inverse temperature for Boltzmann policy. Higher = more deterministic.
                 Use float('inf') for pure argmax (greedy) policy.
-        gamma_h: Discount factor for future rewards.
+        gamma_h: Discount factor for future rewards. Exactly one of gamma_h or rho_h
+                must be provided. If gamma_h is given, rho_h is computed as -ln(gamma_h).
+                Defaults to 1.0 (no discounting) if neither is provided.
+        rho_h: Continuous-time discount rate. Exactly one of gamma_h or rho_h must be
+               provided. If rho_h is given, gamma_h is computed as exp(-rho_h).
         parallel: If True, use multiprocessing for parallel computation.
                  Requires 'fork' context (works on Linux, may not work on macOS/Windows).
         num_workers: Number of parallel workers. If None, uses mp.cpu_count().
@@ -1036,12 +1039,17 @@ def compute_human_policy_prior(
     # Precompute powers for action profile indexing
     action_powers: npt.NDArray[np.int64] = num_actions ** np.arange(num_agents)
 
-    # Compute continuous-time discount rate for duration-aware discounting
-    # rho_h = -ln(gamma_h). When gamma_h == 1.0, rho_h == 0 (no discounting).
-    if gamma_h == 1.0:
-        rho_h = 0.0
+    # Resolve gamma_h / rho_h: exactly one must be provided (or neither for default)
+    if gamma_h is not None and rho_h is not None:
+        raise ValueError("Specify exactly one of gamma_h or rho_h, not both.")
+    if gamma_h is not None:
+        rho_h = 0.0 if gamma_h == 1.0 else -math.log(gamma_h)
+    elif rho_h is not None:
+        gamma_h = math.exp(-rho_h)
     else:
-        rho_h = -math.log(gamma_h)
+        # Default: no discounting
+        gamma_h = 1.0
+        rho_h = 0.0
 
     # first get the dag of the world model:
     states, state_to_idx, successors, transitions = world_model.get_dag(return_probabilities=True, quiet=quiet)

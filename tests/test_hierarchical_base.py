@@ -84,13 +84,13 @@ class SimpleLevelMapper(LevelMapper):
     def super_agent(self, fine_agent_index):
         return fine_agent_index  # identity mapping
 
-    def is_feasible(self, coarse_action, fine_state, fine_action):
+    def is_feasible(self, coarse_action_profile, fine_state, fine_action_profile):
         return True  # all actions feasible
 
-    def is_abort(self, coarse_action, fine_state, fine_action):
-        return fine_action == (0,)  # action 0 is abort
+    def is_abort(self, coarse_action_profile, fine_state, fine_action_profile):
+        return fine_action_profile == (0,)  # action 0 is abort
 
-    def return_control(self, coarse_action, fine_state, fine_action, fine_successor_state):
+    def return_control(self, coarse_action_profile, fine_state, fine_action_profile, fine_successor_state):
         # Return control when fine state changes macro-cell
         return self.super_state(fine_state) != self.super_state(fine_successor_state)
 

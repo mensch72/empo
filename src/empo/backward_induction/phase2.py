@@ -195,11 +195,9 @@ def _rp_process_single_state(
                 dw += human_action_profile_prob * np.dot(next_state_probabilities, duration_weight_factors)
             else:
                 v += human_action_profile_prob * np.dot(next_state_probabilities, Vr_values[next_state_indices])
+        Qr_values[robot_action_profile_index] = v  # discounting already applied per-transition
         if rho_r > 0.0:
-            Qr_values[robot_action_profile_index] = v  # discounting already applied per-transition
             duration_weights_per_rap[robot_action_profile_index] = dw
-        else:
-            Qr_values[robot_action_profile_index] = gamma_r * v
     
     # Compute robot policy as power-law policy
     # Use log-space computation for numerical stability:
@@ -861,8 +859,10 @@ def compute_robot_policy(
     human_policy_prior: Optional[TabularHumanPolicyPrior] = None,
     *,
     beta_r: float = 10.0,
-    gamma_h: float = 1.0, 
-    gamma_r: float = 1.0,
+    gamma_h: Optional[float] = None, 
+    gamma_r: Optional[float] = None,
+    rho_h: Optional[float] = None,
+    rho_r: Optional[float] = None,
     zeta: float = 1.0,
     xi: float = 1.0,
     eta: float = 1.0,
@@ -891,8 +891,10 @@ def compute_robot_policy(
     human_policy_prior: Optional[TabularHumanPolicyPrior] = None,
     *,
     beta_r: float = 10.0,
-    gamma_h: float = 1.0, 
-    gamma_r: float = 1.0,
+    gamma_h: Optional[float] = None, 
+    gamma_r: Optional[float] = None,
+    rho_h: Optional[float] = None,
+    rho_r: Optional[float] = None,
     zeta: float = 1.0,
     xi: float = 1.0,
     eta: float = 1.0,
@@ -925,8 +927,10 @@ def compute_robot_policy(
     human_policy_prior: Optional[TabularHumanPolicyPrior] = None,
     *,
     beta_r: float = 10.0,
-    gamma_h: float = 1.0, 
-    gamma_r: float = 1.0,
+    gamma_h: Optional[float] = None, 
+    gamma_r: Optional[float] = None,
+    rho_h: Optional[float] = None,
+    rho_r: Optional[float] = None,
     zeta: float = 1.0,
     xi: float = 1.0,
     eta: float = 1.0,
@@ -954,8 +958,10 @@ def compute_robot_policy(
     human_policy_prior: Optional[TabularHumanPolicyPrior] = None,
     *,
     beta_r: float = 10.0,
-    gamma_h: float = 1.0, 
-    gamma_r: float = 1.0,
+    gamma_h: Optional[float] = None, 
+    gamma_r: Optional[float] = None,
+    rho_h: Optional[float] = None,
+    rho_r: Optional[float] = None,
     zeta: float = 1.0,
     xi: float = 1.0,
     eta: float = 1.0,
@@ -1013,8 +1019,14 @@ def compute_robot_policy(
         human_policy_prior: Precomputed human policy prior from compute_human_policy_prior().
                            If None, will be computed automatically using the goal generator.
         beta_r: Power-law concentration parameter. Higher = more deterministic.
-        gamma_h: Discount factor for human goal achievement values.
-        gamma_r: Discount factor for robot values.
+        gamma_h: Discount factor for human goal achievement values. Exactly one of
+                gamma_h or rho_h must be provided. Defaults to 1.0 if neither is given.
+        gamma_r: Discount factor for robot values. Exactly one of gamma_r or rho_r
+                must be provided. Defaults to 1.0 if neither is given.
+        rho_h: Continuous-time discount rate for humans. If given, gamma_h is computed
+               as exp(-rho_h).
+        rho_r: Continuous-time discount rate for robots. If given, gamma_r is computed
+               as exp(-rho_r).
         zeta: Risk-aversion parameter for aggregate goal ability.
         xi: Inter-human power-inequality aversion parameter.
         eta: Additional intertemporal power-inequality aversion parameter.
@@ -1113,15 +1125,27 @@ def compute_robot_policy(
     # Precompute powers for action profile indexing
     action_powers: npt.NDArray[np.int64] = num_actions ** np.arange(num_agents)
 
-    # Compute continuous-time discount rates for duration-aware discounting
-    if gamma_h == 1.0:
+    # Resolve gamma_h / rho_h: exactly one must be provided (or neither for default)
+    if gamma_h is not None and rho_h is not None:
+        raise ValueError("Specify exactly one of gamma_h or rho_h, not both.")
+    if gamma_h is not None:
+        rho_h = 0.0 if gamma_h == 1.0 else -math.log(gamma_h)
+    elif rho_h is not None:
+        gamma_h = math.exp(-rho_h)
+    else:
+        gamma_h = 1.0
         rho_h = 0.0
+
+    # Resolve gamma_r / rho_r: exactly one must be provided (or neither for default)
+    if gamma_r is not None and rho_r is not None:
+        raise ValueError("Specify exactly one of gamma_r or rho_r, not both.")
+    if gamma_r is not None:
+        rho_r = 0.0 if gamma_r == 1.0 else -math.log(gamma_r)
+    elif rho_r is not None:
+        gamma_r = math.exp(-rho_r)
     else:
-        rho_h = -math.log(gamma_h)
-    if gamma_r == 1.0:
+        gamma_r = 1.0
         rho_r = 0.0
-    else:
-        rho_r = -math.log(gamma_r)
 
     # Serialize human_policy_prior using cloudpickle for parallel mode
     human_policy_prior_pickle = cloudpickle.dumps(human_policy_prior)
