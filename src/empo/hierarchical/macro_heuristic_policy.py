@@ -55,10 +55,22 @@ class MacroHeuristicPolicy(HumanPolicyPrior):
             world_model: A ``MacroGridEnv`` instance.
             human_agent_indices: Indices of human agents.
             possible_goal_generator: Generator enumerating macro-level goals.
-            beta: Boltzmann rationality parameter (default 5.0).
+            beta: Boltzmann rationality parameter (default 5.0). Must be
+                finite and non-negative.
         """
         super().__init__(world_model, human_agent_indices)
         self.possible_goal_generator = possible_goal_generator
+        # Validate beta to avoid NaNs from inf * 0 in Boltzmann computations.
+        if not np.isfinite(beta):
+            raise ValueError(
+                f"MacroHeuristicPolicy beta must be finite; got {beta!r}. "
+                "Deterministic (beta=inf) Boltzmann policies are not "
+                "supported for MacroHeuristicPolicy."
+            )
+        if beta < 0.0:
+            raise ValueError(
+                f"MacroHeuristicPolicy beta must be non-negative; got {beta!r}."
+            )
         self.beta = beta
 
     def __call__(
