@@ -929,7 +929,9 @@ def compute_human_policy_prior(
         1. Build the DAG of reachable states using world_model.get_dag()
         2. Compute dependency levels for topological ordering
         3. Process states in reverse topological order:
-           - Terminal states: V(s, g) = is_achieved(g, s)
+           - Terminal states (and states where the goal is already achieved): V(s, g) = 0
+             Achievement is handled as reward-on-transition via the successor term achievement(s'),
+             i.e., goal attainment is credited when entering s rather than by adding value at s.
            - Non-terminal states (with D = transition duration from world_model):
              * Q(s, a, g) = E[achievement(s') + (1-achievement(s')) · e^{-ρ_h·D} · V(s', g)]
              * π(a|s,g) = softmax(β * Q(s, *, g))
