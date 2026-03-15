@@ -390,22 +390,24 @@ class TestDistanceEstimation:
         assert part.num_cells == 2
         cell_a = part.cell_of(0, 0)
         cell_b = part.cell_of(1, 1)
-        # Centres are (0,0) and (1,1); Manhattan distance = |1-0| + |1-0| = 2.
+        # Single-cell source → distance to closest target cell = Manhattan.
         assert part.estimated_distance(cell_a, cell_b) == 2.0
 
     def test_distance_between_known_rectangles(self):
-        """Distance between centres of two known rectangles."""
+        """Avg min-distance between two known rectangles."""
         # Two 2×1 rooms separated by a gap: left at x=0..1, right at x=3..4
-        left = _rect_from_corners(0, 0, 1, 0)   # centre (0.5, 0)
-        right = _rect_from_corners(3, 0, 4, 0)   # centre (3.5, 0)
+        left = _rect_from_corners(0, 0, 1, 0)   # positions (0,0),(1,0)
+        right = _rect_from_corners(3, 0, 4, 0)   # positions (3,0),(4,0)
         walkable = left | right
         part = CellPartition(walkable, seed=42)
         assert part.num_cells == 2
         cell_l = part.cell_of(0, 0)
         cell_r = part.cell_of(3, 0)
         assert cell_l != cell_r
-        # Manhattan distance between centres: |3.5 - 0.5| + |0 - 0| = 3.0
-        assert part.estimated_distance(cell_l, cell_r) == 3.0
+        # From (0,0): min to {(3,0),(4,0)} = 3
+        # From (1,0): min to {(3,0),(4,0)} = 2
+        # Average = (3+2)/2 = 2.5
+        assert part.estimated_distance(cell_l, cell_r) == 2.5
 
 
 # ---------------------------------------------------------------------------

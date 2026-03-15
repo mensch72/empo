@@ -20,6 +20,35 @@ import random
 Rectangle = Tuple[int, int, int, int]
 
 
+def _sum_min_dist_1d(
+    src_lo: int, src_hi: int,
+    tgt_lo: int, tgt_hi: int,
+) -> float:
+    """Sum of min_{t ∈ [tgt_lo..tgt_hi]} |x − t| for x ∈ [src_lo..src_hi].
+
+    Uses closed-form arithmetic over three ranges:
+
+    - x < tgt_lo  →  distance = tgt_lo − x
+    - tgt_lo ≤ x ≤ tgt_hi  →  distance = 0
+    - x > tgt_hi  →  distance = x − tgt_hi
+    """
+    total = 0.0
+    # Range 1: x < tgt_lo
+    lo = src_lo
+    hi = min(src_hi, tgt_lo - 1)
+    if hi >= lo:
+        n = hi - lo + 1
+        total += n * tgt_lo - n * (lo + hi) / 2.0
+    # Range 2: tgt_lo ≤ x ≤ tgt_hi → 0 (skip)
+    # Range 3: x > tgt_hi
+    lo = max(src_lo, tgt_hi + 1)
+    hi = src_hi
+    if hi >= lo:
+        n = hi - lo + 1
+        total += n * (lo + hi) / 2.0 - n * tgt_hi
+    return total
+
+
 def _rect_area(r: Rectangle) -> int:
     """Return the area (number of cells) of a rectangle."""
     return (r[2] - r[0] + 1) * (r[3] - r[1] + 1)
@@ -119,16 +148,31 @@ class CellPartition:
         return [(b, a) for a, b in pairs]
 
     def estimated_distance(self, cell_i: int, cell_j: int) -> float:
-        """Manhattan distance between the centres of two macro-cells."""
+        """Estimated travel distance from *cell_i* to *cell_j*.
+
+        Computed analytically as the average, over all positions in the
+        source rectangle, of the Manhattan distance from that position
+        to the closest position in the target rectangle.
+
+        Because Manhattan distance decomposes into independent x and y
+        components, and min-distance to a rectangle likewise decomposes,
+        the result is::
+
+            avg_dx / W_i  +  avg_dy / H_i
+
+        where ``avg_dx`` (resp. ``avg_dy``) is the sum of
+        ``min_{t} |x − t|`` over the source x-range (resp. y-range),
+        and ``W_i``, ``H_i`` are the source rectangle dimensions.
+        """
         if cell_i == cell_j:
             return 0.0
-        ri = self.rectangles[cell_i]
-        rj = self.rectangles[cell_j]
-        ci_x = (ri[0] + ri[2]) / 2.0
-        ci_y = (ri[1] + ri[3]) / 2.0
-        cj_x = (rj[0] + rj[2]) / 2.0
-        cj_y = (rj[1] + rj[3]) / 2.0
-        return abs(ci_x - cj_x) + abs(ci_y - cj_y)
+        xi_min, yi_min, xi_max, yi_max = self.rectangles[cell_i]
+        xj_min, yj_min, xj_max, yj_max = self.rectangles[cell_j]
+        wi = xi_max - xi_min + 1
+        hi = yi_max - yi_min + 1
+        sum_dx = _sum_min_dist_1d(xi_min, xi_max, xj_min, xj_max)
+        sum_dy = _sum_min_dist_1d(yi_min, yi_max, yj_min, yj_max)
+        return sum_dx / wi + sum_dy / hi
 
     # ------------------------------------------------------------------
     # Factory
