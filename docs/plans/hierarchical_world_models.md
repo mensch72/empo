@@ -20,17 +20,18 @@ The initial implementation targets a **two-level hierarchy** for MultiGrid envir
 
 ### 1.3 Testing on the Command Line
 
-**Quick test (Tasks 1–4 only):**
+**Quick test (Tasks 1–5):**
 ```bash
 # No Docker required — just pip install and run
 pip install -r setup/requirements.txt pytest
 make test-hierarchical
 ```
 
-This runs 30 tests covering:
+This runs 60 tests covering:
 - `tests/test_world_model_duration.py` — WorldModel duration API (9 tests)
 - `tests/test_duration_discounting.py` — Phase 1/2 duration-aware discounting (6 tests)
 - `tests/test_hierarchical_base.py` — HierarchicalWorldModel & LevelMapper ABCs (15 tests)
+- `tests/test_cell_partition.py` — Macro-cell partitioning (30 tests)
 
 **Full local test suite (no Docker):**
 ```bash

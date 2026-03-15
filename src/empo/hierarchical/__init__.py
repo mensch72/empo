@@ -28,8 +28,10 @@ for multi-agent systems using empowerment-based objectives.
 
 from empo.hierarchical.hierarchical_world_model import HierarchicalWorldModel
 from empo.hierarchical.level_mapper import LevelMapper
+from empo.hierarchical.cell_partition import CellPartition
 
 __all__ = [
     "HierarchicalWorldModel",
     "LevelMapper",
+    "CellPartition",
 ]

@@ -145,6 +145,7 @@ test-hierarchical:
 		tests/test_world_model_duration.py \
 		tests/test_duration_discounting.py \
 		tests/test_hierarchical_base.py \
+		tests/test_cell_partition.py \
 		-v
 
 lint:
