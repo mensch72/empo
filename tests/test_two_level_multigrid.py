@@ -134,12 +134,7 @@ class TestSuperStateConsistency:
         _, next_micro = transitions[0]
         next_macro = h.mapper.super_state(next_micro)
         # Remaining time should decrease by 1 (step count incremented)
-        assert next_macro[0] == macro_state_from_initial_time(h) - 1
-
-
-def macro_state_from_initial_time(h):
-    """Helper: initial remaining time."""
-    return h.micro_env.max_steps
+        assert next_macro[0] == h.micro_env.max_steps - 1
 
 
 # ── TestMacroTransitionsFromHierarchy ────────────────────────────────

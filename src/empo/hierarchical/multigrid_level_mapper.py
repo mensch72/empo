@@ -44,6 +44,11 @@ class MultiGridLevelMapper(LevelMapper):
         super().__init__(macro_env, micro_env)
         self.macro_env = macro_env
 
+        # Cache micro-level action indices for feasibility/abort checks
+        fine_actions = getattr(micro_env, 'actions', None)
+        self._forward_idx: int = getattr(fine_actions, 'forward', 3)
+        self._still_idx: int = getattr(fine_actions, 'still', 0)
+
     def super_state(self, fine_state: Any) -> Any:
         """Map a micro-level state to the corresponding macro-level state.
 
@@ -91,12 +96,9 @@ class MultiGridLevelMapper(LevelMapper):
 
             target_cell = coarse_a - 1  # WALK target
 
-            # Only check 'forward' actions (action index 3 in standard
-            # MultiGrid actions).  Turns and non-movement actions are
-            # always compatible with WALK.
-            fine_actions = getattr(self.fine_model, 'actions', None)
-            forward_idx = getattr(fine_actions, 'forward', 3)
-            if fine_a != forward_idx:
+            # Only check 'forward' actions — turns and non-movement
+            # actions are always compatible with WALK.
+            if fine_a != self._forward_idx:
                 continue
 
             # Compute where forward would take the agent
@@ -141,13 +143,10 @@ class MultiGridLevelMapper(LevelMapper):
         Returns:
             True if any agent is aborting its coarse action.
         """
-        fine_actions = getattr(self.fine_model, 'actions', None)
-        still_idx = getattr(fine_actions, 'still', 0)
-
         for coarse_a, fine_a in zip(
             coarse_action_profile, fine_action_profile
         ):
-            if coarse_a != MACRO_PASS and fine_a == still_idx:
+            if coarse_a != MACRO_PASS and fine_a == self._still_idx:
                 return True
         return False
 

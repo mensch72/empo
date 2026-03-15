@@ -25,6 +25,16 @@ from empo.hierarchical.cell_partition import CellPartition
 MACRO_PASS = 0
 
 
+class _MacroAgent:
+    """Lightweight stand-in for agent objects at the macro level.
+
+    The backward induction algorithm accesses ``len(world_model.agents)``
+    and may iterate over agents.  These proxies satisfy that interface
+    without carrying micro-level state.
+    """
+    pass
+
+
 def macro_walk(cell_index: int) -> int:
     """Return the macro-action index for WALK(cell_index)."""
     return cell_index + 1
@@ -113,10 +123,9 @@ class MacroGridEnv(WorldModel):
         )
         self.observation_space = spaces.Discrete(1)  # Placeholder
 
-        # Agent proxy objects (backward induction accesses len(agents))
-        self.agents = [
-            type('MacroAgent', (), {})() for _ in range(self._num_agents)
-        ]
+        # Agent proxy objects — backward induction accesses len(agents)
+        # and iterates over them.  These are lightweight stand-ins.
+        self.agents = [_MacroAgent() for _ in range(self._num_agents)]
 
         # Copy agent role indices from micro_env
         self._human_agent_indices = list(micro_env.human_agent_indices)

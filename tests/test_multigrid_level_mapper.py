@@ -98,10 +98,10 @@ class TestIsFeasible:
         )
 
     def test_turn_is_feasible_with_walk(self):
-        """Turning actions are always feasible with WALK."""
+        """Turning actions (left=1, right=2) are always feasible with WALK."""
         h = _make_hierarchy()
         micro = h.micro_env.get_state()
-        # Left turn = action 1
+        # Action 1 = left turn in standard MultiGrid action space
         assert h.mapper.is_feasible(
             (macro_walk(1), MACRO_PASS), micro, (1, 0),
         )
