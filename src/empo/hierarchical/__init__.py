@@ -29,9 +29,17 @@ for multi-agent systems using empowerment-based objectives.
 from empo.hierarchical.hierarchical_world_model import HierarchicalWorldModel
 from empo.hierarchical.level_mapper import LevelMapper
 from empo.hierarchical.cell_partition import CellPartition
+from empo.hierarchical.macro_grid_env import MacroGridEnv, MACRO_PASS, macro_walk
+from empo.hierarchical.multigrid_level_mapper import MultiGridLevelMapper
+from empo.hierarchical.two_level_multigrid import TwoLevelMultigrid
 
 __all__ = [
     "HierarchicalWorldModel",
     "LevelMapper",
     "CellPartition",
+    "MacroGridEnv",
+    "MACRO_PASS",
+    "macro_walk",
+    "MultiGridLevelMapper",
+    "TwoLevelMultigrid",
 ]
