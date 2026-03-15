@@ -191,9 +191,9 @@ def test_phase1_default_durations_match_uniform():
         assert state in Vh_explicit, f"State {state} missing from explicit-unit run"
         for agent_idx in Vh_default[state]:
             for goal in Vh_default[state][agent_idx]:
-                v_d = Vh_default[state][agent_idx][goal]
-                v_e = Vh_explicit[state][agent_idx].get(goal, 0)
-                assert abs(float(v_d) - float(v_e)) < 1e-4, \
+                v_d = float(Vh_default[state][agent_idx].get(goal, 0))
+                v_e = float(Vh_explicit[state][agent_idx].get(goal, 0))
+                assert abs(v_d - v_e) < 1e-4, \
                     f"Vh mismatch at state agent={agent_idx} goal={goal}: default={v_d}, explicit={v_e}"
 
 
@@ -324,6 +324,6 @@ def test_phase2_longer_durations_produce_different_values():
     assert np.isfinite(Vr_d[init_state])
     assert np.isfinite(Vr_l[init_state])
 
-    # Non-uniform durations (5.0) should produce different Vr from default (1.0)
-    assert Vr_d[init_state] != Vr_l[init_state], \
+    # Non-uniform durations (5.0) should produce meaningfully different Vr from default (1.0)
+    assert abs(Vr_d[init_state] - Vr_l[init_state]) > 1e-6, \
         f"Expected different Vr values but got same: default={Vr_d[init_state]}, long={Vr_l[init_state]}"
