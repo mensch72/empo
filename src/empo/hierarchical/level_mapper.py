@@ -24,12 +24,14 @@ class LevelMapper(ABC):
     """
 
     def __init__(self, coarse_model: WorldModel, fine_model: WorldModel):
-        assert isinstance(coarse_model, WorldModel), (
-            f"coarse_model must be a WorldModel instance, got {type(coarse_model)}"
-        )
-        assert isinstance(fine_model, WorldModel), (
-            f"fine_model must be a WorldModel instance, got {type(fine_model)}"
-        )
+        if not isinstance(coarse_model, WorldModel):
+            raise TypeError(
+                f"coarse_model must be a WorldModel instance, got {type(coarse_model)}"
+            )
+        if not isinstance(fine_model, WorldModel):
+            raise TypeError(
+                f"fine_model must be a WorldModel instance, got {type(fine_model)}"
+            )
         self.coarse_model = coarse_model
         self.fine_model = fine_model
 

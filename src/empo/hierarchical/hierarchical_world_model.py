@@ -41,18 +41,22 @@ class HierarchicalWorldModel:
                 mappers doesn't match len(levels) - 1.
         """
         # Type checking for levels
-        assert isinstance(levels, list), f"levels must be a list, got {type(levels)}"
+        if not isinstance(levels, list):
+            raise TypeError(f"levels must be a list, got {type(levels)}")
         for i, level in enumerate(levels):
-            assert isinstance(level, WorldModel), (
-                f"levels[{i}] must be a WorldModel instance, got {type(level)}"
-            )
+            if not isinstance(level, WorldModel):
+                raise TypeError(
+                    f"levels[{i}] must be a WorldModel instance, got {type(level)}"
+                )
         
         # Type checking for mappers
-        assert isinstance(mappers, list), f"mappers must be a list, got {type(mappers)}"
+        if not isinstance(mappers, list):
+            raise TypeError(f"mappers must be a list, got {type(mappers)}")
         for i, mapper in enumerate(mappers):
-            assert isinstance(mapper, LevelMapper), (
-                f"mappers[{i}] must be a LevelMapper instance, got {type(mapper)}"
-            )
+            if not isinstance(mapper, LevelMapper):
+                raise TypeError(
+                    f"mappers[{i}] must be a LevelMapper instance, got {type(mapper)}"
+                )
         
         if len(levels) < 2:
             raise ValueError(
@@ -66,14 +70,16 @@ class HierarchicalWorldModel:
 
         # Verify mapper connections match the provided levels
         for i, mapper in enumerate(mappers):
-            assert mapper.coarse_model is levels[i], (
-                f"mappers[{i}].coarse_model must be levels[{i}] (same object reference), "
-                f"but got different object"
-            )
-            assert mapper.fine_model is levels[i + 1], (
-                f"mappers[{i}].fine_model must be levels[{i + 1}] (same object reference), "
-                f"but got different object"
-            )
+            if mapper.coarse_model is not levels[i]:
+                raise ValueError(
+                    f"mappers[{i}].coarse_model must be levels[{i}] (same object reference), "
+                    f"but got different object"
+                )
+            if mapper.fine_model is not levels[i + 1]:
+                raise ValueError(
+                    f"mappers[{i}].fine_model must be levels[{i + 1}] (same object reference), "
+                    f"but got different object"
+                )
         self.levels = levels
         self.mappers = mappers
 

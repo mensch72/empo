@@ -75,6 +75,7 @@ _shared_human_policy_prior_pickle: Optional[bytes] = None
 _shared_sliced_cache: Optional[SlicedAttainmentCache] = None
 _shared_num_action_profiles: int = 0
 _shared_rp_params: Optional[Tuple[List[int], List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], float, float, float, float, float, float, float, float, float]] = None
+_shared_world_model: Optional['WorldModel'] = None  # For duration-aware discounting in workers
 
 
 def _rp_process_single_state(
@@ -310,10 +311,11 @@ def _rp_process_single_state(
                     successor_values = np.where(attainment_values_array, 1.0, vhe_values_array)
                     if rho_h > 0.0:
                         # Duration-aware discounting for human achievement values
+                        # Only discount non-achieved successors (achieved stay at 1.0)
                         transitions_list = [(float(p), states[i]) for p, i in zip(next_state_probabilities, next_state_indices)]
                         durations = world_model.transition_durations(state, action_profile.tolist(), transitions_list)
                         discount_factors_h = np.exp(-rho_h * np.array(durations))
-                        successor_values = discount_factors_h * successor_values
+                        successor_values = np.where(attainment_values_array, 1.0, discount_factors_h * vhe_values_array)
                     else:
                         # Original formula: only non-achieved successors are discounted
                         successor_values = np.where(attainment_values_array, 1.0, gamma_h * vhe_values_array)
@@ -619,6 +621,7 @@ def _rp_init_shared_data(
     use_shared_memory: bool = False,
     sliced_cache: Optional[SlicedAttainmentCache] = None,
     num_action_profiles: int = 0,
+    world_model: Optional['WorldModel'] = None,
 ) -> None:
     """Initialize shared data for robot policy worker processes.
     
@@ -632,10 +635,12 @@ def _rp_init_shared_data(
         use_shared_memory: If True, states and transitions are already in shared memory
         sliced_cache: Optional SlicedAttainmentCache from Phase 1 for reading
         num_action_profiles: Number of action profiles (needed for slice cache creation)
+        world_model: WorldModel for duration-aware discounting (needed when rho_h or rho_r > 0)
     """
     global _shared_states, _shared_transitions, _shared_Vh_values, _shared_Vr_values
     global _shared_rp_params, _shared_human_policy_prior_pickle
     global _shared_sliced_cache, _shared_num_action_profiles
+    global _shared_world_model
     
     if use_shared_memory:
         # DAG is already in shared memory, just store refs as None
@@ -651,6 +656,7 @@ def _rp_init_shared_data(
     _shared_human_policy_prior_pickle = human_policy_prior_pickle
     _shared_sliced_cache = sliced_cache
     _shared_num_action_profiles = num_action_profiles
+    _shared_world_model = world_model
 
 
 def _rp_process_state_batch(
@@ -738,6 +744,7 @@ def _rp_process_state_batch(
             slice_cache=slice_cache,
             rho_h=rho_h,
             rho_r=rho_r,
+            world_model=_shared_world_model,
         )
         
         vh_results[state_index] = vh_results_state
@@ -1393,7 +1400,7 @@ def compute_robot_policy(
             else:
                 # Many states - parallelize
                 # Re-initialize shared data so new workers see updated values from previous levels
-                _rp_init_shared_data(states, transitions, Vh_values, Vr_values, params, human_policy_prior_pickle, use_shared_memory=True, sliced_cache=sliced_cache, num_action_profiles=num_action_profiles)
+                _rp_init_shared_data(states, transitions, Vh_values, Vr_values, params, human_policy_prior_pickle, use_shared_memory=True, sliced_cache=sliced_cache, num_action_profiles=num_action_profiles, world_model=world_model)
                 
                 batches = split_into_batches(level, num_workers)
                 

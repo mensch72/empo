@@ -10,14 +10,11 @@ Tests that:
 """
 
 import sys
-import numpy as np
-import pytest
 
 import gymnasium as gym
 sys.modules['gym'] = gym
 
 from empo.world_model import WorldModel
-from gym_multigrid.multigrid import MultiGridEnv
 from gym_multigrid.envs import CollectGame4HEnv10x10N2
 
 

@@ -10,7 +10,6 @@ Tests that:
 """
 
 import sys
-import numpy as np
 import pytest
 
 import gymnasium as gym

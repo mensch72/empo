@@ -82,6 +82,7 @@ _shared_num_action_profiles: int = 0  # Needed to create slice caches in workers
 _shared_params: Optional[Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], List[int], List[List[int]], float, float, bool, float]] = None
 _shared_believed_others_policy_pickle: Optional[bytes] = None  # cloudpickle'd believed_others_policy function
 _shared_disk_dag: Optional['DiskBasedDAG'] = None  # For parallel disk slicing
+_shared_world_model: Optional['WorldModel'] = None  # For duration-aware discounting in workers
 
 
 def _hpp_process_single_state(
@@ -223,13 +224,15 @@ def _hpp_process_single_state(
                                 )
                             # Use np.where to avoid intermediate array allocation
                             # NumPy automatically promotes float16 to float64 during computation
-                            successor_values = np.where(attainment_values_array, 1.0, v_values_array)
                             if rho_h > 0.0:
                                 # Duration-aware discounting: e^{-rho_h * D(s, a, s')} per transition
+                                # Only discount non-achieved successors (achieved stay at 1.0)
                                 transitions_list = [(float(p), states[i]) for p, i in zip(next_state_probabilities, next_state_indices)]
                                 durations = world_model.transition_durations(state, action_profile.tolist(), transitions_list)
                                 discount_factors = np.exp(-rho_h * np.array(durations))
-                                successor_values = discount_factors * successor_values
+                                successor_values = np.where(attainment_values_array, 1.0, discount_factors * v_values_array)
+                            else:
+                                successor_values = np.where(attainment_values_array, 1.0, v_values_array)
                             expectation = np.dot(
                                 next_state_probabilities,
                                 successor_values
@@ -560,6 +563,7 @@ def _hpp_init_shared_data(
     use_shared_memory: bool = False,
     sliced_cache: Optional[SlicedAttainmentCache] = None,
     num_action_profiles: int = 0,
+    world_model: Optional['WorldModel'] = None,
 ) -> None:
     """Initialize shared data for worker processes.
     
@@ -572,9 +576,11 @@ def _hpp_init_shared_data(
         use_shared_memory: If True, store states and transitions in shared memory
         sliced_cache: Optional SlicedAttainmentCache for goal attainment arrays
         num_action_profiles: Number of action profiles (needed to create slice caches)
+        world_model: WorldModel for duration-aware discounting (needed when rho_h > 0)
     """
     global _shared_states, _shared_transitions, _shared_Vh_values, _shared_params
     global _shared_believed_others_policy_pickle, _shared_sliced_cache, _shared_num_action_profiles
+    global _shared_world_model
     
     if use_shared_memory:
         # Store DAG in shared memory to avoid copy-on-write
@@ -590,6 +596,7 @@ def _hpp_init_shared_data(
     _shared_believed_others_policy_pickle = believed_others_policy_pickle
     _shared_sliced_cache = sliced_cache
     _shared_num_action_profiles = num_action_profiles
+    _shared_world_model = world_model
 
 
 def _hpp_process_state_batch(
@@ -666,6 +673,7 @@ def _hpp_process_state_batch(
             slice_cache=slice_cache,
             optimistic=optimistic,
             rho_h=rho_h,
+            world_model=_shared_world_model,
         )
         
         v_results[state_index] = state_v_results
@@ -744,6 +752,7 @@ def _hpp_process_timestep_batch_disk(
             slice_cache=timestep_cache,
             optimistic=optimistic,
             rho_h=rho_h,
+            world_model=_shared_world_model,
         )
         
         v_results[global_state_idx] = state_v_results
@@ -1372,7 +1381,8 @@ def compute_human_policy_prior(
                     # DAG (states, transitions) is already in shared memory, only update Vh_values
                     _hpp_init_shared_data(states, transitions, Vh_values, params, believed_others_policy_pickle, 
                                           use_shared_memory=True, sliced_cache=sliced_cache, 
-                                          num_action_profiles=num_action_profiles)
+                                          num_action_profiles=num_action_profiles,
+                                          world_model=world_model)
                     
                     # Only pass state indices - workers access shared data via globals
                     batches = split_into_batches(level, num_workers)
