@@ -270,11 +270,14 @@ class MacroHeuristicPolicy(HumanPolicyPrior):
         vals = np.array([advantages.get(a, 0.0) for a in available],
                         dtype=np.float64)
 
-        # Replace inf/-inf with large finite values to avoid NaN in softmax
+        # Clamp non-finite advantages (from unreachable targets) so the
+        # softmax stays well-defined.  The cap is set large enough to
+        # dominate all finite values while remaining numerically safe.
         finite_mask = np.isfinite(vals)
         if not finite_mask.all():
-            max_finite = np.abs(vals[finite_mask]).max() if finite_mask.any() else 1.0
-            cap = max(max_finite * 2, 100.0)
+            max_finite = (np.abs(vals[finite_mask]).max()
+                          if finite_mask.any() else 0.0)
+            cap = max(max_finite + 1.0, 100.0)
             vals = np.clip(vals, -cap, cap)
 
         # Numerically stable softmax
