@@ -1033,13 +1033,13 @@ def compute_robot_policy(
         1. Build the DAG of reachable states using world_model.get_dag()
         2. Compute dependency levels for topological ordering
         3. Process states in reverse topological order:
-           - Terminal states: V_h^e(s, g) = 0, V_r(s) = 0
+           - Terminal states: V_h^e(s, g) = 0, V_r(s) = terminal_Vr (strictly negative; default -1e-10)
            - Non-terminal states (with D = transition duration from world_model):
              * Q_r(s, a_r) = E[e^{-ρ_r·D} V_r(s')] under human_policy_prior
              * π_r(a_r|s) = power-law policy based on Q_r
              * V_h^e(s, g) = E[achievement(s') + (1-achievement(s')) · e^{-ρ_h·D} · V_h^e(s', g)]
              * X_h(s) = E[V_h^e(s, g)^ζ] (aggregate goal ability)
-             * U_r(s) = E[(1-e^{-ρ_r·D})/ρ_r] · K(s)^η  (duration-weighted reward)
+             * U_r(s) = -E[(1-e^{-ρ_r·D})/ρ_r] · K(s)^η  (duration-weighted intrinsic cost; negative)
              * V_r(s) = U_r(s) + Q_r(s, π_r)
            When ρ = 0 (γ = 1.0), per-transition discounting is skipped (no duration queries).
     
