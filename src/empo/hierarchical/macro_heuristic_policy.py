@@ -169,6 +169,45 @@ class MacroHeuristicPolicy(HumanPolicyPrior):
         # Fallback: uniform
         return {a: 0.0 for a in available}
 
+    def _all_distances_to_target(
+        self,
+        state: Any,
+        target_cell: int,
+    ) -> Dict[int, float]:
+        """Compute shortest-path distance from all macro-cells to *target_cell*.
+
+        Runs a single Dijkstra search over the macro-cell graph (defined by
+        open passages) and returns a mapping from cell index to distance.
+        """
+        macro_env: MacroGridEnv = self.world_model  # type: ignore[assignment]
+
+        # Number of macro cells in the world model. We assume MacroGridEnv
+        # exposes this as ``num_macro_cells``.
+        num_cells = macro_env.num_macro_cells
+
+        # Dijkstra from target_cell over the implicit undirected graph where
+        # edges correspond to open passages between macro-cells.
+        distances: Dict[int, float] = {target_cell: 0.0}
+        heap: List[tuple[float, int]] = [(0.0, target_cell)]
+
+        while heap:
+            dist_u, u = heapq.heappop(heap)
+            if dist_u > distances[u]:
+                continue
+            # Explore neighbors of u: any v with an open passage.
+            for v in range(num_cells):
+                if v == u:
+                    continue
+                if not macro_env.passage_open(state, u, v):
+                    continue
+                alt = dist_u + 1.0
+                old = distances.get(v)
+                if old is None or alt < old:
+                    distances[v] = alt
+                    heapq.heappush(heap, (alt, v))
+
+        return distances
+
     def _advantages_cell_goal(
         self,
         state: Any,
@@ -178,24 +217,29 @@ class MacroHeuristicPolicy(HumanPolicyPrior):
     ) -> Dict[int, float]:
         """Advantages for moving *toward* target_cell."""
         macro_env: MacroGridEnv = self.world_model  # type: ignore[assignment]
-        dist_from_current = self._shortest_path_distance(
-            current_cell, target_cell, state,
-        )
+
+        # Precompute all distances to target_cell with a single Dijkstra run.
+        distances = self._all_distances_to_target(state, target_cell)
+        dist_from_current = distances.get(current_cell, float("inf"))
+
         advantages: Dict[int, float] = {}
         for action in available:
             if action == MACRO_PASS:
                 advantages[action] = 0.0
             else:
                 dest_cell = action - 1  # WALK(dest_cell)
-                # A closed passage makes WALK equivalent to PASS (no move)
+                # A closed passage makes WALK equivalent to PASS (no move).
                 if not macro_env.passage_open(state, current_cell, dest_cell):
                     advantages[action] = 0.0
                 else:
-                    dist_from_dest = self._shortest_path_distance(
-                        dest_cell, target_cell, state,
-                    )
-                    # Advantage = how much closer we get
-                    advantages[action] = dist_from_current - dist_from_dest
+                    dist_from_dest = distances.get(dest_cell, float("inf"))
+                    # If either cell is effectively unreachable from the target,
+                    # treat the move as neutral to avoid inf - inf.
+                    if not np.isfinite(dist_from_current) or not np.isfinite(dist_from_dest):
+                        advantages[action] = 0.0
+                    else:
+                        # Advantage = how much closer we get.
+                        advantages[action] = dist_from_current - dist_from_dest
         return advantages
 
     def _advantages_away(
