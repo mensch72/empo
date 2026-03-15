@@ -173,7 +173,7 @@ def _rp_process_single_state(
     # Cache duration arrays per action_profile_index to avoid repeated world_model queries.
     # Durations depend on (state, action_profile, transitions) which are uniquely identified
     # by action_profile_index for a given state. The cache is reused across Q_r and V_h^e loops.
-    _duration_cache: Dict[int, npt.NDArray] = {} if (rho_r > 0.0 or rho_h > 0.0) else {}
+    _duration_cache: Dict[int, npt.NDArray] = {}
     
     if DEBUG:
         print(f"  Transient state {state_index}")
@@ -335,7 +335,7 @@ def _rp_process_single_state(
                         discount_factors_h = np.exp(-rho_h * durations_arr)
                         successor_values = np.where(attainment_values_array, 1.0, discount_factors_h * vhe_values_array)
                     else:
-                        # No duration-aware discounting (rho_h == 0 → gamma_h == 1.0): no discount applied
+                        # Standard gamma discounting (not duration-aware)
                         successor_values = np.where(attainment_values_array, 1.0, gamma_h * vhe_values_array)
                     v += human_action_profile_prob * np.dot(
                         next_state_probabilities,
