@@ -405,6 +405,11 @@ class MacroGridEnv(WorldModel):
         """
         self.micro_env.reset()
         self._build_macro_structures()
+        # Rebuilding macro structures changes the macro dynamics and
+        # action_space.n, so any cached DAG based on the previous
+        # configuration must be invalidated.
+        if hasattr(self, "clear_dag_cache"):
+            self.clear_dag_cache()
         self._state = self._micro_to_macro_state(
             self.micro_env.get_state()
         )
