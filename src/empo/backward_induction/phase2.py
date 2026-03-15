@@ -200,11 +200,16 @@ def _rp_process_single_state(
                 else:
                     transitions_list = [(float(p), states[i]) for p, i in zip(next_state_probabilities, next_state_indices)]
                     durations_arr = np.array(world_model.transition_durations(state, action_profile.tolist(), transitions_list))
+                    if len(durations_arr) != len(next_state_indices):
+                        raise ValueError(
+                            f"transition_durations() returned {len(durations_arr)} durations but expected "
+                            f"{len(next_state_indices)} (state_index={state_index}, action_profile_index={action_profile_index})")
                     _duration_cache[action_profile_index] = durations_arr
                 discount_factors_r = np.exp(-rho_r * durations_arr)
                 v += human_action_profile_prob * np.dot(next_state_probabilities, discount_factors_r * Vr_values[next_state_indices])
                 # Duration weight: (1 - e^{-rho*D}) / rho for reward term
-                duration_weight_factors = (1.0 - discount_factors_r) / rho_r
+                # Use -expm1(-x) = 1 - e^{-x} for numerical stability when rho_r*D is small
+                duration_weight_factors = -np.expm1(-rho_r * durations_arr) / rho_r
                 dw += human_action_profile_prob * np.dot(next_state_probabilities, duration_weight_factors)
             else:
                 v += human_action_profile_prob * np.dot(next_state_probabilities, Vr_values[next_state_indices])
@@ -331,6 +336,10 @@ def _rp_process_single_state(
                         else:
                             transitions_list = [(float(p), states[i]) for p, i in zip(next_state_probabilities, next_state_indices)]
                             durations_arr = np.array(world_model.transition_durations(state, action_profile.tolist(), transitions_list))
+                            if len(durations_arr) != len(next_state_indices):
+                                raise ValueError(
+                                    f"transition_durations() returned {len(durations_arr)} durations but expected "
+                                    f"{len(next_state_indices)} (state_index={state_index}, action_profile_index={action_profile_index})")
                             _duration_cache[action_profile_index] = durations_arr
                         discount_factors_h = np.exp(-rho_h * durations_arr)
                         successor_values = np.where(attainment_values_array, 1.0, discount_factors_h * vhe_values_array)
@@ -1025,13 +1034,14 @@ def compute_robot_policy(
         2. Compute dependency levels for topological ordering
         3. Process states in reverse topological order:
            - Terminal states: V_h^e(s, g) = 0, V_r(s) = 0
-           - Non-terminal states:
-             * Q_r(s, a_r) = γ_r * E[V_r(s')] under human_policy_prior
+           - Non-terminal states (with D = transition duration from world_model):
+             * Q_r(s, a_r) = E[e^{-ρ_r·D} V_r(s')] under human_policy_prior
              * π_r(a_r|s) = power-law policy based on Q_r
-             * V_h^e(s, g) = E[achievement(s') + (1-achievement(s')) * γ_h * V_h^e(s', g)]
+             * V_h^e(s, g) = E[achievement(s') + (1-achievement(s')) · e^{-ρ_h·D} · V_h^e(s', g)]
              * X_h(s) = E[V_h^e(s, g)^ζ] (aggregate goal ability)
-             * U_r(s) = -(mean(X_h^{-ξ}))^η (intrinsic reward)
-             * V_r(s) = U_r(s) + E[Q_r(s, a_r)]
+             * U_r(s) = E[(1-e^{-ρ_r·D})/ρ_r] · K(s)^η  (duration-weighted reward)
+             * V_r(s) = U_r(s) + Q_r(s, π_r)
+           When ρ = 0 (γ = 1.0), per-transition discounting is skipped (no duration queries).
     
     Args:
         world_model: A WorldModel (or MultiGridEnv) with get_state(), set_state(),

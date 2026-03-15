@@ -165,6 +165,12 @@ def _hpp_process_single_state(
     
     # Non-terminal state: compute both V-values and policies
     p_results = {}
+    
+    # Cache duration arrays per action_profile_index to avoid repeated world_model queries.
+    # Durations depend on (state, action_profile, transitions) which are uniquely identified
+    # by action_profile_index for a given state. The cache is reused across goal iterations.
+    _duration_cache: Dict[int, npt.NDArray] = {}
+    
     for agent_index in human_agent_indices:
         vres = v_results[agent_index] = vres0.copy() if use_indexed else {}
         pres = p_results[agent_index] = pres0.copy() if use_indexed else {}
@@ -229,9 +235,18 @@ def _hpp_process_single_state(
                                 # Only discount non-achieved successors (achieved stay at 1.0)
                                 if world_model is None:
                                     raise ValueError("world_model is required for duration-aware discounting (rho_h > 0)")
-                                transitions_list = [(float(p), states[i]) for p, i in zip(next_state_probabilities, next_state_indices)]
-                                durations = world_model.transition_durations(state, action_profile.tolist(), transitions_list)
-                                discount_factors = np.exp(-rho_h * np.array(durations))
+                                # Use cached durations if available, otherwise compute and cache
+                                if action_profile_index in _duration_cache:
+                                    durations_arr = _duration_cache[action_profile_index]
+                                else:
+                                    transitions_list = [(float(p), states[i]) for p, i in zip(next_state_probabilities, next_state_indices)]
+                                    durations_arr = np.array(world_model.transition_durations(state, action_profile.tolist(), transitions_list))
+                                    if len(durations_arr) != len(next_state_indices):
+                                        raise ValueError(
+                                            f"transition_durations() returned {len(durations_arr)} durations but expected "
+                                            f"{len(next_state_indices)} (state_index={state_index}, action_profile_index={action_profile_index})")
+                                    _duration_cache[action_profile_index] = durations_arr
+                                discount_factors = np.exp(-rho_h * durations_arr)
                                 successor_values = np.where(attainment_values_array, 1.0, discount_factors * v_values_array)
                             else:
                                 successor_values = np.where(attainment_values_array, 1.0, v_values_array)
@@ -915,10 +930,11 @@ def compute_human_policy_prior(
         2. Compute dependency levels for topological ordering
         3. Process states in reverse topological order:
            - Terminal states: V(s, g) = is_achieved(g, s)
-           - Non-terminal states: 
-             * Q(s, a, g) = γ * E[V(s', g)] under believed_others_policy
+           - Non-terminal states (with D = transition duration from world_model):
+             * Q(s, a, g) = E[achievement(s') + (1-achievement(s')) · e^{-ρ_h·D} · V(s', g)]
              * π(a|s,g) = softmax(β * Q(s, *, g))
              * V(s, g) = Σ_a π(a|s,g) * Q(s, a, g)
+           When ρ_h = 0 (γ_h = 1.0), per-transition discounting is skipped (no duration queries).
     
     Args:
         world_model: A WorldModel (or MultiGridEnv) with get_state(), set_state(),

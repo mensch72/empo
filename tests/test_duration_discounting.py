@@ -133,7 +133,13 @@ class WholeMapGoalGenerator(PossibleGoalGenerator):
 
 def test_phase1_gamma_one_skips_durations():
     """With gamma_h=1.0, duration computation is skipped (rho=0)."""
-    env = DurationTestEnv()
+    
+    class NoDurationEnv(DurationTestEnv):
+        """Env that raises if transition_durations is ever called."""
+        def transition_durations(self, state, actions, transitions):
+            raise AssertionError("transition_durations should not be called when gamma_h=1.0")
+    
+    env = NoDurationEnv()
     goal_gen = WholeMapGoalGenerator(env, 3)
     # This should run without calling transition_durations at all
     policy = compute_human_policy_prior(
@@ -155,18 +161,40 @@ def test_phase1_default_durations_match_uniform():
     # With default durations and gamma_h=0.9:
     # e^{-rho*1} = gamma_h = 0.9
     # So per-transition discount = 0.9, same as the constant gamma_h
-    env = DurationTestEnv()  # default durations
-    goal_gen = WholeMapGoalGenerator(env, 3)
+    env_default = DurationTestEnv()  # default durations (all 1.0)
 
-    policy, Vh = compute_human_policy_prior(
-        env, human_agent_indices=[0],
-        possible_goal_generator=goal_gen,
+    class ExplicitUnitEnv(DurationTestEnv):
+        """Env that explicitly returns [1.0] durations."""
+        def transition_durations(self, state, actions, transitions):
+            return [1.0] * len(transitions)
+
+    env_explicit = ExplicitUnitEnv()
+
+    goal_gen_d = WholeMapGoalGenerator(env_default, 3)
+    goal_gen_e = WholeMapGoalGenerator(env_explicit, 3)
+
+    _, Vh_default = compute_human_policy_prior(
+        env_default, human_agent_indices=[0],
+        possible_goal_generator=goal_gen_d,
         beta_h=10.0, gamma_h=0.9, quiet=True,
         return_Vh=True,
     )
-    # Just verify it runs without error and produces valid values
-    assert policy is not None
-    assert Vh is not None
+    _, Vh_explicit = compute_human_policy_prior(
+        env_explicit, human_agent_indices=[0],
+        possible_goal_generator=goal_gen_e,
+        beta_h=10.0, gamma_h=0.9, quiet=True,
+        return_Vh=True,
+    )
+
+    # Compare Vh values at all states
+    for state in Vh_default:
+        assert state in Vh_explicit, f"State {state} missing from explicit-unit run"
+        for agent_idx in Vh_default[state]:
+            for goal in Vh_default[state][agent_idx]:
+                v_d = Vh_default[state][agent_idx][goal]
+                v_e = Vh_explicit[state][agent_idx].get(goal, 0)
+                assert abs(float(v_d) - float(v_e)) < 1e-4, \
+                    f"Vh mismatch at state agent={agent_idx} goal={goal}: default={v_d}, explicit={v_e}"
 
 
 def test_phase1_larger_durations_reduce_values():
@@ -295,3 +323,7 @@ def test_phase2_longer_durations_produce_different_values():
     assert init_state in Vr_l
     assert np.isfinite(Vr_d[init_state])
     assert np.isfinite(Vr_l[init_state])
+
+    # Non-uniform durations (5.0) should produce different Vr from default (1.0)
+    assert Vr_d[init_state] != Vr_l[init_state], \
+        f"Expected different Vr values but got same: default={Vr_d[init_state]}, long={Vr_l[init_state]}"
