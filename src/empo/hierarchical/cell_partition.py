@@ -119,16 +119,27 @@ class CellPartition:
         return [(b, a) for a, b in pairs]
 
     def estimated_distance(self, cell_i: int, cell_j: int) -> float:
-        """Manhattan distance between the centres of two macro-cells."""
+        """Estimated travel distance from *cell_i* to *cell_j*.
+
+        Computed as the average, over all positions in the source cell,
+        of the Manhattan distance from that position to the closest
+        position in the target cell.
+        """
         if cell_i == cell_j:
             return 0.0
+        positions_j = self.cell_positions(cell_j)
+        total = 0.0
+        count = 0
         ri = self.rectangles[cell_i]
-        rj = self.rectangles[cell_j]
-        ci_x = (ri[0] + ri[2]) / 2.0
-        ci_y = (ri[1] + ri[3]) / 2.0
-        cj_x = (rj[0] + rj[2]) / 2.0
-        cj_y = (rj[1] + rj[3]) / 2.0
-        return abs(ci_x - cj_x) + abs(ci_y - cj_y)
+        for x in range(ri[0], ri[2] + 1):
+            for y in range(ri[1], ri[3] + 1):
+                min_dist = min(
+                    abs(x - tx) + abs(y - ty)
+                    for tx, ty in positions_j
+                )
+                total += min_dist
+                count += 1
+        return total / count
 
     # ------------------------------------------------------------------
     # Factory
