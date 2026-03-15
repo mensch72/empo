@@ -146,6 +146,9 @@ class CellPartition:
     ) -> 'CellPartition':
         """Create a partition from a grid with ``.get(x, y)`` access.
 
+        Empty cells (``None``) are treated as walkable (they have no
+        ``.type`` and thus are never matched by *excluded_types*).
+
         Args:
             grid: Object supporting ``grid.get(x, y)`` that returns
                 ``None`` for empty cells or an object with a ``.type``
@@ -153,6 +156,7 @@ class CellPartition:
             width: Grid width.
             height: Grid height.
             excluded_types: Cell types to exclude from the partition.
+                Defaults to ``{'wall', 'lava'}``.
             seed: Random seed for tie-breaking.
 
         Returns:

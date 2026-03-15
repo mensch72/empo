@@ -393,10 +393,10 @@ class TestDistanceEstimation:
         walkable = top | bottom
         part = CellPartition(walkable, seed=42)
         if part.num_cells >= 2:
-            c0 = part.cell_of(1, 0)
-            c1 = part.cell_of(0, 1)
-            if c0 != c1:
-                dist = part.estimated_distance(c0, c1)
+            top_cell = part.cell_of(1, 0)
+            bottom_cell = part.cell_of(0, 1)
+            if top_cell != bottom_cell:
+                dist = part.estimated_distance(top_cell, bottom_cell)
                 assert dist > 0
 
 
@@ -482,7 +482,7 @@ class TestFromGrid:
         cells = {(1, 1): _FakeObj('door')}
         grid = _FakeGrid(3, 3, cells)
         part = CellPartition.from_grid(grid, 3, 3, seed=42)
-        assert part.cell_of(1, 1) is not None
+        assert isinstance(part.cell_of(1, 1), int)
         total = sum(_rect_area(r) for r in part.rectangles)
         assert total == 9
 
