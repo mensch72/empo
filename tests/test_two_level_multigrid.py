@@ -58,9 +58,8 @@ class TestConstruction:
         assert isinstance(h.mapper, MultiGridLevelMapper)
 
     def test_seed_deterministic(self):
-        micro = _make_rock_gateway()
-        h1 = TwoLevelMultigrid(micro, seed=42)
-        h2 = TwoLevelMultigrid(micro, seed=42)
+        h1 = TwoLevelMultigrid(_make_rock_gateway(), seed=42)
+        h2 = TwoLevelMultigrid(_make_rock_gateway(), seed=42)
         assert h1.macro_env.get_state() == h2.macro_env.get_state()
 
     def test_door_test_env_works(self):

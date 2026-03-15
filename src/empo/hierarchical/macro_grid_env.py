@@ -191,9 +191,10 @@ class MacroGridEnv(WorldModel):
         """Compute macro-level transitions.
 
         For WALK(j) actions: deterministically moves the agent to cell j
-        if the passage is open and j is adjacent. Otherwise, the agent
-        stays in place (treated as PASS). Remaining time is decremented
-        by the estimated walk duration.
+        if the passage is open and j is adjacent, decrementing remaining
+        time by the estimated inter-cell distance.  Otherwise (closed
+        passage, non-adjacent, invalid target), the agent stays in place
+        and 1 unit of time elapses (same as PASS).
 
         Returns None for terminal states (remaining_time <= 0 or all
         agents terminated).
@@ -207,7 +208,7 @@ class MacroGridEnv(WorldModel):
             return None
 
         new_agents = list(agent_states)
-        max_duration = 1
+        max_duration = 1  # baseline: at least 1 step (PASS duration)
 
         for i, action in enumerate(actions):
             cell, carry_t, carry_c, term, started, paused = agent_states[i]
@@ -243,7 +244,7 @@ class MacroGridEnv(WorldModel):
                     self._partition.estimated_distance(cell, target_cell)
                 )))
                 max_duration = max(max_duration, dur)
-            # Else: passage closed → agent stays (duration still counts)
+            # Else: passage closed → agent stays, unit-step duration only
 
         new_remaining = max(0, remaining_time - max_duration)
         new_state = (
