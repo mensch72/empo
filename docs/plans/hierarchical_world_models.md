@@ -1,7 +1,7 @@
 # Implementation Plan: Hierarchical World Models
 
-**Status:** In Progress (Tasks 1–8 complete)  
-**Date:** 2026-03-14
+**Status:** In Progress (Tasks 1–10 complete)  
+**Date:** 2026-03-15
 
 ## 1. Overview
 
@@ -20,14 +20,14 @@ The initial implementation targets a **two-level hierarchy** for MultiGrid envir
 
 ### 1.3 Testing on the Command Line
 
-**Quick test (Tasks 1–8):**
+**Quick test (Tasks 1–10):**
 ```bash
 # No Docker required — just pip install and run
 pip install -r setup/requirements.txt pytest
 make test-hierarchical
 ```
 
-This runs 144 tests covering:
+This runs 203 tests covering:
 - `tests/test_world_model_duration.py` — WorldModel duration API (9 tests)
 - `tests/test_duration_discounting.py` — Phase 1/2 duration-aware discounting (6 tests)
 - `tests/test_hierarchical_base.py` — HierarchicalWorldModel & LevelMapper ABCs (15 tests)
@@ -35,6 +35,8 @@ This runs 144 tests covering:
 - `tests/test_macro_grid_env.py` — MacroGridEnv M^0 world model (45 tests)
 - `tests/test_multigrid_level_mapper.py` — MultiGridLevelMapper (16 tests)
 - `tests/test_two_level_multigrid.py` — TwoLevelMultigrid end-to-end (22 tests)
+- `tests/test_macro_goals.py` — Macro-level goals and goal generator (32 tests)
+- `tests/test_macro_heuristic_policy.py` — MacroHeuristicPolicy (27 tests)
 
 **Full local test suite (no Docker):**
 ```bash

@@ -32,6 +32,12 @@ from empo.hierarchical.cell_partition import CellPartition
 from empo.hierarchical.macro_grid_env import MacroGridEnv, MACRO_PASS, macro_walk
 from empo.hierarchical.multigrid_level_mapper import MultiGridLevelMapper
 from empo.hierarchical.two_level_multigrid import TwoLevelMultigrid
+from empo.hierarchical.macro_goals import (
+    MacroCellGoal,
+    MacroProximityGoal,
+    MacroGoalGenerator,
+)
+from empo.hierarchical.macro_heuristic_policy import MacroHeuristicPolicy
 
 __all__ = [
     "HierarchicalWorldModel",
@@ -42,4 +48,8 @@ __all__ = [
     "macro_walk",
     "MultiGridLevelMapper",
     "TwoLevelMultigrid",
+    "MacroCellGoal",
+    "MacroProximityGoal",
+    "MacroGoalGenerator",
+    "MacroHeuristicPolicy",
 ]
