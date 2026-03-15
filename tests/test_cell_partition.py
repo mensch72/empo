@@ -302,16 +302,15 @@ class TestPartitionProperties:
 class TestAdjacencyAndBorders:
 
     def test_adjacent_rooms(self):
-        """Two rooms sharing a complete edge are adjacent."""
+        """Two rooms sharing a complete edge form one rectangle."""
         left = _rect_from_corners(0, 0, 1, 2)
         right = _rect_from_corners(2, 0, 3, 2)
         walkable = left | right
         part = CellPartition(walkable, seed=42)
         _assert_valid_partition(part, walkable)
-        # The rooms should merge since their union is a rectangle.
-        if part.num_cells == 2:
-            assert 1 in part.adjacency[0]
-            assert 0 in part.adjacency[1]
+        # The union is a 4×3 rectangle, so it must merge into one cell.
+        assert part.num_cells == 1
+        assert part.adjacency[0] == frozenset()
 
     def test_border_pairs_content(self):
         """Border pairs between adjacent cells are valid grid-neighbour pairs."""
@@ -384,20 +383,29 @@ class TestDistanceEstimation:
         assert part.estimated_distance(0, 0) == 0.0
 
     def test_adjacent_cells(self):
-        """Distance between adjacent 1x1 cells should be 1."""
-        walkable = {(0, 0), (1, 0)}
-        # These merge into one cell, so use a case that doesn't merge.
-        # Use an L-shape to get two cells.
-        top = _rect_from_corners(0, 0, 2, 0)
-        bottom = _rect_from_corners(0, 1, 0, 1)
-        walkable = top | bottom
+        """Distance between two diagonally placed 1×1 cells equals 2."""
+        # Two isolated 1×1 cells that cannot merge (diagonal, no shared edge).
+        walkable = {(0, 0), (1, 1)}
         part = CellPartition(walkable, seed=42)
-        if part.num_cells >= 2:
-            top_cell = part.cell_of(1, 0)
-            bottom_cell = part.cell_of(0, 1)
-            if top_cell != bottom_cell:
-                dist = part.estimated_distance(top_cell, bottom_cell)
-                assert dist > 0
+        assert part.num_cells == 2
+        cell_a = part.cell_of(0, 0)
+        cell_b = part.cell_of(1, 1)
+        # Centres are (0,0) and (1,1); Manhattan distance = |1-0| + |1-0| = 2.
+        assert part.estimated_distance(cell_a, cell_b) == 2.0
+
+    def test_distance_between_known_rectangles(self):
+        """Distance between centres of two known rectangles."""
+        # Two 2×1 rooms separated by a gap: left at x=0..1, right at x=3..4
+        left = _rect_from_corners(0, 0, 1, 0)   # centre (0.5, 0)
+        right = _rect_from_corners(3, 0, 4, 0)   # centre (3.5, 0)
+        walkable = left | right
+        part = CellPartition(walkable, seed=42)
+        assert part.num_cells == 2
+        cell_l = part.cell_of(0, 0)
+        cell_r = part.cell_of(3, 0)
+        assert cell_l != cell_r
+        # Manhattan distance between centres: |3.5 - 0.5| + |0 - 0| = 3.0
+        assert part.estimated_distance(cell_l, cell_r) == 3.0
 
 
 # ---------------------------------------------------------------------------

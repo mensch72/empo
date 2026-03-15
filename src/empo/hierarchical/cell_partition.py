@@ -184,7 +184,7 @@ class CellPartition:
         alive: Set[int] = set()
         next_id = 0
 
-        for pos in walkable:
+        for pos in sorted(walkable):
             blocks[next_id] = (pos[0], pos[1], pos[0], pos[1])
             pos_to_block[pos] = next_id
             alive.add(next_id)
@@ -193,7 +193,7 @@ class CellPartition:
         # 2. Compute initial block adjacency.
         block_adj: Dict[int, Set[int]] = {bid: set() for bid in alive}
         _DIRS = ((1, 0), (-1, 0), (0, 1), (0, -1))
-        for pos in walkable:
+        for pos in sorted(walkable):
             bid = pos_to_block[pos]
             for dx, dy in _DIRS:
                 npos = (pos[0] + dx, pos[1] + dy)
@@ -221,8 +221,8 @@ class CellPartition:
                     (_rect_area(merged), self._rng.random(), lo, hi),
                 )
 
-        for bid in alive:
-            for nbid in block_adj[bid]:
+        for bid in sorted(alive):
+            for nbid in sorted(block_adj[bid]):
                 _try_enqueue(bid, nbid)
 
         # 4. Iteratively pop the minimal-area merge and apply it.
@@ -261,7 +261,7 @@ class CellPartition:
             block_adj.pop(b, None)
 
             # Enqueue candidate merges with the new block.
-            for nbid in new_adj:
+            for nbid in sorted(new_adj):
                 if nbid in alive:
                     _try_enqueue(new_id, nbid)
 
@@ -284,9 +284,9 @@ class CellPartition:
     def _compute_adjacency_and_borders(self) -> None:
         """Compute adjacency graph and border pairs between macro-cells."""
         adj: Dict[int, Set[int]] = {i: set() for i in range(self.num_cells)}
-        borders: Dict[
+        border_sets: Dict[
             Tuple[int, int],
-            List[Tuple[Tuple[int, int], Tuple[int, int]]]
+            Set[Tuple[Tuple[int, int], Tuple[int, int]]]
         ] = {}
 
         _DIRS = ((1, 0), (-1, 0), (0, 1), (0, -1))
@@ -303,10 +303,11 @@ class CellPartition:
                             pair = (pos, npos)
                         else:
                             pair = (npos, pos)
-                        if key not in borders:
-                            borders[key] = [pair]
-                        elif pair not in borders[key]:
-                            borders[key].append(pair)
+                        if key not in border_sets:
+                            border_sets[key] = set()
+                        border_sets[key].add(pair)
 
         self.adjacency = {i: frozenset(s) for i, s in adj.items()}
-        self._border_pairs = borders
+        self._border_pairs = {
+            k: sorted(v) for k, v in border_sets.items()
+        }

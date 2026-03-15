@@ -27,11 +27,11 @@ pip install -r setup/requirements.txt pytest
 make test-hierarchical
 ```
 
-This runs 60 tests covering:
+This runs 61 tests covering:
 - `tests/test_world_model_duration.py` — WorldModel duration API (9 tests)
 - `tests/test_duration_discounting.py` — Phase 1/2 duration-aware discounting (6 tests)
 - `tests/test_hierarchical_base.py` — HierarchicalWorldModel & LevelMapper ABCs (15 tests)
-- `tests/test_cell_partition.py` — Macro-cell partitioning (30 tests)
+- `tests/test_cell_partition.py` — Macro-cell partitioning (31 tests)
 
 **Full local test suite (no Docker):**
 ```bash
