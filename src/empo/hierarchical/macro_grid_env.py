@@ -15,6 +15,7 @@ The macro-level action space is:
 from typing import Any, Dict, List, Optional, Tuple
 
 from gymnasium import spaces
+import math
 
 from empo.world_model import WorldModel
 from empo.hierarchical.cell_partition import CellPartition
@@ -256,9 +257,8 @@ class MacroGridEnv(WorldModel):
                 new_agents[i] = (
                     target_cell, carry_t, carry_c, term, started, paused,
                 )
-                dur = max(1, int(round(
-                    self._partition.estimated_distance(cell, target_cell)
-                )))
+                distance = self._partition.estimated_distance(cell, target_cell)
+                dur = max(1, math.ceil(distance))
                 max_duration = max(max_duration, dur)
             # Else: passage closed → agent stays, unit-step duration only
 
