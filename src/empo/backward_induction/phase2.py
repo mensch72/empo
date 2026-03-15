@@ -170,6 +170,11 @@ def _rp_process_single_state(
     vh_results = {}
     action_profile: npt.NDArray[np.int64] = np.zeros(num_agents, dtype=np.int64)
     
+    # Cache duration arrays per action_profile_index to avoid repeated world_model queries.
+    # Durations depend on (state, action_profile, transitions) which are uniquely identified
+    # by action_profile_index for a given state. The cache is reused across Q_r and V_h^e loops.
+    _duration_cache: Dict[int, npt.NDArray] = {} if (rho_r > 0.0 or rho_h > 0.0) else {}
+    
     if DEBUG:
         print(f"  Transient state {state_index}")
     
@@ -187,9 +192,16 @@ def _rp_process_single_state(
             _, next_state_probabilities, next_state_indices = state_transitions[action_profile_index]
             if rho_r > 0.0:
                 # Duration-aware discounting: e^{-rho_r * D(s, a, s')} per transition
-                transitions_list = [(float(p), states[i]) for p, i in zip(next_state_probabilities, next_state_indices)]
-                durations = world_model.transition_durations(state, action_profile.tolist(), transitions_list)
-                discount_factors_r = np.exp(-rho_r * np.array(durations))
+                if world_model is None:
+                    raise ValueError("world_model is required for duration-aware discounting (rho_r > 0)")
+                # Use cached durations if available, otherwise compute and cache
+                if action_profile_index in _duration_cache:
+                    durations_arr = _duration_cache[action_profile_index]
+                else:
+                    transitions_list = [(float(p), states[i]) for p, i in zip(next_state_probabilities, next_state_indices)]
+                    durations_arr = np.array(world_model.transition_durations(state, action_profile.tolist(), transitions_list))
+                    _duration_cache[action_profile_index] = durations_arr
+                discount_factors_r = np.exp(-rho_r * durations_arr)
                 v += human_action_profile_prob * np.dot(next_state_probabilities, discount_factors_r * Vr_values[next_state_indices])
                 # Duration weight: (1 - e^{-rho*D}) / rho for reward term
                 duration_weight_factors = (1.0 - discount_factors_r) / rho_r
@@ -308,16 +320,22 @@ def _rp_process_single_state(
                         )
                     # Use np.where to avoid intermediate array allocation
                     # NumPy automatically promotes float16 to float64 during computation
-                    successor_values = np.where(attainment_values_array, 1.0, vhe_values_array)
                     if rho_h > 0.0:
                         # Duration-aware discounting for human achievement values
                         # Only discount non-achieved successors (achieved stay at 1.0)
-                        transitions_list = [(float(p), states[i]) for p, i in zip(next_state_probabilities, next_state_indices)]
-                        durations = world_model.transition_durations(state, action_profile.tolist(), transitions_list)
-                        discount_factors_h = np.exp(-rho_h * np.array(durations))
+                        if world_model is None:
+                            raise ValueError("world_model is required for duration-aware discounting (rho_h > 0)")
+                        # Use cached durations if available, otherwise compute and cache
+                        if action_profile_index in _duration_cache:
+                            durations_arr = _duration_cache[action_profile_index]
+                        else:
+                            transitions_list = [(float(p), states[i]) for p, i in zip(next_state_probabilities, next_state_indices)]
+                            durations_arr = np.array(world_model.transition_durations(state, action_profile.tolist(), transitions_list))
+                            _duration_cache[action_profile_index] = durations_arr
+                        discount_factors_h = np.exp(-rho_h * durations_arr)
                         successor_values = np.where(attainment_values_array, 1.0, discount_factors_h * vhe_values_array)
                     else:
-                        # Original formula: only non-achieved successors are discounted
+                        # No duration-aware discounting (rho_h == 0 → gamma_h == 1.0): no discount applied
                         successor_values = np.where(attainment_values_array, 1.0, gamma_h * vhe_values_array)
                     v += human_action_profile_prob * np.dot(
                         next_state_probabilities,
@@ -1026,14 +1044,15 @@ def compute_robot_policy(
         human_policy_prior: Precomputed human policy prior from compute_human_policy_prior().
                            If None, will be computed automatically using the goal generator.
         beta_r: Power-law concentration parameter. Higher = more deterministic.
-        gamma_h: Discount factor for human goal achievement values. Exactly one of
-                gamma_h or rho_h must be provided. Defaults to 1.0 if neither is given.
-        gamma_r: Discount factor for robot values. Exactly one of gamma_r or rho_r
-                must be provided. Defaults to 1.0 if neither is given.
-        rho_h: Continuous-time discount rate for humans. If given, gamma_h is computed
-               as exp(-rho_h).
-        rho_r: Continuous-time discount rate for robots. If given, gamma_r is computed
-               as exp(-rho_r).
+        gamma_h: Discount factor for human goal achievement values (0 < gamma_h ≤ 1).
+                At most one of gamma_h or rho_h may be provided. Defaults to 1.0 if
+                neither is given.
+        gamma_r: Discount factor for robot values (0 < gamma_r ≤ 1). At most one of
+                gamma_r or rho_r may be provided. Defaults to 1.0 if neither is given.
+        rho_h: Continuous-time discount rate for humans (rho_h ≥ 0). If given, gamma_h
+               is computed as exp(-rho_h).
+        rho_r: Continuous-time discount rate for robots (rho_r ≥ 0). If given, gamma_r
+               is computed as exp(-rho_r).
         zeta: Risk-aversion parameter for aggregate goal ability.
         xi: Inter-human power-inequality aversion parameter.
         eta: Additional intertemporal power-inequality aversion parameter.
@@ -1132,23 +1151,31 @@ def compute_robot_policy(
     # Precompute powers for action profile indexing
     action_powers: npt.NDArray[np.int64] = num_actions ** np.arange(num_agents)
 
-    # Resolve gamma_h / rho_h: exactly one must be provided (or neither for default)
+    # Resolve gamma_h / rho_h: at most one may be provided (neither → default 1.0)
     if gamma_h is not None and rho_h is not None:
-        raise ValueError("Specify exactly one of gamma_h or rho_h, not both.")
+        raise ValueError("Specify at most one of gamma_h or rho_h, not both.")
     if gamma_h is not None:
+        if not (0.0 < gamma_h <= 1.0):
+            raise ValueError(f"gamma_h must be in (0, 1], got {gamma_h}")
         rho_h = 0.0 if gamma_h == 1.0 else -math.log(gamma_h)
     elif rho_h is not None:
+        if rho_h < 0.0:
+            raise ValueError(f"rho_h must be >= 0, got {rho_h}")
         gamma_h = math.exp(-rho_h)
     else:
         gamma_h = 1.0
         rho_h = 0.0
 
-    # Resolve gamma_r / rho_r: exactly one must be provided (or neither for default)
+    # Resolve gamma_r / rho_r: at most one may be provided (neither → default 1.0)
     if gamma_r is not None and rho_r is not None:
-        raise ValueError("Specify exactly one of gamma_r or rho_r, not both.")
+        raise ValueError("Specify at most one of gamma_r or rho_r, not both.")
     if gamma_r is not None:
+        if not (0.0 < gamma_r <= 1.0):
+            raise ValueError(f"gamma_r must be in (0, 1], got {gamma_r}")
         rho_r = 0.0 if gamma_r == 1.0 else -math.log(gamma_r)
     elif rho_r is not None:
+        if rho_r < 0.0:
+            raise ValueError(f"rho_r must be >= 0, got {rho_r}")
         gamma_r = math.exp(-rho_r)
     else:
         gamma_r = 1.0

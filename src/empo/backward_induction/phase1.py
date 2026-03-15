@@ -227,6 +227,8 @@ def _hpp_process_single_state(
                             if rho_h > 0.0:
                                 # Duration-aware discounting: e^{-rho_h * D(s, a, s')} per transition
                                 # Only discount non-achieved successors (achieved stay at 1.0)
+                                if world_model is None:
+                                    raise ValueError("world_model is required for duration-aware discounting (rho_h > 0)")
                                 transitions_list = [(float(p), states[i]) for p, i in zip(next_state_probabilities, next_state_indices)]
                                 durations = world_model.transition_durations(state, action_profile.tolist(), transitions_list)
                                 discount_factors = np.exp(-rho_h * np.array(durations))
@@ -933,11 +935,11 @@ def compute_human_policy_prior(
                                If None, uses uniform distribution over all action profiles.
         beta_h: Inverse temperature for Boltzmann policy. Higher = more deterministic.
                 Use float('inf') for pure argmax (greedy) policy.
-        gamma_h: Discount factor for future rewards. Exactly one of gamma_h or rho_h
-                must be provided. If gamma_h is given, rho_h is computed as -ln(gamma_h).
-                Defaults to 1.0 (no discounting) if neither is provided.
-        rho_h: Continuous-time discount rate. Exactly one of gamma_h or rho_h must be
-               provided. If rho_h is given, gamma_h is computed as exp(-rho_h).
+        gamma_h: Discount factor for future rewards (0 < gamma_h ≤ 1). At most one of
+                gamma_h or rho_h may be provided. If gamma_h is given, rho_h is computed
+                as -ln(gamma_h). Defaults to 1.0 (no discounting) if neither is provided.
+        rho_h: Continuous-time discount rate (rho_h ≥ 0). At most one of gamma_h or
+               rho_h may be provided. If rho_h is given, gamma_h is computed as exp(-rho_h).
         parallel: If True, use multiprocessing for parallel computation.
                  Requires 'fork' context (works on Linux, may not work on macOS/Windows).
         num_workers: Number of parallel workers. If None, uses mp.cpu_count().
@@ -1048,12 +1050,16 @@ def compute_human_policy_prior(
     # Precompute powers for action profile indexing
     action_powers: npt.NDArray[np.int64] = num_actions ** np.arange(num_agents)
 
-    # Resolve gamma_h / rho_h: exactly one must be provided (or neither for default)
+    # Resolve gamma_h / rho_h: at most one may be provided (neither → default 1.0)
     if gamma_h is not None and rho_h is not None:
-        raise ValueError("Specify exactly one of gamma_h or rho_h, not both.")
+        raise ValueError("Specify at most one of gamma_h or rho_h, not both.")
     if gamma_h is not None:
+        if not (0.0 < gamma_h <= 1.0):
+            raise ValueError(f"gamma_h must be in (0, 1], got {gamma_h}")
         rho_h = 0.0 if gamma_h == 1.0 else -math.log(gamma_h)
     elif rho_h is not None:
+        if rho_h < 0.0:
+            raise ValueError(f"rho_h must be >= 0, got {rho_h}")
         gamma_h = math.exp(-rho_h)
     else:
         # Default: no discounting
