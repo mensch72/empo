@@ -126,6 +126,11 @@ class MultiGridLevelMapper(LevelMapper):
                 dx, dy = _DIR_TO_VEC[adir]
                 fwd_x, fwd_y = ax + dx, ay + dy
 
+                # Bounds check: off-grid forward → agent stays → feasible
+                if (fwd_x < 0 or fwd_x >= self.fine_model.width
+                        or fwd_y < 0 or fwd_y >= self.fine_model.height):
+                    continue
+
                 # Check if the forward position is passable.  If blocked
                 # (e.g. closed door, wall object), the agent cannot
                 # actually move there, so it stays in place → feasible.

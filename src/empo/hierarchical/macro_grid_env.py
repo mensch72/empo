@@ -98,30 +98,11 @@ class MacroGridEnv(WorldModel):
 
         self.micro_env = micro_env
         self._num_agents = len(micro_env.agents)
+        self._partition_seed = seed
 
-        # Build cell partition from the micro environment's grid
-        self._partition = CellPartition.from_grid(
-            micro_env.grid, micro_env.width, micro_env.height,
-            seed=seed,
-        )
+        # Build partition and derived structures from the current grid
+        self._build_macro_structures()
 
-        # Sorted adjacent pairs (i < j) for canonical passage flag ordering
-        self._adj_pairs: List[Tuple[int, int]] = sorted(
-            {(min(i, j), max(i, j))
-             for i in range(self._partition.num_cells)
-             for j in self._partition.adjacency.get(i, frozenset())}
-        )
-        self._passage_pair_idx: Dict[Tuple[int, int], int] = {
-            pair: idx for idx, pair in enumerate(self._adj_pairs)
-        }
-
-        # Action space: PASS + WALK(j) for each cell index.
-        # Uses Discrete (per-agent) to match the convention expected by
-        # WorldModel.get_dag() and backward_induction, which read
-        # action_space.n.  Multi-agent action profiles are constructed
-        # externally from len(self.agents) × action_space.n.
-        self._num_actions = self._partition.num_cells + 1
-        self.action_space = spaces.Discrete(self._num_actions)
         # Observation space is Discrete(1) because MacroGridEnv is a
         # WorldModel used for planning via get_state()/set_state().
         # reset() and step() return 0 as the observation; callers
@@ -141,6 +122,37 @@ class MacroGridEnv(WorldModel):
 
         # Compute initial macro state from current micro state
         self._state = self._micro_to_macro_state(micro_env.get_state())
+
+    def _build_macro_structures(self) -> None:
+        """(Re)build partition, adjacency index, and action space.
+
+        Called from ``__init__`` and ``reset()`` to keep the macro
+        abstraction consistent with the micro environment's grid.
+        """
+        self._partition = CellPartition.from_grid(
+            self.micro_env.grid,
+            self.micro_env.width,
+            self.micro_env.height,
+            seed=self._partition_seed,
+        )
+
+        # Sorted adjacent pairs (i < j) for canonical passage flag ordering
+        self._adj_pairs: List[Tuple[int, int]] = sorted(
+            {(min(i, j), max(i, j))
+             for i in range(self._partition.num_cells)
+             for j in self._partition.adjacency.get(i, frozenset())}
+        )
+        self._passage_pair_idx: Dict[Tuple[int, int], int] = {
+            pair: idx for idx, pair in enumerate(self._adj_pairs)
+        }
+
+        # Action space: PASS + WALK(j) for each cell index.
+        # Uses Discrete (per-agent) to match the convention expected by
+        # WorldModel.get_dag() and backward_induction, which read
+        # action_space.n.  Multi-agent action profiles are constructed
+        # externally from len(self.agents) × action_space.n.
+        self._num_actions = self._partition.num_cells + 1
+        self.action_space = spaces.Discrete(self._num_actions)
 
     # ------------------------------------------------------------------
     # Properties
@@ -381,6 +393,10 @@ class MacroGridEnv(WorldModel):
     def reset(self, *, seed=None, options=None):
         """Reset by resetting the micro environment and recomputing state.
 
+        Rebuilds the cell partition and derived structures (adjacency,
+        action space) after resetting the micro environment, since
+        ``MultiGridEnv.reset()`` may regenerate the grid layout.
+
         Note: ``seed`` and ``options`` are accepted for Gymnasium
         compatibility but are not forwarded to ``micro_env.reset()``,
         because ``MultiGridEnv.reset()`` (in ``gym_multigrid``) is
@@ -388,6 +404,7 @@ class MacroGridEnv(WorldModel):
         environment, call ``micro_env.seed(s)`` before resetting.
         """
         self.micro_env.reset()
+        self._build_macro_structures()
         self._state = self._micro_to_macro_state(
             self.micro_env.get_state()
         )
