@@ -165,6 +165,7 @@ class MacroHeuristicPolicy(HumanPolicyPrior):
         available: List[int],
     ) -> Dict[int, float]:
         """Advantages for moving *toward* target_cell."""
+        macro_env: MacroGridEnv = self.world_model  # type: ignore[assignment]
         dist_from_current = self._shortest_path_distance(
             current_cell, target_cell, state,
         )
@@ -174,11 +175,15 @@ class MacroHeuristicPolicy(HumanPolicyPrior):
                 advantages[action] = 0.0
             else:
                 dest_cell = action - 1  # WALK(dest_cell)
-                dist_from_dest = self._shortest_path_distance(
-                    dest_cell, target_cell, state,
-                )
-                # Advantage = how much closer we get
-                advantages[action] = dist_from_current - dist_from_dest
+                # A closed passage makes WALK equivalent to PASS (no move)
+                if not macro_env.passage_open(state, current_cell, dest_cell):
+                    advantages[action] = 0.0
+                else:
+                    dist_from_dest = self._shortest_path_distance(
+                        dest_cell, target_cell, state,
+                    )
+                    # Advantage = how much closer we get
+                    advantages[action] = dist_from_current - dist_from_dest
         return advantages
 
     def _advantages_away(
@@ -189,6 +194,7 @@ class MacroHeuristicPolicy(HumanPolicyPrior):
         available: List[int],
     ) -> Dict[int, float]:
         """Advantages for moving *away from* other_cell."""
+        macro_env: MacroGridEnv = self.world_model  # type: ignore[assignment]
         dist_from_current = self._shortest_path_distance(
             current_cell, other_cell, state,
         )
@@ -198,11 +204,15 @@ class MacroHeuristicPolicy(HumanPolicyPrior):
                 advantages[action] = 0.0
             else:
                 dest_cell = action - 1
-                dist_from_dest = self._shortest_path_distance(
-                    dest_cell, other_cell, state,
-                )
-                # Advantage = how much further away we get
-                advantages[action] = dist_from_dest - dist_from_current
+                # A closed passage makes WALK equivalent to PASS (no move)
+                if not macro_env.passage_open(state, current_cell, dest_cell):
+                    advantages[action] = 0.0
+                else:
+                    dist_from_dest = self._shortest_path_distance(
+                        dest_cell, other_cell, state,
+                    )
+                    # Advantage = how much further away we get
+                    advantages[action] = dist_from_dest - dist_from_current
         return advantages
 
     # ------------------------------------------------------------------
@@ -215,7 +225,7 @@ class MacroHeuristicPolicy(HumanPolicyPrior):
         to_cell: int,
         state: Any,
     ) -> float:
-        """BFS shortest-path distance on the passage-weighted adjacency graph.
+        """Dijkstra shortest-path distance on the passage-weighted adjacency graph.
 
         Uses ``partition.estimated_distance`` as edge weights, restricted
         to edges whose passage is currently open.
@@ -270,15 +280,19 @@ class MacroHeuristicPolicy(HumanPolicyPrior):
         vals = np.array([advantages.get(a, 0.0) for a in available],
                         dtype=np.float64)
 
-        # Clamp non-finite advantages (from unreachable targets) so the
-        # softmax stays well-defined.  The cap is set large enough to
-        # dominate all finite values while remaining numerically safe.
+        # Replace non-finite advantages (inf/-inf/NaN from unreachable
+        # targets) with explicit finite caps so the softmax stays
+        # well-defined.  np.clip alone does not handle NaN, so we
+        # overwrite non-finite entries directly.
         finite_mask = np.isfinite(vals)
         if not finite_mask.all():
             max_finite = (np.abs(vals[finite_mask]).max()
                           if finite_mask.any() else 0.0)
             cap = max(max_finite + 1.0, 100.0)
-            vals = np.clip(vals, -cap, cap)
+            vals[~finite_mask & (vals > 0)] = cap
+            vals[~finite_mask & (vals < 0)] = -cap
+            # NaN (neither >0 nor <0) → treat as neutral
+            vals[np.isnan(vals)] = 0.0
 
         # Numerically stable softmax
         vals *= self.beta

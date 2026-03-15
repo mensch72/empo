@@ -8,7 +8,7 @@ import pytest
 
 from gym_multigrid.multigrid import MultiGridEnv
 
-from empo.hierarchical.macro_grid_env import MacroGridEnv, MACRO_PASS
+from empo.hierarchical.macro_grid_env import MacroGridEnv
 from empo.hierarchical.macro_goals import (
     MacroCellGoal,
     MacroProximityGoal,
