@@ -12,9 +12,8 @@ The macro-level action space is:
   j+1: WALK(j) — walk to macro-cell j
 """
 
-from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-import gymnasium as gym
 from gymnasium import spaces
 
 from empo.world_model import WorldModel
@@ -116,11 +115,13 @@ class MacroGridEnv(WorldModel):
             pair: idx for idx, pair in enumerate(self._adj_pairs)
         }
 
-        # Action space: PASS + WALK(j) for each cell index
+        # Action space: PASS + WALK(j) for each cell index.
+        # Uses Discrete (per-agent) to match the convention expected by
+        # WorldModel.get_dag() and backward_induction, which read
+        # action_space.n.  Multi-agent action profiles are constructed
+        # externally from len(self.agents) × action_space.n.
         self._num_actions = self._partition.num_cells + 1
-        self.action_space = spaces.MultiDiscrete(
-            [self._num_actions] * self._num_agents
-        )
+        self.action_space = spaces.Discrete(self._num_actions)
         self.observation_space = spaces.Discrete(1)  # Placeholder
 
         # Agent proxy objects — backward induction accesses len(agents)

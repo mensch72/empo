@@ -48,8 +48,7 @@ class TestConstruction:
     def test_action_space_matches_num_cells(self):
         macro = MacroGridEnv(_make_rock_gateway(), seed=42)
         expected = macro.num_cells + 1  # PASS + WALK(j) per cell
-        for n in macro.action_space.nvec:
-            assert n == expected
+        assert macro.action_space.n == expected
 
     def test_agents_len_matches_micro(self):
         micro = _make_rock_gateway()
