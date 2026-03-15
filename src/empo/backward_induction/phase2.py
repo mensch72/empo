@@ -20,6 +20,7 @@ Attainment Cache:
     redundant is_achieved() computation between phases.
 """
 
+import math
 import numpy as np
 import numpy.typing as npt
 import time
@@ -73,7 +74,8 @@ _shared_robot_agent_indices: Optional[List[int]] = None
 _shared_human_policy_prior_pickle: Optional[bytes] = None
 _shared_sliced_cache: Optional[SlicedAttainmentCache] = None
 _shared_num_action_profiles: int = 0
-_shared_rp_params: Optional[Tuple[List[int], List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], float, float, float, float, float, float, float]] = None
+_shared_rp_params: Optional[Tuple[List[int], List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], float, float, float, float, float, float, float, float, float]] = None
+_shared_world_model: Optional['WorldModel'] = None  # For duration-aware discounting in workers
 
 
 def _rp_process_single_state(
@@ -102,6 +104,9 @@ def _rp_process_single_state(
     use_indexed: bool = False,
     vres0: Union[Dict, npt.NDArray] = None,
     compute_successor_probs: bool = False,
+    rho_h: float = 0.0,
+    rho_r: float = 0.0,
+    world_model: Optional['WorldModel'] = None,
 ) -> Tuple[
     Dict[int, Dict[PossibleGoal, float]],  # vh_results: agent -> goal -> value
     float,  # vr_result
@@ -165,20 +170,52 @@ def _rp_process_single_state(
     vh_results = {}
     action_profile: npt.NDArray[np.int64] = np.zeros(num_agents, dtype=np.int64)
     
+    # Cache duration arrays per action_profile_index to avoid repeated world_model queries.
+    # Durations depend on (state, action_profile, transitions) which are uniquely identified
+    # by action_profile_index for a given state. The cache is reused across Q_r and V_h^e loops.
+    _duration_cache: Dict[int, npt.NDArray] = {}
+    
     if DEBUG:
         print(f"  Transient state {state_index}")
     
     # Compute Q_r values for all robot action profiles
     Qr_values = np.zeros(len(robot_action_profiles))
+    # Track expected duration weight per robot action profile (for duration-weighted reward)
+    duration_weights_per_rap = np.zeros(len(robot_action_profiles)) if rho_r > 0.0 else None
     for robot_action_profile_index, robot_action_profile in enumerate(robot_action_profiles):
         action_profile[robot_agent_indices] = robot_action_profile
         v = 0.0
+        dw = 0.0
         for human_action_profile_prob, human_action_profile in human_policy_prior.profile_distribution(state):
             action_profile[human_agent_indices] = human_action_profile
             action_profile_index = (action_profile @ action_powers).item()
             _, next_state_probabilities, next_state_indices = state_transitions[action_profile_index]
-            v += human_action_profile_prob * np.dot(next_state_probabilities, Vr_values[next_state_indices])
-        Qr_values[robot_action_profile_index] = gamma_r * v
+            if rho_r > 0.0:
+                # Duration-aware discounting: e^{-rho_r * D(s, a, s')} per transition
+                if world_model is None:
+                    raise ValueError("world_model is required for duration-aware discounting (rho_r > 0)")
+                # Use cached durations if available, otherwise compute and cache
+                if action_profile_index in _duration_cache:
+                    durations_arr = _duration_cache[action_profile_index]
+                else:
+                    transitions_list = [(float(p), states[i]) for p, i in zip(next_state_probabilities, next_state_indices)]
+                    durations_arr = np.array(world_model.transition_durations(state, action_profile.tolist(), transitions_list))
+                    if len(durations_arr) != len(next_state_indices):
+                        raise ValueError(
+                            f"transition_durations() returned {len(durations_arr)} durations but expected "
+                            f"{len(next_state_indices)} (state_index={state_index}, action_profile_index={action_profile_index})")
+                    _duration_cache[action_profile_index] = durations_arr
+                discount_factors_r = np.exp(-rho_r * durations_arr)
+                v += human_action_profile_prob * np.dot(next_state_probabilities, discount_factors_r * Vr_values[next_state_indices])
+                # Duration weight: (1 - e^{-rho*D}) / rho for reward term
+                # Use -expm1(-x) = 1 - e^{-x} for numerical stability when rho_r*D is small
+                duration_weight_factors = -np.expm1(-rho_r * durations_arr) / rho_r
+                dw += human_action_profile_prob * np.dot(next_state_probabilities, duration_weight_factors)
+            else:
+                v += human_action_profile_prob * np.dot(next_state_probabilities, Vr_values[next_state_indices])
+        Qr_values[robot_action_profile_index] = v  # discounting already applied per-transition
+        if rho_r > 0.0:
+            duration_weights_per_rap[robot_action_profile_index] = dw
     
     # Compute robot policy as power-law policy
     # Use log-space computation for numerical stability:
@@ -288,9 +325,30 @@ def _rp_process_single_state(
                         )
                     # Use np.where to avoid intermediate array allocation
                     # NumPy automatically promotes float16 to float64 during computation
+                    if rho_h > 0.0:
+                        # Duration-aware discounting for human achievement values
+                        # Only discount non-achieved successors (achieved stay at 1.0)
+                        if world_model is None:
+                            raise ValueError("world_model is required for duration-aware discounting (rho_h > 0)")
+                        # Use cached durations if available, otherwise compute and cache
+                        if action_profile_index in _duration_cache:
+                            durations_arr = _duration_cache[action_profile_index]
+                        else:
+                            transitions_list = [(float(p), states[i]) for p, i in zip(next_state_probabilities, next_state_indices)]
+                            durations_arr = np.array(world_model.transition_durations(state, action_profile.tolist(), transitions_list))
+                            if len(durations_arr) != len(next_state_indices):
+                                raise ValueError(
+                                    f"transition_durations() returned {len(durations_arr)} durations but expected "
+                                    f"{len(next_state_indices)} (state_index={state_index}, action_profile_index={action_profile_index})")
+                            _duration_cache[action_profile_index] = durations_arr
+                        discount_factors_h = np.exp(-rho_h * durations_arr)
+                        successor_values = np.where(attainment_values_array, 1.0, discount_factors_h * vhe_values_array)
+                    else:
+                        # Standard gamma discounting (not duration-aware)
+                        successor_values = np.where(attainment_values_array, 1.0, gamma_h * vhe_values_array)
                     v += human_action_profile_prob * np.dot(
                         next_state_probabilities,
-                        np.where(attainment_values_array, 1.0, gamma_h * vhe_values_array)
+                        successor_values
                     )
                 vh += ps[robot_action_profile_index] * v
             
@@ -319,7 +377,12 @@ def _rp_process_single_state(
     
     y = powersum / len(human_agent_indices)  # average over humans
     ur = -(y**eta)
-    vr = ur + float(np.dot(ps, Qr_values))
+    if rho_r > 0.0:
+        # Duration-weighted reward: expected (1-e^{-rho*D})/rho under the joint policy
+        expected_duration_weight = float(np.dot(ps, duration_weights_per_rap))
+        vr = expected_duration_weight * ur + float(np.dot(ps, Qr_values))
+    else:
+        vr = ur + float(np.dot(ps, Qr_values))
     
     if DEBUG:
         print(f"  ...Ur = {ur:.4f}, Vr = {vr:.4f}")
@@ -357,6 +420,9 @@ def _rp_compute_sequential(
     quiet: bool = False,
     memory_profile: bool = False,
     markov_chain: Optional[MarkovChain] = None,
+    rho_h: float = 0.0,
+    rho_r: float = 0.0,
+    world_model: Optional['WorldModel'] = None,
 ) -> None:
     """Sequential Phase 2 backward induction algorithm.
     
@@ -508,6 +574,9 @@ def _rp_compute_sequential(
             use_indexed=use_indexed,
             vres0=vres0,
             compute_successor_probs=(markov_chain is not None),
+            rho_h=rho_h,
+            rho_r=rho_r,
+            world_model=world_model,
         )
         
         # Store results
@@ -579,6 +648,7 @@ def _rp_init_shared_data(
     use_shared_memory: bool = False,
     sliced_cache: Optional[SlicedAttainmentCache] = None,
     num_action_profiles: int = 0,
+    world_model: Optional['WorldModel'] = None,
 ) -> None:
     """Initialize shared data for robot policy worker processes.
     
@@ -592,10 +662,12 @@ def _rp_init_shared_data(
         use_shared_memory: If True, states and transitions are already in shared memory
         sliced_cache: Optional SlicedAttainmentCache from Phase 1 for reading
         num_action_profiles: Number of action profiles (needed for slice cache creation)
+        world_model: WorldModel for duration-aware discounting (needed when rho_h or rho_r > 0)
     """
     global _shared_states, _shared_transitions, _shared_Vh_values, _shared_Vr_values
     global _shared_rp_params, _shared_human_policy_prior_pickle
     global _shared_sliced_cache, _shared_num_action_profiles
+    global _shared_world_model
     
     if use_shared_memory:
         # DAG is already in shared memory, just store refs as None
@@ -611,6 +683,7 @@ def _rp_init_shared_data(
     _shared_human_policy_prior_pickle = human_policy_prior_pickle
     _shared_sliced_cache = sliced_cache
     _shared_num_action_profiles = num_action_profiles
+    _shared_world_model = world_model
 
 
 def _rp_process_state_batch(
@@ -659,7 +732,7 @@ def _rp_process_state_batch(
     
     (human_agent_indices, robot_agent_indices, possible_goal_generator, 
      num_agents, num_actions, action_powers, beta_r, gamma_h, gamma_r, 
-     zeta, xi, eta, terminal_Vr) = _shared_rp_params
+     zeta, xi, eta, terminal_Vr, rho_h, rho_r) = _shared_rp_params
     
     # Deserialize human_policy_prior
     human_policy_prior = cloudpickle.loads(_shared_human_policy_prior_pickle)
@@ -696,6 +769,9 @@ def _rp_process_state_batch(
             possible_goal_generator, num_agents, num_actions, action_powers,
             human_policy_prior, beta_r, gamma_h, gamma_r, zeta, xi, eta, terminal_Vr,
             slice_cache=slice_cache,
+            rho_h=rho_h,
+            rho_r=rho_r,
+            world_model=_shared_world_model,
         )
         
         vh_results[state_index] = vh_results_state
@@ -817,8 +893,10 @@ def compute_robot_policy(
     human_policy_prior: Optional[TabularHumanPolicyPrior] = None,
     *,
     beta_r: float = 10.0,
-    gamma_h: float = 1.0, 
-    gamma_r: float = 1.0,
+    gamma_h: Optional[float] = None, 
+    gamma_r: Optional[float] = None,
+    rho_h: Optional[float] = None,
+    rho_r: Optional[float] = None,
     zeta: float = 1.0,
     xi: float = 1.0,
     eta: float = 1.0,
@@ -847,8 +925,10 @@ def compute_robot_policy(
     human_policy_prior: Optional[TabularHumanPolicyPrior] = None,
     *,
     beta_r: float = 10.0,
-    gamma_h: float = 1.0, 
-    gamma_r: float = 1.0,
+    gamma_h: Optional[float] = None, 
+    gamma_r: Optional[float] = None,
+    rho_h: Optional[float] = None,
+    rho_r: Optional[float] = None,
     zeta: float = 1.0,
     xi: float = 1.0,
     eta: float = 1.0,
@@ -881,8 +961,10 @@ def compute_robot_policy(
     human_policy_prior: Optional[TabularHumanPolicyPrior] = None,
     *,
     beta_r: float = 10.0,
-    gamma_h: float = 1.0, 
-    gamma_r: float = 1.0,
+    gamma_h: Optional[float] = None, 
+    gamma_r: Optional[float] = None,
+    rho_h: Optional[float] = None,
+    rho_r: Optional[float] = None,
     zeta: float = 1.0,
     xi: float = 1.0,
     eta: float = 1.0,
@@ -910,8 +992,10 @@ def compute_robot_policy(
     human_policy_prior: Optional[TabularHumanPolicyPrior] = None,
     *,
     beta_r: float = 10.0,
-    gamma_h: float = 1.0, 
-    gamma_r: float = 1.0,
+    gamma_h: Optional[float] = None, 
+    gamma_r: Optional[float] = None,
+    rho_h: Optional[float] = None,
+    rho_r: Optional[float] = None,
     zeta: float = 1.0,
     xi: float = 1.0,
     eta: float = 1.0,
@@ -949,14 +1033,15 @@ def compute_robot_policy(
         1. Build the DAG of reachable states using world_model.get_dag()
         2. Compute dependency levels for topological ordering
         3. Process states in reverse topological order:
-           - Terminal states: V_h^e(s, g) = 0, V_r(s) = 0
-           - Non-terminal states:
-             * Q_r(s, a_r) = γ_r * E[V_r(s')] under human_policy_prior
+           - Terminal states: V_h^e(s, g) = 0, V_r(s) = terminal_Vr (strictly negative; default -1e-10)
+           - Non-terminal states (with D = transition duration from world_model):
+             * Q_r(s, a_r) = E[e^{-ρ_r·D} V_r(s')] under human_policy_prior
              * π_r(a_r|s) = power-law policy based on Q_r
-             * V_h^e(s, g) = E[achievement(s') + (1-achievement(s')) * γ_h * V_h^e(s', g)]
+             * V_h^e(s, g) = E[achievement(s') + (1-achievement(s')) · e^{-ρ_h·D} · V_h^e(s', g)]
              * X_h(s) = E[V_h^e(s, g)^ζ] (aggregate goal ability)
-             * U_r(s) = -(mean(X_h^{-ξ}))^η (intrinsic reward)
-             * V_r(s) = U_r(s) + E[Q_r(s, a_r)]
+             * U_r(s) = -E[(1-e^{-ρ_r·D})/ρ_r] · K(s)^η  (duration-weighted intrinsic cost; negative)
+             * V_r(s) = U_r(s) + Q_r(s, π_r)
+           When ρ = 0 (γ = 1.0), per-transition discounting is skipped (no duration queries).
     
     Args:
         world_model: A WorldModel (or MultiGridEnv) with get_state(), set_state(),
@@ -969,8 +1054,15 @@ def compute_robot_policy(
         human_policy_prior: Precomputed human policy prior from compute_human_policy_prior().
                            If None, will be computed automatically using the goal generator.
         beta_r: Power-law concentration parameter. Higher = more deterministic.
-        gamma_h: Discount factor for human goal achievement values.
-        gamma_r: Discount factor for robot values.
+        gamma_h: Discount factor for human goal achievement values (0 < gamma_h ≤ 1).
+                At most one of gamma_h or rho_h may be provided. Defaults to 1.0 if
+                neither is given.
+        gamma_r: Discount factor for robot values (0 < gamma_r ≤ 1). At most one of
+                gamma_r or rho_r may be provided. Defaults to 1.0 if neither is given.
+        rho_h: Continuous-time discount rate for humans (rho_h ≥ 0). If given, gamma_h
+               is computed as exp(-rho_h).
+        rho_r: Continuous-time discount rate for robots (rho_r ≥ 0). If given, gamma_r
+               is computed as exp(-rho_r).
         zeta: Risk-aversion parameter for aggregate goal ability.
         xi: Inter-human power-inequality aversion parameter.
         eta: Additional intertemporal power-inequality aversion parameter.
@@ -1068,6 +1160,36 @@ def compute_robot_policy(
 
     # Precompute powers for action profile indexing
     action_powers: npt.NDArray[np.int64] = num_actions ** np.arange(num_agents)
+
+    # Resolve gamma_h / rho_h: at most one may be provided (neither → default 1.0)
+    if gamma_h is not None and rho_h is not None:
+        raise ValueError("Specify at most one of gamma_h or rho_h, not both.")
+    if gamma_h is not None:
+        if not (0.0 < gamma_h <= 1.0):
+            raise ValueError(f"gamma_h must be in (0, 1], got {gamma_h}")
+        rho_h = 0.0 if gamma_h == 1.0 else -math.log(gamma_h)
+    elif rho_h is not None:
+        if rho_h < 0.0:
+            raise ValueError(f"rho_h must be >= 0, got {rho_h}")
+        gamma_h = math.exp(-rho_h)
+    else:
+        gamma_h = 1.0
+        rho_h = 0.0
+
+    # Resolve gamma_r / rho_r: at most one may be provided (neither → default 1.0)
+    if gamma_r is not None and rho_r is not None:
+        raise ValueError("Specify at most one of gamma_r or rho_r, not both.")
+    if gamma_r is not None:
+        if not (0.0 < gamma_r <= 1.0):
+            raise ValueError(f"gamma_r must be in (0, 1], got {gamma_r}")
+        rho_r = 0.0 if gamma_r == 1.0 else -math.log(gamma_r)
+    elif rho_r is not None:
+        if rho_r < 0.0:
+            raise ValueError(f"rho_r must be >= 0, got {rho_r}")
+        gamma_r = math.exp(-rho_r)
+    else:
+        gamma_r = 1.0
+        rho_r = 0.0
 
     # Serialize human_policy_prior using cloudpickle for parallel mode
     human_policy_prior_pickle = cloudpickle.dumps(human_policy_prior)
@@ -1235,10 +1357,10 @@ def compute_robot_policy(
             print(f"Computed {len(dependency_levels)} dependency levels")
         
         # Initialize shared data for worker processes
-        params: Tuple[List[int], List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], float, float, float, float, float, float, float] = (
+        params: Tuple[List[int], List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], float, float, float, float, float, float, float, float, float] = (
             human_agent_indices, robot_agent_indices, possible_goal_generator, 
             num_agents, num_actions, action_powers, beta_r, gamma_h, gamma_r, 
-            zeta, xi, eta, terminal_Vr
+            zeta, xi, eta, terminal_Vr, rho_h, rho_r
         )
         
         # Use 'fork' context explicitly to ensure shared memory works
@@ -1294,6 +1416,9 @@ def compute_robot_policy(
                         possible_goal_generator, num_agents, num_actions, action_powers,
                         human_policy_prior, beta_r, gamma_h, gamma_r, zeta, xi, eta, terminal_Vr,
                         slice_cache=inline_slice_cache,
+                        rho_h=rho_h,
+                        rho_r=rho_r,
+                        world_model=world_model,
                     )
                     
                     # Store results
@@ -1312,7 +1437,7 @@ def compute_robot_policy(
             else:
                 # Many states - parallelize
                 # Re-initialize shared data so new workers see updated values from previous levels
-                _rp_init_shared_data(states, transitions, Vh_values, Vr_values, params, human_policy_prior_pickle, use_shared_memory=True, sliced_cache=sliced_cache, num_action_profiles=num_action_profiles)
+                _rp_init_shared_data(states, transitions, Vh_values, Vr_values, params, human_policy_prior_pickle, use_shared_memory=True, sliced_cache=sliced_cache, num_action_profiles=num_action_profiles, world_model=world_model)
                 
                 batches = split_into_batches(level, num_workers)
                 
@@ -1431,6 +1556,7 @@ def compute_robot_policy(
                 sliced_cache,
                 level_fct, return_values, archive_dir, disk_dag, quiet, memory_profile,
                 markov_chain=markov_chain_data,
+                rho_h=rho_h, rho_r=rho_r, world_model=world_model,
             )
         except KeyboardInterrupt:
             if not quiet:

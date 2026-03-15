@@ -18,6 +18,44 @@ This document outlines a plan to extend the EMPO framework to support **hierarch
 
 The initial implementation targets a **two-level hierarchy** for MultiGrid environments. The abstract interfaces are designed for $L$ levels but only $L = 2$ will be implemented and tested.
 
+### 1.3 Testing on the Command Line
+
+**Quick test (Tasks 1–4 only):**
+```bash
+# No Docker required — just pip install and run
+pip install -r setup/requirements.txt pytest
+make test-hierarchical
+```
+
+This runs 30 tests covering:
+- `tests/test_world_model_duration.py` — WorldModel duration API (9 tests)
+- `tests/test_duration_discounting.py` — Phase 1/2 duration-aware discounting (6 tests)
+- `tests/test_hierarchical_base.py` — HierarchicalWorldModel & LevelMapper ABCs (15 tests)
+
+**Full local test suite (no Docker):**
+```bash
+make test-local
+```
+
+**Run a single test file:**
+```bash
+PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds \
+  python -m pytest tests/test_hierarchical_base.py -v
+```
+
+**Run a single test:**
+```bash
+PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds \
+  python -m pytest tests/test_hierarchical_base.py::test_construct_two_level -v
+```
+
+**With Docker (full environment):**
+```bash
+make up          # start dev container
+make shell       # enter container
+python -m pytest tests/test_hierarchical_base.py tests/test_duration_discounting.py tests/test_world_model_duration.py -v
+```
+
 ## 2. Extending WorldModel with Step Duration
 
 ### 2.1 Motivation
@@ -178,65 +216,65 @@ class LevelMapper(ABC):
     @abstractmethod
     def is_feasible(
         self,
-        coarse_action: Tuple[int, ...],
+        coarse_action_profile: Tuple[int, ...],
         fine_state: Any,
-        fine_action: Tuple[int, ...]
+        fine_action_profile: Tuple[int, ...]
     ) -> bool:
-        """Check if a fine-level action is compatible with the current coarse-level action.
+        """Check if a fine-level action profile is compatible with the current coarse-level one.
 
-        An action a^{ℓ+1} is feasible if it does not contradict the plan specified
+        An action profile a^{ℓ+1} is feasible if it does not contradict the plan specified
         by a^ℓ. For example, if a^ℓ says "walk to cell X", then a^{ℓ+1} should not
         walk in the opposite direction.
 
         Args:
-            coarse_action: The current action profile from M^ℓ.
+            coarse_action_profile: The current action profile from M^ℓ.
             fine_state: The current state in M^{ℓ+1}.
-            fine_action: The proposed action profile in M^{ℓ+1}.
+            fine_action_profile: The proposed action profile in M^{ℓ+1}.
 
         Returns:
-            True if fine_action is compatible with coarse_action in fine_state.
+            True if fine_action_profile is compatible with coarse_action_profile in fine_state.
         """
 
     @abstractmethod
     def is_abort(
         self,
-        coarse_action: Tuple[int, ...],
+        coarse_action_profile: Tuple[int, ...],
         fine_state: Any,
-        fine_action: Tuple[int, ...]
+        fine_action_profile: Tuple[int, ...]
     ) -> bool:
-        """Check if a fine-level action constitutes aborting the coarse-level plan.
+        """Check if a fine-level action profile constitutes aborting the coarse-level plan.
 
         Aborting means the fine-level agent explicitly chooses to stop pursuing
-        the coarse-level action (e.g., by passing/staying still).
+        the coarse-level action profile (e.g., by passing/staying still).
 
         Args:
-            coarse_action: The current action profile from M^ℓ.
+            coarse_action_profile: The current action profile from M^ℓ.
             fine_state: The current state in M^{ℓ+1}.
-            fine_action: The proposed action profile in M^{ℓ+1}.
+            fine_action_profile: The proposed action profile in M^{ℓ+1}.
 
         Returns:
-            True if fine_action is considered aborting coarse_action.
+            True if fine_action_profile is considered aborting coarse_action_profile.
         """
 
     @abstractmethod
     def return_control(
         self,
-        coarse_action: Tuple[int, ...],
+        coarse_action_profile: Tuple[int, ...],
         fine_state: Any,
-        fine_action: Tuple[int, ...],
+        fine_action_profile: Tuple[int, ...],
         fine_successor_state: Any
     ) -> bool:
         """Check if control should return to the coarse level after a fine-level transition.
 
         Control returns when:
-        - The coarse-level action is achieved (agent reached target cell, object toggled, etc.)
-        - The coarse-level action becomes unachievable (target moved away, path blocked, etc.)
-        - The fine-level action was an abort
+        - The coarse-level action profile is achieved (agent reached target cell, object toggled, etc.)
+        - The coarse-level action profile becomes unachievable (target moved away, path blocked, etc.)
+        - The fine-level action profile was an abort
 
         Args:
-            coarse_action: The current action profile from M^ℓ.
+            coarse_action_profile: The current action profile from M^ℓ.
             fine_state: The state in M^{ℓ+1} before the transition.
-            fine_action: The action taken in M^{ℓ+1}.
+            fine_action_profile: The action profile taken in M^{ℓ+1}.
             fine_successor_state: The state in M^{ℓ+1} after the transition.
 
         Returns:
@@ -443,8 +481,8 @@ class MultiGridLevelMapper(LevelMapper):
         """Identity mapping (no agent grouping in two-level MultiGrid)."""
         return fine_agent_index
 
-    def is_feasible(self, coarse_action, fine_state, fine_action) -> bool:
-        """Check that fine_action doesn't contradict coarse_action.
+    def is_feasible(self, coarse_action_profile, fine_state, fine_action_profile) -> bool:
+        """Check that fine_action_profile doesn't contradict coarse_action_profile.
 
         Rejects fine-level actions that:
         - Enter a different macro-cell than the one specified by WALK(j)
@@ -454,10 +492,10 @@ class MultiGridLevelMapper(LevelMapper):
         - Walk away from the target when APPROACH(agent) is active
         """
 
-    def is_abort(self, coarse_action, fine_state, fine_action) -> bool:
+    def is_abort(self, coarse_action_profile, fine_state, fine_action_profile) -> bool:
         """M^1 'still' (action 0) is treated as aborting the M^0 plan."""
 
-    def return_control(self, coarse_action, fine_state, fine_action, fine_successor) -> bool:
+    def return_control(self, coarse_action_profile, fine_state, fine_action_profile, fine_successor) -> bool:
         """Return control when:
         - The agent successfully completed the M^0 action (reached target cell,
           toggled target object, picked up target object, etc.)
@@ -694,30 +732,30 @@ class HierarchicalRobotPolicy(RobotPolicy):
         self.macro_policy = macro_policy
         self.macro_Vr = macro_Vr
         self.macro_Xh = macro_Xh
-        self._current_coarse_action: Optional[Tuple[int, ...]] = None
+        self._current_coarse_action_profile: Optional[Tuple[int, ...]] = None
         self._current_coarse_state: Optional[Any] = None
 
     def sample(self, state: Any) -> Any:
         """Sample a micro-level action.
 
         Logic:
-        1. If control is at macro level (no active coarse action):
+        1. If control is at macro level (no active coarse action profile):
            a. Compute macro-state from micro-state via super_state()
            b. Sample macro-action from macro_policy
-           c. Store as current coarse action, transfer control to micro level
+           c. Store as current coarse action profile, transfer control to micro level
         2. If control is at micro level:
-           a. Compute the sub-problem policy for (coarse_state, coarse_action, micro_state)
+           a. Compute the sub-problem policy for (coarse_state, coarse_action_profile, micro_state)
            b. Sample micro-action from sub-problem policy
            c. Check return_control() — if True, return control to macro level
         """
 
     def reset(self, world_model: Any) -> None:
         """Reset control state at the start of an episode."""
-        self._current_coarse_action = None
+        self._current_coarse_action_profile = None
         self._current_coarse_state = None
 
     def _compute_sub_policy(
-        self, coarse_state, coarse_action, micro_state
+        self, coarse_state, coarse_action_profile, micro_state
     ) -> TabularRobotPolicy:
         """Compute a micro-level sub-problem policy on demand.
 
@@ -726,7 +764,7 @@ class HierarchicalRobotPolicy(RobotPolicy):
 
         The sub-problem is defined by:
         - Initial state: micro_state
-        - Feasible actions: those satisfying is_feasible(coarse_action, ...)
+        - Feasible actions: those satisfying is_feasible(coarse_action_profile, ...)
         - Terminal states: those where return_control(...) is True
         - Terminal values: M(σ^0(s^1)) from the macro-level computation
         """

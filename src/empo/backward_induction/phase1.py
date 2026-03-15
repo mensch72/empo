@@ -79,9 +79,10 @@ _shared_transitions: Optional[List[List[TransitionData]]] = None
 _shared_Vh_values: Optional[VhValues] = None
 _shared_sliced_cache: Optional[SlicedAttainmentCache] = None  # Sliced cache for goal attainment arrays
 _shared_num_action_profiles: int = 0  # Needed to create slice caches in workers
-_shared_params: Optional[Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], List[int], List[List[int]], float, float, bool]] = None
+_shared_params: Optional[Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], List[int], List[List[int]], float, float, bool, float]] = None
 _shared_believed_others_policy_pickle: Optional[bytes] = None  # cloudpickle'd believed_others_policy function
 _shared_disk_dag: Optional['DiskBasedDAG'] = None  # For parallel disk slicing
+_shared_world_model: Optional['WorldModel'] = None  # For duration-aware discounting in workers
 
 
 def _hpp_process_single_state(
@@ -104,6 +105,8 @@ def _hpp_process_single_state(
     vres0: Union[Dict, npt.NDArray] = None,
     pres0: Union[Dict, npt.NDArray] = None,
     optimistic: bool = False,
+    rho_h: float = 0.0,
+    world_model: Optional['WorldModel'] = None,
 ) -> Tuple[Dict[int, Dict[PossibleGoal, float]], Optional[Dict[int, Dict[PossibleGoal, npt.NDArray[np.floating[Any]]]]]]:
     """Process a single state, returning (v_results, p_results).
     
@@ -125,6 +128,10 @@ def _hpp_process_single_state(
         gamma_h: Discount factor
         slice_cache: Optional slice cache to WRITE to (worker's local cache for this batch).
             Structure: Dict[state_index, List[Dict[goal, array]]]
+        rho_h: Continuous-time discount rate = -ln(gamma_h). When > 0, per-transition
+            duration-aware discounting is used via world_model.transition_durations().
+        world_model: WorldModel instance for querying transition_durations(). Required
+            when rho_h > 0.
     
     Returns:
         Tuple of:
@@ -158,6 +165,12 @@ def _hpp_process_single_state(
     
     # Non-terminal state: compute both V-values and policies
     p_results = {}
+    
+    # Cache duration arrays per action_profile_index to avoid repeated world_model queries.
+    # Durations depend on (state, action_profile, transitions) which are uniquely identified
+    # by action_profile_index for a given state. The cache is reused across goal iterations.
+    _duration_cache: Dict[int, npt.NDArray] = {}
+    
     for agent_index in human_agent_indices:
         vres = v_results[agent_index] = vres0.copy() if use_indexed else {}
         pres = p_results[agent_index] = pres0.copy() if use_indexed else {}
@@ -175,7 +188,7 @@ def _hpp_process_single_state(
                     print(f"    Goal achieved in state, agent {agent_index}: V = 0, remain still policy")
             else:
                 # Compute Q values as expected future V values
-                expected_Vs = np.zeros(num_actions)
+                q = np.zeros(num_actions)
                 for action in actions:
                     v_accum = 0.0
                     for action_profile_prob, action_profile in believed_others_policy(state, agent_index, action):
@@ -217,17 +230,35 @@ def _hpp_process_single_state(
                                 )
                             # Use np.where to avoid intermediate array allocation
                             # NumPy automatically promotes float16 to float64 during computation
+                            if rho_h > 0.0:
+                                # Duration-aware discounting: e^{-rho_h * D(s, a, s')} per transition
+                                # Only discount non-achieved successors (achieved stay at 1.0)
+                                if world_model is None:
+                                    raise ValueError("world_model is required for duration-aware discounting (rho_h > 0)")
+                                # Use cached durations if available, otherwise compute and cache
+                                if action_profile_index in _duration_cache:
+                                    durations_arr = _duration_cache[action_profile_index]
+                                else:
+                                    transitions_list = [(float(p), states[i]) for p, i in zip(next_state_probabilities, next_state_indices)]
+                                    durations_arr = np.array(world_model.transition_durations(state, action_profile.tolist(), transitions_list))
+                                    if len(durations_arr) != len(next_state_indices):
+                                        raise ValueError(
+                                            f"transition_durations() returned {len(durations_arr)} durations but expected "
+                                            f"{len(next_state_indices)} (state_index={state_index}, action_profile_index={action_profile_index})")
+                                    _duration_cache[action_profile_index] = durations_arr
+                                discount_factors = np.exp(-rho_h * durations_arr)
+                                successor_values = np.where(attainment_values_array, 1.0, discount_factors * v_values_array)
+                            else:
+                                successor_values = np.where(attainment_values_array, 1.0, v_values_array)
                             expectation = np.dot(
                                 next_state_probabilities,
-                                np.where(attainment_values_array, 1.0, v_values_array)
+                                successor_values
                             )
                             if ((expectation > anticipated_expectation) if optimistic 
                                 else (expectation < anticipated_expectation)):
                                 anticipated_expectation = expectation
                         v_accum += action_profile_prob * anticipated_expectation
-                    expected_Vs[action] = v_accum
-                
-                q = gamma_h * expected_Vs
+                    q[action] = v_accum
                 
                 # Boltzmann policy (numerically stable softmax)
                 if beta_h == math.inf:
@@ -278,6 +309,8 @@ def _hpp_compute_sequential(
     quiet: bool = False,
     memory_profile: bool = False,
     optimistic: bool = False,
+    rho_h: float = 0.0,
+    world_model: Optional['WorldModel'] = None,
 ) -> None:
     """Sequential backward induction algorithm.
     
@@ -384,6 +417,8 @@ def _hpp_compute_sequential(
                     vres0=vres0,
                     pres0=pres0,
                     optimistic=optimistic,
+                    rho_h=rho_h,
+                    world_model=world_model,
                 )
                 
                 # Store results
@@ -504,6 +539,8 @@ def _hpp_compute_sequential(
             vres0=vres0,
             pres0=pres0,
             optimistic=optimistic,
+            rho_h=rho_h,
+            world_model=world_model,
         )
         
         # Store results
@@ -543,6 +580,7 @@ def _hpp_init_shared_data(
     use_shared_memory: bool = False,
     sliced_cache: Optional[SlicedAttainmentCache] = None,
     num_action_profiles: int = 0,
+    world_model: Optional['WorldModel'] = None,
 ) -> None:
     """Initialize shared data for worker processes.
     
@@ -555,9 +593,11 @@ def _hpp_init_shared_data(
         use_shared_memory: If True, store states and transitions in shared memory
         sliced_cache: Optional SlicedAttainmentCache for goal attainment arrays
         num_action_profiles: Number of action profiles (needed to create slice caches)
+        world_model: WorldModel for duration-aware discounting (needed when rho_h > 0)
     """
     global _shared_states, _shared_transitions, _shared_Vh_values, _shared_params
     global _shared_believed_others_policy_pickle, _shared_sliced_cache, _shared_num_action_profiles
+    global _shared_world_model
     
     if use_shared_memory:
         # Store DAG in shared memory to avoid copy-on-write
@@ -573,6 +613,7 @@ def _hpp_init_shared_data(
     _shared_believed_others_policy_pickle = believed_others_policy_pickle
     _shared_sliced_cache = sliced_cache
     _shared_num_action_profiles = num_action_profiles
+    _shared_world_model = world_model
 
 
 def _hpp_process_state_batch(
@@ -613,7 +654,7 @@ def _hpp_process_state_batch(
     
     Vh_values = _shared_Vh_values
     (human_agent_indices, possible_goal_generator, num_agents, num_actions, 
-     action_powers, robot_agent_indices, robot_action_profiles, beta_h, gamma_h, optimistic) = _shared_params
+     action_powers, robot_agent_indices, robot_action_profiles, beta_h, gamma_h, optimistic, rho_h) = _shared_params
     
     v_results: Dict[int, Dict[int, Dict[PossibleGoal, float]]] = {}
     p_results: Dict[State, Dict[int, Dict[PossibleGoal, npt.NDArray[np.floating[Any]]]]] = {}
@@ -648,6 +689,8 @@ def _hpp_process_state_batch(
             beta_h, gamma_h,
             slice_cache=slice_cache,
             optimistic=optimistic,
+            rho_h=rho_h,
+            world_model=_shared_world_model,
         )
         
         v_results[state_index] = state_v_results
@@ -690,7 +733,7 @@ def _hpp_process_timestep_batch_disk(
     states = _shared_states
     Vh_values = _shared_Vh_values
     (human_agent_indices, possible_goal_generator, num_agents, num_actions, 
-     action_powers, robot_agent_indices, robot_action_profiles, beta_h, gamma_h, optimistic) = _shared_params
+     action_powers, robot_agent_indices, robot_action_profiles, beta_h, gamma_h, optimistic, rho_h) = _shared_params
     
     # Deserialize believed_others_policy if custom one was provided via cloudpickle
     if _shared_believed_others_policy_pickle is not None:
@@ -725,6 +768,8 @@ def _hpp_process_timestep_batch_disk(
             beta_h, gamma_h,
             slice_cache=timestep_cache,
             optimistic=optimistic,
+            rho_h=rho_h,
+            world_model=_shared_world_model,
         )
         
         v_results[global_state_idx] = state_v_results
@@ -749,7 +794,8 @@ def compute_human_policy_prior(
     believed_others_policy: Optional[Callable[[State, int, int], List[Tuple[float, npt.NDArray[np.int64]]]]] = None, 
     *,
     beta_h: float = 10.0, 
-    gamma_h: float = 1.0, 
+    gamma_h: Optional[float] = None, 
+    rho_h: Optional[float] = None,
     parallel: bool = False, 
     num_workers: Optional[int] = None, 
     level_fct: Optional[Callable[[State], int]] = None, 
@@ -773,7 +819,8 @@ def compute_human_policy_prior(
     believed_others_policy: Optional[Callable[[State, int, int], List[Tuple[float, npt.NDArray[np.int64]]]]] = None, 
     *, 
     beta_h: float = 10.0, 
-    gamma_h: float = 1.0, 
+    gamma_h: Optional[float] = None, 
+    rho_h: Optional[float] = None,
     parallel: bool = False, 
     num_workers: Optional[int] = None, 
     level_fct: Optional[Callable[[State], int]] = None, 
@@ -797,7 +844,8 @@ def compute_human_policy_prior(
     believed_others_policy: Optional[Callable[[State, int, int], List[Tuple[float, npt.NDArray[np.int64]]]]] = None, 
     *, 
     beta_h: float = 10.0, 
-    gamma_h: float = 1.0, 
+    gamma_h: Optional[float] = None, 
+    rho_h: Optional[float] = None,
     parallel: bool = False, 
     num_workers: Optional[int] = None, 
     level_fct: Optional[Callable[[State], int]] = None, 
@@ -821,7 +869,8 @@ def compute_human_policy_prior(
     believed_others_policy: Optional[Callable[[State, int, int], List[Tuple[float, npt.NDArray[np.int64]]]]] = None, 
     *, 
     beta_h: float = 10.0, 
-    gamma_h: float = 1.0, 
+    gamma_h: Optional[float] = None, 
+    rho_h: Optional[float] = None,
     parallel: bool = False, 
     num_workers: Optional[int] = None, 
     level_fct: Optional[Callable[[State], int]] = None, 
@@ -844,7 +893,8 @@ def compute_human_policy_prior(
     believed_others_policy: Optional[Callable[[State, int, int], List[Tuple[float, npt.NDArray[np.int64]]]]] = None, 
     *,
     beta_h: float = 10.0, 
-    gamma_h: float = 1.0, 
+    gamma_h: Optional[float] = None, 
+    rho_h: Optional[float] = None,
     parallel: bool = False, 
     num_workers: Optional[int] = None, 
     level_fct: Optional[Callable[[State], int]] = None, 
@@ -879,11 +929,14 @@ def compute_human_policy_prior(
         1. Build the DAG of reachable states using world_model.get_dag()
         2. Compute dependency levels for topological ordering
         3. Process states in reverse topological order:
-           - Terminal states: V(s, g) = is_achieved(g, s)
-           - Non-terminal states: 
-             * Q(s, a, g) = γ * E[V(s', g)] under believed_others_policy
+           - Terminal states (and states where the goal is already achieved): V(s, g) = 0
+             Achievement is handled as reward-on-transition via the successor term achievement(s'),
+             i.e., goal attainment is credited when entering s rather than by adding value at s.
+           - Non-terminal states (with D = transition duration from world_model):
+             * Q(s, a, g) = E[achievement(s') + (1-achievement(s')) · e^{-ρ_h·D} · V(s', g)]
              * π(a|s,g) = softmax(β * Q(s, *, g))
              * V(s, g) = Σ_a π(a|s,g) * Q(s, a, g)
+           When ρ_h = 0 (γ_h = 1.0), per-transition discounting is skipped (no duration queries).
     
     Args:
         world_model: A WorldModel (or MultiGridEnv) with get_state(), set_state(),
@@ -900,7 +953,11 @@ def compute_human_policy_prior(
                                If None, uses uniform distribution over all action profiles.
         beta_h: Inverse temperature for Boltzmann policy. Higher = more deterministic.
                 Use float('inf') for pure argmax (greedy) policy.
-        gamma_h: Discount factor for future rewards.
+        gamma_h: Discount factor for future rewards (0 < gamma_h ≤ 1). At most one of
+                gamma_h or rho_h may be provided. If gamma_h is given, rho_h is computed
+                as -ln(gamma_h). Defaults to 1.0 (no discounting) if neither is provided.
+        rho_h: Continuous-time discount rate (rho_h ≥ 0). At most one of gamma_h or
+               rho_h may be provided. If rho_h is given, gamma_h is computed as exp(-rho_h).
         parallel: If True, use multiprocessing for parallel computation.
                  Requires 'fork' context (works on Linux, may not work on macOS/Windows).
         num_workers: Number of parallel workers. If None, uses mp.cpu_count().
@@ -1010,6 +1067,22 @@ def compute_human_policy_prior(
 
     # Precompute powers for action profile indexing
     action_powers: npt.NDArray[np.int64] = num_actions ** np.arange(num_agents)
+
+    # Resolve gamma_h / rho_h: at most one may be provided (neither → default 1.0)
+    if gamma_h is not None and rho_h is not None:
+        raise ValueError("Specify at most one of gamma_h or rho_h, not both.")
+    if gamma_h is not None:
+        if not (0.0 < gamma_h <= 1.0):
+            raise ValueError(f"gamma_h must be in (0, 1], got {gamma_h}")
+        rho_h = 0.0 if gamma_h == 1.0 else -math.log(gamma_h)
+    elif rho_h is not None:
+        if rho_h < 0.0:
+            raise ValueError(f"rho_h must be >= 0, got {rho_h}")
+        gamma_h = math.exp(-rho_h)
+    else:
+        # Default: no discounting
+        gamma_h = 1.0
+        rho_h = 0.0
 
     # first get the dag of the world model:
     states, state_to_idx, successors, transitions = world_model.get_dag(return_probabilities=True, quiet=quiet)
@@ -1217,9 +1290,9 @@ def compute_human_policy_prior(
             
             # Initialize shared data for worker processes
             # On Linux (fork), workers inherit these as copy-on-write
-            params: Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], List[int], List[List[int]], float, float, bool] = (
+            params: Tuple[List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], List[int], List[List[int]], float, float, bool, float] = (
                 human_agent_indices, possible_goal_generator, num_agents, num_actions,
-                action_powers, robot_agent_indices, robot_action_profiles, beta_h, gamma_h, optimistic
+                action_powers, robot_agent_indices, robot_action_profiles, beta_h, gamma_h, optimistic, rho_h
             )
             
             # Use 'fork' context explicitly to ensure shared memory works
@@ -1308,6 +1381,8 @@ def compute_human_policy_prior(
                             beta_h, gamma_h,
                             slice_cache=inline_slice_cache,
                             optimistic=optimistic,
+                            rho_h=rho_h,
+                            world_model=world_model,
                         )
                         
                         # Store results
@@ -1330,7 +1405,8 @@ def compute_human_policy_prior(
                     # DAG (states, transitions) is already in shared memory, only update Vh_values
                     _hpp_init_shared_data(states, transitions, Vh_values, params, believed_others_policy_pickle, 
                                           use_shared_memory=True, sliced_cache=sliced_cache, 
-                                          num_action_profiles=num_action_profiles)
+                                          num_action_profiles=num_action_profiles,
+                                          world_model=world_model)
                     
                     # Only pass state indices - workers access shared data via globals
                     batches = split_into_batches(level, num_workers)
@@ -1504,7 +1580,8 @@ def compute_human_policy_prior(
                              beta_h, gamma_h,
                              progress_callback, memory_monitor,
                              sliced_cache, disk_dag, level_fct, archive_dir, return_Vh,
-                             quiet=quiet, memory_profile=memory_profile, optimistic=optimistic)
+                             quiet=quiet, memory_profile=memory_profile, optimistic=optimistic,
+                             rho_h=rho_h, world_model=world_model)
         except KeyboardInterrupt:
             if not quiet:
                 print("\n[Phase1] Computation interrupted (KeyboardInterrupt).")
