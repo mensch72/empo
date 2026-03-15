@@ -122,7 +122,11 @@ class MacroGridEnv(WorldModel):
         # externally from len(self.agents) × action_space.n.
         self._num_actions = self._partition.num_cells + 1
         self.action_space = spaces.Discrete(self._num_actions)
-        self.observation_space = spaces.Discrete(1)  # Placeholder
+        # Observation space is Discrete(1) because MacroGridEnv is a
+        # WorldModel used for planning via get_state()/set_state().
+        # reset() and step() return 0 as the observation; callers
+        # should use get_state() for the full macro-state tuple.
+        self.observation_space = spaces.Discrete(1)
 
         # Agent proxy objects — backward induction accesses len(agents)
         # and iterates over them.  These are lightweight stand-ins.
@@ -375,18 +379,29 @@ class MacroGridEnv(WorldModel):
     # ------------------------------------------------------------------
 
     def reset(self, *, seed=None, options=None):
-        """Reset by resetting the micro environment and recomputing state."""
-        self.micro_env.reset(seed=seed, options=options)
+        """Reset by resetting the micro environment and recomputing state.
+
+        Note: ``seed`` and ``options`` are accepted for Gymnasium
+        compatibility but are not forwarded to ``micro_env.reset()``,
+        because ``MultiGridEnv.reset()`` (in ``gym_multigrid``) is
+        defined with no keyword arguments.  To seed the micro
+        environment, call ``micro_env.seed(s)`` before resetting.
+        """
+        self.micro_env.reset()
         self._state = self._micro_to_macro_state(
             self.micro_env.get_state()
         )
-        return self._state, {}
+        return 0, {}
 
     def step(self, actions):
-        """Apply a macro action and return (obs, reward, done, trunc, info)."""
+        """Apply a macro action and return (obs, reward, done, trunc, info).
+
+        The observation is always 0 (matching ``observation_space =
+        Discrete(1)``).  Use ``get_state()`` for the full macro state.
+        """
         transitions = self.transition_probabilities(self._state, actions)
         if transitions is None:
-            return self._state, 0.0, True, False, {}
+            return 0, 0.0, True, False, {}
 
         _, new_state = transitions[0]
         self._state = new_state
@@ -395,4 +410,4 @@ class MacroGridEnv(WorldModel):
             new_state[0] <= 0
             or all(a[3] for a in new_state[2])
         )
-        return new_state, 0.0, done, False, {}
+        return 0, 0.0, done, False, {}

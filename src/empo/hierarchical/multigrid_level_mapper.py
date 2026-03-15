@@ -52,12 +52,16 @@ class MultiGridLevelMapper(LevelMapper):
     def super_state(self, fine_state: Any) -> Any:
         """Map a micro-level state to the corresponding macro-level state.
 
-        Sets the micro_env to *fine_state* so that passage flags can be
-        computed from the grid, then delegates to
-        ``MacroGridEnv._micro_to_macro_state()``.
+        Temporarily sets the micro_env to *fine_state* so that passage
+        flags can be computed from the grid, then restores the previous
+        state.  Delegates to ``MacroGridEnv._micro_to_macro_state()``.
         """
-        self.fine_model.set_state(fine_state)
-        return self.macro_env._micro_to_macro_state(fine_state)
+        old_state = self.fine_model.get_state()
+        try:
+            self.fine_model.set_state(fine_state)
+            return self.macro_env._micro_to_macro_state(fine_state)
+        finally:
+            self.fine_model.set_state(old_state)
 
     def super_agent(self, fine_agent_index: int) -> int:
         """Identity mapping (no agent grouping in two-level MultiGrid)."""
@@ -76,6 +80,10 @@ class MultiGridLevelMapper(LevelMapper):
         other than the target cell j.  All other fine actions (turn,
         still, pickup, etc.) are allowed.
 
+        A forward action into a non-overlappable object (e.g. a closed
+        door or wall) is always feasible because the agent would not
+        actually move.
+
         Args:
             coarse_action_profile: Current M^0 action profile.
             fine_state: Current M^1 state tuple.
@@ -88,39 +96,57 @@ class MultiGridLevelMapper(LevelMapper):
         _, micro_agents, _, _ = fine_state
         partition = self.macro_env.partition
 
-        for i, (coarse_a, fine_a) in enumerate(
-            zip(coarse_action_profile, fine_action_profile)
-        ):
-            if coarse_a == MACRO_PASS:
-                continue  # PASS at macro level → any fine action OK
+        # Temporarily set fine_model state so the grid is accessible
+        old_state = self.fine_model.get_state()
+        try:
+            self.fine_model.set_state(fine_state)
 
-            target_cell = coarse_a - 1  # WALK target
+            for i, (coarse_a, fine_a) in enumerate(
+                zip(coarse_action_profile, fine_action_profile)
+            ):
+                if coarse_a == MACRO_PASS:
+                    continue  # PASS at macro level → any fine action OK
 
-            # Only check 'forward' actions — turns and non-movement
-            # actions are always compatible with WALK.
-            if fine_a != self._forward_idx:
-                continue
+                target_cell = coarse_a - 1  # WALK target
 
-            # Compute where forward would take the agent
-            ax, ay, adir = (
-                micro_agents[i][0],
-                micro_agents[i][1],
-                micro_agents[i][2],
-            )
-            if ax is None or adir is None:
-                continue  # Terminated agent
+                # Only check 'forward' actions — turns and non-movement
+                # actions are always compatible with WALK.
+                if fine_a != self._forward_idx:
+                    continue
 
-            dx, dy = _DIR_TO_VEC[adir]
-            fwd_x, fwd_y = ax + dx, ay + dy
+                # Compute where forward would take the agent
+                ax, ay, adir = (
+                    micro_agents[i][0],
+                    micro_agents[i][1],
+                    micro_agents[i][2],
+                )
+                if ax is None or adir is None:
+                    continue  # Terminated agent
 
-            try:
-                fwd_cell = partition.cell_of(fwd_x, fwd_y)
-            except KeyError:
-                continue  # Forward into wall / off grid → no cell change
+                dx, dy = _DIR_TO_VEC[adir]
+                fwd_x, fwd_y = ax + dx, ay + dy
 
-            current_cell = partition.cell_of(ax, ay)
-            if fwd_cell != current_cell and fwd_cell != target_cell:
-                return False  # Moving to wrong cell
+                # Check if the forward position is passable.  If blocked
+                # (e.g. closed door, wall object), the agent cannot
+                # actually move there, so it stays in place → feasible.
+                fwd_obj = self.fine_model.grid.get(fwd_x, fwd_y)
+                if (fwd_obj is not None
+                        and getattr(fwd_obj, 'type', None) != 'agent'
+                        and not getattr(
+                            fwd_obj, 'can_overlap', lambda: False
+                        )()):
+                    continue  # Blocked → agent stays → feasible
+
+                try:
+                    fwd_cell = partition.cell_of(fwd_x, fwd_y)
+                except KeyError:
+                    continue  # Forward into wall / off grid → no cell change
+
+                current_cell = partition.cell_of(ax, ay)
+                if fwd_cell != current_cell and fwd_cell != target_cell:
+                    return False  # Moving to wrong cell
+        finally:
+            self.fine_model.set_state(old_state)
 
         return True
 
