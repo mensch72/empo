@@ -149,6 +149,8 @@ test-hierarchical:
 		tests/test_macro_grid_env.py \
 		tests/test_multigrid_level_mapper.py \
 		tests/test_two_level_multigrid.py \
+		tests/test_macro_goals.py \
+		tests/test_macro_heuristic_policy.py \
 		-v
 
 lint:
