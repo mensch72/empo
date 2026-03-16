@@ -180,13 +180,10 @@ class MacroHeuristicPolicy(HumanPolicyPrior):
         open passages) and returns a mapping from cell index to distance.
         """
         macro_env: MacroGridEnv = self.world_model  # type: ignore[assignment]
+        partition = macro_env.partition
 
-        # Number of macro cells in the world model. We assume MacroGridEnv
-        # exposes this as ``num_macro_cells``.
-        num_cells = macro_env.num_macro_cells
-
-        # Dijkstra from target_cell over the implicit undirected graph where
-        # edges correspond to open passages between macro-cells.
+        # Dijkstra from target_cell over the adjacency graph, restricted
+        # to edges whose passage is currently open.
         distances: Dict[int, float] = {target_cell: 0.0}
         heap: List[tuple[float, int]] = [(0.0, target_cell)]
 
@@ -194,13 +191,11 @@ class MacroHeuristicPolicy(HumanPolicyPrior):
             dist_u, u = heapq.heappop(heap)
             if dist_u > distances[u]:
                 continue
-            # Explore neighbors of u: any v with an open passage.
-            for v in range(num_cells):
-                if v == u:
-                    continue
+            for v in partition.adjacency.get(u, frozenset()):
                 if not macro_env.passage_open(state, u, v):
                     continue
-                alt = dist_u + 1.0
+                edge_weight = partition.estimated_distance(u, v)
+                alt = dist_u + edge_weight
                 old = distances.get(v)
                 if old is None or alt < old:
                     distances[v] = alt
