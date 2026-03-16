@@ -258,7 +258,10 @@ class MacroHeuristicPolicy(HumanPolicyPrior):
             for v in partition.adjacency.get(u, frozenset()):
                 if not macro_env.passage_open(state, u, v):
                     continue
-                edge_weight = partition.estimated_distance(u, v)
+                # Use reverse-direction edge weight so distances are from each
+                # cell *to* target_cell, consistent with the direction-dependent
+                # definition of estimated_distance(source, dest).
+                edge_weight = partition.estimated_distance(v, u)
                 alt = dist_u + edge_weight
                 old = distances.get(v)
                 if old is None or alt < old:
