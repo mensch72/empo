@@ -79,8 +79,10 @@ class MacroHeuristicPolicy(HumanPolicyPrior):
 
         Also reattaches the goal generator to the new world model so that
         cached goals reference the correct environment after unpickling.
+        Clears the distance cache since the graph topology may have changed.
         """
         super().set_world_model(world_model)
+        self._distance_cache.clear()
         if hasattr(self.possible_goal_generator, 'set_world_model'):
             self.possible_goal_generator.set_world_model(world_model)
 
@@ -111,9 +113,6 @@ class MacroHeuristicPolicy(HumanPolicyPrior):
                 "unpickling). Call set_world_model() before using the policy."
             )
         num_actions = self.world_model.action_space.n
-
-        # Clear the per-call distance cache for this state.
-        self._distance_cache.clear()
 
         if possible_goal is not None:
             return self._goal_conditioned(state, human_agent_index,
