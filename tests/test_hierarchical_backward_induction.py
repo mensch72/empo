@@ -139,9 +139,10 @@ class TestHierarchicalRobotPolicySample:
         policy, hierarchy = policy_and_env
         micro_state = hierarchy.finest().get_state()
         _ = policy.sample(micro_state)
-        # Either a coarse action is active, or it was immediately aborted
-        # (both are valid outcomes). Just verify no crash.
-        assert True
+        # After the first sample, either a coarse action is active (micro level)
+        # or it was immediately aborted back to macro level.
+        coarse = policy.current_coarse_action_profile
+        assert coarse is None or isinstance(coarse, tuple)
 
     def test_reset_returns_to_macro(self, policy_and_env):
         policy, hierarchy = policy_and_env
@@ -387,7 +388,8 @@ class TestObserveTransition:
         assert policy.at_macro_level
 
     def test_observe_after_sample(self, policy_and_env):
-        """observe_transition after sample should not crash."""
+        """observe_transition after sample should not crash and leave
+        the policy in a consistent state."""
         policy, hierarchy = policy_and_env
         micro_env = hierarchy.finest()
         micro_state = micro_env.get_state()
@@ -398,7 +400,9 @@ class TestObserveTransition:
         num_agents = len(micro_env.agents)
         full_actions = tuple([0] * num_agents)
         policy.observe_transition(micro_state, full_actions, micro_state)
-        assert True  # No crash
+        # Policy should be either at macro level (control returned) or
+        # still at micro level (control not returned yet).
+        assert isinstance(policy.at_macro_level, bool)
 
 
 # ── TestExports ──────────────────────────────────────────────────────

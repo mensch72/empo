@@ -417,8 +417,9 @@ class HierarchicalRobotPolicy(RobotPolicy):
                     duration_weights_per_rap[rap_idx] = dw
 
             # ── Robot policy: power-law distribution ───────────
-            # Ensure Q_r values are strictly negative for the power-law
-            # formula: π_r(a) ∝ (-Q_r(a))^{-β_r}
+            # Clamp Q_r to ensure all values are ≤ terminal_Vr < 0;
+            # the power-law formula π_r(a) ∝ (-Q_r(a))^{-β_r} requires
+            # strictly negative Q_r to avoid log(0) = -inf.
             Qr_values = np.minimum(Qr_values, self.terminal_Vr)
             log_neg_Qr = np.log(-Qr_values)
             log_powers = -beta_r * log_neg_Qr
@@ -508,7 +509,7 @@ class HierarchicalRobotPolicy(RobotPolicy):
                                     break
                         vh += ps[rap_idx] * v
                     if vh != 0.0:
-                        vh_agent[goal] = np.float16(vh)
+                        vh_agent[goal] = float(vh)
                     xh += gw * vh ** zeta
 
                 if xh > 0:
