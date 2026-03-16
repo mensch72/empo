@@ -160,11 +160,63 @@ class MacroGoalGenerator(PossibleGoalGenerator):
             indexed: Whether goals have indices.
         """
         super().__init__(env, indexed=indexed)
+        self._goals_cache: dict = {}
+
+    def set_world_model(self, world_model: Any) -> None:
+        """Set or update the world model reference.
+
+        Clears the cached goal lists so they are rebuilt with the new env.
+        """
+        self.env = self.world_model = world_model
+        self._goals_cache.clear()
+
+    def __getstate__(self):
+        """Exclude env/world_model from pickling."""
+        state = self.__dict__.copy()
+        state['env'] = None
+        state['world_model'] = None
+        state['_goals_cache'] = {}
+        return state
+
+    def __setstate__(self, state):
+        """Restore state after unpickling."""
+        self.__dict__.update(state)
+
+    def _get_goals_for_agent(
+        self, human_agent_index: int,
+    ) -> list:
+        """Return cached goal list for *human_agent_index*."""
+        if human_agent_index not in self._goals_cache:
+            num_cells = self.env.num_cells
+            num_agents = len(self.env.agents)
+            goals = []
+            for cell_idx in range(num_cells):
+                goals.append(
+                    (MacroCellGoal(self.env, human_agent_index, cell_idx), 1.0)
+                )
+            for other_idx in range(num_agents):
+                if other_idx != human_agent_index:
+                    goals.append(
+                        (MacroProximityGoal(
+                            self.env, human_agent_index, other_idx, True,
+                        ), 1.0)
+                    )
+                    goals.append(
+                        (MacroProximityGoal(
+                            self.env, human_agent_index, other_idx, False,
+                        ), 1.0)
+                    )
+            self._goals_cache[human_agent_index] = goals
+        return self._goals_cache[human_agent_index]
 
     def generate(
         self, state, human_agent_index: int,
     ) -> Iterator[Tuple[PossibleGoal, float]]:
         """Yield ``(goal, weight)`` pairs for *human_agent_index*.
+
+        Goals are cached per *human_agent_index* to avoid creating fresh
+        objects on every call (important for backward induction where
+        ``generate()`` is invoked for every state).
 
         Args:
             state: Current macro-state (unused; goals are state-independent).
@@ -173,19 +225,4 @@ class MacroGoalGenerator(PossibleGoalGenerator):
         Yields:
             ``(PossibleGoal, float)`` pairs with weight 1.0 each.
         """
-        num_cells = self.env.num_cells
-        num_agents = len(self.env.agents)
-
-        # MacroCellGoal for each cell
-        for cell_idx in range(num_cells):
-            yield MacroCellGoal(self.env, human_agent_index, cell_idx), 1.0
-
-        # MacroProximityGoal for each other agent
-        for other_idx in range(num_agents):
-            if other_idx != human_agent_index:
-                yield MacroProximityGoal(
-                    self.env, human_agent_index, other_idx, True,
-                ), 1.0
-                yield MacroProximityGoal(
-                    self.env, human_agent_index, other_idx, False,
-                ), 1.0
+        yield from self._get_goals_for_agent(human_agent_index)

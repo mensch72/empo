@@ -73,6 +73,16 @@ class MacroHeuristicPolicy(HumanPolicyPrior):
             )
         self.beta = beta
 
+    def set_world_model(self, world_model: 'MacroGridEnv') -> None:
+        """Set or update the world model reference.
+
+        Also reattaches the goal generator to the new world model so that
+        cached goals reference the correct environment after unpickling.
+        """
+        super().set_world_model(world_model)
+        if hasattr(self.possible_goal_generator, 'set_world_model'):
+            self.possible_goal_generator.set_world_model(world_model)
+
     def __call__(
         self,
         state: Any,
@@ -89,7 +99,16 @@ class MacroHeuristicPolicy(HumanPolicyPrior):
 
         Returns:
             ``np.ndarray`` of shape ``(action_space.n,)`` summing to 1.
+
+        Raises:
+            RuntimeError: If called after unpickling without calling
+                ``set_world_model()`` first.
         """
+        if self.world_model is None:
+            raise RuntimeError(
+                "MacroHeuristicPolicy.world_model is None (likely after "
+                "unpickling). Call set_world_model() before using the policy."
+            )
         num_actions = self.world_model.action_space.n
 
         if possible_goal is not None:
@@ -246,9 +265,11 @@ class MacroHeuristicPolicy(HumanPolicyPrior):
     ) -> Dict[int, float]:
         """Advantages for moving *away from* other_cell."""
         macro_env: MacroGridEnv = self.world_model  # type: ignore[assignment]
-        dist_from_current = self._shortest_path_distance(
-            current_cell, other_cell, state,
-        )
+
+        # Single Dijkstra to compute all distances to other_cell.
+        distances = self._all_distances_to_target(state, other_cell)
+        dist_from_current = distances.get(current_cell, float("inf"))
+
         advantages: Dict[int, float] = {}
         for action in available:
             if action == MACRO_PASS:
@@ -259,11 +280,12 @@ class MacroHeuristicPolicy(HumanPolicyPrior):
                 if not macro_env.passage_open(state, current_cell, dest_cell):
                     advantages[action] = 0.0
                 else:
-                    dist_from_dest = self._shortest_path_distance(
-                        dest_cell, other_cell, state,
-                    )
-                    # Advantage = how much further away we get
-                    advantages[action] = dist_from_dest - dist_from_current
+                    dist_from_dest = distances.get(dest_cell, float("inf"))
+                    if not np.isfinite(dist_from_current) or not np.isfinite(dist_from_dest):
+                        advantages[action] = 0.0
+                    else:
+                        # Advantage = how much further away we get
+                        advantages[action] = dist_from_dest - dist_from_current
         return advantages
 
     # ------------------------------------------------------------------

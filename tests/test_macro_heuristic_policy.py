@@ -126,9 +126,14 @@ class TestCellGoalConditioning:
         state = macro.get_state()
         agent_cell = state[2][0][0]
         available = macro.available_actions(state, 0)
-        walk_actions = [a for a in available if a != MACRO_PASS]
+        # Only consider WALK actions to cells with an open passage.
+        walk_actions = [
+            a for a in available
+            if a != MACRO_PASS
+            and macro.passage_open(state, agent_cell, a - 1)
+        ]
         if not walk_actions:
-            pytest.skip("No adjacent cells available")
+            pytest.skip("No adjacent cells with open passage")
         target_cell = walk_actions[0] - 1  # WALK(j) = j+1
         goal = MacroCellGoal(macro, 0, target_cell)
         dist = pol(state, 0, goal)
