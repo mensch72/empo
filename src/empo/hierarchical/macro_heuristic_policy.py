@@ -72,6 +72,7 @@ class MacroHeuristicPolicy(HumanPolicyPrior):
                 f"MacroHeuristicPolicy beta must be non-negative; got {beta!r}."
             )
         self.beta = beta
+        self._distance_cache: Dict[tuple, Dict[int, float]] = {}
 
     def set_world_model(self, world_model: 'MacroGridEnv') -> None:
         """Set or update the world model reference.
@@ -111,6 +112,9 @@ class MacroHeuristicPolicy(HumanPolicyPrior):
             )
         num_actions = self.world_model.action_space.n
 
+        # Clear the per-call distance cache for this state.
+        self._distance_cache.clear()
+
         if possible_goal is not None:
             return self._goal_conditioned(state, human_agent_index,
                                           possible_goal, num_actions)
@@ -134,7 +138,12 @@ class MacroHeuristicPolicy(HumanPolicyPrior):
         if s > 0:
             total_dist /= s
         else:
-            total_dist = np.ones(num_actions, dtype=np.float64) / num_actions
+            # Fallback: uniform over available actions only (not all actions)
+            available = self.world_model.available_actions(
+                state, human_agent_index,
+            )
+            for a in available:
+                total_dist[a] = 1.0 / len(available)
         return total_dist
 
     # ------------------------------------------------------------------
@@ -170,12 +179,27 @@ class MacroHeuristicPolicy(HumanPolicyPrior):
 
         Higher advantage → more preferred.  The advantage is defined as
         the negative change in distance-to-goal caused by the action.
+
+        Raises:
+            ValueError: If the goal's ``agent_index`` does not match
+                *human_agent_index* (which would produce incorrect
+                conditioned distributions).
         """
         if isinstance(goal, MacroCellGoal):
+            if goal.agent_index != human_agent_index:
+                raise ValueError(
+                    f"MacroCellGoal.agent_index ({goal.agent_index}) does not "
+                    f"match human_agent_index ({human_agent_index})."
+                )
             return self._advantages_cell_goal(
                 state, current_cell, goal.target_cell, available,
             )
         if isinstance(goal, MacroProximityGoal):
+            if goal.agent_index != human_agent_index:
+                raise ValueError(
+                    f"MacroProximityGoal.agent_index ({goal.agent_index}) "
+                    f"does not match human_agent_index ({human_agent_index})."
+                )
             other_cell = state[2][goal.other_agent_index][0]
             if goal.same_cell:
                 return self._advantages_cell_goal(
@@ -197,7 +221,17 @@ class MacroHeuristicPolicy(HumanPolicyPrior):
 
         Runs a single Dijkstra search over the macro-cell graph (defined by
         open passages) and returns a mapping from cell index to distance.
+
+        Results are cached per ``(passage_flags, target_cell)`` so that
+        repeated calls within the same ``__call__`` (e.g., marginal
+        distribution over many goals) reuse the same shortest-path tree
+        when the passage configuration has not changed.
         """
+        passage_flags = state[1]
+        cache_key = (passage_flags, target_cell)
+        if cache_key in self._distance_cache:
+            return self._distance_cache[cache_key]
+
         macro_env: MacroGridEnv = self.world_model  # type: ignore[assignment]
         partition = macro_env.partition
 
@@ -220,6 +254,7 @@ class MacroHeuristicPolicy(HumanPolicyPrior):
                     distances[v] = alt
                     heapq.heappush(heap, (alt, v))
 
+        self._distance_cache[cache_key] = distances
         return distances
 
     def _advantages_cell_goal(

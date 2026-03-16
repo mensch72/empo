@@ -69,7 +69,8 @@ class TestMacroCellGoal:
         macro = _macro_env()
         g1 = MacroCellGoal(macro, 0, 0)
         g2 = MacroCellGoal(macro, 0, 1)
-        assert hash(g1) != hash(g2)
+        # Hash collisions are allowed; assert set/dict can distinguish them.
+        assert len({g1, g2}) == 2
 
     def test_equality(self):
         macro = _macro_env()
@@ -175,7 +176,8 @@ class TestMacroProximityGoal:
         macro = self._two_agent_macro()
         g_same = MacroProximityGoal(macro, 0, 1, True)
         g_diff = MacroProximityGoal(macro, 0, 1, False)
-        assert hash(g_same) != hash(g_diff)
+        # Hash collisions are allowed; assert set/dict can distinguish them.
+        assert len({g_same, g_diff}) == 2
 
     def test_equality(self):
         macro = self._two_agent_macro()
