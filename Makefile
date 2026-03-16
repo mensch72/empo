@@ -138,7 +138,7 @@ test-local:
 		--ignore=tests/debug_dag_by_timestep.py \
 		--ignore=tests/debug_dag_parallel.py
 
-# Run only hierarchical world model tests (Tasks 1-8) locally
+# Run only hierarchical world model tests (Tasks 1-11) locally
 test-hierarchical:
 	@echo "Running hierarchical world model tests..."
 	PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds python -m pytest \
@@ -151,6 +151,7 @@ test-hierarchical:
 		tests/test_two_level_multigrid.py \
 		tests/test_macro_goals.py \
 		tests/test_macro_heuristic_policy.py \
+		tests/test_hierarchical_backward_induction.py \
 		-v
 
 lint:
