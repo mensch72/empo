@@ -136,6 +136,10 @@ class HierarchicalRobotPolicy(RobotPolicy):
             # non-robot agents default to MACRO_PASS.
             full_coarse = [MACRO_PASS] * num_agents
             for i, r_idx in enumerate(self.robot_agent_indices):
+                assert r_idx < num_agents, (
+                    f"robot_agent_index {r_idx} out of range for "
+                    f"{num_agents} agents"
+                )
                 full_coarse[r_idx] = robot_coarse[i]
             full_coarse = tuple(full_coarse)
 

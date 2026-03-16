@@ -76,7 +76,7 @@ QUICK_MAX_STEPS = 8
 
 
 # ---------------------------------------------------------------------------
-# Helpers (use Any types so module-level gym patch isn't needed)
+# Helpers (specific types are imported in main(); use Any for annotations)
 # ---------------------------------------------------------------------------
 
 def macro_action_name(action: int) -> str:
