@@ -298,10 +298,6 @@ class HumanPolicyPrior(ABC):
                     for k in range(len(probs))]
         
         # General case for 3+ agents (rare)
-        # Use indices instead of meshgrid - more memory efficient
-        shape = tuple(len(m) for m in marginals)
-        np.prod(shape)
-        
         # Compute joint probabilities directly using broadcasting
         # Start with first marginal reshaped to broadcast
         joint = marginals[0].copy()
