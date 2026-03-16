@@ -10,15 +10,12 @@ Covers:
 - ``observe_transition()`` triggers return-control correctly.
 """
 
-import numpy as np
 import pytest
 
 from gym_multigrid.multigrid import MultiGridEnv
 
 from empo.hierarchical import (
-    MacroGridEnv,
     MacroGoalGenerator,
-    MacroHeuristicPolicy,
     TwoLevelMultigrid,
     MACRO_PASS,
     macro_walk,

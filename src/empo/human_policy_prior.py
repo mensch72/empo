@@ -206,9 +206,8 @@ class HumanPolicyPrior(ABC):
         Args:
             state: Current world state.
             device: Optional computation backend:
-                   - None: NumPy (default, good for small problems)
+                   - None or 'cpu': NumPy (default, good for small/medium problems)
                    - 'cuda' or 'cuda:N': PyTorch GPU (best for large problems)
-                   - 'cpu': PyTorch CPU (usually slower than NumPy)
         Returns:
             List of tuples (probability, action_profile) where action_profile is
             a list of actions for each human agent in order of human_agent_indices.

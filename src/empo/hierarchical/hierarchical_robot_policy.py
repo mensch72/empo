@@ -121,7 +121,6 @@ class HierarchicalRobotPolicy(RobotPolicy):
 
         mapper = self.hierarchical_model.mappers[0]
         micro_env = self.hierarchical_model.finest()
-        macro_env = self.hierarchical_model.coarsest()
         num_agents = len(micro_env.agents)
 
         # ── Step 1: decide macro action if needed ──────────────
@@ -136,10 +135,11 @@ class HierarchicalRobotPolicy(RobotPolicy):
             # non-robot agents default to MACRO_PASS.
             full_coarse = [MACRO_PASS] * num_agents
             for i, r_idx in enumerate(self.robot_agent_indices):
-                assert r_idx < num_agents, (
-                    f"robot_agent_index {r_idx} out of range for "
-                    f"{num_agents} agents"
-                )
+                if r_idx >= num_agents:
+                    raise IndexError(
+                        f"robot_agent_index {r_idx} out of range for "
+                        f"{num_agents} agents"
+                    )
                 full_coarse[r_idx] = robot_coarse[i]
             full_coarse = tuple(full_coarse)
 
@@ -150,8 +150,11 @@ class HierarchicalRobotPolicy(RobotPolicy):
                 self._current_coarse_action_profile = None
                 self._current_coarse_state = None
                 self._current_sub_policy = None
-                # Return a "still" action for each robot
-                return tuple(0 for _ in self.robot_agent_indices)
+                # Return "still" if available, else action 0 (best safe default)
+                still_action = getattr(micro_env.actions, 'still', None)
+                if still_action is None:
+                    still_action = 0
+                return tuple(still_action for _ in self.robot_agent_indices)
 
             self._current_coarse_action_profile = full_coarse
             # Invalidate previous sub-policy
@@ -160,7 +163,6 @@ class HierarchicalRobotPolicy(RobotPolicy):
         # ── Step 2: compute/retrieve micro sub-problem policy ──
         if self._current_sub_policy is None:
             self._current_sub_policy = self._compute_sub_policy(
-                self._current_coarse_state,
                 self._current_coarse_action_profile,
                 state,
             )
@@ -229,7 +231,6 @@ class HierarchicalRobotPolicy(RobotPolicy):
 
     def _compute_sub_policy(
         self,
-        coarse_state: Any,
         coarse_action_profile: Tuple[int, ...],
         micro_state: Any,
     ) -> TabularRobotPolicy:
@@ -248,7 +249,6 @@ class HierarchicalRobotPolicy(RobotPolicy):
         - **Discounting**: uses per-transition durations from M^1.
 
         Args:
-            coarse_state: The macro-state when control was transferred.
             coarse_action_profile: The sampled macro action profile.
             micro_state: The current micro-state to start from.
 
