@@ -195,98 +195,6 @@ class HumanPolicyPrior(ABC):
                 actions.append(action)
             return actions
 
-
-class TabularHumanPolicyPrior(HumanPolicyPrior):
-    """
-    Tabular (lookup-table) implementation of human policy prior.
-    
-    This implementation stores precomputed policy distributions in a nested
-    dictionary structure, indexed by (state, agent_index, goal).
-    
-    Typically created by the `compute_human_policy_prior()` function which
-    performs backward induction to compute optimal Boltzmann policies.
-    
-    Attributes:
-        values: Nested dict mapping state -> agent_index -> goal -> action_distribution.
-        possible_goal_generator: Generator for enumerating possible goals.
-    
-    Structure of `values`:
-        {
-            state1: {
-                agent_idx1: {
-                    goal1: np.array([p_action0, p_action1, ...]),
-                    goal2: np.array([...]),
-                    ...
-                },
-                agent_idx2: {...},
-            },
-            state2: {...},
-        }
-    """
-
-    values: dict
-    possible_goal_generator: 'PossibleGoalGenerator'
-
-    def __init__(
-        self, 
-        world_model: 'WorldModel', 
-        human_agent_indices: List[int], 
-        possible_goal_generator: 'PossibleGoalGenerator', 
-        values: dict
-    ):
-        """
-        Initialize the tabular policy prior.
-        
-        Args:
-            world_model: The world model (environment) this prior applies to.
-            human_agent_indices: List of indices of human agents.
-            possible_goal_generator: Generator for enumerating possible goals.
-            values: Precomputed policy lookup table (state -> agent -> goal -> distribution).
-        """
-        super().__init__(world_model, human_agent_indices)
-        self.values = values
-        self.possible_goal_generator = possible_goal_generator
-
-    def __call__(
-        self, 
-        state, 
-        human_agent_index: int, 
-        possible_goal: Optional['PossibleGoal'] = None
-    ) -> np.ndarray:
-        """
-        Look up or compute the action distribution.
-        
-        Args:
-            state: Current world state (must be a key in self.values).
-            human_agent_index: Index of the human agent.
-            possible_goal: If provided, return distribution conditioned on this goal.
-                          If None, compute marginal by averaging over goals.
-        
-        Returns:
-            np.ndarray: Probability distribution over actions.
-        
-        Raises:
-            KeyError: If state or agent_index not found in lookup table.
-        """
-        if possible_goal is not None:
-#            key = possible_goal.index if hasattr(possible_goal, 'index') else possible_goal
-            key = possible_goal
-            return self.values[state][human_agent_index][key]
-        else:
-            # Compute marginal by averaging over goals weighted by their prior
-            vs = self.values[state][human_agent_index]
-            # Support override for parallel mode where world_model is None after unpickling
-            if hasattr(self, '_num_actions_override') and self._num_actions_override is not None:
-                num_actions: int = self._num_actions_override
-            else:
-                num_actions = self.world_model.action_space.n  # type: ignore[attr-defined]
-            total = np.zeros(num_actions)
-            for goal, weight in self.possible_goal_generator.generate(state, human_agent_index):
-#                key = goal.index if hasattr(goal, 'index') else goal
-                key = goal
-                total += vs[key] * weight
-            return total
-        
     def profile_distribution(
         self, 
         state,
@@ -363,7 +271,7 @@ class TabularHumanPolicyPrior(HumanPolicyPrior):
             return self._profile_distribution_torch(marginals, device)
         else:
             return self._profile_distribution_numpy(marginals)
-    
+
     def _profile_distribution_numpy(self, marginals: List[np.ndarray]) -> List[tuple]:
         """NumPy implementation of profile distribution computation.
         
@@ -459,6 +367,98 @@ class TabularHumanPolicyPrior(HumanPolicyPrior):
         
         return result
 
+
+class TabularHumanPolicyPrior(HumanPolicyPrior):
+    """
+    Tabular (lookup-table) implementation of human policy prior.
+    
+    This implementation stores precomputed policy distributions in a nested
+    dictionary structure, indexed by (state, agent_index, goal).
+    
+    Typically created by the `compute_human_policy_prior()` function which
+    performs backward induction to compute optimal Boltzmann policies.
+    
+    Attributes:
+        values: Nested dict mapping state -> agent_index -> goal -> action_distribution.
+        possible_goal_generator: Generator for enumerating possible goals.
+    
+    Structure of `values`:
+        {
+            state1: {
+                agent_idx1: {
+                    goal1: np.array([p_action0, p_action1, ...]),
+                    goal2: np.array([...]),
+                    ...
+                },
+                agent_idx2: {...},
+            },
+            state2: {...},
+        }
+    """
+
+    values: dict
+    possible_goal_generator: 'PossibleGoalGenerator'
+
+    def __init__(
+        self, 
+        world_model: 'WorldModel', 
+        human_agent_indices: List[int], 
+        possible_goal_generator: 'PossibleGoalGenerator', 
+        values: dict
+    ):
+        """
+        Initialize the tabular policy prior.
+        
+        Args:
+            world_model: The world model (environment) this prior applies to.
+            human_agent_indices: List of indices of human agents.
+            possible_goal_generator: Generator for enumerating possible goals.
+            values: Precomputed policy lookup table (state -> agent -> goal -> distribution).
+        """
+        super().__init__(world_model, human_agent_indices)
+        self.values = values
+        self.possible_goal_generator = possible_goal_generator
+
+    def __call__(
+        self, 
+        state, 
+        human_agent_index: int, 
+        possible_goal: Optional['PossibleGoal'] = None
+    ) -> np.ndarray:
+        """
+        Look up or compute the action distribution.
+        
+        Args:
+            state: Current world state (must be a key in self.values).
+            human_agent_index: Index of the human agent.
+            possible_goal: If provided, return distribution conditioned on this goal.
+                          If None, compute marginal by averaging over goals.
+        
+        Returns:
+            np.ndarray: Probability distribution over actions.
+        
+        Raises:
+            KeyError: If state or agent_index not found in lookup table.
+        """
+        if possible_goal is not None:
+#            key = possible_goal.index if hasattr(possible_goal, 'index') else possible_goal
+            key = possible_goal
+            return self.values[state][human_agent_index][key]
+        else:
+            # Compute marginal by averaging over goals weighted by their prior
+            vs = self.values[state][human_agent_index]
+            # Support override for parallel mode where world_model is None after unpickling
+            if hasattr(self, '_num_actions_override') and self._num_actions_override is not None:
+                num_actions: int = self._num_actions_override
+            else:
+                num_actions = self.world_model.action_space.n  # type: ignore[attr-defined]
+            total = np.zeros(num_actions)
+            for goal, weight in self.possible_goal_generator.generate(state, human_agent_index):
+#                key = goal.index if hasattr(goal, 'index') else goal
+                key = goal
+                total += vs[key] * weight
+            return total
+        
 
 class HeuristicPotentialPolicy(HumanPolicyPrior):
     """

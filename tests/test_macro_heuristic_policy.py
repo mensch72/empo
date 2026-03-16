@@ -377,3 +377,86 @@ class TestExports:
     def test_exported_from_hierarchical_package(self):
         from empo.hierarchical import MacroHeuristicPolicy
         assert MacroHeuristicPolicy is not None
+
+
+# ── TestProfileDistribution ─────────────────────────────────────────
+
+class TestProfileDistribution:
+    """Tests that MacroHeuristicPolicy inherits profile_distribution from base class."""
+
+    def test_has_profile_distribution(self):
+        pol = _policy()
+        assert hasattr(pol, 'profile_distribution')
+        assert callable(pol.profile_distribution)
+
+    def test_has_profile_distribution_with_fixed_goal(self):
+        pol = _policy()
+        assert hasattr(pol, 'profile_distribution_with_fixed_goal')
+        assert callable(pol.profile_distribution_with_fixed_goal)
+
+    def test_profile_distribution_returns_list(self):
+        pol = _policy()
+        macro = pol.world_model
+        state = macro.get_state()
+        dist = pol.profile_distribution(state)
+        assert isinstance(dist, list)
+        assert len(dist) > 0
+
+    def test_profile_distribution_probabilities_sum_to_one(self):
+        pol = _policy()
+        macro = pol.world_model
+        state = macro.get_state()
+        dist = pol.profile_distribution(state)
+        total = sum(p for p, _ in dist)
+        assert abs(total - 1.0) < 1e-9
+
+    def test_profile_distribution_entries_are_tuples(self):
+        pol = _policy()
+        macro = pol.world_model
+        state = macro.get_state()
+        dist = pol.profile_distribution(state)
+        for entry in dist:
+            prob, profile = entry
+            assert isinstance(prob, float)
+            assert isinstance(profile, list)
+
+    def test_profile_distribution_with_fixed_goal_sums_to_one(self):
+        pol = _policy()
+        macro = pol.world_model
+        state = macro.get_state()
+        human_idx = macro.human_agent_indices[0]
+        gen = MacroGoalGenerator(macro)
+        goals = list(gen.generate(state, human_idx))
+        if not goals:
+            pytest.skip("No goals for this state")
+        goal, _ = goals[0]
+        dist = pol.profile_distribution_with_fixed_goal(state, human_idx, goal)
+        total = sum(p for p, _ in dist)
+        assert abs(total - 1.0) < 1e-9
+
+    def test_profile_distribution_with_fixed_goal_differs_from_marginal(self):
+        """Goal-conditioned profile should differ from marginal."""
+        pol = _policy()
+        macro = pol.world_model
+        state = macro.get_state()
+        human_idx = macro.human_agent_indices[0]
+        gen = MacroGoalGenerator(macro)
+        goals = list(gen.generate(state, human_idx))
+        if len(goals) < 2:
+            pytest.skip("Need ≥2 goals to compare")
+        goal, _ = goals[0]
+
+        marginal = pol.profile_distribution(state)
+        conditioned = pol.profile_distribution_with_fixed_goal(state, human_idx, goal)
+
+        # Convert to dicts for comparison
+        marginal_dict = {tuple(p): prob for prob, p in marginal}
+        conditioned_dict = {tuple(p): prob for prob, p in conditioned}
+
+        # They should have different probability distributions
+        # (unless beta=0, which makes everything uniform)
+        any_differ = any(
+            abs(marginal_dict.get(k, 0) - conditioned_dict.get(k, 0)) > 1e-9
+            for k in set(marginal_dict) | set(conditioned_dict)
+        )
+        assert any_differ, "Conditioned and marginal should differ for non-zero beta"
