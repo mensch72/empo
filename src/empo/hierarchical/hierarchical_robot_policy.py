@@ -98,31 +98,58 @@ class HierarchicalRobotPolicy(RobotPolicy):
         1. If control is at the macro level (no active coarse action profile):
            a. Compute macro-state from micro-state via ``super_state()``.
            b. Sample macro-action from ``macro_policy``.
-           c. Store as current coarse action profile, transfer control to
-              the micro level.
+           c. Expand the robot-only macro profile to a full per-agent profile
+              (``MACRO_PASS`` for non-robot agents).
+           d. If the full coarse profile is all ``MACRO_PASS``, stay at the
+              macro level (return a default micro action without transferring
+              control).
+           e. Otherwise, store as current coarse action profile and transfer
+              control to the micro level.
         2. Compute the sub-problem policy for the current context and sample
            a micro-level action.
-        3. After obtaining the action, simulate whether ``return_control()``
-           would fire.  If so, return control to the macro level.
+        3. Rely on ``observe_transition()`` (called after ``env.step()``) for
+           return-control / abort detection.
 
         Args:
             state: A micro-level state (fine-level).
 
         Returns:
-            A micro-level action profile (tuple of ints, one per agent).
+            A robot-only micro-level action profile (tuple of ints, one per
+            robot agent).
         """
+        from empo.hierarchical.macro_grid_env import MACRO_PASS
+
         mapper = self.hierarchical_model.mappers[0]
         micro_env = self.hierarchical_model.finest()
         macro_env = self.hierarchical_model.coarsest()
+        num_agents = len(micro_env.agents)
 
         # ── Step 1: decide macro action if needed ──────────────
         if self._current_coarse_action_profile is None:
             coarse_state = mapper.super_state(state)
             self._current_coarse_state = coarse_state
 
-            # Sample from the macro policy
-            coarse_profile = self.macro_policy.sample(coarse_state)
-            self._current_coarse_action_profile = coarse_profile
+            # macro_policy.sample() returns a *robot-only* profile
+            robot_coarse = self.macro_policy.sample(coarse_state)
+
+            # Expand to a full per-agent coarse profile:
+            # non-robot agents default to MACRO_PASS.
+            full_coarse = [MACRO_PASS] * num_agents
+            for i, r_idx in enumerate(self.robot_agent_indices):
+                full_coarse[r_idx] = robot_coarse[i]
+            full_coarse = tuple(full_coarse)
+
+            # If every agent's coarse action is PASS, there is no walk
+            # target for return_control() to trigger on.  Stay at the
+            # macro level and emit a default micro action.
+            if all(a == MACRO_PASS for a in full_coarse):
+                self._current_coarse_action_profile = None
+                self._current_coarse_state = None
+                self._current_sub_policy = None
+                # Return a "still" action for each robot
+                return tuple(0 for _ in self.robot_agent_indices)
+
+            self._current_coarse_action_profile = full_coarse
             # Invalidate previous sub-policy
             self._current_sub_policy = None
 
@@ -134,23 +161,8 @@ class HierarchicalRobotPolicy(RobotPolicy):
                 state,
             )
 
-        # Sample from the sub-policy
+        # Sample from the sub-policy (returns robot-only profile)
         micro_action_profile = self._current_sub_policy.sample(state)
-
-        # ── Step 3: check return-control ───────────────────────
-        # We need to tentatively check whether the micro transition
-        # produced by this action would trigger return_control.
-        # Since we don't have the successor state yet, we record the
-        # action and rely on the caller calling ``observe_transition``
-        # after stepping the environment.  As a fallback, we check
-        # abort (which only depends on the action profile).
-        if mapper.is_abort(
-            self._current_coarse_action_profile, state, micro_action_profile
-        ):
-            # Aborting → return control immediately
-            self._current_coarse_action_profile = None
-            self._current_coarse_state = None
-            self._current_sub_policy = None
 
         return micro_action_profile
 

@@ -68,8 +68,8 @@ def compute_hierarchical_robot_policy(
         A ``HierarchicalRobotPolicy``.
 
     Raises:
-        ValueError: If fewer than 2 goal generators are provided, or if
-            both gamma and rho are specified simultaneously.
+        ValueError: If no goal generators are provided, or if both gamma
+            and rho are specified simultaneously.
     """
     if hierarchical_model.num_levels != 2:
         raise ValueError(

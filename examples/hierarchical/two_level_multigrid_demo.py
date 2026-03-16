@@ -56,26 +56,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-# Patch gym import for compatibility
-import gymnasium as gym
-sys.modules['gym'] = gym
-
-from gym_multigrid.multigrid import MultiGridEnv
-
-from empo.hierarchical import (
-    TwoLevelMultigrid,
-    MacroGridEnv,
-    MacroGoalGenerator,
-    MacroHeuristicPolicy,
-    MacroCellGoal,
-    MacroProximityGoal,
-    MACRO_PASS,
-    macro_walk,
-    compute_hierarchical_robot_policy,
-    HierarchicalRobotPolicy,
-)
-from empo.hierarchical.macro_grid_env import decode_macro_action
-
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -96,18 +76,19 @@ QUICK_MAX_STEPS = 8
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Helpers (use Any types so module-level gym patch isn't needed)
 # ---------------------------------------------------------------------------
 
 def macro_action_name(action: int) -> str:
     """Human-readable name for a macro action."""
+    from empo.hierarchical.macro_grid_env import decode_macro_action
     kind, target = decode_macro_action(action)
     if kind == 'PASS':
         return 'PASS'
     return f'WALK({target})'
 
 
-def print_macro_structure(hierarchy: TwoLevelMultigrid) -> None:
+def print_macro_structure(hierarchy: Any) -> None:
     """Print a summary of the macro-level abstraction."""
     macro = hierarchy.macro_env
     partition = macro.partition
@@ -126,7 +107,7 @@ def print_macro_structure(hierarchy: TwoLevelMultigrid) -> None:
 
 
 def print_macro_goals(
-    gen: MacroGoalGenerator,
+    gen: Any,
     macro_state: Any,
     human_idx: int,
 ) -> None:
@@ -139,10 +120,10 @@ def print_macro_goals(
 
 
 def print_macro_policy_summary(
-    policy: MacroHeuristicPolicy,
+    policy: Any,
     macro_state: Any,
     human_idx: int,
-    gen: MacroGoalGenerator,
+    gen: Any,
 ) -> None:
     """Print the heuristic macro-level human policy for the initial state."""
     # Marginal
@@ -170,11 +151,10 @@ def print_macro_policy_summary(
 # ---------------------------------------------------------------------------
 
 def run_rollout(
-    micro_env: MultiGridEnv,
-    hierarchy: TwoLevelMultigrid,
-    h_policy: HierarchicalRobotPolicy,
-    macro_prior: MacroHeuristicPolicy,
-    macro_gen: MacroGoalGenerator,
+    micro_env: Any,
+    hierarchy: Any,
+    h_policy: Any,
+    macro_gen: Any,
     *,
     max_steps: int = 30,
     record_video: bool = True,
@@ -182,9 +162,9 @@ def run_rollout(
 ) -> int:
     """Run a single rollout using the hierarchical robot policy.
 
-    The *robot* follows the hierarchical policy; the *human* follows the
-    macro-level heuristic prior (marginal) translated into a random micro
-    action (uniform among the micro actions in the indicated direction).
+    The *robot* follows the hierarchical policy; the *human* takes
+    uniformly random micro-level actions (this is a demo, not an
+    exact simulation of rational human behaviour).
 
     Returns the number of steps taken.
     """
@@ -192,7 +172,6 @@ def run_rollout(
     h_policy.reset(hierarchy)
 
     macro_env = hierarchy.macro_env
-    mapper = hierarchy.mapper
     human_indices = list(micro_env.human_agent_indices)
     robot_indices = list(micro_env.robot_agent_indices)
 
@@ -242,16 +221,12 @@ def run_rollout(
         # --- Robot action via hierarchical policy ---
         robot_action_profile = h_policy.sample(state)
 
-        # --- Human action: sample from the heuristic macro prior ---
-        # We use a simple heuristic: sample uniformly from available
-        # micro-level actions for a human agent.
+        # --- Human action: uniform random at the micro level ---
         actions = [0] * len(micro_env.agents)
         for i, r_idx in enumerate(robot_indices):
             actions[r_idx] = robot_action_profile[i]
 
         for h_idx in human_indices:
-            # Use marginal macro policy to bias direction, but at micro
-            # level just pick a random action (this is a demo, not exact).
             actions[h_idx] = np.random.randint(0, micro_env.action_space.n)
 
         # Step
@@ -340,6 +315,15 @@ def parse_args():
 
 
 def main():
+    # Gym-dependent imports (require gym compatibility patch applied first)
+    from gym_multigrid.multigrid import MultiGridEnv
+    from empo.hierarchical import (
+        TwoLevelMultigrid,
+        MacroGoalGenerator,
+        MacroHeuristicPolicy,
+        compute_hierarchical_robot_policy,
+    )
+
     args = parse_args()
 
     # Resolve quick mode defaults
@@ -438,7 +422,7 @@ def main():
         micro_env.reset()
 
         steps = run_rollout(
-            micro_env, hierarchy, h_policy, macro_prior, macro_gen,
+            micro_env, hierarchy, h_policy, macro_gen,
             max_steps=max_steps,
             record_video=record_video,
             verbose=True,
@@ -465,4 +449,10 @@ def main():
 
 
 if __name__ == '__main__':
+    # Patch gym import for compatibility — done here rather than at module
+    # level so that importing this file as a library doesn't mutate
+    # sys.modules for other code.
+    import gymnasium as gym
+    sys.modules['gym'] = gym
+
     main()
