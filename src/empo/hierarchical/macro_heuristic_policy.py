@@ -82,9 +82,21 @@ class MacroHeuristicPolicy(HumanPolicyPrior):
         Clears the distance cache since the graph topology may have changed.
         """
         super().set_world_model(world_model)
-        self._distance_cache.clear()
+        self._distance_cache = {}
         if hasattr(self.possible_goal_generator, 'set_world_model'):
             self.possible_goal_generator.set_world_model(world_model)
+
+    def __getstate__(self):
+        """Exclude world_model and distance cache from pickling.
+
+        The parent ``HumanPolicyPrior.__getstate__`` already strips
+        ``world_model``.  We additionally clear ``_distance_cache`` to
+        avoid carrying potentially large shortest-path tables into
+        worker processes via spawn-based multiprocessing.
+        """
+        state = super().__getstate__()
+        state['_distance_cache'] = {}
+        return state
 
     def __call__(
         self,

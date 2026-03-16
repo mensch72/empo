@@ -43,7 +43,9 @@ class MacroCellGoal(PossibleGoal):
         super().__init__(env, index=index)
         self.agent_index = agent_index
         self.target_cell = target_cell
-        self._hash = hash(('MacroCellGoal', self.agent_index, self.target_cell))
+        # Use int-based tuple (no strings) so hash is deterministic across
+        # processes — Python randomises string hashes per interpreter.
+        self._hash = hash((0, self.agent_index, self.target_cell))
         super()._freeze()
 
     def is_achieved(self, state) -> int:
@@ -103,11 +105,13 @@ class MacroProximityGoal(PossibleGoal):
         self.agent_index = agent_index
         self.other_agent_index = other_agent_index
         self.same_cell = same_cell
+        # Use int-based tuple (no strings) so hash is deterministic across
+        # processes — Python randomises string hashes per interpreter.
         self._hash = hash((
-            'MacroProximityGoal',
+            1,
             self.agent_index,
             self.other_agent_index,
-            self.same_cell,
+            int(self.same_cell),
         ))
         super()._freeze()
 
