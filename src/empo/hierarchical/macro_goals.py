@@ -10,7 +10,7 @@ All goals follow the ``PossibleGoal`` immutability protocol (``_freeze()``
 pattern) and are hashable for use as dictionary keys in backward induction.
 """
 
-from typing import Any, Iterator, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from empo.possible_goal import PossibleGoal, PossibleGoalGenerator
 
@@ -160,7 +160,7 @@ class MacroGoalGenerator(PossibleGoalGenerator):
             indexed: Whether goals have indices.
         """
         super().__init__(env, indexed=indexed)
-        self._goals_cache: dict = {}
+        self._goals_cache: Dict[int, List[Tuple[PossibleGoal, float]]] = {}
 
     def set_world_model(self, world_model: Any) -> None:
         """Set or update the world model reference.
@@ -184,7 +184,7 @@ class MacroGoalGenerator(PossibleGoalGenerator):
 
     def _get_goals_for_agent(
         self, human_agent_index: int,
-    ) -> list:
+    ) -> List[Tuple[PossibleGoal, float]]:
         """Return cached goal list for *human_agent_index*."""
         if human_agent_index not in self._goals_cache:
             num_cells = self.env.num_cells
