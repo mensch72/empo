@@ -87,7 +87,6 @@ def compute_hierarchical_robot_policy(
         )
 
     macro_env = hierarchical_model.coarsest()
-    micro_env = hierarchical_model.finest()
 
     # ── Resolve discount parameters ────────────────────────────
     if gamma_h is not None and rho_h is not None:

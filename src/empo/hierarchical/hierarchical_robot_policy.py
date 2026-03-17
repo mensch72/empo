@@ -262,7 +262,6 @@ class HierarchicalRobotPolicy(RobotPolicy):
 
         mapper = self.hierarchical_model.mappers[0]
         micro_env = self.hierarchical_model.finest()
-        macro_env = self.hierarchical_model.coarsest()
 
         # Build restricted sub-problem DAG
         sub_states, sub_state_to_idx, sub_transitions, sub_terminal_mask = (
@@ -299,7 +298,6 @@ class HierarchicalRobotPolicy(RobotPolicy):
         sub_policy = self._backward_induction_on_sub_dag(
             micro_env,
             sub_states,
-            sub_state_to_idx,
             sub_transitions,
             sub_terminal_mask,
             terminal_Vr_map,
@@ -314,7 +312,6 @@ class HierarchicalRobotPolicy(RobotPolicy):
         self,
         micro_env: Any,
         states: List[Any],
-        state_to_idx: Dict[Any, int],
         transitions: List[List[Tuple[Tuple[int, ...], List[float], List[int]]]],
         terminal_mask: List[bool],
         terminal_Vr_map: Dict[int, float],
@@ -327,7 +324,6 @@ class HierarchicalRobotPolicy(RobotPolicy):
         Args:
             micro_env: The micro-level WorldModel.
             states: Sub-problem states in topological order.
-            state_to_idx: State → index mapping.
             transitions: Per-state transition data (feasibility-filtered).
             terminal_mask: Boolean per state — True for terminal sub-states.
             terminal_Vr_map: Terminal V_r overrides (from macro solve).
@@ -335,7 +331,6 @@ class HierarchicalRobotPolicy(RobotPolicy):
         Returns:
             TabularRobotPolicy for the sub-problem.
         """
-        import math
         from itertools import product as itertools_product
         from scipy.special import logsumexp
 

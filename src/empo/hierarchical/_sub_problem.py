@@ -169,6 +169,12 @@ def build_sub_problem_dag(
                     if in_degree[si] == 0:
                         topo_queue.append(si)
 
+    if len(topo_order) != n:
+        raise ValueError(
+            f"Cycle detected in sub-problem DAG: topological sort produced "
+            f"{len(topo_order)} of {n} states"
+        )
+
     # Build old→new index mapping
     old_to_new = [0] * n
     for new_idx, old_idx in enumerate(topo_order):
