@@ -5,7 +5,8 @@ Implements ``compute_hierarchical_robot_policy()`` which:
 1. Computes the macro-level (M^0) robot policy fully via
    ``compute_robot_policy()``.
 2. Returns a ``HierarchicalRobotPolicy`` that computes micro-level
-   sub-problem policies on demand during rollouts (no caching).
+   sub-problem policies on demand during rollouts (no caching across
+   macro decisions).
 """
 
 import math
@@ -41,7 +42,8 @@ def compute_hierarchical_robot_policy(
     1. Computes the macro-level (M^0) robot policy fully via
        ``compute_robot_policy()``.
     2. Returns a ``HierarchicalRobotPolicy`` that computes micro-level
-       sub-problem policies on demand during rollouts (no caching).
+       sub-problem policies on demand during rollouts (no caching across
+       macro decisions).
 
     Args:
         hierarchical_model: A two-level ``HierarchicalWorldModel``.
@@ -93,6 +95,14 @@ def compute_hierarchical_robot_policy(
         raise ValueError("Specify at most one of gamma_h or rho_h, not both.")
     if gamma_r is not None and rho_r is not None:
         raise ValueError("Specify at most one of gamma_r or rho_r, not both.")
+    if gamma_h is not None and not (0.0 < gamma_h <= 1.0):
+        raise ValueError(f"gamma_h must be in (0, 1], got {gamma_h}")
+    if gamma_r is not None and not (0.0 < gamma_r <= 1.0):
+        raise ValueError(f"gamma_r must be in (0, 1], got {gamma_r}")
+    if rho_h is not None and rho_h < 0.0:
+        raise ValueError(f"rho_h must be >= 0, got {rho_h}")
+    if rho_r is not None and rho_r < 0.0:
+        raise ValueError(f"rho_r must be >= 0, got {rho_r}")
 
     # For the macro-level solve we pass whichever form the caller specified
     # (gamma or rho) directly to compute_robot_policy() so we avoid

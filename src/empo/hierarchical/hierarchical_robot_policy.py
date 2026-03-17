@@ -2,7 +2,9 @@
 
 Maintains the current control level and delegates to the appropriate
 level's policy.  Computes micro-level sub-problem policies on demand
-(no caching — each sub-problem is solved fresh).
+(no caching across macro decisions — each macro-to-micro transition
+triggers a fresh sub-problem solve, but the resulting micro policy is
+reused for the duration of that macro action).
 """
 
 from typing import Any, Dict, List, Optional, Tuple

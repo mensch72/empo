@@ -204,7 +204,7 @@ def run_rollout(
         )
 
     steps = 0
-    for step in range(max_steps):
+    for env_step in range(max_steps):
         state = micro_env.get_state()
 
         # --- Robot action via hierarchical policy ---
@@ -227,13 +227,13 @@ def run_rollout(
         # Notify policy of the transition
         h_policy.observe_transition(prev_state, tuple(actions), state)
 
-        if verbose and step < 10:
+        if verbose and env_step < 10:
             coarse = h_policy.current_coarse_action_profile
             coarse_str = (
                 ', '.join(macro_action_name(a) for a in coarse)
                 if coarse is not None else '(deciding)'
             )
-            print(f"  step {step:2d}: robot={robot_action_profile}  "
+            print(f"  env_step {env_step:2d}: robot={robot_action_profile}  "
                   f"macro={coarse_str}  at_macro={h_policy.at_macro_level}")
 
         if record_video:
