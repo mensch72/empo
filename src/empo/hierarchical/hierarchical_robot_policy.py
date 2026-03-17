@@ -383,12 +383,12 @@ class HierarchicalRobotPolicy(RobotPolicy):
             # ── Build per-state transition lookup table ────────
             # Maps encoded action_profile_index → (probs, succ_indices)
             # for O(1) access in inner loops below.
-            trans_lookup: Dict[int, Tuple[List[float], List[int]]] = {}
+            ap_index_to_trans: Dict[int, Tuple[List[float], List[int]]] = {}
             for t_ap, t_probs, t_succs in state_trans:
                 t_ap_index = int(
                     sum(a * (num_actions ** i) for i, a in enumerate(t_ap))
                 )
-                trans_lookup[t_ap_index] = (t_probs, t_succs)
+                ap_index_to_trans[t_ap_index] = (t_probs, t_succs)
 
             # ── Q_r computation ────────────────────────────────
             Qr_values = np.zeros(len(robot_action_profiles))
@@ -406,7 +406,7 @@ class HierarchicalRobotPolicy(RobotPolicy):
                     ap_index = int(
                         (action_profile_arr * action_powers).sum()
                     )
-                    entry = trans_lookup.get(ap_index)
+                    entry = ap_index_to_trans.get(ap_index)
                     if entry is not None:
                         t_probs, t_succs = entry
                         rap_feasible[rap_idx] = True
@@ -490,7 +490,7 @@ class HierarchicalRobotPolicy(RobotPolicy):
                             ap_index = int(
                                 (action_profile_arr * action_powers).sum()
                             )
-                            entry = trans_lookup.get(ap_index)
+                            entry = ap_index_to_trans.get(ap_index)
                             if entry is not None:
                                 t_probs, t_succs = entry
                                 probs_arr = np.array(t_probs)

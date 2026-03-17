@@ -471,11 +471,11 @@ class TestProfileDistribution:
         # goal-conditioned distribution.  (It can coincide with one of them
         # when symmetric pairs cancel out, but not all of them — we already
         # checked that at least two conditioned distributions differ.)
-        differs_from_any = any(
+        differs_from_some = any(
             any(
                 abs(marginal_dict.get(k, 0) - d.get(k, 0)) > 1e-9
                 for k in set(marginal_dict) | set(d)
             )
             for d in dists
         )
-        assert differs_from_any, "Marginal should differ from at least one conditioned distribution"
+        assert differs_from_some, "Marginal should differ from at least one conditioned distribution"
