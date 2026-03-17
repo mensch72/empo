@@ -150,7 +150,7 @@ def build_sub_problem_dag(
     for src_idx in range(n):
         for _, _, succ_idxs in bfs_transitions[src_idx]:
             for si in succ_idxs:
-                if si != src_idx:  # ignore self-loops (shouldn't exist in DAG)
+                if si != src_idx:  # defensive: skip if same state (not a DAG edge)
                     in_degree[si] += 1
 
     topo_queue: deque[int] = deque()
@@ -164,7 +164,7 @@ def build_sub_problem_dag(
         topo_order.append(node)
         for _, _, succ_idxs in bfs_transitions[node]:
             for si in succ_idxs:
-                if si != node:
+                if si != node:  # defensive: skip self-transitions
                     in_degree[si] -= 1
                     if in_degree[si] == 0:
                         topo_queue.append(si)
