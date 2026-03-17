@@ -52,7 +52,7 @@ import argparse
 import os
 import sys
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
 
@@ -98,7 +98,7 @@ def print_macro_structure(hierarchy: Any) -> None:
     for i in range(partition.num_cells):
         positions = sorted(partition.cell_positions(i))
         print(f"    Cell {i}: {positions}")
-    print(f"  Adjacency:")
+    print("  Adjacency:")
     for cell_i, neighbours in sorted(partition.adjacency.items()):
         print(f"    {cell_i} → {sorted(neighbours)}")
     print(f"  Action space: {macro.action_space.n}  "
@@ -171,7 +171,6 @@ def run_rollout(
     micro_env.reset()
     h_policy.reset(hierarchy)
 
-    macro_env = hierarchy.macro_env
     human_indices = list(micro_env.human_agent_indices)
     robot_indices = list(micro_env.robot_agent_indices)
 
@@ -179,15 +178,6 @@ def run_rollout(
         micro_env.start_video_recording()
 
     state = micro_env.get_state()
-
-    # Sample a fixed goal for each human (used only for annotation/display)
-    human_goals: Dict[int, Any] = {}
-    for h_idx in human_indices:
-        goals = list(macro_gen.generate(macro_env.get_state(), h_idx))
-        if goals:
-            # Pick one with highest weight
-            goals.sort(key=lambda gw: -gw[1])
-            human_goals[h_idx] = goals[0][0]
 
     def _annotation(state, robot_action=None):
         lines = []

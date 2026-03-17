@@ -2,7 +2,7 @@
 
 Covers:
 - ``compute_hierarchical_robot_policy()`` produces a valid
-  ``HierarchicalRobotPolicy`` on a small two-room environment.
+  ``HierarchicalRobotPolicy`` on a small trivial environment.
 - Macro-level policy produces valid distributions.
 - Sub-problem policies respect feasibility constraints.
 - Control transfer occurs at macro-action boundaries.
@@ -423,7 +423,7 @@ class TestObserveTransition:
         micro_env = hierarchy.finest()
         micro_state = micro_env.get_state()
 
-        action = policy.sample(micro_state)
+        _action = policy.sample(micro_state)
 
         # Build full action profile
         num_agents = len(micro_env.agents)

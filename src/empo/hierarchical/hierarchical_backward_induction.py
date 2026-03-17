@@ -9,7 +9,7 @@ Implements ``compute_hierarchical_robot_policy()`` which:
 """
 
 import math
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Optional
 
 from empo.possible_goal import PossibleGoalGenerator
 from empo.human_policy_prior import HumanPolicyPrior

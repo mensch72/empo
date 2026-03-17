@@ -355,7 +355,6 @@ class HierarchicalRobotPolicy(RobotPolicy):
         rho_h = self.rho_h
         rho_r = self.rho_r
         gamma_h = self.gamma_h
-        gamma_r = self.gamma_r
         beta_r = self.beta_r
         zeta = self.zeta
         xi = self.xi
@@ -397,11 +396,12 @@ class HierarchicalRobotPolicy(RobotPolicy):
                 np.zeros(len(robot_action_profiles)) if rho_r > 0.0 else None
             )
 
+            h_dist = list(hpp.profile_distribution(state))
             for rap_idx, rap in enumerate(robot_action_profiles):
                 action_profile_arr[self.robot_agent_indices] = rap
                 v = 0.0
                 dw = 0.0
-                for h_prob, h_profile in hpp.profile_distribution(state):
+                for h_prob, h_profile in h_dist:
                     action_profile_arr[self.human_agent_indices] = h_profile
                     ap_index = int(
                         (action_profile_arr * action_powers).sum()
@@ -475,15 +475,16 @@ class HierarchicalRobotPolicy(RobotPolicy):
                 for goal, gw in self.micro_goal_generator.generate(
                     state, agent_index
                 ):
+                    h_goal_dist = list(
+                        hpp.profile_distribution_with_fixed_goal(
+                            state, agent_index, goal
+                        )
+                    )
                     vh = 0.0
                     for rap_idx, rap in enumerate(robot_action_profiles):
                         action_profile_arr[self.robot_agent_indices] = rap
                         v = 0.0
-                        for h_prob, h_profile in (
-                            hpp.profile_distribution_with_fixed_goal(
-                                state, agent_index, goal
-                            )
-                        ):
+                        for h_prob, h_profile in h_goal_dist:
                             action_profile_arr[self.human_agent_indices] = (
                                 h_profile
                             )
