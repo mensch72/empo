@@ -366,7 +366,7 @@ class BasePhase2Trainer(ABC):
             # Archiving failed (likely permission issues from Docker UID mismatch)
             # Delete entire tensorboard dir and recreate to allow new writes
             print(f"[TensorBoard] Warning: Failed to archive old data: {e}")
-            print(f"[TensorBoard] Deleting and recreating tensorboard directory...")
+            print("[TensorBoard] Deleting and recreating tensorboard directory...")
             try:
                 import shutil
                 shutil.rmtree(tensorboard_dir)
@@ -1494,7 +1494,7 @@ class BasePhase2Trainer(ABC):
             Tuple of (transition, next_state).
         """
         if self.debug:
-            print(f"[DEBUG] collect_transition: sampling human actions first...")
+            print("[DEBUG] collect_transition: sampling human actions first...")
         
         # Step 1: Sample human actions FIRST (before robot, so we can compute transition_probs once)
         with self.profiler.section("sample_human_actions"):
@@ -1513,7 +1513,7 @@ class BasePhase2Trainer(ABC):
                 )
         
         if self.debug:
-            print(f"[DEBUG] collect_transition: sampling robot action (with transition_probs)...")
+            print("[DEBUG] collect_transition: sampling robot action (with transition_probs)...")
         
         # Step 3: Sample robot action, passing transition_probs for curiosity bonus
         with self.profiler.section("sample_robot_action"):
@@ -1527,7 +1527,7 @@ class BasePhase2Trainer(ABC):
             next_state = self.step_environment(state, robot_action, human_actions)
         
         if self.debug:
-            print(f"[DEBUG] collect_transition: environment stepped, creating transition...")
+            print("[DEBUG] collect_transition: environment stepped, creating transition...")
         
         # Create transition - reusing the same transition_probs_by_action
         # When using model-based targets, we intentionally do NOT store next_state
@@ -1549,7 +1549,7 @@ class BasePhase2Trainer(ABC):
         )
         
         if self.debug:
-            print(f"[DEBUG] collect_transition: done")
+            print("[DEBUG] collect_transition: done")
         
         return transition, next_state
     
@@ -3028,13 +3028,13 @@ class BasePhase2Trainer(ABC):
                         continue
                     # Handle U_r specially (it predicts y, not U_r directly)
                     if key == 'u_r' and 'y_mean' in stats:
-                        self.writer.add_scalar(f'Predictions/u_r_y_mean', stats['y_mean'], self.training_step_count)
+                        self.writer.add_scalar('Predictions/u_r_y_mean', stats['y_mean'], self.training_step_count)
                         if 'y_std' in stats:
-                            self.writer.add_scalar(f'Predictions/u_r_y_std', stats['y_std'], self.training_step_count)
+                            self.writer.add_scalar('Predictions/u_r_y_std', stats['y_std'], self.training_step_count)
                         if 'y_target_mean' in stats:
-                            self.writer.add_scalar(f'Targets/u_r_y_mean', stats['y_target_mean'], self.training_step_count)
+                            self.writer.add_scalar('Targets/u_r_y_mean', stats['y_target_mean'], self.training_step_count)
                         if 'u_r_target_mean' in stats:
-                            self.writer.add_scalar(f'Targets/u_r_mean', stats['u_r_target_mean'], self.training_step_count)
+                            self.writer.add_scalar('Targets/u_r_mean', stats['u_r_target_mean'], self.training_step_count)
                     elif 'mean' in stats:
                         self.writer.add_scalar(f'Predictions/{key}_mean', stats['mean'], self.training_step_count)
                         if 'std' in stats:
@@ -3047,72 +3047,70 @@ class BasePhase2Trainer(ABC):
                     if 'z_target_mean' in stats:
                         self.writer.add_scalar(f'ZSpace/{key}_z_target', stats['z_target_mean'], self.training_step_count)
                     if 'in_decay_phase' in stats:
-                        self.writer.add_scalar(f'ZSpace/in_decay_phase', stats['in_decay_phase'], self.training_step_count)
+                        self.writer.add_scalar('ZSpace/in_decay_phase', stats['in_decay_phase'], self.training_step_count)
             
-            # Log parameter norms
-            param_norms = self._compute_param_norms()
-            for key, value in param_norms.items():
-                self.writer.add_scalar(f'ParamNorm/{key}', value, self.training_step_count)
-            
-            # Log exploration epsilons side by side
-            self.writer.add_scalar('Exploration/epsilon_r', self.config.get_epsilon_r(self.training_step_count), self.training_step_count)
-            self.writer.add_scalar('Exploration/epsilon_h', self.config.get_epsilon_h(self.training_step_count), self.training_step_count)
-            
-            # Log unique states seen (works for all modes - neural, tabular, etc.)
-            self.writer.add_scalar('Exploration/unique_states_seen', len(self._state_visit_counts), self.training_step_count)
-            
-            # Log histogram of visit counts for exploration analysis
-            # This helps diagnose whether exploration is stuck revisiting same states
-            # Use global_step=0 to show only current histogram (avoids accumulating history)
-            if self._state_visit_counts:
-                visit_counts = np.array(list(self._state_visit_counts.values()), dtype=np.float32)
-                self.writer.add_histogram('Exploration/visit_count_distribution', visit_counts, global_step=0)
-            
-            # Log learning rates
-            networks_to_log_lr = ['v_h_e', 'x_h', 'q_r']
-            if self.config.u_r_use_network:
-                networks_to_log_lr.append('u_r')
-            if self.config.v_r_use_network:
-                networks_to_log_lr.append('v_r')
-            for net_name in networks_to_log_lr:
-                lr = self.config.get_learning_rate(
-                    net_name, self.training_step_count, self.update_counts.get(net_name, 0)
-                )
-                self.writer.add_scalar(f'LearningRate/{net_name}', lr, self.training_step_count)
-            
-            # Log warm-up phase information
-            self.writer.add_scalar('Warmup/effective_beta_r', 
-                                  self.config.get_effective_beta_r(self.training_step_count), self.training_step_count)
-            self.writer.add_scalar('Warmup/is_warmup', 
-                                  1.0 if self.config.is_in_warmup(self.training_step_count) else 0.0, self.training_step_count)
-            active = self.config.get_active_networks(self.training_step_count)
-            active_mask = sum(2**i for i, n in enumerate(['v_h_e', 'x_h', 'u_r', 'q_r', 'v_r']) if n in active)
-            self.writer.add_scalar('Warmup/active_networks_mask', active_mask, self.training_step_count)
-            self.writer.add_scalar('Warmup/stage', 
-                                  self.config.get_warmup_stage(self.training_step_count), self.training_step_count)
-            
-            # Log encoder cache hit rates (if available)
-            if hasattr(self, 'get_cache_stats'):
-                cache_stats = self.get_cache_stats()
-                for encoder_name, (hits, misses) in cache_stats.items():
-                    total = hits + misses
-                    if total > 0:
-                        hit_rate = hits / total
-                        self.writer.add_scalar(f'Cache/{encoder_name}_hit_rate', hit_rate, self.training_step_count)
-                        self.writer.add_scalar(f'Cache/{encoder_name}_calls', total, self.training_step_count)
-                # Reset stats after logging so we get per-step rates
-                if hasattr(self, 'reset_cache_stats'):
-                    self.reset_cache_stats()
-            
-            # Log lookup table sizes (if any lookup tables are in use)
-            lookup_tables = get_all_lookup_tables(self.networks)
-            if lookup_tables:
-                total_entries = 0
-                for name, net in lookup_tables.items():
-                    size = len(net.table)
-                    total_entries += size
-                    self.writer.add_scalar(f'LookupTable/{name}_size', size, self.training_step_count)
-                self.writer.add_scalar('LookupTable/total_entries', total_entries, self.training_step_count)
+            # Log parameter norms, epsilons, LRs, warm-up stage (guard: writer may be None)
+            if self.writer is not None:
+                param_norms = self._compute_param_norms()
+                for key, value in param_norms.items():
+                    self.writer.add_scalar(f'ParamNorm/{key}', value, self.training_step_count)
+                
+                # Log exploration epsilons side by side
+                self.writer.add_scalar('Exploration/epsilon_r', self.config.get_epsilon_r(self.training_step_count), self.training_step_count)
+                self.writer.add_scalar('Exploration/epsilon_h', self.config.get_epsilon_h(self.training_step_count), self.training_step_count)
+                
+                # Log unique states seen (works for all modes - neural, tabular, etc.)
+                self.writer.add_scalar('Exploration/unique_states_seen', len(self._state_visit_counts), self.training_step_count)
+                
+                # Log histogram of visit counts for exploration analysis
+                if self._state_visit_counts:
+                    visit_counts = np.array(list(self._state_visit_counts.values()), dtype=np.float32)
+                    self.writer.add_histogram('Exploration/visit_count_distribution', visit_counts, global_step=0)
+                
+                # Log learning rates
+                networks_to_log_lr = ['v_h_e', 'x_h', 'q_r']
+                if self.config.u_r_use_network:
+                    networks_to_log_lr.append('u_r')
+                if self.config.v_r_use_network:
+                    networks_to_log_lr.append('v_r')
+                for net_name in networks_to_log_lr:
+                    lr = self.config.get_learning_rate(
+                        net_name, self.training_step_count, self.update_counts.get(net_name, 0)
+                    )
+                    self.writer.add_scalar(f'LearningRate/{net_name}', lr, self.training_step_count)
+                
+                # Log warm-up phase information
+                self.writer.add_scalar('Warmup/effective_beta_r', 
+                                      self.config.get_effective_beta_r(self.training_step_count), self.training_step_count)
+                self.writer.add_scalar('Warmup/is_warmup', 
+                                      1.0 if self.config.is_in_warmup(self.training_step_count) else 0.0, self.training_step_count)
+                active = self.config.get_active_networks(self.training_step_count)
+                active_mask = sum(2**i for i, n in enumerate(['v_h_e', 'x_h', 'u_r', 'q_r', 'v_r']) if n in active)
+                self.writer.add_scalar('Warmup/active_networks_mask', active_mask, self.training_step_count)
+                self.writer.add_scalar('Warmup/stage', 
+                                      self.config.get_warmup_stage(self.training_step_count), self.training_step_count)
+                
+                # Log encoder cache hit rates (if available)
+                if hasattr(self, 'get_cache_stats'):
+                    cache_stats = self.get_cache_stats()
+                    for encoder_name, (hits, misses) in cache_stats.items():
+                        total = hits + misses
+                        if total > 0:
+                            hit_rate = hits / total
+                            self.writer.add_scalar(f'Cache/{encoder_name}_hit_rate', hit_rate, self.training_step_count)
+                            self.writer.add_scalar(f'Cache/{encoder_name}_calls', total, self.training_step_count)
+                    if hasattr(self, 'reset_cache_stats'):
+                        self.reset_cache_stats()
+                
+                # Log lookup table sizes (if any lookup tables are in use)
+                lookup_tables = get_all_lookup_tables(self.networks)
+                if lookup_tables:
+                    total_entries = 0
+                    for name, net in lookup_tables.items():
+                        size = len(net.table)
+                        total_entries += size
+                        self.writer.add_scalar(f'LookupTable/{name}_size', size, self.training_step_count)
+                    self.writer.add_scalar('LookupTable/total_entries', total_entries, self.training_step_count)
         
         # Check for warm-up stage transitions
         with self.profiler.section("warmup_check"):
@@ -3145,7 +3143,7 @@ class BasePhase2Trainer(ABC):
                         with self._shared_env_steps.get_lock():
                             self._shared_env_steps.value = 0
                         if self.verbose:
-                            print(f"  [Async] Reset shared_env_steps to 0 to unthrottle actors")
+                            print("  [Async] Reset shared_env_steps to 0 to unthrottle actors")
                     if self.verbose:
                         print(f"  [Training] Cleared replay buffer ({buffer_size_before} transitions) at start of β_r ramp-up")
                     if self.writer is not None:
@@ -3162,7 +3160,7 @@ class BasePhase2Trainer(ABC):
                         with self._shared_env_steps.get_lock():
                             self._shared_env_steps.value = 0
                         if self.verbose:
-                            print(f"  [Async] Reset shared_env_steps to 0 to unthrottle actors")
+                            print("  [Async] Reset shared_env_steps to 0 to unthrottle actors")
                     if self.verbose:
                         print(f"  [Training] Cleared replay buffer ({buffer_size_before} transitions) after β_r ramp-up")
                     if self.writer is not None:
@@ -3519,7 +3517,7 @@ class BasePhase2Trainer(ABC):
                 p.terminate()
         
         if self.verbose:
-            print(f"[Async] Training complete. All actors stopped.")
+            print("[Async] Training complete. All actors stopped.")
         
         return history
     
@@ -3706,7 +3704,7 @@ class BasePhase2Trainer(ABC):
                 import os
                 print(f"[Learner] TensorBoard writer active (pid={os.getpid()})")
             else:
-                print(f"[Learner] TensorBoard writer is None (logging disabled)")
+                print("[Learner] TensorBoard writer is None (logging disabled)")
         
         # Progress bar measured in training steps
         pbar = tqdm(total=num_training_steps, desc="Async Training", unit="steps")
