@@ -59,12 +59,11 @@ def build_sub_problem_dag(
     num_agents: int = len(micro_env.agents)
     num_actions: int = micro_env.action_space.n
 
-    # Precompute all action profiles
+    # Iterate action profiles lazily to avoid large memory spike
     from itertools import product as itertools_product
 
-    all_action_profiles: List[Tuple[int, ...]] = [
-        tuple(a) for a in itertools_product(range(num_actions), repeat=num_agents)
-    ]
+    def _action_profiles():
+        return itertools_product(range(num_actions), repeat=num_agents)
 
     # BFS data structures
     states: List[Any] = []
@@ -97,7 +96,8 @@ def build_sub_problem_dag(
 
             state_trans: List[Tuple[Tuple[int, ...], List[float], List[int]]] = []
 
-            for ap in all_action_profiles:
+            for ap in _action_profiles():
+                ap = tuple(ap)
                 # Feasibility filter
                 if not mapper.is_feasible(coarse_action_profile, src_state, ap):
                     continue

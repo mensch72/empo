@@ -272,9 +272,10 @@ class HierarchicalRobotPolicy(RobotPolicy):
             )
         )
 
-        if len(sub_states) == 0:
-            # Edge case: root state is already terminal (return_control
-            # would fire immediately).  Return a trivial policy.
+        if not sub_transitions[0]:
+            # Edge case: root state has no feasible outgoing transitions
+            # (e.g., return_control fires on all successors immediately).
+            # Return a trivial policy.
             return self._trivial_policy(micro_env)
 
         # Assign terminal V_r from macro-level solve
@@ -379,6 +380,7 @@ class HierarchicalRobotPolicy(RobotPolicy):
 
             # ── Q_r computation ────────────────────────────────
             Qr_values = np.zeros(len(robot_action_profiles))
+            rap_feasible = np.zeros(len(robot_action_profiles), dtype=bool)
             duration_weights_per_rap = (
                 np.zeros(len(robot_action_profiles)) if rho_r > 0.0 else None
             )
@@ -401,6 +403,7 @@ class HierarchicalRobotPolicy(RobotPolicy):
                             )
                         )
                         if t_ap_index == ap_index:
+                            rap_feasible[rap_idx] = True
                             probs_arr = np.array(t_probs)
                             succ_arr = np.array(t_succs)
                             if rho_r > 0.0:
@@ -433,14 +436,23 @@ class HierarchicalRobotPolicy(RobotPolicy):
                     duration_weights_per_rap[rap_idx] = dw
 
             # ── Robot policy: power-law distribution ───────────
+            # Only feasible robot action profiles participate in the
+            # distribution; infeasible ones get zero probability.
             # Clamp Q_r to ensure all values are ≤ terminal_Vr < 0;
             # the power-law formula π_r(a) ∝ (-Q_r(a))^{-β_r} requires
             # strictly negative Q_r to avoid log(0) = -inf.
-            Qr_values = np.minimum(Qr_values, self.terminal_Vr)
-            log_neg_Qr = np.log(-Qr_values)
-            log_powers = -beta_r * log_neg_Qr
-            log_norm = logsumexp(log_powers)
-            ps = np.exp(log_powers - log_norm)
+            if not rap_feasible.any():
+                # Degenerate: no RAP had any matching transition;
+                # assign uniform over all profiles.
+                ps = np.ones(len(robot_action_profiles)) / len(robot_action_profiles)
+            else:
+                Qr_values = np.minimum(Qr_values, self.terminal_Vr)
+                log_neg_Qr = np.log(-Qr_values)
+                log_powers = -beta_r * log_neg_Qr
+                # Mask infeasible RAPs so they get zero probability
+                log_powers[~rap_feasible] = -np.inf
+                log_norm = logsumexp(log_powers)
+                ps = np.exp(log_powers - log_norm)
             robot_policy_dict[state] = {
                 rap: ps[i] for i, rap in enumerate(robot_action_profiles)
             }

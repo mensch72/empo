@@ -52,7 +52,8 @@ def compute_hierarchical_robot_policy(
             ``possible_goal_generators[1]`` is for M^1 (micro).
         human_policy_priors: Optional list of ``HumanPolicyPrior`` per level.
             ``human_policy_priors[0]`` is for M^0, ``[1]`` for M^1.
-            If ``None``, both are auto-computed.
+            If ``None``, M^0 prior is auto-computed via backward induction
+            and M^1 falls back to a uniform prior over human actions.
         beta_r: Power-law concentration parameter.
         gamma_h: Human discount factor (0 < gamma_h ≤ 1).
         gamma_r: Robot discount factor (0 < gamma_r ≤ 1).
