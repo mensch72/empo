@@ -278,7 +278,11 @@ class HierarchicalRobotPolicy(RobotPolicy):
         if not sub_transitions[0]:
             # Edge case: root state has no feasible outgoing transitions
             # (e.g., return_control fires on all successors immediately).
-            # Return a trivial policy.
+            # Return control to macro immediately so the policy doesn't
+            # get stuck at the micro level.
+            self._current_coarse_action_profile = None
+            self._current_coarse_state = None
+            self._current_sub_policy = None
             return self._trivial_policy(micro_env)
 
         # Assign terminal V_r from macro-level solve

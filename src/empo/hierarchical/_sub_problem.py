@@ -34,9 +34,10 @@ def build_sub_problem_dag(
       **terminal** (they will not be expanded further).
     - The root state itself is never terminal.
 
-    The resulting states are topologically ordered so that successor states
-    always appear after their predecessors (standard BFS discovery order
-    already satisfies this for acyclic environments).
+    After BFS discovery, a Kahn topological sort is applied to ensure that
+    every successor state has a strictly higher index than its predecessor.
+    This guarantees correct reverse-order processing for backward induction,
+    even when cross-edges exist in the BFS tree.
 
     Args:
         micro_env: The micro-level WorldModel (must support ``get_state``,
@@ -62,17 +63,17 @@ def build_sub_problem_dag(
     # Iterate action profiles lazily to avoid large memory spike
     from itertools import product as itertools_product
 
-    # BFS data structures
-    states: List[Any] = []
-    state_to_idx: Dict[Any, int] = {}
-    terminal_mask: List[bool] = []
-    transitions: List[List[Tuple[Tuple[int, ...], List[float], List[int]]]] = []
+    # ── Phase 1: BFS discovery ──────────────────────────────────
+    bfs_states: List[Any] = []
+    bfs_state_to_idx: Dict[Any, int] = {}
+    bfs_terminal_mask: List[bool] = []
+    bfs_transitions: List[List[Tuple[Tuple[int, ...], List[float], List[int]]]] = []
 
     # Enqueue root
-    state_to_idx[root_state] = 0
-    states.append(root_state)
-    terminal_mask.append(False)  # root is never terminal
-    transitions.append([])
+    bfs_state_to_idx[root_state] = 0
+    bfs_states.append(root_state)
+    bfs_terminal_mask.append(False)  # root is never terminal
+    bfs_transitions.append([])
 
     queue: deque[int] = deque([0])
 
@@ -84,9 +85,9 @@ def build_sub_problem_dag(
     try:
         while queue:
             src_idx = queue.popleft()
-            src_state = states[src_idx]
+            src_state = bfs_states[src_idx]
 
-            if terminal_mask[src_idx]:
+            if bfs_terminal_mask[src_idx]:
                 continue  # Don't expand terminal states
 
             micro_env.set_state(src_state)
@@ -111,22 +112,22 @@ def build_sub_problem_dag(
                     if prob <= 0.0:
                         continue
 
-                    if succ_state not in state_to_idx:
-                        succ_idx = len(states)
-                        state_to_idx[succ_state] = succ_idx
-                        states.append(succ_state)
+                    if succ_state not in bfs_state_to_idx:
+                        succ_idx = len(bfs_states)
+                        bfs_state_to_idx[succ_state] = succ_idx
+                        bfs_states.append(succ_state)
 
                         # Determine if successor is terminal
                         is_term = mapper.return_control(
                             coarse_action_profile, src_state, ap, succ_state
                         )
-                        terminal_mask.append(is_term)
-                        transitions.append([])
+                        bfs_terminal_mask.append(is_term)
+                        bfs_transitions.append([])
 
                         if not is_term:
                             queue.append(succ_idx)
                     else:
-                        succ_idx = state_to_idx[succ_state]
+                        succ_idx = bfs_state_to_idx[succ_state]
 
                     probs.append(prob)
                     succ_indices.append(succ_idx)
@@ -134,7 +135,7 @@ def build_sub_problem_dag(
                 if probs:
                     state_trans.append((ap, probs, succ_indices))
 
-            transitions[src_idx] = state_trans
+            bfs_transitions[src_idx] = state_trans
 
             if pbar is not None:
                 pbar.update(1)
@@ -142,5 +143,46 @@ def build_sub_problem_dag(
         micro_env.set_state(old_state)
         if pbar is not None:
             pbar.close()
+
+    # ── Phase 2: Kahn topological sort ──────────────────────────
+    n = len(bfs_states)
+    in_degree = [0] * n
+    for src_idx in range(n):
+        for _, _, succ_idxs in bfs_transitions[src_idx]:
+            for si in succ_idxs:
+                if si != src_idx:  # ignore self-loops (shouldn't exist in DAG)
+                    in_degree[si] += 1
+
+    topo_queue: deque[int] = deque()
+    for i in range(n):
+        if in_degree[i] == 0:
+            topo_queue.append(i)
+
+    topo_order: List[int] = []  # bfs_idx → position in topo_order
+    while topo_queue:
+        node = topo_queue.popleft()
+        topo_order.append(node)
+        for _, _, succ_idxs in bfs_transitions[node]:
+            for si in succ_idxs:
+                if si != node:
+                    in_degree[si] -= 1
+                    if in_degree[si] == 0:
+                        topo_queue.append(si)
+
+    # Build old→new index mapping
+    old_to_new = [0] * n
+    for new_idx, old_idx in enumerate(topo_order):
+        old_to_new[old_idx] = new_idx
+
+    # Remap everything to topological order
+    states: List[Any] = [bfs_states[old] for old in topo_order]
+    terminal_mask: List[bool] = [bfs_terminal_mask[old] for old in topo_order]
+    state_to_idx: Dict[Any, int] = {s: i for i, s in enumerate(states)}
+    transitions: List[List[Tuple[Tuple[int, ...], List[float], List[int]]]] = []
+    for old in topo_order:
+        remapped: List[Tuple[Tuple[int, ...], List[float], List[int]]] = []
+        for ap, probs, succ_idxs in bfs_transitions[old]:
+            remapped.append((ap, probs, [old_to_new[si] for si in succ_idxs]))
+        transitions.append(remapped)
 
     return states, state_to_idx, transitions, terminal_mask

@@ -47,9 +47,11 @@ def compute_hierarchical_robot_policy(
         hierarchical_model: A two-level ``HierarchicalWorldModel``.
         human_agent_indices: Indices of human agents (same across levels).
         robot_agent_indices: Indices of robot agents.
-        possible_goal_generators: One ``PossibleGoalGenerator`` per level.
-            ``possible_goal_generators[0]`` is for M^0 (macro),
-            ``possible_goal_generators[1]`` is for M^1 (micro).
+        possible_goal_generators: List of ``PossibleGoalGenerator`` objects.
+            Must contain at least the macro-level (M^0) generator at index 0.
+            An optional second entry at index 1 provides the micro-level
+            (M^1) generator (only needed when computing micro-level X_h /
+            intrinsic cost terms).
         human_policy_priors: Optional list of ``HumanPolicyPrior`` per level.
             ``human_policy_priors[0]`` is for M^0, ``[1]`` for M^1.
             If ``None``, M^0 prior is auto-computed via backward induction

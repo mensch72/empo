@@ -364,6 +364,38 @@ class TestSubProblemDag:
         )
         assert micro_env.get_state() == original_state
 
+    def test_topological_order(self):
+        """All successor indices must be strictly greater than source index."""
+        hierarchy = _build_hierarchy()
+        micro_env = hierarchy.finest()
+        mapper = hierarchy.mapper
+        macro_env = hierarchy.coarsest()
+
+        micro_state = micro_env.get_state()
+        agent_cell = macro_env.partition.cell_of(
+            micro_state[1][0][0], micro_state[1][0][1]
+        )
+        adj = macro_env.partition.adjacency.get(agent_cell, frozenset())
+        if not adj:
+            pytest.skip("Agent has no adjacent cells")
+        target = min(adj)
+        num_agents = len(macro_env.agents)
+        coarse_ap = tuple(
+            macro_walk(target) if i == 0 else MACRO_PASS
+            for i in range(num_agents)
+        )
+
+        states, _, transitions, _ = build_sub_problem_dag(
+            micro_env, mapper, coarse_ap, micro_state, quiet=True
+        )
+        for src_idx, state_trans in enumerate(transitions):
+            for ap, probs, succ_indices in state_trans:
+                for si in succ_indices:
+                    assert si > src_idx, (
+                        f"Topological order violated: state {src_idx} has "
+                        f"successor {si} (expected > {src_idx})"
+                    )
+
 
 # ── TestObserveTransition ────────────────────────────────────────────
 
