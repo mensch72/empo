@@ -380,6 +380,16 @@ class HierarchicalRobotPolicy(RobotPolicy):
                 Vr_values[idx] = terminal_Vr_map.get(idx, self.terminal_Vr)
                 continue
 
+            # ── Build per-state transition lookup table ────────
+            # Maps encoded action_profile_index → (probs, succ_indices)
+            # for O(1) access in inner loops below.
+            trans_lookup: Dict[int, Tuple[List[float], List[int]]] = {}
+            for t_ap, t_probs, t_succs in state_trans:
+                t_ap_index = int(
+                    sum(a * (num_actions ** i) for i, a in enumerate(t_ap))
+                )
+                trans_lookup[t_ap_index] = (t_probs, t_succs)
+
             # ── Q_r computation ────────────────────────────────
             Qr_values = np.zeros(len(robot_action_profiles))
             rap_feasible = np.zeros(len(robot_action_profiles), dtype=bool)
@@ -396,43 +406,36 @@ class HierarchicalRobotPolicy(RobotPolicy):
                     ap_index = int(
                         (action_profile_arr * action_powers).sum()
                     )
-                    # Find matching transition
-                    for t_ap, t_probs, t_succs in state_trans:
-                        t_ap_index = int(
-                            sum(
-                                a * (num_actions ** i)
-                                for i, a in enumerate(t_ap)
+                    entry = trans_lookup.get(ap_index)
+                    if entry is not None:
+                        t_probs, t_succs = entry
+                        rap_feasible[rap_idx] = True
+                        probs_arr = np.array(t_probs)
+                        succ_arr = np.array(t_succs)
+                        if rho_r > 0.0:
+                            trans_list = [
+                                (float(p), states[si])
+                                for p, si in zip(t_probs, t_succs)
+                            ]
+                            durations = np.array(
+                                micro_env.transition_durations(
+                                    state,
+                                    action_profile_arr.tolist(),
+                                    trans_list,
+                                )
                             )
-                        )
-                        if t_ap_index == ap_index:
-                            rap_feasible[rap_idx] = True
-                            probs_arr = np.array(t_probs)
-                            succ_arr = np.array(t_succs)
-                            if rho_r > 0.0:
-                                trans_list = [
-                                    (float(p), states[si])
-                                    for p, si in zip(t_probs, t_succs)
-                                ]
-                                durations = np.array(
-                                    micro_env.transition_durations(
-                                        state,
-                                        action_profile_arr.tolist(),
-                                        trans_list,
-                                    )
-                                )
-                                disc_r = np.exp(-rho_r * durations)
-                                v += h_prob * float(
-                                    np.dot(probs_arr, disc_r * Vr_values[succ_arr])
-                                )
-                                dw_factors = -np.expm1(-rho_r * durations) / rho_r
-                                dw += h_prob * float(
-                                    np.dot(probs_arr, dw_factors)
-                                )
-                            else:
-                                v += h_prob * float(
-                                    np.dot(probs_arr, Vr_values[succ_arr])
-                                )
-                            break
+                            disc_r = np.exp(-rho_r * durations)
+                            v += h_prob * float(
+                                np.dot(probs_arr, disc_r * Vr_values[succ_arr])
+                            )
+                            dw_factors = -np.expm1(-rho_r * durations) / rho_r
+                            dw += h_prob * float(
+                                np.dot(probs_arr, dw_factors)
+                            )
+                        else:
+                            v += h_prob * float(
+                                np.dot(probs_arr, Vr_values[succ_arr])
+                            )
                 Qr_values[rap_idx] = v
                 if rho_r > 0.0:
                     duration_weights_per_rap[rap_idx] = dw
@@ -487,56 +490,50 @@ class HierarchicalRobotPolicy(RobotPolicy):
                             ap_index = int(
                                 (action_profile_arr * action_powers).sum()
                             )
-                            for t_ap, t_probs, t_succs in state_trans:
-                                t_ap_index = int(
-                                    sum(
-                                        a * (num_actions ** i)
-                                        for i, a in enumerate(t_ap)
-                                    )
+                            entry = trans_lookup.get(ap_index)
+                            if entry is not None:
+                                t_probs, t_succs = entry
+                                probs_arr = np.array(t_probs)
+                                succ_arr = np.array(t_succs)
+                                att = np.array(
+                                    [
+                                        goal.is_achieved(states[si])
+                                        for si in t_succs
+                                    ]
                                 )
-                                if t_ap_index == ap_index:
-                                    probs_arr = np.array(t_probs)
-                                    succ_arr = np.array(t_succs)
-                                    att = np.array(
-                                        [
-                                            goal.is_achieved(states[si])
-                                            for si in t_succs
-                                        ]
-                                    )
-                                    vhe_succ = np.array(
-                                        [
-                                            Vh_values[si][agent_index].get(
-                                                goal, 0.0
-                                            )
-                                            for si in t_succs
-                                        ]
-                                    )
-                                    if rho_h > 0.0:
-                                        trans_list = [
-                                            (float(p), states[si])
-                                            for p, si in zip(
-                                                t_probs, t_succs
-                                            )
-                                        ]
-                                        durations = np.array(
-                                            micro_env.transition_durations(
-                                                state,
-                                                action_profile_arr.tolist(),
-                                                trans_list,
-                                            )
+                                vhe_succ = np.array(
+                                    [
+                                        Vh_values[si][agent_index].get(
+                                            goal, 0.0
                                         )
-                                        disc_h = np.exp(-rho_h * durations)
-                                        vals = np.where(
-                                            att, 1.0, disc_h * vhe_succ
+                                        for si in t_succs
+                                    ]
+                                )
+                                if rho_h > 0.0:
+                                    trans_list = [
+                                        (float(p), states[si])
+                                        for p, si in zip(
+                                            t_probs, t_succs
                                         )
-                                    else:
-                                        vals = np.where(
-                                            att, 1.0, gamma_h * vhe_succ
+                                    ]
+                                    durations = np.array(
+                                        micro_env.transition_durations(
+                                            state,
+                                            action_profile_arr.tolist(),
+                                            trans_list,
                                         )
-                                    v += h_prob * float(
-                                        np.dot(probs_arr, vals)
                                     )
-                                    break
+                                    disc_h = np.exp(-rho_h * durations)
+                                    vals = np.where(
+                                        att, 1.0, disc_h * vhe_succ
+                                    )
+                                else:
+                                    vals = np.where(
+                                        att, 1.0, gamma_h * vhe_succ
+                                    )
+                                v += h_prob * float(
+                                    np.dot(probs_arr, vals)
+                                )
                         vh += ps[rap_idx] * v
                     if vh != 0.0:
                         vh_agent[goal] = float(vh)
