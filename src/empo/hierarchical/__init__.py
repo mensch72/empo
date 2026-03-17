@@ -38,6 +38,10 @@ from empo.hierarchical.macro_goals import (
     MacroGoalGenerator,
 )
 from empo.hierarchical.macro_heuristic_policy import MacroHeuristicPolicy
+from empo.hierarchical.hierarchical_backward_induction import (
+    compute_hierarchical_robot_policy,
+)
+from empo.hierarchical.hierarchical_robot_policy import HierarchicalRobotPolicy
 
 __all__ = [
     "HierarchicalWorldModel",
@@ -52,4 +56,6 @@ __all__ = [
     "MacroProximityGoal",
     "MacroGoalGenerator",
     "MacroHeuristicPolicy",
+    "compute_hierarchical_robot_policy",
+    "HierarchicalRobotPolicy",
 ]

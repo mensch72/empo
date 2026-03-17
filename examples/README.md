@@ -7,6 +7,7 @@ This directory contains categorized example scripts demonstrating empo functiona
 ## Layout
 
 - `examples/diagnostics/` - DAG computation, profiling, debugging
+- `examples/hierarchical/` - Hierarchical planning demos
 - `examples/multigrid/` - MultiGrid environment demos
 - `examples/phase1/` - Phase 1 (human policy prior) demos
 - `examples/phase2/` - Phase 2 (robot policy) demos
@@ -80,6 +81,7 @@ These examples take longer to run in full mode. Use `--quick` for faster testing
 | `examples/visualization/single_agent_value_function.py` | 5 beta values | 5 beta values | Value function visualization |
 | `examples/transport/transport_random_demo.py` | 100 steps | 20 steps | AI transport environment demo |
 | `examples/transport/transport_learning_demo.py` | 500 episodes | 50 episodes | Transport human policy learning |
+| `examples/hierarchical/two_level_multigrid_demo.py` | 5 rollouts | 2 rollouts | Hierarchical two-level planning |
 
 ### Usage Examples
 
@@ -88,6 +90,10 @@ These examples take longer to run in full mode. Use `--quick` for faster testing
 PYTHONPATH=src:vendor/multigrid python examples/diagnostics/bellman_backward_induction.py --quick
 PYTHONPATH=src:vendor/multigrid python examples/phase1/neural_policy_prior_demo.py --quick
 PYTHONPATH=src:vendor/multigrid python examples/multigrid/control_button_demo.py --quick
+
+# Hierarchical planning demo
+PYTHONPATH=src:vendor/multigrid:multigrid_worlds python examples/hierarchical/two_level_multigrid_demo.py --quick
+PYTHONPATH=src:vendor/multigrid:multigrid_worlds python examples/hierarchical/two_level_multigrid_demo.py  # full run with video
 
 # Transport environment demo
 PYTHONPATH=src:vendor/multigrid:vendor/ai_transport python examples/transport/transport_random_demo.py --quick

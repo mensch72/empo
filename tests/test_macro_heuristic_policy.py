@@ -377,3 +377,105 @@ class TestExports:
     def test_exported_from_hierarchical_package(self):
         from empo.hierarchical import MacroHeuristicPolicy
         assert MacroHeuristicPolicy is not None
+
+
+# ── TestProfileDistribution ─────────────────────────────────────────
+
+class TestProfileDistribution:
+    """Tests that MacroHeuristicPolicy inherits profile_distribution from base class."""
+
+    def test_has_profile_distribution(self):
+        pol = _policy()
+        assert hasattr(pol, 'profile_distribution')
+        assert callable(pol.profile_distribution)
+
+    def test_has_profile_distribution_with_fixed_goal(self):
+        pol = _policy()
+        assert hasattr(pol, 'profile_distribution_with_fixed_goal')
+        assert callable(pol.profile_distribution_with_fixed_goal)
+
+    def test_profile_distribution_returns_list(self):
+        pol = _policy()
+        macro = pol.world_model
+        state = macro.get_state()
+        dist = pol.profile_distribution(state)
+        assert isinstance(dist, list)
+        assert len(dist) > 0
+
+    def test_profile_distribution_probabilities_sum_to_one(self):
+        pol = _policy()
+        macro = pol.world_model
+        state = macro.get_state()
+        dist = pol.profile_distribution(state)
+        total = sum(p for p, _ in dist)
+        assert abs(total - 1.0) < 1e-9
+
+    def test_profile_distribution_entries_are_tuples(self):
+        pol = _policy()
+        macro = pol.world_model
+        state = macro.get_state()
+        dist = pol.profile_distribution(state)
+        for entry in dist:
+            prob, profile = entry
+            assert isinstance(prob, float)
+            assert isinstance(profile, list)
+
+    def test_profile_distribution_with_fixed_goal_sums_to_one(self):
+        pol = _policy()
+        macro = pol.world_model
+        state = macro.get_state()
+        human_idx = macro.human_agent_indices[0]
+        gen = MacroGoalGenerator(macro)
+        goals = list(gen.generate(state, human_idx))
+        if not goals:
+            pytest.skip("No goals for this state")
+        goal, _ = goals[0]
+        dist = pol.profile_distribution_with_fixed_goal(state, human_idx, goal)
+        total = sum(p for p, _ in dist)
+        assert abs(total - 1.0) < 1e-9
+
+    def test_profile_distribution_with_fixed_goal_differs_from_marginal(self):
+        """Goal-conditioned profile should differ from marginal."""
+        pol = _policy()
+        macro = pol.world_model
+        state = macro.get_state()
+        human_idx = macro.human_agent_indices[0]
+        gen = MacroGoalGenerator(macro)
+        goals = list(gen.generate(state, human_idx))
+        if len(goals) < 2:
+            pytest.skip("Need ≥2 goals to compare")
+
+        # Verify that at least two goals produce meaningfully different
+        # conditioned distributions; otherwise the marginal can match
+        # the conditioned one (e.g., only one available action).
+        dists = []
+        for g, _ in goals:
+            d = pol.profile_distribution_with_fixed_goal(state, human_idx, g)
+            dists.append({tuple(p): prob for prob, p in d})
+        goals_differ = any(
+            any(
+                abs(dists[0].get(k, 0) - dists[j].get(k, 0)) > 1e-9
+                for k in set(dists[0]) | set(dists[j])
+            )
+            for j in range(1, len(dists))
+        )
+        if not goals_differ:
+            pytest.skip("All goals produce identical conditioned distributions")
+
+        marginal = pol.profile_distribution(state)
+
+        # Convert to dict for comparison
+        marginal_dict = {tuple(p): prob for prob, p in marginal}
+
+        # The marginal (average over goals) should differ from at least one
+        # goal-conditioned distribution.  (It can coincide with one of them
+        # when symmetric pairs cancel out, but not all of them — we already
+        # checked that at least two conditioned distributions differ.)
+        differs_from_some = any(
+            any(
+                abs(marginal_dict.get(k, 0) - d.get(k, 0)) > 1e-9
+                for k in set(marginal_dict) | set(d)
+            )
+            for d in dists
+        )
+        assert differs_from_some, "Marginal should differ from at least one conditioned distribution"

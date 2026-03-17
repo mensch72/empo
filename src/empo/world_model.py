@@ -509,6 +509,10 @@ class WorldModel(gym.Env):
         # Reset environment to get root state
         self.reset()
         root_state = self.get_state()
+
+        # Ensure _dag_cache is available (reset() may have cleared it)
+        if self._dag_cache is None:
+            self._dag_cache = {}
         
         # PHASE 1: Discover all states and edges using BFS
         discovered_states: List[State] = []  # Temporary list during discovery
