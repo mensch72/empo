@@ -62,9 +62,6 @@ def build_sub_problem_dag(
     # Iterate action profiles lazily to avoid large memory spike
     from itertools import product as itertools_product
 
-    def _action_profiles():
-        return itertools_product(range(num_actions), repeat=num_agents)
-
     # BFS data structures
     states: List[Any] = []
     state_to_idx: Dict[Any, int] = {}
@@ -96,8 +93,7 @@ def build_sub_problem_dag(
 
             state_trans: List[Tuple[Tuple[int, ...], List[float], List[int]]] = []
 
-            for ap in _action_profiles():
-                ap = tuple(ap)
+            for ap in itertools_product(range(num_actions), repeat=num_agents):
                 # Feasibility filter
                 if not mapper.is_feasible(coarse_action_profile, src_state, ap):
                     continue
