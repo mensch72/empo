@@ -86,7 +86,7 @@ class HierarchicalRobotPolicy(RobotPolicy):
         # Control state
         self._current_coarse_action_profile: Optional[Tuple[int, ...]] = None
         self._current_coarse_state: Optional[Any] = None
-        self._current_sub_policy: Optional[TabularRobotPolicy] = None
+        self._current_sub_policy: Optional[RobotPolicy] = None
 
     # ------------------------------------------------------------------
     # RobotPolicy interface
@@ -238,19 +238,20 @@ class HierarchicalRobotPolicy(RobotPolicy):
         self,
         coarse_action_profile: Tuple[int, ...],
         micro_state: Any,
-    ) -> TabularRobotPolicy:
+    ) -> RobotPolicy:
         """Compute a micro-level sub-problem policy on demand.
 
-        No caching is performed — each sub-problem is solved fresh since it
-        is unlikely to encounter the same sub-problem twice in practice.
+        No caching is performed across macro decisions — each sub-problem is
+        solved fresh since it is unlikely to encounter the same sub-problem
+        twice in practice.
 
         The sub-problem is a restricted DAG rooted at *micro_state* where:
 
         - **Feasible actions only**: only action profiles accepted by
           ``mapper.is_feasible()`` are expanded.
-        - **Terminal states**: states where ``mapper.return_control()``
-          is True become terminal with value ``V_r(σ^0(s^1))`` from the
-          pre-computed macro-level solve.
+        - **Return-control edges**: transition edges where
+          ``mapper.return_control()`` fires use the pre-computed macro-level
+          ``V_r(σ^0(s^1))`` as the successor value.
         - **Discounting**: uses per-transition durations from M^1.
 
         Args:
@@ -258,7 +259,7 @@ class HierarchicalRobotPolicy(RobotPolicy):
             micro_state: The current micro-state to start from.
 
         Returns:
-            A ``TabularRobotPolicy`` for the sub-problem.
+            A ``RobotPolicy`` for the sub-problem.
         """
         from empo.hierarchical._sub_problem import build_sub_problem_dag
 
@@ -286,10 +287,19 @@ class HierarchicalRobotPolicy(RobotPolicy):
             self._current_sub_policy = None
             return self._trivial_policy(micro_env)
 
-        # Assign terminal V_r from macro-level solve
+        # Collect state indices that need macro V_r:
+        # 1. States in terminal_mask (reached only via return-control)
+        # 2. Any state that is a successor on a return-control edge
+        rc_state_indices: set = set()
+        for state_trans in sub_transitions:
+            for _, _, succ_indices, rc_flags in state_trans:
+                for si, rc in zip(succ_indices, rc_flags):
+                    if rc:
+                        rc_state_indices.add(si)
+
         terminal_Vr_map: Dict[int, float] = {}
         for idx, is_term in enumerate(sub_terminal_mask):
-            if is_term:
+            if is_term or idx in rc_state_indices:
                 s = sub_states[idx]
                 coarse_s = mapper.super_state(s)
                 terminal_Vr_map[idx] = self.macro_Vr.get(
@@ -314,7 +324,9 @@ class HierarchicalRobotPolicy(RobotPolicy):
         self,
         micro_env: Any,
         states: List[Any],
-        transitions: List[List[Tuple[Tuple[int, ...], List[float], List[int]]]],
+        transitions: List[
+            List[Tuple[Tuple[int, ...], List[float], List[int], List[bool]]]
+        ],
         terminal_mask: List[bool],
         terminal_Vr_map: Dict[int, float],
     ) -> TabularRobotPolicy:
@@ -323,12 +335,18 @@ class HierarchicalRobotPolicy(RobotPolicy):
         This is a simplified, self-contained backward induction that operates
         on the sub-DAG data structures directly (no ``get_dag()`` call).
 
+        Per-edge ``rc_flags`` (return-control flags) are used to select the
+        correct successor value: macro-level ``terminal_Vr_map`` for
+        return-control edges, and the sub-DAG–computed ``Vr_values`` for
+        normal edges.
+
         Args:
             micro_env: The micro-level WorldModel.
             states: Sub-problem states in topological order.
-            transitions: Per-state transition data (feasibility-filtered).
+            transitions: Per-state transition data with per-edge rc_flags.
             terminal_mask: Boolean per state — True for terminal sub-states.
-            terminal_Vr_map: Terminal V_r overrides (from macro solve).
+            terminal_Vr_map: Terminal V_r overrides (from macro solve) for
+                states reachable via return-control edges.
 
         Returns:
             TabularRobotPolicy for the sub-problem.
@@ -382,14 +400,17 @@ class HierarchicalRobotPolicy(RobotPolicy):
                 continue
 
             # ── Build per-state transition lookup table ────────
-            # Maps encoded action_profile_index → (probs, succ_indices)
+            # Maps encoded action_profile_index →
+            #   (probs, succ_indices, rc_flags)
             # for O(1) access in inner loops below.
-            ap_index_to_trans: Dict[int, Tuple[List[float], List[int]]] = {}
-            for t_ap, t_probs, t_succs in state_trans:
+            ap_index_to_trans: Dict[
+                int, Tuple[List[float], List[int], List[bool]]
+            ] = {}
+            for t_ap, t_probs, t_succs, t_rc in state_trans:
                 t_ap_index = int(
                     sum(a * (num_actions ** i) for i, a in enumerate(t_ap))
                 )
-                ap_index_to_trans[t_ap_index] = (t_probs, t_succs)
+                ap_index_to_trans[t_ap_index] = (t_probs, t_succs, t_rc)
 
             # ── Q_r computation ────────────────────────────────
             Qr_values = np.zeros(len(robot_action_profiles))
@@ -410,10 +431,15 @@ class HierarchicalRobotPolicy(RobotPolicy):
                     )
                     entry = ap_index_to_trans.get(ap_index)
                     if entry is not None:
-                        t_probs, t_succs = entry
+                        t_probs, t_succs, t_rc = entry
                         rap_feasible[rap_idx] = True
                         probs_arr = np.array(t_probs)
-                        succ_arr = np.array(t_succs)
+                        # Per-edge V_r: use terminal_Vr for RC edges
+                        succ_vr = np.array([
+                            terminal_Vr_map.get(si, self.terminal_Vr)
+                            if rc else Vr_values[si]
+                            for si, rc in zip(t_succs, t_rc)
+                        ])
                         if rho_r > 0.0:
                             trans_list = [
                                 (float(p), states[si])
@@ -428,7 +454,7 @@ class HierarchicalRobotPolicy(RobotPolicy):
                             )
                             disc_r = np.exp(-rho_r * durations)
                             v += h_prob * float(
-                                np.dot(probs_arr, disc_r * Vr_values[succ_arr])
+                                np.dot(probs_arr, disc_r * succ_vr)
                             )
                             dw_factors = -np.expm1(-rho_r * durations) / rho_r
                             dw += h_prob * float(
@@ -436,7 +462,7 @@ class HierarchicalRobotPolicy(RobotPolicy):
                             )
                         else:
                             v += h_prob * float(
-                                np.dot(probs_arr, Vr_values[succ_arr])
+                                np.dot(probs_arr, succ_vr)
                             )
                 Qr_values[rap_idx] = v
                 if rho_r > 0.0:
@@ -495,21 +521,25 @@ class HierarchicalRobotPolicy(RobotPolicy):
                             )
                             entry = ap_index_to_trans.get(ap_index)
                             if entry is not None:
-                                t_probs, t_succs = entry
+                                t_probs, t_succs, t_rc = entry
                                 probs_arr = np.array(t_probs)
-                                succ_arr = np.array(t_succs)
                                 att = np.array(
                                     [
                                         goal.is_achieved(states[si])
                                         for si in t_succs
                                     ]
                                 )
+                                # For RC edges, V_h^e defaults to 0
+                                # (sub-problem ends, no further tracking)
                                 vhe_succ = np.array(
                                     [
-                                        Vh_values[si][agent_index].get(
-                                            goal, 0.0
+                                        0.0 if rc
+                                        else Vh_values[si][
+                                            agent_index
+                                        ].get(goal, 0.0)
+                                        for si, rc in zip(
+                                            t_succs, t_rc
                                         )
-                                        for si in t_succs
                                     ]
                                 )
                                 if rho_h > 0.0:
@@ -561,7 +591,7 @@ class HierarchicalRobotPolicy(RobotPolicy):
             micro_env, list(self.robot_agent_indices), robot_policy_dict
         )
 
-    def _trivial_policy(self, micro_env: Any) -> Any:
+    def _trivial_policy(self, micro_env: Any) -> RobotPolicy:
         """Return a policy for degenerate sub-problems.
 
         Produces a policy whose ``sample()`` always returns a safe non-moving
@@ -573,7 +603,7 @@ class HierarchicalRobotPolicy(RobotPolicy):
             still = left if left is not None else 0
         default_profile = tuple(still for _ in self.robot_agent_indices)
 
-        class _ConstantPolicy:
+        class _ConstantPolicy(RobotPolicy):
             """Policy that always returns a fixed action profile."""
 
             def sample(self, state: Any) -> Tuple[int, ...]:

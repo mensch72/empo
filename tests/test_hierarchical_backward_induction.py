@@ -278,7 +278,7 @@ class TestSubProblemDag:
         for idx, state_trans in enumerate(transitions):
             if term_mask[idx]:
                 continue
-            for ap, _, _ in state_trans:
+            for ap, _, _, _ in state_trans:
                 assert mapper.is_feasible(coarse_ap, states[idx], ap), (
                     f"Infeasible action {ap} at state index {idx}"
                 )
@@ -390,7 +390,7 @@ class TestSubProblemDag:
             micro_env, mapper, coarse_ap, micro_state, quiet=True
         )
         for src_idx, state_trans in enumerate(transitions):
-            for ap, probs, succ_indices in state_trans:
+            for ap, probs, succ_indices, _ in state_trans:
                 for si in succ_indices:
                     assert si > src_idx, (
                         f"Topological order violated: state {src_idx} has "
