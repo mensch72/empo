@@ -150,10 +150,13 @@ class HierarchicalRobotPolicy(RobotPolicy):
                 self._current_coarse_action_profile = None
                 self._current_coarse_state = None
                 self._current_sub_policy = None
-                # Return "still" if available, else action 0 (best safe default)
+                # Return a non-moving micro action: prefer "still", then "left"
+                # (a turn in place), and only action 0 as a last resort.
                 still_action = getattr(micro_env.actions, 'still', None)
                 if still_action is None:
-                    still_action = 0
+                    # No still — use "left" (turn in place) if available
+                    left_action = getattr(micro_env.actions, 'left', None)
+                    still_action = left_action if left_action is not None else 0
                 return tuple(still_action for _ in self.robot_agent_indices)
 
             self._current_coarse_action_profile = full_coarse
@@ -559,10 +562,25 @@ class HierarchicalRobotPolicy(RobotPolicy):
             micro_env, list(self.robot_agent_indices), robot_policy_dict
         )
 
-    @staticmethod
-    def _trivial_policy(micro_env: Any) -> TabularRobotPolicy:
-        """Return an empty TabularRobotPolicy (for degenerate sub-problems)."""
-        return TabularRobotPolicy(micro_env, [], {})
+    def _trivial_policy(self, micro_env: Any) -> Any:
+        """Return a policy for degenerate sub-problems.
+
+        Produces a policy whose ``sample()`` always returns a safe non-moving
+        action for each robot agent (``still`` if available, else ``left``).
+        """
+        still = getattr(micro_env.actions, 'still', None)
+        if still is None:
+            left = getattr(micro_env.actions, 'left', None)
+            still = left if left is not None else 0
+        default_profile = tuple(still for _ in self.robot_agent_indices)
+
+        class _ConstantPolicy:
+            """Policy that always returns a fixed action profile."""
+
+            def sample(self, state: Any) -> Tuple[int, ...]:
+                return default_profile
+
+        return _ConstantPolicy()
 
 
 class _UniformHumanPrior:

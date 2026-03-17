@@ -93,6 +93,16 @@ def compute_hierarchical_robot_policy(
     if gamma_r is not None and rho_r is not None:
         raise ValueError("Specify at most one of gamma_r or rho_r, not both.")
 
+    # For the macro-level solve we pass whichever form the caller specified
+    # (gamma or rho) directly to compute_robot_policy() so we avoid
+    # gamma ↔ rho conversions that can lose precision or underflow.
+    _macro_gamma_h = gamma_h  # may be None
+    _macro_gamma_r = gamma_r
+    _macro_rho_h = rho_h
+    _macro_rho_r = rho_r
+
+    # For HierarchicalRobotPolicy we still need concrete values of both
+    # gamma and rho (it uses rho in sub-problem backward induction).
     if gamma_h is not None:
         _rho_h = 0.0 if gamma_h == 1.0 else -math.log(gamma_h)
         _gamma_h = gamma_h
@@ -133,8 +143,10 @@ def compute_hierarchical_robot_policy(
         possible_goal_generator=possible_goal_generators[0],
         human_policy_prior=macro_prior,
         beta_r=beta_r,
-        gamma_h=_gamma_h,
-        gamma_r=_gamma_r,
+        gamma_h=_macro_gamma_h,
+        gamma_r=_macro_gamma_r,
+        rho_h=_macro_rho_h,
+        rho_r=_macro_rho_r,
         zeta=zeta,
         xi=xi,
         eta=eta,

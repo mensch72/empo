@@ -444,19 +444,35 @@ class TestProfileDistribution:
         goals = list(gen.generate(state, human_idx))
         if len(goals) < 2:
             pytest.skip("Need ≥2 goals to compare")
-        goal, _ = goals[0]
 
+        # Verify that at least two goals produce meaningfully different
+        # conditioned distributions; otherwise the marginal can match
+        # the conditioned one (e.g., only one available action).
+        dists = []
+        for g, _ in goals:
+            d = pol.profile_distribution_with_fixed_goal(state, human_idx, g)
+            dists.append({tuple(p): prob for prob, p in d})
+        goals_differ = any(
+            any(
+                abs(dists[0].get(k, 0) - dists[j].get(k, 0)) > 1e-9
+                for k in set(dists[0]) | set(dists[j])
+            )
+            for j in range(1, len(dists))
+        )
+        if not goals_differ:
+            pytest.skip("All goals produce identical conditioned distributions")
+
+        goal, _ = goals[0]
         marginal = pol.profile_distribution(state)
-        conditioned = pol.profile_distribution_with_fixed_goal(state, human_idx, goal)
+        conditioned = dists[0]
 
         # Convert to dicts for comparison
         marginal_dict = {tuple(p): prob for prob, p in marginal}
-        conditioned_dict = {tuple(p): prob for prob, p in conditioned}
 
         # They should have different probability distributions
         # (unless beta=0, which makes everything uniform)
         any_differ = any(
-            abs(marginal_dict.get(k, 0) - conditioned_dict.get(k, 0)) > 1e-9
-            for k in set(marginal_dict) | set(conditioned_dict)
+            abs(marginal_dict.get(k, 0) - conditioned.get(k, 0)) > 1e-9
+            for k in set(marginal_dict) | set(conditioned)
         )
         assert any_differ, "Conditioned and marginal should differ for non-zero beta"
