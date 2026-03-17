@@ -57,30 +57,34 @@ def _make_policy(hierarchy: TwoLevelMultigrid, beta_r=5.0):
     )
 
 
+# ── Module-scoped fixtures (expensive solve done once) ──────────────
+
+@pytest.fixture(scope="module")
+def shared_hierarchy():
+    return _build_hierarchy()
+
+
+@pytest.fixture(scope="module")
+def shared_policy(shared_hierarchy):
+    return _make_policy(shared_hierarchy)
+
+
 # ── TestComputeHierarchicalRobotPolicy ───────────────────────────────
 
 class TestComputeHierarchicalRobotPolicy:
     """Tests for the top-level ``compute_hierarchical_robot_policy()`` function."""
 
-    def test_returns_hierarchical_policy(self):
-        hierarchy = _build_hierarchy()
-        policy = _make_policy(hierarchy)
-        assert isinstance(policy, HierarchicalRobotPolicy)
+    def test_returns_hierarchical_policy(self, shared_policy):
+        assert isinstance(shared_policy, HierarchicalRobotPolicy)
 
-    def test_macro_policy_is_tabular(self):
-        hierarchy = _build_hierarchy()
-        policy = _make_policy(hierarchy)
-        assert isinstance(policy.macro_policy, TabularRobotPolicy)
+    def test_macro_policy_is_tabular(self, shared_policy):
+        assert isinstance(shared_policy.macro_policy, TabularRobotPolicy)
 
-    def test_macro_Vr_has_entries(self):
-        hierarchy = _build_hierarchy()
-        policy = _make_policy(hierarchy)
-        assert len(policy.macro_Vr) > 0
+    def test_macro_Vr_has_entries(self, shared_policy):
+        assert len(shared_policy.macro_Vr) > 0
 
-    def test_macro_Vr_values_are_negative(self):
-        hierarchy = _build_hierarchy()
-        policy = _make_policy(hierarchy)
-        for vr in policy.macro_Vr.values():
+    def test_macro_Vr_values_are_negative(self, shared_policy):
+        for vr in shared_policy.macro_Vr.values():
             assert vr < 0, f"V_r should be strictly negative, got {vr}"
 
     def test_rejects_zero_goal_generators(self):
@@ -94,10 +98,8 @@ class TestComputeHierarchicalRobotPolicy:
                 quiet=True,
             )
 
-    def test_starts_at_macro_level(self):
-        hierarchy = _build_hierarchy()
-        policy = _make_policy(hierarchy)
-        assert policy.at_macro_level
+    def test_starts_at_macro_level(self, shared_policy):
+        assert shared_policy.at_macro_level
 
 
 # ── TestHierarchicalRobotPolicySample ────────────────────────────────
@@ -106,10 +108,9 @@ class TestHierarchicalRobotPolicySample:
     """Tests for ``HierarchicalRobotPolicy.sample()`` and control transfer."""
 
     @pytest.fixture
-    def policy_and_env(self):
-        hierarchy = _build_hierarchy()
-        policy = _make_policy(hierarchy)
-        return policy, hierarchy
+    def policy_and_env(self, shared_hierarchy, shared_policy):
+        shared_policy.reset(shared_hierarchy)
+        return shared_policy, shared_hierarchy
 
     def test_sample_returns_tuple(self, policy_and_env):
         policy, hierarchy = policy_and_env
@@ -403,10 +404,9 @@ class TestObserveTransition:
     """Tests for control-transfer via ``observe_transition()``."""
 
     @pytest.fixture
-    def policy_and_env(self):
-        hierarchy = _build_hierarchy()
-        policy = _make_policy(hierarchy)
-        return policy, hierarchy
+    def policy_and_env(self, shared_hierarchy, shared_policy):
+        shared_policy.reset(shared_hierarchy)
+        return shared_policy, shared_hierarchy
 
     def test_observe_noop_at_macro_level(self, policy_and_env):
         """observe_transition is a no-op when already at macro level."""

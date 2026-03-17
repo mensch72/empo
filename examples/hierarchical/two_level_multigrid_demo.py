@@ -154,7 +154,6 @@ def run_rollout(
     micro_env: Any,
     hierarchy: Any,
     h_policy: Any,
-    macro_gen: Any,
     *,
     max_steps: int = 30,
     record_video: bool = True,
@@ -412,7 +411,7 @@ def main():
         micro_env.reset()
 
         steps = run_rollout(
-            micro_env, hierarchy, h_policy, macro_gen,
+            micro_env, hierarchy, h_policy,
             max_steps=max_steps,
             record_video=record_video,
             verbose=True,

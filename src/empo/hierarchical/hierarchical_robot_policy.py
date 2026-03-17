@@ -264,7 +264,7 @@ class HierarchicalRobotPolicy(RobotPolicy):
         micro_env = self.hierarchical_model.finest()
 
         # Build restricted sub-problem DAG
-        sub_states, sub_state_to_idx, sub_transitions, sub_terminal_mask = (
+        sub_states, _, sub_transitions, sub_terminal_mask = (
             build_sub_problem_dag(
                 micro_env=micro_env,
                 mapper=mapper,
