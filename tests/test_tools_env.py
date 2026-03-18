@@ -270,22 +270,26 @@ class TestPerceivedState:
 
         assert hasattr(WM, "perceived_state")
 
-        # Verify default returns state as-is on a concrete subclass
-        env = ToolsWorldModel(
-            n_agents=2,
-            n_tools=2,
-            max_steps=3,
-            p_failure=0.0,
-            seed=0,
-            can_reach=np.ones((2, 2), dtype=bool),
-            can_grab=np.ones((2, 2), dtype=bool),
-            can_hear=np.ones((2, 2), dtype=bool),
-        )
-        env.reset(seed=0)
+        # Use a minimal concrete subclass that does NOT override perceived_state
+        class _MinimalWorldModel(WM):
+            def __init__(self):
+                super().__init__()
+                self._state = (1, (0,))
+
+            def get_state(self):
+                return self._state
+
+            def set_state(self, state):
+                self._state = state
+
+            def transition_probabilities(self, state, actions):
+                return [(1.0, state)]
+
+        env = _MinimalWorldModel()
         s = env.get_state()
-        # When all can_hear entries are True, perceived_state equals true state
+        # Base default returns the true state unchanged for any agent index
         assert env.perceived_state(s, 0) == s
-        assert env.perceived_state(s, 1) == s
+        assert env.perceived_state(s, 99) == s
 
     def test_tools_masks_unheard_requests(self):
         """Requests from agents that cannot be heard are masked to 0."""

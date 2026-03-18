@@ -110,8 +110,11 @@ def action_name(action: int, n_tools: int, n_agents: int) -> str:
 class ToolsWorldModel(WorldModel):
     """WorldModel for tool exchange in a shared workshop.
 
-    Inherits the default ``step()`` from :class:`WorldModel`, which calls
-    ``transition_probabilities()`` and samples from it — no override needed.
+    Overrides ``step()`` and ``reset()`` to follow the ``Discrete(1)``
+    observation-space contract (returns dummy observation ``0``; use
+    ``get_state()`` for the full state tuple).  Transition sampling in
+    ``step()`` uses the environment RNG (``self._rng``) so that
+    ``reset(seed=...)`` makes rollouts reproducible.
     """
 
     metadata = {"render_modes": ["rgb_array"]}
@@ -296,7 +299,7 @@ class ToolsWorldModel(WorldModel):
             return 0, 0.0, True, False, {}
         probabilities = [prob for prob, _ in transitions]
         successor_states = [state for _, state in transitions]
-        chosen_idx = np.random.choice(len(transitions), p=probabilities)
+        chosen_idx = self._rng.choice(len(transitions), p=probabilities)
         self.set_state(successor_states[chosen_idx])
         terminated = self.is_terminal(successor_states[chosen_idx])
         return 0, 0.0, terminated, False, {}
@@ -375,6 +378,10 @@ class ToolsWorldModel(WorldModel):
 
         if action_type == "take":
             k = param
+            # If agent already holds this tool, treat as no-op to avoid
+            # violating the invariant (tool in exactly one place).
+            if hd[agent][k]:
+                return True
             # find source
             source, stype = None, None
             for j in range(n_agents):
@@ -442,6 +449,12 @@ class ToolsWorldModel(WorldModel):
 
         n = self.n_agents
         m = self.n_tools
+
+        if len(actions) != n:
+            raise ValueError(
+                f"Expected {n} actions (one per agent), got {len(actions)}"
+            )
+
         results: Dict[Any, float] = {}
 
         for fail_idx in range(n + 1):
@@ -496,9 +509,6 @@ class ToolsWorldModel(WorldModel):
         if not results:
             return None
         return [(p, s) for s, p in results.items()]
-
-    # step() is inherited from WorldModel — it calls transition_probabilities
-    # and samples from it, which is the desired behaviour.
 
     # ----- reconstruction helpers (for parallel DAG) -----
     def _get_construction_kwargs(self) -> dict:
