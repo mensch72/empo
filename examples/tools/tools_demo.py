@@ -101,7 +101,8 @@ def main():
         seed=args.seed,
         robot_agent_indices=[0],
     )
-    state, _ = env.reset(seed=args.seed)
+    env.reset(seed=args.seed)
+    state = env.get_state()
     np.random.seed(args.seed)
 
     print(

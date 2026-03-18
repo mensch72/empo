@@ -38,6 +38,7 @@ from __future__ import annotations
 
 from collections import deque
 from typing import Any, Dict, Hashable, Iterator, List, Optional, Tuple
+import random as _stdlib_random
 
 import gymnasium as gym
 import numpy as np
@@ -84,7 +85,9 @@ def decode_action(action: int, n_tools: int, n_agents: int):
         return "give", action - n_tools - 1
     if n_tools + n_agents + 1 <= action <= 2 * n_tools + n_agents:
         return "request", action - n_tools - n_agents - 1
-    return "pass", None  # treat invalid as pass
+    raise ValueError(
+        f"Invalid action index {action} for n_tools={n_tools}, n_agents={n_agents}"
+    )
 
 
 def action_name(action: int, n_tools: int, n_agents: int) -> str:
@@ -111,7 +114,7 @@ class ToolsWorldModel(WorldModel):
     ``transition_probabilities()`` and samples from it — no override needed.
     """
 
-    metadata = {"render_modes": ["rgb_array", "human"]}
+    metadata = {"render_modes": ["rgb_array"]}
 
     # ----- construction -----
     def __init__(
@@ -174,8 +177,9 @@ class ToolsWorldModel(WorldModel):
         # Action space: pass + take(m) + give(n) + request(m)
         self.n_actions = 1 + 2 * n_tools + n_agents
         self.action_space = gym.spaces.Discrete(self.n_actions)
-        # observation_space is a placeholder; planning code uses get_state()
-        self.observation_space = gym.spaces.MultiBinary(n_agents * n_tools * 3 + 1)
+        # Planning code uses get_state() for the full state tuple.
+        # observation_space is a dummy placeholder (same convention as MacroGridEnv).
+        self.observation_space = gym.spaces.Discrete(1)
 
         # Required by WorldModel / DAG builder
         self.agents = list(range(n_agents))
@@ -264,13 +268,38 @@ class ToolsWorldModel(WorldModel):
     def robot_agent_indices(self) -> List[int]:
         return self._robot_indices
 
-    def reset(self, seed=None, options=None):
+    def reset(self, *, seed=None, options=None):
+        """Reset the environment.
+
+        Uses Gymnasium keyword-only signature for compatibility with
+        wrappers.  ``seed`` re-seeds the internal RNG; ``options`` is
+        accepted but unused.
+        """
         if seed is not None:
             self._rng = np.random.RandomState(seed)
         self._remaining = self.max_steps
         self._init_tools()
         self._dag_cache = None
-        return self.get_state(), {}
+        return 0, {}
+
+    def step(self, actions):
+        """Apply actions and return ``(obs, reward, done, trunc, info)``.
+
+        The observation is always ``0`` (matching ``observation_space =
+        Discrete(1)``).  Use :meth:`get_state` for the full state tuple.
+        """
+        if not isinstance(actions, (list, tuple)):
+            actions = [actions]
+        current_state = self.get_state()
+        transitions = self.transition_probabilities(current_state, list(actions))
+        if transitions is None:
+            return 0, 0.0, True, False, {}
+        probabilities = [prob for prob, _ in transitions]
+        successor_states = [state for _, state in transitions]
+        chosen_idx = np.random.choice(len(transitions), p=probabilities)
+        self.set_state(successor_states[chosen_idx])
+        terminated = self.is_terminal(successor_states[chosen_idx])
+        return 0, 0.0, terminated, False, {}
 
     def get_state(self) -> Hashable:
         return (
@@ -430,6 +459,12 @@ class ToolsWorldModel(WorldModel):
             hd = [list(row) for row in state[2]]
             rq = [list(row) for row in state[3]]
 
+            # Apply actions sequentially in agent-index order.  Each
+            # action is applied against the *evolving* state, so a
+            # higher-index agent whose action conflicts with an earlier
+            # agent's successful action will naturally fail (e.g., tool
+            # already moved).  This is the intended priority mechanism:
+            # lower-index agents have implicit priority.
             for i in range(n):
                 if i == failed:
                     continue
@@ -491,9 +526,12 @@ class ToolsWorldModel(WorldModel):
             goals: Optional list of PossibleGoal objects to visualise.
 
         Returns:
-            numpy RGB array (H, W, 3) when render_mode == "rgb_array", else None.
+            numpy RGB array (H, W, 3) when ``render_mode == "rgb_array"``,
+            else ``None``.
         """
-        return render_tools_state(self, goals=goals)
+        if self.render_mode == "rgb_array":
+            return render_tools_state(self, goals=goals)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -593,7 +631,6 @@ class ToolsGoalSampler(PossibleGoalSampler):
     def __init__(self, env: ToolsWorldModel, indexed: bool = True):
         super().__init__(env, indexed=indexed)
         self._env = env
-        self._rng = np.random.RandomState()
         # pre-build per-agent goal lists
         self._agent_goals: Dict[int, List[PossibleGoal]] = {}
         idx = 0
@@ -608,7 +645,7 @@ class ToolsGoalSampler(PossibleGoalSampler):
 
     def sample(self, state, human_agent_index: int) -> Tuple[PossibleGoal, float]:
         gs = self._agent_goals[human_agent_index]
-        g = gs[self._rng.randint(len(gs))]
+        g = _stdlib_random.choice(gs)
         return g, 1.0
 
 

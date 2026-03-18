@@ -102,7 +102,8 @@ class TestConstruction:
 
 class TestState:
     def test_reset(self, small_env):
-        state, info = small_env.reset(seed=42)
+        small_env.reset(seed=42)
+        state = small_env.get_state()
         assert state[0] == 5  # remaining steps
 
     def test_get_set_roundtrip(self, small_env):
@@ -228,19 +229,21 @@ class TestTransitions:
 
 class TestStep:
     def test_step_inherits_from_worldmodel(self, small_env):
-        """step() should be the inherited WorldModel.step, not overridden."""
-        assert type(small_env).step is WorldModel.step
+        """step() is overridden to return dummy observations (Discrete(1))."""
+        # ToolsWorldModel overrides step() for Gymnasium contract consistency
+        assert type(small_env).step is not WorldModel.step
 
     def test_step_produces_valid_state(self, small_env):
         small_env.reset(seed=42)
-        obs, reward, terminated, truncated, info = small_env.step([0, 0])
-        assert obs[0] == small_env.max_steps - 1
+        _obs, reward, terminated, truncated, info = small_env.step([0, 0])
+        state = small_env.get_state()
+        assert state[0] == small_env.max_steps - 1
         assert not terminated
 
     def test_step_reaches_terminal(self, small_env):
         small_env.reset(seed=42)
         for _ in range(small_env.max_steps):
-            obs, reward, terminated, truncated, info = small_env.step([0, 0])
+            _obs, reward, terminated, truncated, info = small_env.step([0, 0])
         assert terminated
 
     def test_step_consistent_with_transition_probs(self, small_env):
@@ -252,8 +255,9 @@ class TestStep:
         possible_states = {s for _, s in trans}
 
         small_env.set_state(state)
-        obs, _, _, _, _ = small_env.step(actions)
-        assert obs in possible_states
+        small_env.step(actions)
+        new_state = small_env.get_state()
+        assert new_state in possible_states
 
 
 # ---- perceived state ----
@@ -456,8 +460,22 @@ class TestHeuristicPolicy:
 
 class TestRendering:
     def test_render_produces_array(self, small_env):
+        # render() returns None when render_mode is not "rgb_array"
         small_env.reset(seed=42)
-        img = small_env.render()
+        assert small_env.render() is None
+
+    def test_render_rgb_array(self):
+        env = ToolsWorldModel(
+            n_agents=2,
+            n_tools=2,
+            max_steps=5,
+            p_failure=0.0,
+            seed=42,
+            robot_agent_indices=[0],
+            render_mode="rgb_array",
+        )
+        env.reset(seed=42)
+        img = env.render()
         assert img is not None
         assert img.ndim == 3
         assert img.shape[2] == 3  # RGB
