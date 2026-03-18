@@ -644,6 +644,11 @@ class ToolsGoalSampler(PossibleGoalSampler):
             self._agent_goals[i] = gs
 
     def sample(self, state, human_agent_index: int) -> Tuple[PossibleGoal, float]:
+        """Sample a goal uniformly at random for *human_agent_index*.
+
+        Returns ``(goal, 1.0)`` — the weight is 1.0 because the generator
+        already accounts for the uniform distribution (weight = 1/n_goals).
+        """
         gs = self._agent_goals[human_agent_index]
         g = _stdlib_random.choice(gs)
         return g, 1.0
