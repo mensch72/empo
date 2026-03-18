@@ -660,3 +660,61 @@ class TestActionEffects:
         # and it's no longer on any workbench, so agent 1's take fails.
         assert holds[0][0] == 1
         assert holds[1][0] == 0
+
+    def test_conflict_take_grab_blocked_same_timestep(self):
+        """Even with can_grab[1,0]=True, agent 1 cannot grab a tool that
+        agent 0 just claimed via 'take' in the same timestep."""
+        env = ToolsWorldModel(
+            n_agents=2,
+            n_tools=1,
+            max_steps=5,
+            p_failure=0.0,
+            seed=0,
+            can_reach=np.ones((2, 2), dtype=bool),
+            can_grab=np.ones((2, 2), dtype=bool),  # full grab access
+            can_hear=np.ones((2, 2), dtype=bool),
+        )
+        env.reset(seed=0)
+        env._workbench[:] = False
+        env._holds[:] = False
+        env._workbench[0, 0] = True  # tool on agent 0's workbench
+
+        state = env.get_state()
+        # Both try to take tool 0
+        trans = env.transition_probabilities(state, [_action_take(0), _action_take(0)])
+        assert trans is not None
+        _, ns = trans[0]
+        _, wb, holds, _ = ns
+        # Agent 0 claims tool 0; agent 1's take is blocked by the
+        # claimed_tools lock even though can_grab[1,0] is True.
+        assert holds[0][0] == 1
+        assert holds[1][0] == 0
+
+    def test_shape_validation_rejects_bad_can_hear(self):
+        """Passing a wrongly-shaped can_hear raises ValueError."""
+        with pytest.raises(ValueError, match="can_hear shape"):
+            ToolsWorldModel(
+                n_agents=2,
+                n_tools=1,
+                max_steps=3,
+                p_failure=0.0,
+                seed=0,
+                can_hear=np.ones((3, 3), dtype=bool),
+            )
+
+    def test_perceived_state_invalid_agent_index(self):
+        """perceived_state raises ValueError for out-of-range agent_index."""
+        env = ToolsWorldModel(
+            n_agents=2,
+            n_tools=1,
+            max_steps=3,
+            p_failure=0.0,
+            seed=0,
+            can_hear=np.ones((2, 2), dtype=bool),
+            can_reach=np.ones((2, 2), dtype=bool),
+            can_grab=np.ones((2, 2), dtype=bool),
+        )
+        env.reset(seed=0)
+        s = env.get_state()
+        with pytest.raises(ValueError, match="agent_index"):
+            env.perceived_state(s, 5)

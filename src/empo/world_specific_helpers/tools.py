@@ -203,17 +203,28 @@ class ToolsWorldModel(WorldModel):
         # --- constant state (graphs) ---
         if agent_positions is not None:
             self.agent_positions = np.array(agent_positions, dtype=np.float64)
+            if self.agent_positions.shape != (n_agents, 2):
+                raise ValueError(
+                    f"agent_positions shape {self.agent_positions.shape} "
+                    f"!= expected ({n_agents}, 2)"
+                )
         else:
             self.agent_positions = self._rng.rand(n_agents, 2)
             # Place robot(s) at centre
             for ri in self._robot_indices:
                 self.agent_positions[ri] = [0.5, 0.5]
 
+        expected_shape = (n_agents, n_agents)
+
         self.can_hear = (
             np.array(can_hear, dtype=bool)
             if can_hear is not None
             else self._waxman_graph(waxman_hear_alpha, waxman_hear_beta)
         )
+        if self.can_hear.shape != expected_shape:
+            raise ValueError(
+                f"can_hear shape {self.can_hear.shape} != expected {expected_shape}"
+            )
         np.fill_diagonal(self.can_hear, True)
 
         self.can_reach = (
@@ -221,6 +232,10 @@ class ToolsWorldModel(WorldModel):
             if can_reach is not None
             else self._waxman_graph(waxman_reach_alpha, waxman_reach_beta)
         )
+        if self.can_reach.shape != expected_shape:
+            raise ValueError(
+                f"can_reach shape {self.can_reach.shape} != expected {expected_shape}"
+            )
         np.fill_diagonal(self.can_reach, True)
 
         if can_grab is not None:
@@ -229,6 +244,10 @@ class ToolsWorldModel(WorldModel):
             self.can_grab = self.can_reach.copy()
             mask = self._rng.rand(n_agents, n_agents) >= grab_prob
             self.can_grab[mask] = False
+        if self.can_grab.shape != expected_shape:
+            raise ValueError(
+                f"can_grab shape {self.can_grab.shape} != expected {expected_shape}"
+            )
         np.fill_diagonal(self.can_grab, True)
 
         # --- mutable state ---
@@ -320,6 +339,10 @@ class ToolsWorldModel(WorldModel):
 
     def perceived_state(self, state, agent_index: int):
         """Perceived state masks ``has_requested`` entries the agent cannot hear."""
+        if not 0 <= agent_index < self.n_agents:
+            raise ValueError(
+                f"agent_index {agent_index} out of range [0, {self.n_agents})"
+            )
         remaining, workbench, holds, requested = state
         m = self.n_tools
         new_req: list = []
@@ -478,6 +501,13 @@ class ToolsWorldModel(WorldModel):
             # agent's successful action will naturally fail (e.g., tool
             # already moved).  This is the intended priority mechanism:
             # lower-index agents have implicit priority.
+            #
+            # ``claimed_tools`` tracks tools acquired via "take" this
+            # timestep.  A later agent cannot grab a tool from a hand
+            # that was just filled — this enforces strict priority so
+            # that a higher-index take cannot re-take a tool that a
+            # lower-index agent already claimed.
+            claimed_tools: set = set()
             for i in range(n):
                 if i == failed:
                     continue
@@ -486,9 +516,23 @@ class ToolsWorldModel(WorldModel):
                 if atype == "pass":
                     pass  # always feasible, no effect
                 elif atype == "take":
-                    self._apply(
-                        i, atype, param, m, n, self.can_reach, self.can_grab, wb, hd, rq
-                    )
+                    if param in claimed_tools:
+                        pass  # tool already claimed this timestep
+                    else:
+                        ok = self._apply(
+                            i,
+                            atype,
+                            param,
+                            m,
+                            n,
+                            self.can_reach,
+                            self.can_grab,
+                            wb,
+                            hd,
+                            rq,
+                        )
+                        if ok:
+                            claimed_tools.add(param)
                 elif atype == "give":
                     self._apply(
                         i, atype, param, m, n, self.can_reach, self.can_grab, wb, hd, rq
