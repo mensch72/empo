@@ -341,7 +341,8 @@ class ToolsWorldModel(WorldModel):
         """Perceived state masks ``has_requested`` entries the agent cannot hear."""
         if not 0 <= agent_index < self.n_agents:
             raise ValueError(
-                f"agent_index {agent_index} out of range [0, {self.n_agents})"
+                f"agent_index {agent_index} must be between 0 and "
+                f"{self.n_agents - 1} (inclusive)"
             )
         remaining, workbench, holds, requested = state
         m = self.n_tools
