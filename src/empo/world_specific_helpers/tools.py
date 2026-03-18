@@ -685,7 +685,6 @@ class ToolsGoalSampler(PossibleGoalSampler):
 
     def __init__(self, env: ToolsWorldModel, indexed: bool = True):
         super().__init__(env, indexed=indexed)
-        self._env = env
         # pre-build per-agent goal lists
         self._agent_goals: Dict[int, List[PossibleGoal]] = {}
         idx = 0
@@ -725,8 +724,9 @@ class ToolsHeuristicPolicy(HumanPolicyPrior):
         beta: float = 5.0,
     ):
         super().__init__(env, env.human_agent_indices)
-        self._env = env
         self._goal_gen = possible_goal_generator
+        if not np.isfinite(beta) or beta < 0:
+            raise ValueError(f"beta must be finite and non-negative, got {beta}")
         self._beta = beta
 
     # ------ shortest path on can_reach ------
@@ -764,7 +764,7 @@ class ToolsHeuristicPolicy(HumanPolicyPrior):
         self, state, agent_idx: int, goal: PossibleGoal
     ) -> np.ndarray:
         """Return softmax action distribution for *agent_idx* pursuing *goal*."""
-        env = self._env
+        env = self.world_model
         n, m = env.n_agents, env.n_tools
         num_actions = env.n_actions
         _remaining, wb, holds, _requested = state
@@ -848,7 +848,7 @@ class ToolsHeuristicPolicy(HumanPolicyPrior):
         m: int,
     ):
         """Set logit for giving the currently-held tool toward a requester."""
-        env = self._env
+        env = self.world_model
         # find held tool
         held = None
         for k2 in range(m):
@@ -861,7 +861,9 @@ class ToolsHeuristicPolicy(HumanPolicyPrior):
         # find agents who requested held tool (smallest-index first)
         requesters = [j for j in range(n) if perceived_requested[j][held]]
         if requesters:
-            path = self._bfs_shortest(env.can_reach, agent_idx, requesters)
+            # pick smallest-index requester, then find shortest path to them
+            target = min(requesters)
+            path = self._bfs_shortest(env.can_reach, agent_idx, [target])
             if path and len(path) >= 2:
                 next_hop = path[1]
                 logits[_action_give(next_hop, m)] = 4.0
@@ -875,7 +877,7 @@ class ToolsHeuristicPolicy(HumanPolicyPrior):
             return self._action_distribution(state, human_agent_index, possible_goal)
 
         # marginalise over goals
-        dist = np.zeros(self._env.n_actions, dtype=np.float64)
+        dist = np.zeros(self.world_model.n_actions, dtype=np.float64)
         count = 0
         for goal, weight in self._goal_gen.generate(state, human_agent_index):
             dist += weight * self._action_distribution(state, human_agent_index, goal)

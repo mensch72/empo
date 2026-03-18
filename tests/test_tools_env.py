@@ -6,7 +6,7 @@ Validates:
 2. State get/set roundtrip
 3. Action encoding/decoding
 4. Transition probabilities (sum to 1, correct successor count)
-5. step() uses transition_probabilities (inherited from WorldModel)
+5. step() overrides WorldModel.step() to return dummy obs (Discrete(1) contract)
 6. perceived_state masks has_requested correctly
 7. Goal classes (HoldGoal, WorkbenchGoal)
 8. Goal generator and sampler
