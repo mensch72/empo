@@ -301,6 +301,27 @@ class WorldModel(gym.Env):
             "This is required for Phase 2 training."
         )
     
+    def perceived_state(self, state: Any, agent_index: int) -> Any:
+        """
+        Return the state as perceived by a specific agent.
+        
+        In partially observable settings, an agent may not have full knowledge
+        of the true state. This method returns the agent's perceived version
+        of the state, which may mask or modify certain components.
+        
+        The default implementation returns the true state unchanged (full
+        observability). Subclasses should override this for environments
+        where agents have limited perception.
+        
+        Args:
+            state: The true state as returned by get_state().
+            agent_index: Index of the perceiving agent.
+        
+        Returns:
+            The perceived state (hashable, same format as get_state()).
+        """
+        return state
+    
     def is_terminal(self, state: Optional[Any] = None) -> bool:
         """
         Check if a state is terminal (no valid transitions exist).

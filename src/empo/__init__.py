@@ -53,6 +53,17 @@ try:
 except ImportError:
     _HAS_TRANSPORT = False
 
+# Tools environment (always available — no external vendor dependency)
+from empo.world_specific_helpers.tools import (
+    ToolsWorldModel,
+    HoldGoal,
+    WorkbenchGoal,
+    ToolsGoalGenerator,
+    ToolsGoalSampler,
+    ToolsHeuristicPolicy,
+    create_tools_env,
+)
+
 __version__ = "0.1.0"
 
 __all__ = [
@@ -76,6 +87,14 @@ __all__ = [
     # Memory Monitoring
     "MemoryMonitor",
     "check_memory",
+    # Tools Environment
+    "ToolsWorldModel",
+    "HoldGoal",
+    "WorkbenchGoal",
+    "ToolsGoalGenerator",
+    "ToolsGoalSampler",
+    "ToolsHeuristicPolicy",
+    "create_tools_env",
 ]
 
 # Add transport exports if available
