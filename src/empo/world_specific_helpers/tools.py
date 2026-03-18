@@ -228,7 +228,7 @@ class ToolsWorldModel(WorldModel):
         return g
 
     def _init_tools(self):
-        """Place each tool on a random workbench; clear holds & requests."""
+        """Clear all mutable state and place each tool on a random workbench."""
         self._workbench[:] = False
         self._holds[:] = False
         self._requested[:] = False
@@ -733,7 +733,7 @@ class ToolsHeuristicPolicy(HumanPolicyPrior):
         # no requester or unreachable → give to a random reachable neighbour
         neighbours = [j for j in range(n) if j != agent_idx and env.can_reach[agent_idx, j]]
         if neighbours:
-            j = neighbours[int(np.random.randint(len(neighbours)))]
+            j = neighbours[np.random.randint(len(neighbours))]
             logits[_action_give(j, m)] = 1.0
 
     # ------ HumanPolicyPrior interface ------

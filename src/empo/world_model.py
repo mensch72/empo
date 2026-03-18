@@ -311,7 +311,8 @@ class WorldModel(gym.Env):
         
         The default implementation returns the true state unchanged (full
         observability). Subclasses should override this for environments
-        where agents have limited perception.
+        where agents have limited perception.  The returned value must be
+        hashable and follow the same format as ``get_state()``.
         
         Args:
             state: The true state as returned by get_state().

@@ -164,7 +164,8 @@ def main():
         actions = []
         for i in range(env.n_agents):
             if i in env.robot_agent_indices:
-                # Robot: random action
+                # Robot: random action (may be infeasible — infeasible actions
+                # are treated as "pass" by transition_probabilities)
                 a = np.random.randint(env.n_actions)
             else:
                 # Human: heuristic conditioned on assigned goal
