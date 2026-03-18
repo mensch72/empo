@@ -145,24 +145,37 @@ class ToolsWorldModel(WorldModel):
         self.render_mode = render_mode
 
         # Agent roles
-        self._robot_indices: List[int] = robot_agent_indices if robot_agent_indices is not None else [0]
+        self._robot_indices: List[int] = (
+            robot_agent_indices if robot_agent_indices is not None else [0]
+        )
         self._human_indices: List[int] = (
             human_agent_indices_list
             if human_agent_indices_list is not None
             else [i for i in range(n_agents) if i not in self._robot_indices]
         )
 
-        # Failure probability distribution over agents
+        # Validate and normalise failure probability
+        if not 0.0 <= p_failure <= 1.0:
+            raise ValueError(f"p_failure must be in [0, 1], got {p_failure}")
+
         if p_fail is not None:
-            self.p_fail = np.asarray(p_fail, dtype=np.float64)
-            self.p_fail /= self.p_fail.sum()
+            p_fail = np.asarray(p_fail, dtype=np.float64)
+            if len(p_fail) != n_agents:
+                raise ValueError(f"p_fail length {len(p_fail)} != n_agents {n_agents}")
+            if (p_fail < 0).any():
+                raise ValueError("p_fail entries must be non-negative")
+            total = p_fail.sum()
+            if total <= 0:
+                raise ValueError("p_fail must have positive sum")
+            self.p_fail = p_fail / total
         else:
             self.p_fail = np.ones(n_agents, dtype=np.float64) / n_agents
 
         # Action space: pass + take(m) + give(n) + request(m)
         self.n_actions = 1 + 2 * n_tools + n_agents
         self.action_space = gym.spaces.Discrete(self.n_actions)
-        self.observation_space = gym.spaces.Discrete(1)  # placeholder
+        # observation_space is a placeholder; planning code uses get_state()
+        self.observation_space = gym.spaces.MultiBinary(n_agents * n_tools * 3 + 1)
 
         # Required by WorldModel / DAG builder
         self.agents = list(range(n_agents))
@@ -190,20 +203,26 @@ class ToolsWorldModel(WorldModel):
                 self.agent_positions[ri] = [0.5, 0.5]
 
         self.can_hear = (
-            np.array(can_hear, dtype=bool) if can_hear is not None
+            np.array(can_hear, dtype=bool)
+            if can_hear is not None
             else self._waxman_graph(waxman_hear_alpha, waxman_hear_beta)
         )
+        np.fill_diagonal(self.can_hear, True)
+
         self.can_reach = (
-            np.array(can_reach, dtype=bool) if can_reach is not None
+            np.array(can_reach, dtype=bool)
+            if can_reach is not None
             else self._waxman_graph(waxman_reach_alpha, waxman_reach_beta)
         )
+        np.fill_diagonal(self.can_reach, True)
+
         if can_grab is not None:
             self.can_grab = np.array(can_grab, dtype=bool)
         else:
             self.can_grab = self.can_reach.copy()
             mask = self._rng.rand(n_agents, n_agents) >= grab_prob
             self.can_grab[mask] = False
-            np.fill_diagonal(self.can_grab, True)
+        np.fill_diagonal(self.can_grab, True)
 
         # --- mutable state ---
         self._remaining: int = max_steps
@@ -419,11 +438,17 @@ class ToolsWorldModel(WorldModel):
                 if atype == "pass":
                     pass  # always feasible, no effect
                 elif atype == "take":
-                    self._apply(i, atype, param, m, n, self.can_reach, self.can_grab, wb, hd, rq)
+                    self._apply(
+                        i, atype, param, m, n, self.can_reach, self.can_grab, wb, hd, rq
+                    )
                 elif atype == "give":
-                    self._apply(i, atype, param, m, n, self.can_reach, self.can_grab, wb, hd, rq)
+                    self._apply(
+                        i, atype, param, m, n, self.can_reach, self.can_grab, wb, hd, rq
+                    )
                 elif atype == "request":
-                    self._apply(i, atype, param, m, n, self.can_reach, self.can_grab, wb, hd, rq)
+                    self._apply(
+                        i, atype, param, m, n, self.can_reach, self.can_grab, wb, hd, rq
+                    )
 
             new_state = (
                 remaining - 1,
@@ -481,7 +506,7 @@ class HoldGoal(PossibleGoal):
         super().__init__(env, index=index)
         self.agent_idx = agent_idx
         self.tool_idx = tool_idx
-        self._hash = hash(("HoldGoal", agent_idx, tool_idx))
+        self._hash = hash((0, agent_idx, tool_idx))
         super()._freeze()
 
     def is_achieved(self, state) -> int:
@@ -509,7 +534,7 @@ class WorkbenchGoal(PossibleGoal):
         super().__init__(env, index=index)
         self.agent_idx = agent_idx
         self.tool_idx = tool_idx
-        self._hash = hash(("WorkbenchGoal", agent_idx, tool_idx))
+        self._hash = hash((1, agent_idx, tool_idx))
         super()._freeze()
 
     def is_achieved(self, state) -> int:
@@ -538,21 +563,28 @@ class ToolsGoalGenerator(PossibleGoalGenerator):
 
     def __init__(self, env: ToolsWorldModel, indexed: bool = True):
         super().__init__(env, indexed=indexed)
-        goals: List[PossibleGoal] = []
+        # Pre-build per-agent goal lists for O(1) generate() calls.
+        self._agent_goals: Dict[int, List[PossibleGoal]] = {}
         idx = 0
         for i in env.human_agent_indices:
+            gs: List[PossibleGoal] = []
             for k in range(env.n_tools):
-                goals.append(HoldGoal(env, i, k, index=idx))
+                gs.append(HoldGoal(env, i, k, index=idx))
                 idx += 1
-                goals.append(WorkbenchGoal(env, i, k, index=idx))
+                gs.append(WorkbenchGoal(env, i, k, index=idx))
                 idx += 1
-        self._goals = goals
-        self._weight = 1.0 / len(goals) if goals else 1.0
+            self._agent_goals[i] = gs
+        # Per-agent weight: 1/n_goals_per_agent so weights sum to 1 for each agent.
+        # This is consistent with the sampler (uniform sampling, weight=1.0):
+        #   generator_weight = sampler_weight * p(goal)  =>  1/n = 1.0 * (1/n)
+        self._n_goals_per_agent = 2 * env.n_tools
 
-    def generate(self, state, human_agent_index: int) -> Iterator[Tuple[PossibleGoal, float]]:
-        for g in self._goals:
-            if getattr(g, "agent_idx", None) == human_agent_index:
-                yield g, self._weight
+    def generate(
+        self, state, human_agent_index: int
+    ) -> Iterator[Tuple[PossibleGoal, float]]:
+        weight = 1.0 / self._n_goals_per_agent if self._n_goals_per_agent > 0 else 1.0
+        for g in self._agent_goals.get(human_agent_index, []):
+            yield g, weight
 
 
 class ToolsGoalSampler(PossibleGoalSampler):
@@ -638,7 +670,7 @@ class ToolsHeuristicPolicy(HumanPolicyPrior):
         env = self._env
         n, m = env.n_agents, env.n_tools
         num_actions = env.n_actions
-        _remaining, wb, holds, requested = state
+        _remaining, wb, holds, _requested = state
 
         # decode perceived state for this agent
         p_state = env.perceived_state(state, agent_idx)
@@ -664,8 +696,12 @@ class ToolsHeuristicPolicy(HumanPolicyPrior):
             if logits[_action_take(k)] > 0:
                 return _softmax(logits, self._beta)
 
-            # 3) request k; give held tool along shortest path
-            logits[_action_request(k, m, n)] = 3.0
+            # 3) not reachable: request k if not already requested
+            if not p_req[agent_idx][k]:
+                logits[_action_request(k, m, n)] = 4.0
+                return _softmax(logits, self._beta)
+
+            # 4) already requested k → give held tool along shortest path
             self._give_along_path(agent_idx, holds, p_req, logits, n, m)
             return _softmax(logits, self._beta)
 
@@ -690,8 +726,12 @@ class ToolsHeuristicPolicy(HumanPolicyPrior):
             if logits[_action_take(k)] > 0:
                 return _softmax(logits, self._beta)
 
-            # 4) request k; give held tool along shortest path
-            logits[_action_request(k, m, n)] = 3.0
+            # 4) not reachable: request k if not already requested
+            if not p_req[agent_idx][k]:
+                logits[_action_request(k, m, n)] = 4.0
+                return _softmax(logits, self._beta)
+
+            # 5) already requested k → give held tool along shortest path
             self._give_along_path(agent_idx, holds, p_req, logits, n, m)
             return _softmax(logits, self._beta)
 
@@ -730,10 +770,11 @@ class ToolsHeuristicPolicy(HumanPolicyPrior):
                 logits[_action_give(next_hop, m)] = 4.0
                 return
 
-        # no requester or unreachable → give to a random reachable neighbour
-        neighbours = [j for j in range(n) if j != agent_idx and env.can_reach[agent_idx, j]]
-        if neighbours:
-            j = neighbours[np.random.randint(len(neighbours))]
+        # no requester or unreachable → equal logits for all reachable neighbours
+        neighbours = [
+            j for j in range(n) if j != agent_idx and env.can_reach[agent_idx, j]
+        ]
+        for j in neighbours:
             logits[_action_give(j, m)] = 1.0
 
     # ------ HumanPolicyPrior interface ------
@@ -787,8 +828,6 @@ def render_tools_state(env: ToolsWorldModel, goals=None, ax=None, figsize=(8, 8)
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.patches import FancyArrowPatch
-    import matplotlib.patches as mpatches
 
     own_fig = ax is None
     if own_fig:
@@ -830,7 +869,10 @@ def render_tools_state(env: ToolsWorldModel, goals=None, ax=None, figsize=(8, 8)
                     xy=pos[j],
                     xytext=pos[i],
                     arrowprops=dict(
-                        arrowstyle="->", color="grey", lw=0.5, alpha=0.2,
+                        arrowstyle="->",
+                        color="grey",
+                        lw=0.5,
+                        alpha=0.2,
                         linestyle="dotted",
                     ),
                 )
@@ -844,8 +886,15 @@ def render_tools_state(env: ToolsWorldModel, goals=None, ax=None, figsize=(8, 8)
         label = f"R{i}" if i in env._robot_indices else f"H{i}"
         ax.plot(pos[i, 0], pos[i, 1], "o", color=c, markersize=18, zorder=5)
         ax.text(
-            pos[i, 0], pos[i, 1], label, ha="center", va="center",
-            fontsize=7, fontweight="bold", color="white", zorder=6,
+            pos[i, 0],
+            pos[i, 1],
+            label,
+            ha="center",
+            va="center",
+            fontsize=7,
+            fontweight="bold",
+            color="white",
+            zorder=6,
         )
 
         # held tool overlay
@@ -853,12 +902,20 @@ def render_tools_state(env: ToolsWorldModel, goals=None, ax=None, figsize=(8, 8)
             if holds[i][k]:
                 marker = _TOOL_MARKERS[k % len(_TOOL_MARKERS)]
                 ax.plot(
-                    pos[i, 0], pos[i, 1] + 0.04, marker,
-                    color="black", markersize=10, zorder=7,
+                    pos[i, 0],
+                    pos[i, 1] + 0.04,
+                    marker,
+                    color="black",
+                    markersize=10,
+                    zorder=7,
                 )
                 ax.text(
-                    pos[i, 0] + 0.03, pos[i, 1] + 0.04, f"T{k}",
-                    fontsize=6, color="black", zorder=7,
+                    pos[i, 0] + 0.03,
+                    pos[i, 1] + 0.04,
+                    f"T{k}",
+                    fontsize=6,
+                    color="black",
+                    zorder=7,
                 )
 
         # workbench tools (small shapes around agent)
@@ -868,12 +925,20 @@ def render_tools_state(env: ToolsWorldModel, goals=None, ax=None, figsize=(8, 8)
             dx, dy = 0.06 * np.cos(angle), 0.06 * np.sin(angle)
             marker = _TOOL_MARKERS[k % len(_TOOL_MARKERS)]
             ax.plot(
-                pos[i, 0] + dx, pos[i, 1] + dy, marker,
-                color="dimgrey", markersize=7, zorder=4,
+                pos[i, 0] + dx,
+                pos[i, 1] + dy,
+                marker,
+                color="dimgrey",
+                markersize=7,
+                zorder=4,
             )
             ax.text(
-                pos[i, 0] + dx + 0.015, pos[i, 1] + dy, f"T{k}",
-                fontsize=5, color="dimgrey", zorder=4,
+                pos[i, 0] + dx + 0.015,
+                pos[i, 1] + dy,
+                f"T{k}",
+                fontsize=5,
+                color="dimgrey",
+                zorder=4,
             )
 
     # ---- has_requested arrows (solid blue) ----
@@ -888,7 +953,9 @@ def render_tools_state(env: ToolsWorldModel, goals=None, ax=None, figsize=(8, 8)
                         xy=tool_pos,
                         xytext=pos[i],
                         arrowprops=dict(
-                            arrowstyle="->", color="royalblue", lw=1.2,
+                            arrowstyle="->",
+                            color="royalblue",
+                            lw=1.2,
                             connectionstyle="arc3,rad=0.2",
                         ),
                     )
@@ -904,7 +971,9 @@ def render_tools_state(env: ToolsWorldModel, goals=None, ax=None, figsize=(8, 8)
                         xy=tool_pos,
                         xytext=pos[g.agent_idx],
                         arrowprops=dict(
-                            arrowstyle="->", color="blue", lw=1.5,
+                            arrowstyle="->",
+                            color="blue",
+                            lw=1.5,
                             linestyle="dashed",
                             connectionstyle="arc3,rad=-0.3",
                         ),

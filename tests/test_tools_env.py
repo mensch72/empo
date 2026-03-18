@@ -35,8 +35,8 @@ from empo.world_specific_helpers.tools import (
 )
 from empo.world_model import WorldModel
 
-
 # ---- fixtures ----
+
 
 @pytest.fixture
 def small_env():
@@ -65,6 +65,7 @@ def example_env():
 
 
 # ---- basic construction ----
+
 
 class TestConstruction:
     def test_creates(self, small_env):
@@ -98,6 +99,7 @@ class TestConstruction:
 
 # ---- state management ----
 
+
 class TestState:
     def test_reset(self, small_env):
         state, info = small_env.reset(seed=42)
@@ -128,6 +130,7 @@ class TestState:
 
 
 # ---- action encoding ----
+
 
 class TestActions:
     def test_pass(self, small_env):
@@ -161,6 +164,7 @@ class TestActions:
 
 
 # ---- transition probabilities ----
+
 
 class TestTransitions:
     def test_terminal_returns_none(self, small_env):
@@ -214,12 +218,13 @@ class TestTransitions:
                     for k in range(small_env.n_tools):
                         total = sum(wb[i][k] for i in range(small_env.n_agents))
                         total += sum(holds[i][k] for i in range(small_env.n_agents))
-                        assert total == 1, (
-                            f"Tool {k} count={total} after actions ({a0},{a1})"
-                        )
+                        assert (
+                            total == 1
+                        ), f"Tool {k} count={total} after actions ({a0},{a1})"
 
 
 # ---- step uses transition_probabilities ----
+
 
 class TestStep:
     def test_step_inherits_from_worldmodel(self, small_env):
@@ -253,6 +258,7 @@ class TestStep:
 
 # ---- perceived state ----
 
+
 class TestPerceivedState:
     def test_default_perceived_state_unchanged(self):
         """WorldModel base default returns state unchanged."""
@@ -261,10 +267,16 @@ class TestPerceivedState:
         assert hasattr(WM, "perceived_state")
 
         # Verify default returns state as-is on a concrete subclass
-        env = ToolsWorldModel(n_agents=2, n_tools=2, max_steps=3, p_failure=0.0, seed=0,
-                              can_reach=np.ones((2, 2), dtype=bool),
-                              can_grab=np.ones((2, 2), dtype=bool),
-                              can_hear=np.ones((2, 2), dtype=bool))
+        env = ToolsWorldModel(
+            n_agents=2,
+            n_tools=2,
+            max_steps=3,
+            p_failure=0.0,
+            seed=0,
+            can_reach=np.ones((2, 2), dtype=bool),
+            can_grab=np.ones((2, 2), dtype=bool),
+            can_hear=np.ones((2, 2), dtype=bool),
+        )
         env.reset(seed=0)
         s = env.get_state()
         # When all can_hear entries are True, perceived_state equals true state
@@ -280,11 +292,13 @@ class TestPerceivedState:
             p_failure=0.0,
             seed=0,
             # Manually set can_hear: agent 0 can hear only itself
-            can_hear=np.array([
-                [True, False, False],
-                [True, True, True],
-                [True, True, True],
-            ]),
+            can_hear=np.array(
+                [
+                    [True, False, False],
+                    [True, True, True],
+                    [True, True, True],
+                ]
+            ),
             can_reach=np.ones((3, 3), dtype=bool),
             can_grab=np.ones((3, 3), dtype=bool),
         )
@@ -329,6 +343,7 @@ class TestPerceivedState:
 
 # ---- goals ----
 
+
 class TestGoals:
     def test_hold_goal(self, small_env):
         small_env.reset(seed=42)
@@ -369,10 +384,13 @@ class TestGoals:
 
 # ---- goal generator / sampler ----
 
+
 class TestGoalGenSampler:
     def test_generator_yields_goals(self, example_env):
         gen = ToolsGoalGenerator(example_env)
-        goals = list(gen.generate(example_env.get_state(), example_env.human_agent_indices[0]))
+        goals = list(
+            gen.generate(example_env.get_state(), example_env.human_agent_indices[0])
+        )
         assert len(goals) > 0
         for g, w in goals:
             assert isinstance(g, (HoldGoal, WorkbenchGoal))
@@ -391,12 +409,15 @@ class TestGoalGenSampler:
     def test_sampler(self, example_env):
         example_env.reset(seed=123)
         sampler = ToolsGoalSampler(example_env)
-        g, w = sampler.sample(example_env.get_state(), example_env.human_agent_indices[0])
+        g, w = sampler.sample(
+            example_env.get_state(), example_env.human_agent_indices[0]
+        )
         assert isinstance(g, (HoldGoal, WorkbenchGoal))
         assert w == 1.0
 
 
 # ---- heuristic policy ----
+
 
 class TestHeuristicPolicy:
     def test_returns_valid_distribution(self, example_env):
@@ -432,6 +453,7 @@ class TestHeuristicPolicy:
 
 # ---- rendering ----
 
+
 class TestRendering:
     def test_render_produces_array(self, small_env):
         small_env.reset(seed=42)
@@ -443,11 +465,16 @@ class TestRendering:
 
 # ---- specific action effects ----
 
+
 class TestActionEffects:
     def test_take_tool_from_own_workbench(self):
         """Agent can take a tool from their own workbench."""
         env = ToolsWorldModel(
-            n_agents=2, n_tools=1, max_steps=5, p_failure=0.0, seed=0,
+            n_agents=2,
+            n_tools=1,
+            max_steps=5,
+            p_failure=0.0,
+            seed=0,
             can_reach=np.ones((2, 2), dtype=bool),
             can_grab=np.ones((2, 2), dtype=bool),
             can_hear=np.ones((2, 2), dtype=bool),
@@ -470,7 +497,11 @@ class TestActionEffects:
     def test_give_tool_to_neighbour(self):
         """Agent gives held tool to neighbour's workbench."""
         env = ToolsWorldModel(
-            n_agents=2, n_tools=1, max_steps=5, p_failure=0.0, seed=0,
+            n_agents=2,
+            n_tools=1,
+            max_steps=5,
+            p_failure=0.0,
+            seed=0,
             can_reach=np.ones((2, 2), dtype=bool),
             can_grab=np.ones((2, 2), dtype=bool),
             can_hear=np.ones((2, 2), dtype=bool),
@@ -493,7 +524,11 @@ class TestActionEffects:
     def test_request_sets_flag(self):
         """Request action sets has_requested flag."""
         env = ToolsWorldModel(
-            n_agents=2, n_tools=2, max_steps=5, p_failure=0.0, seed=0,
+            n_agents=2,
+            n_tools=2,
+            max_steps=5,
+            p_failure=0.0,
+            seed=0,
             can_reach=np.ones((2, 2), dtype=bool),
             can_grab=np.ones((2, 2), dtype=bool),
             can_hear=np.ones((2, 2), dtype=bool),
@@ -519,7 +554,11 @@ class TestActionEffects:
     def test_request_cancels_previous(self):
         """Requesting a new tool cancels the previous request."""
         env = ToolsWorldModel(
-            n_agents=2, n_tools=2, max_steps=5, p_failure=0.0, seed=0,
+            n_agents=2,
+            n_tools=2,
+            max_steps=5,
+            p_failure=0.0,
+            seed=0,
             can_reach=np.ones((2, 2), dtype=bool),
             can_grab=np.ones((2, 2), dtype=bool),
             can_hear=np.ones((2, 2), dtype=bool),
@@ -546,7 +585,11 @@ class TestActionEffects:
     def test_failure_produces_extra_successor(self):
         """With p_failure > 0 and a non-trivial action, more successors appear."""
         env = ToolsWorldModel(
-            n_agents=2, n_tools=1, max_steps=5, p_failure=0.5, seed=0,
+            n_agents=2,
+            n_tools=1,
+            max_steps=5,
+            p_failure=0.5,
+            seed=0,
             can_reach=np.ones((2, 2), dtype=bool),
             can_grab=np.ones((2, 2), dtype=bool),
             can_hear=np.ones((2, 2), dtype=bool),
@@ -569,7 +612,11 @@ class TestActionEffects:
         """When two agents try to take the same tool and can't grab from hands,
         the lower-index agent takes it and the higher-index agent fails."""
         env = ToolsWorldModel(
-            n_agents=2, n_tools=1, max_steps=5, p_failure=0.0, seed=0,
+            n_agents=2,
+            n_tools=1,
+            max_steps=5,
+            p_failure=0.0,
+            seed=0,
             can_reach=np.ones((2, 2), dtype=bool),
             # can_grab only from self — cannot grab from each other's hand
             can_grab=np.eye(2, dtype=bool),

@@ -34,17 +34,13 @@ from __future__ import annotations
 
 import argparse
 import os
-import sys
 
 import numpy as np
 
 from empo.world_specific_helpers.tools import (
-    ACTION_PASS,
     HoldGoal,
     ToolsGoalGenerator,
-    ToolsGoalSampler,
     ToolsHeuristicPolicy,
-    ToolsWorldModel,
     WorkbenchGoal,
     action_name,
     create_tools_env,
@@ -56,23 +52,33 @@ from empo.world_specific_helpers.tools import (
 def parse_args():
     parser = argparse.ArgumentParser(description="Tools Workshop Demo")
     parser.add_argument(
-        "--steps", type=int, default=30,
+        "--steps",
+        type=int,
+        default=30,
         help="Number of simulation steps (default: 30)",
     )
     parser.add_argument(
-        "--seed", type=int, default=42,
+        "--seed",
+        type=int,
+        default=42,
         help="Random seed (default: 42)",
     )
     parser.add_argument(
-        "--video", type=str, default=None,
+        "--video",
+        type=str,
+        default=None,
         help="Path to save video (e.g. outputs/tools_demo.mp4)",
     )
     parser.add_argument(
-        "--beta", type=float, default=5.0,
+        "--beta",
+        type=float,
+        default=5.0,
         help="Heuristic policy temperature (default: 5.0)",
     )
     parser.add_argument(
-        "--p-failure", type=float, default=0.1,
+        "--p-failure",
+        type=float,
+        default=0.1,
         help="Action failure probability (default: 0.1)",
     )
     return parser.parse_args()
@@ -98,8 +104,10 @@ def main():
     state, _ = env.reset(seed=args.seed)
     np.random.seed(args.seed)
 
-    print(f"  Agents: {env.n_agents}  (robot={env.robot_agent_indices}, "
-          f"humans={env.human_agent_indices})")
+    print(
+        f"  Agents: {env.n_agents}  (robot={env.robot_agent_indices}, "
+        f"humans={env.human_agent_indices})"
+    )
     print(f"  Tools:  {env.n_tools}")
     print(f"  Steps:  {args.steps}")
     print(f"  p_fail: {args.p_failure}")
@@ -173,13 +181,11 @@ def main():
                 a = heuristic.sample(state, i, goal)
             actions.append(a)
 
-        action_strs = [
-            action_name(a, env.n_tools, env.n_agents) for a in actions
-        ]
+        action_strs = [action_name(a, env.n_tools, env.n_agents) for a in actions]
         print(f"  Actions: {action_strs}")
 
         # Step
-        obs, reward, terminated, truncated, info = env.step(actions)
+        _obs, _reward, terminated, _truncated, _info = env.step(actions)
         if terminated:
             print("  → TERMINAL")
             break
