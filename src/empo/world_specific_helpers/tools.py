@@ -259,6 +259,27 @@ class ToolsWorldModel(WorldModel):
 
     # ----- helpers for construction -----
     def _waxman_graph(self, alpha: float, beta: float) -> np.ndarray:
+        """Generate a directed Waxman-style connectivity graph over agents.
+
+        Parameters
+        ----------
+        alpha:
+            Base connection probability factor. Interpreted as a
+            probability and therefore clamped to the interval [0, 1].
+        beta:
+            Controls distance sensitivity. Must be strictly positive
+            to avoid division by zero and to keep the exponent well
+            defined.
+        """
+        # Clamp alpha to a valid probability range.
+        alpha_clamped = float(np.clip(alpha, 0.0, 1.0))
+        # Enforce a strictly positive beta to avoid divide-by-zero and
+        # negative/ill-defined exponents.
+        if beta <= 0.0:
+            raise ValueError(
+                f"waxman_*_beta must be positive; got beta={beta!r}"
+            )
+
         n = self.n_agents
         pos = self.agent_positions
         L = np.sqrt(2.0)
@@ -267,7 +288,9 @@ class ToolsWorldModel(WorldModel):
             for j in range(n):
                 if i != j:
                     d = np.linalg.norm(pos[i] - pos[j])
-                    p = alpha * np.exp(-d / (beta * L))
+                    # Compute Waxman probability and clamp to [0, 1].
+                    p = alpha_clamped * np.exp(-d / (beta * L))
+                    p = float(np.clip(p, 0.0, 1.0))
                     if self._rng.rand() < p:
                         g[i, j] = True
         return g
