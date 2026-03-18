@@ -160,6 +160,47 @@ class ToolsWorldModel(WorldModel):
             else [i for i in range(n_agents) if i not in self._robot_indices]
         )
 
+        # Validate agent index assignments
+        provided_robot = robot_agent_indices is not None
+        provided_human = human_agent_indices_list is not None
+
+        def _validate_role_indices(name: str, indices: List[int]) -> None:
+            if not indices:
+                raise ValueError(f"{name} must contain at least one agent index")
+            for idx in indices:
+                if not isinstance(idx, int):
+                    raise ValueError(
+                        f"{name} entries must be integers in [0, {n_agents - 1}], got {idx!r}"
+                    )
+                if idx < 0 or idx >= n_agents:
+                    raise ValueError(
+                        f"{name} entries must be in [0, {n_agents - 1}], got {idx}"
+                    )
+            if len(set(indices)) != len(indices):
+                raise ValueError(f"{name} must not contain duplicate agent indices")
+
+        _validate_role_indices("robot_agent_indices", self._robot_indices)
+        _validate_role_indices("human_agent_indices_list", self._human_indices)
+
+        # If both roles were explicitly provided, require disjointness and full coverage.
+        if provided_robot and provided_human:
+            robot_set = set(self._robot_indices)
+            human_set = set(self._human_indices)
+            overlap = robot_set & human_set
+            if overlap:
+                raise ValueError(
+                    "robot_agent_indices and human_agent_indices_list must be disjoint; "
+                    f"overlapping indices: {sorted(overlap)}"
+                )
+            all_agents = set(range(n_agents))
+            if robot_set | human_set != all_agents:
+                raise ValueError(
+                    "When both robot_agent_indices and human_agent_indices_list are provided, "
+                    "their union must cover all agents "
+                    f"(expected {sorted(all_agents)}, got "
+                    f"robots={sorted(robot_set)}, humans={sorted(human_set)})"
+                )
+
         # Validate and normalise failure probability
         if not 0.0 <= p_failure <= 1.0:
             raise ValueError(f"p_failure must be in [0, 1], got {p_failure}")
