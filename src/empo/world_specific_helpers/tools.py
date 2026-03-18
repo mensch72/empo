@@ -761,7 +761,7 @@ class ToolsHeuristicPolicy(HumanPolicyPrior):
         if held is None:
             return  # nothing to give
 
-        # find agents who requested held tool
+        # find agents who requested held tool (smallest-index first)
         requesters = [j for j in range(n) if perceived_requested[j][held]]
         if requesters:
             path = self._bfs_shortest(env.can_reach, agent_idx, requesters)
@@ -770,12 +770,7 @@ class ToolsHeuristicPolicy(HumanPolicyPrior):
                 logits[_action_give(next_hop, m)] = 4.0
                 return
 
-        # no requester or unreachable → equal logits for all reachable neighbours
-        neighbours = [
-            j for j in range(n) if j != agent_idx and env.can_reach[agent_idx, j]
-        ]
-        for j in neighbours:
-            logits[_action_give(j, m)] = 1.0
+        # no requester or unreachable → keep the tool (pass)
 
     # ------ HumanPolicyPrior interface ------
     def __call__(self, state, human_agent_index: int, possible_goal=None):
