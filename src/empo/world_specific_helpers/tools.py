@@ -16,11 +16,14 @@ State:
         - holds[i,k]: bool matrix — which agent holds which tool
         - has_requested[i,k]: bool matrix — which agent has requested which tool
 
-Actions per agent i (total = 1 + 2*n_tools + n_agents):
-    0               : pass
-    1..m            : take tool k  (k = action - 1)
-    m+1..m+n        : give to agent j  (j = action - m - 1)
-    m+n+1..2m+n     : request tool k  (k = action - m - n - 1)
+Actions per agent i:
+    Agent i has ``n_tools + n_give_targets(i)`` actions where
+    ``n_give_targets(i) = sum(can_reach[i, :])``.
+
+    0..m-1                 : acquire tool k — if already holding k do nothing;
+                             else if reachable/grabbable take it; otherwise request it.
+    m..m+|give_targets|-1  : give held tool to agent give_targets[j]
+                             (only agents j with can_reach[i, j])
 
 Transition dynamics:
     With probability (1 - p_failure) all actions are attempted.
@@ -54,57 +57,69 @@ from empo.world_model import WorldModel
 # ---------------------------------------------------------------------------
 # Action helpers
 # ---------------------------------------------------------------------------
-ACTION_PASS = 0
+ACTION_PASS = 0  # kept for backward-compat references; acquire(0) is the new "idle"
 
 
-def _action_take(k: int) -> int:
-    """Action index for 'take tool k'."""
-    return 1 + k
+def _action_acquire(k: int) -> int:
+    """Action index for 'acquire tool k'."""
+    return k
 
 
-def _action_give(j: int, n_tools: int) -> int:
-    """Action index for 'give to agent j'."""
-    return 1 + n_tools + j
+def _action_give(agent_idx: int, give_targets: List[int]) -> int:
+    """Action index for 'give to agent j' (relative to *give_targets* list).
 
+    ``give_targets`` is the precomputed list of agent indices this agent can
+    reach (``env.give_targets[i]``).  Returns
+    ``n_tools + give_targets.index(agent_idx)``.
 
-def _action_request(k: int, n_tools: int, n_agents: int) -> int:
-    """Action index for 'request tool k'."""
-    return 1 + n_tools + n_agents + k
-
-
-def decode_action(action: int, n_tools: int, n_agents: int):
-    """Decode an action index into (type_str, param).
-
-    Returns one of:
-        ('pass', None)
-        ('take', k)        — tool index k
-        ('give', j)        — target agent index j
-        ('request', k)     — tool index k
+    Note: ``n_tools`` is not passed here; the caller must know that the
+    give_targets list starts right after the acquire actions.  Use
+    ``_action_give_idx`` for the raw positional variant.
     """
-    if action == ACTION_PASS:
-        return "pass", None
-    if 1 <= action <= n_tools:
-        return "take", action - 1
-    if n_tools + 1 <= action <= n_tools + n_agents:
-        return "give", action - n_tools - 1
-    if n_tools + n_agents + 1 <= action <= 2 * n_tools + n_agents:
-        return "request", action - n_tools - n_agents - 1
-    raise ValueError(
-        f"Invalid action index {action} for n_tools={n_tools}, n_agents={n_agents}"
+    # We don't know n_tools here; this helper is mainly used in tests.
+    # The give actions start at index n_tools, and give_targets.index gives
+    # the offset.  However, since n_tools is not available, we store the
+    # offset only and the caller adds n_tools.  For backward-compat with
+    # existing test calls like _action_give(1, env.give_targets[0]) where
+    # the caller expects the *absolute* action index, we cannot compute it
+    # without n_tools.  So raise if called directly — tests should use
+    # _action_give_idx instead or pass n_tools explicitly.
+    raise NotImplementedError(
+        "_action_give cannot compute absolute action index without n_tools. "
+        "Use _action_give_idx(give_targets.index(agent_idx), n_tools) instead."
     )
 
 
-def action_name(action: int, n_tools: int, n_agents: int) -> str:
+def _action_give_idx(j_pos: int, n_tools: int) -> int:
+    """Action index for give at position *j_pos* (0-based) in give_targets."""
+    return n_tools + j_pos
+
+
+def decode_action(action: int, n_tools: int, give_targets: List[int]):
+    """Decode an action index into (type_str, param).
+
+    Returns one of:
+        ('acquire', k)     — tool index k
+        ('give', j)        — target agent index j (absolute)
+    """
+    if 0 <= action < n_tools:
+        return "acquire", action
+    pos = action - n_tools
+    if 0 <= pos < len(give_targets):
+        return "give", give_targets[pos]
+    raise ValueError(
+        f"Invalid action index {action} for n_tools={n_tools}, "
+        f"give_targets={give_targets}"
+    )
+
+
+def action_name(action: int, n_tools: int, give_targets: List[int]) -> str:
     """Human-readable name for an action index."""
-    atype, param = decode_action(action, n_tools, n_agents)
-    if atype == "pass":
-        return "pass"
-    if atype == "take":
-        return f"take T{param}"
+    atype, param = decode_action(action, n_tools, give_targets)
+    if atype == "acquire":
+        return f"acq T{param}"
     if atype == "give":
         return f"give→A{param}"
-    if atype == "request":
-        return f"req T{param}"
     return "?"
 
 
@@ -134,12 +149,18 @@ class ToolsWorldModel(WorldModel):
         robot_agent_indices: Optional[List[int]] = None,
         human_agent_indices_list: Optional[List[int]] = None,
         seed: Optional[int] = None,
-        # Waxman parameters
+        # Waxman parameters (defaults for human agents)
         waxman_hear_alpha: float = 0.8,
         waxman_hear_beta: float = 0.5,
         waxman_reach_alpha: float = 0.6,
         waxman_reach_beta: float = 0.3,
         grab_prob: float = 0.5,
+        # Robot Waxman overrides (None = use human defaults)
+        robot_waxman_hear_alpha: Optional[float] = None,
+        robot_waxman_hear_beta: Optional[float] = None,
+        robot_waxman_reach_alpha: Optional[float] = None,
+        robot_waxman_reach_beta: Optional[float] = None,
+        robot_grab_prob: Optional[float] = None,
         # Optional pre-specified constant state
         agent_positions: Optional[np.ndarray] = None,
         can_hear: Optional[np.ndarray] = None,
@@ -222,11 +243,8 @@ class ToolsWorldModel(WorldModel):
         else:
             self.p_fail = np.ones(n_agents, dtype=np.float64) / n_agents
 
-        # Action space: pass + take(m) + give(n) + request(m)
-        self.n_actions = 1 + 2 * n_tools + n_agents
-        self.action_space = gym.spaces.Discrete(self.n_actions)
-        # Planning code uses get_state() for the full state tuple.
-        # observation_space is a dummy placeholder (same convention as MacroGridEnv).
+        # Action space (per-agent, computed after graphs are built)
+        # Placeholder — will be set after can_reach is known.
         self.observation_space = gym.spaces.Discrete(1)
 
         # Required by WorldModel / DAG builder
@@ -240,6 +258,13 @@ class ToolsWorldModel(WorldModel):
             reach_alpha=waxman_reach_alpha,
             reach_beta=waxman_reach_beta,
             grab_prob=grab_prob,
+        )
+        self._robot_waxman_params = dict(
+            hear_alpha=robot_waxman_hear_alpha,
+            hear_beta=robot_waxman_hear_beta,
+            reach_alpha=robot_waxman_reach_alpha,
+            reach_beta=robot_waxman_reach_beta,
+            grab_prob=robot_grab_prob,
         )
 
         # RNG for graph / tool initialisation
@@ -260,11 +285,38 @@ class ToolsWorldModel(WorldModel):
                 self.agent_positions[ri] = [0.5, 0.5]
 
         expected_shape = (n_agents, n_agents)
+        robot_set = set(self._robot_indices)
+
+        # Effective Waxman params per source agent (robot overrides if given)
+        def _ha(i: int) -> float:
+            if i in robot_set and robot_waxman_hear_alpha is not None:
+                return robot_waxman_hear_alpha
+            return waxman_hear_alpha
+
+        def _hb(i: int) -> float:
+            if i in robot_set and robot_waxman_hear_beta is not None:
+                return robot_waxman_hear_beta
+            return waxman_hear_beta
+
+        def _ra(i: int) -> float:
+            if i in robot_set and robot_waxman_reach_alpha is not None:
+                return robot_waxman_reach_alpha
+            return waxman_reach_alpha
+
+        def _rb(i: int) -> float:
+            if i in robot_set and robot_waxman_reach_beta is not None:
+                return robot_waxman_reach_beta
+            return waxman_reach_beta
+
+        def _gp(i: int) -> float:
+            if i in robot_set and robot_grab_prob is not None:
+                return robot_grab_prob
+            return grab_prob
 
         self.can_hear = (
             np.array(can_hear, dtype=bool)
             if can_hear is not None
-            else self._waxman_graph(waxman_hear_alpha, waxman_hear_beta)
+            else self._waxman_graph_per_agent(_ha, _hb)
         )
         if self.can_hear.shape != expected_shape:
             raise ValueError(
@@ -275,7 +327,7 @@ class ToolsWorldModel(WorldModel):
         self.can_reach = (
             np.array(can_reach, dtype=bool)
             if can_reach is not None
-            else self._waxman_graph(waxman_reach_alpha, waxman_reach_beta)
+            else self._waxman_graph_per_agent(_ra, _rb)
         )
         if self.can_reach.shape != expected_shape:
             raise ValueError(
@@ -287,13 +339,31 @@ class ToolsWorldModel(WorldModel):
             self.can_grab = np.array(can_grab, dtype=bool)
         else:
             self.can_grab = self.can_reach.copy()
-            mask = self._rng.rand(n_agents, n_agents) >= grab_prob
-            self.can_grab[mask] = False
+            for i in range(n_agents):
+                for j in range(n_agents):
+                    if i != j and self.can_grab[i, j]:
+                        if self._rng.rand() >= _gp(i):
+                            self.can_grab[i, j] = False
         if self.can_grab.shape != expected_shape:
             raise ValueError(
                 f"can_grab shape {self.can_grab.shape} != expected {expected_shape}"
             )
         np.fill_diagonal(self.can_grab, True)
+
+        # Per-agent give targets (agents reachable by agent i)
+        self.give_targets: List[List[int]] = [
+            [j for j in range(n_agents) if self.can_reach[i, j]]
+            for i in range(n_agents)
+        ]
+
+        # Per-agent action counts: acquire(m) + give(|give_targets[i]|)
+        self._n_actions_per_agent: List[int] = [
+            n_tools + len(self.give_targets[i]) for i in range(n_agents)
+        ]
+
+        # action_space is set to the max for Gymnasium compatibility
+        self.n_actions = max(self._n_actions_per_agent)
+        self.action_space = gym.spaces.Discrete(self.n_actions)
 
         # --- mutable state ---
         self._remaining: int = max_steps
@@ -303,36 +373,28 @@ class ToolsWorldModel(WorldModel):
         self._init_tools()
 
     # ----- helpers for construction -----
-    def _waxman_graph(self, alpha: float, beta: float) -> np.ndarray:
-        """Generate a directed Waxman-style connectivity graph over agents.
+    def _waxman_graph_per_agent(
+        self,
+        alpha_fn,
+        beta_fn,
+    ) -> np.ndarray:
+        """Generate a directed Waxman-style connectivity graph.
 
-        Parameters
-        ----------
-        alpha:
-            Base connection probability factor. Interpreted as a
-            probability and therefore clamped to the interval [0, 1].
-        beta:
-            Controls distance sensitivity. Must be strictly positive
-            to avoid division by zero and to keep the exponent well
-            defined.
+        ``alpha_fn(i)`` and ``beta_fn(i)`` return per-source-agent parameters.
         """
-        # Clamp alpha to a valid probability range.
-        alpha_clamped = float(np.clip(alpha, 0.0, 1.0))
-        # Enforce a strictly positive beta to avoid divide-by-zero and
-        # negative/ill-defined exponents.
-        if beta <= 0.0:
-            raise ValueError(f"waxman_*_beta must be positive; got beta={beta!r}")
-
         n = self.n_agents
         pos = self.agent_positions
         L = np.sqrt(2.0)
         g = np.eye(n, dtype=bool)
         for i in range(n):
+            a = float(np.clip(alpha_fn(i), 0.0, 1.0))
+            b = beta_fn(i)
+            if b <= 0.0:
+                raise ValueError(f"waxman beta must be positive; got {b!r}")
             for j in range(n):
                 if i != j:
                     d = np.linalg.norm(pos[i] - pos[j])
-                    # Compute Waxman probability and clamp to [0, 1].
-                    p = alpha_clamped * np.exp(-d / (beta * L))
+                    p = a * np.exp(-d / (b * L))
                     p = float(np.clip(p, 0.0, 1.0))
                     if self._rng.rand() < p:
                         g[i, j] = True
@@ -348,6 +410,10 @@ class ToolsWorldModel(WorldModel):
             self._workbench[owner, k] = True
 
     # ----- WorldModel interface -----
+    @property
+    def n_actions_per_agent(self) -> List[int]:
+        return self._n_actions_per_agent
+
     @property
     def human_agent_indices(self) -> List[int]:
         return self._human_indices
@@ -427,25 +493,12 @@ class ToolsWorldModel(WorldModel):
         ``workbench`` and ``holds`` can be tuples-of-tuples **or** lists-of-lists.
         ``requested`` is not needed for feasibility checks.
         """
-        atype, param = decode_action(action, self.n_tools, self.n_agents)
-        if atype == "pass":
-            return True
-        if atype == "take":
-            k = param
-            for j in range(self.n_agents):
-                if self.can_reach[agent, j] and workbench[j][k]:
-                    return True
-                if self.can_grab[agent, j] and holds[j][k]:
-                    return True
-            return False
+        gt = self.give_targets[agent]
+        atype, param = decode_action(action, self.n_tools, gt)
+        if atype == "acquire":
+            return True  # acquire is always a valid choice (may be no-op)
         if atype == "give":
-            j = param
-            if not self.can_reach[agent, j]:
-                return False
             return any(holds[agent])
-        if atype == "request":
-            k = param
-            return not holds[agent][k] and not workbench[agent][k]
         return False
 
     # ----- apply a single agent's action (mutates lists in-place) -----
@@ -463,16 +516,13 @@ class ToolsWorldModel(WorldModel):
         rq: List[List[int]],
     ) -> bool:
         """Apply one agent's action in-place; return True if it succeeded."""
-        if action_type == "pass":
-            return True
 
-        if action_type == "take":
+        if action_type == "acquire":
             k = param
-            # If agent already holds this tool, treat as no-op to avoid
-            # violating the invariant (tool in exactly one place).
+            # Already holding → no-op (success)
             if hd[agent][k]:
                 return True
-            # find source
+            # Try to take from reachable workbench or grabbable hand
             source, stype = None, None
             for j in range(n_agents):
                 if can_reach[agent, j] and wb[j][k]:
@@ -483,23 +533,27 @@ class ToolsWorldModel(WorldModel):
                     if can_grab[agent, j] and hd[j][k]:
                         source, stype = j, "hd"
                         break
-            if source is None:
-                return False
-            # put down currently held tool (if any)
+            if source is not None:
+                # take path: put down current tool, grab k
+                for k2 in range(n_tools):
+                    if hd[agent][k2]:
+                        hd[agent][k2] = 0
+                        wb[agent][k2] = 1
+                        break
+                if stype == "wb":
+                    wb[source][k] = 0
+                else:
+                    hd[source][k] = 0
+                hd[agent][k] = 1
+                rq[agent][k] = 0
+                return True
+            # Cannot take → request path
+            if hd[agent][k] or wb[agent][k]:
+                return False  # already have it on own workbench → no request
+            # cancel previous request and set new one
             for k2 in range(n_tools):
-                if hd[agent][k2]:
-                    hd[agent][k2] = 0
-                    wb[agent][k2] = 1
-                    break
-            # remove from source
-            if stype == "wb":
-                wb[source][k] = 0
-            else:
-                hd[source][k] = 0
-            # agent now holds tool k
-            hd[agent][k] = 1
-            # cancel own request for k
-            rq[agent][k] = 0
+                rq[agent][k2] = 0
+            rq[agent][k] = 1
             return True
 
         if action_type == "give":
@@ -515,18 +569,7 @@ class ToolsWorldModel(WorldModel):
                 return False
             hd[agent][held] = 0
             wb[j][held] = 1
-            # cancel j's request for this tool
             rq[j][held] = 0
-            return True
-
-        if action_type == "request":
-            k = param
-            if hd[agent][k] or wb[agent][k]:
-                return False
-            # cancel previous request
-            for k2 in range(n_tools):
-                rq[agent][k2] = 0
-            rq[agent][k] = 1
             return True
 
         return False
@@ -562,51 +605,26 @@ class ToolsWorldModel(WorldModel):
             hd = [list(row) for row in state[2]]
             rq = [list(row) for row in state[3]]
 
-            # Apply actions sequentially in agent-index order.  Each
-            # action is applied against the *evolving* state, so a
-            # higher-index agent whose action conflicts with an earlier
-            # agent's successful action will naturally fail (e.g., tool
-            # already moved).  This is the intended priority mechanism:
-            # lower-index agents have implicit priority.
-            #
-            # ``claimed_tools`` tracks tools acquired via "take" this
-            # timestep.  A later agent cannot grab a tool from a hand
-            # that was just filled — this enforces strict priority so
-            # that a higher-index take cannot re-take a tool that a
-            # lower-index agent already claimed.
             claimed_tools: set = set()
             for i in range(n):
                 if i == failed:
                     continue
-                atype, param = decode_action(actions[i], m, n)
-                # feasibility check against current evolving state
-                if atype == "pass":
-                    pass  # always feasible, no effect
-                elif atype == "take":
+                gt = self.give_targets[i]
+                atype, param = decode_action(actions[i], m, gt)
+                if atype == "acquire":
                     if param in claimed_tools:
                         pass  # tool already claimed this timestep
                     else:
                         ok = self._apply(
-                            i,
-                            atype,
-                            param,
-                            m,
-                            n,
-                            self.can_reach,
-                            self.can_grab,
-                            wb,
-                            hd,
-                            rq,
+                            i, atype, param, m, n,
+                            self.can_reach, self.can_grab, wb, hd, rq,
                         )
-                        if ok:
+                        if ok and hd[i][param]:
                             claimed_tools.add(param)
                 elif atype == "give":
                     self._apply(
-                        i, atype, param, m, n, self.can_reach, self.can_grab, wb, hd, rq
-                    )
-                elif atype == "request":
-                    self._apply(
-                        i, atype, param, m, n, self.can_reach, self.can_grab, wb, hd, rq
+                        i, atype, param, m, n,
+                        self.can_reach, self.can_grab, wb, hd, rq,
                     )
 
             new_state = (
@@ -623,6 +641,7 @@ class ToolsWorldModel(WorldModel):
 
     # ----- reconstruction helpers (for parallel DAG) -----
     def _get_construction_kwargs(self) -> dict:
+        rwp = self._robot_waxman_params
         return dict(
             n_agents=self.n_agents,
             n_tools=self.n_tools,
@@ -637,6 +656,11 @@ class ToolsWorldModel(WorldModel):
             can_reach=self.can_reach,
             can_grab=self.can_grab,
             render_mode=self.render_mode,
+            robot_waxman_hear_alpha=rwp["hear_alpha"],
+            robot_waxman_hear_beta=rwp["hear_beta"],
+            robot_waxman_reach_alpha=rwp["reach_alpha"],
+            robot_waxman_reach_beta=rwp["reach_beta"],
+            robot_grab_prob=rwp["grab_prob"],
         )
 
     # ----- rendering -----
@@ -824,6 +848,7 @@ class ToolsHeuristicPolicy(HumanPolicyPrior):
     """Goal-conditioned heuristic policy for the tools environment.
 
     Implements the strategy described in the issue for HoldGoal and WorkbenchGoal.
+    Uses the acquire/give action encoding (no pass action).
     """
 
     def __init__(
@@ -875,84 +900,74 @@ class ToolsHeuristicPolicy(HumanPolicyPrior):
         """Return softmax action distribution for *agent_idx* pursuing *goal*."""
         env = self.world_model
         n, m = env.n_agents, env.n_tools
-        num_actions = env.n_actions
+        gt = env.give_targets[agent_idx]
+        na = env._n_actions_per_agent[agent_idx]
         _remaining, wb, holds, _requested = state
 
         # decode perceived state for this agent
         p_state = env.perceived_state(state, agent_idx)
         _, _, _, p_req = p_state
 
-        logits = np.full(num_actions, -1e9)
-        logits[ACTION_PASS] = 0.0  # pass always feasible, baseline logit
+        logits = np.full(na, -1e9)
+
+        # Find a "no-op" action: acquire a tool we already hold
+        noop_action = None
+        for k in range(m):
+            if holds[agent_idx][k]:
+                noop_action = _action_acquire(k)
+                break
+        if noop_action is not None:
+            logits[noop_action] = 0.0  # baseline
 
         if isinstance(goal, HoldGoal) and goal.agent_idx == agent_idx:
             k = goal.tool_idx
-            # 1) already holding k → pass
-            if holds[agent_idx][k]:
-                logits[ACTION_PASS] = 10.0
-                return _softmax(logits, self._beta)
+            # acquire(k) handles: no-op if held, take if reachable, request otherwise
+            logits[_action_acquire(k)] = 5.0
 
-            # 2) k on reachable workbench or grabbable hand → take
-            for j in range(n):
-                if env.can_reach[agent_idx, j] and wb[j][k]:
-                    logits[_action_take(k)] = 5.0
-                if env.can_grab[agent_idx, j] and holds[j][k]:
-                    logits[_action_take(k)] = 5.0
+            # If already requested k and holding something, help by giving
+            if p_req[agent_idx][k] and any(holds[agent_idx]):
+                self._give_along_path(agent_idx, holds, p_req, logits, n, m, gt)
 
-            if logits[_action_take(k)] > 0:
-                return _softmax(logits, self._beta)
-
-            # 3) not reachable: request k if not already requested
-            if not p_req[agent_idx][k]:
-                logits[_action_request(k, m, n)] = 4.0
-                return _softmax(logits, self._beta)
-
-            # 4) already requested k → give held tool along shortest path
-            self._give_along_path(agent_idx, holds, p_req, logits, n, m)
             return _softmax(logits, self._beta)
 
         if isinstance(goal, WorkbenchGoal) and goal.agent_idx == agent_idx:
             k = goal.tool_idx
-            # 1) already on own workbench → pass
+            # 1) already on own workbench → prefer no-op
             if wb[agent_idx][k]:
-                logits[ACTION_PASS] = 10.0
+                if noop_action is not None:
+                    logits[noop_action] = 10.0
+                else:
+                    logits[:] = 0.0  # no tool held, uniform
                 return _softmax(logits, self._beta)
 
-            # 2) holding k → give to self
+            # 2) holding k → give to self (puts on own workbench)
             if holds[agent_idx][k]:
-                logits[_action_give(agent_idx, m)] = 5.0
+                try:
+                    j_pos = gt.index(agent_idx)
+                    logits[_action_give_idx(j_pos, m)] = 5.0
+                except ValueError:
+                    pass
                 return _softmax(logits, self._beta)
 
-            # 3) k on reachable workbench or grabbable hand → take
-            for j in range(n):
-                if env.can_reach[agent_idx, j] and wb[j][k]:
-                    logits[_action_take(k)] = 5.0
-                if env.can_grab[agent_idx, j] and holds[j][k]:
-                    logits[_action_take(k)] = 5.0
-            if logits[_action_take(k)] > 0:
-                return _softmax(logits, self._beta)
-
-            # 4) not reachable: request k if not already requested
-            if not p_req[agent_idx][k]:
-                logits[_action_request(k, m, n)] = 4.0
-                return _softmax(logits, self._beta)
-
-            # 5) already requested k → give held tool along shortest path
-            self._give_along_path(agent_idx, holds, p_req, logits, n, m)
+            # 3) don't have it → acquire it
+            logits[_action_acquire(k)] = 5.0
             return _softmax(logits, self._beta)
 
         if isinstance(goal, IdleGoal) and goal.agent_idx == agent_idx:
-            # Goal: have hands free.
             if not any(holds[agent_idx]):
-                # Already idle → pass
-                logits[ACTION_PASS] = 10.0
+                # Already idle → uniform
+                logits[:] = 0.0
                 return _softmax(logits, self._beta)
-            # Holding something → give to own workbench
-            logits[_action_give(agent_idx, m)] = 5.0
+            # Holding something → give to self
+            try:
+                j_pos = gt.index(agent_idx)
+                logits[_action_give_idx(j_pos, m)] = 5.0
+            except ValueError:
+                pass
             return _softmax(logits, self._beta)
 
         # goal does not apply to this agent → uniform over feasible actions
-        for a in range(num_actions):
+        for a in range(na):
             if env.is_feasible(a, agent_idx, wb, holds):
                 logits[a] = 0.0
         return _softmax(logits, self._beta)
@@ -965,30 +980,29 @@ class ToolsHeuristicPolicy(HumanPolicyPrior):
         logits: np.ndarray,
         n: int,
         m: int,
+        give_targets: List[int],
     ):
         """Set logit for giving the currently-held tool toward a requester."""
         env = self.world_model
-        # find held tool
         held = None
         for k2 in range(m):
             if holds[agent_idx][k2]:
                 held = k2
                 break
         if held is None:
-            return  # nothing to give
+            return
 
-        # find agents who requested held tool (smallest-index first)
         requesters = [j for j in range(n) if perceived_requested[j][held]]
         if requesters:
-            # pick smallest-index requester, then find shortest path to them
             target = min(requesters)
             path = self._bfs_shortest(env.can_reach, agent_idx, [target])
             if path and len(path) >= 2:
                 next_hop = path[1]
-                logits[_action_give(next_hop, m)] = 4.0
-                return
-
-        # no requester or unreachable → keep the tool (pass)
+                try:
+                    j_pos = give_targets.index(next_hop)
+                    logits[_action_give_idx(j_pos, m)] = 4.0
+                except ValueError:
+                    pass
 
     # ------ HumanPolicyPrior interface ------
     def __call__(self, state, human_agent_index: int, possible_goal=None):
@@ -996,7 +1010,8 @@ class ToolsHeuristicPolicy(HumanPolicyPrior):
             return self._action_distribution(state, human_agent_index, possible_goal)
 
         # marginalise over goals
-        dist = np.zeros(self.world_model.n_actions, dtype=np.float64)
+        na = self.world_model._n_actions_per_agent[human_agent_index]
+        dist = np.zeros(na, dtype=np.float64)
         count = 0
         for goal, weight in self._goal_gen.generate(state, human_agent_index):
             dist += weight * self._action_distribution(state, human_agent_index, goal)
@@ -1327,12 +1342,12 @@ def render_tools_transition(
             move_type = None
             actor = None
             for i in range(n):
-                atype, param = decode_action(actions[i], m, n)
+                atype, param = decode_action(actions[i], m, env.give_targets[i])
                 if atype == "give" and old_owner == i:
                     move_type = "give"
                     actor = i
                     break
-                if atype == "take" and param == k:
+                if atype == "acquire" and param == k and holds_new[i][k]:
                     move_type = "take"
                     actor = i
                     break
@@ -1481,13 +1496,13 @@ def render_tools_transition(
                                                     color="royalblue", lw=2.5,
                                                     connectionstyle="arc3,rad=-0.3"))
 
-        # ---- animated request arcs (only for agents whose action is request) ----
+        # ---- animated request arcs (acquire that resulted in a new request) ----
         for i in range(n):
-            atype, aparam = decode_action(actions[i], m, n)
-            if atype == "request":
+            atype, aparam = decode_action(actions[i], m, env.give_targets[i])
+            if atype == "acquire":
                 k = aparam
-                # skip if already shown as persistent arc above
-                if req_old[i][k]:
+                # Only animate if this is a newly-placed request
+                if req_old[i][k] or not req_new[i][k]:
                     continue
                 tp = _tool_render_pos(k, wb_old, holds_old, pos, n)
                 if k in moves:

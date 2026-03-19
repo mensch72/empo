@@ -171,7 +171,7 @@ def run_rollout(env, robot_policy, human_policy_prior, goal_sampler, goal_gen, a
                 actions[hi] = np.random.choice(len(dist), p=dist)
 
         # Print step summary
-        action_strs = [action_name(a, env.n_tools, env.n_agents) for a in actions]
+        action_strs = [action_name(a, env.n_tools, env.give_targets[i]) for i, a in enumerate(actions)]
         print(
             f"  Step {step + 1}/{args.steps}  remaining={remaining}  "
             f"actions={action_strs}"

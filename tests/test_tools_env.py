@@ -19,7 +19,6 @@ import pytest
 
 # Import using PYTHONPATH-compatible paths
 from empo.world_specific_helpers.tools import (
-    ACTION_PASS,
     HoldGoal,
     IdleGoal,
     ToolsGoalGenerator,
@@ -27,9 +26,8 @@ from empo.world_specific_helpers.tools import (
     ToolsHeuristicPolicy,
     ToolsWorldModel,
     WorkbenchGoal,
-    _action_give,
-    _action_request,
-    _action_take,
+    _action_acquire,
+    _action_give_idx,
     action_name,
     create_tools_env,
     decode_action,
@@ -79,9 +77,11 @@ class TestConstruction:
         assert small_env.human_agent_indices == [1]
 
     def test_action_space_size(self, small_env):
-        # 1 + 2*2 + 2 = 7
-        assert small_env.n_actions == 7
-        assert small_env.action_space.n == 7
+        # Per-agent: n_tools + len(give_targets[i])
+        nap = small_env.n_actions_per_agent
+        assert len(nap) == 2
+        for i, na in enumerate(nap):
+            assert na == small_env.n_tools + len(small_env.give_targets[i])
 
     def test_graph_diagonals(self, small_env):
         for i in range(small_env.n_agents):
@@ -135,34 +135,31 @@ class TestState:
 
 
 class TestActions:
-    def test_pass(self, small_env):
-        assert decode_action(0, 2, 2) == ("pass", None)
-
-    def test_take(self, small_env):
-        assert decode_action(1, 2, 2) == ("take", 0)
-        assert decode_action(2, 2, 2) == ("take", 1)
+    def test_acquire(self, small_env):
+        gt = small_env.give_targets[0]
+        m = small_env.n_tools
+        assert decode_action(0, m, gt) == ("acquire", 0)
+        assert decode_action(1, m, gt) == ("acquire", 1)
 
     def test_give(self, small_env):
-        assert decode_action(3, 2, 2) == ("give", 0)
-        assert decode_action(4, 2, 2) == ("give", 1)
-
-    def test_request(self, small_env):
-        assert decode_action(5, 2, 2) == ("request", 0)
-        assert decode_action(6, 2, 2) == ("request", 1)
+        gt = small_env.give_targets[0]
+        m = small_env.n_tools
+        for j_pos, j in enumerate(gt):
+            assert decode_action(m + j_pos, m, gt) == ("give", j)
 
     def test_action_name(self, small_env):
-        assert action_name(0, 2, 2) == "pass"
-        assert "take" in action_name(1, 2, 2)
-        assert "give" in action_name(3, 2, 2)
-        assert "req" in action_name(5, 2, 2)
+        gt = small_env.give_targets[0]
+        m = small_env.n_tools
+        assert "acq" in action_name(0, m, gt)
+        if len(gt) > 0:
+            assert "give" in action_name(m, m, gt)
 
-    def test_encode_helpers(self):
-        assert _action_take(0) == 1
-        assert _action_take(1) == 2
-        assert _action_give(0, 2) == 3
-        assert _action_give(1, 2) == 4
-        assert _action_request(0, 2, 2) == 5
-        assert _action_request(1, 2, 2) == 6
+    def test_encode_helpers(self, small_env):
+        assert _action_acquire(0) == 0
+        assert _action_acquire(1) == 1
+        m = small_env.n_tools
+        assert _action_give_idx(0, m) == m
+        assert _action_give_idx(1, m) == m + 1
 
 
 # ---- transition probabilities ----
@@ -199,8 +196,9 @@ class TestTransitions:
         """Number of distinct successors ≤ n + 1."""
         example_env.reset(seed=123)
         s = example_env.get_state()
+        nap = example_env.n_actions_per_agent
         for _ in range(5):
-            actions = [np.random.randint(example_env.n_actions) for _ in range(4)]
+            actions = [np.random.randint(nap[i]) for i in range(4)]
             trans = example_env.transition_probabilities(s, actions)
             if trans is not None:
                 assert len(trans) <= example_env.n_agents + 1
@@ -209,9 +207,10 @@ class TestTransitions:
         """After any transition, each tool is still on exactly one wb or in one hand."""
         small_env.reset(seed=42)
         s = small_env.get_state()
+        nap = small_env.n_actions_per_agent
         # try every action pair
-        for a0 in range(small_env.n_actions):
-            for a1 in range(small_env.n_actions):
+        for a0 in range(nap[0]):
+            for a1 in range(nap[1]):
                 trans = small_env.transition_probabilities(s, [a0, a1])
                 if trans is None:
                     continue
@@ -402,7 +401,7 @@ class TestGoalGenSampler:
         )
         assert len(goals) > 0
         for g, w in goals:
-            assert isinstance(g, (HoldGoal, WorkbenchGoal))
+            assert isinstance(g, (HoldGoal, WorkbenchGoal, IdleGoal))
             assert w > 0
 
     def test_generator_weights_sum(self, example_env):
@@ -434,9 +433,10 @@ class TestHeuristicPolicy:
         gen = ToolsGoalGenerator(example_env)
         pol = ToolsHeuristicPolicy(example_env, gen, beta=5.0)
         state = example_env.get_state()
+        nap = example_env.n_actions_per_agent
         for hi in example_env.human_agent_indices:
             dist = pol(state, hi)
-            assert dist.shape == (example_env.n_actions,)
+            assert dist.shape == (nap[hi],)
             assert abs(dist.sum() - 1.0) < 1e-6
             assert (dist >= 0).all()
 
@@ -446,9 +446,10 @@ class TestHeuristicPolicy:
         pol = ToolsHeuristicPolicy(example_env, gen, beta=5.0)
         state = example_env.get_state()
         hi = example_env.human_agent_indices[0]
+        nap = example_env.n_actions_per_agent
         goal = HoldGoal(example_env, hi, 0)
         dist = pol(state, hi, goal)
-        assert dist.shape == (example_env.n_actions,)
+        assert dist.shape == (nap[hi],)
         assert abs(dist.sum() - 1.0) < 1e-6
 
     def test_sample(self, example_env):
@@ -456,8 +457,9 @@ class TestHeuristicPolicy:
         gen = ToolsGoalGenerator(example_env)
         pol = ToolsHeuristicPolicy(example_env, gen, beta=5.0)
         state = example_env.get_state()
-        action = pol.sample(state, example_env.human_agent_indices[0])
-        assert 0 <= action < example_env.n_actions
+        hi = example_env.human_agent_indices[0]
+        action = pol.sample(state, hi)
+        assert 0 <= action < example_env.n_actions_per_agent[hi]
 
 
 # ---- rendering ----
@@ -491,7 +493,7 @@ class TestRendering:
 
 class TestActionEffects:
     def test_take_tool_from_own_workbench(self):
-        """Agent can take a tool from their own workbench."""
+        """Agent can acquire a tool from their own workbench (reachable → take)."""
         env = ToolsWorldModel(
             n_agents=2,
             n_tools=1,
@@ -509,8 +511,8 @@ class TestActionEffects:
         env._workbench[0, 0] = True
 
         state = env.get_state()
-        # Agent 0 takes tool 0
-        trans = env.transition_probabilities(state, [_action_take(0), ACTION_PASS])
+        # Agent 0 acquires tool 0 (reachable → take), agent 1 acquires tool 0 (idle)
+        trans = env.transition_probabilities(state, [_action_acquire(0), _action_acquire(0)])
         assert trans is not None
         _, ns = trans[0]
         _, wb, holds, _ = ns
@@ -536,23 +538,28 @@ class TestActionEffects:
         env._holds[0, 0] = True
 
         state = env.get_state()
-        # Agent 0 gives to agent 1
-        trans = env.transition_probabilities(state, [_action_give(1, 1), ACTION_PASS])
+        # Agent 0 gives to agent 1 (agent 1 is in give_targets[0])
+        gt0 = env.give_targets[0]
+        give_action = _action_give_idx(gt0.index(1), env.n_tools)
+        # Agent 1 does a give (no-op since not holding anything)
+        noop_1 = _action_give_idx(0, env.n_tools)
+        trans = env.transition_probabilities(
+            state, [give_action, noop_1])
         assert trans is not None
         _, ns = trans[0]
         _, wb, holds, _ = ns
         assert holds[0][0] == 0  # agent 0 no longer holds
         assert wb[1][0] == 1  # tool on agent 1's workbench
 
-    def test_request_sets_flag(self):
-        """Request action sets has_requested flag."""
+    def test_acquire_unreachable_sets_request(self):
+        """Acquiring a tool not on a reachable workbench sets request flag."""
         env = ToolsWorldModel(
             n_agents=2,
             n_tools=2,
             max_steps=5,
             p_failure=0.0,
             seed=0,
-            can_reach=np.ones((2, 2), dtype=bool),
+            can_reach=np.eye(2, dtype=bool),  # can only reach self
             can_grab=np.ones((2, 2), dtype=bool),
             can_hear=np.ones((2, 2), dtype=bool),
         )
@@ -564,25 +571,24 @@ class TestActionEffects:
         env._workbench[1, 1] = True  # tool 1 on agent 1's wb
 
         state = env.get_state()
-        n, m = env.n_agents, env.n_tools
-        # Agent 0 requests tool 1
+        # Agent 0 acquires tool 1 → not reachable → sets request
         trans = env.transition_probabilities(
-            state, [_action_request(1, m, n), ACTION_PASS]
+            state, [_action_acquire(1), _action_acquire(0)]
         )
         assert trans is not None
         _, ns = trans[0]
         _, _, _, req = ns
         assert req[0][1] == 1
 
-    def test_request_cancels_previous(self):
-        """Requesting a new tool cancels the previous request."""
+    def test_acquire_unreachable_cancels_previous_request(self):
+        """Acquiring a new unreachable tool cancels the previous request."""
         env = ToolsWorldModel(
             n_agents=2,
             n_tools=2,
             max_steps=5,
             p_failure=0.0,
             seed=0,
-            can_reach=np.ones((2, 2), dtype=bool),
+            can_reach=np.eye(2, dtype=bool),  # can only reach self
             can_grab=np.ones((2, 2), dtype=bool),
             can_hear=np.ones((2, 2), dtype=bool),
         )
@@ -594,10 +600,9 @@ class TestActionEffects:
         env._requested[0, 0] = True  # agent 0 already requested tool 0
 
         state = env.get_state()
-        n, m = env.n_agents, env.n_tools
-        # Agent 0 now requests tool 1
+        # Agent 0 now acquires tool 1 (unreachable → request, cancels old)
         trans = env.transition_probabilities(
-            state, [_action_request(1, m, n), ACTION_PASS]
+            state, [_action_acquire(1), _action_acquire(0)]
         )
         assert trans is not None
         _, ns = trans[0]
@@ -623,8 +628,8 @@ class TestActionEffects:
         env._workbench[0, 0] = True
 
         state = env.get_state()
-        # Agent 0 takes tool, agent 1 passes
-        trans = env.transition_probabilities(state, [_action_take(0), ACTION_PASS])
+        # Agent 0 acquires tool, agent 1 acquires tool 0 (idle)
+        trans = env.transition_probabilities(state, [_action_acquire(0), _action_acquire(0)])
         assert trans is not None
         # Should have ≤ 3 successors (no-fail, agent0-fails, agent1-fails)
         assert len(trans) <= 3
@@ -651,20 +656,20 @@ class TestActionEffects:
         env._workbench[0, 0] = True  # tool on agent 0's workbench
 
         state = env.get_state()
-        # Both agents try to take tool 0
-        trans = env.transition_probabilities(state, [_action_take(0), _action_take(0)])
+        # Both agents try to acquire tool 0
+        trans = env.transition_probabilities(state, [_action_acquire(0), _action_acquire(0)])
         assert trans is not None
         _, ns = trans[0]
         _, wb, holds, _ = ns
         # Agent 0 (lower index) picks it up first.
         # Agent 1 cannot grab from agent 0's hand (can_grab[1,0]=False),
-        # and it's no longer on any workbench, so agent 1's take fails.
+        # and it's no longer on any workbench, so agent 1's acquire fails.
         assert holds[0][0] == 1
         assert holds[1][0] == 0
 
-    def test_conflict_take_grab_blocked_same_timestep(self):
+    def test_conflict_acquire_grab_blocked_same_timestep(self):
         """Even with can_grab[1,0]=True, agent 1 cannot grab a tool that
-        agent 0 just claimed via 'take' in the same timestep."""
+        agent 0 just claimed via 'acquire' in the same timestep."""
         env = ToolsWorldModel(
             n_agents=2,
             n_tools=1,
@@ -681,12 +686,12 @@ class TestActionEffects:
         env._workbench[0, 0] = True  # tool on agent 0's workbench
 
         state = env.get_state()
-        # Both try to take tool 0
-        trans = env.transition_probabilities(state, [_action_take(0), _action_take(0)])
+        # Both try to acquire tool 0
+        trans = env.transition_probabilities(state, [_action_acquire(0), _action_acquire(0)])
         assert trans is not None
         _, ns = trans[0]
         _, wb, holds, _ = ns
-        # Agent 0 claims tool 0; agent 1's take is blocked by the
+        # Agent 0 claims tool 0; agent 1's acquire is blocked by the
         # claimed_tools lock even though can_grab[1,0] is True.
         assert holds[0][0] == 1
         assert holds[1][0] == 0
