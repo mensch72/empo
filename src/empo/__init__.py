@@ -33,7 +33,7 @@ which has been extended with:
 Example usage:
     >>> from empo import WorldModel, PossibleGoal
     >>> from src.envs import SmallOneOrTwoChambersMapEnv
-    >>> 
+    >>>
     >>> env = SmallOneOrTwoChambersMapEnv()
     >>> state = env.get_state()
     >>> transitions = env.transition_probabilities(state, [0, 0])
@@ -58,6 +58,7 @@ from empo.world_specific_helpers.tools import (
     ToolsWorldModel,
     HoldGoal,
     WorkbenchGoal,
+    IdleGoal,
     ToolsGoalGenerator,
     ToolsGoalSampler,
     ToolsHeuristicPolicy,
@@ -71,7 +72,7 @@ __all__ = [
     "WorldModel",
     # Possible Goals
     "PossibleGoal",
-    "PossibleGoalGenerator", 
+    "PossibleGoalGenerator",
     "PossibleGoalSampler",
     # Human Policy Prior
     "HumanPolicyPrior",
@@ -91,6 +92,7 @@ __all__ = [
     "ToolsWorldModel",
     "HoldGoal",
     "WorkbenchGoal",
+    "IdleGoal",
     "ToolsGoalGenerator",
     "ToolsGoalSampler",
     "ToolsHeuristicPolicy",
@@ -99,12 +101,14 @@ __all__ = [
 
 # Add transport exports if available
 if _HAS_TRANSPORT:
-    __all__.extend([
-        "TransportEnvWrapper",
-        "TransportActions",
-        "StepType",
-        "create_transport_env",
-        "TransportGoal",
-        "TransportGoalGenerator",
-        "TransportGoalSampler",
-    ])
+    __all__.extend(
+        [
+            "TransportEnvWrapper",
+            "TransportActions",
+            "StepType",
+            "create_transport_env",
+            "TransportGoal",
+            "TransportGoalGenerator",
+            "TransportGoalSampler",
+        ]
+    )

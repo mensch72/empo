@@ -32,6 +32,10 @@ Transition dynamics:
 Goals:
     - HoldGoal(i, k): agent i holds tool k
     - WorkbenchGoal(i, k): tool k is on agent i's workbench
+    - IdleGoal(i): agent i is not holding any tool (hands free)
+
+The goal set is designed so that in every reachable state, at least one
+goal per agent is already attained (required by Phase 2 backward induction).
 """
 
 from __future__ import annotations
@@ -317,9 +321,7 @@ class ToolsWorldModel(WorldModel):
         # Enforce a strictly positive beta to avoid divide-by-zero and
         # negative/ill-defined exponents.
         if beta <= 0.0:
-            raise ValueError(
-                f"waxman_*_beta must be positive; got beta={beta!r}"
-            )
+            raise ValueError(f"waxman_*_beta must be positive; got beta={beta!r}")
 
         n = self.n_agents
         pos = self.agent_positions
@@ -712,11 +714,50 @@ class WorkbenchGoal(PossibleGoal):
         return f"WorkbenchGoal(A{self.agent_idx}, T{self.tool_idx})"
 
 
+class IdleGoal(PossibleGoal):
+    """Goal: agent *agent_idx* is not holding any tool (hands free).
+
+    This goal ensures that the set of possible goals covers the full state
+    space: in every reachable state at least one goal per agent is already
+    attained.  Without it, a state where the agent holds nothing and has an
+    empty workbench would leave no goal achieved, violating the Phase 2
+    backward-induction precondition.
+    """
+
+    def __init__(self, env, agent_idx: int, index: Optional[int] = None):
+        super().__init__(env, index=index)
+        self.agent_idx = agent_idx
+        # Use int tag 2 to distinguish from HoldGoal(0,...) and WorkbenchGoal(1,...)
+        self._hash = hash((2, agent_idx))
+        super()._freeze()
+
+    def is_achieved(self, state) -> int:
+        _remaining, _wb, holds, _rq = state
+        return int(not any(holds[self.agent_idx]))
+
+    def __hash__(self):
+        return self._hash
+
+    def __eq__(self, other):
+        return isinstance(other, IdleGoal) and self.agent_idx == other.agent_idx
+
+    def __repr__(self):
+        return f"IdleGoal(A{self.agent_idx})"
+
+
 # ---------------------------------------------------------------------------
 # Goal generator / sampler
 # ---------------------------------------------------------------------------
 class ToolsGoalGenerator(PossibleGoalGenerator):
-    """Enumerate all Hold and Workbench goals for every human agent."""
+    """Enumerate all Hold, Workbench, and Idle goals for every human agent.
+
+    The goal set is designed so that in every reachable state, at least one
+    goal per agent is already attained:
+
+    * Agent holds tool *k* → ``HoldGoal(i, k)`` achieved
+    * Agent holds nothing, tool *k* on workbench → ``WorkbenchGoal(i, k)`` achieved
+    * Agent holds nothing, empty workbench → ``IdleGoal(i)`` achieved
+    """
 
     def __init__(self, env: ToolsWorldModel, indexed: bool = True):
         super().__init__(env, indexed=indexed)
@@ -730,11 +771,13 @@ class ToolsGoalGenerator(PossibleGoalGenerator):
                 idx += 1
                 gs.append(WorkbenchGoal(env, i, k, index=idx))
                 idx += 1
+            gs.append(IdleGoal(env, i, index=idx))
+            idx += 1
             self._agent_goals[i] = gs
         # Per-agent weight: 1/n_goals_per_agent so weights sum to 1 for each agent.
         # This is consistent with the sampler (uniform sampling, weight=1.0):
         #   generator_weight = sampler_weight * p(goal)  =>  1/n = 1.0 * (1/n)
-        self._n_goals_per_agent = 2 * env.n_tools
+        self._n_goals_per_agent = 2 * env.n_tools + 1
 
     def generate(
         self, state, human_agent_index: int
@@ -745,7 +788,7 @@ class ToolsGoalGenerator(PossibleGoalGenerator):
 
 
 class ToolsGoalSampler(PossibleGoalSampler):
-    """Uniformly sample a Hold or Workbench goal for a given human agent."""
+    """Uniformly sample a Hold, Workbench, or Idle goal for a given human agent."""
 
     def __init__(self, env: ToolsWorldModel, indexed: bool = True):
         super().__init__(env, indexed=indexed)
@@ -759,6 +802,8 @@ class ToolsGoalSampler(PossibleGoalSampler):
                 idx += 1
                 gs.append(WorkbenchGoal(env, i, k, index=idx))
                 idx += 1
+            gs.append(IdleGoal(env, i, index=idx))
+            idx += 1
             self._agent_goals[i] = gs
 
     def sample(self, state, human_agent_index: int) -> Tuple[PossibleGoal, float]:
@@ -894,6 +939,16 @@ class ToolsHeuristicPolicy(HumanPolicyPrior):
 
             # 5) already requested k → give held tool along shortest path
             self._give_along_path(agent_idx, holds, p_req, logits, n, m)
+            return _softmax(logits, self._beta)
+
+        if isinstance(goal, IdleGoal) and goal.agent_idx == agent_idx:
+            # Goal: have hands free.
+            if not any(holds[agent_idx]):
+                # Already idle → pass
+                logits[ACTION_PASS] = 10.0
+                return _softmax(logits, self._beta)
+            # Holding something → give to own workbench
+            logits[_action_give(agent_idx, m)] = 5.0
             return _softmax(logits, self._beta)
 
         # goal does not apply to this agent → uniform over feasible actions
@@ -1136,6 +1191,17 @@ def render_tools_state(env: ToolsWorldModel, goals=None, ax=None, figsize=(8, 8)
                             connectionstyle="arc3,rad=-0.3",
                         ),
                     )
+            elif isinstance(g, IdleGoal):
+                # Draw a dashed blue circle around the agent to show "idle" goal
+                circle = plt.Circle(
+                    pos[g.agent_idx],
+                    0.06,
+                    fill=False,
+                    edgecolor="blue",
+                    linestyle="dashed",
+                    linewidth=1.5,
+                )
+                ax.add_patch(circle)
 
     if own_fig:
         fig.tight_layout()

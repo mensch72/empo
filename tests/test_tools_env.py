@@ -21,6 +21,7 @@ import pytest
 from empo.world_specific_helpers.tools import (
     ACTION_PASS,
     HoldGoal,
+    IdleGoal,
     ToolsGoalGenerator,
     ToolsGoalSampler,
     ToolsHeuristicPolicy,
