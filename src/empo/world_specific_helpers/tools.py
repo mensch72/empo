@@ -834,8 +834,8 @@ class ToolsHeuristicPolicy(HumanPolicyPrior):
     ):
         super().__init__(env, env.human_agent_indices)
         self._goal_gen = possible_goal_generator
-        if not np.isfinite(beta) or beta < 0:
-            raise ValueError(f"beta must be finite and non-negative, got {beta}")
+        if beta < 0 or np.isnan(beta):
+            raise ValueError(f"beta must be non-negative (inf allowed), got {beta}")
         self._beta = beta
 
     # ------ shortest path on can_reach ------
@@ -1113,18 +1113,20 @@ def render_tools_state(env: ToolsWorldModel, goals=None, ax=None, figsize=(8, 8)
         # held tool overlay
         for k in range(m):
             if holds[i][k]:
+                angle = 2 * np.pi * k / m - np.pi / 2
+                dx, dy = 0.03 * np.cos(angle), 0.03 * np.sin(angle)
                 marker = _TOOL_MARKERS[k % len(_TOOL_MARKERS)]
                 ax.plot(
-                    pos[i, 0],
-                    pos[i, 1] + 0.04,
+                    pos[i, 0] + dx,
+                    pos[i, 1] + dy,
                     marker,
                     color="black",
                     markersize=10,
                     zorder=7,
                 )
                 ax.text(
-                    pos[i, 0] + 0.03,
-                    pos[i, 1] + 0.04,
+                    pos[i, 0] + dx + 0.015,
+                    pos[i, 1] + dy,
                     f"T{k}",
                     fontsize=6,
                     color="black",
@@ -1132,44 +1134,51 @@ def render_tools_state(env: ToolsWorldModel, goals=None, ax=None, figsize=(8, 8)
                 )
 
         # workbench tools (small shapes around agent)
-        wb_tools = [k for k in range(m) if wb[i][k]]
-        for ti, k in enumerate(wb_tools):
-            angle = 2 * np.pi * ti / max(len(wb_tools), 1) - np.pi / 2
-            dx, dy = 0.06 * np.cos(angle), 0.06 * np.sin(angle)
-            marker = _TOOL_MARKERS[k % len(_TOOL_MARKERS)]
-            ax.plot(
-                pos[i, 0] + dx,
-                pos[i, 1] + dy,
-                marker,
-                color="dimgrey",
-                markersize=7,
-                zorder=4,
-            )
-            ax.text(
-                pos[i, 0] + dx + 0.015,
-                pos[i, 1] + dy,
-                f"T{k}",
-                fontsize=5,
-                color="dimgrey",
-                zorder=4,
-            )
+        for k in range(m):
+            if wb[i][k]:
+                angle = 2 * np.pi * k / m - np.pi / 2
+                dx, dy = 0.06 * np.cos(angle), 0.06 * np.sin(angle)
+                marker = _TOOL_MARKERS[k % len(_TOOL_MARKERS)]
+                ax.plot(
+                    pos[i, 0] + dx,
+                    pos[i, 1] + dy,
+                    marker,
+                    color="dimgrey",
+                    markersize=7,
+                    zorder=4,
+                )
+                ax.text(
+                    pos[i, 0] + dx + 0.015,
+                    pos[i, 1] + dy,
+                    f"T{k}",
+                    fontsize=5,
+                    color="dimgrey",
+                    zorder=4,
+                )
 
-    # ---- has_requested arrows (solid blue) ----
+    # ---- has_requested arrows (solid blue, parallel to goal arcs) ----
+    _REQ_OFFSET = 0.015  # perpendicular offset for parallel look
     for i in range(n):
         for k in range(m):
             if req[i][k]:
-                # find where tool k currently is
                 tool_pos = _tool_render_pos(k, wb, holds, pos, n)
                 if tool_pos is not None:
+                    diff = tool_pos - pos[i]
+                    length = np.linalg.norm(diff)
+                    if length > 1e-9:
+                        perp = np.array([-diff[1], diff[0]]) / length
+                    else:
+                        perp = np.array([0.0, 0.0])
+                    off = _REQ_OFFSET * perp
                     ax.annotate(
                         "",
-                        xy=tool_pos,
-                        xytext=pos[i],
+                        xy=tool_pos + off,
+                        xytext=pos[i] + off,
                         arrowprops=dict(
                             arrowstyle="->",
                             color="royalblue",
-                            lw=1.2,
-                            connectionstyle="arc3,rad=0.2",
+                            lw=2.5,
+                            connectionstyle="arc3,rad=-0.3",
                         ),
                     )
 
@@ -1186,7 +1195,7 @@ def render_tools_state(env: ToolsWorldModel, goals=None, ax=None, figsize=(8, 8)
                         arrowprops=dict(
                             arrowstyle="->",
                             color="blue",
-                            lw=1.5,
+                            lw=3.0,
                             linestyle="dashed",
                             connectionstyle="arc3,rad=-0.3",
                         ),
@@ -1199,7 +1208,7 @@ def render_tools_state(env: ToolsWorldModel, goals=None, ax=None, figsize=(8, 8)
                     fill=False,
                     edgecolor="blue",
                     linestyle="dashed",
-                    linewidth=1.5,
+                    linewidth=3.0,
                 )
                 ax.add_patch(circle)
 
@@ -1214,13 +1223,295 @@ def render_tools_state(env: ToolsWorldModel, goals=None, ax=None, figsize=(8, 8)
 
 
 def _tool_render_pos(k, wb, holds, positions, n):
-    """Find approximate render position of tool k."""
+    """Find approximate render position of tool k.
+
+    Must match the placement logic in :func:`render_tools_state`.
+    Angle is constant per tool index; distance is short (held) or long (workbench).
+    """
+    m = len(wb[0])  # number of tools
+    angle = 2 * np.pi * k / m - np.pi / 2
     for i in range(n):
         if holds[i][k]:
-            return positions[i] + np.array([0.0, 0.04])
+            dx, dy = 0.03 * np.cos(angle), 0.03 * np.sin(angle)
+            return positions[i] + np.array([dx, dy])
         if wb[i][k]:
-            return positions[i] + np.array([0.06, 0.0])
+            dx, dy = 0.06 * np.cos(angle), 0.06 * np.sin(angle)
+            return positions[i] + np.array([dx, dy])
     return None
+
+
+def _tool_owner(k, wb, holds, n):
+    """Return ``(agent_index, 'held'|'wb')`` for tool *k*, or ``(None, None)``."""
+    for i in range(n):
+        if holds[i][k]:
+            return i, "held"
+        if wb[i][k]:
+            return i, "wb"
+    return None, None
+
+
+def _draw_partial_arc(ax, start, end, frac, rad=-0.2, color="royalblue",
+                      lw=2.5, alpha=0.7):
+    """Draw fraction *frac* of a quadratic Bezier arc from *start* to *end*.
+
+    The control point is offset perpendicular to the start→end midpoint by
+    ``rad * ||end - start||``, matching matplotlib's ``arc3,rad=`` semantics.
+    """
+    start = np.asarray(start, dtype=float)
+    end = np.asarray(end, dtype=float)
+    diff = end - start
+    length = np.linalg.norm(diff)
+    if length < 1e-9 or frac <= 0:
+        return
+    mid = (start + end) / 2
+    perp = np.array([diff[1], -diff[0]])  # 90° CW (matches matplotlib arc3)
+    ctrl = mid + rad * perp  # control point (same convention as mpl)
+    n_pts = max(int(50 * frac), 2)
+    ts = np.linspace(0, frac, n_pts)
+    pts = np.column_stack([
+        (1 - ts)**2 * start[0] + 2 * (1 - ts) * ts * ctrl[0] + ts**2 * end[0],
+        (1 - ts)**2 * start[1] + 2 * (1 - ts) * ts * ctrl[1] + ts**2 * end[1],
+    ])
+    ax.plot(pts[:, 0], pts[:, 1], color=color, lw=lw, alpha=alpha,
+            solid_capstyle="round")
+
+
+def render_tools_transition(
+    env: ToolsWorldModel,
+    old_state,
+    new_state,
+    actions: List[int],
+    goals=None,
+    n_interp: int = 10,
+    figsize=(8, 8),
+) -> List[np.ndarray]:
+    """Render interpolated frames showing tool motion between two states.
+
+    For each moved tool a T-shaped indicator is drawn:
+
+    * *give*: red line from the giver extending toward the tool with a
+      T-bar just **before** the tool (a "pusher").
+    * *take*: green line from the taker extending toward the tool with a
+      T-bar just **behind** the tool.
+
+    Returns a list of *n_interp* RGB numpy frames.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    pos = env.agent_positions
+    n, m = env.n_agents, env.n_tools
+
+    _rem_old, wb_old, holds_old, req_old = old_state
+    _rem_new, wb_new, holds_new, req_new = new_state
+
+    # Compute old / new render positions for each tool
+    old_tool_pos = {}
+    new_tool_pos = {}
+    for k in range(m):
+        op = _tool_render_pos(k, wb_old, holds_old, pos, n)
+        np_ = _tool_render_pos(k, wb_new, holds_new, pos, n)
+        if op is not None:
+            old_tool_pos[k] = op
+        if np_ is not None:
+            new_tool_pos[k] = np_
+
+    # Determine which tools moved and the cause
+    moves: Dict[int, dict] = {}
+    for k in range(m):
+        if k not in old_tool_pos or k not in new_tool_pos:
+            continue
+        if not np.allclose(old_tool_pos[k], new_tool_pos[k], atol=1e-6):
+            old_owner, _ = _tool_owner(k, wb_old, holds_old, n)
+            move_type = None
+            actor = None
+            for i in range(n):
+                atype, param = decode_action(actions[i], m, n)
+                if atype == "give" and old_owner == i:
+                    move_type = "give"
+                    actor = i
+                    break
+                if atype == "take" and param == k:
+                    move_type = "take"
+                    actor = i
+                    break
+            if move_type is None:
+                new_owner, _ = _tool_owner(k, wb_new, holds_new, n)
+                move_type = "take"
+                actor = new_owner
+            moves[k] = {
+                "old": old_tool_pos[k],
+                "new": new_tool_pos[k],
+                "type": move_type,
+                "actor": actor,
+            }
+
+    static_tools = set(range(m)) - set(moves.keys())
+
+    frames: List[np.ndarray] = []
+    for fi in range(n_interp):
+        t = (fi + 1) / (n_interp + 1)  # 0 < t < 1
+
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
+        ax.set_xlim(-0.1, 1.1)
+        ax.set_ylim(-0.1, 1.1)
+        ax.set_aspect("equal")
+        ax.set_title(f"Tools Workshop  (t_remaining={_rem_old})")
+        ax.axis("off")
+
+        # ---- graph edges ----
+        for i in range(n):
+            for j in range(n):
+                if i == j:
+                    continue
+                if env.can_grab[i, j]:
+                    ax.annotate("", xy=pos[j], xytext=pos[i],
+                                arrowprops=dict(arrowstyle="->", color="grey",
+                                                lw=2.0, alpha=0.35))
+                elif env.can_reach[i, j]:
+                    ax.annotate("", xy=pos[j], xytext=pos[i],
+                                arrowprops=dict(arrowstyle="->", color="grey",
+                                                lw=1.0, alpha=0.3))
+                elif env.can_hear[i, j]:
+                    ax.annotate("", xy=pos[j], xytext=pos[i],
+                                arrowprops=dict(arrowstyle="->", color="grey",
+                                                lw=0.5, alpha=0.2,
+                                                linestyle="dotted"))
+
+        # ---- agents ----
+        for i in range(n):
+            c = _agent_color(i, env._robot_indices)
+            label = f"R{i}" if i in env._robot_indices else f"H{i}"
+            ax.plot(pos[i, 0], pos[i, 1], "o", color=c, markersize=18, zorder=5)
+            ax.text(pos[i, 0], pos[i, 1], label, ha="center", va="center",
+                    fontsize=7, fontweight="bold", color="white", zorder=6)
+
+        # ---- static tools (old state positions) ----
+        for k in static_tools:
+            if k in old_tool_pos:
+                tp = old_tool_pos[k]
+                _, kind = _tool_owner(k, wb_old, holds_old, n)
+                marker = _TOOL_MARKERS[k % len(_TOOL_MARKERS)]
+                color = "black" if kind == "held" else "dimgrey"
+                msize = 10 if kind == "held" else 7
+                zord = 7 if kind == "held" else 4
+                ax.plot(tp[0], tp[1], marker, color=color,
+                        markersize=msize, zorder=zord)
+                ax.text(tp[0] + 0.015, tp[1], f"T{k}",
+                        fontsize=6 if kind == "held" else 5,
+                        color=color, zorder=zord)
+
+        # ---- moving tools (interpolated) + T-shaped indicators ----
+        for k, mv in moves.items():
+            tool_pos = (1 - t) * mv["old"] + t * mv["new"]
+            marker = _TOOL_MARKERS[k % len(_TOOL_MARKERS)]
+            ax.plot(tool_pos[0], tool_pos[1], marker, color="black",
+                    markersize=10, zorder=8)
+            ax.text(tool_pos[0] + 0.015, tool_pos[1], f"T{k}",
+                    fontsize=6, color="black", zorder=8)
+
+            # T-shaped indicator
+            actor = mv["actor"]
+            if actor is not None:
+                actor_pos = pos[actor]
+                direction = tool_pos - actor_pos
+                dist = np.linalg.norm(direction)
+                if dist > 1e-6:
+                    unit = direction / dist
+                    perp = np.array([-unit[1], unit[0]])
+
+                    if mv["type"] == "give":
+                        # Pusher: T-bar just before the tool (between actor and tool)
+                        tbar_center = tool_pos - unit * 0.015
+                    else:
+                        # Take: T-bar just behind the tool (far side from actor)
+                        tbar_center = tool_pos + unit * 0.015
+
+                    tbar_half = 0.02
+                    tbar_left = tbar_center + perp * tbar_half
+                    tbar_right = tbar_center - perp * tbar_half
+
+                    clr = "red" if mv["type"] == "give" else "green"
+                    ax.plot([actor_pos[0], tool_pos[0]],
+                            [actor_pos[1], tool_pos[1]],
+                            color=clr, lw=2.5, zorder=9, alpha=0.7)
+                    ax.plot([tbar_left[0], tbar_right[0]],
+                            [tbar_left[1], tbar_right[1]],
+                            color=clr, lw=3.0, zorder=9, alpha=0.7)
+
+        # ---- goal arrows ----
+        if goals:
+            for g in goals:
+                if isinstance(g, (HoldGoal, WorkbenchGoal)):
+                    tp = _tool_render_pos(g.tool_idx, wb_old, holds_old, pos, n)
+                    if g.tool_idx in moves:
+                        mv = moves[g.tool_idx]
+                        tp = (1 - t) * mv["old"] + t * mv["new"]
+                    if tp is not None:
+                        ax.annotate("", xy=tp, xytext=pos[g.agent_idx],
+                                    arrowprops=dict(arrowstyle="->", color="blue",
+                                                    lw=3.0, linestyle="dashed",
+                                                    connectionstyle="arc3,rad=-0.3"))
+                elif isinstance(g, IdleGoal):
+                    circle = plt.Circle(pos[g.agent_idx], 0.06, fill=False,
+                                        edgecolor="blue", linestyle="dashed",
+                                        linewidth=3.0)
+                    ax.add_patch(circle)
+
+        # ---- persistent request arcs (already in old_state matrix) ----
+        _REQ_OFFSET = 0.015
+        for i in range(n):
+            for k in range(m):
+                if req_old[i][k]:
+                    tp = _tool_render_pos(k, wb_old, holds_old, pos, n)
+                    if k in moves:
+                        mv = moves[k]
+                        tp = (1 - t) * mv["old"] + t * mv["new"]
+                    if tp is not None:
+                        diff = tp - pos[i]
+                        length = np.linalg.norm(diff)
+                        if length > 1e-9:
+                            perp = np.array([-diff[1], diff[0]]) / length
+                        else:
+                            perp = np.array([0.0, 0.0])
+                        off = _REQ_OFFSET * perp
+                        ax.annotate("", xy=tp + off, xytext=pos[i] + off,
+                                    arrowprops=dict(arrowstyle="->",
+                                                    color="royalblue", lw=2.5,
+                                                    connectionstyle="arc3,rad=-0.3"))
+
+        # ---- animated request arcs (only for agents whose action is request) ----
+        for i in range(n):
+            atype, aparam = decode_action(actions[i], m, n)
+            if atype == "request":
+                k = aparam
+                # skip if already shown as persistent arc above
+                if req_old[i][k]:
+                    continue
+                tp = _tool_render_pos(k, wb_old, holds_old, pos, n)
+                if k in moves:
+                    mv = moves[k]
+                    tp = (1 - t) * mv["old"] + t * mv["new"]
+                if tp is not None:
+                    diff = tp - pos[i]
+                    length = np.linalg.norm(diff)
+                    if length > 1e-9:
+                        perp = np.array([-diff[1], diff[0]]) / length
+                    else:
+                        perp = np.array([0.0, 0.0])
+                    off = _REQ_OFFSET * perp
+                    _draw_partial_arc(ax, pos[i] + off, tp + off, t,
+                                      rad=-0.3, color="royalblue",
+                                      lw=2.5, alpha=0.7)
+
+        fig.tight_layout()
+        fig.canvas.draw()
+        buf = np.asarray(fig.canvas.buffer_rgba())[:, :, :3].copy()
+        plt.close(fig)
+        frames.append(buf)
+
+    return frames
 
 
 # ---------------------------------------------------------------------------
@@ -1286,7 +1577,17 @@ def save_tools_video(frames: List[np.ndarray], path: str, fps: int = 2):
 # Internal utility
 # ---------------------------------------------------------------------------
 def _softmax(logits: np.ndarray, beta: float) -> np.ndarray:
-    """Numerically stable softmax with temperature *beta*."""
+    """Numerically stable softmax with temperature *beta*.
+
+    When *beta* is ``inf``, returns a uniform distribution over the
+    maximum-logit actions (deterministic argmax with tie-breaking).
+    """
+    if np.isinf(beta):
+        max_val = logits.max()
+        mask = logits == max_val
+        out = np.zeros_like(logits, dtype=np.float64)
+        out[mask] = 1.0 / mask.sum()
+        return out
     x = beta * logits
     x = x - x.max()
     e = np.exp(x)
