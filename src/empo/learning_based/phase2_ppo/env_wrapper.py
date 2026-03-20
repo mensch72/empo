@@ -18,7 +18,6 @@ This module does NOT modify any existing environment or wrapper code.
 
 from __future__ import annotations
 
-import random
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import gymnasium
@@ -107,6 +106,11 @@ class EMPOMultiGridEnv(gymnasium.Env):
         self._goal_weights: Dict[int, float] = {}
         self._step_count: int = 0
 
+        # Seeded RNG for reproducibility (set from Gymnasium's np_random
+        # during reset(); initial value is a throwaway that is never used
+        # because reset() must be called before step()).
+        self._py_rng: np.random.RandomState = np.random.RandomState(0)
+
     # ------------------------------------------------------------------
     # Gymnasium API
     # ------------------------------------------------------------------
@@ -118,6 +122,10 @@ class EMPOMultiGridEnv(gymnasium.Env):
         options: Optional[dict] = None,
     ) -> Tuple[np.ndarray, dict]:
         super().reset(seed=seed)
+        # Seed the internal RNG from Gymnasium's np_random
+        self._py_rng = np.random.RandomState(
+            self.np_random.integers(0, 2**31)
+        )
         self.world_model.reset(seed=seed)
         state = self.world_model.get_state()
 
@@ -147,11 +155,15 @@ class EMPOMultiGridEnv(gymnasium.Env):
         next_state = self.world_model.get_state()
         self._step_count += 1
 
+        # -- Truncate if episode exceeds maximum length --
+        if self._step_count >= self.config.steps_per_episode:
+            truncated = True
+
         # -- Compute intrinsic reward U_r(s_t) at pre-transition state --
         u_r = self._compute_u_r(pre_state)
 
-        # -- Goal resampling (stochastic) --
-        if random.random() < self.config.goal_resample_prob:
+        # -- Goal resampling (stochastic, using seeded RNG) --
+        if self._py_rng.random() < self.config.goal_resample_prob:
             self._resample_goals(next_state)
 
         # -- Compute transition probabilities for auxiliary training --
@@ -184,22 +196,28 @@ class EMPOMultiGridEnv(gymnasium.Env):
             self._goal_weights[h_idx] = weight
 
     def _sample_human_actions(self, state: Any) -> List[int]:
-        """Sample an action for every agent; humans use the policy prior."""
-        n_agents = len(self.human_agent_indices) + len(
-            self.robot_agent_indices
-        )
+        """Sample an action for every agent; humans use the policy prior.
+
+        The joint-action list is sized by ``max(all_indices) + 1`` so that
+        non-contiguous agent indices are handled correctly (matching the
+        DQN Phase 2 trainer convention).
+        """
+        all_indices = self.human_agent_indices + self.robot_agent_indices
+        n_agents = max(all_indices) + 1 if all_indices else 0
         actions: List[int] = [0] * n_agents
         for h_idx in self.human_agent_indices:
             goal = self._goals.get(h_idx)
             if goal is None:
                 # Uniform random if no goal assigned yet
-                actions[h_idx] = random.randrange(self.config.num_actions)
+                actions[h_idx] = int(
+                    self._py_rng.randint(self.config.num_actions)
+                )
             else:
                 probs = self.human_policy_prior(
                     state, h_idx, goal, self.world_model
                 )
                 actions[h_idx] = int(
-                    np.random.choice(len(probs), p=np.asarray(probs))
+                    self._py_rng.choice(len(probs), p=np.asarray(probs))
                 )
         return actions
 
@@ -217,11 +235,18 @@ class EMPOMultiGridEnv(gymnasium.Env):
         return joint
 
     def _compute_u_r(self, state: Any) -> float:
-        """Compute U_r(s) using auxiliary networks (or return 0.0)."""
+        """Compute U_r(s) using auxiliary networks (or return 0.0).
+
+        X_h values are floored at ``_X_H_MIN`` (1e-3) to prevent
+        numerical instability in the X_h^{-ξ} exponentiation.
+        """
         if self.auxiliary_networks is None:
             return 0.0
 
         import torch
+
+        # Floor value matching trainer.py
+        _X_H_MIN = 1e-3
 
         with torch.no_grad():
             nets = self.auxiliary_networks
@@ -238,7 +263,7 @@ class EMPOMultiGridEnv(gymnasium.Env):
                     x_h = nets.x_h.forward(
                         state, self.world_model, h_idx, "cpu"
                     )
-                    x_h_vals.append(float(x_h.item()))
+                    x_h_vals.append(max(float(x_h.item()), _X_H_MIN))
                 if x_h_vals:
                     y = float(
                         np.mean(

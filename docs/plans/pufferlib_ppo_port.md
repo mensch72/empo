@@ -442,8 +442,8 @@ class EMPOMultiGridEnv(gymnasium.Env):
         _, _, wm_terminated, _, _ = self.world_model.step(joint_action)
         next_state = self.world_model.get_state()
         
-        # Compute intrinsic reward U_r(next_state)
-        u_r = self._compute_u_r(next_state)
+        # Compute intrinsic reward U_r(state) at pre-transition state s_t
+        u_r = self._compute_u_r(state)
         
         # Episode termination
         self._step_count += 1

@@ -42,8 +42,6 @@ class PPOPhase2Config:
         Number of epochs per PPO update.
     ppo_clip_coef : float
         PPO surrogate-objective clipping coefficient (ε).
-    ppo_ent_coef : float
-        Entropy-bonus coefficient.
     ppo_vf_coef : float
         Value-function loss coefficient.
     ppo_max_grad_norm : float
@@ -140,7 +138,6 @@ class PPOPhase2Config:
     ppo_num_minibatches: int = 4
     ppo_update_epochs: int = 4
     ppo_clip_coef: float = 0.2
-    ppo_ent_coef: float = 0.01
     ppo_vf_coef: float = 0.5
     ppo_max_grad_norm: float = 0.5
     ppo_gae_lambda: float = 0.95

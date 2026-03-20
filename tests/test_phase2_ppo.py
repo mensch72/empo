@@ -384,6 +384,101 @@ class TestEMPOMultiGridEnv:
                 break
         assert terminated  # MockWorldModel terminates after 50 steps
 
+    def test_episode_truncates_at_steps_per_episode(self):
+        """Episode is truncated when step count reaches steps_per_episode."""
+        wm = MockWorldModel(n_agents=3, n_actions=5)
+        cfg = PPOPhase2Config(
+            num_actions=5, num_robots=1, steps_per_episode=10
+        )
+        env = EMPOMultiGridEnv(
+            world_model=wm,
+            human_policy_prior=mock_human_policy_prior,
+            goal_sampler=mock_goal_sampler,
+            human_agent_indices=[0, 1],
+            robot_agent_indices=[2],
+            config=cfg,
+            obs_dim=3,
+        )
+        env.reset()
+        for i in range(9):
+            _, _, terminated, truncated, _ = env.step(0)
+            assert not truncated, f"Unexpected truncation at step {i+1}"
+        # Step 10 should trigger truncation
+        _, _, _, truncated, _ = env.step(0)
+        assert truncated
+
+    def test_seeded_rng_reproducibility(self):
+        """Two envs with the same seed produce identical trajectories."""
+        results = []
+        for _ in range(2):
+            env = self._make_env()
+            env.reset(seed=42)
+            trajectory = []
+            for _ in range(5):
+                _, reward, _, _, info = env.step(0)
+                trajectory.append(
+                    (info["next_state"], info["human_actions"])
+                )
+            results.append(trajectory)
+        assert results[0] == results[1]
+
+    def test_non_contiguous_agent_indices(self):
+        """Handles non-contiguous agent indices (e.g. [1, 3] human, [5] robot)."""
+        wm = MockWorldModel(n_agents=6, n_actions=5)
+        cfg = PPOPhase2Config(
+            num_actions=5, num_robots=1, steps_per_episode=50
+        )
+        env = EMPOMultiGridEnv(
+            world_model=wm,
+            human_policy_prior=mock_human_policy_prior,
+            goal_sampler=mock_goal_sampler,
+            human_agent_indices=[1, 3],
+            robot_agent_indices=[5],
+            config=cfg,
+            obs_dim=3,
+        )
+        env.reset(seed=0)
+        # Should not raise IndexError
+        _, _, _, _, info = env.step(0)
+        ha = info["human_actions"]
+        assert len(ha) == 6  # max(1,3,5) + 1 = 6
+        # Human agents should have been assigned actions from the policy prior
+        # (uniform over 5 actions, so 0-4 are all valid)
+        assert 0 <= ha[1] < 5, f"Human at index 1 got invalid action {ha[1]}"
+        assert 0 <= ha[3] < 5, f"Human at index 3 got invalid action {ha[3]}"
+
+    def test_batch_size_guard_in_ppo_update(self):
+        """PPO update does not crash when N < ppo_num_minibatches."""
+        cfg = PPOPhase2Config(
+            num_actions=5,
+            num_robots=1,
+            hidden_dim=32,
+            ppo_num_minibatches=100,  # much larger than N
+            ppo_update_epochs=1,
+        )
+        ac = EMPOActorCritic(
+            state_encoder=None,
+            hidden_dim=32,
+            num_actions=5,
+            obs_dim=3,
+        )
+        trainer = PPOPhase2Trainer(
+            actor_critic=ac,
+            auxiliary_networks=PPOAuxiliaryNetworks(
+                v_h_e=_MockVhE()
+            ),
+            config=cfg,
+        )
+        N = 4
+        obs = torch.randn(N, 3)
+        actions = torch.randint(0, 5, (N,))
+        old_lp = torch.zeros(N)
+        adv = torch.randn(N)
+        ret = torch.randn(N)
+        # Should not crash with batch_size=0
+        result = trainer.ppo_update(obs, actions, old_lp, adv, ret)
+        assert "policy_loss" in result
+
 
 # ======================================================================
 # 4. PPOPhase2Trainer tests
@@ -636,7 +731,7 @@ class TestIsolation:
         assert len(buf) == 1
 
     def test_no_ppo_imports_in_phase2_init(self):
-        """The DQN-path __init__.py should NOT mention PPO."""
+        """The DQN-path __init__.py should NOT import from phase2_ppo."""
         init_path = os.path.join(
             os.path.dirname(__file__),
             "..", "src", "empo", "learning_based", "phase2", "__init__.py"
@@ -646,6 +741,8 @@ class TestIsolation:
         if os.path.exists(init_path):
             with open(init_path) as f:
                 content = f.read()
-            assert "ppo" not in content.lower(), (
-                "The DQN-path __init__.py should not contain PPO references"
+            # Check for actual imports/references to the PPO module, not just
+            # any mention of "ppo" (which could appear in comments/docs).
+            assert "phase2_ppo" not in content, (
+                "The DQN-path __init__.py should not reference phase2_ppo"
             )

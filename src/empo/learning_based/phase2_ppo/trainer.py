@@ -1,13 +1,19 @@
 """
 PPO-based Phase 2 trainer for EMPO.
 
-This module orchestrates:
-1. **Warm-up**: Train auxiliary networks (V_h^e, X_h, U_r) with a uniform
-   random robot policy before PPO starts.
-2. **PPO training**: Collect on-policy rollouts with the current actor-critic,
-   compute advantages using GAE with the intrinsic reward U_r(s), and update
-   the actor-critic via PPO.  Auxiliary networks are trained in parallel from
-   a separate replay buffer filled with the same rollout data.
+This module orchestrates PPO-based Phase 2 training:
+
+- Collect on-policy rollouts with the current actor-critic.
+- Compute advantages using GAE with the intrinsic reward U_r(s).
+- Update the actor-critic via PPO.
+- Train the auxiliary networks (V_h^e, X_h, U_r) from the same rollout data.
+
+Earlier design docs for EMPO describe a separate **warm-up** stage that
+would train auxiliary networks under a uniform random robot policy before
+PPO updates begin, controlled by ``warmup_*_steps`` configuration fields.
+That explicit warm-up stage is **not implemented** in this trainer; any
+``warmup_*_steps`` fields in the config are currently ignored here, and
+all training performed by this module happens within the PPO loop itself.
 
 This module does NOT import or modify the existing DQN-path trainer
 (``learning_based.phase2.trainer``).  It reads only base-class interfaces
@@ -290,7 +296,7 @@ class PPOPhase2Trainer:
         """
         cfg = self.config
         N = obs_batch.shape[0]
-        batch_size = N // cfg.ppo_num_minibatches
+        batch_size = max(1, N // max(1, cfg.ppo_num_minibatches))
 
         # Normalize advantages over the full rollout (before minibatch split).
         # This is the convention used by CleanRL/PufferLib PPO: normalize once
@@ -308,7 +314,7 @@ class PPOPhase2Trainer:
         for _epoch in range(cfg.ppo_update_epochs):
             indices = torch.randperm(N, device=self.device)
             for start in range(0, N, batch_size):
-                end = start + batch_size
+                end = min(start + batch_size, N)
                 mb_idx = indices[start:end]
 
                 mb_obs = obs_batch[mb_idx]
