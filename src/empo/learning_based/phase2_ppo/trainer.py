@@ -384,7 +384,12 @@ class PPOPhase2Trainer:
         self, rollout: PPORolloutBuffer
     ) -> None:
         """Extract auxiliary transitions from a PPO rollout and push them
-        into the replay buffer for V_h^e / X_h / U_r training."""
+        into the replay buffer for V_h^e / X_h / U_r training.
+
+        For multi-robot training the ``robot_action`` stored in the buffer
+        is the per-robot action tuple (not a 1-tuple wrapping the flat
+        joint-action index).
+        """
         for entry in rollout.entries:
             info = entry.info
             state = info.get("state")
@@ -397,9 +402,18 @@ class PPOPhase2Trainer:
             if state is None or next_state is None:
                 continue
 
+            # Convert flat action index to per-robot tuple for multi-robot.
+            robot_action: tuple
+            if hasattr(self.actor_critic, "action_index_to_tuple"):
+                robot_action = self.actor_critic.action_index_to_tuple(
+                    entry.action
+                )
+            else:
+                robot_action = (entry.action,)
+
             self.aux_replay_buffer.push(
                 state=state,
-                robot_action=(entry.action,),
+                robot_action=robot_action,
                 goals=goals,
                 goal_weights=goal_weights,
                 human_actions=human_actions,
@@ -639,8 +653,21 @@ class PPOPhase2Trainer:
                 lp = log_prob.item()
                 val = value.item()
 
+                # Map flat joint-action index to the env's expected format.
+                # For multi-robot (MultiDiscrete), convert to per-robot tuple.
+                # For single-robot (Discrete), pass scalar int unchanged.
+                if (
+                    self.actor_critic.num_robots > 1
+                    and hasattr(self.actor_critic, "action_index_to_tuple")
+                ):
+                    env_action: Any = self.actor_critic.action_index_to_tuple(
+                        action_int
+                    )
+                else:
+                    env_action = action_int
+
                 next_obs, reward, terminated, truncated, step_info = env.step(
-                    action_int
+                    env_action
                 )
                 done = terminated or truncated
 

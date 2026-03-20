@@ -87,8 +87,8 @@ class MockWorldModel:
 
 
 def mock_human_policy_prior(state, human_idx, goal, world_model):
-    """Uniform random policy prior."""
-    n = 5
+    """Uniform random policy prior (adapts to world_model.n_actions)."""
+    n = getattr(world_model, "n_actions", 5)
     return [1.0 / n] * n
 
 
@@ -478,6 +478,101 @@ class TestEMPOMultiGridEnv:
         # Should not crash with batch_size=0
         result = trainer.ppo_update(obs, actions, old_lp, adv, ret)
         assert "policy_loss" in result
+
+    def test_multi_robot_transition_probs(self):
+        """Transition probs correctly iterate over joint actions for 2 robots."""
+        wm = MockWorldModel(n_agents=4, n_actions=3)
+        cfg = PPOPhase2Config(
+            num_actions=3, num_robots=2, steps_per_episode=50
+        )
+        env = EMPOMultiGridEnv(
+            world_model=wm,
+            human_policy_prior=mock_human_policy_prior,
+            goal_sampler=mock_goal_sampler,
+            human_agent_indices=[0, 1],
+            robot_agent_indices=[2, 3],
+            config=cfg,
+            obs_dim=3,
+        )
+        env.reset(seed=0)
+        # Multi-robot: action is a tuple (per-robot action)
+        _, _, _, _, info = env.step((0, 1))
+        tp = info["transition_probs"]
+        # Should have 3^2 = 9 joint actions
+        assert len(tp) == 9, f"Expected 9 joint actions, got {len(tp)}"
+        # Each entry should be a valid transition probability list
+        for idx, transitions in tp.items():
+            assert isinstance(transitions, list)
+            assert len(transitions) > 0
+            probs_sum = sum(p for p, _ in transitions)
+            assert abs(probs_sum - 1.0) < 1e-6
+
+    def test_multi_robot_action_space_is_multidiscrete(self):
+        """Multi-robot env has MultiDiscrete action space."""
+        wm = MockWorldModel(n_agents=4, n_actions=3)
+        cfg = PPOPhase2Config(
+            num_actions=3, num_robots=2, steps_per_episode=50
+        )
+        env = EMPOMultiGridEnv(
+            world_model=wm,
+            human_policy_prior=mock_human_policy_prior,
+            goal_sampler=mock_goal_sampler,
+            human_agent_indices=[0, 1],
+            robot_agent_indices=[2, 3],
+            config=cfg,
+            obs_dim=3,
+        )
+        assert isinstance(env.action_space, gymnasium.spaces.MultiDiscrete)
+
+    def test_multi_robot_push_aux_buffer_stores_tuple(self):
+        """push_rollout_to_aux_buffer stores per-robot action tuple."""
+        cfg = PPOPhase2Config(
+            num_actions=3,
+            num_robots=2,
+            hidden_dim=32,
+            aux_buffer_size=100,
+        )
+        ac = EMPOActorCritic(
+            state_encoder=None,
+            hidden_dim=32,
+            num_actions=3,
+            num_robots=2,
+            obs_dim=3,
+        )
+        trainer = PPOPhase2Trainer(
+            actor_critic=ac,
+            auxiliary_networks=PPOAuxiliaryNetworks(
+                v_h_e=_MockVhE()
+            ),
+            config=cfg,
+        )
+        # Create a rollout entry with a flat joint-action index
+        # For 2 robots with 3 actions each, index 5 = (2, 1) in base-3
+        rollout = PPORolloutBuffer()
+        rollout.add(PPORolloutEntry(
+            obs=np.zeros(3),
+            action=5,
+            log_prob=0.0,
+            value=0.0,
+            reward=0.0,
+            done=False,
+            info={
+                "state": (0, 0, 0, 0),
+                "next_state": (1, 1, 1, 1),
+                "goals": {},
+                "goal_weights": {},
+                "human_actions": [0, 0, 0, 0],
+                "transition_probs": {0: [(1.0, (0, 0, 0, 0))]},
+            },
+        ))
+
+        trainer.push_rollout_to_aux_buffer(rollout)
+        assert len(trainer.aux_replay_buffer) == 1
+        entry = trainer.aux_replay_buffer.buffer[0]
+        # The stored robot_action should be a tuple of per-robot actions
+        assert entry.robot_action == (2, 1), (
+            f"Expected (2, 1), got {entry.robot_action}"
+        )
 
 
 # ======================================================================

@@ -25,6 +25,24 @@ import numpy as np
 from gymnasium import spaces
 
 
+def _flat_index_to_tuple(
+    index: int, num_actions: int, num_robots: int
+) -> Tuple[int, ...]:
+    """Convert a flat joint-action index to a per-robot action tuple.
+
+    Inverse of :meth:`EMPOActorCritic.action_tuple_to_index` (defined in
+    ``actor_critic.py``).  Uses little-endian base-``num_actions`` expansion::
+
+        index = a_0 + a_1 * num_actions + a_2 * num_actions^2 + ...
+    """
+    actions = []
+    remaining = index
+    for _ in range(num_robots):
+        actions.append(remaining % num_actions)
+        remaining //= num_actions
+    return tuple(actions)
+
+
 class EMPOMultiGridEnv(gymnasium.Env):
     """PufferLib-compatible wrapper around a :class:`WorldModel`.
 
@@ -280,6 +298,10 @@ class EMPOMultiGridEnv(gymnasium.Env):
 
         Returns ``{action_index: [(prob, next_state), ...]}``.
         Handles both ``Discrete`` and ``MultiDiscrete`` action spaces.
+
+        For ``MultiDiscrete`` (multi-robot) the flat joint-action index is
+        converted to a per-robot action tuple before calling
+        ``_build_joint_action``, which expects an indexable sequence.
         """
         if isinstance(self.action_space, spaces.Discrete):
             num_robot_actions = self.action_space.n
@@ -288,9 +310,19 @@ class EMPOMultiGridEnv(gymnasium.Env):
         else:
             return {}
 
+        num_actions = self.config.num_actions
+        num_robots = len(self.robot_agent_indices)
+
         probs_by_action: Dict[int, list] = {}
         for a_r_idx in range(num_robot_actions):
-            joint = self._build_joint_action(a_r_idx, human_actions)
+            # For MultiDiscrete, convert flat index to per-robot action tuple
+            if isinstance(self.action_space, spaces.MultiDiscrete):
+                robot_action: Any = _flat_index_to_tuple(
+                    a_r_idx, num_actions, num_robots
+                )
+            else:
+                robot_action = a_r_idx
+            joint = self._build_joint_action(robot_action, human_actions)
             trans = self.world_model.transition_probabilities(state, joint)
             if trans is not None:
                 probs_by_action[a_r_idx] = trans
