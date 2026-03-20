@@ -677,12 +677,12 @@ The warm-up stages are adapted for PPO:
 During warm-up (Stages 0–2), the robot acts uniformly at random. With PufferLib, this
 is achieved by:
 
-**Option A: Separate warm-up phase without PPO**
+**Option A: Separate warm-up part without PPO**
 
-Run warm-up as a separate pre-training phase that doesn't use PufferLib at all:
+Run warm-up as a separate pre-training part that doesn't use PufferLib at all:
 
 ```python
-# Phase A: Warm up auxiliary networks with random robot
+# Part A: Warm up auxiliary networks with random robot
 for step in range(total_warmup_steps):
     state = env.get_state()
     robot_action = env.action_space.sample()  # Random
@@ -691,7 +691,7 @@ for step in range(total_warmup_steps):
     # Train V_h^e, X_h, U_r from this transition
     train_auxiliary_networks(transition)
 
-# Phase B: PufferLib PPO training with intrinsic reward
+# Part B: PufferLib PPO training with intrinsic reward
 # ... (Section 8)
 ```
 
@@ -745,7 +745,7 @@ def train_empo_ppo(
     device='cuda',
 ):
     # ================================================================
-    # Phase A: Warm-up (auxiliary networks only, random robot)
+    # Part A: Warm-up (auxiliary networks only, random robot)
     # ================================================================
     auxiliary_networks = create_auxiliary_networks(config, device)
     warmup_trainer = AuxiliaryWarmupTrainer(
@@ -756,7 +756,7 @@ def train_empo_ppo(
     warmup_trainer.train(num_steps=config.get_total_warmup_steps())
     
     # ================================================================
-    # Phase B: PPO training with intrinsic reward
+    # Part B: PPO training with intrinsic reward
     # ================================================================
     
     # Create actor-critic
@@ -1016,7 +1016,7 @@ creating a natural time-scale separation.
 
 ## 10. Migration Plan
 
-### Phase 1: Foundation (Estimated: 2–3 weeks)
+### Migration Step 1: Foundation (Estimated: 2–3 weeks)
 
 - [ ] **10.1** Add PufferLib dependency (`pip install pufferlib`)
 - [ ] **10.2** Implement `EMPOMultiGridEnv` (Gymnasium wrapper with human agent simulation)
@@ -1024,7 +1024,7 @@ creating a natural time-scale separation.
 - [ ] **10.4** Unit tests: env wrapper produces valid observations, rewards, dones
 - [ ] **10.5** Verify: random policy through wrapper matches current random rollout behavior
 
-### Phase 2: Intrinsic Reward Integration (Estimated: 2–3 weeks)
+### Migration Step 2: Intrinsic Reward Integration (Estimated: 2–3 weeks)
 
 - [ ] **10.6** Implement centralized U_r reward computation (Option C from Section 5.4)
 - [ ] **10.7** Implement auxiliary network training loop (V_h^e, X_h, U_r) using PPO rollout data
@@ -1032,7 +1032,7 @@ creating a natural time-scale separation.
 - [ ] **10.9** Unit tests: U_r computation matches current `get_u_r()` method
 - [ ] **10.10** Verify: auxiliary networks converge during warm-up with random robot
 
-### Phase 3: PPO Training (Estimated: 2–3 weeks)
+### Migration Step 3: PPO Training (Estimated: 2–3 weeks)
 
 - [ ] **10.11** Integrate PufferLib PPO trainer with EMPOMultiGridEnv
 - [ ] **10.12** Implement warm-up → PPO transition (Section 7.2)
@@ -1040,7 +1040,7 @@ creating a natural time-scale separation.
 - [ ] **10.14** End-to-end test: train on small grid (5×5, 1 human, 1 robot)
 - [ ] **10.15** Compare learned behavior with current DQN-trained policy
 
-### Phase 4: Optimization and Scaling (Estimated: 2–3 weeks)
+### Migration Step 4: Optimization and Scaling (Estimated: 2–3 weeks)
 
 - [ ] **10.16** Implement batched U_r computation across vectorized environments
 - [ ] **10.17** Profile training loop, optimize bottlenecks
@@ -1048,7 +1048,7 @@ creating a natural time-scale separation.
 - [ ] **10.19** TensorBoard integration: log PPO metrics alongside auxiliary metrics
 - [ ] **10.20** Checkpoint/resume support for PPO + auxiliary networks
 
-### Phase 5: Cleanup and Documentation (Estimated: 1 week)
+### Migration Step 5: Cleanup and Documentation (Estimated: 1 week)
 
 - [ ] **10.21** Update `docs/WARMUP_DESIGN.md` with PPO-adapted warm-up
 - [ ] **10.22** Update `docs/API.md` with new interfaces
