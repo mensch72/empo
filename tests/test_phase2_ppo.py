@@ -111,7 +111,7 @@ class _MockVhE(BaseHumanGoalAchievementNetwork):
 
     def forward(self, state, world_model, human_agent_idx, goal, device="cpu"):
         # Return a constant prediction ∈ [0, 1]
-        return self.apply_clamp(self._linear(torch.zeros(1)))
+        return self.apply_clamp(self._linear(torch.zeros(1, device=device)))
 
     def get_config(self):
         return {"type": "mock"}

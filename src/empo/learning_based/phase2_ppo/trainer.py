@@ -46,6 +46,10 @@ from .config import PPOPhase2Config
 
 logger = logging.getLogger(__name__)
 
+# Floor for X_h values to prevent numerical instability in X_h^{-ξ}
+# (division by zero / explosion when X_h → 0).  Matches the DQN path.
+_X_H_MIN = 1e-3
+
 
 # ======================================================================
 # Container for auxiliary networks (PPO path)
@@ -445,14 +449,12 @@ class PPOPhase2Trainer:
                     with torch.no_grad():
                         target_net = nets.v_h_e_target or nets.v_h_e
                         # Check if goal achieved in next_state
-                        goal_achieved = torch.tensor(
-                            float(
-                                hasattr(goal, "is_achieved")
-                                and goal.is_achieved(t.next_state)
-                            ),
-                            device=self.device,
+                        achieved = (
+                            goal.is_achieved(t.next_state)
+                            if hasattr(goal, "is_achieved")
+                            else 0
                         )
-                        if goal_achieved.item() > 0.5:
+                        if achieved:
                             target = torch.tensor(1.0, device=self.device)
                         elif t.terminal:
                             target = torch.tensor(0.0, device=self.device)
@@ -554,7 +556,7 @@ class PPOPhase2Trainer:
                             )
                             xv = x_h_target_net.apply_hard_clamp(xv)
                             x_vals.append(
-                                max(xv.squeeze().item(), 1e-3)
+                                max(xv.squeeze().item(), _X_H_MIN)
                             )
                     if x_vals:
                         x_t = torch.tensor(x_vals, device=self.device)
