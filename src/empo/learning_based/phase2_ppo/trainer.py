@@ -398,12 +398,21 @@ class PPOPhase2Trainer:
                 terminal=entry.done,
             )
 
-    def train_auxiliary_step(self) -> Dict[str, float]:
+    def train_auxiliary_step(
+        self,
+        world_model: Any = None,
+    ) -> Dict[str, float]:
         """Run one gradient step on the auxiliary networks.
 
-        This is a skeleton that logs which networks are updated.
-        The actual loss computation mirrors the DQN path's
-        ``compute_losses`` but operates on the PPO auxiliary networks.
+        Mirrors the DQN path's ``compute_losses`` but uses the base-class
+        ``forward()`` interface (single-item, not ``forward_batch``).
+
+        Parameters
+        ----------
+        world_model : WorldModel or None
+            A world model instance used for ``forward()`` calls on the
+            auxiliary networks.  When ``None``, V_h^e and X_h forward passes
+            are skipped (useful for unit testing the plumbing).
 
         Returns
         -------
@@ -412,28 +421,162 @@ class PPOPhase2Trainer:
         if len(self.aux_replay_buffer) < self.config.batch_size:
             return {}
 
-        # TODO(phase2_ppo): Implement actual auxiliary loss computation.
-        # When implemented, this will:
-        # 1. Sample a batch from self.aux_replay_buffer
-        # 2. Compute V_h^e TD targets using transition_probs_by_action
-        # 3. Compute X_h Monte Carlo targets from V_h^e samples
-        # 4. Compute U_r targets from X_h values
-        # 5. Backprop through respective optimisers
-        # For now, return zero losses to allow the training loop to run.
+        batch = self.aux_replay_buffer.sample(self.config.batch_size)
+        cfg = self.config
+        nets = self.auxiliary_networks
         losses: Dict[str, float] = {}
 
-        # --- V_h^e loss (TD target from model-based successors) ---
-        # Placeholder: actual implementation would compute eq. (6) targets
-        # using transition_probs_by_action and the current π_r.
-        losses["v_h_e_loss"] = 0.0
+        # -----------------------------------------------------------------
+        # V_h^e loss: MSE between V_h^e(s, g_h) and TD target
+        # -----------------------------------------------------------------
+        if world_model is not None:
+            v_h_e_preds: List[torch.Tensor] = []
+            v_h_e_targets: List[torch.Tensor] = []
 
-        # --- X_h loss (Monte Carlo target from V_h^e samples) ---
-        if self.auxiliary_networks.x_h is not None:
-            losses["x_h_loss"] = 0.0
+            for t in batch:
+                for h_idx, goal in t.goals.items():
+                    # Forward pass (online network)
+                    pred = nets.v_h_e(
+                        t.state, world_model, h_idx, goal, self.device
+                    )
+                    v_h_e_preds.append(pred.squeeze())
 
-        # --- U_r loss (target from X_h values) ---
-        if self.auxiliary_networks.u_r is not None:
-            losses["u_r_loss"] = 0.0
+                    # Target from target network
+                    with torch.no_grad():
+                        target_net = nets.v_h_e_target or nets.v_h_e
+                        # Check if goal achieved in next_state
+                        goal_achieved = torch.tensor(
+                            float(
+                                hasattr(goal, "is_achieved")
+                                and goal.is_achieved(t.next_state)
+                            ),
+                            device=self.device,
+                        )
+                        if goal_achieved.item() > 0.5:
+                            target = torch.tensor(1.0, device=self.device)
+                        elif t.terminal:
+                            target = torch.tensor(0.0, device=self.device)
+                        else:
+                            next_v = target_net(
+                                t.next_state,
+                                world_model,
+                                h_idx,
+                                goal,
+                                self.device,
+                            )
+                            next_v = target_net.apply_hard_clamp(next_v)
+                            target = cfg.gamma_h * next_v.squeeze()
+                    v_h_e_targets.append(target)
+
+            if v_h_e_preds:
+                preds_t = torch.stack(v_h_e_preds)
+                targets_t = torch.stack(v_h_e_targets)
+                loss_v = ((preds_t - targets_t) ** 2).mean()
+
+                opt = self.aux_optimizers["v_h_e"]
+                opt.zero_grad()
+                loss_v.backward()
+                if cfg.v_h_e_grad_clip is not None:
+                    nn.utils.clip_grad_norm_(
+                        nets.v_h_e.parameters(), cfg.v_h_e_grad_clip
+                    )
+                opt.step()
+                losses["v_h_e_loss"] = loss_v.item()
+
+        # -----------------------------------------------------------------
+        # X_h loss: MSE between X_h(s, h) and w_h * V_h^e(s, g_h)^ζ
+        # -----------------------------------------------------------------
+        if (
+            nets.x_h is not None
+            and world_model is not None
+            and "x_h" in self.aux_optimizers
+        ):
+            x_h_preds: List[torch.Tensor] = []
+            x_h_targets_list: List[torch.Tensor] = []
+
+            for t in batch:
+                for h_idx, goal in t.goals.items():
+                    weight = t.goal_weights.get(h_idx, 1.0)
+                    pred = nets.x_h(
+                        t.state, world_model, h_idx, self.device
+                    )
+                    x_h_preds.append(pred.squeeze())
+
+                    with torch.no_grad():
+                        v_target_net = nets.v_h_e_target or nets.v_h_e
+                        v_for_x = v_target_net(
+                            t.state, world_model, h_idx, goal, self.device
+                        )
+                        v_for_x = v_target_net.apply_hard_clamp(v_for_x)
+                        x_target = nets.x_h.compute_target(
+                            v_for_x.squeeze(),
+                            goal_weight=weight,
+                        )
+                    x_h_targets_list.append(x_target)
+
+            if x_h_preds:
+                xp = torch.stack(x_h_preds)
+                xt = torch.stack(x_h_targets_list)
+                loss_x = ((xp - xt) ** 2).mean()
+
+                opt = self.aux_optimizers["x_h"]
+                opt.zero_grad()
+                loss_x.backward()
+                if cfg.x_h_grad_clip is not None:
+                    nn.utils.clip_grad_norm_(
+                        nets.x_h.parameters(), cfg.x_h_grad_clip
+                    )
+                opt.step()
+                losses["x_h_loss"] = loss_x.item()
+
+        # -----------------------------------------------------------------
+        # U_r loss: MSE between predicted y and target y = E_h[X_h^{-ξ}]
+        # -----------------------------------------------------------------
+        if (
+            nets.u_r is not None
+            and world_model is not None
+            and "u_r" in self.aux_optimizers
+        ):
+            y_preds: List[torch.Tensor] = []
+            y_targets: List[torch.Tensor] = []
+
+            x_h_target_net = nets.x_h_target or nets.x_h
+            for t in batch:
+                y_pred, _ = nets.u_r(t.state, world_model, self.device)
+                y_preds.append(y_pred.squeeze())
+
+                with torch.no_grad():
+                    x_vals: List[float] = []
+                    if x_h_target_net is not None:
+                        for h_idx in t.goals.keys():
+                            xv = x_h_target_net(
+                                t.state, world_model, h_idx, self.device
+                            )
+                            xv = x_h_target_net.apply_hard_clamp(xv)
+                            x_vals.append(
+                                max(xv.squeeze().item(), 1e-3)
+                            )
+                    if x_vals:
+                        x_t = torch.tensor(x_vals, device=self.device)
+                        y_t = (x_t ** (-cfg.xi)).mean()
+                    else:
+                        y_t = torch.tensor(1.0, device=self.device)
+                y_targets.append(y_t)
+
+            if y_preds:
+                yp = torch.stack(y_preds)
+                yt = torch.stack(y_targets)
+                loss_u = ((yp - yt) ** 2).mean()
+
+                opt = self.aux_optimizers["u_r"]
+                opt.zero_grad()
+                loss_u.backward()
+                if cfg.u_r_grad_clip is not None:
+                    nn.utils.clip_grad_norm_(
+                        nets.u_r.parameters(), cfg.u_r_grad_clip
+                    )
+                opt.step()
+                losses["u_r_loss"] = loss_u.item()
 
         return losses
 
@@ -557,9 +700,11 @@ class PPOPhase2Trainer:
 
             # --- Step 4: auxiliary training ---
             self.push_rollout_to_aux_buffer(self.rollout_buffer)
+            # Use the env's world_model for auxiliary forward passes
+            wm = getattr(env, "world_model", None)
             aux_losses: Dict[str, float] = {}
             for _ in range(cfg.aux_training_steps_per_iteration):
-                step_losses = self.train_auxiliary_step()
+                step_losses = self.train_auxiliary_step(world_model=wm)
                 for k, v in step_losses.items():
                     aux_losses[k] = aux_losses.get(k, 0.0) + v
 

@@ -37,6 +37,9 @@ from empo.learning_based.phase2_ppo.trainer import (
 from empo.learning_based.phase2.replay_buffer import (
     Phase2ReplayBuffer,
 )
+from empo.learning_based.phase2.human_goal_ability import (
+    BaseHumanGoalAchievementNetwork,
+)
 
 
 # ======================================================================
@@ -97,6 +100,21 @@ def mock_goal_sampler(state, human_idx):
 # ======================================================================
 # 1. PPOPhase2Config tests
 # ======================================================================
+
+
+class _MockVhE(BaseHumanGoalAchievementNetwork):
+    """Minimal V_h^e implementation for testing auxiliary training."""
+
+    def __init__(self):
+        super().__init__(gamma_h=0.99)
+        self._linear = torch.nn.Linear(1, 1)
+
+    def forward(self, state, world_model, human_agent_idx, goal, device="cpu"):
+        # Return a constant prediction ∈ [0, 1]
+        return self.apply_clamp(self._linear(torch.zeros(1)))
+
+    def get_config(self):
+        return {"type": "mock"}
 
 
 class TestPPOPhase2Config:
@@ -491,11 +509,8 @@ class TestPPOPhase2Trainer:
             num_actions=5,
             obs_dim=3,
         )
-        mock_v_h_e = MagicMock(spec=["parameters", "eval", "train"])
-        mock_v_h_e.parameters.return_value = iter(
-            [torch.zeros(1, requires_grad=True)]
-        )
-        aux = PPOAuxiliaryNetworks(v_h_e=mock_v_h_e)
+        v_h_e = _MockVhE()
+        aux = PPOAuxiliaryNetworks(v_h_e=v_h_e)
         trainer = PPOPhase2Trainer(ac, aux, cfg, device="cpu")
 
         def env_factory():
@@ -514,6 +529,77 @@ class TestPPOPhase2Trainer:
         assert len(metrics) == 2
         assert "policy_loss" in metrics[0]
         assert "iteration" in metrics[0]
+
+    def test_auxiliary_training_computes_losses(self):
+        """Auxiliary training step produces V_h^e loss values."""
+        cfg = PPOPhase2Config(
+            num_actions=5,
+            num_robots=1,
+            hidden_dim=16,
+            batch_size=2,
+            aux_buffer_size=100,
+        )
+        ac = EMPOActorCritic(
+            state_encoder=None,
+            hidden_dim=16,
+            num_actions=5,
+            obs_dim=3,
+        )
+        v_h_e = _MockVhE()
+        aux = PPOAuxiliaryNetworks(v_h_e=v_h_e)
+        trainer = PPOPhase2Trainer(ac, aux, cfg, device="cpu")
+
+        # Fill buffer with enough transitions
+        for i in range(5):
+            trainer.aux_replay_buffer.push(
+                state=(i, 0, 0),
+                robot_action=(0,),
+                goals={0: "goal_0", 1: "goal_1"},
+                goal_weights={0: 1.0, 1: 1.0},
+                human_actions=[0, 0, 0],
+                next_state=(i + 1, 0, 0),
+                terminal=False,
+            )
+
+        wm = MockWorldModel(n_agents=3, n_actions=5)
+        losses = trainer.train_auxiliary_step(world_model=wm)
+        assert "v_h_e_loss" in losses
+        assert losses["v_h_e_loss"] >= 0.0
+
+    def test_auxiliary_training_no_world_model_skips(self):
+        """When world_model is None, auxiliary step returns empty."""
+        cfg = PPOPhase2Config(
+            num_actions=5,
+            num_robots=1,
+            hidden_dim=16,
+            batch_size=2,
+            aux_buffer_size=100,
+        )
+        ac = EMPOActorCritic(
+            state_encoder=None,
+            hidden_dim=16,
+            num_actions=5,
+            obs_dim=3,
+        )
+        v_h_e = _MockVhE()
+        aux = PPOAuxiliaryNetworks(v_h_e=v_h_e)
+        trainer = PPOPhase2Trainer(ac, aux, cfg, device="cpu")
+
+        # Fill buffer
+        for i in range(5):
+            trainer.aux_replay_buffer.push(
+                state=(i, 0, 0),
+                robot_action=(0,),
+                goals={0: "goal_0"},
+                goal_weights={0: 1.0},
+                human_actions=[0, 0, 0],
+                next_state=(i + 1, 0, 0),
+                terminal=False,
+            )
+
+        # No world_model → should return empty
+        losses = trainer.train_auxiliary_step(world_model=None)
+        assert losses == {}
 
 
 # ======================================================================
