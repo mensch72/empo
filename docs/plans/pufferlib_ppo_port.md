@@ -243,12 +243,17 @@ environment's reward signal with the intrinsic reward U_r(s):
 class EMPORewardWrapper(gymnasium.Wrapper):
     """
     Wraps a WorldModel environment, replacing environment rewards
-    with the EMPO intrinsic reward U_r(s).
+    with the EMPO intrinsic reward U_r(s_t).
+    
+    Convention: U_r is evaluated at the PRE-transition state s_t (not s_{t+1}).
+    This matches the Bellman equation V_r(s) = U_r(s) + γ E[V_r(s')], and the
+    GAE TD error δ_t = U_r(s_t) + γ V_r(s_{t+1}) − V_r(s_t) (see Appendix B).
     
     On each step:
-    1. Calls the base env.step(action) to get (obs, env_reward, done, truncated, info)
-    2. Computes U_r(s') using the auxiliary networks
-    3. Returns (obs, U_r(s'), done, truncated, info)
+    1. Records the pre-transition state s_t via get_state()
+    2. Calls the base env.step(action) to get (obs, env_reward, done, truncated, info)
+    3. Computes U_r(s_t) using the auxiliary networks
+    4. Returns (obs, U_r(s_t), done, truncated, info)
     """
     
     def __init__(self, env, auxiliary_networks, config, device='cpu'):
@@ -262,13 +267,13 @@ class EMPORewardWrapper(gymnasium.Wrapper):
         self._steps_since_freeze = 0
     
     def step(self, action):
+        # Capture pre-transition state for U_r(s_t) computation
+        pre_state = self.env.get_state()
+        
         obs, env_reward, terminated, truncated, info = self.env.step(action)
         
-        # Get current state for U_r computation
-        state = self.env.get_state()
-        
-        # Compute intrinsic reward using (frozen) auxiliary networks
-        u_r = self._compute_u_r(state)
+        # Compute intrinsic reward at the PRE-transition state
+        u_r = self._compute_u_r(pre_state)
         
         # Store original env reward in info for debugging/logging
         info['env_reward'] = env_reward
@@ -511,10 +516,25 @@ We use the `info` dict to carry this data out of the environment wrapper:
 # Compute model-based transition probabilities from the WorldModel.
 # This matches Phase2Transition.transition_probs_by_action:
 # Dict[int, List[Tuple[float, HashableState]]]
-# We iterate over all robot action indices and, for each, call
+# We iterate over all *robot action indices* and, for each, call
 # transition_probabilities with the sampled human actions fixed.
+#
+# Single-robot case (Discrete): indices are 0..|A|-1.
+# Multi-robot case (MultiDiscrete): indices are flattened joint-action
+# indices 0..|A|^N - 1, which _build_joint_action maps back to a concrete
+# joint action tuple for the WorldModel.
+import numpy as np
+from gymnasium import spaces
+
+if isinstance(self.action_space, spaces.Discrete):
+    num_robot_actions = self.action_space.n
+elif isinstance(self.action_space, spaces.MultiDiscrete):
+    num_robot_actions = int(np.prod(self.action_space.nvec))
+else:
+    raise TypeError(f"Unsupported action_space type: {type(self.action_space)}")
+
 transition_probs_by_action = {}
-for a_r_idx in range(self.action_space.n):
+for a_r_idx in range(num_robot_actions):
     joint = self._build_joint_action(a_r_idx, human_actions)
     trans = self.world_model.transition_probabilities(state, joint)
     if trans is not None:
@@ -830,7 +850,7 @@ def train_empo_ppo(
     goal_sampler,
     human_agent_indices,
     robot_agent_indices,
-    config,  # Phase2Config + PPO config
+    config,  # PPOPhase2Config (standalone; duplicates theory params like gamma_h, gamma_r, zeta, xi, eta)
     num_envs=16,
     device='cuda',
 ):
@@ -879,7 +899,7 @@ def train_empo_ppo(
         policy=actor_critic,
         learning_rate=config.lr_ppo,
         gamma=config.gamma_r,
-        gae_lambda=config.gae_lambda,
+        gae_lambda=config.ppo_gae_lambda,
         clip_coef=config.ppo_clip_coef,
         ent_coef=config.ppo_ent_coef,
         vf_coef=config.ppo_vf_coef,
@@ -890,7 +910,7 @@ def train_empo_ppo(
     )
     
     # Auxiliary network replay buffer (for V_h^e, X_h, U_r training)
-    aux_replay_buffer = Phase2ReplayBuffer(capacity=config.buffer_size)
+    aux_replay_buffer = Phase2ReplayBuffer(capacity=config.aux_buffer_size)
     
     for iteration in range(config.num_ppo_iterations):
         # --- Step 1: PPO rollout ---
@@ -1102,7 +1122,7 @@ target. This is a known challenge in intrinsic motivation RL (cf. RND, ICM).
   stationary within each PPO iteration (similar to "inner-outer loop" optimization)
 - The freeze-update-freeze cycle (Section 7.4) formalizes this separation
 - In the limit, if auxiliary networks converge, U_r becomes stationary and PPO converges
-  to the optimal policy for that fixed U_r
+  to a fixed-point approximate solution for the MDP induced by that fixed U_r
 
 **Recommendation:** Use a lower learning rate for auxiliary networks relative to PPO,
 creating a natural time-scale separation.
