@@ -8,6 +8,7 @@
 1. [Executive Summary](#1-executive-summary)
 2. [Current Architecture (DQN-style)](#2-current-architecture-dqn-style)
 3. [Proposed Architecture (PufferLib PPO)](#3-proposed-architecture-pufferlib-ppo)
+   - [3.4 Code Isolation Strategy](#34-code-isolation-strategy)
 4. [The Core Challenge: Intrinsic Reward Integration](#4-the-core-challenge-intrinsic-reward-integration)
 5. [Environment Wrapper Design](#5-environment-wrapper-design)
 6. [Network Architecture Changes](#6-network-architecture-changes)
@@ -35,18 +36,28 @@ simultaneously. U_r is non-stationary: it changes as those networks improve. Thi
 document describes how to feed this intrinsic reward to PufferLib's PPO while
 preserving the theoretical properties of the EMPO framework.
 
+### Parallel Implementation Principle
+
+> **The PPO implementation MUST be parallel to the existing DQN-based code.**
+> No existing files, classes, or functions in the current DQN trainer will be modified.
+> The existing code path must remain fully functional at all times, guaranteeing
+> backward compatibility. The PPO trainer lives in its own modules, uses its own
+> config class, and is selected via a separate entry point — not a flag inside
+> the existing trainer.
+
 ### Key Changes at a Glance
 
 | Aspect | Current (DQN-style) | Proposed (PufferLib PPO) |
 |--------|---------------------|--------------------------|
 | **Robot policy** | Implicit: π_r ∝ (-Q_r)^{-β_r} | Explicit: π_r network (actor) |
 | **Robot value** | Optional V_r network, or computed from U_r + E[Q_r] | V_r network (critic) |
-| **Q_r** | Learned via model-based Bellman targets | **Eliminated** — PPO doesn't need Q-values |
+| **Q_r** | Learned via model-based Bellman targets | Not used by PPO path (DQN code untouched) |
 | **Reward signal** | Implicit in Bellman equation (γ_r · V_r(s')) | Explicit U_r(s) passed as reward to PPO |
 | **Data collection** | Off-policy replay buffer | On-policy rollout buffer (PufferLib vectorized) |
 | **Exploration** | ε-greedy + power-law softmax + RND | PPO entropy bonus + (optionally) RND |
 | **Parallelism** | Custom async actor-learner | PufferLib vectorized environments |
 | **V_h^e, X_h, U_r** | Trained from same replay buffer | Trained from a **separate** replay buffer filled from the same rollouts |
+| **Code location** | `learning_based/phase2/` | New: `learning_based/phase2_ppo/` (separate module) |
 
 ---
 
@@ -115,13 +126,16 @@ KEPT (trained separately):                    NEW (trained by PPO):
 - **Auxiliary networks** (V_h^e, X_h, and optionally U_r network): Still trained separately,
   but now using transitions collected from PPO rollouts
 
-### 3.2 What Gets Eliminated
+### 3.2 What the PPO Path Does Not Use
 
-- **Q_r network and Q_r target network** — PPO doesn't need Q-values
-- **Power-law softmax policy derivation** (eq. 5) — replaced by explicit policy network
-- **Off-policy replay buffer** for robot policy — PPO uses on-policy rollout buffers
-- **Custom ε-greedy exploration** — PPO uses entropy bonus in the policy loss
-- **z-space transformation** for Q_r — no longer needed
+The following components are **not used by the PPO trainer** but remain fully intact in
+the existing DQN code path (nothing is deleted or modified):
+
+- **Q_r network and Q_r target network** — PPO doesn't need Q-values (existing code untouched)
+- **Power-law softmax policy derivation** (eq. 5) — replaced by explicit policy network (existing code untouched)
+- **Off-policy replay buffer** for robot policy — PPO uses on-policy rollout buffers (existing `Phase2ReplayBuffer` untouched)
+- **Custom ε-greedy exploration** — PPO uses entropy bonus in the policy loss (existing exploration code untouched)
+- **z-space transformation** for Q_r — no longer needed in PPO path (existing `value_transforms.py` untouched)
 
 ### 3.3 What Gets Kept
 
@@ -132,6 +146,61 @@ KEPT (trained separately):                    NEW (trained by PPO):
 - **Goal sampling** — unchanged
 - **Staged warm-up** — adapted (see Section 7)
 - **Model-based targets for V_h^e** — still valuable for variance reduction
+
+### 3.4 Code Isolation Strategy
+
+The PPO implementation is a **completely separate code path** from the existing DQN
+trainer. This is the single most important implementation constraint:
+
+#### Rules
+
+1. **No modifications to any existing file** in `learning_based/phase2/` or
+   `learning_based/multigrid/phase2/`. The existing DQN trainer, its networks,
+   config, replay buffer, and all supporting code remain untouched.
+
+2. **New code lives in new modules:**
+   ```
+   src/empo/learning_based/phase2_ppo/        # Base PPO trainer classes
+   ├── __init__.py
+   ├── config.py                               # PPOPhase2Config (standalone)
+   ├── actor_critic.py                         # EMPOActorCritic network
+   ├── env_wrapper.py                          # EMPOMultiGridEnv (Gymnasium wrapper)
+   ├── reward_wrapper.py                       # EMPORewardWrapper
+   ├── trainer.py                              # PPO training loop
+   └── auxiliary_trainer.py                    # Warm-up + aux net training
+   
+   src/empo/learning_based/multigrid/phase2_ppo/  # MultiGrid-specific PPO
+   ├── __init__.py
+   ├── actor_critic.py                         # MultiGrid actor-critic
+   ├── env_wrapper.py                          # MultiGrid PPO env
+   └── trainer.py                              # MultiGrid PPO trainer
+   ```
+
+3. **Shared base classes are read-only dependencies.** The PPO trainer may *import* and
+   *use* (but never modify) existing base classes like `BaseHumanGoalAchievementNetwork`,
+   `BaseAggregateGoalAbilityNetwork`, `BaseIntrinsicRewardNetwork`, `Phase2Transition`,
+   and `Phase2ReplayBuffer`. It may also reuse shared state encoders (`MultiGridStateEncoder`,
+   `MultiGridGoalEncoder`).
+
+4. **Separate entry points.** The PPO trainer is invoked through its own entry point
+   (e.g., `examples/phase2/pufferlib_ppo_demo.py`), not via a flag on the existing trainer.
+
+5. **Separate config class.** The PPO path uses `PPOPhase2Config` (defined in
+   `phase2_ppo/config.py`), not `Phase2Config`. It contains only PPO-relevant parameters
+   plus the shared theory parameters (γ_r, γ_h, ζ, ξ, η). It does NOT inherit from or
+   modify `Phase2Config`.
+
+6. **Existing tests must pass unmodified.** Any test in `tests/` that exercises the DQN
+   trainer must continue to pass without changes after the PPO code is added.
+
+#### Rationale
+
+- **Code stability**: The DQN trainer is the production implementation. Modifying it
+  risks regressions in a complex, interdependent training system.
+- **Backward compatibility**: Users relying on the DQN trainer (configs, checkpoints,
+  evaluation scripts) are not affected.
+- **Clean comparison**: Having both trainers side-by-side makes A/B evaluation trivial.
+- **Safe rollback**: If PPO doesn't work, no DQN code was harmed.
 
 ---
 
@@ -497,6 +566,10 @@ auxiliary networks. These are synced from the main process periodically (see Sec
 
 ## 6. Network Architecture Changes
 
+All new network classes below live in `learning_based/phase2_ppo/` (or the
+environment-specific `learning_based/multigrid/phase2_ppo/`). They do **not**
+modify or extend the existing DQN-path network classes.
+
 ### 6.1 New: Robot Policy Network (Actor)
 
 ```python
@@ -631,10 +704,13 @@ The following are unchanged in architecture (only their training loop changes):
   gradients flow through V_h^e and X_h losses; the PPO loss trains the actor-critic
   heads but can optionally also flow through the shared encoder
 
-### 6.5 Eliminated Networks
+### 6.5 Networks Not Used by PPO Path
 
-- **Q_r (BaseRobotQNetwork)** — no longer needed
-- **Q_r target** — no longer needed
+The following existing networks are **not used** by the PPO trainer (but remain in the
+codebase, untouched, for the DQN path):
+
+- **Q_r (BaseRobotQNetwork)** — PPO doesn't need Q-values
+- **Q_r target** — PPO doesn't need target networks for robot Q
 - **V_r (BaseRobotValueNetwork) as currently defined** — replaced by PPO critic
 - **V_r target** — PPO handles value estimation internally
 
@@ -740,6 +816,10 @@ The freeze-update cycle:
 ---
 
 ## 8. Training Loop Redesign
+
+The PPO training loop is implemented in `learning_based/phase2_ppo/trainer.py`,
+completely independent of the existing `learning_based/phase2/trainer.py`. It imports
+auxiliary network base classes but does not modify them.
 
 ### 8.1 Main Training Loop
 
@@ -1031,45 +1111,55 @@ creating a natural time-scale separation.
 
 ## 10. Migration Plan
 
+> **Invariant: No existing code is modified.**
+> Every task below creates NEW files or adds NEW tests. If any task seems to
+> require editing a file in `learning_based/phase2/` or `learning_based/multigrid/phase2/`,
+> that is a design error — stop and refactor the approach. Run `git diff --stat`
+> after each migration step to confirm zero changes to existing files.
+
 ### Migration Step 1: Foundation (Estimated: 2–3 weeks)
 
-- [ ] **10.1** Add PufferLib dependency (`pip install pufferlib`)
-- [ ] **10.2** Implement `EMPOMultiGridEnv` (Gymnasium wrapper with human agent simulation)
-- [ ] **10.3** Implement `EMPOActorCritic` (combined actor-critic network)
-- [ ] **10.4** Unit tests: env wrapper produces valid observations, rewards, dones
-- [ ] **10.5** Verify: random policy through wrapper matches current random rollout behavior
+- [ ] **10.1** Create `learning_based/phase2_ppo/` and `learning_based/multigrid/phase2_ppo/` modules
+- [ ] **10.2** Add PufferLib dependency (`pip install pufferlib`)
+- [ ] **10.3** Implement `PPOPhase2Config` in `phase2_ppo/config.py` (standalone, not extending `Phase2Config`)
+- [ ] **10.4** Implement `EMPOMultiGridEnv` in `multigrid/phase2_ppo/env_wrapper.py` (Gymnasium wrapper with human agent simulation)
+- [ ] **10.5** Implement `EMPOActorCritic` in `phase2_ppo/actor_critic.py` (combined actor-critic network)
+- [ ] **10.6** Unit tests in `tests/test_phase2_ppo_env.py`: env wrapper produces valid observations, rewards, dones
+- [ ] **10.7** Verify: random policy through wrapper matches current random rollout behavior
+- [ ] **10.8** Run ALL existing DQN-path tests → confirm zero regressions
 
 ### Migration Step 2: Intrinsic Reward Integration (Estimated: 2–3 weeks)
 
-- [ ] **10.6** Implement centralized U_r reward computation (Option C from Section 5.4)
-- [ ] **10.7** Implement auxiliary network training loop (V_h^e, X_h, U_r) using PPO rollout data
-- [ ] **10.8** Implement freeze/sync cycle for auxiliary networks
-- [ ] **10.9** Unit tests: U_r computation matches current `get_u_r()` method
-- [ ] **10.10** Verify: auxiliary networks converge during warm-up with random robot
+- [ ] **10.9** Implement centralized U_r reward computation (Option C from Section 5.4) in `phase2_ppo/reward_wrapper.py`
+- [ ] **10.10** Implement auxiliary network training loop (V_h^e, X_h, U_r) in `phase2_ppo/auxiliary_trainer.py`
+- [ ] **10.11** Implement freeze/sync cycle for auxiliary networks
+- [ ] **10.12** Unit tests in `tests/test_phase2_ppo_reward.py`: U_r computation matches current `get_u_r()` method
+- [ ] **10.13** Verify: auxiliary networks converge during warm-up with random robot
+- [ ] **10.14** Run ALL existing DQN-path tests → confirm zero regressions
 
 ### Migration Step 3: PPO Training (Estimated: 2–3 weeks)
 
-- [ ] **10.11** Integrate PufferLib PPO trainer with EMPOMultiGridEnv
-- [ ] **10.12** Implement warm-up → PPO transition (Section 7.2)
-- [ ] **10.13** Implement PPO hyperparameter configuration in Phase2Config
-- [ ] **10.14** End-to-end test: train on small grid (5×5, 1 human, 1 robot)
-- [ ] **10.15** Compare learned behavior with current DQN-trained policy
+- [ ] **10.15** Implement PPO training loop in `phase2_ppo/trainer.py`
+- [ ] **10.16** Implement warm-up → PPO transition (Section 7.2)
+- [ ] **10.17** End-to-end test in `tests/test_phase2_ppo_training.py`: train on small grid (5×5, 1 human, 1 robot)
+- [ ] **10.18** Compare learned behavior with current DQN-trained policy (both running side-by-side)
+- [ ] **10.19** Run ALL existing DQN-path tests → confirm zero regressions
 
 ### Migration Step 4: Optimization and Scaling (Estimated: 2–3 weeks)
 
-- [ ] **10.16** Implement batched U_r computation across vectorized environments
-- [ ] **10.17** Profile training loop, optimize bottlenecks
-- [ ] **10.18** Test on larger environments (7×7, 3 humans, 1 robot)
-- [ ] **10.19** TensorBoard integration: log PPO metrics alongside auxiliary metrics
-- [ ] **10.20** Checkpoint/resume support for PPO + auxiliary networks
+- [ ] **10.20** Implement batched U_r computation across vectorized environments
+- [ ] **10.21** Profile training loop, optimize bottlenecks
+- [ ] **10.22** Test on larger environments (7×7, 3 humans, 1 robot)
+- [ ] **10.23** TensorBoard integration: log PPO metrics alongside auxiliary metrics
+- [ ] **10.24** Checkpoint/resume support for PPO + auxiliary networks
 
-### Migration Step 5: Cleanup and Documentation (Estimated: 1 week)
+### Migration Step 5: Documentation (Estimated: 1 week)
 
-- [ ] **10.21** Update `docs/WARMUP_DESIGN.md` with PPO-adapted warm-up
-- [ ] **10.22** Update `docs/API.md` with new interfaces
-- [ ] **10.23** Create example script: `examples/phase2/pufferlib_ppo_demo.py`
-- [ ] **10.24** Update `docs/plans/ppo_a3c_considerations.md` with implementation notes
-- [ ] **10.25** Keep current DQN-style trainer as fallback (feature flag in config)
+- [ ] **10.25** Add PPO-specific section to `docs/WARMUP_DESIGN.md` (append, don't modify existing content)
+- [ ] **10.26** Add PPO API section to `docs/API.md` (append, don't modify existing content)
+- [ ] **10.27** Create example script: `examples/phase2/pufferlib_ppo_demo.py`
+- [ ] **10.28** Update `docs/plans/ppo_a3c_considerations.md` with implementation notes
+- [ ] **10.29** Final regression run: ALL existing tests pass unmodified
 
 ---
 
@@ -1113,12 +1203,17 @@ creating a natural time-scale separation.
 
 ### 11.3 Success Criteria
 
-1. PPO-trained robot achieves similar or better human empowerment scores as DQN-trained
+1. **Backward compatibility**: Zero modifications to existing DQN-path files; all existing
+   tests pass unmodified. `git diff --stat` against the base branch shows only *new* files
+   in `phase2_ppo/` directories, new tests in `tests/`, and doc updates.
+2. PPO-trained robot achieves similar or better human empowerment scores as DQN-trained
    robot on the standard 5×5 and 7×7 test environments
-2. Training wall-clock time is comparable or faster (due to PufferLib parallelism)
-3. Training is stable (no divergence, reasonable loss curves)
-4. Code is maintainable: the PPO trainer is cleaner and simpler than the current
+3. Training wall-clock time is comparable or faster (due to PufferLib parallelism)
+4. Training is stable (no divergence, reasonable loss curves)
+5. Code is maintainable: the PPO trainer is cleaner and simpler than the current
    DQN trainer (fewer networks to manage, no Q_r/V_r target networks for the robot)
+6. Both trainers can coexist: a user can run DQN training and PPO training from the
+   same codebase, potentially even on the same environment, for direct comparison
 
 ---
 
@@ -1495,37 +1590,68 @@ This allows testing:
 
 ---
 
-## Appendix A: Phase2Config Extensions
+## Appendix A: PPOPhase2Config (Separate Configuration)
 
-New configuration parameters needed for PPO integration:
+The PPO trainer uses its **own config class**, defined in `learning_based/phase2_ppo/config.py`.
+It does NOT extend or modify the existing `Phase2Config`. Shared theory parameters
+(γ_r, γ_h, ζ, ξ, η) are duplicated — this is intentional, to avoid coupling.
 
 ```python
+# File: learning_based/phase2_ppo/config.py
+
 @dataclass
-class Phase2Config:
-    # ... existing parameters ...
+class PPOPhase2Config:
+    """
+    Configuration for PPO-based Phase 2 training.
     
-    # PPO configuration
-    use_ppo: bool = False               # Enable PPO mode (vs. DQN mode)
+    This is a standalone config class — it does NOT inherit from Phase2Config.
+    Shared theory parameters are duplicated here to avoid coupling to the DQN
+    config. The existing Phase2Config is not modified.
+    """
+    
+    # ----- Theory parameters (shared with DQN path, duplicated here) -----
+    gamma_r: float = 0.99               # Robot discount factor
+    gamma_h: float = 0.99               # Human discount factor (for V_h^e)
+    zeta: float = 1.0                   # Risk/reliability preference (ζ ≥ 1)
+    xi: float = 1.0                     # Inter-human inequality aversion (ξ ≥ 1)
+    eta: float = 1.0                    # Intertemporal inequality aversion (η ≥ 1)
+    steps_per_episode: int = 50         # Environment steps per episode
+    
+    # ----- PPO hyperparameters -----
     ppo_rollout_length: int = 128       # Steps per PPO rollout
     ppo_num_minibatches: int = 4        # Minibatches per PPO update
     ppo_update_epochs: int = 4          # Epochs per PPO update
     ppo_clip_coef: float = 0.2          # PPO clipping coefficient
     ppo_ent_coef: float = 0.01          # Entropy bonus coefficient
-    ppo_vf_coef: float = 0.5           # Value function loss coefficient
+    ppo_vf_coef: float = 0.5            # Value function loss coefficient
     ppo_max_grad_norm: float = 0.5      # Max gradient norm for clipping
     ppo_gae_lambda: float = 0.95        # GAE lambda
-    lr_ppo: float = 3e-4               # PPO learning rate
+    lr_ppo: float = 3e-4                # PPO learning rate
     num_envs: int = 16                  # Number of vectorized environments
+    num_ppo_iterations: int = 10000     # Total PPO iterations
     
-    # Auxiliary network training under PPO
-    aux_training_steps_per_iteration: int = 10   # Aux training steps per PPO iteration
-    aux_buffer_size: int = 50000                 # Separate replay buffer for auxiliary nets
-    reward_freeze_interval: int = 1              # Freeze aux nets every N PPO iterations
+    # ----- Auxiliary network training (V_h^e, X_h, U_r) -----
+    lr_v_h_e: float = 1e-4              # Learning rate for V_h^e
+    lr_x_h: float = 1e-4                # Learning rate for X_h
+    lr_u_r: float = 1e-4                # Learning rate for U_r network
+    aux_training_steps_per_iteration: int = 10
+    aux_buffer_size: int = 50000
+    reward_freeze_interval: int = 1     # Freeze aux nets every N PPO iterations
+    batch_size: int = 256
     
-    # Entropy schedule (optional, mimics β_r ramp-up)
+    # ----- Warm-up (auxiliary nets only, random robot) -----
+    warmup_v_h_e_steps: int = 5000      # Training steps for V_h^e-only warm-up
+    warmup_x_h_steps: int = 7500        # Training steps for V_h^e + X_h
+    warmup_u_r_steps: int = 10000       # Training steps for V_h^e + X_h + U_r
+    
+    # ----- Entropy schedule (optional, mimics β_r ramp-up) -----
     ppo_ent_coef_start: float = 0.1     # Initial entropy coefficient (high = exploratory)
     ppo_ent_coef_end: float = 0.01      # Final entropy coefficient
-    ppo_ent_anneal_steps: int = 10000   # Steps to anneal entropy coefficient
+    ppo_ent_anneal_steps: int = 10000   # Training steps to anneal entropy coefficient
+    
+    # ----- Network architecture -----
+    hidden_dim: int = 256
+    use_shared_encoder: bool = True     # Share state encoder between actor-critic and V_h^e
 ```
 
 ## Appendix B: Comparison of PPO Advantage Computation with EMPO Intrinsic Reward
