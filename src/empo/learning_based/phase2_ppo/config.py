@@ -213,7 +213,15 @@ class PPOPhase2Config:
     # ── Convenience helpers ──────────────────────────────────────────────
 
     def get_total_warmup_steps(self) -> int:
-        """Total training steps consumed by warm-up stages 0-2."""
+        """Total training steps consumed by warm-up (stages 0-2).
+
+        The warm-up stage boundaries are cumulative thresholds:
+        - Stage 0 → 1: ``warmup_v_h_e_steps``
+        - Stage 1 → 2: ``warmup_x_h_steps``
+        - Stage 2 → end: ``warmup_u_r_steps`` (the final threshold)
+
+        So ``warmup_u_r_steps`` is the cumulative total of all warm-up.
+        """
         return self.warmup_u_r_steps
 
     def get_entropy_coef(self, training_step: int) -> float:

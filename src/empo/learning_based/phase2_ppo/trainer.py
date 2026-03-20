@@ -288,7 +288,10 @@ class PPOPhase2Trainer:
         N = obs_batch.shape[0]
         batch_size = N // cfg.ppo_num_minibatches
 
-        # Normalise advantages
+        # Normalize advantages over the full rollout (before minibatch split).
+        # This is the convention used by CleanRL/PufferLib PPO: normalize once
+        # globally rather than per-minibatch, to keep the advantage scale
+        # consistent across all minibatches within the same update.
         adv_mean = advantages.mean()
         adv_std = advantages.std() + 1e-8
         advantages = (advantages - adv_mean) / adv_std
@@ -409,7 +412,14 @@ class PPOPhase2Trainer:
         if len(self.aux_replay_buffer) < self.config.batch_size:
             return {}
 
-        _batch = self.aux_replay_buffer.sample(self.config.batch_size)
+        # TODO(phase2_ppo): Implement actual auxiliary loss computation.
+        # When implemented, this will:
+        # 1. Sample a batch from self.aux_replay_buffer
+        # 2. Compute V_h^e TD targets using transition_probs_by_action
+        # 3. Compute X_h Monte Carlo targets from V_h^e samples
+        # 4. Compute U_r targets from X_h values
+        # 5. Backprop through respective optimisers
+        # For now, return zero losses to allow the training loop to run.
         losses: Dict[str, float] = {}
 
         # --- V_h^e loss (TD target from model-based successors) ---
