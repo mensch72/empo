@@ -217,8 +217,8 @@ class EMPORewardWrapper(gymnasium.Wrapper):
                 return u_r.item()
             # Option B: Compute from X_h values directly
             x_h_vals = []
-            for h in self.env.human_agent_indices:
-                x_h = nets.x_h.forward(state, self.env, h, self.device)
+            for human_idx in self.env.human_agent_indices:
+                x_h = nets.x_h.forward(state, self.env, human_idx, self.device)
                 x_h_vals.append(x_h.item())
             y = np.mean([x ** (-self.config.xi) for x in x_h_vals])
             return -(y ** self.config.eta)
@@ -1308,6 +1308,10 @@ food items. It is:
 class ForagingHeuristicPolicy(HumanPolicyPrior):
     """Heuristic: walk toward the goal position via shortest path."""
     
+    def __init__(self, num_actions, epsilon=0.1):
+        self.num_actions = num_actions
+        self.epsilon = epsilon  # Exploration smoothing
+    
     def __call__(self, state, human_agent_index, possible_goal):
         agent_pos = state.agent_positions[human_agent_index]
         goal_pos = possible_goal.target_position
@@ -1316,7 +1320,7 @@ class ForagingHeuristicPolicy(HumanPolicyPrior):
         dy = np.sign(goal_pos[1] - agent_pos[1])
         action = direction_to_action(dx, dy)
         # Return Boltzmann-softened distribution (peaked at best action)
-        probs = np.ones(self.num_actions) * epsilon
+        probs = np.ones(self.num_actions) * self.epsilon
         probs[action] = 1.0
         probs /= probs.sum()
         return probs
@@ -1453,12 +1457,20 @@ class MockEMPORewardWrapper(gymnasium.Wrapper):
     - Always negative (U_r < 0)
     - Non-stationary (drifts over training, simulating auxiliary net updates)
     - State-dependent (not action-dependent)
+    
+    Args:
+        env: Base environment.
+        drift_rate: How fast the reward drifts (simulates aux net updates).
+        reward_scale: Scale factor for original reward's influence on mock U_r.
+        drift_scale: Scale factor for temporal drift component.
     """
     
-    def __init__(self, env, drift_rate=0.001):
+    def __init__(self, env, drift_rate=0.001, reward_scale=0.1, drift_scale=0.01):
         super().__init__(env)
         self._step = 0
         self._drift_rate = drift_rate
+        self._reward_scale = reward_scale
+        self._drift_scale = drift_scale
         self._base_reward = -1.0
     
     def step(self, action):
@@ -1466,7 +1478,9 @@ class MockEMPORewardWrapper(gymnasium.Wrapper):
         # Simulate non-stationary negative reward
         self._step += 1
         drift = self._drift_rate * self._step
-        mock_u_r = self._base_reward - 0.1 * abs(env_reward) + 0.01 * drift
+        mock_u_r = (self._base_reward
+                    - self._reward_scale * abs(env_reward)
+                    + self._drift_scale * drift)
         mock_u_r = min(mock_u_r, -0.01)  # Ensure U_r < 0
         info['env_reward'] = env_reward
         info['u_r'] = mock_u_r
