@@ -131,11 +131,11 @@ KEPT (trained separately):                    NEW (trained by PPO):
 The following components are **not used by the PPO trainer** but remain fully intact in
 the existing DQN code path (nothing is deleted or modified):
 
-- **Q_r network and Q_r target network** — PPO doesn't need Q-values (existing code untouched)
-- **Power-law softmax policy derivation** (eq. 5) — replaced by explicit policy network (existing code untouched)
-- **Off-policy replay buffer** for robot policy — PPO uses on-policy rollout buffers (existing `Phase2ReplayBuffer` untouched)
-- **Custom ε-greedy exploration** — PPO uses entropy bonus in the policy loss (existing exploration code untouched)
-- **z-space transformation** for Q_r — no longer needed in PPO path (existing `value_transforms.py` untouched)
+- **Q_r network and Q_r target network** — PPO doesn't need Q-values
+- **Power-law softmax policy derivation** (eq. 5) — replaced by explicit policy network
+- **Off-policy replay buffer** for robot policy — PPO uses on-policy rollout buffers
+- **Custom ε-greedy exploration** — PPO uses entropy bonus in the policy loss
+- **z-space transformation** for Q_r — no longer needed in PPO path
 
 ### 3.3 What Gets Kept
 
@@ -1111,11 +1111,13 @@ creating a natural time-scale separation.
 
 ## 10. Migration Plan
 
-> **Invariant: No existing code is modified.**
+> **Invariant: No existing Python source files are modified.**
 > Every task below creates NEW files or adds NEW tests. If any task seems to
 > require editing a file in `learning_based/phase2/` or `learning_based/multigrid/phase2/`,
 > that is a design error — stop and refactor the approach. Run `git diff --stat`
-> after each migration step to confirm zero changes to existing files.
+> after each migration step to confirm zero changes to existing `.py` files.
+> Documentation files (`.md`) may have new sections appended but existing content
+> must not be altered.
 
 ### Migration Step 1: Foundation (Estimated: 2–3 weeks)
 
@@ -1203,9 +1205,10 @@ creating a natural time-scale separation.
 
 ### 11.3 Success Criteria
 
-1. **Backward compatibility**: Zero modifications to existing DQN-path files; all existing
-   tests pass unmodified. `git diff --stat` against the base branch shows only *new* files
-   in `phase2_ppo/` directories, new tests in `tests/`, and doc updates.
+1. **Backward compatibility**: Zero modifications to existing Python source files in
+   `learning_based/phase2/` and `learning_based/multigrid/phase2/`; all existing tests
+   pass unmodified. `git diff --stat` against the base branch shows only *new* `.py` files
+   in `phase2_ppo/` directories, new tests in `tests/`, and documentation appendages.
 2. PPO-trained robot achieves similar or better human empowerment scores as DQN-trained
    robot on the standard 5×5 and 7×7 test environments
 3. Training wall-clock time is comparable or faster (due to PufferLib parallelism)
