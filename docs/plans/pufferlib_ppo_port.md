@@ -16,6 +16,8 @@
 9. [Theoretical Considerations](#9-theoretical-considerations)
 10. [Migration Plan](#10-migration-plan)
 11. [Open Questions and Risks](#11-open-questions-and-risks)
+12. [PPO for Phase 1 Training](#12-ppo-for-phase-1-training)
+13. [Testing with PufferLib Ocean Environments](#13-testing-with-pufferlib-ocean-environments)
 
 ---
 
@@ -215,7 +217,7 @@ class EMPORewardWrapper(gymnasium.Wrapper):
                 return u_r.item()
             # Option B: Compute from X_h values directly
             x_h_vals = []
-            for h in self.human_agent_indices:
+            for h in self.env.human_agent_indices:
                 x_h = nets.x_h.forward(state, self.env, h, self.device)
                 x_h_vals.append(x_h.item())
             y = np.mean([x ** (-self.config.xi) for x in x_h_vals])
@@ -362,8 +364,8 @@ class EMPOMultiGridEnv(gymnasium.Env):
         # Build joint action
         joint_action = self._build_joint_action(action, human_actions)
         
-        # Step the world model
-        self.world_model.step(joint_action)
+        # Step the world model (returns terminated=True when no transitions exist)
+        _, _, wm_terminated, _, _ = self.world_model.step(joint_action)
         next_state = self.world_model.get_state()
         
         # Compute intrinsic reward U_r(next_state)
@@ -372,7 +374,7 @@ class EMPOMultiGridEnv(gymnasium.Env):
         # Episode termination
         self._step_count += 1
         truncated = self._step_count >= self.config.steps_per_episode
-        terminated = False  # EMPO episodes are truncated, not terminated
+        terminated = wm_terminated  # Propagate from WorldModel (e.g., no valid transitions)
         
         # Resample goals with probability goal_resample_prob
         if random.random() < self.config.goal_resample_prob:
@@ -381,7 +383,8 @@ class EMPOMultiGridEnv(gymnasium.Env):
         obs = self._encode_observation(next_state)
         info = {
             'u_r': u_r,
-            'state': next_state,  # For auxiliary network training
+            'state': state,              # Pre-transition state for auxiliary training
+            'next_state': next_state,    # Post-transition state for TD targets
             'goals': self._goals.copy(),
             'goal_weights': self._goal_weights.copy(),
             'human_actions': human_actions,
@@ -436,13 +439,25 @@ We use the `info` dict to carry this data out of the environment wrapper:
 
 ```python
 # In the EMPOMultiGridEnv.step():
+# Compute model-based transition probabilities from the WorldModel.
+# This matches Phase2Transition.transition_probs_by_action:
+# Dict[int, List[Tuple[float, HashableState]]]
+# We iterate over all robot action indices and, for each, call
+# transition_probabilities with the sampled human actions fixed.
+transition_probs_by_action = {}
+for a_r_idx in range(self.action_space.n):
+    joint = self._build_joint_action(a_r_idx, human_actions)
+    trans = self.world_model.transition_probabilities(state, joint)
+    if trans is not None:
+        transition_probs_by_action[a_r_idx] = trans
+
 info = {
-    'state': state,              # WorldModel state (for V_h^e forward pass)
-    'next_state': next_state,    # For TD targets
-    'goals': goals,              # {human_idx: goal} (for V_h^e)
+    'state': state,                          # Pre-transition WorldModel state
+    'next_state': next_state,                # Post-transition state for TD targets
+    'goals': goals,                          # {human_idx: goal} (for V_h^e)
     'goal_weights': goal_weights,
     'human_actions': human_actions,
-    'transition_probs': trans_probs,  # For model-based V_h^e targets
+    'transition_probs': transition_probs_by_action,  # Model-based V_h^e targets
 }
 ```
 
@@ -517,17 +532,11 @@ class EMPORobotPolicyNetwork(nn.Module):
         """Returns action logits (unnormalized log-probabilities)."""
         features = self.state_encoder(obs)
         return self.policy_head(features)
-    
-    def get_action_and_value(self, obs, action=None):
-        """PPO-compatible: returns action, log_prob, entropy, value."""
-        logits = self.forward(obs)
-        dist = torch.distributions.Categorical(logits=logits)
-        
-        if action is None:
-            action = dist.sample()
-        
-        return action, dist.log_prob(action), dist.entropy(), None
 ```
+
+Note: The actor-only class does not provide `get_action_and_value()` because PPO
+requires the critic's value estimate. Use the combined `EMPOActorCritic` (Section 6.3)
+for PPO training, which provides the full `get_action_and_value()` interface.
 
 ### 6.2 New: Robot Value Network (Critic)
 
@@ -653,14 +662,15 @@ indirection. The loop is now:
 
 ### 7.2 Adapted Warm-up Schedule
 
-The warm-up stages are adapted for PPO:
+The warm-up stages are adapted for PPO. Durations are measured in **training steps
+(gradient updates)**, matching the existing Phase 2 convention (see `Phase2Config`):
 
-| Stage | Duration | Active Components | π_r | Notes |
-|-------|----------|-------------------|-----|-------|
-| 0 | W₀ steps | V_h^e only | Uniform random | Same as current Stage 0 |
-| 1 | W₁ steps | V_h^e + X_h | Uniform random | Same as current Stage 1 |
-| 2 | W₂ steps | V_h^e + X_h + U_r | Uniform random | Same as current Stage 2 |
-| 3 | R steps | V_h^e + X_h + U_r + PPO | PPO training begins | **NEW**: PPO replaces Q_r+V_r warmup |
+| Stage | Duration (training steps) | Active Components | π_r | Notes |
+|-------|---------------------------|-------------------|-----|-------|
+| 0 | W₀ training steps | V_h^e only | Uniform random | Same as current Stage 0 |
+| 1 | W₁ training steps | V_h^e + X_h | Uniform random | Same as current Stage 1 |
+| 2 | W₂ training steps | V_h^e + X_h + U_r | Uniform random | Same as current Stage 2 |
+| 3 | R training steps | V_h^e + X_h + U_r + PPO | PPO training begins | **NEW**: PPO replaces Q_r+V_r warmup |
 | 4 | Remainder | All | PPO (full training) | Continued joint training |
 
 **Key differences from current warm-up:**
@@ -771,9 +781,9 @@ def train_empo_ppo(
     
     # Create vectorized PufferLib environments
     def make_env():
-        env = world_model_factory()
+        world_model = world_model_factory.create()
         return EMPOMultiGridEnv(
-            env, human_policy_prior, goal_sampler,
+            world_model, human_policy_prior, goal_sampler,
             human_agent_indices, robot_agent_indices,
             config, auxiliary_networks=frozen_aux,
         )
@@ -809,7 +819,12 @@ def train_empo_ppo(
         # Extract auxiliary training data from rollout infos
         aux_transitions = extract_auxiliary_transitions(rollout_data)
         for t in aux_transitions:
-            aux_replay_buffer.push(t)
+            # Unpack fields to match Phase2ReplayBuffer.push() signature
+            aux_replay_buffer.push(
+                t.state, t.robot_action, t.goals, t.goal_weights,
+                t.human_actions, t.next_state, t.transition_probs_by_action,
+                terminal=t.terminal,
+            )
         
         # --- Step 2: PPO update (policy + value) ---
         ppo_trainer.update(rollout_data)
@@ -947,8 +962,8 @@ change if all Q-values are scaled by a constant. With PPO, the policy is paramet
 independently of value scales, so this property is lost. However:
 
 - PPO's reward normalization provides a different kind of scale robustness
-- The policy still converges to the optimal policy in the limit
-- The practical impact may be small if training is stable
+- With a sufficiently expressive network and stable training, PPO can approximate the fixed-point policy that solves the Phase 2 equations for a given U_r
+- In practice, the impact of losing exact power-law scale invariance on the approximated solution may be small if training is stable (this should be evaluated empirically)
 
 **Mitigation (optional):** Parameterize the PPO policy head using a power-law form:
 
@@ -1104,6 +1119,365 @@ creating a natural time-scale separation.
 3. Training is stable (no divergence, reasonable loss curves)
 4. Code is maintainable: the PPO trainer is cleaner and simpler than the current
    DQN trainer (fewer networks to manage, no Q_r/V_r target networks for the robot)
+
+---
+
+## 12. PPO for Phase 1 Training
+
+### 12.1 Overview
+
+Phase 1 currently uses a **DQN-style approach** to approximate goal-conditioned human
+policy priors: a Q-network Q(s, a, g) is trained via experience replay with TD targets,
+and the policy prior π_h(a|s, g) is derived as a Boltzmann softmax over Q-values:
+
+```
+π_h(a | s, g) = softmax(β_h · Q(s, a, g))
+```
+
+PufferLib's PPO could also be used here, replacing Q-learning with direct policy
+approximation. However, Phase 1 has a unique challenge that Phase 2 does not:
+**goal-conditioned policies**.
+
+### 12.2 The Goal-Conditioning Challenge
+
+In Phase 1, the policy is conditioned on a *possible goal* g_h:
+
+```
+π_h(a | s, g_h)    — the policy for human h to achieve goal g_h
+```
+
+Standard PPO learns an unconditional policy π(a|s). To use PPO for Phase 1, we need
+to handle goal conditioning. There are several approaches:
+
+#### Approach A: Goal as Part of the Observation
+
+Treat the goal as an additional input to the policy network:
+
+```python
+class GoalConditionedActorCritic(nn.Module):
+    """PPO actor-critic with goal conditioning for Phase 1."""
+    
+    def __init__(self, state_encoder, goal_encoder, hidden_dim, num_actions):
+        super().__init__()
+        self.state_encoder = state_encoder
+        self.goal_encoder = goal_encoder
+        combined_dim = state_encoder.output_dim + goal_encoder.output_dim
+        
+        self.actor = nn.Sequential(
+            nn.Linear(combined_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, num_actions),
+        )
+        self.critic = nn.Sequential(
+            nn.Linear(combined_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, 1),
+        )
+    
+    def forward(self, obs, goal):
+        state_features = self.state_encoder(obs)
+        goal_features = self.goal_encoder(goal)
+        combined = torch.cat([state_features, goal_features], dim=-1)
+        return self.actor(combined), self.critic(combined)
+```
+
+The environment wrapper samples a goal at the start of each episode and includes it in
+the observation. The reward is `goal.is_achieved(state)` (0 or 1). This is essentially
+**Hindsight Experience Replay (HER)**-style goal-conditioned RL.
+
+**Pros:**
+- Straightforward PPO application with standard Gymnasium interface
+- PufferLib handles vectorization transparently
+- The reward is a simple binary signal from the environment (no intrinsic reward issues)
+
+**Cons:**
+- PPO must learn a separate behavior for each goal from a single network
+- Sparse reward (0/1) requires reward shaping or HER-like relabeling
+- Need to sample goals proportionally during training for proper coverage
+
+#### Approach B: Separate PPO per Goal Class
+
+Train a separate PPO policy for each major goal class. This is conceptually simpler but
+doesn't scale well:
+
+**Pros:** Each policy sees a focused reward signal  
+**Cons:** Number of policies grows with goal space; no weight sharing across goals
+
+#### Approach C: Marginal Policy via PPO + Goal Sampling
+
+Train a single PPO policy that approximates the *marginal* policy
+π_h(a|s) = E_g[π_h(a|s,g)] by sampling goals stochastically each episode:
+
+```python
+class Phase1EMPOEnv(gymnasium.Env):
+    """PufferLib-compatible wrapper for Phase 1 training."""
+    
+    def reset(self, seed=None, options=None):
+        self.world_model.reset(seed=seed)
+        state = self.world_model.get_state()
+        # Sample a new goal for this episode
+        self.current_goal, _ = self.goal_sampler.sample(state, self.human_idx)
+        obs = self._encode(state, self.current_goal)
+        return obs, {}
+    
+    def step(self, action):
+        # ... step world model ...
+        reward = self.current_goal.is_achieved(next_state)
+        obs = self._encode(next_state, self.current_goal)
+        return obs, reward, terminated, truncated, info
+```
+
+**Pros:** Single PPO policy; goal coverage handled by sampling distribution  
+**Cons:** Policy must generalize across goals; may need many episodes for rare goals
+
+### 12.3 Recommended Approach for Phase 1
+
+**Approach A (goal as observation)** is recommended because:
+
+1. It directly mirrors the current Q-network architecture Q(s, a, g), which already
+   takes both state and goal as inputs
+2. The existing `MultiGridGoalEncoder` and `MultiGridStateEncoder` can be reused
+3. The reward signal is well-defined (binary goal achievement + shaping rewards)
+4. Unlike Phase 2, the Phase 1 reward is **not intrinsic** — it comes from the
+   environment (goal achievement). This eliminates the core challenge of Phase 2
+
+### 12.4 Phase 1 PPO vs. Current DQN
+
+| Aspect | Current (DQN) | PPO Alternative |
+|--------|---------------|-----------------|
+| Policy | Implicit via Boltzmann softmax over Q | Explicit policy network |
+| Value | Q(s, a, g) — action-value | V(s, g) — state-value |
+| Data | Off-policy replay buffer | On-policy rollout buffer |
+| Goal conditioning | Q-network input | Actor-critic input |
+| Reward | Binary (goal achieved) + shaping | Same (no change needed) |
+| β_h parameter | Directly controls Boltzmann temperature | Replaced by entropy coef |
+
+### 12.5 Phase 1 PPO Considerations
+
+- **Marginal policy (φ-network):** The current Phase 1 optionally trains a "direct phi
+  network" that predicts π_h(a|s) = E_g[π_h(a|s,g)] without enumerating goals. With PPO,
+  the phi network can be trained as a **distillation target** from the goal-conditioned
+  PPO policy, similar to the current joint training approach
+- **β_h interpretation:** The Boltzmann parameter β_h controls how sharply the policy
+  concentrates on the best actions. In PPO, this is implicitly controlled by the entropy
+  coefficient and training duration. To preserve the β_h semantics, we could use the
+  power-law policy head (Section 9.1) in Phase 1 as well
+- **Priority:** Porting Phase 1 to PPO is **lower priority** than Phase 2, because:
+  - Phase 1's DQN approach is simpler (no mutual dependencies, no intrinsic reward)
+  - The existing Phase 1 trainer works well in practice
+  - Phase 2 benefits more from PPO's on-policy stability for non-stationary rewards
+
+---
+
+## 13. Testing with PufferLib Ocean Environments
+
+### 13.1 Selection Criteria
+
+When choosing environments for validating the ported PPO Phase 2 training, we
+prioritize:
+
+1. **Simple and easy to visualize** — grid-based, 2D, interpretable agent behavior
+2. **Goal-agnostic** — the environment structure itself is not tied to specific goals;
+   instead, goals can be overlaid externally (e.g., "reach cell X", "be near agent Y")
+3. **Easy to write heuristic human policies** — so we can test Phase 2 training in
+   isolation without first training a Phase 1 neural policy prior. This is critical
+   for fast iteration: if every Phase 2 test requires a trained Phase 1, the development
+   cycle becomes unacceptably slow
+
+The third criterion is especially important. EMPO Phase 2 requires a human policy prior
+π_h(a|s, g), which currently comes from Phase 1 training (Q-learning). For testing the
+PPO port, we want to substitute a **heuristic human policy** that requires no training.
+The existing codebase already provides `HeuristicPotentialPolicy` for multigrid
+environments, which uses shortest-path gradients to guide humans toward goals. A suitable
+test environment should support similar heuristic policies.
+
+### 13.2 Most Suitable Ocean Environments
+
+#### 13.2.1 Foraging (Best Match)
+
+**Why best match:** Foraging is a multi-agent grid world where agents navigate to collect
+food items. It is:
+
+- **Simple & visual**: 2D grid, rendered via `render_mode='rgb_array'`
+- **Goal-agnostic**: "Food" positions serve as natural goal candidates, and we can
+  define `PossibleGoal` instances as "reach the cell containing food item X"
+- **Heuristic human policies are trivial**: "walk toward the nearest food" is a
+  one-line BFS/distance heuristic — no Phase 1 training needed:
+
+```python
+class ForagingHeuristicPolicy(HumanPolicyPrior):
+    """Heuristic: walk toward the goal position via shortest path."""
+    
+    def __call__(self, state, human_agent_index, possible_goal):
+        agent_pos = state.agent_positions[human_agent_index]
+        goal_pos = possible_goal.target_position
+        # 8-directional movement: pick direction that minimizes L-inf distance
+        dx = np.sign(goal_pos[0] - agent_pos[0])
+        dy = np.sign(goal_pos[1] - agent_pos[1])
+        action = direction_to_action(dx, dy)
+        # Return Boltzmann-softened distribution (peaked at best action)
+        probs = np.ones(self.num_actions) * epsilon
+        probs[action] = 1.0
+        probs /= probs.sum()
+        return probs
+```
+
+**How to test Phase 2:**
+1. Wrap Foraging as a `WorldModel` (implement `get_state`, `set_state`,
+   `transition_probabilities`)
+2. Define food positions as `PossibleGoal` instances
+3. Use the heuristic human policy above as the policy prior
+4. Run the full PPO Phase 2 training loop with intrinsic reward U_r
+5. Verify: the robot learns to help humans reach food (U_r improves over training)
+
+```python
+env = pufferlib.environments.ocean.environment.make_foraging(
+    width=64, height=64, num_agents=4, discretize=True,
+    food_reward=0.1, render_mode='rgb_array'
+)
+```
+
+#### 13.2.2 Predator-Prey (Multi-Role)
+
+**Why:** Predator-Prey assigns different roles to agents (predators vs. prey), which maps
+to EMPO's human-robot distinction. The robot could be a "helper" that influences predator
+or prey outcomes.
+
+- **Simple & visual**: Grid navigation with role differentiation visible in rendering
+- **Goal-agnostic**: Goals can be "prey reaches cell X" or "predator catches prey Y"
+- **Heuristic policies**: Prey runs away from nearest predator (flee heuristic), predator
+  chases nearest prey (chase heuristic) — both are trivial distance-based policies
+
+**How to test Phase 2:**
+1. Designate some agents as humans (prey), one as robot
+2. Define goals as "prey h reaches safe zone S" (a `PossibleGoal` with positional check)
+3. Heuristic human policy: flee from predators toward safe zone
+4. Robot learns (via PPO) to position itself to maximize prey survival (human power)
+
+#### 13.2.3 Squared (Single-Agent Baseline)
+
+**Why:** Squared is a single-agent grid navigation task. While it lacks multi-agent
+structure, it is useful as a **minimal sanity check** for the PPO integration before
+adding multi-agent complexity.
+
+- **Simple & visual**: Agent navigates to target on grid
+- **Goal-agnostic**: Target position is the goal
+- **No human policy needed**: Single-agent, so we can test PPO mechanics in isolation
+
+**How to test:**
+1. Verify PufferLib PPO loop end-to-end (rollout, GAE, policy/value updates)
+2. Test vectorized execution with multiple parallel instances
+3. Confirm reward normalization works with always-negative rewards (wrapping reward to
+   simulate U_r < 0)
+
+### 13.3 Wrapping Ocean Environments as WorldModels
+
+To use Ocean environments with EMPO's Phase 2 trainer, they must implement the
+`WorldModel` interface. The key challenge is `transition_probabilities()`, since Ocean
+environments are simulation-based (no analytical transition model). Options:
+
+**Option A: Empirical transition model (for deterministic envs)**
+
+If the environment is deterministic given the joint action, `transition_probabilities()`
+returns a single successor with probability 1.0:
+
+```python
+class ForagingWorldModel(WorldModel):
+    """WorldModel wrapper for PufferLib Foraging."""
+    
+    def transition_probabilities(self, state, actions):
+        saved = self.get_state()
+        self.set_state(state)
+        # Step the env to find the successor
+        self.env.step(actions)
+        next_state = self.get_state()
+        self.set_state(saved)  # Restore original state
+        return [(1.0, next_state)]
+    
+    def get_state(self):
+        # Serialize env state as hashable tuple
+        return self.env.get_internal_state()
+    
+    def set_state(self, state):
+        self.env.set_internal_state(state)
+```
+
+**Option B: Skip model-based targets**
+
+Set `use_model_based_targets=False` in Phase2Config. V_h^e targets will use single
+observed successors instead of expected values. This is simpler but higher-variance.
+Acceptable for testing purposes.
+
+### 13.4 Testing Progression
+
+Recommended order for validating the PufferLib PPO integration, designed so that each
+step adds exactly one new component:
+
+```
+Step 1: Squared (single-agent)
+        → PPO compiles and learns spatial navigation          (5 min)
+        
+Step 2: Squared + negative reward wrapper
+        → PPO handles always-negative rewards (simulates U_r) (10 min)
+        
+Step 3: Foraging (multi-agent, heuristic humans)
+        → Multi-agent env works, heuristic human policy OK     (30 min)
+        
+Step 4: Foraging + EMPO reward wrapper
+        → Intrinsic reward U_r replaces env reward             (1 hour)
+        → Test freeze/sync cycle for auxiliary networks
+        
+Step 5: Foraging + full EMPO auxiliary training
+        → V_h^e, X_h, U_r trained alongside PPO robot          (hours)
+        → Verify warm-up stages, auxiliary network convergence
+        
+Step 6: EMPO MiniGrid 5×5 (1 human, 1 robot)
+        → Full pipeline with existing HeuristicPotentialPolicy  (hours)
+        → Compare with current DQN-trained policy behavior
+        
+Step 7: EMPO MiniGrid 7×7 (3 humans, 1 robot)
+        → Scaling test with multiple humans                     (hours-days)
+```
+
+### 13.5 Mock EMPO Reward for Ocean Environments
+
+To test the intrinsic reward integration without the full EMPO auxiliary network stack,
+create a mock U_r that simulates the key properties of the real signal:
+
+```python
+class MockEMPORewardWrapper(gymnasium.Wrapper):
+    """
+    Wraps any PufferLib Ocean environment with a mock intrinsic reward.
+    
+    Simulates the EMPO U_r signal properties:
+    - Always negative (U_r < 0)
+    - Non-stationary (drifts over training, simulating auxiliary net updates)
+    - State-dependent (not action-dependent)
+    """
+    
+    def __init__(self, env, drift_rate=0.001):
+        super().__init__(env)
+        self._step = 0
+        self._drift_rate = drift_rate
+        self._base_reward = -1.0
+    
+    def step(self, action):
+        obs, env_reward, terminated, truncated, info = self.env.step(action)
+        # Simulate non-stationary negative reward
+        self._step += 1
+        drift = self._drift_rate * self._step
+        mock_u_r = self._base_reward - 0.1 * abs(env_reward) + 0.01 * drift
+        mock_u_r = min(mock_u_r, -0.01)  # Ensure U_r < 0
+        info['env_reward'] = env_reward
+        info['u_r'] = mock_u_r
+        return obs, mock_u_r, terminated, truncated, info
+```
+
+This allows testing:
+- PPO convergence with always-negative rewards
+- Reward normalization effectiveness
+- Impact of reward drift on training stability
+- Freeze/sync cycle mechanics (swap mock for updated mock periodically)
 
 ---
 
