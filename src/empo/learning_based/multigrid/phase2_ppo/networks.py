@@ -11,9 +11,7 @@ This module does NOT modify any code in ``learning_based/multigrid/phase2/``.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple
-
-import torch
+from typing import Any, Tuple
 
 from empo.learning_based.phase2_ppo.actor_critic import EMPOActorCritic
 from empo.learning_based.phase2_ppo.config import PPOPhase2Config

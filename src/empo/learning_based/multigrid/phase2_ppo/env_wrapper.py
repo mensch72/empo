@@ -14,7 +14,6 @@ from typing import Any, Callable, Dict, List, Optional
 
 import numpy as np
 import torch
-import torch.nn as nn
 from gymnasium import spaces
 
 from empo.learning_based.phase2_ppo.env_wrapper import EMPOWorldModelEnv
@@ -174,16 +173,18 @@ class MultiGridWorldModelEnv(EMPOWorldModelEnv):
 
         # -- Compute transition probabilities for auxiliary training --
         if getattr(self.config, "compute_transition_probs", False):
-            transition_probs = self._compute_transition_probs(
-                pre_state, human_actions
-            )
+            transition_probs = self._compute_transition_probs(pre_state, human_actions)
         else:
             transition_probs = None
 
         obs = self._state_to_obs(next_state)
 
         info: Dict[str, Any] = {
-            "env_reward": float(np.sum(env_reward)) if hasattr(env_reward, '__len__') else float(env_reward),
+            "env_reward": (
+                float(np.sum(env_reward))
+                if hasattr(env_reward, "__len__")
+                else float(env_reward)
+            ),
             "u_r": u_r,
         }
 
