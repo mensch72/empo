@@ -25,6 +25,7 @@ import torch
 import gymnasium
 
 pytest.importorskip("pufferlib")
+# Side-effect imports: ensure PufferLib submodules are registered for the trainer.
 import pufferlib.emulation  # noqa: E402,F401
 import pufferlib.vector  # noqa: E402,F401
 
