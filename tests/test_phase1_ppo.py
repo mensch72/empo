@@ -455,23 +455,56 @@ class TestPhase1PPOEnv:
         assert info["goal_achieved"] == reward
 
     def test_seeded_rng_reproducibility(self):
-        """Same seed → identical trajectories; different seed → divergent."""
-        results = []
-        # First two runs use the same seed; third run uses a different seed.
-        seeds = [42, 42, 7]
-        for seed in seeds:
-            env = self._make_env()
+        """Same seed → identical resample pattern; different seed → divergent."""
+
+        class _RandomGoal(_DummyGoal):
+            """Goal with a random ID so resampled goals differ."""
+
+            def __init__(self, goal_id):
+                self.goal_id = goal_id
+
+            def is_achieved(self, state):
+                return 0
+
+            def __repr__(self):
+                return f"_RandomGoal({self.goal_id})"
+
+        _counter = [0]
+
+        def _counting_sampler(state, h_idx):
+            _counter[0] += 1
+            return _RandomGoal(_counter[0]), 1.0
+
+        def _run(seed):
+            """Run a short episode and return the sequence of goal IDs observed."""
+            _counter[0] = 0
+            cfg = PPOPhase1Config(
+                num_actions=4, steps_per_episode=50, goal_resample_prob=0.5
+            )
+            wm = MockWorldModel(n_agents=2, n_actions=4)
+            env = _ZeroObsEnv(
+                world_model=wm,
+                goal_sampler=_counting_sampler,
+                training_human_index=0,
+                other_agent_policies={1: mock_other_policy},
+                config=cfg,
+                obs_dim=3,
+            )
             env.reset(seed=seed)
-            trajectory = []
-            for _ in range(5):
-                obs, reward, _, _, info = env.step(0)
-                trajectory.append((obs.tolist(), reward))
-            results.append(trajectory)
-        # Same seed should produce identical trajectories
-        assert results[0] == results[1]
-        # Different seed should produce a different trajectory
-        # (with deterministic mock this may still match, so we just
-        # confirm the first two are identical — the key invariant)
+            goal_ids = [env._current_goal.goal_id]
+            for _ in range(20):
+                env.step(0)
+                goal_ids.append(env._current_goal.goal_id)
+            return goal_ids
+
+        run_a = _run(42)
+        run_b = _run(42)
+        run_c = _run(7)
+
+        # Same seed must produce identical goal resample sequences
+        assert run_a == run_b
+        # Different seed should produce a different sequence
+        assert run_a != run_c
 
     def test_reward_shaping_adds_bonus(self):
         """Non-zero reward_shaping_coef adds shaping term to reward."""

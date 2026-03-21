@@ -99,7 +99,9 @@ class MultiGridPhase1PPOEnv(Phase1PPOEnv):
         # Seed internal RNG
         self._py_rng = np.random.RandomState(self.np_random.integers(0, 2**31))
 
-        # Reset world model (MultiGridEnv.reset takes no kwargs)
+        # Seed and reset world model (MultiGridEnv.reset takes no kwargs)
+        if seed is not None and hasattr(self.world_model, "seed"):
+            self.world_model.seed(seed)
         self.world_model.reset()
         state = self.world_model.get_state()
 

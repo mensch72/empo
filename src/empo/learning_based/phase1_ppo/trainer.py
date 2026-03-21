@@ -27,6 +27,7 @@ from __future__ import annotations
 import os
 from typing import Any, Callable, Dict, List, Optional
 
+import numpy as np
 import torch
 
 try:
@@ -246,9 +247,13 @@ class PPOPhase1Trainer:
             losses = getattr(pufferl, "losses", None)
             if isinstance(losses, dict):
                 for key, value in losses.items():
-                    # Only include scalar numeric values
+                    # Accept Python scalars, numpy scalars, and 0-d torch tensors
                     if isinstance(value, (int, float)):
                         metrics[key] = float(value)
+                    elif isinstance(value, np.number):
+                        metrics[key] = float(value)
+                    elif isinstance(value, torch.Tensor) and value.ndim == 0:
+                        metrics[key] = value.item()
 
             all_metrics.append(metrics)
 
