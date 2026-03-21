@@ -175,7 +175,7 @@ class EMPOWorldModelEnv(gymnasium.Env):
 
         # -- Build joint action and step the world model --
         joint_action = self._build_joint_action(action, human_actions)
-        _, env_reward, terminated, truncated, wm_info = self.world_model.step(
+        _, env_reward, terminated, truncated, _wm_info = self.world_model.step(
             joint_action
         )
 
