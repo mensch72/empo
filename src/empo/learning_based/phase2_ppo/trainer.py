@@ -635,13 +635,37 @@ class PPOPhase2Trainer:
             nets.x_h.load_state_dict(checkpoint["x_h"])
         if "u_r" in checkpoint and nets.u_r is not None:
             nets.u_r.load_state_dict(checkpoint["u_r"])
-        # Targets
-        if "v_h_e_target" in checkpoint and nets.v_h_e_target is not None:
-            nets.v_h_e_target.load_state_dict(checkpoint["v_h_e_target"])
-        if "x_h_target" in checkpoint and nets.x_h_target is not None:
-            nets.x_h_target.load_state_dict(checkpoint["x_h_target"])
-        if "u_r_target" in checkpoint and nets.u_r_target is not None:
-            nets.u_r_target.load_state_dict(checkpoint["u_r_target"])
+        # Targets: recreate from online nets if missing but present in checkpoint
+        if "v_h_e_target" in checkpoint:
+            if nets.v_h_e_target is None and nets.v_h_e is not None:
+                v_h_e_target = copy.deepcopy(nets.v_h_e)
+                v_h_e_target.eval()
+                for p in v_h_e_target.parameters():
+                    p.requires_grad_(False)
+                v_h_e_target.to(self.device)
+                nets.v_h_e_target = v_h_e_target
+            if nets.v_h_e_target is not None:
+                nets.v_h_e_target.load_state_dict(checkpoint["v_h_e_target"])
+        if "x_h_target" in checkpoint:
+            if nets.x_h_target is None and nets.x_h is not None:
+                x_h_target = copy.deepcopy(nets.x_h)
+                x_h_target.eval()
+                for p in x_h_target.parameters():
+                    p.requires_grad_(False)
+                x_h_target.to(self.device)
+                nets.x_h_target = x_h_target
+            if nets.x_h_target is not None:
+                nets.x_h_target.load_state_dict(checkpoint["x_h_target"])
+        if "u_r_target" in checkpoint:
+            if nets.u_r_target is None and nets.u_r is not None:
+                u_r_target = copy.deepcopy(nets.u_r)
+                u_r_target.eval()
+                for p in u_r_target.parameters():
+                    p.requires_grad_(False)
+                u_r_target.to(self.device)
+                nets.u_r_target = u_r_target
+            if nets.u_r_target is not None:
+                nets.u_r_target.load_state_dict(checkpoint["u_r_target"])
         # Optimisers
         opt_states = checkpoint.get("aux_optimizers", {})
         for name, state in opt_states.items():
