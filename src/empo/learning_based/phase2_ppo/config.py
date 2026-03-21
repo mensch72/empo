@@ -104,16 +104,8 @@ class PPOPhase2Config:
 
     Optional flags
     --------------
-    u_r_use_network : bool
-        If True, use a learned U_r network; otherwise compute U_r from X_h.
-    x_h_use_network : bool
-        If True, use a learned X_h network; otherwise compute from V_h^e.
     use_z_space_transform : bool
         Apply z-space value transforms to auxiliary targets.
-    use_encoders : bool
-        Whether neural-net encoders are used (vs. lookup tables).
-    include_step_count : bool
-        Whether the time-step index is part of the state representation.
     """
 
     # ── Theory parameters (duplicated from DQN config on purpose) ────────
@@ -164,11 +156,7 @@ class PPOPhase2Config:
     num_robots: int = 1
 
     # ── Optional flags ───────────────────────────────────────────────────
-    u_r_use_network: bool = False
-    x_h_use_network: bool = True
     use_z_space_transform: bool = False
-    use_encoders: bool = True
-    include_step_count: bool = True
 
     # ── Auxiliary-network regularisation ──────────────────────────────────
     v_h_e_weight_decay: float = 1e-4

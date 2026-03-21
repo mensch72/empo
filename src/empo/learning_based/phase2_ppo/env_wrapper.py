@@ -1,7 +1,7 @@
 """
 Gymnasium-compatible environment wrapper for PPO-based Phase 2 training.
 
-``EMPOMultiGridEnv`` wraps a :class:`WorldModel` so that:
+``EMPOWorldModelEnv`` wraps a :class:`WorldModel` so that:
 
 1. Each ``step()`` simulates the human agents using a policy prior,
    samples goals, and advances the world model — only the robot action(s)
@@ -46,7 +46,7 @@ def _flat_index_to_tuple(
     return tuple(actions)
 
 
-class EMPOMultiGridEnv(gymnasium.Env):
+class EMPOWorldModelEnv(gymnasium.Env):
     """PufferLib-compatible wrapper around a :class:`WorldModel`.
 
     Parameters
@@ -405,3 +405,8 @@ class EMPOMultiGridEnv(gymnasium.Env):
         return np.zeros(
             self.observation_space.shape, dtype=np.float32
         )
+
+
+# Backward-compatible alias (the class was previously named EMPOMultiGridEnv
+# even though it is not MultiGrid-specific).
+EMPOMultiGridEnv = EMPOWorldModelEnv

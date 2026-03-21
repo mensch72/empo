@@ -30,12 +30,13 @@ Shared read-only imports from the DQN path:
 
 from .config import PPOPhase2Config
 from .actor_critic import EMPOActorCritic
-from .env_wrapper import EMPOMultiGridEnv
+from .env_wrapper import EMPOWorldModelEnv, EMPOMultiGridEnv
 from .trainer import PPOPhase2Trainer
 
 __all__ = [
     "PPOPhase2Config",
     "EMPOActorCritic",
-    "EMPOMultiGridEnv",
+    "EMPOWorldModelEnv",
+    "EMPOMultiGridEnv",  # backward-compatible alias
     "PPOPhase2Trainer",
 ]

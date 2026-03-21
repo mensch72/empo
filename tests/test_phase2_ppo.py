@@ -10,7 +10,7 @@ Test categories:
     1. PPOPhase2Config — creation, validation, helpers, PufferLib config
     2. EMPOActorCritic — forward (PufferLib convention), encode/decode,
        get_action_and_value, action mapping
-    3. EMPOMultiGridEnv — reset, step, observation / reward / info contract
+    3. EMPOWorldModelEnv — reset, step, observation / reward / info contract
     4. PPOPhase2Trainer — auxiliary training, push_transition_to_aux_buffer,
        PufferLib training loop
     5. Isolation check — no existing Phase 2 files modified
@@ -31,7 +31,7 @@ import pufferlib.vector  # noqa: E402
 # ── PPO-path imports (new code under test) ──────────────────────────────
 from empo.learning_based.phase2_ppo.config import PPOPhase2Config
 from empo.learning_based.phase2_ppo.actor_critic import EMPOActorCritic
-from empo.learning_based.phase2_ppo.env_wrapper import EMPOMultiGridEnv
+from empo.learning_based.phase2_ppo.env_wrapper import EMPOWorldModelEnv
 from empo.learning_based.phase2_ppo.trainer import (
     PPOPhase2Trainer,
     PPOAuxiliaryNetworks,
@@ -101,19 +101,18 @@ def mock_goal_sampler(state, human_idx):
     return f"goal_{human_idx}", 1.0
 
 
-class _PufferLibCompatEnv(EMPOMultiGridEnv):
-    """Testing shim that enforces a numeric-only top-level ``info`` dict.
+class _PufferLibCompatEnv(EMPOWorldModelEnv):
+    """Testing shim that asserts a numeric-only top-level ``info`` dict.
 
-    EMPOMultiGridEnv.step() already follows the contract that all top-level
-    ``info`` values are scalar numerics, and stores any richer auxiliary data
-    in its internal ``_aux_buffer`` attribute instead.
+    ``EMPOWorldModelEnv.step()`` already follows the contract that all
+    top-level ``info`` values are scalar numerics, and stores any richer
+    auxiliary data in its internal ``_aux_buffer`` attribute instead.
 
-    Historically, PufferLib's Serial vectorisation backend called ``np.mean()``
-    on every top-level ``info`` value, which would break if non-numeric data
-    appeared there.  This wrapper exists to guard against regressions in tests:
-    it drops any unexpected non-numeric entries, so that the PufferLib-backed
-    training loop continues to run safely even if EMPOMultiGridEnv were
-    accidentally changed to return complex objects in ``info`` again.
+    PufferLib's Serial vectorisation backend calls ``np.mean()`` on every
+    top-level ``info`` value, which would break on non-numeric data.  This
+    wrapper **asserts** that the contract holds (failing the test if a
+    regression reintroduces complex objects in ``info``), rather than
+    silently filtering non-numeric entries.
 
     Trainers should continue to read rich auxiliary data from ``_aux_buffer``
     after ``evaluate()``; this wrapper does not modify that behaviour.
@@ -121,12 +120,16 @@ class _PufferLibCompatEnv(EMPOMultiGridEnv):
 
     def step(self, action):
         obs, reward, terminated, truncated, info = super().step(action)
-        numeric_info = {
-            k: v
-            for k, v in info.items()
-            if isinstance(v, (int, float, np.integer, np.floating))
-        }
-        return obs, reward, terminated, truncated, numeric_info
+        for key, value in info.items():
+            assert isinstance(
+                value, (int, float, np.integer, np.floating)
+            ), (
+                f"EMPOWorldModelEnv.step() returned non-numeric info "
+                f"value for key {key!r}: {type(value).__name__}. "
+                f"Top-level info must contain only scalar numerics; "
+                f"rich auxiliary data belongs in _aux_buffer."
+            )
+        return obs, reward, terminated, truncated, info
 
 
 # ======================================================================
@@ -432,11 +435,11 @@ class TestEMPOActorCritic:
 
 
 # ======================================================================
-# 3. EMPOMultiGridEnv tests
+# 3. EMPOWorldModelEnv tests
 # ======================================================================
 
 
-class TestEMPOMultiGridEnv:
+class TestEMPOWorldModelEnv:
     """Tests for the Gymnasium-compatible environment wrapper."""
 
     def _make_env(self, config=None, **kwargs):
@@ -444,7 +447,7 @@ class TestEMPOMultiGridEnv:
         cfg = config or PPOPhase2Config(
             num_actions=5, num_robots=1, steps_per_episode=50
         )
-        return EMPOMultiGridEnv(
+        return EMPOWorldModelEnv(
             world_model=wm,
             human_policy_prior=mock_human_policy_prior,
             goal_sampler=mock_goal_sampler,
@@ -534,7 +537,7 @@ class TestEMPOMultiGridEnv:
         cfg = PPOPhase2Config(
             num_actions=5, num_robots=1, steps_per_episode=10
         )
-        env = EMPOMultiGridEnv(
+        env = EMPOWorldModelEnv(
             world_model=wm,
             human_policy_prior=mock_human_policy_prior,
             goal_sampler=mock_goal_sampler,
@@ -573,7 +576,7 @@ class TestEMPOMultiGridEnv:
         cfg = PPOPhase2Config(
             num_actions=5, num_robots=1, steps_per_episode=50
         )
-        env = EMPOMultiGridEnv(
+        env = EMPOWorldModelEnv(
             world_model=wm,
             human_policy_prior=mock_human_policy_prior,
             goal_sampler=mock_goal_sampler,
@@ -600,7 +603,7 @@ class TestEMPOMultiGridEnv:
             num_actions=3, num_robots=2, steps_per_episode=50,
             compute_transition_probs=True,
         )
-        env = EMPOMultiGridEnv(
+        env = EMPOWorldModelEnv(
             world_model=wm,
             human_policy_prior=mock_human_policy_prior,
             goal_sampler=mock_goal_sampler,
@@ -631,7 +634,7 @@ class TestEMPOMultiGridEnv:
         cfg = PPOPhase2Config(
             num_actions=3, num_robots=2, steps_per_episode=50
         )
-        env = EMPOMultiGridEnv(
+        env = EMPOWorldModelEnv(
             world_model=wm,
             human_policy_prior=mock_human_policy_prior,
             goal_sampler=mock_goal_sampler,

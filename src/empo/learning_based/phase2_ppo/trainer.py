@@ -440,7 +440,7 @@ class PPOPhase2Trainer:
     ) -> None:
         """Extract auxiliary transition data from environment aux buffers.
 
-        Each :class:`EMPOMultiGridEnv` stores per-step auxiliary data in its
+        Each :class:`EMPOWorldModelEnv` stores per-step auxiliary data in its
         ``_aux_buffer`` attribute.  Under the Serial backend the envs live
         in the same process, so we can read their buffers directly.  This
         avoids PufferLib's info aggregation which only handles numeric
@@ -464,7 +464,7 @@ class PPOPhase2Trainer:
         _MAX_UNWRAP_DEPTH = 20
 
         for env in envs:
-            # Unwrap PufferLib emulation layers to reach EMPOMultiGridEnv.
+            # Unwrap PufferLib emulation layers to reach EMPOWorldModelEnv.
             # Depth limit prevents infinite loops in misconfigured wrappers.
             inner = env
             depth = 0
@@ -498,7 +498,7 @@ class PPOPhase2Trainer:
                     terminal = bool(terminated or truncated)
 
                 # robot_action should already be a per-robot tuple (stored
-                # by EMPOMultiGridEnv._aux_buffer).  Normalise for safety.
+                # by EMPOWorldModelEnv._aux_buffer).  Normalise for safety.
                 robot_action = info.get("robot_action", (0,))
                 if isinstance(robot_action, int):
                     robot_action = (robot_action,)
@@ -531,7 +531,7 @@ class PPOPhase2Trainer:
         ----------
         env_creator : callable
             A zero-argument callable that returns a new Gymnasium-compatible
-            :class:`EMPOMultiGridEnv` instance.  The trainer wraps each
+            :class:`EMPOWorldModelEnv` instance.  The trainer wraps each
             instance with ``pufferlib.emulation.GymnasiumPufferEnv`` and
             passes the wrapped creator to ``pufferlib.vector.make()`` for
             vectorised execution.
@@ -558,10 +558,29 @@ class PPOPhase2Trainer:
         total_timesteps = n_iters * puffer_config["batch_size"]
         puffer_config["total_timesteps"] = total_timesteps
 
-        # Wrap the Gymnasium env creator with PufferLib's emulation layer
+        # Wrap the Gymnasium env creator with PufferLib's emulation layer.
+        # Ensure every env instance is wired to this trainer's auxiliary
+        # networks so that U_r rewards and freeze/sync behave correctly.
+        aux_nets = self.auxiliary_networks
+
         def puffer_env_creator(buf=None, seed=0):
+            def _create():
+                env = env_creator()
+                if getattr(env, "auxiliary_networks", None) is None:
+                    if aux_nets is None:
+                        raise RuntimeError(
+                            "PPOPhase2Trainer.train(): environment was created "
+                            "without 'auxiliary_networks', and the trainer's "
+                            "'auxiliary_networks' attribute is None. Either "
+                            "pass auxiliary_networks into your env_creator or "
+                            "initialise PPOPhase2Trainer with non-None "
+                            "auxiliary networks."
+                        )
+                    env.auxiliary_networks = aux_nets
+                return env
+
             return pufferlib.emulation.GymnasiumPufferEnv(
-                env_creator=env_creator, buf=buf, seed=seed
+                env_creator=_create, buf=buf, seed=seed
             )
 
         # Create vectorised environments via PufferLib

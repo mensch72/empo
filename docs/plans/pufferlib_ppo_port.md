@@ -165,7 +165,7 @@ trainer. This is the single most important implementation constraint:
    ├── __init__.py
    ├── config.py                               # PPOPhase2Config (standalone)
    ├── actor_critic.py                         # EMPOActorCritic network
-   ├── env_wrapper.py                          # EMPOMultiGridEnv (Gymnasium wrapper)
+   ├── env_wrapper.py                          # EMPOWorldModelEnv (Gymnasium wrapper)
    └── trainer.py                              # PPO training loop + aux net training
    ```
 
@@ -207,7 +207,7 @@ training driver.
 
 | PufferLib module | Role in EMPO |
 |---|---|
-| ``pufferlib.emulation.GymnasiumPufferEnv`` | Wraps ``EMPOMultiGridEnv`` (a standard Gymnasium env) into a PufferLib-compatible env with shared-memory observation buffers |
+| ``pufferlib.emulation.GymnasiumPufferEnv`` | Wraps ``EMPOWorldModelEnv`` (a standard Gymnasium env) into a PufferLib-compatible env with shared-memory observation buffers |
 | ``pufferlib.vector.make(env_creator, ...)`` | Creates a vectorised pool of ``num_envs`` wrapped environments. The initial EMPO PPO integration uses ``backend='Serial'``, which steps all environments in a single process. PufferLib also supports multiprocessing / shared-memory backends (e.g. ``backend='Multiprocessing'``) for true parallel env stepping; switching backend requires no trainer code changes. |
 | ``pufferlib.pufferl.PuffeRL(config, vecenv, policy)`` | The core training class.  Manages the rollout buffer, advantage computation (CUDA kernel), PPO clipped-surrogate update, gradient clipping, learning-rate scheduling, and checkpointing |
 | ``pufferlib.pytorch.sample_logits`` | Differentiable action sampling from logits, supporting Discrete, MultiDiscrete, and continuous action spaces |
@@ -253,7 +253,7 @@ mixed-precision training.
 
 #### What is EMPO-specific (not handled by PufferLib)
 
-- **Intrinsic reward U_r(s)**: Computed inside ``EMPOMultiGridEnv.step()``
+- **Intrinsic reward U_r(s)**: Computed inside ``EMPOWorldModelEnv.step()``
   and returned as the standard Gymnasium reward.  PufferLib treats it as
   any other reward signal.
 - **Auxiliary network training**: V_h^e, X_h, U_r networks are trained
@@ -441,7 +441,7 @@ the WorldModel interface to Gymnasium and inject the intrinsic reward:
 import gymnasium
 import pufferlib.emulation
 
-class EMPOMultiGridEnv(gymnasium.Env):
+class EMPOWorldModelEnv(gymnasium.Env):
     """
     PufferLib-compatible wrapper for EMPO Phase 2 training.
     
@@ -575,7 +575,7 @@ PPO rollouts collect (obs, action, reward, done) tuples. But the auxiliary netwo
 We use the `info` dict to carry this data out of the environment wrapper:
 
 ```python
-# In the EMPOMultiGridEnv.step():
+# In the EMPOWorldModelEnv.step():
 # Compute model-based transition probabilities from the WorldModel.
 # This matches Phase2Transition.transition_probs_by_action:
 # Dict[int, List[Tuple[float, HashableState]]]
@@ -625,7 +625,7 @@ import pufferlib.vector
 
 def make_env():
     env = create_multigrid_world_model(...)
-    return EMPOMultiGridEnv(
+    return EMPOWorldModelEnv(
         world_model=env,
         human_policy_prior=human_policy_prior,
         goal_sampler=goal_sampler,
@@ -946,7 +946,7 @@ def train_empo_ppo(
     # Create vectorized PufferLib environments
     def make_env(buf=None, seed=0):
         world_model = world_model_factory.create()
-        env = EMPOMultiGridEnv(
+        env = EMPOWorldModelEnv(
             world_model, human_policy_prior, goal_sampler,
             human_agent_indices, robot_agent_indices,
             config, auxiliary_networks=auxiliary_networks,
@@ -1059,7 +1059,7 @@ shared_weights['v_h_e'] = v_h_e_target.state_dict()
 shared_weights['x_h'] = x_h_target.state_dict()
 
 # Each environment checks for updates periodically
-class EMPOMultiGridEnv:
+class EMPOWorldModelEnv:
     def _maybe_sync_networks(self):
         if self._shared_weights_version != self._local_version:
             self.auxiliary_networks.v_h_e.load_state_dict(
@@ -1186,7 +1186,7 @@ creating a natural time-scale separation.
 - [ ] **10.1** Create `learning_based/phase2_ppo/` and `learning_based/multigrid/phase2_ppo/` modules
 - [ ] **10.2** Add PufferLib dependency (`pip install pufferlib`)
 - [ ] **10.3** Implement `PPOPhase2Config` in `phase2_ppo/config.py` (standalone, not extending `Phase2Config`)
-- [ ] **10.4** Implement `EMPOMultiGridEnv` in `multigrid/phase2_ppo/env_wrapper.py` (Gymnasium wrapper with human agent simulation)
+- [ ] **10.4** Implement `EMPOWorldModelEnv` in `multigrid/phase2_ppo/env_wrapper.py` (Gymnasium wrapper with human agent simulation)
 - [ ] **10.5** Implement `EMPOActorCritic` in `phase2_ppo/actor_critic.py` (combined actor-critic network)
 - [ ] **10.6** Unit tests in `tests/test_phase2_ppo_env.py`: env wrapper produces valid observations, rewards, dones
 - [ ] **10.7** Verify: random policy through wrapper matches current random rollout behavior
