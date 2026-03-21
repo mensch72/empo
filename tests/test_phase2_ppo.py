@@ -1,5 +1,5 @@
 """
-Tests for the PPO-based Phase 2 implementation.
+Tests for the PPO-based Phase 2 implementation (PufferLib-backed).
 
 These tests verify the **new** PPO code path without touching or importing
 anything from the existing DQN-based Phase 2 trainer.  The only shared
@@ -7,10 +7,12 @@ imports are the stable public data structures (Phase2Transition,
 Phase2ReplayBuffer, base network classes).
 
 Test categories:
-    1. PPOPhase2Config — creation, validation, helpers
-    2. EMPOActorCritic — forward, get_action_and_value, action mapping
+    1. PPOPhase2Config — creation, validation, helpers, PufferLib config
+    2. EMPOActorCritic — forward (PufferLib convention), encode/decode,
+       get_action_and_value, action mapping
     3. EMPOMultiGridEnv — reset, step, observation / reward / info contract
-    4. PPOPhase2Trainer — GAE computation, PPO update, rollout collection
+    4. PPOPhase2Trainer — auxiliary training, push_transition_to_aux_buffer,
+       PufferLib training loop
     5. Isolation check — no existing Phase 2 files modified
 """
 
@@ -22,6 +24,10 @@ import pytest
 import torch
 import gymnasium
 
+import pufferlib
+import pufferlib.emulation
+import pufferlib.vector
+
 # ── PPO-path imports (new code under test) ──────────────────────────────
 from empo.learning_based.phase2_ppo.config import PPOPhase2Config
 from empo.learning_based.phase2_ppo.actor_critic import EMPOActorCritic
@@ -29,8 +35,6 @@ from empo.learning_based.phase2_ppo.env_wrapper import EMPOMultiGridEnv
 from empo.learning_based.phase2_ppo.trainer import (
     PPOPhase2Trainer,
     PPOAuxiliaryNetworks,
-    PPORolloutBuffer,
-    PPORolloutEntry,
 )
 
 # ── Shared read-only imports (from DQN path, not modified) ──────────────
@@ -95,6 +99,25 @@ def mock_human_policy_prior(state, human_idx, goal, world_model):
 def mock_goal_sampler(state, human_idx):
     """Returns a dummy goal and weight."""
     return f"goal_{human_idx}", 1.0
+
+
+class _PufferLibCompatEnv(EMPOMultiGridEnv):
+    """Thin wrapper that strips non-numeric info for PufferLib compatibility.
+
+    PufferLib's Serial vectorisation backend calls ``np.mean()`` on every
+    info value.  EMPOMultiGridEnv returns complex auxiliary data (tuples,
+    dicts) which cannot be averaged.  This wrapper keeps only scalar numeric
+    values so the PufferLib training loop runs without error.
+    """
+
+    def step(self, action):
+        obs, reward, terminated, truncated, info = super().step(action)
+        numeric_info = {
+            k: v
+            for k, v in info.items()
+            if isinstance(v, (int, float, np.integer, np.floating))
+        }
+        return obs, reward, terminated, truncated, numeric_info
 
 
 # ======================================================================
@@ -180,6 +203,42 @@ class TestPPOPhase2Config:
 
         assert not issubclass(PPOPhase2Config, Phase2Config)
 
+    def test_to_pufferlib_config(self):
+        """to_pufferlib_config() produces a valid PufferLib config dict."""
+        cfg = PPOPhase2Config(
+            num_envs=4,
+            ppo_rollout_length=32,
+            ppo_num_minibatches=2,
+            ppo_update_epochs=3,
+            gamma_r=0.97,
+            ppo_gae_lambda=0.9,
+            ppo_clip_coef=0.1,
+            ppo_vf_coef=0.25,
+            ppo_max_grad_norm=1.0,
+            lr_ppo=1e-3,
+            ppo_ent_coef_start=0.05,
+        )
+        d = cfg.to_pufferlib_config()
+
+        expected_batch = 4 * 32  # num_envs * rollout_length
+        assert d["batch_size"] == expected_batch
+        assert d["bptt_horizon"] == 32
+        assert d["minibatch_size"] == expected_batch // 2
+        assert d["update_epochs"] == 3
+        assert d["gamma"] == 0.97
+        assert d["gae_lambda"] == 0.9
+        assert d["clip_coef"] == 0.1
+        assert d["vf_coef"] == 0.25
+        assert d["max_grad_norm"] == 1.0
+        assert d["learning_rate"] == 1e-3
+        assert d["ent_coef"] == 0.05
+        # Should contain all keys expected by PuffeRL
+        for key in [
+            "seed", "total_timesteps", "compile", "use_rnn",
+            "device", "anneal_lr",
+        ]:
+            assert key in d, f"Missing PufferLib key: {key}"
+
 
 # ======================================================================
 # 2. EMPOActorCritic tests
@@ -200,7 +259,7 @@ class TestEMPOActorCritic:
         obs = torch.randn(3, 8)
         logits, value = ac(obs)
         assert logits.shape == (3, 4)
-        assert value.shape == (3,)
+        assert value.shape == (3, 1)
 
     def test_forward_with_encoder(self):
         enc = torch.nn.Linear(16, 32)
@@ -214,7 +273,7 @@ class TestEMPOActorCritic:
         obs = torch.randn(2, 16)
         logits, value = ac(obs)
         assert logits.shape == (2, 5)
-        assert value.shape == (2,)
+        assert value.shape == (2, 1)
 
     def test_multi_robot_joint_actions(self):
         ac = EMPOActorCritic(
@@ -227,6 +286,59 @@ class TestEMPOActorCritic:
         obs = torch.randn(1, 4)
         logits, value = ac(obs)
         assert logits.shape == (1, 9)  # 3^2
+        assert value.shape == (1, 1)
+
+    def test_forward_returns_pufferlib_convention(self):
+        """forward() returns (logits, value) with PufferLib-expected shapes."""
+        ac = EMPOActorCritic(
+            state_encoder=None,
+            hidden_dim=32,
+            num_actions=6,
+            num_robots=1,
+            obs_dim=10,
+        )
+        B = 7
+        obs = torch.randn(B, 10)
+        logits, value = ac.forward(obs)
+
+        assert logits.shape == (B, 6), "logits should be (B, num_actions)"
+        assert value.shape == (B, 1), "value should be (B, 1) for PufferLib"
+        assert logits.dtype == torch.float32
+        assert value.dtype == torch.float32
+
+    def test_forward_eval_exists(self):
+        """forward_eval is present and returns same results as forward."""
+        ac = EMPOActorCritic(
+            state_encoder=None,
+            hidden_dim=16,
+            num_actions=4,
+            obs_dim=8,
+        )
+        obs = torch.randn(2, 8)
+        assert hasattr(ac, "forward_eval"), "forward_eval method missing"
+
+        logits_fwd, value_fwd = ac.forward(obs)
+        logits_eval, value_eval = ac.forward_eval(obs)
+
+        assert torch.equal(logits_fwd, logits_eval)
+        assert torch.equal(value_fwd, value_eval)
+
+    def test_encode_decode_roundtrip(self):
+        """encode_observations + decode_actions matches forward."""
+        ac = EMPOActorCritic(
+            state_encoder=None,
+            hidden_dim=32,
+            num_actions=5,
+            obs_dim=8,
+        )
+        obs = torch.randn(4, 8)
+        logits_fwd, value_fwd = ac.forward(obs)
+
+        hidden = ac.encode_observations(obs)
+        logits_dec, value_dec = ac.decode_actions(hidden)
+
+        assert torch.equal(logits_fwd, logits_dec)
+        assert torch.equal(value_fwd, value_dec)
 
     def test_get_action_and_value(self):
         ac = EMPOActorCritic(
@@ -447,38 +559,6 @@ class TestEMPOMultiGridEnv:
         assert 0 <= ha[1] < 5, f"Human at index 1 got invalid action {ha[1]}"
         assert 0 <= ha[3] < 5, f"Human at index 3 got invalid action {ha[3]}"
 
-    def test_batch_size_guard_in_ppo_update(self):
-        """PPO update does not crash when N < ppo_num_minibatches."""
-        cfg = PPOPhase2Config(
-            num_actions=5,
-            num_robots=1,
-            hidden_dim=32,
-            ppo_num_minibatches=100,  # much larger than N
-            ppo_update_epochs=1,
-        )
-        ac = EMPOActorCritic(
-            state_encoder=None,
-            hidden_dim=32,
-            num_actions=5,
-            obs_dim=3,
-        )
-        trainer = PPOPhase2Trainer(
-            actor_critic=ac,
-            auxiliary_networks=PPOAuxiliaryNetworks(
-                v_h_e=_MockVhE()
-            ),
-            config=cfg,
-        )
-        N = 4
-        obs = torch.randn(N, 3)
-        actions = torch.randint(0, 5, (N,))
-        old_lp = torch.zeros(N)
-        adv = torch.randn(N)
-        ret = torch.randn(N)
-        # Should not crash with batch_size=0
-        result = trainer.ppo_update(obs, actions, old_lp, adv, ret)
-        assert "policy_loss" in result
-
     def test_multi_robot_transition_probs(self):
         """Transition probs correctly iterate over joint actions for 2 robots."""
         wm = MockWorldModel(n_agents=4, n_actions=3)
@@ -524,56 +604,6 @@ class TestEMPOMultiGridEnv:
         )
         assert isinstance(env.action_space, gymnasium.spaces.MultiDiscrete)
 
-    def test_multi_robot_push_aux_buffer_stores_tuple(self):
-        """push_rollout_to_aux_buffer stores per-robot action tuple."""
-        cfg = PPOPhase2Config(
-            num_actions=3,
-            num_robots=2,
-            hidden_dim=32,
-            aux_buffer_size=100,
-        )
-        ac = EMPOActorCritic(
-            state_encoder=None,
-            hidden_dim=32,
-            num_actions=3,
-            num_robots=2,
-            obs_dim=3,
-        )
-        trainer = PPOPhase2Trainer(
-            actor_critic=ac,
-            auxiliary_networks=PPOAuxiliaryNetworks(
-                v_h_e=_MockVhE()
-            ),
-            config=cfg,
-        )
-        # Create a rollout entry with a flat joint-action index
-        # For 2 robots with 3 actions each, index 5 = (2, 1) in base-3
-        rollout = PPORolloutBuffer()
-        rollout.add(PPORolloutEntry(
-            obs=np.zeros(3),
-            action=5,
-            log_prob=0.0,
-            value=0.0,
-            reward=0.0,
-            done=False,
-            info={
-                "state": (0, 0, 0, 0),
-                "next_state": (1, 1, 1, 1),
-                "goals": {},
-                "goal_weights": {},
-                "human_actions": [0, 0, 0, 0],
-                "transition_probs": {0: [(1.0, (0, 0, 0, 0))]},
-            },
-        ))
-
-        trainer.push_rollout_to_aux_buffer(rollout)
-        assert len(trainer.aux_replay_buffer) == 1
-        entry = trainer.aux_replay_buffer.buffer[0]
-        # The stored robot_action should be a tuple of per-robot actions
-        assert entry.robot_action == (2, 1), (
-            f"Expected (2, 1), got {entry.robot_action}"
-        )
-
 
 # ======================================================================
 # 4. PPOPhase2Trainer tests
@@ -581,29 +611,32 @@ class TestEMPOMultiGridEnv:
 
 
 class TestPPOPhase2Trainer:
-    """Tests for the PPO trainer."""
+    """Tests for the PPO trainer (PufferLib-backed)."""
 
     @staticmethod
-    def _make_trainer():
-        cfg = PPOPhase2Config(
+    def _make_trainer(**config_overrides):
+        defaults = dict(
             num_actions=5,
             num_robots=1,
             hidden_dim=32,
             ppo_rollout_length=16,
             ppo_num_minibatches=2,
             ppo_update_epochs=2,
-            batch_size=8,
             aux_buffer_size=1000,
         )
+        defaults.update(config_overrides)
+        cfg = PPOPhase2Config(**defaults)
         ac = EMPOActorCritic(
             state_encoder=None,
-            hidden_dim=32,
-            num_actions=5,
+            hidden_dim=defaults["hidden_dim"],
+            num_actions=defaults["num_actions"],
             obs_dim=3,
         )
         # Mock auxiliary networks
         mock_v_h_e = MagicMock(spec=["parameters", "eval", "train"])
-        mock_v_h_e.parameters.return_value = iter([torch.zeros(1, requires_grad=True)])
+        mock_v_h_e.parameters.return_value = iter(
+            [torch.zeros(1, requires_grad=True)]
+        )
         aux = PPOAuxiliaryNetworks(v_h_e=mock_v_h_e)
         return PPOPhase2Trainer(ac, aux, cfg, device="cpu")
 
@@ -612,113 +645,45 @@ class TestPPOPhase2Trainer:
         assert trainer.training_step_count == 0
         assert trainer.ppo_iteration == 0
 
-    def test_gae_constant_reward(self):
-        """With constant reward and value, advantages should be ~0."""
+    def test_push_transition_to_aux_buffer(self):
+        """push_transition_to_aux_buffer stores a single transition."""
         trainer = self._make_trainer()
-        T = 10
-        rewards = [1.0] * T
-        # Perfectly calibrated critic
-        gamma = trainer.config.gamma_r
-        # V(s) = 1 / (1 - gamma) for constant reward under infinite horizon
-        v_inf = 1.0 / (1.0 - gamma)
-        values = [v_inf] * T
-        dones = [False] * T
-        adv, ret = trainer.compute_gae(rewards, values, dones, v_inf)
-        # Advantages should be close to zero
-        assert np.allclose(adv, 0.0, atol=0.15)
-
-    def test_gae_terminal_episode(self):
-        """When episode terminates, no bootstrap from next state."""
-        trainer = self._make_trainer()
-        rewards = [0.0, 0.0, 1.0]
-        values = [0.0, 0.0, 0.0]
-        dones = [False, False, True]
-        adv, ret = trainer.compute_gae(rewards, values, dones, 0.0)
-        # Last step: advantage should be reward - value = 1.0
-        assert adv[2] == pytest.approx(1.0)
-
-    def test_ppo_update_runs(self):
-        """PPO update should produce valid loss values."""
-        trainer = self._make_trainer()
-        N = 16
-        obs = torch.randn(N, 3)
-        actions = torch.randint(0, 5, (N,))
-        log_probs = torch.randn(N)
-        advantages = torch.randn(N)
-        returns = torch.randn(N)
-
-        losses = trainer.ppo_update(
-            obs, actions, log_probs, advantages, returns
+        trainer.push_transition_to_aux_buffer(
+            state=(1, 2, 3),
+            next_state=(2, 3, 4),
+            robot_action=(0,),
+            goals={0: "g0", 1: "g1"},
+            goal_weights={0: 1.0, 1: 1.0},
+            human_actions=[0, 1, 2],
+            transition_probs={0: [(1.0, (2, 3, 4))]},
+            terminal=False,
         )
-        assert "policy_loss" in losses
-        assert "value_loss" in losses
-        assert "entropy" in losses
-        assert isinstance(losses["policy_loss"], float)
-
-    def test_push_rollout_to_aux_buffer(self):
-        trainer = self._make_trainer()
-        buf = PPORolloutBuffer()
-        buf.add(
-            PPORolloutEntry(
-                obs=np.zeros(3),
-                action=1,
-                log_prob=-0.5,
-                value=0.1,
-                reward=-0.3,
-                done=False,
-                info={
-                    "state": (1, 2, 3),
-                    "next_state": (2, 3, 4),
-                    "goals": {0: "g0", 1: "g1"},
-                    "goal_weights": {0: 1.0, 1: 1.0},
-                    "human_actions": [0, 1, 2],
-                    "transition_probs": {0: [(1.0, (2, 3, 4))]},
-                },
-            )
-        )
-        trainer.push_rollout_to_aux_buffer(buf)
         assert len(trainer.aux_replay_buffer) == 1
+        entry = trainer.aux_replay_buffer.buffer[0]
+        assert entry.state == (1, 2, 3)
+        assert entry.next_state == (2, 3, 4)
+        assert entry.robot_action == (0,)
+        assert entry.goals == {0: "g0", 1: "g1"}
+        assert entry.terminal is False
 
-    def test_full_training_loop(self):
-        """End-to-end: small training loop completes without error."""
-        cfg = PPOPhase2Config(
-            num_actions=5,
-            num_robots=1,
-            hidden_dim=16,
-            ppo_rollout_length=8,
-            ppo_num_minibatches=2,
-            ppo_update_epochs=1,
-            batch_size=4,
-            aux_buffer_size=500,
-            num_ppo_iterations=2,
-            aux_training_steps_per_iteration=1,
+    def test_push_transition_to_aux_buffer_multi_robot(self):
+        """push_transition_to_aux_buffer stores per-robot action tuple."""
+        trainer = self._make_trainer(
+            num_actions=3, num_robots=2, hidden_dim=32,
         )
-        ac = EMPOActorCritic(
-            state_encoder=None,
-            hidden_dim=16,
-            num_actions=5,
-            obs_dim=3,
+        trainer.push_transition_to_aux_buffer(
+            state=(0, 0, 0, 0),
+            next_state=(1, 1, 1, 1),
+            robot_action=(2, 1),
+            goals={},
+            goal_weights={},
+            human_actions=[0, 0, 0, 0],
+            transition_probs={0: [(1.0, (0, 0, 0, 0))]},
+            terminal=False,
         )
-        v_h_e = _MockVhE()
-        aux = PPOAuxiliaryNetworks(v_h_e=v_h_e)
-        trainer = PPOPhase2Trainer(ac, aux, cfg, device="cpu")
-
-        def env_factory():
-            wm = MockWorldModel(n_agents=3, n_actions=5)
-            return EMPOMultiGridEnv(
-                world_model=wm,
-                human_policy_prior=mock_human_policy_prior,
-                goal_sampler=mock_goal_sampler,
-                human_agent_indices=[0, 1],
-                robot_agent_indices=[2],
-                config=cfg,
-                obs_dim=3,
-            )
-
-        metrics = trainer.train(env_factory, num_iterations=2)
-        assert len(metrics) == 2
-        assert "policy_loss" in metrics[0]
-        assert "iteration" in metrics[0]
+        assert len(trainer.aux_replay_buffer) == 1
+        entry = trainer.aux_replay_buffer.buffer[0]
+        assert entry.robot_action == (2, 1)
 
     def test_auxiliary_training_computes_losses(self):
         """Auxiliary training step produces V_h^e loss values."""
@@ -790,6 +755,82 @@ class TestPPOPhase2Trainer:
         # No world_model → should return empty
         losses = trainer.train_auxiliary_step(world_model=None)
         assert losses == {}
+
+    def test_freeze_auxiliary_networks(self):
+        """freeze_auxiliary_networks creates frozen target copies."""
+        cfg = PPOPhase2Config(
+            num_actions=5, num_robots=1, hidden_dim=16,
+        )
+        ac = EMPOActorCritic(
+            state_encoder=None, hidden_dim=16, num_actions=5, obs_dim=3,
+        )
+        v_h_e = _MockVhE()
+        aux = PPOAuxiliaryNetworks(v_h_e=v_h_e)
+        trainer = PPOPhase2Trainer(ac, aux, cfg, device="cpu")
+
+        assert trainer.auxiliary_networks.v_h_e_target is None
+        trainer.freeze_auxiliary_networks()
+        assert trainer.auxiliary_networks.v_h_e_target is not None
+        # Target should be a separate object (deep copy)
+        assert (
+            trainer.auxiliary_networks.v_h_e_target
+            is not trainer.auxiliary_networks.v_h_e
+        )
+        # Target parameters should be frozen
+        for p in trainer.auxiliary_networks.v_h_e_target.parameters():
+            assert not p.requires_grad
+
+    def test_pufferlib_training_loop(self):
+        """End-to-end: PufferLib training loop completes 2 iterations."""
+        cfg = PPOPhase2Config(
+            num_actions=5,
+            num_robots=1,
+            hidden_dim=16,
+            ppo_rollout_length=8,
+            ppo_num_minibatches=2,
+            ppo_update_epochs=1,
+            num_envs=4,
+            num_ppo_iterations=2,
+            aux_training_steps_per_iteration=1,
+            aux_buffer_size=500,
+            batch_size=4,
+            steps_per_episode=50,
+        )
+        ac = EMPOActorCritic(
+            state_encoder=None,
+            hidden_dim=16,
+            num_actions=5,
+            obs_dim=3,
+        )
+        v_h_e = _MockVhE()
+        aux = PPOAuxiliaryNetworks(v_h_e=v_h_e)
+        trainer = PPOPhase2Trainer(ac, aux, cfg, device="cpu")
+
+        def env_creator():
+            wm = MockWorldModel(n_agents=3, n_actions=5)
+            return _PufferLibCompatEnv(
+                world_model=wm,
+                human_policy_prior=mock_human_policy_prior,
+                goal_sampler=mock_goal_sampler,
+                human_agent_indices=[0, 1],
+                robot_agent_indices=[2],
+                config=cfg,
+                obs_dim=3,
+            )
+
+        # Workaround: PufferLib 3.0 bug — torch.nan is a float, so
+        # torch.nan.item() raises AttributeError when var_y == 0.
+        _nan = torch.nan
+        torch.nan = torch.tensor(float("nan"))
+        try:
+            metrics = trainer.train(env_creator, num_iterations=2)
+        finally:
+            torch.nan = _nan
+
+        assert len(metrics) == 2
+        for m in metrics:
+            assert "iteration" in m
+            assert "global_step" in m
 
 
 # ======================================================================
