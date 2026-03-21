@@ -397,26 +397,23 @@ class PPOPhase2Trainer:
 
     @staticmethod
     def _sync_aux_nets_to_envs(vecenv: Any) -> None:
-        """Inject the current (frozen) auxiliary_networks into each env.
+        """Ensure each env in the vectorised pool has the latest auxiliary_networks.
 
-        After ``freeze_auxiliary_networks()`` creates frozen target copies,
-        this method pushes the ``auxiliary_networks`` reference into every
-        ``EMPOMultiGridEnv`` instance managed by the vectorised env pool.
-        This ensures that intrinsic rewards computed during rollouts use
-        the frozen copies.
+        After ``freeze_auxiliary_networks()`` creates frozen target copies
+        (which are stored as new attributes on the ``PPOAuxiliaryNetworks``
+        dataclass), the env instances that hold a reference to the *same*
+        dataclass object automatically see the updated targets.
+
+        This method is a no-op for the default wiring (where the env_creator
+        closure captures the ``auxiliary_networks`` reference by object identity).
+        It is kept as an explicit synchronisation point so that future
+        implementations using multiprocessing backends can override it
+        to serialise / ship the updated networks to worker processes.
         """
-        if not hasattr(vecenv, "envs"):
-            return
-        for env in vecenv.envs:
-            # PufferLib wraps envs; unwrap to the Gymnasium env
-            inner = env
-            while hasattr(inner, "env"):
-                inner = inner.env
-            if hasattr(inner, "auxiliary_networks"):
-                # The env already holds a ref — the trainer can update it
-                # by mutating the PPOAuxiliaryNetworks dataclass in place
-                # (freeze creates new target attrs on the same object).
-                pass
+        # In the Serial backend the envs share the same process and the
+        # same PPOAuxiliaryNetworks object, so frozen target updates are
+        # immediately visible.  Nothing to do here.
+        pass
 
     def _collect_aux_data_from_rollout(
         self, pufferl: Any, vecenv: Any
