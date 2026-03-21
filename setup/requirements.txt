@@ -32,8 +32,7 @@ psutil>=5.9.0
 scikit-learn>=1.2.0
 
 # PPO-based Phase 2 training (optional — only needed for phase2_ppo module)
-# Install manually: pip install pufferlib>=3.0
-# pufferlib>=3.0
+pufferlib>=3.0
 
 # Data analysis and statistics
 pandas>=2.0.0
