@@ -43,7 +43,7 @@ import argparse
 import itertools
 import os
 import sys
-from typing import List, Optional
+from typing import List
 
 # ---------------------------------------------------------------------------
 # Path setup (allows running the script directly without ``pip install -e``)
