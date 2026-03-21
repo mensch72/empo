@@ -549,11 +549,15 @@ class PPOPhase2Trainer:
     # ------------------------------------------------------------------
 
     def save_checkpoint(self, path: str) -> str:
-        """Persist the full trainer state to *path*.
+        """Persist EMPO Phase 2 network state and counters to *path*.
 
-        Saves auxiliary network weights, their target copies, optimiser
-        states, and training counters so that ``load_checkpoint`` can
-        resume from the same point.
+        Saves the actor-critic and auxiliary network weights, their target
+        copies, auxiliary optimiser states, and EMPO-specific training
+        counters. This allows ``load_checkpoint`` to restore these
+        components for evaluation or further fine-tuning, but does not
+        include PuffeRL/PPO driver optimiser state, rollout buffers, or
+        driver-specific training counters. PPO training will therefore
+        restart from a fresh driver state after loading.
 
         Returns the actual path used (may differ if a tempdir fallback
         was needed).
