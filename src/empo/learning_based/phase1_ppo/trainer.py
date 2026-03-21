@@ -257,7 +257,7 @@ class PPOPhase1Trainer:
             iteration += 1
 
         # Cleanup
-        vecenv.close()
+        pufferl.close()
         if self._tb_writer is not None:
             self._tb_writer.close()
 
