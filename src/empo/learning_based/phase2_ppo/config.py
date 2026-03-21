@@ -185,6 +185,9 @@ class PPOPhase2Config:
     device: str = "cpu"
     seed: int = 1
 
+    # ── Performance flags ─────────────────────────────────────────────────
+    compute_transition_probs: bool = True
+
     def __post_init__(self) -> None:
         if self.zeta < 1.0:
             raise ValueError(f"zeta must be >= 1.0, got {self.zeta}")
@@ -212,7 +215,17 @@ class PPOPhase2Config:
         return self.warmup_u_r_steps
 
     def get_entropy_coef(self, training_step: int) -> float:
-        """Linearly-annealed entropy coefficient."""
+        """Linearly-annealed entropy coefficient.
+
+        .. note::
+
+           PufferLib's ``PuffeRL`` does not support per-iteration entropy
+           coefficient updates.  ``to_pufferlib_config()`` sets a fixed
+           ``ent_coef`` equal to ``ppo_ent_coef_start``.  This method is
+           provided for callers that implement custom training loops
+           outside PufferLib, or for future PufferLib versions that expose
+           a mutable ``ent_coef`` field.
+        """
         if training_step >= self.ppo_ent_anneal_steps:
             return self.ppo_ent_coef_end
         frac = training_step / max(1, self.ppo_ent_anneal_steps)

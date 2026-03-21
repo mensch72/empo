@@ -418,52 +418,63 @@ class PPOPhase2Trainer:
     def _collect_aux_data_from_rollout(
         self, pufferl: Any, vecenv: Any
     ) -> None:
-        """Extract auxiliary transition data from PufferLib's rollout infos.
+        """Extract auxiliary transition data from environment aux buffers.
 
-        PufferLib stores per-step info dicts on its ``infos`` attribute
-        after ``evaluate()``.  We iterate over them and push transitions
-        into the auxiliary replay buffer so that ``train_auxiliary_step()``
-        has data to train on.
+        Each :class:`EMPOMultiGridEnv` stores per-step auxiliary data in its
+        ``_aux_buffer`` attribute.  Under the Serial backend the envs live
+        in the same process, so we can read their buffers directly.  This
+        avoids PufferLib's info aggregation which only handles numeric
+        scalars.
+
+        After reading, each env's ``_aux_buffer`` is drained so that
+        transitions are not pushed twice.
         """
-        infos = getattr(pufferl, "infos", None)
-        if infos is None:
+        # Access the underlying env instances through PufferLib's vecenv.
+        envs = getattr(vecenv, "envs", None)
+        if envs is None:
+            # Fall back: some vecenv wrappers expose a different attribute
+            envs = getattr(vecenv, "single_env", None)
+            if envs is not None:
+                envs = [envs]
+        if not envs:
             return
 
-        # PufferLib stores infos as a list-of-dicts (one per agent-step)
-        if isinstance(infos, dict):
-            # Sometimes it's a dict-of-lists; skip if not iterable as expected
-            return
-
-        for info in infos:
-            if not isinstance(info, dict):
-                continue
-            # Only push if the info contains the required EMPO auxiliary fields
-            state = info.get("state")
-            next_state = info.get("next_state")
-            goals = info.get("goals")
-            if state is None or next_state is None or goals is None:
+        for env in envs:
+            # Unwrap PufferLib emulation layers to reach EMPOMultiGridEnv
+            inner = env
+            while hasattr(inner, "env"):
+                inner = inner.env
+            aux_buffer = getattr(inner, "_aux_buffer", None)
+            if aux_buffer is None:
                 continue
 
-            goal_weights = info.get("goal_weights", {})
-            human_actions = info.get("human_actions", [])
-            transition_probs = info.get("transition_probs")
-            terminal = info.get("terminated", False) or info.get("terminal", False)
+            while aux_buffer:
+                info = aux_buffer.popleft()
+                state = info.get("state")
+                next_state = info.get("next_state")
+                goals = info.get("goals")
+                if state is None or next_state is None or goals is None:
+                    continue
 
-            # Store robot action as a tuple (for multi-robot compat)
-            robot_action = info.get("robot_action", (0,))
-            if isinstance(robot_action, int):
-                robot_action = (robot_action,)
+                goal_weights = info.get("goal_weights", {})
+                human_actions = info.get("human_actions", [])
+                transition_probs = info.get("transition_probs")
+                terminal = info.get("terminated", False)
 
-            self.push_transition_to_aux_buffer(
-                state=state,
-                next_state=next_state,
-                robot_action=robot_action,
-                goals=goals,
-                goal_weights=goal_weights,
-                human_actions=human_actions,
-                transition_probs=transition_probs,
-                terminal=terminal,
-            )
+                robot_action = info.get("robot_action", (0,))
+                if isinstance(robot_action, int):
+                    robot_action = (robot_action,)
+
+                self.push_transition_to_aux_buffer(
+                    state=state,
+                    next_state=next_state,
+                    robot_action=robot_action,
+                    goals=goals,
+                    goal_weights=goal_weights,
+                    human_actions=human_actions,
+                    transition_probs=transition_probs,
+                    terminal=terminal,
+                )
 
     # ------------------------------------------------------------------
     # Full training loop  (PufferLib-backed)
@@ -493,7 +504,10 @@ class PPOPhase2Trainer:
             Per-iteration loss / metric dictionaries.
         """
         cfg = self.config
-        n_iters = num_iterations or cfg.num_ppo_iterations
+        if num_iterations is None:
+            n_iters = cfg.num_ppo_iterations
+        else:
+            n_iters = num_iterations
 
         # Build PufferLib config dict (PuffeRL expects a flat dict)
         puffer_config = cfg.to_pufferlib_config()

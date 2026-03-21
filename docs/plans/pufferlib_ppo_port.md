@@ -940,71 +940,50 @@ def train_empo_ppo(
     ).to(device)
     
     # Freeze auxiliary networks for reward computation
-    frozen_aux = freeze_networks(auxiliary_networks)
+    trainer = PPOPhase2Trainer(actor_critic, auxiliary_networks, config)
+    trainer.freeze_auxiliary_networks()
     
     # Create vectorized PufferLib environments
-    def make_env():
+    def make_env(buf=None, seed=0):
         world_model = world_model_factory.create()
-        return EMPOMultiGridEnv(
+        env = EMPOMultiGridEnv(
             world_model, human_policy_prior, goal_sampler,
             human_agent_indices, robot_agent_indices,
-            config, auxiliary_networks=frozen_aux,
+            config, auxiliary_networks=auxiliary_networks,
+        )
+        return pufferlib.emulation.GymnasiumPufferEnv(
+            env_creator=lambda: env, buf=buf, seed=seed,
         )
     
-    vec_env = pufferlib.vector.make(
-        make_env, num_envs=num_envs,
-        backend=pufferlib.vector.Multiprocessing,
+    vecenv = pufferlib.vector.make(
+        make_env, num_envs=num_envs, backend="Serial",
     )
     
-    # PPO training loop
-    ppo_trainer = pufferlib.cleanrl.PPO(
-        env=vec_env,
-        policy=actor_critic,
-        learning_rate=config.lr_ppo,
-        gamma=config.gamma_r,
-        gae_lambda=config.ppo_gae_lambda,
-        clip_coef=config.ppo_clip_coef,
-        ent_coef=config.ppo_ent_coef,
-        vf_coef=config.ppo_vf_coef,
-        max_grad_norm=config.ppo_max_grad_norm,
-        num_steps=config.ppo_rollout_length,
-        num_minibatches=config.ppo_num_minibatches,
-        update_epochs=config.ppo_update_epochs,
-    )
+    # PufferLib-driven PPO training loop
+    puffer_config = config.to_pufferlib_config()
+    pufferl = pufferlib.pufferl.PuffeRL(puffer_config, vecenv, actor_critic)
     
     # Auxiliary network replay buffer (for V_h^e, X_h, U_r training)
     aux_replay_buffer = Phase2ReplayBuffer(capacity=config.aux_buffer_size)
     
     for iteration in range(config.num_ppo_iterations):
-        # --- Step 1: PPO rollout ---
-        rollout_data = ppo_trainer.collect_rollout()
+        # --- Step 1: PufferLib rollout (vectorised env stepping) ---
+        pufferl.evaluate()
         
-        # Extract auxiliary training data from rollout infos
-        aux_transitions = extract_auxiliary_transitions(rollout_data)
-        for t in aux_transitions:
-            # Unpack fields to match Phase2ReplayBuffer.push() signature
-            aux_replay_buffer.push(
-                t.state, t.robot_action, t.goals, t.goal_weights,
-                t.human_actions, t.next_state, t.transition_probs_by_action,
-                terminal=t.terminal,
-            )
+        # Extract auxiliary training data from rollout info dicts
+        trainer._collect_aux_data_from_rollout(pufferl, vecenv)
         
-        # --- Step 2: PPO update (policy + value) ---
-        ppo_trainer.update(rollout_data)
+        # --- Step 2: PufferLib PPO update (GAE + clipped surrogate) ---
+        pufferl.train()
         
         # --- Step 3: Auxiliary network training ---
         # Train V_h^e, X_h, U_r using transitions from the rollout
-        # This uses the CURRENT (non-frozen) policy for V_h^e targets
         for aux_step in range(config.aux_training_steps_per_iteration):
-            batch = aux_replay_buffer.sample(config.batch_size)
-            aux_losses = compute_auxiliary_losses(
-                batch, auxiliary_networks, actor_critic, config
-            )
-            update_auxiliary_networks(aux_losses, aux_optimizers)
+            step_losses = trainer.train_auxiliary_step(world_model)
         
         # --- Step 4: Freeze updated auxiliary networks for next rollout ---
-        frozen_aux = freeze_networks(auxiliary_networks)
-        sync_frozen_to_envs(vec_env, frozen_aux)
+        trainer.freeze_auxiliary_networks()
+        trainer._sync_aux_nets_to_envs(vecenv)
     
     return actor_critic, auxiliary_networks
 ```

@@ -105,9 +105,13 @@ class _PufferLibCompatEnv(EMPOMultiGridEnv):
     """Thin wrapper that strips non-numeric info for PufferLib compatibility.
 
     PufferLib's Serial vectorisation backend calls ``np.mean()`` on every
-    info value.  EMPOMultiGridEnv returns complex auxiliary data (tuples,
-    dicts) which cannot be averaged.  This wrapper keeps only scalar numeric
-    values so the PufferLib training loop runs without error.
+    top-level info value.  EMPOMultiGridEnv returns complex auxiliary data
+    (tuples, dicts) which cannot be averaged.  This wrapper keeps only
+    scalar numeric values at the top level so the PufferLib training loop
+    runs without error.
+
+    Auxiliary data is still accessible via the env's ``_aux_buffer``
+    attribute, which the trainer reads directly after ``evaluate()``.
     """
 
     def step(self, action):
@@ -832,12 +836,11 @@ class TestPPOPhase2Trainer:
 
         # Workaround: PufferLib 3.0 bug — torch.nan is a float, so
         # torch.nan.item() raises AttributeError when var_y == 0.
-        _nan = torch.nan
-        torch.nan = torch.tensor(float("nan"))
-        try:
+        import pytest
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(torch, "nan", torch.tensor(float("nan")))
             metrics = trainer.train(env_creator, num_iterations=2)
-        finally:
-            torch.nan = _nan
 
         assert len(metrics) == 2
         for m in metrics:

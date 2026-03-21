@@ -18,6 +18,7 @@ This module does NOT modify any existing environment or wrapper code.
 
 from __future__ import annotations
 
+from collections import deque
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import gymnasium
@@ -124,6 +125,12 @@ class EMPOMultiGridEnv(gymnasium.Env):
         self._goal_weights: Dict[int, float] = {}
         self._step_count: int = 0
 
+        # Ring buffer for auxiliary transition data collected during step().
+        # The trainer reads this directly (via vecenv env references) after
+        # each PufferLib evaluate() call, bypassing PufferLib's info
+        # aggregation which cannot handle non-numeric values.
+        self._aux_buffer: deque = deque(maxlen=config.ppo_rollout_length + 1)
+
         # Seeded RNG for reproducibility (set from Gymnasium's np_random
         # during reset(); initial value is a throwaway that is never used
         # because reset() must be called before step()).
@@ -150,6 +157,7 @@ class EMPOMultiGridEnv(gymnasium.Env):
         # Sample initial goals for each human
         self._resample_goals(state)
         self._step_count = 0
+        self._aux_buffer.clear()
 
         obs = self._state_to_obs(state)
         info: Dict[str, Any] = {"state": state}
@@ -185,9 +193,15 @@ class EMPOMultiGridEnv(gymnasium.Env):
             self._resample_goals(next_state)
 
         # -- Compute transition probabilities for auxiliary training --
-        transition_probs = self._compute_transition_probs(
-            pre_state, human_actions
-        )
+        # This can be expensive for multi-robot environments (enumerates
+        # |A|^N joint actions).  Disable via config.compute_transition_probs
+        # when auxiliary training does not need model-based targets.
+        if getattr(self.config, "compute_transition_probs", True):
+            transition_probs = self._compute_transition_probs(
+                pre_state, human_actions
+            )
+        else:
+            transition_probs = None
 
         obs = self._state_to_obs(next_state)
         info: Dict[str, Any] = {
@@ -200,6 +214,19 @@ class EMPOMultiGridEnv(gymnasium.Env):
             "env_reward": env_reward,
             "u_r": u_r,
         }
+
+        # Store auxiliary data for trainer to read directly (bypasses
+        # PufferLib info aggregation which only handles numeric scalars).
+        self._aux_buffer.append({
+            "state": pre_state,
+            "next_state": next_state,
+            "goals": dict(self._goals),
+            "goal_weights": dict(self._goal_weights),
+            "human_actions": human_actions,
+            "transition_probs": transition_probs,
+            "robot_action": int(action),
+            "terminated": terminated,
+        })
         return obs, u_r, terminated, truncated, info
 
     # ------------------------------------------------------------------
@@ -263,6 +290,12 @@ class EMPOMultiGridEnv(gymnasium.Env):
     def _compute_u_r(self, state: Any) -> float:
         """Compute U_r(s) using auxiliary networks (or return 0.0).
 
+        When frozen target copies (``*_target``) are available (created by
+        :meth:`PPOPhase2Trainer.freeze_auxiliary_networks`), they are used
+        for reward computation so that the intrinsic reward is stationary
+        within a rollout.  Falls back to the online networks when targets
+        are absent.
+
         X_h values are floored at ``_X_H_MIN`` (1e-3) to prevent
         numerical instability in the X_h^{-ξ} exponentiation.
 
@@ -277,11 +310,15 @@ class EMPOMultiGridEnv(gymnasium.Env):
         # Floor value matching trainer.py
         _X_H_MIN = 1e-3
 
-        # Infer device from aux network parameters, defaulting to cpu
         nets = self.auxiliary_networks
+
+        # Prefer frozen target networks for stationary reward during rollouts.
+        u_r_net = getattr(nets, "u_r_target", None) or getattr(nets, "u_r", None)
+        x_h_net = getattr(nets, "x_h_target", None) or getattr(nets, "x_h", None)
+
+        # Infer device from aux network parameters, defaulting to cpu
         device = "cpu"
-        for net in [getattr(nets, "u_r", None), getattr(nets, "x_h", None),
-                     getattr(nets, "v_h_e", None)]:
+        for net in [u_r_net, x_h_net, getattr(nets, "v_h_e", None)]:
             if net is not None:
                 try:
                     device = str(next(net.parameters()).device)
@@ -291,16 +328,16 @@ class EMPOMultiGridEnv(gymnasium.Env):
 
         with torch.no_grad():
             # Option A: dedicated U_r network
-            if hasattr(nets, "u_r") and nets.u_r is not None:
-                _, u_r = nets.u_r.forward(
+            if u_r_net is not None:
+                _, u_r = u_r_net.forward(
                     state, self.world_model, device
                 )
                 return float(u_r.item())
             # Option B: compute from X_h values directly (eq. 8)
-            if hasattr(nets, "x_h") and nets.x_h is not None:
+            if x_h_net is not None:
                 x_h_vals = []
                 for h_idx in self.human_agent_indices:
-                    x_h = nets.x_h.forward(
+                    x_h = x_h_net.forward(
                         state, self.world_model, h_idx, device
                     )
                     x_h_vals.append(max(float(x_h.item()), _X_H_MIN))
