@@ -70,6 +70,18 @@ def parse_args():
         help="Number of rollouts for the video (default: 10)",
     )
     parser.add_argument(
+        "--n-agents",
+        type=int,
+        default=3,
+        help="Number of agents (default: 3)",
+    )
+    parser.add_argument(
+        "--n-tools",
+        type=int,
+        default=3,
+        help="Number of tools (default: 3)",
+    )
+    parser.add_argument(
         "--seed",
         type=int,
         default=42,
@@ -209,8 +221,8 @@ def main():
 
     # Create environment: 1 robot (centre), 2 humans, 3 tools
     env = create_tools_env(
-        n_agents=3,
-        n_tools=3,
+        n_agents=args.n_agents,
+        n_tools=args.n_tools,
         max_steps=args.steps,
         p_failure=args.p_failure,
         seed=args.seed,
