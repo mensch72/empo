@@ -234,3 +234,50 @@ class PPOPhase2Config:
     def num_joint_actions(self) -> int:
         """Total joint robot actions: |A|^N."""
         return self.num_actions ** self.num_robots
+
+    def to_pufferlib_config(self) -> dict:
+        """Build the flat config dict expected by ``pufferlib.pufferl.PuffeRL``.
+
+        PuffeRL reads a plain dict with string keys.  This method maps
+        EMPO PPO config fields to PufferLib's expected keys.
+        """
+        batch_size = self.num_envs * self.ppo_rollout_length
+        return {
+            "batch_size": batch_size,
+            "bptt_horizon": self.ppo_rollout_length,
+            "minibatch_size": max(1, batch_size // max(1, self.ppo_num_minibatches)),
+            "max_minibatch_size": max(1, batch_size // max(1, self.ppo_num_minibatches)),
+            "update_epochs": self.ppo_update_epochs,
+            "gamma": self.gamma_r,
+            "gae_lambda": self.ppo_gae_lambda,
+            "clip_coef": self.ppo_clip_coef,
+            "vf_coef": self.ppo_vf_coef,
+            "vf_clip_coef": 10.0,
+            "ent_coef": self.ppo_ent_coef_start,
+            "max_grad_norm": self.ppo_max_grad_norm,
+            "learning_rate": self.lr_ppo,
+            "anneal_lr": False,
+            "min_lr_ratio": 0.0,
+            "device": "cpu",
+            "seed": 1,
+            "torch_deterministic": False,
+            "total_timesteps": self.num_ppo_iterations * batch_size,
+            "compile": False,
+            "compile_mode": "reduce-overhead",
+            "use_rnn": False,
+            "cpu_offload": False,
+            "checkpoint_interval": 1_000_000,
+            "data_dir": "experiments",
+            "env": "empo_phase2",
+            "precision": "float32",
+            "optimizer": "adam",
+            "adam_beta1": 0.9,
+            "adam_beta2": 0.999,
+            "adam_eps": 1e-5,
+            "prio_alpha": 0.0,
+            "prio_beta0": 1.0,
+            "vtrace_rho_clip": 1.0,
+            "vtrace_c_clip": 1.0,
+            "neptune": False,
+            "wandb": False,
+        }

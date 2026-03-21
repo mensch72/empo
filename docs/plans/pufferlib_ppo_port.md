@@ -203,58 +203,66 @@ trainer. This is the single most important implementation constraint:
 - **Clean comparison**: Having both trainers side-by-side makes A/B evaluation trivial.
 - **Safe rollback**: If PPO doesn't work, no DQN code was harmed.
 
-### 3.5 PufferLib Integration Strategy
+### 3.5 PufferLib Integration (Required)
 
-The current implementation uses a **CleanRL-style pure-PyTorch PPO** that follows
-the same algorithmic structure as PufferLib's PPO but does *not* yet depend on the
-PufferLib library itself.  This is deliberate and staged:
+The PPO implementation **uses PufferLib** (``pufferlib >= 3.0``) directly.
+PufferLib provides the PPO training loop, vectorised environment management,
+advantage computation (with V-trace / priority corrections), and logging.
+There is no hand-written PPO loop — PufferLib's ``PuffeRL`` class is the
+training driver.
 
-#### Current stage: PyTorch-native PPO scaffold
+#### PufferLib components used
 
-The initial implementation (``phase2_ppo/trainer.py``) implements PPO with GAE,
-clipped surrogate loss, and entropy bonus using only PyTorch.  This allows:
+| PufferLib module | Role in EMPO |
+|---|---|
+| ``pufferlib.emulation.GymnasiumPufferEnv`` | Wraps ``EMPOMultiGridEnv`` (a standard Gymnasium env) into a PufferLib-compatible env with shared-memory observation buffers |
+| ``pufferlib.vector.make(env_creator, ...)`` | Creates a vectorised pool of ``num_envs`` wrapped environments, stepping them in parallel via shared memory (C-level, avoids Python GIL) |
+| ``pufferlib.pufferl.PuffeRL(config, vecenv, policy)`` | The core training class.  Manages the rollout buffer, advantage computation (CUDA kernel), PPO clipped-surrogate update, gradient clipping, learning-rate scheduling, and checkpointing |
+| ``pufferlib.pytorch.sample_logits`` | Differentiable action sampling from logits, supporting Discrete, MultiDiscrete, and continuous action spaces |
+| ``pufferlib.pytorch.layer_init`` | Orthogonal weight initialisation (CleanRL convention) |
 
-- Validating the EMPO-specific reward integration (U_r, auxiliary networks)
-  without adding an external dependency.
-- Running on any hardware without PufferLib installation.
-- Easier debugging since all code is local.
+#### Policy convention
 
-#### Next stage: PufferLib vectorized environments
+PufferLib policies implement::
 
-PufferLib's primary value-add over raw PyTorch PPO is its **highly optimised
-environment vectorisation layer** (``pufferlib.vector``), which avoids Python-level
-for-loops across environments and uses shared memory + C extensions for observation
-transfer.  The migration path is:
+    def forward(self, observations, state=None) -> (logits, value)
 
-1. **Wrap ``EMPOMultiGridEnv`` with ``pufferlib.PufferEnv``** — this is a thin
-   adapter that makes any Gymnasium env compatible with PufferLib's vectoriser.
-2. **Replace the Python for-loop rollout in ``train()``** with
-   ``pufferlib.vector.make(...)`` to create a vectorised env pool that steps
-   ``num_envs`` instances in parallel (C-level multiprocessing, not Python
-   ``multiprocessing``).
-3. **Use ``pufferlib.frameworks.cleanrl.Policy``** as the actor-critic wrapper,
-   which ``EMPOActorCritic`` already conforms to (``get_action_and_value``,
-   ``get_value`` methods).
-4. **Use ``pufferlib.cleanrl.train()``** or the equivalent PufferLib PPO update
-   loop for the core optimisation, passing the intrinsic reward through the
-   standard Gymnasium reward channel (already done by ``EMPOMultiGridEnv``).
+where ``logits`` is a tensor of shape ``(batch, num_actions)`` for Discrete
+or a list of tensors for MultiDiscrete, and ``value`` is ``(batch, 1)``.
+``EMPOActorCritic`` follows this convention.
 
-#### What PufferLib does *not* replace
+For LSTM support, the policy can split into ``encode_observations`` and
+``decode_actions`` methods and be wrapped with ``pufferlib.models.LSTMWrapper``.
 
-PufferLib's PPO is algorithmically identical to CleanRL's PPO — it does not
-"bypass PyTorch" for the neural network forward/backward passes.  PufferLib's
-performance gains come from:
+#### Training loop
 
-- **Vectorised environment stepping** (C-level, avoids Python GIL).
-- **Shared-memory observation buffers** (zero-copy transfer to GPU).
-- **Automatic batching** of environment resets.
-- **Dashboard / logging integration**.
+The outer training loop is::
 
-The neural network training (actor-critic forward, loss computation, ``optimizer.step()``)
-remains standard PyTorch regardless of whether PufferLib is used.  Our current
-pure-PyTorch implementation is therefore algorithmically equivalent and will produce
-identical results for the same hyperparameters; PufferLib will primarily improve
-*wall-clock throughput* by parallelising environment stepping.
+    pufferl = PuffeRL(config, vecenv, policy)
+    while pufferl.global_step < config['total_timesteps']:
+        pufferl.evaluate()   # collect rollout via vectorised envs
+        pufferl.train()      # PPO update (clipped surrogate, value loss, entropy)
+        # EMPO-specific: train auxiliary networks from the same rollout data
+        train_auxiliary_networks(...)
+    pufferl.close()
+
+PufferLib handles rollout collection, advantage estimation (GAE with V-trace),
+minibatch sampling with prioritised experience, gradient accumulation, and
+mixed-precision training.
+
+#### What is EMPO-specific (not handled by PufferLib)
+
+- **Intrinsic reward U_r(s)**: Computed inside ``EMPOMultiGridEnv.step()``
+  and returned as the standard Gymnasium reward.  PufferLib treats it as
+  any other reward signal.
+- **Auxiliary network training**: V_h^e, X_h, U_r networks are trained
+  from a separate replay buffer filled from the same rollout data.
+  This happens *outside* PufferLib's ``train()`` call.
+- **Warm-up staging**: Auxiliary networks can be pre-trained before
+  enabling PPO updates, using the same ``evaluate()`` loop with a
+  frozen random policy.
+- **Auxiliary-network freezing**: Periodically deep-copying the auxiliary
+  networks into frozen "target" copies for reward computation.
 
 ---
 

@@ -1,19 +1,18 @@
 """
-PPO-based Phase 2 trainer for EMPO.
+PufferLib-based Phase 2 trainer for EMPO.
 
-This module orchestrates PPO-based Phase 2 training:
+This module orchestrates Phase 2 training using **PufferLib's PuffeRL** class
+for the core PPO loop (rollout collection, advantage computation, clipped
+surrogate update).  EMPO-specific auxiliary network training (V_h^e, X_h,
+U_r) runs alongside PufferLib as a post-train hook.
 
-- Collect on-policy rollouts with the current actor-critic.
-- Compute advantages using GAE with the intrinsic reward U_r(s).
-- Update the actor-critic via PPO.
-- Train the auxiliary networks (V_h^e, X_h, U_r) from the same rollout data.
+Key PufferLib integration points:
 
-Earlier design docs for EMPO describe a separate **warm-up** stage that
-would train auxiliary networks under a uniform random robot policy before
-PPO updates begin, controlled by ``warmup_*_steps`` configuration fields.
-That explicit warm-up stage is **not implemented** in this trainer; any
-``warmup_*_steps`` fields in the config are currently ignored here, and
-all training performed by this module happens within the PPO loop itself.
+- ``pufferlib.vector.make()`` creates vectorised environments.
+- ``pufferlib.pufferl.PuffeRL`` drives ``evaluate()`` + ``train()``.
+- ``EMPOActorCritic.forward(observations, state)`` → ``(logits, value)``
+  follows PufferLib's expected policy interface.
+- ``pufferlib.pytorch.sample_logits`` handles action sampling.
 
 This module does NOT import or modify the existing DQN-path trainer
 (``learning_based.phase2.trainer``).  It reads only base-class interfaces
@@ -32,6 +31,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
+
+import pufferlib
+import pufferlib.vector
+import pufferlib.pufferl
+import pufferlib.emulation
 
 # Read-only imports from existing DQN path (shared data structures)
 from empo.learning_based.phase2.replay_buffer import (
@@ -82,60 +86,20 @@ class PPOAuxiliaryNetworks:
 
 
 # ======================================================================
-# Rollout buffer (on-policy, separate from the DQN replay buffer)
-# ======================================================================
-
-
-@dataclass
-class PPORolloutEntry:
-    """A single step from a PPO rollout."""
-
-    obs: np.ndarray
-    action: int
-    log_prob: float
-    value: float
-    reward: float
-    done: bool
-    # Auxiliary data carried via the env ``info`` dict
-    info: Dict[str, Any]
-
-
-class PPORolloutBuffer:
-    """Simple on-policy rollout buffer for a single PPO iteration."""
-
-    def __init__(self) -> None:
-        self.entries: List[PPORolloutEntry] = []
-
-    def add(self, entry: PPORolloutEntry) -> None:
-        self.entries.append(entry)
-
-    def clear(self) -> None:
-        self.entries.clear()
-
-    def __len__(self) -> int:
-        return len(self.entries)
-
-
-# ======================================================================
-# PPO Phase 2 Trainer
+# PPO Phase 2 Trainer  (PufferLib-backed)
 # ======================================================================
 
 
 class PPOPhase2Trainer:
-    """PPO-based Phase 2 trainer.
+    """PufferLib-backed PPO Phase 2 trainer.
 
-    This trainer is the PPO-path counterpart of ``BasePhase2Trainer`` in the
-    DQN path.  It manages:
-
-    * An :class:`EMPOActorCritic` (actor + critic)
-    * A set of :class:`PPOAuxiliaryNetworks` (V_h^e, X_h, U_r)
-    * A :class:`Phase2ReplayBuffer` for auxiliary-network training
-    * A :class:`PPORolloutBuffer` for on-policy PPO data
+    This trainer uses ``pufferlib.pufferl.PuffeRL`` for the core PPO loop
+    and adds EMPO-specific auxiliary-network training on top.
 
     Parameters
     ----------
     actor_critic : EMPOActorCritic
-        The PPO actor-critic network.
+        The PPO actor-critic network (follows PufferLib policy convention).
     auxiliary_networks : PPOAuxiliaryNetworks
         Auxiliary networks for V_h^e, X_h, U_r.
     config : PPOPhase2Config
@@ -155,11 +119,6 @@ class PPOPhase2Trainer:
         self.auxiliary_networks = auxiliary_networks
         self.config = config
         self.device = device
-
-        # PPO optimiser
-        self.ppo_optimizer = optim.Adam(
-            self.actor_critic.parameters(), lr=config.lr_ppo
-        )
 
         # Auxiliary optimisers
         self.aux_optimizers: Dict[str, optim.Optimizer] = {}
@@ -185,9 +144,6 @@ class PPOPhase2Trainer:
         self.aux_replay_buffer = Phase2ReplayBuffer(
             capacity=config.aux_buffer_size
         )
-
-        # On-policy rollout buffer
-        self.rollout_buffer = PPORolloutBuffer()
 
         # Counters
         self.training_step_count: int = 0
@@ -216,211 +172,31 @@ class PPOPhase2Trainer:
                 p.requires_grad = False
 
     # ------------------------------------------------------------------
-    # PPO update
-    # ------------------------------------------------------------------
-
-    def compute_gae(
-        self,
-        rewards: List[float],
-        values: List[float],
-        dones: List[bool],
-        last_value: float,
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """Compute GAE advantages and returns.
-
-        Parameters
-        ----------
-        rewards : list[float]
-            Per-step rewards from the rollout (U_r(s_t)).
-        values : list[float]
-            Per-step value estimates V_r(s_t) from the critic.
-        dones : list[bool]
-            Per-step done flags.
-        last_value : float
-            Bootstrap value V_r(s_{T+1}) for the final step.
-
-        Returns
-        -------
-        advantages : ndarray, shape (T,)
-        returns : ndarray, shape (T,)
-        """
-        gamma = self.config.gamma_r
-        lam = self.config.ppo_gae_lambda
-        T = len(rewards)
-
-        advantages = np.zeros(T, dtype=np.float32)
-        last_gae = 0.0
-
-        for t in reversed(range(T)):
-            if t == T - 1:
-                next_value = last_value
-                next_non_terminal = 1.0 - float(dones[t])
-            else:
-                next_value = values[t + 1]
-                next_non_terminal = 1.0 - float(dones[t])
-
-            delta = (
-                rewards[t]
-                + gamma * next_value * next_non_terminal
-                - values[t]
-            )
-            last_gae = delta + gamma * lam * next_non_terminal * last_gae
-            advantages[t] = last_gae
-
-        returns = advantages + np.array(values, dtype=np.float32)
-        return advantages, returns
-
-    def ppo_update(
-        self,
-        obs_batch: torch.Tensor,
-        actions_batch: torch.Tensor,
-        old_log_probs: torch.Tensor,
-        advantages: torch.Tensor,
-        returns: torch.Tensor,
-    ) -> Dict[str, float]:
-        """Run one PPO update over the collected rollout data.
-
-        Parameters
-        ----------
-        obs_batch : Tensor, (N, obs_dim)
-        actions_batch : Tensor, (N,)
-        old_log_probs : Tensor, (N,)
-        advantages : Tensor, (N,)
-        returns : Tensor, (N,)
-
-        Returns
-        -------
-        losses : dict[str, float]
-            Dictionary with ``'policy_loss'``, ``'value_loss'``,
-            ``'entropy'``, and ``'total_loss'`` scalars.
-        """
-        cfg = self.config
-        N = obs_batch.shape[0]
-        batch_size = max(1, N // max(1, cfg.ppo_num_minibatches))
-
-        # Normalize advantages over the full rollout (before minibatch split).
-        # This is the convention used by CleanRL/PufferLib PPO: normalize once
-        # globally rather than per-minibatch, to keep the advantage scale
-        # consistent across all minibatches within the same update.
-        adv_mean = advantages.mean()
-        adv_std = advantages.std() + 1e-8
-        advantages = (advantages - adv_mean) / adv_std
-
-        total_policy_loss = 0.0
-        total_value_loss = 0.0
-        total_entropy = 0.0
-        num_updates = 0
-
-        for _epoch in range(cfg.ppo_update_epochs):
-            indices = torch.randperm(N, device=self.device)
-            for start in range(0, N, batch_size):
-                end = min(start + batch_size, N)
-                mb_idx = indices[start:end]
-
-                mb_obs = obs_batch[mb_idx]
-                mb_actions = actions_batch[mb_idx]
-                mb_old_lp = old_log_probs[mb_idx]
-                mb_adv = advantages[mb_idx]
-                mb_ret = returns[mb_idx]
-
-                _, new_lp, entropy, new_val = (
-                    self.actor_critic.get_action_and_value(
-                        mb_obs, mb_actions
-                    )
-                )
-
-                # Policy loss (clipped surrogate)
-                ratio = torch.exp(new_lp - mb_old_lp)
-                surr1 = ratio * mb_adv
-                surr2 = (
-                    torch.clamp(
-                        ratio, 1.0 - cfg.ppo_clip_coef, 1.0 + cfg.ppo_clip_coef
-                    )
-                    * mb_adv
-                )
-                policy_loss = -torch.min(surr1, surr2).mean()
-
-                # Value loss
-                value_loss = 0.5 * ((new_val - mb_ret) ** 2).mean()
-
-                # Entropy bonus
-                ent_coef = cfg.get_entropy_coef(self.training_step_count)
-                entropy_loss = -ent_coef * entropy.mean()
-
-                loss = (
-                    policy_loss
-                    + cfg.ppo_vf_coef * value_loss
-                    + entropy_loss
-                )
-
-                self.ppo_optimizer.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_norm_(
-                    self.actor_critic.parameters(), cfg.ppo_max_grad_norm
-                )
-                self.ppo_optimizer.step()
-
-                total_policy_loss += policy_loss.item()
-                total_value_loss += value_loss.item()
-                total_entropy += entropy.mean().item()
-                num_updates += 1
-
-        self.training_step_count += num_updates
-        return {
-            "policy_loss": total_policy_loss / max(num_updates, 1),
-            "value_loss": total_value_loss / max(num_updates, 1),
-            "entropy": total_entropy / max(num_updates, 1),
-            "total_loss": (
-                (total_policy_loss + total_value_loss)
-                / max(num_updates, 1)
-            ),
-        }
-
-    # ------------------------------------------------------------------
     # Auxiliary training
     # ------------------------------------------------------------------
 
-    def push_rollout_to_aux_buffer(
-        self, rollout: PPORolloutBuffer
+    def push_transition_to_aux_buffer(
+        self,
+        state: Any,
+        next_state: Any,
+        robot_action: tuple,
+        goals: dict,
+        goal_weights: dict,
+        human_actions: list,
+        transition_probs: Optional[dict],
+        terminal: bool,
     ) -> None:
-        """Extract auxiliary transitions from a PPO rollout and push them
-        into the replay buffer for V_h^e / X_h / U_r training.
-
-        For multi-robot training the ``robot_action`` stored in the buffer
-        is the per-robot action tuple (not a 1-tuple wrapping the flat
-        joint-action index).
-        """
-        for entry in rollout.entries:
-            info = entry.info
-            state = info.get("state")
-            next_state = info.get("next_state")
-            goals = info.get("goals", {})
-            goal_weights = info.get("goal_weights", {})
-            human_actions = info.get("human_actions", [])
-            transition_probs = info.get("transition_probs")
-
-            if state is None or next_state is None:
-                continue
-
-            # Convert flat action index to per-robot tuple for multi-robot.
-            robot_action: tuple
-            if hasattr(self.actor_critic, "action_index_to_tuple"):
-                robot_action = self.actor_critic.action_index_to_tuple(
-                    entry.action
-                )
-            else:
-                robot_action = (entry.action,)
-
-            self.aux_replay_buffer.push(
-                state=state,
-                robot_action=robot_action,
-                goals=goals,
-                goal_weights=goal_weights,
-                human_actions=human_actions,
-                next_state=next_state,
-                transition_probs_by_action=transition_probs,
-                terminal=entry.done,
-            )
+        """Push a single transition into the auxiliary replay buffer."""
+        self.aux_replay_buffer.push(
+            state=state,
+            robot_action=robot_action,
+            goals=goals,
+            goal_weights=goal_weights,
+            human_actions=human_actions,
+            next_state=next_state,
+            transition_probs_by_action=transition_probs,
+            terminal=terminal,
+        )
 
     def train_auxiliary_step(
         self,
@@ -603,21 +379,24 @@ class PPOPhase2Trainer:
         return losses
 
     # ------------------------------------------------------------------
-    # Full training loop
+    # Full training loop  (PufferLib-backed)
     # ------------------------------------------------------------------
 
     def train(
         self,
-        env_factory: Callable[[], Any],
+        env_creator: Callable[[], Any],
         num_iterations: Optional[int] = None,
     ) -> List[Dict[str, float]]:
-        """Run the full PPO Phase 2 training loop.
+        """Run the full PufferLib PPO Phase 2 training loop.
 
         Parameters
         ----------
-        env_factory : callable
-            A zero-argument callable that returns a new
-            :class:`EMPOMultiGridEnv` instance.
+        env_creator : callable
+            A zero-argument callable that returns a new Gymnasium-compatible
+            :class:`EMPOMultiGridEnv` instance.  The trainer wraps each
+            instance with ``pufferlib.emulation.GymnasiumPufferEnv`` and
+            passes the wrapped creator to ``pufferlib.vector.make()`` for
+            vectorised execution.
         num_iterations : int or None
             Override ``config.num_ppo_iterations``.
 
@@ -628,135 +407,77 @@ class PPOPhase2Trainer:
         """
         cfg = self.config
         n_iters = num_iterations or cfg.num_ppo_iterations
-        env = env_factory()
-        all_metrics: List[Dict[str, float]] = []
+
+        # Build PufferLib config dict (PuffeRL expects a flat dict)
+        puffer_config = cfg.to_pufferlib_config()
+        total_timesteps = n_iters * puffer_config["batch_size"]
+        puffer_config["total_timesteps"] = total_timesteps
+
+        # Wrap the Gymnasium env creator with PufferLib's emulation layer
+        def puffer_env_creator(buf=None, seed=0):
+            return pufferlib.emulation.GymnasiumPufferEnv(
+                env_creator=env_creator, buf=buf, seed=seed
+            )
+
+        # Create vectorised environments via PufferLib
+        vecenv = pufferlib.vector.make(
+            puffer_env_creator,
+            num_envs=cfg.num_envs,
+            backend="Serial",
+        )
+
+        # Initialise PuffeRL training driver
+        pufferl = pufferlib.pufferl.PuffeRL(
+            puffer_config, vecenv, self.actor_critic
+        )
 
         # Initial freeze of auxiliary networks
         self.freeze_auxiliary_networks()
 
-        for iteration in range(n_iters):
+        all_metrics: List[Dict[str, float]] = []
+        iteration = 0
+        # Use a driver env for auxiliary forward passes (world_model access)
+        driver_env = vecenv.driver_env
+        wm = getattr(driver_env, "world_model", None)
+        if wm is None and hasattr(driver_env, "env"):
+            wm = getattr(driver_env.env, "world_model", None)
+
+        while pufferl.global_step < total_timesteps and iteration < n_iters:
             self.ppo_iteration = iteration
 
-            # --- Step 1: collect rollout ---
-            self.rollout_buffer.clear()
-            obs, info = env.reset()
-            obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
+            # --- PufferLib: collect rollout + PPO update ---
+            pufferl.evaluate()
+            pufferl.train()
 
-            for _t in range(cfg.ppo_rollout_length):
-                with torch.no_grad():
-                    action, log_prob, _ent, value = (
-                        self.actor_critic.get_action_and_value(
-                            obs_t.unsqueeze(0)
-                        )
-                    )
-                action_int = action.item()
-                lp = log_prob.item()
-                val = value.item()
-
-                # Map flat joint-action index to the env's expected format.
-                # For multi-robot (MultiDiscrete), convert to per-robot tuple.
-                # For single-robot (Discrete), pass scalar int unchanged.
-                if (
-                    self.actor_critic.num_robots > 1
-                    and hasattr(self.actor_critic, "action_index_to_tuple")
-                ):
-                    env_action: Any = self.actor_critic.action_index_to_tuple(
-                        action_int
-                    )
-                else:
-                    env_action = action_int
-
-                next_obs, reward, terminated, truncated, step_info = env.step(
-                    env_action
-                )
-                done = terminated or truncated
-
-                self.rollout_buffer.add(
-                    PPORolloutEntry(
-                        obs=obs,
-                        action=action_int,
-                        log_prob=lp,
-                        value=val,
-                        reward=reward,
-                        done=done,
-                        info=step_info,
-                    )
-                )
-
-                if done:
-                    obs, info = env.reset()
-                else:
-                    obs = next_obs
-
-                obs_t = torch.as_tensor(
-                    obs, dtype=torch.float32, device=self.device
-                )
-
-            # Bootstrap value for last observation
-            with torch.no_grad():
-                last_val = self.actor_critic.get_value(
-                    obs_t.unsqueeze(0)
-                ).item()
-
-            # --- Step 2: compute advantages ---
-            rewards = [e.reward for e in self.rollout_buffer.entries]
-            values = [e.value for e in self.rollout_buffer.entries]
-            dones = [e.done for e in self.rollout_buffer.entries]
-            advantages, returns = self.compute_gae(
-                rewards, values, dones, last_val
-            )
-
-            # --- Step 3: PPO update ---
-            obs_batch = torch.as_tensor(
-                np.stack([e.obs for e in self.rollout_buffer.entries]),
-                dtype=torch.float32,
-                device=self.device,
-            )
-            actions_batch = torch.as_tensor(
-                [e.action for e in self.rollout_buffer.entries],
-                dtype=torch.long,
-                device=self.device,
-            )
-            old_lps = torch.as_tensor(
-                [e.log_prob for e in self.rollout_buffer.entries],
-                dtype=torch.float32,
-                device=self.device,
-            )
-            adv_t = torch.as_tensor(
-                advantages, dtype=torch.float32, device=self.device
-            )
-            ret_t = torch.as_tensor(
-                returns, dtype=torch.float32, device=self.device
-            )
-
-            ppo_losses = self.ppo_update(
-                obs_batch, actions_batch, old_lps, adv_t, ret_t
-            )
-
-            # --- Step 4: auxiliary training ---
-            self.push_rollout_to_aux_buffer(self.rollout_buffer)
-            # Use the env's world_model for auxiliary forward passes
-            wm = getattr(env, "world_model", None)
+            # --- EMPO-specific: train auxiliary networks ---
             aux_losses: Dict[str, float] = {}
             for _ in range(cfg.aux_training_steps_per_iteration):
                 step_losses = self.train_auxiliary_step(world_model=wm)
                 for k, v in step_losses.items():
                     aux_losses[k] = aux_losses.get(k, 0.0) + v
 
-            # --- Step 5: re-freeze auxiliary networks ---
+            # Re-freeze auxiliary networks periodically
             if (iteration + 1) % cfg.reward_freeze_interval == 0:
                 self.freeze_auxiliary_networks()
 
-            metrics = {**ppo_losses, **aux_losses, "iteration": iteration}
+            metrics = {
+                **pufferl.losses,
+                **aux_losses,
+                "iteration": iteration,
+                "global_step": pufferl.global_step,
+            }
             all_metrics.append(metrics)
+            self.training_step_count = pufferl.global_step
+            iteration += 1
 
             if iteration % 100 == 0:
                 logger.info(
-                    "PPO iter %d: policy_loss=%.4f value_loss=%.4f entropy=%.4f",
+                    "PPO iter %d (step %d): policy_loss=%.4f value_loss=%.4f",
                     iteration,
-                    ppo_losses.get("policy_loss", 0),
-                    ppo_losses.get("value_loss", 0),
-                    ppo_losses.get("entropy", 0),
+                    pufferl.global_step,
+                    pufferl.losses.get("policy_loss", 0),
+                    pufferl.losses.get("value_loss", 0),
                 )
 
+        pufferl.close()
         return all_metrics
