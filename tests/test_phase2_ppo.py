@@ -238,6 +238,10 @@ class TestPPOPhase2Config:
             "device", "anneal_lr",
         ]:
             assert key in d, f"Missing PufferLib key: {key}"
+        # Verify critical defaults are sensible
+        assert d["device"] == "cpu"
+        assert d["use_rnn"] is False
+        assert isinstance(d["seed"], int)
 
 
 # ======================================================================
