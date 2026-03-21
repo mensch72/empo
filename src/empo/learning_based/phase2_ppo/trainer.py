@@ -430,20 +430,27 @@ class PPOPhase2Trainer:
         transitions are not pushed twice.
         """
         # Access the underlying env instances through PufferLib's vecenv.
+        # PufferLib Serial backend exposes ``envs`` as a list of env
+        # instances.  ``single_env`` is used by some wrappers that hold
+        # a single reference.
         envs = getattr(vecenv, "envs", None)
         if envs is None:
-            # Fall back: some vecenv wrappers expose a different attribute
             envs = getattr(vecenv, "single_env", None)
             if envs is not None:
                 envs = [envs]
         if not envs:
             return
 
+        _MAX_UNWRAP_DEPTH = 20
+
         for env in envs:
-            # Unwrap PufferLib emulation layers to reach EMPOMultiGridEnv
+            # Unwrap PufferLib emulation layers to reach EMPOMultiGridEnv.
+            # Depth limit prevents infinite loops in misconfigured wrappers.
             inner = env
-            while hasattr(inner, "env"):
+            depth = 0
+            while hasattr(inner, "env") and depth < _MAX_UNWRAP_DEPTH:
                 inner = inner.env
+                depth += 1
             aux_buffer = getattr(inner, "_aux_buffer", None)
             if aux_buffer is None:
                 continue

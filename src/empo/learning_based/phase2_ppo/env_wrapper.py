@@ -129,6 +129,9 @@ class EMPOMultiGridEnv(gymnasium.Env):
         # The trainer reads this directly (via vecenv env references) after
         # each PufferLib evaluate() call, bypassing PufferLib's info
         # aggregation which cannot handle non-numeric values.
+        # Size is rollout_length + 1 to accommodate edge cases where an
+        # episode boundary adds one extra transition before the trainer
+        # drains the buffer.
         self._aux_buffer: deque = deque(maxlen=config.ppo_rollout_length + 1)
 
         # Seeded RNG for reproducibility (set from Gymnasium's np_random
@@ -315,10 +318,16 @@ class EMPOMultiGridEnv(gymnasium.Env):
         # Prefer frozen target networks for stationary reward during rollouts.
         u_r_net = getattr(nets, "u_r_target", None) or getattr(nets, "u_r", None)
         x_h_net = getattr(nets, "x_h_target", None) or getattr(nets, "x_h", None)
+        # v_h_e is not used directly for reward computation (only U_r and
+        # X_h are), but we include it in the device probe below as a
+        # fallback when neither U_r nor X_h has parameters.
+        v_h_e_net = (
+            getattr(nets, "v_h_e_target", None) or getattr(nets, "v_h_e", None)
+        )
 
         # Infer device from aux network parameters, defaulting to cpu
         device = "cpu"
-        for net in [u_r_net, x_h_net, getattr(nets, "v_h_e", None)]:
+        for net in [u_r_net, x_h_net, v_h_e_net]:
             if net is not None:
                 try:
                     device = str(next(net.parameters()).device)
