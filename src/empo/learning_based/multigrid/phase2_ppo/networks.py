@@ -144,12 +144,19 @@ def create_multigrid_ppo_networks(
         use_encoders=use_encoders,
     ).to(device)
 
+    # Use the encoder's actual feature_dim (post-construction) for the
+    # auxiliary networks' ``state_feature_dim``.  When ``use_encoders=False``
+    # (identity mode), ``MultiGridStateEncoder`` overwrites ``feature_dim``
+    # to match the true flattened output size, which may differ from the
+    # ``feature_dim`` parameter passed to this factory.
+    actual_state_feature_dim = state_encoder.feature_dim
+
     # ── V_h^e ───────────────────────────────────────────────────────────
     v_h_e = MultiGridHumanGoalAchievementNetwork(
         grid_height=grid_height,
         grid_width=grid_width,
         num_agents_per_color=num_agents_per_color,
-        state_feature_dim=feature_dim,
+        state_feature_dim=actual_state_feature_dim,
         goal_feature_dim=goal_feature_dim,
         hidden_dim=config.hidden_dim,
         gamma_h=config.gamma_h,
@@ -167,7 +174,7 @@ def create_multigrid_ppo_networks(
             grid_height=grid_height,
             grid_width=grid_width,
             num_agents_per_color=num_agents_per_color,
-            state_feature_dim=feature_dim,
+            state_feature_dim=actual_state_feature_dim,
             hidden_dim=config.hidden_dim,
             zeta=config.zeta,
             max_agents=max_agents,
@@ -183,7 +190,7 @@ def create_multigrid_ppo_networks(
             grid_height=grid_height,
             grid_width=grid_width,
             num_agents_per_color=num_agents_per_color,
-            state_feature_dim=feature_dim,
+            state_feature_dim=actual_state_feature_dim,
             hidden_dim=config.hidden_dim,
             eta=config.eta,
             state_encoder=state_encoder,

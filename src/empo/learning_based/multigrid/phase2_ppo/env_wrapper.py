@@ -157,11 +157,35 @@ class MultiGridWorldModelEnv(EMPOWorldModelEnv):
             joint_action
         )
 
+        # -- Interpret legacy MultiGrid `done` as termination vs truncation --
+        # Some MultiGrid world_models only expose a single `done` flag and
+        # manage episode length internally via `step_count` / `max_steps`.
+        # When such a world_model signals `done` because it hit its own
+        # max-steps limit, we represent this as a Gymnasium-style truncation
+        # (time-limit), not a terminal state.  This preserves correct value
+        # bootstrapping in the PPO update.
+        wm_step_count = getattr(self.world_model, "step_count", None)
+        wm_max_steps = getattr(self.world_model, "max_steps", None)
+        if (
+            truncated is False
+            and terminated
+            and wm_step_count is not None
+            and wm_max_steps is not None
+            and wm_step_count >= wm_max_steps
+        ):
+            # Time-limit inside the underlying world_model
+            terminated = False
+            truncated = True
+
         next_state = self.world_model.get_state()
         self._step_count += 1
 
-        # -- Truncate if episode exceeds maximum length --
-        if self._step_count >= self.config.steps_per_episode:
+        # -- Truncate if episode exceeds maximum length (wrapper-level cap) --
+        # This cap is an artificial limit for PPO training and should be
+        # treated purely as a truncation.  If the world_model has already
+        # reported a genuine terminal state this step, we leave
+        # `terminated=True` and avoid forcing an additional truncation flag.
+        if self._step_count >= self.config.steps_per_episode and not terminated:
             truncated = True
 
         # -- Compute intrinsic reward U_r(s_t) at pre-transition state --
@@ -229,9 +253,13 @@ class MultiGridWorldModelEnv(EMPOWorldModelEnv):
         is an environment-side operation; gradients for the encoder flow
         through the auxiliary-network training path instead).
         """
+        # Ensure tensorization and forward happen on the same device as
+        # the encoder so that there is no device-mismatch when the
+        # encoder lives on CUDA.
+        encoder_device = next(self._state_encoder.parameters()).device
         with torch.no_grad():
             grid_t, glob_f, agent_f, inter_f = self._state_encoder.tensorize_state(
-                state, self.world_model, device="cpu"
+                state, self.world_model, device=encoder_device
             )
             features = self._state_encoder(grid_t, glob_f, agent_f, inter_f)
         return features.squeeze(0).cpu().numpy().astype(np.float32)

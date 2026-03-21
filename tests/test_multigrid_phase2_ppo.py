@@ -279,6 +279,73 @@ class TestMultiGridWorldModelEnv:
             _, _, terminated, truncated, _ = ppo_env.step(0)
         assert truncated is True
 
+    def test_world_model_time_limit_is_truncation_not_termination(self):
+        """MultiGrid done from max_steps should map to truncated, not terminated."""
+        env = _make_env()  # max_steps=20
+        env.reset()
+        cfg = PPOPhase2Config(
+            num_actions=env.action_space.n,
+            num_robots=1,
+            hidden_dim=32,
+            # Set wrapper limit higher than env max_steps so the env
+            # hits its own limit first.
+            steps_per_episode=100,
+        )
+        enc = _make_encoder(env)
+
+        ppo_env = MultiGridWorldModelEnv(
+            world_model=env,
+            human_policy_prior=_uniform_policy,
+            goal_sampler=_dummy_goal_sampler,
+            human_agent_indices=env.human_agent_indices,
+            robot_agent_indices=env.robot_agent_indices,
+            config=cfg,
+            state_encoder=enc,
+        )
+        ppo_env.reset()
+        # Step until the world model signals done
+        terminated = False
+        truncated = False
+        for _ in range(25):  # env max_steps=20, so this is enough
+            _, _, terminated, truncated, _ = ppo_env.step(0)
+            if terminated or truncated:
+                break
+        # MultiGrid done from max_steps should be converted to truncation
+        assert truncated is True
+        assert terminated is False
+
+    def test_terminated_and_truncated_not_both_true(self):
+        """Gymnasium semantics: terminated and truncated should not both be True."""
+        env = _make_env()
+        env.reset()
+        cfg = PPOPhase2Config(
+            num_actions=env.action_space.n,
+            num_robots=1,
+            hidden_dim=32,
+            steps_per_episode=3,
+        )
+        enc = _make_encoder(env)
+
+        ppo_env = MultiGridWorldModelEnv(
+            world_model=env,
+            human_policy_prior=_uniform_policy,
+            goal_sampler=_dummy_goal_sampler,
+            human_agent_indices=env.human_agent_indices,
+            robot_agent_indices=env.robot_agent_indices,
+            config=cfg,
+            state_encoder=enc,
+        )
+        ppo_env.reset()
+        for _ in range(20):
+            _, _, terminated, truncated, _ = ppo_env.step(0)
+            # Should never have both True simultaneously
+            assert not (terminated and truncated), (
+                f"terminated={terminated}, truncated={truncated} — "
+                "Gymnasium requires these to be mutually exclusive"
+            )
+            if terminated or truncated:
+                ppo_env.reset()
+
     def test_observation_varies_with_state(self):
         """Observation should change when the state changes."""
         env = _make_env()
@@ -406,6 +473,27 @@ class TestCreateMultiGridPPONetworks:
         with torch.no_grad():
             result = aux.v_h_e(state, env, h_idx, goal, "cpu")
         assert result.shape == (1,) or result.dim() <= 1
+
+    def test_identity_mode_uses_actual_feature_dim(self):
+        """In identity mode (use_encoders=False) state_feature_dim must match encoder output."""
+        env = _make_env()
+        env.reset()
+        cfg = _make_config(env)
+
+        ac, aux, enc = create_multigrid_ppo_networks(
+            env=env,
+            config=cfg,
+            feature_dim=32,
+            use_encoders=False,
+        )
+        # In identity mode, encoder feature_dim is overwritten to the
+        # actual flattened output size, which is much larger than 32.
+        assert enc.feature_dim != 32
+        # Actor-critic obs_dim must match
+        obs = torch.randn(1, enc.feature_dim)
+        with torch.no_grad():
+            logits, value = ac(obs)
+        assert logits.shape[1] == cfg.num_joint_actions
 
 
 # ======================================================================
