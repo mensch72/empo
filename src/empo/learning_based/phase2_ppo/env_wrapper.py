@@ -9,9 +9,11 @@ Gymnasium-compatible environment wrapper for PPO-based Phase 2 training.
 2. The reward returned is the intrinsic EMPO reward **U_r(s_t)** evaluated
    at the *pre-transition* state (consistent with the Bellman equation
    V_r(s) = U_r(s) + γ E[V_r(s')]; see Appendix B of the migration plan).
-3. Rich auxiliary data (states, goals, human actions, transition
-   probabilities) is packed into the ``info`` dict so the PPO training loop
-   can extract it and train the auxiliary networks (V_h^e, X_h, U_r).
+3. The Gymnasium ``info`` dict returned by each ``step()`` is restricted
+   to numeric scalar values suitable for logging/monitoring. Rich auxiliary
+   transition data (states, goals, human actions, transition probabilities,
+   etc.) is stored internally in ``_aux_buffer`` so the PPO training loop
+   can consume it when training the auxiliary networks (V_h^e, X_h, U_r).
 
 This module does NOT modify any existing environment or wrapper code.
 """
@@ -359,7 +361,9 @@ class EMPOMultiGridEnv(gymnasium.Env):
                     x_h = x_h_net.forward(
                         state, self.world_model, h_idx, device
                     )
-                    x_h_vals.append(max(float(x_h.item()), _X_H_MIN))
+                    x_h_vals.append(
+                        min(max(float(x_h.item()), _X_H_MIN), 1.0)
+                    )
                 if x_h_vals:
                     y = float(
                         np.mean(

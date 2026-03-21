@@ -32,10 +32,30 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 
-import pufferlib
-import pufferlib.vector
-import pufferlib.pufferl
-import pufferlib.emulation
+try:
+    import pufferlib
+    import pufferlib.vector
+    import pufferlib.pufferl
+    import pufferlib.emulation
+except ImportError:
+
+    class _MissingPufferlibModule:
+        """Shim raised at attribute access when ``pufferlib`` is not installed.
+
+        Importing this module will succeed so that test collection and
+        non-PPO code paths are not broken.  Any actual usage (attribute
+        access) raises a clear ``RuntimeError``.
+        """
+
+        def __getattr__(self, name: str) -> Any:
+            raise RuntimeError(
+                "pufferlib is required to use "
+                "empo.learning_based.phase2_ppo.trainer "
+                "(the PPO-based Phase 2 trainer), but it is not installed. "
+                "Install pufferlib to enable PPO-based Phase 2 training."
+            )
+
+    pufferlib = _MissingPufferlibModule()  # type: ignore[assignment]
 
 # Read-only imports from existing DQN path (shared data structures)
 from empo.learning_based.phase2.replay_buffer import (
@@ -153,7 +173,7 @@ class PPOPhase2Trainer:
         )
 
         # Counters
-        self.training_step_count: int = 0
+        self.global_env_step: int = 0
         self.ppo_iteration: int = 0
 
     # ------------------------------------------------------------------
@@ -598,7 +618,7 @@ class PPOPhase2Trainer:
                 "global_step": pufferl.global_step,
             }
             all_metrics.append(metrics)
-            self.training_step_count = pufferl.global_step
+            self.global_env_step = pufferl.global_step
             iteration += 1
 
             if iteration % 100 == 0:

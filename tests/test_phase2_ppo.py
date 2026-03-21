@@ -24,9 +24,9 @@ import pytest
 import torch
 import gymnasium
 
-import pufferlib
-import pufferlib.emulation
-import pufferlib.vector
+pufferlib = pytest.importorskip("pufferlib")
+import pufferlib.emulation  # noqa: E402
+import pufferlib.vector  # noqa: E402
 
 # ── PPO-path imports (new code under test) ──────────────────────────────
 from empo.learning_based.phase2_ppo.config import PPOPhase2Config
@@ -102,16 +102,21 @@ def mock_goal_sampler(state, human_idx):
 
 
 class _PufferLibCompatEnv(EMPOMultiGridEnv):
-    """Thin wrapper that strips non-numeric info for PufferLib compatibility.
+    """Testing shim that enforces a numeric-only top-level ``info`` dict.
 
-    PufferLib's Serial vectorisation backend calls ``np.mean()`` on every
-    top-level info value.  EMPOMultiGridEnv returns complex auxiliary data
-    (tuples, dicts) which cannot be averaged.  This wrapper keeps only
-    scalar numeric values at the top level so the PufferLib training loop
-    runs without error.
+    EMPOMultiGridEnv.step() already follows the contract that all top-level
+    ``info`` values are scalar numerics, and stores any richer auxiliary data
+    in its internal ``_aux_buffer`` attribute instead.
 
-    Auxiliary data is still accessible via the env's ``_aux_buffer``
-    attribute, which the trainer reads directly after ``evaluate()``.
+    Historically, PufferLib's Serial vectorisation backend called ``np.mean()``
+    on every top-level ``info`` value, which would break if non-numeric data
+    appeared there.  This wrapper exists to guard against regressions in tests:
+    it drops any unexpected non-numeric entries, so that the PufferLib-backed
+    training loop continues to run safely even if EMPOMultiGridEnv were
+    accidentally changed to return complex objects in ``info`` again.
+
+    Trainers should continue to read rich auxiliary data from ``_aux_buffer``
+    after ``evaluate()``; this wrapper does not modify that behaviour.
     """
 
     def step(self, action):
@@ -676,7 +681,7 @@ class TestPPOPhase2Trainer:
 
     def test_creation(self):
         trainer = self._make_trainer()
-        assert trainer.training_step_count == 0
+        assert trainer.global_env_step == 0
         assert trainer.ppo_iteration == 0
 
     def test_push_transition_to_aux_buffer(self):
