@@ -166,15 +166,7 @@ trainer. This is the single most important implementation constraint:
    ├── config.py                               # PPOPhase2Config (standalone)
    ├── actor_critic.py                         # EMPOActorCritic network
    ├── env_wrapper.py                          # EMPOMultiGridEnv (Gymnasium wrapper)
-   ├── reward_wrapper.py                       # EMPORewardWrapper
-   ├── trainer.py                              # PPO training loop
-   └── auxiliary_trainer.py                    # Warm-up + aux net training
-   
-   src/empo/learning_based/multigrid/phase2_ppo/  # MultiGrid-specific PPO
-   ├── __init__.py
-   ├── actor_critic.py                         # MultiGrid actor-critic
-   ├── env_wrapper.py                          # MultiGrid PPO env
-   └── trainer.py                              # MultiGrid PPO trainer
+   └── trainer.py                              # PPO training loop + aux net training
    ```
 
 3. **Shared base classes are read-only dependencies.** The PPO trainer may *import* and
@@ -216,20 +208,29 @@ training driver.
 | PufferLib module | Role in EMPO |
 |---|---|
 | ``pufferlib.emulation.GymnasiumPufferEnv`` | Wraps ``EMPOMultiGridEnv`` (a standard Gymnasium env) into a PufferLib-compatible env with shared-memory observation buffers |
-| ``pufferlib.vector.make(env_creator, ...)`` | Creates a vectorised pool of ``num_envs`` wrapped environments, stepping them in parallel via shared memory (C-level, avoids Python GIL) |
+| ``pufferlib.vector.make(env_creator, ...)`` | Creates a vectorised pool of ``num_envs`` wrapped environments. The initial EMPO PPO integration uses ``backend='Serial'``, which steps all environments in a single process. PufferLib also supports multiprocessing / shared-memory backends (e.g. ``backend='Multiprocessing'``) for true parallel env stepping; switching backend requires no trainer code changes. |
 | ``pufferlib.pufferl.PuffeRL(config, vecenv, policy)`` | The core training class.  Manages the rollout buffer, advantage computation (CUDA kernel), PPO clipped-surrogate update, gradient clipping, learning-rate scheduling, and checkpointing |
 | ``pufferlib.pytorch.sample_logits`` | Differentiable action sampling from logits, supporting Discrete, MultiDiscrete, and continuous action spaces |
 | ``pufferlib.pytorch.layer_init`` | Orthogonal weight initialisation (CleanRL convention) |
 
 #### Policy convention
 
-PufferLib policies implement::
+In vanilla PufferLib, policies implement::
 
     def forward(self, observations, state=None) -> (logits, value)
 
 where ``logits`` is a tensor of shape ``(batch, num_actions)`` for Discrete
 or a list of tensors for MultiDiscrete, and ``value`` is ``(batch, 1)``.
-``EMPOActorCritic`` follows this convention.
+
+In the EMPO PPO port, we **flatten the joint robot action** into a single
+Discrete action index before it reaches PufferLib.  Concretely, for
+``num_robots`` robots each with ``num_actions`` primitive actions, we define
+``num_joint_actions = num_actions ** num_robots`` and expose a Discrete
+action space of size ``num_joint_actions`` via the PufferLib env wrapper.
+``EMPOActorCritic.forward()`` therefore returns a single logits tensor of
+shape ``(batch, num_joint_actions)`` plus a value tensor of shape ``(batch, 1)``,
+which is fully compatible with PufferLib's Discrete-policy interface even
+though the underlying world_model uses a MultiDiscrete joint action internally.
 
 For LSTM support, the policy can split into ``encode_observations`` and
 ``decode_actions`` methods and be wrapped with ``pufferlib.models.LSTMWrapper``.

@@ -102,15 +102,6 @@ class PPOPhase2Config:
     num_robots : int
         Number of robots in the environment.
 
-    Target-network update intervals (auxiliary networks)
-    ---------------------------------------------------
-    v_h_e_target_update_interval : int
-        Training steps between V_h^e target-network hard-updates.
-    x_h_target_update_interval : int
-        Training steps between X_h target-network hard-updates.
-    u_r_target_update_interval : int
-        Training steps between U_r target-network hard-updates.
-
     Optional flags
     --------------
     u_r_use_network : bool
@@ -172,11 +163,6 @@ class PPOPhase2Config:
     num_actions: int = 7
     num_robots: int = 1
 
-    # ── Target-network update intervals (auxiliary) ──────────────────────
-    v_h_e_target_update_interval: int = 100
-    x_h_target_update_interval: int = 100
-    u_r_target_update_interval: int = 100
-
     # ── Optional flags ───────────────────────────────────────────────────
     u_r_use_network: bool = False
     x_h_use_network: bool = True
@@ -194,6 +180,10 @@ class PPOPhase2Config:
 
     # ── Goal resampling ──────────────────────────────────────────────────
     goal_resample_prob: float = 0.01
+
+    # ── PufferLib runtime settings ───────────────────────────────────────
+    device: str = "cpu"
+    seed: int = 1
 
     def __post_init__(self) -> None:
         if self.zeta < 1.0:
@@ -258,8 +248,8 @@ class PPOPhase2Config:
             "learning_rate": self.lr_ppo,
             "anneal_lr": False,
             "min_lr_ratio": 0.0,
-            "device": "cpu",
-            "seed": 1,
+            "device": self.device,
+            "seed": self.seed,
             "torch_deterministic": False,
             "total_timesteps": self.num_ppo_iterations * batch_size,
             "compile": False,

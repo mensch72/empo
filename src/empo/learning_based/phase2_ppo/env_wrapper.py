@@ -100,13 +100,13 @@ class EMPOMultiGridEnv(gymnasium.Env):
         num_robots = len(self.robot_agent_indices)
         num_actions = config.num_actions
 
-        # Action space: Discrete for single robot, MultiDiscrete for multiple
-        if num_robots == 1:
-            self.action_space = spaces.Discrete(num_actions)
-        else:
-            self.action_space = spaces.MultiDiscrete(
-                [num_actions] * num_robots
-            )
+        # Action space: always flat Discrete over joint robot actions.
+        # For multi-robot, the flat index is decoded to per-robot actions
+        # inside _build_joint_action() via _flat_index_to_tuple().
+        # This matches EMPOActorCritic which outputs logits of shape
+        # (batch, num_actions ** num_robots) — a single Discrete head.
+        num_joint_actions = num_actions ** num_robots
+        self.action_space = spaces.Discrete(num_joint_actions)
 
         # Observation space
         if observation_space is not None:
@@ -242,14 +242,22 @@ class EMPOMultiGridEnv(gymnasium.Env):
     def _build_joint_action(
         self, robot_action: Any, human_actions: List[int]
     ) -> List[int]:
-        """Merge the robot action(s) into the human-action list."""
+        """Merge the robot action(s) into the human-action list.
+
+        ``robot_action`` is always a flat integer index into the joint
+        robot action space (Discrete of size num_actions ** num_robots).
+        For multi-robot, it is decoded via ``_flat_index_to_tuple()``.
+        """
         joint = list(human_actions)
-        if isinstance(self.action_space, spaces.Discrete):
-            assert len(self.robot_agent_indices) == 1
+        num_robots = len(self.robot_agent_indices)
+        if num_robots == 1:
             joint[self.robot_agent_indices[0]] = int(robot_action)
         else:
+            per_robot = _flat_index_to_tuple(
+                int(robot_action), self.config.num_actions, num_robots
+            )
             for i, r_idx in enumerate(self.robot_agent_indices):
-                joint[r_idx] = int(robot_action[i])
+                joint[r_idx] = per_robot[i]
         return joint
 
     def _compute_u_r(self, state: Any) -> float:
@@ -257,6 +265,9 @@ class EMPOMultiGridEnv(gymnasium.Env):
 
         X_h values are floored at ``_X_H_MIN`` (1e-3) to prevent
         numerical instability in the X_h^{-ξ} exponentiation.
+
+        The device is inferred from the auxiliary network parameters
+        to avoid device-mismatch errors when running on CUDA.
         """
         if self.auxiliary_networks is None:
             return 0.0
@@ -266,12 +277,23 @@ class EMPOMultiGridEnv(gymnasium.Env):
         # Floor value matching trainer.py
         _X_H_MIN = 1e-3
 
+        # Infer device from aux network parameters, defaulting to cpu
+        nets = self.auxiliary_networks
+        device = "cpu"
+        for net in [getattr(nets, "u_r", None), getattr(nets, "x_h", None),
+                     getattr(nets, "v_h_e", None)]:
+            if net is not None:
+                try:
+                    device = str(next(net.parameters()).device)
+                    break
+                except StopIteration:
+                    pass
+
         with torch.no_grad():
-            nets = self.auxiliary_networks
             # Option A: dedicated U_r network
             if hasattr(nets, "u_r") and nets.u_r is not None:
                 _, u_r = nets.u_r.forward(
-                    state, self.world_model, "cpu"
+                    state, self.world_model, device
                 )
                 return float(u_r.item())
             # Option B: compute from X_h values directly (eq. 8)
@@ -279,7 +301,7 @@ class EMPOMultiGridEnv(gymnasium.Env):
                 x_h_vals = []
                 for h_idx in self.human_agent_indices:
                     x_h = nets.x_h.forward(
-                        state, self.world_model, h_idx, "cpu"
+                        state, self.world_model, h_idx, device
                     )
                     x_h_vals.append(max(float(x_h.item()), _X_H_MIN))
                 if x_h_vals:
@@ -297,32 +319,17 @@ class EMPOMultiGridEnv(gymnasium.Env):
         """Compute per-robot-action transition probabilities.
 
         Returns ``{action_index: [(prob, next_state), ...]}``.
-        Handles both ``Discrete`` and ``MultiDiscrete`` action spaces.
 
-        For ``MultiDiscrete`` (multi-robot) the flat joint-action index is
-        converted to a per-robot action tuple before calling
-        ``_build_joint_action``, which expects an indexable sequence.
+        The action space is always flat ``Discrete(num_actions ** num_robots)``
+        so each ``a_r_idx`` is a flat joint-action index.  For multi-robot
+        envs, ``_build_joint_action()`` internally decodes it to per-robot
+        actions via ``_flat_index_to_tuple()``.
         """
-        if isinstance(self.action_space, spaces.Discrete):
-            num_robot_actions = self.action_space.n
-        elif isinstance(self.action_space, spaces.MultiDiscrete):
-            num_robot_actions = int(np.prod(self.action_space.nvec))
-        else:
-            return {}
-
-        num_actions = self.config.num_actions
-        num_robots = len(self.robot_agent_indices)
+        num_robot_actions = self.action_space.n
 
         probs_by_action: Dict[int, list] = {}
         for a_r_idx in range(num_robot_actions):
-            # For MultiDiscrete, convert flat index to per-robot action tuple
-            if isinstance(self.action_space, spaces.MultiDiscrete):
-                robot_action: Any = _flat_index_to_tuple(
-                    a_r_idx, num_actions, num_robots
-                )
-            else:
-                robot_action = a_r_idx
-            joint = self._build_joint_action(robot_action, human_actions)
+            joint = self._build_joint_action(a_r_idx, human_actions)
             trans = self.world_model.transition_probabilities(state, joint)
             if trans is not None:
                 probs_by_action[a_r_idx] = trans

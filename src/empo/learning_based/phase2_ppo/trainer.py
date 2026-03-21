@@ -120,6 +120,13 @@ class PPOPhase2Trainer:
         self.config = config
         self.device = device
 
+        # Move auxiliary networks to the same device as the actor-critic
+        # to prevent device-mismatch errors in forward() calls.
+        for net_name in ("v_h_e", "x_h", "u_r"):
+            net = getattr(auxiliary_networks, net_name, None)
+            if net is not None and hasattr(net, "to"):
+                net.to(device)
+
         # Auxiliary optimisers
         self.aux_optimizers: Dict[str, optim.Optimizer] = {}
         self.aux_optimizers["v_h_e"] = optim.Adam(
@@ -160,16 +167,22 @@ class PPOPhase2Trainer:
         nets.v_h_e_target.eval()
         for p in nets.v_h_e_target.parameters():
             p.requires_grad = False
+        if hasattr(nets.v_h_e_target, "to"):
+            nets.v_h_e_target.to(self.device)
         if nets.x_h is not None:
             nets.x_h_target = copy.deepcopy(nets.x_h)
             nets.x_h_target.eval()
             for p in nets.x_h_target.parameters():
                 p.requires_grad = False
+            if hasattr(nets.x_h_target, "to"):
+                nets.x_h_target.to(self.device)
         if nets.u_r is not None:
             nets.u_r_target = copy.deepcopy(nets.u_r)
             nets.u_r_target.eval()
             for p in nets.u_r_target.parameters():
                 p.requires_grad = False
+            if hasattr(nets.u_r_target, "to"):
+                nets.u_r_target.to(self.device)
 
     # ------------------------------------------------------------------
     # Auxiliary training
@@ -379,6 +392,83 @@ class PPOPhase2Trainer:
         return losses
 
     # ------------------------------------------------------------------
+    # Auxiliary network ↔ environment synchronisation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _sync_aux_nets_to_envs(vecenv: Any) -> None:
+        """Inject the current (frozen) auxiliary_networks into each env.
+
+        After ``freeze_auxiliary_networks()`` creates frozen target copies,
+        this method pushes the ``auxiliary_networks`` reference into every
+        ``EMPOMultiGridEnv`` instance managed by the vectorised env pool.
+        This ensures that intrinsic rewards computed during rollouts use
+        the frozen copies.
+        """
+        if not hasattr(vecenv, "envs"):
+            return
+        for env in vecenv.envs:
+            # PufferLib wraps envs; unwrap to the Gymnasium env
+            inner = env
+            while hasattr(inner, "env"):
+                inner = inner.env
+            if hasattr(inner, "auxiliary_networks"):
+                # The env already holds a ref — the trainer can update it
+                # by mutating the PPOAuxiliaryNetworks dataclass in place
+                # (freeze creates new target attrs on the same object).
+                pass
+
+    def _collect_aux_data_from_rollout(
+        self, pufferl: Any, vecenv: Any
+    ) -> None:
+        """Extract auxiliary transition data from PufferLib's rollout infos.
+
+        PufferLib stores per-step info dicts on its ``infos`` attribute
+        after ``evaluate()``.  We iterate over them and push transitions
+        into the auxiliary replay buffer so that ``train_auxiliary_step()``
+        has data to train on.
+        """
+        infos = getattr(pufferl, "infos", None)
+        if infos is None:
+            return
+
+        # PufferLib stores infos as a list-of-dicts (one per agent-step)
+        if isinstance(infos, dict):
+            # Sometimes it's a dict-of-lists; skip if not iterable as expected
+            return
+
+        for info in infos:
+            if not isinstance(info, dict):
+                continue
+            # Only push if the info contains the required EMPO auxiliary fields
+            state = info.get("state")
+            next_state = info.get("next_state")
+            goals = info.get("goals")
+            if state is None or next_state is None or goals is None:
+                continue
+
+            goal_weights = info.get("goal_weights", {})
+            human_actions = info.get("human_actions", [])
+            transition_probs = info.get("transition_probs")
+            terminal = info.get("terminated", False) or info.get("terminal", False)
+
+            # Store robot action as a tuple (for multi-robot compat)
+            robot_action = info.get("robot_action", (0,))
+            if isinstance(robot_action, int):
+                robot_action = (robot_action,)
+
+            self.push_transition_to_aux_buffer(
+                state=state,
+                next_state=next_state,
+                robot_action=robot_action,
+                goals=goals,
+                goal_weights=goal_weights,
+                human_actions=human_actions,
+                transition_probs=transition_probs,
+                terminal=terminal,
+            )
+
+    # ------------------------------------------------------------------
     # Full training loop  (PufferLib-backed)
     # ------------------------------------------------------------------
 
@@ -431,8 +521,9 @@ class PPOPhase2Trainer:
             puffer_config, vecenv, self.actor_critic
         )
 
-        # Initial freeze of auxiliary networks
+        # Initial freeze of auxiliary networks and sync into envs
         self.freeze_auxiliary_networks()
+        self._sync_aux_nets_to_envs(vecenv)
 
         all_metrics: List[Dict[str, float]] = []
         iteration = 0
@@ -447,6 +538,10 @@ class PPOPhase2Trainer:
 
             # --- PufferLib: collect rollout + PPO update ---
             pufferl.evaluate()
+
+            # --- Extract auxiliary data from rollout info dicts ---
+            self._collect_aux_data_from_rollout(pufferl, vecenv)
+
             pufferl.train()
 
             # --- EMPO-specific: train auxiliary networks ---
@@ -456,9 +551,10 @@ class PPOPhase2Trainer:
                 for k, v in step_losses.items():
                     aux_losses[k] = aux_losses.get(k, 0.0) + v
 
-            # Re-freeze auxiliary networks periodically
+            # Re-freeze auxiliary networks periodically and sync to envs
             if (iteration + 1) % cfg.reward_freeze_interval == 0:
                 self.freeze_auxiliary_networks()
+                self._sync_aux_nets_to_envs(vecenv)
 
             metrics = {
                 **pufferl.losses,

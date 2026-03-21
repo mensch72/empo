@@ -217,6 +217,8 @@ class TestPPOPhase2Config:
             ppo_max_grad_norm=1.0,
             lr_ppo=1e-3,
             ppo_ent_coef_start=0.05,
+            device="cpu",
+            seed=42,
         )
         d = cfg.to_pufferlib_config()
 
@@ -232,6 +234,9 @@ class TestPPOPhase2Config:
         assert d["max_grad_norm"] == 1.0
         assert d["learning_rate"] == 1e-3
         assert d["ent_coef"] == 0.05
+        # device and seed should come from config fields, not be hardcoded
+        assert d["device"] == "cpu"
+        assert d["seed"] == 42
         # Should contain all keys expected by PuffeRL
         for key in [
             "seed", "total_timesteps", "compile", "use_rnn",
@@ -579,8 +584,10 @@ class TestEMPOMultiGridEnv:
             obs_dim=3,
         )
         env.reset(seed=0)
-        # Multi-robot: action is a tuple (per-robot action)
-        _, _, _, _, info = env.step((0, 1))
+        # Multi-robot: action is a flat integer index into joint action space
+        # (0, 1) → 0 + 1*3 = 3 in the flat index
+        flat_action = 0 + 1 * 3  # action_tuple_to_index((0, 1))
+        _, _, _, _, info = env.step(flat_action)
         tp = info["transition_probs"]
         # Should have 3^2 = 9 joint actions
         assert len(tp) == 9, f"Expected 9 joint actions, got {len(tp)}"
@@ -591,8 +598,8 @@ class TestEMPOMultiGridEnv:
             probs_sum = sum(p for p, _ in transitions)
             assert abs(probs_sum - 1.0) < 1e-6
 
-    def test_multi_robot_action_space_is_multidiscrete(self):
-        """Multi-robot env has MultiDiscrete action space."""
+    def test_multi_robot_action_space_is_flat_discrete(self):
+        """Multi-robot env has flat Discrete(num_actions**num_robots) action space."""
         wm = MockWorldModel(n_agents=4, n_actions=3)
         cfg = PPOPhase2Config(
             num_actions=3, num_robots=2, steps_per_episode=50
@@ -606,7 +613,8 @@ class TestEMPOMultiGridEnv:
             config=cfg,
             obs_dim=3,
         )
-        assert isinstance(env.action_space, gymnasium.spaces.MultiDiscrete)
+        assert isinstance(env.action_space, gymnasium.spaces.Discrete)
+        assert env.action_space.n == 3 ** 2  # num_actions ** num_robots = 9
 
 
 # ======================================================================
