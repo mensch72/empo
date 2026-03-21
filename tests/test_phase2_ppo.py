@@ -859,6 +859,10 @@ class TestPPOPhase2Trainer:
             aux_buffer_size=500,
             batch_size=4,
             steps_per_episode=50,
+            # Skip warm-up for this test (tested separately)
+            warmup_v_h_e_steps=0,
+            warmup_x_h_steps=0,
+            warmup_u_r_steps=0,
         )
         ac = EMPOActorCritic(
             state_encoder=None,

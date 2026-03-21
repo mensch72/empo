@@ -24,12 +24,21 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
+
+# TensorBoard (optional)
+try:
+    from torch.utils.tensorboard import SummaryWriter
+
+    HAS_TENSORBOARD = True
+except ImportError:
+    HAS_TENSORBOARD = False
 
 try:
     import pufferlib
@@ -172,6 +181,10 @@ class PPOPhase2Trainer:
         # Counters
         self.global_env_step: int = 0
         self.ppo_iteration: int = 0
+        self.aux_training_step: int = 0  # cumulative warm-up + in-loop aux steps
+
+        # TensorBoard writer (initialised lazily in train())
+        self.writer: Optional[Any] = None  # type: Optional[SummaryWriter]
 
     # ------------------------------------------------------------------
     # Target-network management
@@ -231,6 +244,7 @@ class PPOPhase2Trainer:
     def train_auxiliary_step(
         self,
         world_model: Any = None,
+        active_networks: Optional[Set[str]] = None,
     ) -> Dict[str, float]:
         """Run one gradient step on the auxiliary networks.
 
@@ -243,6 +257,10 @@ class PPOPhase2Trainer:
             A world model instance used for ``forward()`` calls on the
             auxiliary networks.  When ``None``, V_h^e and X_h forward passes
             are skipped (useful for unit testing the plumbing).
+        active_networks : set[str] or None
+            Subset of ``{"v_h_e", "x_h", "u_r"}`` to train on this step.
+            When ``None`` (default), all available networks are trained
+            (backward-compatible behaviour).
 
         Returns
         -------
@@ -259,7 +277,9 @@ class PPOPhase2Trainer:
         # -----------------------------------------------------------------
         # V_h^e loss: MSE between V_h^e(s, g_h) and TD target
         # -----------------------------------------------------------------
-        if world_model is not None:
+        if world_model is not None and (
+            active_networks is None or "v_h_e" in active_networks
+        ):
             v_h_e_preds: List[torch.Tensor] = []
             v_h_e_targets: List[torch.Tensor] = []
 
@@ -316,6 +336,7 @@ class PPOPhase2Trainer:
             nets.x_h is not None
             and world_model is not None
             and "x_h" in self.aux_optimizers
+            and (active_networks is None or "x_h" in active_networks)
         ):
             x_h_preds: List[torch.Tensor] = []
             x_h_targets_list: List[torch.Tensor] = []
@@ -358,6 +379,7 @@ class PPOPhase2Trainer:
             nets.u_r is not None
             and world_model is not None
             and "u_r" in self.aux_optimizers
+            and (active_networks is None or "u_r" in active_networks)
         ):
             y_preds: List[torch.Tensor] = []
             y_targets: List[torch.Tensor] = []
@@ -502,6 +524,125 @@ class PPOPhase2Trainer:
                 )
 
     # ------------------------------------------------------------------
+    # TensorBoard helpers
+    # ------------------------------------------------------------------
+
+    def _init_tensorboard(self) -> None:
+        """Initialise the TensorBoard writer if configured."""
+        tb_dir = self.config.tensorboard_dir
+        if tb_dir is not None and HAS_TENSORBOARD:
+            os.makedirs(tb_dir, exist_ok=True)
+            self.writer = SummaryWriter(log_dir=tb_dir)
+        else:
+            self.writer = None
+
+    def _log_scalar(self, tag: str, value: float, step: int) -> None:
+        if self.writer is not None:
+            self.writer.add_scalar(tag, value, step)
+
+    def _log_text(self, tag: str, text: str, step: int) -> None:
+        if self.writer is not None:
+            self.writer.add_text(tag, text, step)
+
+    # ------------------------------------------------------------------
+    # Checkpoint save / load
+    # ------------------------------------------------------------------
+
+    def save_checkpoint(self, path: str) -> str:
+        """Persist the full trainer state to *path*.
+
+        Saves auxiliary network weights, their target copies, optimiser
+        states, and training counters so that ``load_checkpoint`` can
+        resume from the same point.
+
+        Returns the actual path used (may differ if a tempdir fallback
+        was needed).
+        """
+        nets = self.auxiliary_networks
+        checkpoint: Dict[str, Any] = {
+            "actor_critic": self.actor_critic.state_dict(),
+            "v_h_e": nets.v_h_e.state_dict(),
+            "global_env_step": self.global_env_step,
+            "ppo_iteration": self.ppo_iteration,
+            "aux_training_step": self.aux_training_step,
+            "config": {
+                "gamma_r": self.config.gamma_r,
+                "gamma_h": self.config.gamma_h,
+                "zeta": self.config.zeta,
+                "xi": self.config.xi,
+                "eta": self.config.eta,
+            },
+        }
+        # Optional networks
+        if nets.x_h is not None:
+            checkpoint["x_h"] = nets.x_h.state_dict()
+        if nets.u_r is not None:
+            checkpoint["u_r"] = nets.u_r.state_dict()
+        # Targets
+        if nets.v_h_e_target is not None:
+            checkpoint["v_h_e_target"] = nets.v_h_e_target.state_dict()
+        if nets.x_h_target is not None:
+            checkpoint["x_h_target"] = nets.x_h_target.state_dict()
+        if nets.u_r_target is not None:
+            checkpoint["u_r_target"] = nets.u_r_target.state_dict()
+        # Optimiser states
+        opt_states = {}
+        for name, opt in self.aux_optimizers.items():
+            opt_states[name] = opt.state_dict()
+        checkpoint["aux_optimizers"] = opt_states
+
+        dir_path = os.path.dirname(path)
+        if dir_path:
+            os.makedirs(dir_path, exist_ok=True)
+        try:
+            torch.save(checkpoint, path)
+            return path
+        except (IOError, OSError, RuntimeError) as exc:
+            import tempfile
+
+            fallback = os.path.join(
+                tempfile.gettempdir(),
+                f"empo_ppo_checkpoint_{os.path.basename(path)}",
+            )
+            logger.warning(
+                "Cannot save to %s: %s — falling back to %s", path, exc, fallback
+            )
+            torch.save(checkpoint, fallback)
+            return fallback
+
+    def load_checkpoint(self, path: str) -> None:
+        """Restore trainer state from a checkpoint saved by ``save_checkpoint``.
+
+        Loads auxiliary network weights, targets, optimiser states, and
+        training counters.  The ``actor_critic`` weights are loaded as
+        well so that PPO can resume from the saved policy.
+        """
+        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        self.actor_critic.load_state_dict(checkpoint["actor_critic"])
+        nets = self.auxiliary_networks
+        nets.v_h_e.load_state_dict(checkpoint["v_h_e"])
+        if "x_h" in checkpoint and nets.x_h is not None:
+            nets.x_h.load_state_dict(checkpoint["x_h"])
+        if "u_r" in checkpoint and nets.u_r is not None:
+            nets.u_r.load_state_dict(checkpoint["u_r"])
+        # Targets
+        if "v_h_e_target" in checkpoint and nets.v_h_e_target is not None:
+            nets.v_h_e_target.load_state_dict(checkpoint["v_h_e_target"])
+        if "x_h_target" in checkpoint and nets.x_h_target is not None:
+            nets.x_h_target.load_state_dict(checkpoint["x_h_target"])
+        if "u_r_target" in checkpoint and nets.u_r_target is not None:
+            nets.u_r_target.load_state_dict(checkpoint["u_r_target"])
+        # Optimisers
+        opt_states = checkpoint.get("aux_optimizers", {})
+        for name, state in opt_states.items():
+            if name in self.aux_optimizers:
+                self.aux_optimizers[name].load_state_dict(state)
+        # Counters
+        self.global_env_step = checkpoint.get("global_env_step", 0)
+        self.ppo_iteration = checkpoint.get("ppo_iteration", 0)
+        self.aux_training_step = checkpoint.get("aux_training_step", 0)
+
+    # ------------------------------------------------------------------
     # Full training loop  (PufferLib-backed)
     # ------------------------------------------------------------------
 
@@ -511,6 +652,14 @@ class PPOPhase2Trainer:
         num_iterations: Optional[int] = None,
     ) -> List[Dict[str, float]]:
         """Run the full PufferLib PPO Phase 2 training loop.
+
+        The loop has two phases:
+
+        1. **Warm-up** — auxiliary networks are trained with random robot
+           actions (no PPO).  Networks are enabled progressively according
+           to ``config.get_active_aux_networks()``.
+        2. **PPO** — PufferLib drives the PPO loop; auxiliary networks
+           continue to be trained alongside.
 
         Parameters
         ----------
@@ -534,6 +683,13 @@ class PPOPhase2Trainer:
         else:
             n_iters = num_iterations
 
+        # ── TensorBoard ─────────────────────────────────────────────────
+        self._init_tensorboard()
+
+        # ── Warm-up phase ────────────────────────────────────────────────
+        warmup_metrics = self._run_warmup(env_creator)
+
+        # ── PufferLib PPO phase ──────────────────────────────────────────
         # Build PufferLib config dict (PuffeRL expects a flat dict).
         # Override device/seed from the trainer to avoid mismatch between
         # the config fields and the actual trainer state.
@@ -582,25 +738,14 @@ class PPOPhase2Trainer:
         self.freeze_auxiliary_networks()
         self._sync_aux_nets_to_envs(vecenv)
 
-        all_metrics: List[Dict[str, float]] = []
+        all_metrics: List[Dict[str, float]] = warmup_metrics
         iteration = 0
         # Use a driver env for auxiliary forward passes (world_model access).
         # Bounded unwrapping to reach underlying EMPOWorldModelEnv, matching
         # the pattern in _collect_aux_data_from_rollout().
-        driver_env = vecenv.driver_env
-        wm = None
-        current_env = driver_env
-        _MAX_UNWRAP_DEPTH = 20
-        for _ in range(_MAX_UNWRAP_DEPTH):
-            if current_env is None:
-                break
-            wm = getattr(current_env, "world_model", None)
-            if wm is not None:
-                break
-            if hasattr(current_env, "env"):
-                current_env = current_env.env
-            else:
-                break
+        wm = self._unwrap_world_model(vecenv.driver_env)
+
+        prev_stage = cfg.get_warmup_stage(self.aux_training_step)
 
         while pufferl.global_step < total_timesteps and iteration < n_iters:
             self.ppo_iteration = iteration
@@ -615,10 +760,14 @@ class PPOPhase2Trainer:
 
             # --- EMPO-specific: train auxiliary networks ---
             aux_losses: Dict[str, float] = {}
+            active = cfg.get_active_aux_networks(self.aux_training_step)
             for _ in range(cfg.aux_training_steps_per_iteration):
-                step_losses = self.train_auxiliary_step(world_model=wm)
+                step_losses = self.train_auxiliary_step(
+                    world_model=wm, active_networks=active
+                )
                 for k, v in step_losses.items():
                     aux_losses[k] = aux_losses.get(k, 0.0) + v
+                self.aux_training_step += 1
 
             # Re-freeze auxiliary networks periodically and sync to envs
             if (iteration + 1) % cfg.reward_freeze_interval == 0:
@@ -635,6 +784,37 @@ class PPOPhase2Trainer:
             self.global_env_step = pufferl.global_step
             iteration += 1
 
+            # ── Logging ──────────────────────────────────────────────────
+            if iteration % cfg.log_interval == 0:
+                step = self.aux_training_step
+                for k, v in aux_losses.items():
+                    self._log_scalar(f"Loss/{k}", v, step)
+                self._log_scalar(
+                    "Loss/policy_loss",
+                    pufferl.losses.get("policy_loss", 0),
+                    step,
+                )
+                self._log_scalar(
+                    "Loss/value_loss",
+                    pufferl.losses.get("value_loss", 0),
+                    step,
+                )
+                self._log_scalar("PPO/iteration", iteration, step)
+                self._log_scalar("PPO/global_env_step", pufferl.global_step, step)
+                self._log_scalar(
+                    "PPO/entropy_coef", cfg.get_entropy_coef(step), step
+                )
+                cur_stage = cfg.get_warmup_stage(step)
+                self._log_scalar("Warmup/stage", cur_stage, step)
+                if cur_stage != prev_stage:
+                    self._log_text(
+                        "Warmup/transitions",
+                        f"Step {step}: stage {prev_stage} → {cur_stage} "
+                        f"({cfg.get_warmup_stage_name(step)})",
+                        step,
+                    )
+                    prev_stage = cur_stage
+
             if iteration % 100 == 0:
                 logger.info(
                     "PPO iter %d (step %d): policy_loss=%.4f value_loss=%.4f",
@@ -644,5 +824,158 @@ class PPOPhase2Trainer:
                     pufferl.losses.get("value_loss", 0),
                 )
 
+            # ── Checkpointing ────────────────────────────────────────────
+            if cfg.checkpoint_interval > 0 and iteration % cfg.checkpoint_interval == 0:
+                ckpt_dir = cfg.checkpoint_dir or "checkpoints"
+                ckpt_path = os.path.join(ckpt_dir, f"ppo_phase2_iter{iteration}.pt")
+                self.save_checkpoint(ckpt_path)
+                logger.info("Saved checkpoint to %s", ckpt_path)
+
         pufferl.close()
+
+        if self.writer is not None:
+            self.writer.close()
         return all_metrics
+
+    # ------------------------------------------------------------------
+    # Warm-up implementation
+    # ------------------------------------------------------------------
+
+    def _run_warmup(
+        self, env_creator: Callable[[], Any]
+    ) -> List[Dict[str, float]]:
+        """Execute the auxiliary-only warm-up phase.
+
+        During warm-up, the robot acts with a **uniform random policy**
+        (equivalent to β_r = 0).  Auxiliary networks are trained
+        progressively (V_h^e → X_h → U_r) until
+        ``config.get_total_warmup_steps()`` gradient updates have been
+        performed.
+
+        Returns per-step metric dicts (one per gradient step).
+        """
+        cfg = self.config
+        total_warmup = cfg.get_total_warmup_steps()
+        if total_warmup <= 0 or self.aux_training_step >= total_warmup:
+            return []
+
+        logger.info(
+            "Starting warm-up: %d aux training steps (current=%d)",
+            total_warmup,
+            self.aux_training_step,
+        )
+
+        # Create a single warm-up environment (no PufferLib needed).
+        env = env_creator()
+        aux_nets = self.auxiliary_networks
+        if getattr(env, "auxiliary_networks", None) is None:
+            env.auxiliary_networks = aux_nets
+
+        # Freeze targets so reward computation during rollouts is stable.
+        self.freeze_auxiliary_networks()
+
+        wm = getattr(env, "world_model", None)
+
+        warmup_metrics: List[Dict[str, float]] = []
+        obs, info = env.reset()
+        prev_stage = cfg.get_warmup_stage(self.aux_training_step)
+
+        while self.aux_training_step < total_warmup:
+            # Detect and log stage transitions
+            cur_stage = cfg.get_warmup_stage(self.aux_training_step)
+            if cur_stage != prev_stage:
+                logger.info(
+                    "Warm-up stage %d → %d (%s) at aux step %d",
+                    prev_stage,
+                    cur_stage,
+                    cfg.get_warmup_stage_name(self.aux_training_step),
+                    self.aux_training_step,
+                )
+                self._log_text(
+                    "Warmup/transitions",
+                    f"Step {self.aux_training_step}: stage {prev_stage} → "
+                    f"{cur_stage} ({cfg.get_warmup_stage_name(self.aux_training_step)})",
+                    self.aux_training_step,
+                )
+                # Re-freeze at stage transitions so newly-enabled networks
+                # see the latest V_h^e / X_h targets.
+                self.freeze_auxiliary_networks()
+                prev_stage = cur_stage
+
+            # Step the environment with a uniformly random action.
+            action = env.action_space.sample()
+            obs, _reward, terminated, truncated, info = env.step(action)
+            if terminated or truncated:
+                obs, info = env.reset()
+
+            # Collect aux transition data from the env's _aux_buffer.
+            buf = getattr(env, "_aux_buffer", None)
+            if buf:
+                while buf:
+                    td = buf.popleft()
+                    robot_action = td.get("robot_action", (action,))
+                    if not isinstance(robot_action, tuple):
+                        robot_action = (robot_action,)
+                    self.push_transition_to_aux_buffer(
+                        state=td.get("state"),
+                        next_state=td.get("next_state"),
+                        robot_action=robot_action,
+                        goals=td.get("goals", {}),
+                        goal_weights=td.get("goal_weights", {}),
+                        human_actions=td.get("human_actions", []),
+                        transition_probs=td.get("transition_probs"),
+                        terminal=td.get("terminal", False),
+                    )
+
+            # Train auxiliary networks (respecting active set).
+            active = cfg.get_active_aux_networks(self.aux_training_step)
+            losses = self.train_auxiliary_step(
+                world_model=wm, active_networks=active
+            )
+            self.aux_training_step += 1
+
+            if losses:
+                losses["warmup_stage"] = float(cur_stage)
+                warmup_metrics.append(losses)
+
+                # TensorBoard logging during warm-up.
+                step = self.aux_training_step
+                for k, v in losses.items():
+                    self._log_scalar(f"Warmup/{k}", v, step)
+                self._log_scalar("Warmup/stage", cur_stage, step)
+
+            # Re-freeze periodically during warm-up.
+            if self.aux_training_step % max(1, cfg.reward_freeze_interval) == 0:
+                self.freeze_auxiliary_networks()
+
+        logger.info(
+            "Warm-up complete after %d aux training steps", self.aux_training_step
+        )
+        env.close()
+
+        # Clear the aux replay buffer to discard data collected under
+        # the uniform random policy (cf. DQN trainer's buffer clear at
+        # β_r ramp-up transitions).
+        self.aux_replay_buffer.clear()
+
+        return warmup_metrics
+
+    # ------------------------------------------------------------------
+    # Utility
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _unwrap_world_model(env: Any) -> Any:
+        """Unwrap nested env wrappers to find a ``world_model`` attribute."""
+        current = env
+        for _ in range(20):
+            if current is None:
+                return None
+            wm = getattr(current, "world_model", None)
+            if wm is not None:
+                return wm
+            if hasattr(current, "env"):
+                current = current.env
+            else:
+                return None
+        return None
