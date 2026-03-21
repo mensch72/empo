@@ -20,6 +20,7 @@ from empo.learning_based.phase2_ppo.trainer import PPOAuxiliaryNetworks
 from empo.learning_based.multigrid.state_encoder import MultiGridStateEncoder
 from empo.learning_based.multigrid.goal_encoder import MultiGridGoalEncoder
 from empo.learning_based.multigrid.agent_encoder import AgentIdentityEncoder
+from empo.learning_based.multigrid.constants import NUM_STANDARD_COLORS
 from empo.learning_based.multigrid.feature_extraction import get_num_agents_per_color
 
 from empo.learning_based.multigrid.phase2.human_goal_ability import (
@@ -106,7 +107,7 @@ def create_multigrid_ppo_networks(
         grid_height=grid_height,
         grid_width=grid_width,
         num_agents_per_color=num_agents_per_color,
-        num_agent_colors=7,
+        num_agent_colors=NUM_STANDARD_COLORS,
         feature_dim=feature_dim,
         include_step_count=include_step_count,
         use_encoders=use_encoders,

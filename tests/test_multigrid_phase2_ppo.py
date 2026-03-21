@@ -93,6 +93,21 @@ def _make_encoder(env: MultiGridEnv, feature_dim: int = 32) -> MultiGridStateEnc
 
 
 # ======================================================================
+# Test helper classes
+# ======================================================================
+
+
+class _DummyGoal:
+    """Simple goal for testing V_h^e forward pass."""
+
+    def __init__(self, target_pos=(1, 1)):
+        self.target_pos = target_pos
+
+    def is_achieved(self, state):
+        return 0
+
+
+# ======================================================================
 # 1. MultiGridWorldModelEnv tests
 # ======================================================================
 
@@ -260,7 +275,7 @@ class TestMultiGridWorldModelEnv:
             state_encoder=enc,
         )
         ppo_env.reset()
-        for i in range(3):
+        for _ in range(3):
             _, _, terminated, truncated, _ = ppo_env.step(0)
         assert truncated is True
 
@@ -386,9 +401,7 @@ class TestCreateMultiGridPPONetworks:
         state = env.get_state()
         h_idx = env.human_agent_indices[0]
         # Use a mock goal that has is_achieved
-        goal = type(
-            "Goal", (), {"is_achieved": lambda self, s: 0, "target_pos": (1, 1)}
-        )()
+        goal = _DummyGoal(target_pos=(1, 1))
 
         with torch.no_grad():
             result = aux.v_h_e(state, env, h_idx, goal, "cpu")

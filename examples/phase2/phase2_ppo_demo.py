@@ -203,7 +203,7 @@ def main() -> None:
     # ------------------------------------------------------------------
     # The state encoder is shared (torch module, same parameters across
     # all envs in Serial backend).
-    _enc = state_encoder
+    shared_encoder = state_encoder
 
     def env_creator():
         wm = _create_world_model()
@@ -215,7 +215,7 @@ def main() -> None:
             human_agent_indices=human_indices,
             robot_agent_indices=robot_indices,
             config=cfg,
-            state_encoder=_enc,
+            state_encoder=shared_encoder,
             # auxiliary_networks injected by trainer.train()
         )
 
