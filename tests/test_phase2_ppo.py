@@ -1033,6 +1033,9 @@ class TestPPOPhase2Trainer:
             hidden_dim=16,
             batch_size=2,
             aux_buffer_size=100,
+            warmup_v_h_e_steps=0,
+            warmup_x_h_steps=0,
+            warmup_u_r_steps=0,
         )
         v_h_e = _MockVhE()
         from empo.learning_based.phase2.aggregate_goal_ability import (
@@ -1061,25 +1064,48 @@ class TestPPOPhase2Trainer:
         )
         aux = PPOAuxiliaryNetworks(v_h_e=v_h_e, x_h=x_h)
         trainer = PPOPhase2Trainer(ac, aux, cfg, device="cpu")
+        trainer.freeze_auxiliary_networks()
 
-        # Populate the buffer with transitions
+        # Use a real mock world model so forward passes execute
+        wm = MockWorldModel(n_agents=3, n_actions=5)
+
+        # Populate the buffer with transitions that include goals
+        class _DummyGoal:
+            def is_achieved(self, state):
+                return 0
+
+            def __hash__(self):
+                return 42
+
+            def __eq__(self, other):
+                return isinstance(other, _DummyGoal)
+
+        goal = _DummyGoal()
         for _ in range(5):
             trainer.push_transition_to_aux_buffer(
-                state=(0,),
-                next_state=(1,),
+                state=(0, 0, 0),
+                next_state=(1, 1, 1),
                 robot_action=(0,),
-                goals={0: "g"},
+                goals={0: goal},
                 goal_weights={0: 1.0},
                 human_actions=[0],
                 transition_probs=None,
                 terminal=False,
             )
 
-        # With active_networks={"v_h_e"}, only v_h_e should be trained
-        losses = trainer.train_auxiliary_step(
-            world_model=None, active_networks={"v_h_e"}
+        # With all networks active, both v_h_e_loss and x_h_loss appear
+        losses_all = trainer.train_auxiliary_step(
+            world_model=wm, active_networks={"v_h_e", "x_h"}
         )
-        assert "x_h_loss" not in losses
+        assert "v_h_e_loss" in losses_all
+        assert "x_h_loss" in losses_all
+
+        # With only v_h_e active, x_h_loss is absent
+        losses_v_only = trainer.train_auxiliary_step(
+            world_model=wm, active_networks={"v_h_e"}
+        )
+        assert "v_h_e_loss" in losses_v_only
+        assert "x_h_loss" not in losses_v_only
 
     def test_checkpoint_save_load(self):
         """save_checkpoint / load_checkpoint roundtrips trainer state."""

@@ -659,13 +659,13 @@ class PPOPhase2Trainer:
     ) -> List[Dict[str, float]]:
         """Run the full PufferLib PPO Phase 2 training loop.
 
-        The loop has two phases:
+        The loop has two stages:
 
-        1. **Warm-up** — auxiliary networks are trained with random robot
-           actions (no PPO).  Networks are enabled progressively according
-           to ``config.get_active_aux_networks()``.
-        2. **PPO** — PufferLib drives the PPO loop; auxiliary networks
-           continue to be trained alongside.
+        1. **Warm-up stage** — auxiliary networks are trained with random
+           robot actions (no PPO).  Networks are enabled progressively
+           according to ``config.get_active_aux_networks()``.
+        2. **PPO stage** — PufferLib drives the PPO loop; auxiliary
+           networks continue to be trained alongside.
 
         Parameters
         ----------
@@ -932,7 +932,11 @@ class PPOPhase2Trainer:
             # Train auxiliary networks (respecting active set).
             active = cfg.get_active_aux_networks(self.aux_training_step)
             losses = self.train_auxiliary_step(world_model=wm, active_networks=active)
-            self.aux_training_step += 1
+
+            # Only count as a warm-up step when a gradient update ran
+            # (replay buffer may still be below batch_size early on).
+            if losses:
+                self.aux_training_step += 1
 
             if losses:
                 losses["warmup_stage"] = float(cur_stage)

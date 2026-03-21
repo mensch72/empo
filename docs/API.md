@@ -365,8 +365,9 @@ robot_indices = [i for i, agent in enumerate(env.agents) if agent.color == 'grey
 ## PPO-Based Phase 2 Training (`empo.learning_based.phase2_ppo`)
 
 The PPO path provides an alternative to the DQN-based Phase 2 trainer. It uses
-**PufferLib's PPO** to directly learn an explicit robot policy π_r (actor-critic)
-while training auxiliary networks (V_h^e, X_h, U_r) in a separate loop.
+**PufferLib's PPO** to approximate/fit an explicit robot policy network π_r (actor-critic),
+while approximating the auxiliary networks (V_h^e, X_h, U_r) in a separate loop, all as
+neural solutions to the EMPO Phase 2 equations rather than standard reward-maximizing RL.
 
 > **Parallel implementation**: The PPO path lives in `learning_based/phase2_ppo/`
 > and does *not* modify any DQN-path code. Both paths can coexist.
@@ -455,12 +456,12 @@ trainer.save_checkpoint("checkpoint.pt")
 trainer.load_checkpoint("checkpoint.pt")
 ```
 
-**Training phases:**
+**Training stages:**
 
-1. **Warm-up** — random robot actions; only auxiliary networks trained
-   (V_h^e first, then X_h, then U_r).
-2. **PPO** — PufferLib drives the main PPO loop; auxiliary networks
-   continue training alongside.
+1. **Warm-up stage** — random robot actions; only auxiliary networks
+   trained (V_h^e first, then X_h, then U_r).
+2. **PPO stage** — PufferLib drives the main PPO loop; auxiliary
+   networks continue training alongside.
 
 ### MultiGrid Integration (`multigrid.phase2_ppo`)
 
