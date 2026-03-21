@@ -186,7 +186,11 @@ class PPOPhase2Config:
     seed: int = 1
 
     # ── Performance flags ─────────────────────────────────────────────────
-    compute_transition_probs: bool = True
+    # Transition-probability computation on every env step is expensive for
+    # multi-robot (|A|^N) and currently unused by train_auxiliary_step().
+    # Default to False; enable when model-based / policy-weighted targets
+    # are needed.
+    compute_transition_probs: bool = False
 
     def __post_init__(self) -> None:
         if self.zeta < 1.0:

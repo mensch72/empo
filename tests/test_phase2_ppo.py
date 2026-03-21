@@ -434,9 +434,11 @@ class TestEMPOActorCritic:
 class TestEMPOMultiGridEnv:
     """Tests for the Gymnasium-compatible environment wrapper."""
 
-    def _make_env(self, **kwargs):
+    def _make_env(self, config=None, **kwargs):
         wm = MockWorldModel(n_agents=3, n_actions=5)
-        cfg = PPOPhase2Config(num_actions=5, num_robots=1, steps_per_episode=50)
+        cfg = config or PPOPhase2Config(
+            num_actions=5, num_robots=1, steps_per_episode=50
+        )
         return EMPOMultiGridEnv(
             world_model=wm,
             human_policy_prior=mock_human_policy_prior,
@@ -472,23 +474,35 @@ class TestEMPOMultiGridEnv:
         assert reward == 0.0  # No auxiliary networks → zero reward
 
     def test_info_contains_auxiliary_data(self):
+        """info has only numeric fields; rich data is in _aux_buffer."""
         env = self._make_env()
         env.reset()
         _, _, _, _, info = env.step(2)
-        assert "state" in info
-        assert "next_state" in info
-        assert "goals" in info
-        assert "goal_weights" in info
-        assert "human_actions" in info
-        assert "transition_probs" in info
+        # info must only contain scalar-numeric keys for PufferLib compat.
         assert "u_r" in info
         assert "env_reward" in info
+        # Rich auxiliary data lives in the internal _aux_buffer.
+        assert len(env._aux_buffer) == 1
+        aux = env._aux_buffer[0]
+        assert "state" in aux
+        assert "next_state" in aux
+        assert "goals" in aux
+        assert "goal_weights" in aux
+        assert "human_actions" in aux
+        assert "terminal" in aux
+        # robot_action should be a per-robot tuple
+        assert isinstance(aux["robot_action"], tuple)
 
     def test_transition_probs_per_robot_action(self):
-        env = self._make_env()
+        cfg = PPOPhase2Config(
+            num_actions=5, num_robots=1, steps_per_episode=50,
+            compute_transition_probs=True,
+        )
+        env = self._make_env(config=cfg)
         env.reset()
-        _, _, _, _, info = env.step(0)
-        tp = info["transition_probs"]
+        _, _, _, _, _ = env.step(0)
+        aux = env._aux_buffer[0]
+        tp = aux["transition_probs"]
         # Should have entries for robot actions 0-4
         assert len(tp) == 5
 
@@ -541,8 +555,9 @@ class TestEMPOMultiGridEnv:
             trajectory = []
             for _ in range(5):
                 _, reward, _, _, info = env.step(0)
+                aux = env._aux_buffer[-1]
                 trajectory.append(
-                    (info["next_state"], info["human_actions"])
+                    (aux["next_state"], aux["human_actions"])
                 )
             results.append(trajectory)
         assert results[0] == results[1]
@@ -565,7 +580,8 @@ class TestEMPOMultiGridEnv:
         env.reset(seed=0)
         # Should not raise IndexError
         _, _, _, _, info = env.step(0)
-        ha = info["human_actions"]
+        aux = env._aux_buffer[0]
+        ha = aux["human_actions"]
         assert len(ha) == 6  # max(1,3,5) + 1 = 6
         # Human agents should have been assigned actions from the policy prior
         # (uniform over 5 actions, so 0-4 are all valid)
@@ -576,7 +592,8 @@ class TestEMPOMultiGridEnv:
         """Transition probs correctly iterate over joint actions for 2 robots."""
         wm = MockWorldModel(n_agents=4, n_actions=3)
         cfg = PPOPhase2Config(
-            num_actions=3, num_robots=2, steps_per_episode=50
+            num_actions=3, num_robots=2, steps_per_episode=50,
+            compute_transition_probs=True,
         )
         env = EMPOMultiGridEnv(
             world_model=wm,
@@ -591,8 +608,9 @@ class TestEMPOMultiGridEnv:
         # Multi-robot: action is a flat integer index into joint action space
         # (0, 1) → 0 + 1*3 = 3 in the flat index
         flat_action = 0 + 1 * 3  # action_tuple_to_index((0, 1))
-        _, _, _, _, info = env.step(flat_action)
-        tp = info["transition_probs"]
+        _, _, _, _, _ = env.step(flat_action)
+        aux = env._aux_buffer[0]
+        tp = aux["transition_probs"]
         # Should have 3^2 = 9 joint actions
         assert len(tp) == 9, f"Expected 9 joint actions, got {len(tp)}"
         # Each entry should be a valid transition probability list

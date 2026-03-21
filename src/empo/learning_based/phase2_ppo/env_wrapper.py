@@ -207,16 +207,24 @@ class EMPOMultiGridEnv(gymnasium.Env):
             transition_probs = None
 
         obs = self._state_to_obs(next_state)
+
+        # ``info`` must only contain scalar-numeric values because PufferLib's
+        # Serial backend aggregates infos via ``np.mean`` over each key.
+        # Rich auxiliary data is instead stored in ``_aux_buffer`` below.
         info: Dict[str, Any] = {
-            "state": pre_state,
-            "next_state": next_state,
-            "goals": dict(self._goals),
-            "goal_weights": dict(self._goal_weights),
-            "human_actions": human_actions,
-            "transition_probs": transition_probs,
             "env_reward": env_reward,
             "u_r": u_r,
         }
+
+        # Decode flat joint-action index to per-robot action tuple for
+        # Phase2Transition.robot_action compatibility.
+        num_robots = len(self.robot_agent_indices)
+        if num_robots == 1:
+            robot_action_tuple = (int(action),)
+        else:
+            robot_action_tuple = _flat_index_to_tuple(
+                int(action), self.config.num_actions, num_robots
+            )
 
         # Store auxiliary data for trainer to read directly (bypasses
         # PufferLib info aggregation which only handles numeric scalars).
@@ -227,8 +235,10 @@ class EMPOMultiGridEnv(gymnasium.Env):
             "goal_weights": dict(self._goal_weights),
             "human_actions": human_actions,
             "transition_probs": transition_probs,
-            "robot_action": int(action),
+            "robot_action": robot_action_tuple,
             "terminated": terminated,
+            "truncated": truncated,
+            "terminal": bool(terminated or truncated),
         })
         return obs, u_r, terminated, truncated, info
 

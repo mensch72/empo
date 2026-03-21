@@ -466,11 +466,24 @@ class PPOPhase2Trainer:
                 goal_weights = info.get("goal_weights", {})
                 human_actions = info.get("human_actions", [])
                 transition_probs = info.get("transition_probs")
-                terminal = info.get("terminated", False)
 
+                # Prefer the combined terminal flag that accounts for both
+                # environment termination and episode truncation (from
+                # steps_per_episode).  Fall back to terminated-only for
+                # backward compatibility with older aux-buffer schemas.
+                terminal = info.get("terminal")
+                if terminal is None:
+                    terminated = info.get("terminated", False)
+                    truncated = info.get("truncated", False)
+                    terminal = bool(terminated or truncated)
+
+                # robot_action should already be a per-robot tuple (stored
+                # by EMPOMultiGridEnv._aux_buffer).  Normalise for safety.
                 robot_action = info.get("robot_action", (0,))
                 if isinstance(robot_action, int):
                     robot_action = (robot_action,)
+                elif isinstance(robot_action, (list, tuple)):
+                    robot_action = tuple(robot_action)
 
                 self.push_transition_to_aux_buffer(
                     state=state,
@@ -516,8 +529,12 @@ class PPOPhase2Trainer:
         else:
             n_iters = num_iterations
 
-        # Build PufferLib config dict (PuffeRL expects a flat dict)
+        # Build PufferLib config dict (PuffeRL expects a flat dict).
+        # Override device/seed from the trainer to avoid mismatch between
+        # the config fields and the actual trainer state.
         puffer_config = cfg.to_pufferlib_config()
+        puffer_config["device"] = str(self.device)
+        puffer_config["seed"] = cfg.seed
         total_timesteps = n_iters * puffer_config["batch_size"]
         puffer_config["total_timesteps"] = total_timesteps
 
