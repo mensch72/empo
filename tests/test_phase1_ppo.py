@@ -469,15 +469,17 @@ class TestPhase1PPOEnv:
             def __repr__(self):
                 return f"_RandomGoal({self.goal_id})"
 
-        _counter = [0]
+        _counter = 0
 
         def _counting_sampler(state, h_idx):
-            _counter[0] += 1
-            return _RandomGoal(_counter[0]), 1.0
+            nonlocal _counter
+            _counter += 1
+            return _RandomGoal(_counter), 1.0
 
         def _run(seed):
             """Run a short episode and return the sequence of goal IDs observed."""
-            _counter[0] = 0
+            nonlocal _counter
+            _counter = 0
             cfg = PPOPhase1Config(
                 num_actions=4, steps_per_episode=50, goal_resample_prob=0.5
             )
