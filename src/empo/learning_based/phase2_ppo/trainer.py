@@ -25,9 +25,8 @@ from __future__ import annotations
 import copy
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -168,9 +167,7 @@ class PPOPhase2Trainer:
             )
 
         # Auxiliary replay buffer
-        self.aux_replay_buffer = Phase2ReplayBuffer(
-            capacity=config.aux_buffer_size
-        )
+        self.aux_replay_buffer = Phase2ReplayBuffer(capacity=config.aux_buffer_size)
 
         # Counters
         self.global_env_step: int = 0
@@ -269,9 +266,7 @@ class PPOPhase2Trainer:
             for t in batch:
                 for h_idx, goal in t.goals.items():
                     # Forward pass (online network)
-                    pred = nets.v_h_e(
-                        t.state, world_model, h_idx, goal, self.device
-                    )
+                    pred = nets.v_h_e(t.state, world_model, h_idx, goal, self.device)
                     v_h_e_preds.append(pred.squeeze())
 
                     # Target from target network
@@ -328,9 +323,7 @@ class PPOPhase2Trainer:
             for t in batch:
                 for h_idx, goal in t.goals.items():
                     weight = t.goal_weights.get(h_idx, 1.0)
-                    pred = nets.x_h(
-                        t.state, world_model, h_idx, self.device
-                    )
+                    pred = nets.x_h(t.state, world_model, h_idx, self.device)
                     x_h_preds.append(pred.squeeze())
 
                     with torch.no_grad():
@@ -354,9 +347,7 @@ class PPOPhase2Trainer:
                 opt.zero_grad()
                 loss_x.backward()
                 if cfg.x_h_grad_clip is not None:
-                    nn.utils.clip_grad_norm_(
-                        nets.x_h.parameters(), cfg.x_h_grad_clip
-                    )
+                    nn.utils.clip_grad_norm_(nets.x_h.parameters(), cfg.x_h_grad_clip)
                 opt.step()
                 losses["x_h_loss"] = loss_x.item()
 
@@ -384,9 +375,7 @@ class PPOPhase2Trainer:
                                 t.state, world_model, h_idx, self.device
                             )
                             xv = x_h_target_net.apply_hard_clamp(xv)
-                            x_vals.append(
-                                max(xv.squeeze().item(), _X_H_MIN)
-                            )
+                            x_vals.append(max(xv.squeeze().item(), _X_H_MIN))
                     if x_vals:
                         x_t = torch.tensor(x_vals, device=self.device)
                         y_t = (x_t ** (-cfg.xi)).mean()
@@ -403,9 +392,7 @@ class PPOPhase2Trainer:
                 opt.zero_grad()
                 loss_u.backward()
                 if cfg.u_r_grad_clip is not None:
-                    nn.utils.clip_grad_norm_(
-                        nets.u_r.parameters(), cfg.u_r_grad_clip
-                    )
+                    nn.utils.clip_grad_norm_(nets.u_r.parameters(), cfg.u_r_grad_clip)
                 opt.step()
                 losses["u_r_loss"] = loss_u.item()
 
@@ -435,9 +422,7 @@ class PPOPhase2Trainer:
         # immediately visible.  Nothing to do here.
         pass
 
-    def _collect_aux_data_from_rollout(
-        self, pufferl: Any, vecenv: Any
-    ) -> None:
+    def _collect_aux_data_from_rollout(self, pufferl: Any, vecenv: Any) -> None:
         """Extract auxiliary transition data from environment aux buffers.
 
         Each :class:`EMPOWorldModelEnv` stores per-step auxiliary data in its
@@ -591,9 +576,7 @@ class PPOPhase2Trainer:
         )
 
         # Initialise PuffeRL training driver
-        pufferl = pufferlib.pufferl.PuffeRL(
-            puffer_config, vecenv, self.actor_critic
-        )
+        pufferl = pufferlib.pufferl.PuffeRL(puffer_config, vecenv, self.actor_critic)
 
         # Initial freeze of auxiliary networks and sync into envs
         self.freeze_auxiliary_networks()

@@ -228,7 +228,7 @@ class PPOPhase2Config:
     @property
     def num_joint_actions(self) -> int:
         """Total joint robot actions: |A|^N."""
-        return self.num_actions ** self.num_robots
+        return self.num_actions**self.num_robots
 
     def to_pufferlib_config(self) -> dict:
         """Build the flat config dict expected by ``pufferlib.pufferl.PuffeRL``.
@@ -241,7 +241,9 @@ class PPOPhase2Config:
             "batch_size": batch_size,
             "bptt_horizon": self.ppo_rollout_length,
             "minibatch_size": max(1, batch_size // max(1, self.ppo_num_minibatches)),
-            "max_minibatch_size": max(1, batch_size // max(1, self.ppo_num_minibatches)),
+            "max_minibatch_size": max(
+                1, batch_size // max(1, self.ppo_num_minibatches)
+            ),
             "update_epochs": self.ppo_update_epochs,
             "gamma": self.gamma_r,
             "gae_lambda": self.ppo_gae_lambda,

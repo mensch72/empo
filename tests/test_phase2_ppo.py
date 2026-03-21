@@ -24,9 +24,9 @@ import pytest
 import torch
 import gymnasium
 
-pufferlib = pytest.importorskip("pufferlib")
-import pufferlib.emulation  # noqa: E402
-import pufferlib.vector  # noqa: E402
+pytest.importorskip("pufferlib")
+import pufferlib.emulation  # noqa: E402,F401
+import pufferlib.vector  # noqa: E402,F401
 
 # ── PPO-path imports (new code under test) ──────────────────────────────
 from empo.learning_based.phase2_ppo.config import PPOPhase2Config
@@ -44,7 +44,6 @@ from empo.learning_based.phase2.replay_buffer import (
 from empo.learning_based.phase2.human_goal_ability import (
     BaseHumanGoalAchievementNetwork,
 )
-
 
 # ======================================================================
 # Fixtures & mocks
@@ -75,18 +74,14 @@ class MockWorldModel:
     def step(self, joint_action):
         self._step_count += 1
         # Deterministic successor: increment each agent's pos by its action
-        new_state = tuple(
-            (s + a) % 10 for s, a in zip(self._state, joint_action)
-        )
+        new_state = tuple((s + a) % 10 for s, a in zip(self._state, joint_action))
         self._state = new_state
         terminated = self._step_count >= 50
         return 0, 0.0, terminated, False, {}
 
     def transition_probabilities(self, state, joint_action):
         # Deterministic: single successor with prob 1.0
-        new_state = tuple(
-            (s + a) % 10 for s, a in zip(state, joint_action)
-        )
+        new_state = tuple((s + a) % 10 for s, a in zip(state, joint_action))
         return [(1.0, new_state)]
 
 
@@ -133,9 +128,7 @@ class _PufferLibCompatEnv(_ZeroObsEnv):
     def step(self, action):
         obs, reward, terminated, truncated, info = super().step(action)
         for key, value in info.items():
-            assert isinstance(
-                value, (int, float, np.integer, np.floating)
-            ), (
+            assert isinstance(value, (int, float, np.integer, np.floating)), (
                 f"EMPOWorldModelEnv.step() returned non-numeric info "
                 f"value for key {key!r}: {type(value).__name__}. "
                 f"Top-level info must contain only scalar numerics; "
@@ -176,9 +169,7 @@ class TestPPOPhase2Config:
         assert cfg.num_joint_actions == 7  # 7^1
 
     def test_custom_values(self):
-        cfg = PPOPhase2Config(
-            gamma_r=0.95, num_actions=3, num_robots=2
-        )
+        cfg = PPOPhase2Config(gamma_r=0.95, num_actions=3, num_robots=2)
         assert cfg.gamma_r == 0.95
         assert cfg.num_joint_actions == 9  # 3^2
 
@@ -263,8 +254,12 @@ class TestPPOPhase2Config:
         assert d["seed"] == 42
         # Should contain all keys expected by PuffeRL
         for key in [
-            "seed", "total_timesteps", "compile", "use_rnn",
-            "device", "anneal_lr",
+            "seed",
+            "total_timesteps",
+            "compile",
+            "use_rnn",
+            "device",
+            "anneal_lr",
         ]:
             assert key in d, f"Missing PufferLib key: {key}"
         # Verify critical defaults are sensible
@@ -473,9 +468,7 @@ class TestEMPOWorldModelEnv:
     def test_base_state_to_obs_raises(self):
         """Base EMPOWorldModelEnv._state_to_obs() raises NotImplementedError."""
         wm = MockWorldModel(n_agents=3, n_actions=5)
-        cfg = PPOPhase2Config(
-            num_actions=5, num_robots=1, steps_per_episode=50
-        )
+        cfg = PPOPhase2Config(num_actions=5, num_robots=1, steps_per_episode=50)
         env = EMPOWorldModelEnv(
             world_model=wm,
             human_policy_prior=mock_human_policy_prior,
@@ -533,7 +526,9 @@ class TestEMPOWorldModelEnv:
 
     def test_transition_probs_per_robot_action(self):
         cfg = PPOPhase2Config(
-            num_actions=5, num_robots=1, steps_per_episode=50,
+            num_actions=5,
+            num_robots=1,
+            steps_per_episode=50,
             compute_transition_probs=True,
         )
         env = self._make_env(config=cfg)
@@ -554,9 +549,7 @@ class TestEMPOWorldModelEnv:
         env.reset()
         terminated = False
         for _ in range(100):
-            _, _, terminated, truncated, _ = env.step(
-                env.action_space.sample()
-            )
+            _, _, terminated, truncated, _ = env.step(env.action_space.sample())
             if terminated or truncated:
                 break
         assert terminated  # MockWorldModel terminates after 50 steps
@@ -564,9 +557,7 @@ class TestEMPOWorldModelEnv:
     def test_episode_truncates_at_steps_per_episode(self):
         """Episode is truncated when step count reaches steps_per_episode."""
         wm = MockWorldModel(n_agents=3, n_actions=5)
-        cfg = PPOPhase2Config(
-            num_actions=5, num_robots=1, steps_per_episode=10
-        )
+        cfg = PPOPhase2Config(num_actions=5, num_robots=1, steps_per_episode=10)
         env = _ZeroObsEnv(
             world_model=wm,
             human_policy_prior=mock_human_policy_prior,
@@ -594,18 +585,14 @@ class TestEMPOWorldModelEnv:
             for _ in range(5):
                 _, reward, _, _, info = env.step(0)
                 aux = env._aux_buffer[-1]
-                trajectory.append(
-                    (aux["next_state"], aux["human_actions"])
-                )
+                trajectory.append((aux["next_state"], aux["human_actions"]))
             results.append(trajectory)
         assert results[0] == results[1]
 
     def test_non_contiguous_agent_indices(self):
         """Handles non-contiguous agent indices (e.g. [1, 3] human, [5] robot)."""
         wm = MockWorldModel(n_agents=6, n_actions=5)
-        cfg = PPOPhase2Config(
-            num_actions=5, num_robots=1, steps_per_episode=50
-        )
+        cfg = PPOPhase2Config(num_actions=5, num_robots=1, steps_per_episode=50)
         env = _ZeroObsEnv(
             world_model=wm,
             human_policy_prior=mock_human_policy_prior,
@@ -630,7 +617,9 @@ class TestEMPOWorldModelEnv:
         """Transition probs correctly iterate over joint actions for 2 robots."""
         wm = MockWorldModel(n_agents=4, n_actions=3)
         cfg = PPOPhase2Config(
-            num_actions=3, num_robots=2, steps_per_episode=50,
+            num_actions=3,
+            num_robots=2,
+            steps_per_episode=50,
             compute_transition_probs=True,
         )
         env = _ZeroObsEnv(
@@ -660,9 +649,7 @@ class TestEMPOWorldModelEnv:
     def test_multi_robot_action_space_is_flat_discrete(self):
         """Multi-robot env has flat Discrete(num_actions**num_robots) action space."""
         wm = MockWorldModel(n_agents=4, n_actions=3)
-        cfg = PPOPhase2Config(
-            num_actions=3, num_robots=2, steps_per_episode=50
-        )
+        cfg = PPOPhase2Config(num_actions=3, num_robots=2, steps_per_episode=50)
         env = EMPOWorldModelEnv(
             world_model=wm,
             human_policy_prior=mock_human_policy_prior,
@@ -673,7 +660,7 @@ class TestEMPOWorldModelEnv:
             obs_dim=3,
         )
         assert isinstance(env.action_space, gymnasium.spaces.Discrete)
-        assert env.action_space.n == 3 ** 2  # num_actions ** num_robots = 9
+        assert env.action_space.n == 3**2  # num_actions ** num_robots = 9
 
 
 # ======================================================================
@@ -705,9 +692,7 @@ class TestPPOPhase2Trainer:
         )
         # Mock auxiliary networks
         mock_v_h_e = MagicMock(spec=["parameters", "eval", "train"])
-        mock_v_h_e.parameters.return_value = iter(
-            [torch.zeros(1, requires_grad=True)]
-        )
+        mock_v_h_e.parameters.return_value = iter([torch.zeros(1, requires_grad=True)])
         aux = PPOAuxiliaryNetworks(v_h_e=mock_v_h_e)
         return PPOPhase2Trainer(ac, aux, cfg, device="cpu")
 
@@ -740,7 +725,9 @@ class TestPPOPhase2Trainer:
     def test_push_transition_to_aux_buffer_multi_robot(self):
         """push_transition_to_aux_buffer stores per-robot action tuple."""
         trainer = self._make_trainer(
-            num_actions=3, num_robots=2, hidden_dim=32,
+            num_actions=3,
+            num_robots=2,
+            hidden_dim=32,
         )
         trainer.push_transition_to_aux_buffer(
             state=(0, 0, 0, 0),
@@ -830,10 +817,15 @@ class TestPPOPhase2Trainer:
     def test_freeze_auxiliary_networks(self):
         """freeze_auxiliary_networks creates frozen target copies."""
         cfg = PPOPhase2Config(
-            num_actions=5, num_robots=1, hidden_dim=16,
+            num_actions=5,
+            num_robots=1,
+            hidden_dim=16,
         )
         ac = EMPOActorCritic(
-            state_encoder=None, hidden_dim=16, num_actions=5, obs_dim=3,
+            state_encoder=None,
+            hidden_dim=16,
+            num_actions=5,
+            obs_dim=3,
         )
         v_h_e = _MockVhE()
         aux = PPOAuxiliaryNetworks(v_h_e=v_h_e)
@@ -940,7 +932,12 @@ class TestIsolation:
         """The DQN-path __init__.py should NOT import from phase2_ppo."""
         init_path = os.path.join(
             os.path.dirname(__file__),
-            "..", "src", "empo", "learning_based", "phase2", "__init__.py"
+            "..",
+            "src",
+            "empo",
+            "learning_based",
+            "phase2",
+            "__init__.py",
         )
         # Normalise the path
         init_path = os.path.normpath(init_path)
@@ -949,6 +946,6 @@ class TestIsolation:
                 content = f.read()
             # Check for actual imports/references to the PPO module, not just
             # any mention of "ppo" (which could appear in comments/docs).
-            assert "phase2_ppo" not in content, (
-                "The DQN-path __init__.py should not reference phase2_ppo"
-            )
+            assert (
+                "phase2_ppo" not in content
+            ), "The DQN-path __init__.py should not reference phase2_ppo"

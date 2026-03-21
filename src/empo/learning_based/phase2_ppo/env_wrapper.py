@@ -108,7 +108,7 @@ class EMPOWorldModelEnv(gymnasium.Env):
         # inside _build_joint_action() via _flat_index_to_tuple().
         # This matches EMPOActorCritic which outputs logits of shape
         # (batch, num_actions ** num_robots) — a single Discrete head.
-        num_joint_actions = num_actions ** num_robots
+        num_joint_actions = num_actions**num_robots
         self.action_space = spaces.Discrete(num_joint_actions)
 
         # Observation space
@@ -151,12 +151,10 @@ class EMPOWorldModelEnv(gymnasium.Env):
         seed: Optional[int] = None,
         options: Optional[dict] = None,
     ) -> Tuple[np.ndarray, dict]:
-        super().reset(seed=seed)
+        super().reset(seed=seed, options=options)
         # Seed the internal RNG from Gymnasium's np_random
-        self._py_rng = np.random.RandomState(
-            self.np_random.integers(0, 2**31)
-        )
-        self.world_model.reset(seed=seed)
+        self._py_rng = np.random.RandomState(self.np_random.integers(0, 2**31))
+        self.world_model.reset(seed=seed, options=options)
         state = self.world_model.get_state()
 
         # Sample initial goals for each human
@@ -168,9 +166,7 @@ class EMPOWorldModelEnv(gymnasium.Env):
         info: Dict[str, Any] = {"state": state}
         return obs, info
 
-    def step(
-        self, action: Any
-    ) -> Tuple[np.ndarray, float, bool, bool, dict]:
+    def step(self, action: Any) -> Tuple[np.ndarray, float, bool, bool, dict]:
         # -- Capture pre-transition state for U_r(s_t) --
         pre_state = self.world_model.get_state()
 
@@ -202,9 +198,7 @@ class EMPOWorldModelEnv(gymnasium.Env):
         # |A|^N joint actions).  Disable via config.compute_transition_probs
         # when auxiliary training does not need model-based targets.
         if getattr(self.config, "compute_transition_probs", False):
-            transition_probs = self._compute_transition_probs(
-                pre_state, human_actions
-            )
+            transition_probs = self._compute_transition_probs(pre_state, human_actions)
         else:
             transition_probs = None
 
@@ -230,18 +224,20 @@ class EMPOWorldModelEnv(gymnasium.Env):
 
         # Store auxiliary data for trainer to read directly (bypasses
         # PufferLib info aggregation which only handles numeric scalars).
-        self._aux_buffer.append({
-            "state": pre_state,
-            "next_state": next_state,
-            "goals": dict(self._goals),
-            "goal_weights": dict(self._goal_weights),
-            "human_actions": human_actions,
-            "transition_probs": transition_probs,
-            "robot_action": robot_action_tuple,
-            "terminated": terminated,
-            "truncated": truncated,
-            "terminal": bool(terminated or truncated),
-        })
+        self._aux_buffer.append(
+            {
+                "state": pre_state,
+                "next_state": next_state,
+                "goals": dict(self._goals),
+                "goal_weights": dict(self._goal_weights),
+                "human_actions": human_actions,
+                "transition_probs": transition_probs,
+                "robot_action": robot_action_tuple,
+                "terminated": terminated,
+                "truncated": truncated,
+                "terminal": bool(terminated or truncated),
+            }
+        )
         return obs, u_r, terminated, truncated, info
 
     # ------------------------------------------------------------------
@@ -269,13 +265,9 @@ class EMPOWorldModelEnv(gymnasium.Env):
             goal = self._goals.get(h_idx)
             if goal is None:
                 # Uniform random if no goal assigned yet
-                actions[h_idx] = int(
-                    self._py_rng.randint(self.config.num_actions)
-                )
+                actions[h_idx] = int(self._py_rng.randint(self.config.num_actions))
             else:
-                probs = self.human_policy_prior(
-                    state, h_idx, goal, self.world_model
-                )
+                probs = self.human_policy_prior(state, h_idx, goal, self.world_model)
                 actions[h_idx] = int(
                     self._py_rng.choice(len(probs), p=np.asarray(probs))
                 )
@@ -333,9 +325,7 @@ class EMPOWorldModelEnv(gymnasium.Env):
         # v_h_e is not used directly for reward computation (only U_r and
         # X_h are), but we include it in the device probe below as a
         # fallback when neither U_r nor X_h has parameters.
-        v_h_e_net = (
-            getattr(nets, "v_h_e_target", None) or getattr(nets, "v_h_e", None)
-        )
+        v_h_e_net = getattr(nets, "v_h_e_target", None) or getattr(nets, "v_h_e", None)
 
         # Infer device from aux network parameters, defaulting to cpu
         device = "cpu"
@@ -350,27 +340,17 @@ class EMPOWorldModelEnv(gymnasium.Env):
         with torch.no_grad():
             # Option A: dedicated U_r network
             if u_r_net is not None:
-                _, u_r = u_r_net.forward(
-                    state, self.world_model, device
-                )
+                _, u_r = u_r_net(state, self.world_model, device)
                 return float(u_r.item())
             # Option B: compute from X_h values directly (eq. 8)
             if x_h_net is not None:
                 x_h_vals = []
                 for h_idx in self.human_agent_indices:
-                    x_h = x_h_net.forward(
-                        state, self.world_model, h_idx, device
-                    )
-                    x_h_vals.append(
-                        min(max(float(x_h.item()), _X_H_MIN), 1.0)
-                    )
+                    x_h = x_h_net(state, self.world_model, h_idx, device)
+                    x_h_vals.append(min(max(float(x_h.item()), _X_H_MIN), 1.0))
                 if x_h_vals:
-                    y = float(
-                        np.mean(
-                            [x ** (-self.config.xi) for x in x_h_vals]
-                        )
-                    )
-                    return -(y ** self.config.eta)
+                    y = float(np.mean([x ** (-self.config.xi) for x in x_h_vals]))
+                    return -(y**self.config.eta)
         return 0.0
 
     def _compute_transition_probs(
