@@ -201,7 +201,7 @@ class EMPOWorldModelEnv(gymnasium.Env):
         # This can be expensive for multi-robot environments (enumerates
         # |A|^N joint actions).  Disable via config.compute_transition_probs
         # when auxiliary training does not need model-based targets.
-        if getattr(self.config, "compute_transition_probs", True):
+        if getattr(self.config, "compute_transition_probs", False):
             transition_probs = self._compute_transition_probs(
                 pre_state, human_actions
             )
@@ -398,12 +398,21 @@ class EMPOWorldModelEnv(gymnasium.Env):
     def _state_to_obs(self, state: Any) -> np.ndarray:
         """Convert a world-model state to a flat observation.
 
-        Subclasses (e.g. the MultiGrid-specific wrapper) should override
-        this to produce a proper observation using the environment's encoder.
-        The base implementation returns a zero vector of the right shape.
+        Subclasses (e.g. the MultiGrid-specific wrapper) must override
+        this to produce a proper observation using the world_model's encoder
+        or raw observations.
+
+        The base implementation deliberately raises ``NotImplementedError`` to
+        avoid silently training PPO on constant (zero) observations when
+        ``EMPOWorldModelEnv`` is used directly.  Callers should either
+        subclass ``EMPOWorldModelEnv`` and implement a real encoder here, or
+        extend the constructor to accept an explicit observation function.
         """
-        return np.zeros(
-            self.observation_space.shape, dtype=np.float32
+        raise NotImplementedError(
+            "EMPOWorldModelEnv._state_to_obs() must be overridden to "
+            "convert world_model states to observations. "
+            "Provide an encoder (e.g., via a subclass) instead of "
+            "relying on the base implementation."
         )
 
 

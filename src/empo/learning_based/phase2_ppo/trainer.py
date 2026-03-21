@@ -601,11 +601,23 @@ class PPOPhase2Trainer:
 
         all_metrics: List[Dict[str, float]] = []
         iteration = 0
-        # Use a driver env for auxiliary forward passes (world_model access)
+        # Use a driver env for auxiliary forward passes (world_model access).
+        # Bounded unwrapping to reach underlying EMPOWorldModelEnv, matching
+        # the pattern in _collect_aux_data_from_rollout().
         driver_env = vecenv.driver_env
-        wm = getattr(driver_env, "world_model", None)
-        if wm is None and hasattr(driver_env, "env"):
-            wm = getattr(driver_env.env, "world_model", None)
+        wm = None
+        current_env = driver_env
+        _MAX_UNWRAP_DEPTH = 20
+        for _ in range(_MAX_UNWRAP_DEPTH):
+            if current_env is None:
+                break
+            wm = getattr(current_env, "world_model", None)
+            if wm is not None:
+                break
+            if hasattr(current_env, "env"):
+                current_env = current_env.env
+            else:
+                break
 
         while pufferl.global_step < total_timesteps and iteration < n_iters:
             self.ppo_iteration = iteration

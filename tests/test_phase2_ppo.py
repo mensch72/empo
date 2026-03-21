@@ -101,7 +101,19 @@ def mock_goal_sampler(state, human_idx):
     return f"goal_{human_idx}", 1.0
 
 
-class _PufferLibCompatEnv(EMPOWorldModelEnv):
+class _ZeroObsEnv(EMPOWorldModelEnv):
+    """Test subclass that provides a trivial zero-vector observation encoder.
+
+    ``EMPOWorldModelEnv._state_to_obs()`` deliberately raises
+    ``NotImplementedError`` to prevent silent training on constant zeros.
+    This subclass provides the minimal override needed for tests.
+    """
+
+    def _state_to_obs(self, state):
+        return np.zeros(self.observation_space.shape, dtype=np.float32)
+
+
+class _PufferLibCompatEnv(_ZeroObsEnv):
     """Testing shim that asserts a numeric-only top-level ``info`` dict.
 
     ``EMPOWorldModelEnv.step()`` already follows the contract that all
@@ -447,7 +459,7 @@ class TestEMPOWorldModelEnv:
         cfg = config or PPOPhase2Config(
             num_actions=5, num_robots=1, steps_per_episode=50
         )
-        return EMPOWorldModelEnv(
+        return _ZeroObsEnv(
             world_model=wm,
             human_policy_prior=mock_human_policy_prior,
             goal_sampler=mock_goal_sampler,
@@ -457,6 +469,24 @@ class TestEMPOWorldModelEnv:
             obs_dim=3,
             **kwargs,
         )
+
+    def test_base_state_to_obs_raises(self):
+        """Base EMPOWorldModelEnv._state_to_obs() raises NotImplementedError."""
+        wm = MockWorldModel(n_agents=3, n_actions=5)
+        cfg = PPOPhase2Config(
+            num_actions=5, num_robots=1, steps_per_episode=50
+        )
+        env = EMPOWorldModelEnv(
+            world_model=wm,
+            human_policy_prior=mock_human_policy_prior,
+            goal_sampler=mock_goal_sampler,
+            human_agent_indices=[0, 1],
+            robot_agent_indices=[2],
+            config=cfg,
+            obs_dim=3,
+        )
+        with pytest.raises(NotImplementedError):
+            env.reset()
 
     def test_reset_returns_obs_and_info(self):
         env = self._make_env()
@@ -537,7 +567,7 @@ class TestEMPOWorldModelEnv:
         cfg = PPOPhase2Config(
             num_actions=5, num_robots=1, steps_per_episode=10
         )
-        env = EMPOWorldModelEnv(
+        env = _ZeroObsEnv(
             world_model=wm,
             human_policy_prior=mock_human_policy_prior,
             goal_sampler=mock_goal_sampler,
@@ -576,7 +606,7 @@ class TestEMPOWorldModelEnv:
         cfg = PPOPhase2Config(
             num_actions=5, num_robots=1, steps_per_episode=50
         )
-        env = EMPOWorldModelEnv(
+        env = _ZeroObsEnv(
             world_model=wm,
             human_policy_prior=mock_human_policy_prior,
             goal_sampler=mock_goal_sampler,
@@ -603,7 +633,7 @@ class TestEMPOWorldModelEnv:
             num_actions=3, num_robots=2, steps_per_episode=50,
             compute_transition_probs=True,
         )
-        env = EMPOWorldModelEnv(
+        env = _ZeroObsEnv(
             world_model=wm,
             human_policy_prior=mock_human_policy_prior,
             goal_sampler=mock_goal_sampler,
@@ -613,7 +643,6 @@ class TestEMPOWorldModelEnv:
             obs_dim=3,
         )
         env.reset(seed=0)
-        # Multi-robot: action is a flat integer index into joint action space
         # (0, 1) → 0 + 1*3 = 3 in the flat index
         flat_action = 0 + 1 * 3  # action_tuple_to_index((0, 1))
         _, _, _, _, _ = env.step(flat_action)
