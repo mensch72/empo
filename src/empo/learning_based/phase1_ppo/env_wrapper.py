@@ -131,8 +131,8 @@ class Phase1PPOEnv(gymnasium.Env):
         next_state = self.world_model.get_state()
         self._step_count += 1
 
-        # Truncate at episode length limit
-        if self._step_count >= self.config.steps_per_episode:
+        # Truncate at episode length limit (only if not already terminated)
+        if (not terminated) and self._step_count >= self.config.steps_per_episode:
             truncated = True
 
         # Compute reward: binary goal achievement

@@ -195,7 +195,15 @@ class MultiGridPhase1PPOEnv(Phase1PPOEnv):
         - State features from MultiGridStateEncoder
         - Goal features from MultiGridGoalEncoder
         """
-        encoder_device = next(self._state_encoder.parameters()).device
+        # Resolve encoder device safely — identity-mode encoders may have
+        # no parameters (nn.Identity), so fall back to first buffer or CPU.
+        try:
+            encoder_device = next(self._state_encoder.parameters()).device
+        except StopIteration:
+            try:
+                encoder_device = next(self._state_encoder.buffers()).device
+            except StopIteration:
+                encoder_device = torch.device("cpu")
         with torch.no_grad():
             # Encode state
             grid_t, glob_f, agent_f, inter_f = self._state_encoder.tensorize_state(

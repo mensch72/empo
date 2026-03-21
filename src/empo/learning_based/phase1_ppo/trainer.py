@@ -147,14 +147,19 @@ class PPOPhase1Trainer:
     def load_checkpoint(self, path: str) -> None:
         """Restore Phase 1 network state and counters from *path*.
 
-        .. warning::
+        Phase 1 checkpoints currently store only:
 
-           ``torch.load`` with ``weights_only=False`` is used here so that
-           optimiser state dicts (which contain non-tensor objects) can be
-           restored.  Only load checkpoints from trusted sources.
+        - The actor-critic ``state_dict``.
+        - Scalar training counters (``global_env_step``, ``ppo_iteration``).
+
+        They do **not** include PPO/PuffeRL optimiser state, rollout buffers,
+        or other non-tensor objects.  We therefore load with
+        ``weights_only=True`` to restrict deserialization to tensors and basic
+        types and reduce the attack surface.  As with any checkpointing
+        mechanism, only load files from trusted sources.
         """
         checkpoint = torch.load(
-            path, map_location=self.device, weights_only=False
+            path, map_location=self.device, weights_only=True
         )
         self.actor_critic.load_state_dict(checkpoint["actor_critic"])
         self.global_env_step = checkpoint.get("global_env_step", 0)
@@ -236,11 +241,27 @@ class PPOPhase1Trainer:
                 "iteration": iteration,
                 "global_env_step": self.global_env_step,
             }
+
+            # Merge in any losses/metrics exposed by PuffeRL (e.g., policy/value loss, entropy)
+            losses = getattr(pufferl, "losses", None)
+            if isinstance(losses, dict):
+                for key, value in losses.items():
+                    # Only include scalar numeric values
+                    if isinstance(value, (int, float)):
+                        metrics[key] = float(value)
+
             all_metrics.append(metrics)
 
             # Logging
             if cfg.log_interval > 0 and iteration % cfg.log_interval == 0:
                 self._log_scalar("phase1/global_env_step", self.global_env_step, iteration)
+
+                # Log additional scalar metrics (e.g., PPO losses) to TensorBoard
+                if self._tb_writer is not None:
+                    for key, value in metrics.items():
+                        if key in ("iteration", "global_env_step"):
+                            continue
+                        self._tb_writer.add_scalar(f"phase1/{key}", value, iteration)
 
             # Checkpointing
             if (
