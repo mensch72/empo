@@ -36,6 +36,7 @@ from empo.learning_based.phase2_ppo.env_wrapper import EMPOWorldModelEnv
 from empo.learning_based.phase2_ppo.trainer import (
     PPOPhase2Trainer,
     PPOAuxiliaryNetworks,
+    HAS_TENSORBOARD,
 )
 
 # ── Shared read-only imports (from DQN path, not modified) ──────────────
@@ -267,6 +268,77 @@ class TestPPOPhase2Config:
         assert d["device"] == "cpu"
         assert d["use_rnn"] is False
         assert isinstance(d["seed"], int)
+
+    def test_warmup_stage_boundaries(self):
+        """get_warmup_stage() returns correct stage at boundary values."""
+        cfg = PPOPhase2Config(
+            warmup_v_h_e_steps=100,
+            warmup_x_h_steps=200,
+            warmup_u_r_steps=300,
+        )
+        assert cfg.get_warmup_stage(0) == 0
+        assert cfg.get_warmup_stage(99) == 0
+        assert cfg.get_warmup_stage(100) == 1
+        assert cfg.get_warmup_stage(199) == 1
+        assert cfg.get_warmup_stage(200) == 2
+        assert cfg.get_warmup_stage(299) == 2
+        assert cfg.get_warmup_stage(300) == 3
+        assert cfg.get_warmup_stage(1000) == 3
+
+    def test_active_aux_networks(self):
+        """get_active_aux_networks() returns the correct set per stage."""
+        cfg = PPOPhase2Config(
+            warmup_v_h_e_steps=10,
+            warmup_x_h_steps=20,
+            warmup_u_r_steps=30,
+        )
+        assert cfg.get_active_aux_networks(0) == {"v_h_e"}
+        assert cfg.get_active_aux_networks(10) == {"v_h_e", "x_h"}
+        assert cfg.get_active_aux_networks(20) == {"v_h_e", "x_h", "u_r"}
+        assert cfg.get_active_aux_networks(30) == {"v_h_e", "x_h", "u_r"}
+
+    def test_is_in_warmup(self):
+        cfg = PPOPhase2Config(
+            warmup_v_h_e_steps=30,
+            warmup_x_h_steps=60,
+            warmup_u_r_steps=100,
+        )
+        assert cfg.is_in_warmup(0) is True
+        assert cfg.is_in_warmup(99) is True
+        assert cfg.is_in_warmup(100) is False
+
+    def test_warmup_stage_name(self):
+        cfg = PPOPhase2Config(
+            warmup_v_h_e_steps=10,
+            warmup_x_h_steps=20,
+            warmup_u_r_steps=30,
+        )
+        assert "V_h^e" in cfg.get_warmup_stage_name(0)
+        assert "X_h" in cfg.get_warmup_stage_name(15)
+        assert "U_r" in cfg.get_warmup_stage_name(25)
+        assert "PPO" in cfg.get_warmup_stage_name(
+            30
+        ).upper() or "full" in cfg.get_warmup_stage_name(30)
+
+    def test_warmup_threshold_validation(self):
+        """warmup thresholds must be non-decreasing."""
+        with pytest.raises(ValueError, match="non-decreasing"):
+            PPOPhase2Config(
+                warmup_v_h_e_steps=200,
+                warmup_x_h_steps=100,
+                warmup_u_r_steps=300,
+            )
+
+    def test_zero_warmup(self):
+        """All warmup steps=0 means no warm-up (stage 3 immediately)."""
+        cfg = PPOPhase2Config(
+            warmup_v_h_e_steps=0,
+            warmup_x_h_steps=0,
+            warmup_u_r_steps=0,
+        )
+        assert cfg.is_in_warmup(0) is False
+        assert cfg.get_warmup_stage(0) == 3
+        assert cfg.get_total_warmup_steps() == 0
 
 
 # ======================================================================
@@ -859,6 +931,10 @@ class TestPPOPhase2Trainer:
             aux_buffer_size=500,
             batch_size=4,
             steps_per_episode=50,
+            # Skip warm-up for this test (tested separately)
+            warmup_v_h_e_steps=0,
+            warmup_x_h_steps=0,
+            warmup_u_r_steps=0,
         )
         ac = EMPOActorCritic(
             state_encoder=None,
@@ -894,6 +970,222 @@ class TestPPOPhase2Trainer:
         for m in metrics:
             assert "iteration" in m
             assert "global_step" in m
+
+    def test_warmup_runs_before_ppo(self):
+        """Warm-up produces metrics with warmup_stage before PPO metrics."""
+        cfg = PPOPhase2Config(
+            num_actions=5,
+            num_robots=1,
+            hidden_dim=16,
+            ppo_rollout_length=8,
+            ppo_num_minibatches=2,
+            ppo_update_epochs=1,
+            num_envs=4,
+            num_ppo_iterations=2,
+            aux_training_steps_per_iteration=1,
+            aux_buffer_size=500,
+            batch_size=4,
+            steps_per_episode=50,
+            # Short warm-up so test is fast.
+            warmup_v_h_e_steps=10,
+            warmup_x_h_steps=10,
+            warmup_u_r_steps=20,
+        )
+        ac = EMPOActorCritic(
+            state_encoder=None,
+            hidden_dim=16,
+            num_actions=5,
+            obs_dim=3,
+        )
+        v_h_e = _MockVhE()
+        aux = PPOAuxiliaryNetworks(v_h_e=v_h_e)
+        trainer = PPOPhase2Trainer(ac, aux, cfg, device="cpu")
+
+        def env_creator():
+            wm = MockWorldModel(n_agents=3, n_actions=5)
+            return _PufferLibCompatEnv(
+                world_model=wm,
+                human_policy_prior=mock_human_policy_prior,
+                goal_sampler=mock_goal_sampler,
+                human_agent_indices=[0, 1],
+                robot_agent_indices=[2],
+                config=cfg,
+                obs_dim=3,
+            )
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(torch, "nan", torch.tensor(float("nan")))
+            metrics = trainer.train(env_creator, num_iterations=2)
+
+        # Warm-up metrics have a warmup_stage key; PPO metrics have iteration
+        warmup_metrics = [m for m in metrics if "warmup_stage" in m]
+        ppo_metrics = [m for m in metrics if "iteration" in m]
+        assert len(warmup_metrics) > 0, "Expected warm-up metrics"
+        assert len(ppo_metrics) == 2, "Expected 2 PPO iteration metrics"
+        # aux_training_step should have advanced beyond warm-up
+        assert trainer.aux_training_step >= 20
+
+    def test_active_networks_filter(self):
+        """train_auxiliary_step with active_networks filters which nets train."""
+        cfg = PPOPhase2Config(
+            num_actions=5,
+            num_robots=1,
+            hidden_dim=16,
+            batch_size=2,
+            aux_buffer_size=100,
+            warmup_v_h_e_steps=0,
+            warmup_x_h_steps=0,
+            warmup_u_r_steps=0,
+        )
+        v_h_e = _MockVhE()
+        from empo.learning_based.phase2.aggregate_goal_ability import (
+            BaseAggregateGoalAbilityNetwork,
+        )
+
+        class _MockXh(BaseAggregateGoalAbilityNetwork):
+            def __init__(self):
+                super().__init__(zeta=2.0)
+                self._linear = torch.nn.Linear(1, 1)
+
+            def forward(self, state, world_model, human_agent_idx, device="cpu"):
+                return self.apply_hard_clamp(
+                    self._linear(torch.zeros(1, device=device))
+                )
+
+            def get_config(self):
+                return {"type": "mock_x_h"}
+
+        x_h = _MockXh()
+        ac = EMPOActorCritic(
+            state_encoder=None,
+            hidden_dim=16,
+            num_actions=5,
+            obs_dim=3,
+        )
+        aux = PPOAuxiliaryNetworks(v_h_e=v_h_e, x_h=x_h)
+        trainer = PPOPhase2Trainer(ac, aux, cfg, device="cpu")
+        trainer.freeze_auxiliary_networks()
+
+        # Use a real mock world model so forward passes execute
+        wm = MockWorldModel(n_agents=3, n_actions=5)
+
+        # Populate the buffer with transitions that include goals
+        class _DummyGoal:
+            def is_achieved(self, state):
+                return 0
+
+            def __hash__(self):
+                return 42
+
+            def __eq__(self, other):
+                return isinstance(other, _DummyGoal)
+
+        goal = _DummyGoal()
+        for _ in range(5):
+            trainer.push_transition_to_aux_buffer(
+                state=(0, 0, 0),
+                next_state=(1, 1, 1),
+                robot_action=(0,),
+                goals={0: goal},
+                goal_weights={0: 1.0},
+                human_actions=[0],
+                transition_probs=None,
+                terminal=False,
+            )
+
+        # With all networks active, both v_h_e_loss and x_h_loss appear
+        losses_all = trainer.train_auxiliary_step(
+            world_model=wm, active_networks={"v_h_e", "x_h"}
+        )
+        assert "v_h_e_loss" in losses_all
+        assert "x_h_loss" in losses_all
+
+        # With only v_h_e active, x_h_loss is absent
+        losses_v_only = trainer.train_auxiliary_step(
+            world_model=wm, active_networks={"v_h_e"}
+        )
+        assert "v_h_e_loss" in losses_v_only
+        assert "x_h_loss" not in losses_v_only
+
+    def test_checkpoint_save_load(self):
+        """save_checkpoint / load_checkpoint roundtrips trainer state."""
+        import tempfile
+
+        cfg = PPOPhase2Config(
+            num_actions=5,
+            num_robots=1,
+            hidden_dim=16,
+            warmup_v_h_e_steps=0,
+            warmup_x_h_steps=0,
+            warmup_u_r_steps=0,
+        )
+        ac = EMPOActorCritic(
+            state_encoder=None,
+            hidden_dim=16,
+            num_actions=5,
+            obs_dim=3,
+        )
+        v_h_e = _MockVhE()
+        aux = PPOAuxiliaryNetworks(v_h_e=v_h_e)
+        trainer = PPOPhase2Trainer(ac, aux, cfg, device="cpu")
+        trainer.global_env_step = 42
+        trainer.ppo_iteration = 7
+        trainer.aux_training_step = 99
+
+        with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
+            ckpt_path = f.name
+
+        try:
+            saved_path = trainer.save_checkpoint(ckpt_path)
+            assert os.path.isfile(saved_path)
+
+            # Create a fresh trainer and load
+            ac2 = EMPOActorCritic(
+                state_encoder=None,
+                hidden_dim=16,
+                num_actions=5,
+                obs_dim=3,
+            )
+            v_h_e2 = _MockVhE()
+            aux2 = PPOAuxiliaryNetworks(v_h_e=v_h_e2)
+            trainer2 = PPOPhase2Trainer(ac2, aux2, cfg, device="cpu")
+            trainer2.load_checkpoint(saved_path)
+
+            assert trainer2.global_env_step == 42
+            assert trainer2.ppo_iteration == 7
+            assert trainer2.aux_training_step == 99
+        finally:
+            if os.path.isfile(ckpt_path):
+                os.unlink(ckpt_path)
+
+    def test_tensorboard_writer_initialised(self):
+        """writer is initialised when tensorboard_dir is set."""
+        import tempfile
+
+        cfg = PPOPhase2Config(
+            num_actions=5,
+            num_robots=1,
+            hidden_dim=16,
+        )
+        ac = EMPOActorCritic(
+            state_encoder=None,
+            hidden_dim=16,
+            num_actions=5,
+            obs_dim=3,
+        )
+        v_h_e = _MockVhE()
+        aux = PPOAuxiliaryNetworks(v_h_e=v_h_e)
+        trainer = PPOPhase2Trainer(ac, aux, cfg, device="cpu")
+        assert trainer.writer is None  # before init
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trainer.config.tensorboard_dir = tmpdir
+            trainer._init_tensorboard()
+            if HAS_TENSORBOARD:
+                assert trainer.writer is not None
+                trainer.writer.close()
+            else:
+                assert trainer.writer is None
 
 
 # ======================================================================

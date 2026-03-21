@@ -7,7 +7,7 @@ are intentionally duplicated to avoid coupling between the two code paths.
 """
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Set
 
 
 @dataclass
@@ -173,6 +173,14 @@ class PPOPhase2Config:
     device: str = "cpu"
     seed: int = 1
 
+    # ── Logging ───────────────────────────────────────────────────────────
+    tensorboard_dir: Optional[str] = None
+    log_interval: int = 1
+
+    # ── Checkpointing ────────────────────────────────────────────────────
+    checkpoint_interval: int = 0  # 0 = disabled; otherwise save every N PPO iters
+    checkpoint_dir: Optional[str] = None
+
     # ── Performance flags ─────────────────────────────────────────────────
     # Transition-probability computation on every env step is expensive for
     # multi-robot (|A|^N) and currently unused by train_auxiliary_step().
@@ -191,6 +199,18 @@ class PPOPhase2Config:
             raise ValueError(f"gamma_r must be in [0, 1], got {self.gamma_r}")
         if self.gamma_h < 0.0 or self.gamma_h > 1.0:
             raise ValueError(f"gamma_h must be in [0, 1], got {self.gamma_h}")
+        # Warm-up thresholds must be non-decreasing (cumulative).
+        if not (
+            self.warmup_v_h_e_steps <= self.warmup_x_h_steps <= self.warmup_u_r_steps
+        ):
+            raise ValueError(
+                "Warm-up thresholds must be non-decreasing: "
+                f"warmup_v_h_e_steps={self.warmup_v_h_e_steps} <= "
+                f"warmup_x_h_steps={self.warmup_x_h_steps} <= "
+                f"warmup_u_r_steps={self.warmup_u_r_steps}"
+            )
+        if self.log_interval < 1:
+            raise ValueError(f"log_interval must be >= 1, got {self.log_interval}")
 
     # ── Convenience helpers ──────────────────────────────────────────────
 
@@ -205,6 +225,52 @@ class PPOPhase2Config:
         So ``warmup_u_r_steps`` is the cumulative total of all warm-up.
         """
         return self.warmup_u_r_steps
+
+    def is_in_warmup(self, training_step: int) -> bool:
+        """Return ``True`` while auxiliary-only warm-up is active."""
+        return training_step < self.warmup_u_r_steps
+
+    def get_warmup_stage(self, training_step: int) -> int:
+        """Numeric warm-up stage at *training_step*.
+
+        Stages::
+
+            0: V_h^e only            (0 ≤ step < warmup_v_h_e_steps)
+            1: V_h^e + X_h           (warmup_v_h_e_steps ≤ step < warmup_x_h_steps)
+            2: V_h^e + X_h + U_r     (warmup_x_h_steps ≤ step < warmup_u_r_steps)
+            3: Full PPO training     (step ≥ warmup_u_r_steps)
+        """
+        if training_step < self.warmup_v_h_e_steps:
+            return 0
+        if training_step < self.warmup_x_h_steps:
+            return 1
+        if training_step < self.warmup_u_r_steps:
+            return 2
+        return 3
+
+    _WARMUP_STAGE_NAMES = {
+        0: "V_h^e only",
+        1: "V_h^e + X_h",
+        2: "V_h^e + X_h + U_r",
+        3: "full PPO",
+    }
+
+    def get_warmup_stage_name(self, training_step: int) -> str:
+        """Human-readable name for the current warm-up stage."""
+        return self._WARMUP_STAGE_NAMES[self.get_warmup_stage(training_step)]
+
+    def get_active_aux_networks(self, training_step: int) -> Set[str]:
+        """Set of auxiliary-network names to train at *training_step*.
+
+        V_h^e is always active; X_h and U_r are added according to the
+        staged warm-up schedule.
+        """
+        active: Set[str] = {"v_h_e"}
+        if training_step >= self.warmup_v_h_e_steps:
+            active.add("x_h")
+        if training_step >= self.warmup_x_h_steps:
+            active.add("u_r")
+        return active
 
     def get_entropy_coef(self, training_step: int) -> float:
         """Linearly-annealed entropy coefficient.

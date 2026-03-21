@@ -424,3 +424,92 @@ Even with zero bias (perfect prediction of the expected value), the variance ter
 - **Check total training time**: May need more episodes after warmup
 - **Verify environment rewards**: Ensure human goals are achievable
 - **Inspect TensorBoard**: Look for signs of instability or non-convergence
+
+---
+
+## PPO-Path Warm-up
+
+The PPO-based Phase 2 trainer (`phase2_ppo`) uses a simplified warm-up that
+follows the same principle — **break mutual dependencies by training auxiliary
+networks first under a fixed (uniform random) robot policy** — but adapts it
+to the PPO context where the robot policy is an explicit neural network rather
+than a power-law softmax over Q-values.
+
+### Differences from the DQN Warm-up
+
+| Aspect | DQN warm-up (Stages 0–6) | PPO warm-up (Stages 0–2) |
+|--------|--------------------------|--------------------------|
+| **β_r = 0** | Robot samples uniformly from power-law softmax | Robot is not used; env stepped with random actions |
+| **Stages** | 7 stages (V_h^e → X_h → U_r → Q_r → V_r → ramp → full) | 3 stages (V_h^e → X_h → U_r), then PPO |
+| **PPO involvement** | N/A | PPO loop starts only after warm-up |
+| **Buffer clearing** | At ramp-up boundaries | At end of warm-up |
+| **Networks** | V_h^e, X_h, U_r, Q_r, V_r, RND | V_h^e, X_h, U_r (actor-critic trained by PPO) |
+
+### PPO Warm-up Stages
+
+```
+Stage 0:  V_h^e only           (0 ≤ step < warmup_v_h_e_steps)
+Stage 1:  V_h^e + X_h          (warmup_v_h_e_steps ≤ step < warmup_x_h_steps)
+Stage 2:  V_h^e + X_h + U_r    (warmup_x_h_steps ≤ step < warmup_u_r_steps)
+Stage 3:  Full PPO training     (step ≥ warmup_u_r_steps)
+```
+
+The thresholds are **cumulative** (not per-stage durations).
+
+### Configuration
+
+```python
+PPOPhase2Config(
+    warmup_v_h_e_steps=5000,   # End of Stage 0
+    warmup_x_h_steps=7500,     # End of Stage 1
+    warmup_u_r_steps=10000,    # End of Stage 2 / total warm-up
+)
+```
+
+Set all three to `0` to skip warm-up entirely (useful for testing or when
+auxiliary networks have been pre-trained).
+
+### How It Works
+
+1. **Environment stepping**: A single environment instance is stepped with
+   uniformly random robot actions.  No PufferLib vectorisation is needed
+   during warm-up.
+
+2. **Auxiliary data collection**: Transition data (states, goals, human
+   actions) flows through the env wrapper's `_aux_buffer` into the trainer's
+   auxiliary replay buffer, the same pipeline used during PPO training.
+
+3. **Staged network training**: On each warm-up step, only networks in
+   `config.get_active_aux_networks(step)` receive gradient updates.
+   V_h^e is always active; X_h joins at Stage 1; U_r at Stage 2.
+
+4. **Target freeze/sync**: Frozen target copies of the auxiliary networks
+   are refreshed at stage transitions and periodically according to
+   `reward_freeze_interval`.
+
+5. **Buffer clearing**: When warm-up ends, the replay buffer is cleared.
+   Data collected under the uniform random policy is not representative
+   of the PPO-trained policy and would pollute auxiliary training.
+
+6. **Transition to PPO**: After warm-up, PufferLib's `PuffeRL` is
+   initialised and the full PPO loop begins.  The auxiliary networks
+   are already partially trained, providing a meaningful intrinsic
+   reward U_r from the start.
+
+### TensorBoard Metrics (PPO Path)
+
+When `tensorboard_dir` is set, the PPO trainer logs:
+
+| Tag | Description |
+|-----|-------------|
+| `Warmup/v_h_e_loss` | V_h^e loss during warm-up |
+| `Warmup/x_h_loss` | X_h loss during warm-up |
+| `Warmup/u_r_loss` | U_r loss during warm-up |
+| `Warmup/stage` | Current warm-up stage (0–3) |
+| `Warmup/transitions` | Text: stage transition events |
+| `Loss/v_h_e_loss` | V_h^e loss during PPO phase |
+| `Loss/policy_loss` | PPO policy loss |
+| `Loss/value_loss` | PPO value loss |
+| `PPO/iteration` | PPO iteration number |
+| `PPO/global_env_step` | Total environment steps |
+| `PPO/entropy_coef` | Current entropy coefficient |
