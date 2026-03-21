@@ -6,7 +6,7 @@ the existing ``Phase2Config``.  Shared theory parameters (γ_r, γ_h, ζ, ξ, η
 are intentionally duplicated to avoid coupling between the two code paths.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional, Set
 
 
@@ -200,7 +200,9 @@ class PPOPhase2Config:
         if self.gamma_h < 0.0 or self.gamma_h > 1.0:
             raise ValueError(f"gamma_h must be in [0, 1], got {self.gamma_h}")
         # Warm-up thresholds must be non-decreasing (cumulative).
-        if not (self.warmup_v_h_e_steps <= self.warmup_x_h_steps <= self.warmup_u_r_steps):
+        if not (
+            self.warmup_v_h_e_steps <= self.warmup_x_h_steps <= self.warmup_u_r_steps
+        ):
             raise ValueError(
                 "Warm-up thresholds must be non-decreasing: "
                 f"warmup_v_h_e_steps={self.warmup_v_h_e_steps} <= "

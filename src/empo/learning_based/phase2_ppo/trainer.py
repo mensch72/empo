@@ -616,6 +616,12 @@ class PPOPhase2Trainer:
         Loads auxiliary network weights, targets, optimiser states, and
         training counters.  The ``actor_critic`` weights are loaded as
         well so that PPO can resume from the saved policy.
+
+        .. warning::
+
+           ``weights_only=False`` is used because optimiser state dicts
+           contain non-tensor types (step counts, betas).  Only load
+           checkpoints from trusted sources.
         """
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
         self.actor_critic.load_state_dict(checkpoint["actor_critic"])
@@ -801,9 +807,7 @@ class PPOPhase2Trainer:
                 )
                 self._log_scalar("PPO/iteration", iteration, step)
                 self._log_scalar("PPO/global_env_step", pufferl.global_step, step)
-                self._log_scalar(
-                    "PPO/entropy_coef", cfg.get_entropy_coef(step), step
-                )
+                self._log_scalar("PPO/entropy_coef", cfg.get_entropy_coef(step), step)
                 cur_stage = cfg.get_warmup_stage(step)
                 self._log_scalar("Warmup/stage", cur_stage, step)
                 if cur_stage != prev_stage:
@@ -841,9 +845,7 @@ class PPOPhase2Trainer:
     # Warm-up implementation
     # ------------------------------------------------------------------
 
-    def _run_warmup(
-        self, env_creator: Callable[[], Any]
-    ) -> List[Dict[str, float]]:
+    def _run_warmup(self, env_creator: Callable[[], Any]) -> List[Dict[str, float]]:
         """Execute the auxiliary-only warm-up phase.
 
         During warm-up, the robot acts with a **uniform random policy**
@@ -929,9 +931,7 @@ class PPOPhase2Trainer:
 
             # Train auxiliary networks (respecting active set).
             active = cfg.get_active_aux_networks(self.aux_training_step)
-            losses = self.train_auxiliary_step(
-                world_model=wm, active_networks=active
-            )
+            losses = self.train_auxiliary_step(world_model=wm, active_networks=active)
             self.aux_training_step += 1
 
             if losses:

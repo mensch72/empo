@@ -316,7 +316,9 @@ class TestPPOPhase2Config:
         assert "V_h^e" in cfg.get_warmup_stage_name(0)
         assert "X_h" in cfg.get_warmup_stage_name(15)
         assert "U_r" in cfg.get_warmup_stage_name(25)
-        assert "PPO" in cfg.get_warmup_stage_name(30).upper() or "full" in cfg.get_warmup_stage_name(30)
+        assert "PPO" in cfg.get_warmup_stage_name(
+            30
+        ).upper() or "full" in cfg.get_warmup_stage_name(30)
 
     def test_warmup_threshold_validation(self):
         """warmup thresholds must be non-decreasing."""
@@ -990,7 +992,10 @@ class TestPPOPhase2Trainer:
             warmup_u_r_steps=20,
         )
         ac = EMPOActorCritic(
-            state_encoder=None, hidden_dim=16, num_actions=5, obs_dim=3,
+            state_encoder=None,
+            hidden_dim=16,
+            num_actions=5,
+            obs_dim=3,
         )
         v_h_e = _MockVhE()
         aux = PPOAuxiliaryNetworks(v_h_e=v_h_e)
@@ -1008,9 +1013,7 @@ class TestPPOPhase2Trainer:
                 obs_dim=3,
             )
 
-        import pytest as _pytest
-
-        with _pytest.MonkeyPatch.context() as mp:
+        with pytest.MonkeyPatch.context() as mp:
             mp.setattr(torch, "nan", torch.tensor(float("nan")))
             metrics = trainer.train(env_creator, num_iterations=2)
 
@@ -1025,8 +1028,11 @@ class TestPPOPhase2Trainer:
     def test_active_networks_filter(self):
         """train_auxiliary_step with active_networks filters which nets train."""
         cfg = PPOPhase2Config(
-            num_actions=5, num_robots=1, hidden_dim=16,
-            batch_size=2, aux_buffer_size=100,
+            num_actions=5,
+            num_robots=1,
+            hidden_dim=16,
+            batch_size=2,
+            aux_buffer_size=100,
         )
         v_h_e = _MockVhE()
         from empo.learning_based.phase2.aggregate_goal_ability import (
@@ -1048,7 +1054,10 @@ class TestPPOPhase2Trainer:
 
         x_h = _MockXh()
         ac = EMPOActorCritic(
-            state_encoder=None, hidden_dim=16, num_actions=5, obs_dim=3,
+            state_encoder=None,
+            hidden_dim=16,
+            num_actions=5,
+            obs_dim=3,
         )
         aux = PPOAuxiliaryNetworks(v_h_e=v_h_e, x_h=x_h)
         trainer = PPOPhase2Trainer(ac, aux, cfg, device="cpu")
@@ -1056,9 +1065,14 @@ class TestPPOPhase2Trainer:
         # Populate the buffer with transitions
         for _ in range(5):
             trainer.push_transition_to_aux_buffer(
-                state=(0,), next_state=(1,), robot_action=(0,),
-                goals={0: "g"}, goal_weights={0: 1.0},
-                human_actions=[0], transition_probs=None, terminal=False,
+                state=(0,),
+                next_state=(1,),
+                robot_action=(0,),
+                goals={0: "g"},
+                goal_weights={0: 1.0},
+                human_actions=[0],
+                transition_probs=None,
+                terminal=False,
             )
 
         # With active_networks={"v_h_e"}, only v_h_e should be trained
@@ -1072,11 +1086,18 @@ class TestPPOPhase2Trainer:
         import tempfile
 
         cfg = PPOPhase2Config(
-            num_actions=5, num_robots=1, hidden_dim=16,
-            warmup_v_h_e_steps=0, warmup_x_h_steps=0, warmup_u_r_steps=0,
+            num_actions=5,
+            num_robots=1,
+            hidden_dim=16,
+            warmup_v_h_e_steps=0,
+            warmup_x_h_steps=0,
+            warmup_u_r_steps=0,
         )
         ac = EMPOActorCritic(
-            state_encoder=None, hidden_dim=16, num_actions=5, obs_dim=3,
+            state_encoder=None,
+            hidden_dim=16,
+            num_actions=5,
+            obs_dim=3,
         )
         v_h_e = _MockVhE()
         aux = PPOAuxiliaryNetworks(v_h_e=v_h_e)
@@ -1094,7 +1115,10 @@ class TestPPOPhase2Trainer:
 
             # Create a fresh trainer and load
             ac2 = EMPOActorCritic(
-                state_encoder=None, hidden_dim=16, num_actions=5, obs_dim=3,
+                state_encoder=None,
+                hidden_dim=16,
+                num_actions=5,
+                obs_dim=3,
             )
             v_h_e2 = _MockVhE()
             aux2 = PPOAuxiliaryNetworks(v_h_e=v_h_e2)
@@ -1113,10 +1137,15 @@ class TestPPOPhase2Trainer:
         import tempfile
 
         cfg = PPOPhase2Config(
-            num_actions=5, num_robots=1, hidden_dim=16,
+            num_actions=5,
+            num_robots=1,
+            hidden_dim=16,
         )
         ac = EMPOActorCritic(
-            state_encoder=None, hidden_dim=16, num_actions=5, obs_dim=3,
+            state_encoder=None,
+            hidden_dim=16,
+            num_actions=5,
+            obs_dim=3,
         )
         v_h_e = _MockVhE()
         aux = PPOAuxiliaryNetworks(v_h_e=v_h_e)
