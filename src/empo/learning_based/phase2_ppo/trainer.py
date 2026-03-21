@@ -937,8 +937,6 @@ class PPOPhase2Trainer:
             # (replay buffer may still be below batch_size early on).
             if losses:
                 self.aux_training_step += 1
-
-            if losses:
                 losses["warmup_stage"] = float(cur_stage)
                 warmup_metrics.append(losses)
 
