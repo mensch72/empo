@@ -773,7 +773,9 @@ class PPOPhase2Trainer:
                 )
                 for k, v in step_losses.items():
                     aux_losses[k] = aux_losses.get(k, 0.0) + v
-                self.aux_training_step += 1
+                # Only advance aux_training_step when a gradient update actually ran.
+                if step_losses:
+                    self.aux_training_step += 1
 
             # Re-freeze auxiliary networks periodically and sync to envs
             if (iteration + 1) % cfg.reward_freeze_interval == 0:
