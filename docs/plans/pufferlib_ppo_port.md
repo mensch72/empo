@@ -1183,47 +1183,47 @@ creating a natural time-scale separation.
 
 ### Migration Step 1: Foundation (Estimated: 2–3 weeks)
 
-- [ ] **10.1** Create `learning_based/phase2_ppo/` and `learning_based/multigrid/phase2_ppo/` modules
-- [ ] **10.2** Add PufferLib dependency (`pip install pufferlib`)
-- [ ] **10.3** Implement `PPOPhase2Config` in `phase2_ppo/config.py` (standalone, not extending `Phase2Config`)
-- [ ] **10.4** Implement `EMPOWorldModelEnv` in `multigrid/phase2_ppo/env_wrapper.py` (Gymnasium wrapper with human agent simulation)
-- [ ] **10.5** Implement `EMPOActorCritic` in `phase2_ppo/actor_critic.py` (combined actor-critic network)
-- [ ] **10.6** Unit tests in `tests/test_phase2_ppo_env.py`: env wrapper produces valid observations, rewards, dones
-- [ ] **10.7** Verify: random policy through wrapper matches current random rollout behavior
-- [ ] **10.8** Run ALL existing DQN-path tests → confirm zero regressions
+- [x] **10.1** Create `learning_based/phase2_ppo/` and `learning_based/multigrid/phase2_ppo/` modules
+- [x] **10.2** Add PufferLib dependency (`pip install pufferlib`)
+- [x] **10.3** Implement `PPOPhase2Config` in `phase2_ppo/config.py` (standalone, not extending `Phase2Config`)
+- [x] **10.4** Implement `EMPOWorldModelEnv` in `phase2_ppo/env_wrapper.py` (Gymnasium wrapper with human agent simulation); `MultiGridWorldModelEnv` in `multigrid/phase2_ppo/env_wrapper.py`
+- [x] **10.5** Implement `EMPOActorCritic` in `phase2_ppo/actor_critic.py` (combined actor-critic network)
+- [x] **10.6** Unit tests in `tests/test_phase2_ppo.py` and `tests/test_multigrid_phase2_ppo.py`: env wrapper produces valid observations, rewards, dones
+- [x] **10.7** Verify: random policy through wrapper matches current random rollout behavior
+- [x] **10.8** Run ALL existing DQN-path tests → confirm zero regressions
 
 ### Migration Step 2: Intrinsic Reward Integration (Estimated: 2–3 weeks)
 
-- [ ] **10.9** Implement centralized U_r reward computation (Option C from Section 5.4) in `phase2_ppo/reward_wrapper.py`
-- [ ] **10.10** Implement auxiliary network training loop (V_h^e, X_h, U_r) in `phase2_ppo/auxiliary_trainer.py`
-- [ ] **10.11** Implement freeze/sync cycle for auxiliary networks
-- [ ] **10.12** Unit tests in `tests/test_phase2_ppo_reward.py`: U_r computation matches current `get_u_r()` method
-- [ ] **10.13** Verify: auxiliary networks converge during warm-up with random robot
-- [ ] **10.14** Run ALL existing DQN-path tests → confirm zero regressions
+- [x] **10.9** Implement centralized U_r reward computation in `phase2_ppo/env_wrapper.py` (via `_compute_u_r()`, using Option C from Section 5.4)
+- [x] **10.10** Implement auxiliary network training loop (V_h^e, X_h, U_r) in `phase2_ppo/trainer.py` (via `train_auxiliary_step()`)
+- [x] **10.11** Implement freeze/sync cycle for auxiliary networks (via `freeze_auxiliary_networks()` with `*_target` copies)
+- [x] **10.12** Unit tests: U_r computation, auxiliary training, freeze/sync verified in `test_phase2_ppo.py`
+- [x] **10.13** Verify: auxiliary networks converge during warm-up with random robot
+- [x] **10.14** Run ALL existing DQN-path tests → confirm zero regressions
 
 ### Migration Step 3: PPO Training (Estimated: 2–3 weeks)
 
-- [ ] **10.15** Implement PPO training loop in `phase2_ppo/trainer.py`
-- [ ] **10.16** Implement warm-up → PPO transition (Section 7.2)
-- [ ] **10.17** End-to-end test in `tests/test_phase2_ppo_training.py`: train on small grid (5×5, 1 human, 1 robot)
+- [x] **10.15** Implement PPO training loop in `phase2_ppo/trainer.py` (uses PufferLib PuffeRL)
+- [x] **10.16** Implement warm-up → PPO transition (staged warm-up with `get_warmup_stage()`)
+- [x] **10.17** End-to-end test: `test_pufferlib_training_loop` and `test_warmup_runs_before_ppo` in `test_phase2_ppo.py`
 - [ ] **10.18** Compare learned behavior with current DQN-trained policy (both running side-by-side)
-- [ ] **10.19** Run ALL existing DQN-path tests → confirm zero regressions
+- [x] **10.19** Run ALL existing DQN-path tests → confirm zero regressions
 
 ### Migration Step 4: Optimization and Scaling (Estimated: 2–3 weeks)
 
 - [ ] **10.20** Implement batched U_r computation across vectorized environments
 - [ ] **10.21** Profile training loop, optimize bottlenecks
 - [ ] **10.22** Test on larger environments (7×7, 3 humans, 1 robot)
-- [ ] **10.23** TensorBoard integration: log PPO metrics alongside auxiliary metrics
-- [ ] **10.24** Checkpoint/resume support for PPO + auxiliary networks
+- [x] **10.23** TensorBoard integration: log PPO metrics alongside auxiliary metrics (via `_tb_writer`)
+- [x] **10.24** Checkpoint/resume support for PPO + auxiliary networks (via `save_checkpoint`/`load_checkpoint`)
 
 ### Migration Step 5: Documentation (Estimated: 1 week)
 
 - [ ] **10.25** Add PPO-specific section to `docs/WARMUP_DESIGN.md` (append, don't modify existing content)
 - [ ] **10.26** Add PPO API section to `docs/API.md` (append, don't modify existing content)
-- [ ] **10.27** Create example script: `examples/phase2/pufferlib_ppo_demo.py`
+- [x] **10.27** Create example scripts: `examples/phase2/phase2_ppo_demo.py`, `examples/phase2/phase2_ppo_asymmetric_freeing.py`, `examples/phase1/phase1_ppo_demo.py`
 - [ ] **10.28** Update `docs/plans/ppo_a3c_considerations.md` with implementation notes
-- [ ] **10.29** Final regression run: ALL existing tests pass unmodified
+- [x] **10.29** Final regression run: ALL existing tests pass unmodified
 
 ---
 
@@ -1426,6 +1426,22 @@ class Phase1EMPOEnv(gymnasium.Env):
   - Phase 1's DQN approach is simpler (no mutual dependencies, no intrinsic reward)
   - The existing Phase 1 trainer works well in practice
   - Phase 2 benefits more from PPO's on-policy stability for non-stationary rewards
+
+### 12.6 Phase 1 PPO Implementation Status
+
+Phase 1 PPO has been **fully implemented** using Approach A (goal as observation):
+
+| Component | File | Status |
+|-----------|------|--------|
+| Config | `learning_based/phase1_ppo/config.py` | ✅ `PPOPhase1Config` dataclass |
+| Actor-Critic | `learning_based/phase1_ppo/actor_critic.py` | ✅ `GoalConditionedActorCritic` |
+| Env Wrapper | `learning_based/phase1_ppo/env_wrapper.py` | ✅ `Phase1PPOEnv` (base class) |
+| Trainer | `learning_based/phase1_ppo/trainer.py` | ✅ `PPOPhase1Trainer` (PufferLib PuffeRL) |
+| MultiGrid Env | `learning_based/multigrid/phase1_ppo/env_wrapper.py` | ✅ `MultiGridPhase1PPOEnv` |
+| MultiGrid Networks | `learning_based/multigrid/phase1_ppo/networks.py` | ✅ `create_multigrid_phase1_ppo_networks()` |
+| Base Tests | `tests/test_phase1_ppo.py` | ✅ 27 tests |
+| MultiGrid Tests | `tests/test_multigrid_phase1_ppo.py` | ✅ 22 tests |
+| Example Script | `examples/phase1/phase1_ppo_demo.py` | ✅ Full demo with rollout movies |
 
 ---
 
