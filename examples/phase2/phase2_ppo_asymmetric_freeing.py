@@ -1,15 +1,21 @@
 #!/usr/bin/env python3
 """
-Phase 2 PPO Robot Policy Demo (PufferLib-backed).
+Phase 2 PPO Robot Policy Demo — Asymmetric Freeing World.
 
-Demonstrates computing the robot policy using PufferLib PPO on a MultiGrid
-environment.  This is the PPO counterpart to the existing DQN-based
-``phase2_robot_policy_demo.py``.
+Demonstrates Phase 2 PPO training on the "simple asymmetric freeing" challenge
+from ``multigrid_worlds/jobst_challenges/asymmetric_freeing_simple.yaml``.
 
-Environment: Tiny 4×6 grid with 1 human, 1 robot, and a rock.
-- Human tries to reach goals (uniform random policy prior).
-- Robot learns to act using PPO with intrinsic EMPO reward U_r(s).
-- Auxiliary networks (V_h^e, X_h, U_r) are trained alongside PPO.
+Environment:
+    An 8×5 grid with two humans locked behind rocks and one robot.
+    Human A (left) has fewer reachable goals than Human B (right).
+    The robot must decide which human to free first to maximise
+    aggregate human power X_h, respecting the equity parameters (ξ, η).
+
+Human behaviour:
+    Both humans use the existing ``HeuristicPotentialPolicy`` (deterministic
+    goal-directed policy based on shortest-path potentials) instead of a
+    uniform random prior.  This makes the demo more realistic: humans
+    actively pursue goals, so V_h^e training has a meaningful signal.
 
 Output:
     After training, generates a movie of rollouts with the learned policy,
@@ -17,15 +23,15 @@ Output:
 
 Usage:
     # Inside Docker container (make shell):
-    python examples/phase2/phase2_ppo_demo.py
+    python examples/phase2/phase2_ppo_asymmetric_freeing.py
 
     # Outside Docker:
     PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds \\
-        python examples/phase2/phase2_ppo_demo.py
+        python examples/phase2/phase2_ppo_asymmetric_freeing.py
 
     # Quick smoke test (2 iterations, 2 rollouts):
     PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds \\
-        python examples/phase2/phase2_ppo_demo.py --iters 2 --rollouts 2
+        python examples/phase2/phase2_ppo_asymmetric_freeing.py --iters 2 --rollouts 2
 
 Requirements:
     pip install pufferlib>=3.0
@@ -55,8 +61,10 @@ for _subdir in ("src", "vendor/multigrid", "vendor/ai_transport", "multigrid_wor
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
-from gym_multigrid.multigrid import MultiGridEnv, World  # noqa: E402
+from gym_multigrid.multigrid import MultiGridEnv, SmallActions  # noqa: E402
 
+from empo.human_policy_prior import HeuristicPotentialPolicy  # noqa: E402
+from empo.learning_based.multigrid import PathDistanceCalculator  # noqa: E402
 from empo.learning_based.phase2_ppo.config import PPOPhase2Config  # noqa: E402
 from empo.learning_based.phase2_ppo.trainer import PPOPhase2Trainer  # noqa: E402
 from empo.learning_based.multigrid.phase2_ppo import (  # noqa: E402
@@ -68,34 +76,77 @@ from empo.learning_based.multigrid.phase2_ppo import (  # noqa: E402
 # Environment helpers
 # ======================================================================
 
-GRID_MAP = """
-We We We We We We
-We Ae Ro .. .. We
-We We Ay We We We
-We We We We We We
-"""
+_WORLD_YAML = os.path.join(
+    _PROJECT_ROOT,
+    "multigrid_worlds",
+    "jobst_challenges",
+    "asymmetric_freeing_simple.yaml",
+)
 
 
 def _create_world_model(max_steps: int = 20) -> MultiGridEnv:
-    """Create the trivial MultiGrid world model."""
+    """Load the simple asymmetric freeing world from YAML."""
     env = MultiGridEnv(
-        map=GRID_MAP,
-        max_steps=max_steps,
+        config_file=os.path.abspath(_WORLD_YAML),
         partial_obs=False,
-        objects_set=World,
+        actions_set=SmallActions,
+        max_steps=max_steps,
     )
     return env
 
 
-def _uniform_human_policy(state, human_idx, goal, world_model):
-    """Uniform random policy prior (placeholder)."""
-    n = world_model.action_space.n
-    return [1.0 / n] * n
+def _make_heuristic_human_policy(
+    ref_env: MultiGridEnv,
+    human_indices: list,
+    beta: float = 1000.0,
+) -> HeuristicPotentialPolicy:
+    """Build a heuristic policy prior for the given environment."""
+    path_calc = PathDistanceCalculator(
+        grid_height=ref_env.height,
+        grid_width=ref_env.width,
+        world_model=ref_env,
+    )
+    return HeuristicPotentialPolicy(
+        world_model=ref_env,
+        human_agent_indices=human_indices,
+        path_calculator=path_calc,
+        beta=beta,
+    )
 
 
-def _dummy_goal_sampler(state, human_idx):
-    """Returns a dummy goal and unit weight."""
-    return f"goal_{human_idx}", 1.0
+def _wrap_human_policy(policy: HeuristicPotentialPolicy):
+    """Wrap the 3-arg ``HeuristicPotentialPolicy.__call__`` to the 4-arg
+    signature expected by ``EMPOWorldModelEnv``.
+
+    Phase 2 PPO env wrapper calls:
+        ``human_policy_prior(state, h_idx, goal, world_model)``
+    but ``HeuristicPotentialPolicy.__call__`` takes:
+        ``(state, human_agent_index, possible_goal)``
+    """
+
+    def _policy_prior(state, human_idx, goal, world_model):
+        return policy(state, human_idx, goal)
+
+    return _policy_prior
+
+
+def _make_goal_sampler(ref_env: MultiGridEnv):
+    """Create a goal sampler from the YAML-configured possible goals.
+
+    Returns a callable ``(state, human_idx) → (goal, weight)`` that
+    wraps the environment's built-in ``possible_goal_sampler``.
+    """
+    sampler = ref_env.possible_goal_sampler
+    if sampler is None:
+        raise RuntimeError(
+            "The world model has no possible_goal_sampler. "
+            "Ensure the YAML file includes a 'possible_goals' section."
+        )
+
+    def _sampler(state, human_idx):
+        return sampler.sample(state, human_idx)
+
+    return _sampler
 
 
 # ======================================================================
@@ -107,6 +158,7 @@ ANNOTATION_PANEL_WIDTH = 300
 ANNOTATION_FONT_SIZE = 12
 MOVIE_FPS = 2
 
+# Action names for SmallActions
 SINGLE_ACTION_NAMES = ["still", "left", "right", "forward"]
 
 
@@ -130,7 +182,7 @@ def run_ppo_rollout(
     env: MultiGridEnv,
     actor_critic,
     state_encoder,
-    human_policy_fn,
+    human_policy: HeuristicPotentialPolicy,
     goal_sampler,
     human_indices: List[int],
     robot_indices: List[int],
@@ -140,9 +192,6 @@ def run_ppo_rollout(
 
     Uses ``env``'s built-in video recording — frames are captured
     automatically via ``env.render(mode='rgb_array', ...)``.
-
-    ``human_policy_fn`` is called as ``(state, h_idx, goal, env)``
-    and returns a probability list over actions.
 
     Returns the number of environment steps taken.
     """
@@ -163,22 +212,26 @@ def run_ppo_rollout(
     # ----- helpers -----
 
     def _state_to_obs(s):
+        """Encode world-model state to a flat observation tensor."""
         encoder_device = next(state_encoder.parameters()).device
         with torch.no_grad():
             tensors = state_encoder.tensorize_state(s, env, device=encoder_device)
             features = state_encoder(*tensors)
-        return features.squeeze(0)
+        return features.squeeze(0)  # (feature_dim,)
 
     def _get_policy(obs_tensor):
+        """Return ``(probs, value)`` from the actor-critic."""
         with torch.no_grad():
             logits, value = actor_critic(obs_tensor.unsqueeze(0))
             probs = torch.softmax(logits, dim=-1).squeeze(0)
         return probs, value.squeeze().item()
 
     def _select_action(probs):
+        """Greedy action selection for rollout visualisation."""
         return torch.argmax(probs).item()
 
     def _annotation_text(s, selected_action=None):
+        """Build annotation lines for the current state."""
         obs = _state_to_obs(s)
         probs, v_r = _get_policy(obs)
         lines = [f"V_r: {v_r:.4f}", ""]
@@ -200,6 +253,7 @@ def run_ppo_rollout(
         annotation_text=_annotation_text(state, action0),
         annotation_panel_width=ANNOTATION_PANEL_WIDTH,
         annotation_font_size=ANNOTATION_FONT_SIZE,
+        goal_overlays=human_goals,
     )
 
     # ----- step loop -----
@@ -208,16 +262,16 @@ def run_ppo_rollout(
         state = env.get_state()
         actions = [0] * len(env.agents)
 
-        # Humans use policy prior
+        # Humans use heuristic policy
         for h in human_indices:
-            probs_h = human_policy_fn(state, h, human_goals[h], env)
-            actions[h] = int(np.random.choice(len(probs_h), p=probs_h))
+            actions[h] = human_policy.sample(state, h, human_goals[h])
 
         # Robot uses trained PPO policy
         obs = _state_to_obs(state)
         probs, _ = _get_policy(obs)
         robot_action = _select_action(probs)
 
+        # Decode joint-action index to per-robot actions
         if len(robot_indices) == 1:
             actions[robot_indices[0]] = robot_action
         else:
@@ -229,6 +283,7 @@ def run_ppo_rollout(
         _, _, done, _ = env.step(actions)
         steps_taken += 1
 
+        # Render frame with annotation for the *new* state
         new_state = env.get_state()
         new_obs = _state_to_obs(new_state)
         new_probs, _ = _get_policy(new_obs)
@@ -240,6 +295,7 @@ def run_ppo_rollout(
             annotation_text=_annotation_text(new_state, new_action),
             annotation_panel_width=ANNOTATION_PANEL_WIDTH,
             annotation_font_size=ANNOTATION_FONT_SIZE,
+            goal_overlays=human_goals,
         )
 
         if done:
@@ -254,12 +310,14 @@ def run_ppo_rollout(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Phase 2 PPO demo (MultiGrid)")
+    parser = argparse.ArgumentParser(
+        description="Phase 2 PPO demo — Asymmetric Freeing (heuristic humans)"
+    )
     parser.add_argument(
         "--iters",
         type=int,
-        default=50,
-        help="Number of PPO iterations (default: 50)",
+        default=100,
+        help="Number of PPO iterations (default: 100)",
     )
     parser.add_argument(
         "--num-envs",
@@ -295,7 +353,7 @@ def main() -> None:
         "--output-dir",
         type=str,
         default=None,
-        help="Directory for output movie (default: outputs/phase2_ppo_demo/)",
+        help="Directory for output movie (default: outputs/phase2_ppo_asymmetric_freeing/)",
     )
     parser.add_argument(
         "--movie-fps",
@@ -306,7 +364,7 @@ def main() -> None:
     args = parser.parse_args()
 
     # ------------------------------------------------------------------
-    # 1. Create a reference environment (used to infer grid size, etc.)
+    # 1. Create a reference environment
     # ------------------------------------------------------------------
     ref_env = _create_world_model()
     ref_env.reset()
@@ -314,13 +372,28 @@ def main() -> None:
     num_actions = ref_env.action_space.n
     human_indices = ref_env.human_agent_indices
     robot_indices = ref_env.robot_agent_indices
-    print(f"Grid: {ref_env.height}×{ref_env.width}")
+
+    print(f"World: {os.path.basename(_WORLD_YAML)}")
+    print(f"Grid : {ref_env.width}×{ref_env.height}")
     print(f"Actions: {num_actions}")
     print(f"Human agents: {human_indices}")
     print(f"Robot agents: {robot_indices}")
+    print(f"Max steps: {ref_env.max_steps}")
 
     # ------------------------------------------------------------------
-    # 2. Configuration
+    # 2. Build heuristic human policy and goal sampler
+    # ------------------------------------------------------------------
+    human_policy = _make_heuristic_human_policy(ref_env, human_indices)
+    human_policy_fn = _wrap_human_policy(human_policy)
+    goal_sampler_fn = _make_goal_sampler(ref_env)
+
+    print("Human policy: HeuristicPotentialPolicy (β=1000)")
+    print(
+        f"Goal sampler: YAML-configured ({len(ref_env.possible_goal_generator.goal_coords)} goals)"
+    )
+
+    # ------------------------------------------------------------------
+    # 3. Configuration
     # ------------------------------------------------------------------
     cfg = PPOPhase2Config(
         # Theory
@@ -333,26 +406,30 @@ def main() -> None:
         num_actions=num_actions,
         num_robots=len(robot_indices),
         hidden_dim=args.hidden_dim,
-        ppo_rollout_length=32,
-        ppo_num_minibatches=2,
-        ppo_update_epochs=2,
+        ppo_rollout_length=64,
+        ppo_num_minibatches=4,
+        ppo_update_epochs=4,
         num_envs=args.num_envs,
         num_ppo_iterations=args.iters,
         lr_ppo=3e-4,
         # Auxiliary
         aux_training_steps_per_iteration=5,
-        aux_buffer_size=5_000,
-        batch_size=32,
+        aux_buffer_size=10_000,
+        batch_size=64,
         reward_freeze_interval=5,
+        # Warm-up (skip for this demo)
+        warmup_v_h_e_steps=0,
+        warmup_x_h_steps=0,
+        warmup_u_r_steps=0,
         # Environment
-        steps_per_episode=20,
+        steps_per_episode=ref_env.max_steps,
         # Runtime
         device=args.device,
         seed=42,
     )
 
     # ------------------------------------------------------------------
-    # 3. Create networks (shared encoder for state → observation)
+    # 4. Create networks
     # ------------------------------------------------------------------
     actor_critic, aux_nets, state_encoder = create_multigrid_ppo_networks(
         env=ref_env,
@@ -366,7 +443,7 @@ def main() -> None:
     print(f"Actor-critic joint actions: {actor_critic.num_joint_actions}")
 
     # ------------------------------------------------------------------
-    # 4. Build the trainer
+    # 5. Build the trainer
     # ------------------------------------------------------------------
     trainer = PPOPhase2Trainer(
         actor_critic=actor_critic,
@@ -376,34 +453,37 @@ def main() -> None:
     )
 
     # ------------------------------------------------------------------
-    # 5. Define env_creator (one per vectorised slot)
+    # 6. Define env_creator
     # ------------------------------------------------------------------
-    # The state encoder is shared (torch module, same parameters across
-    # all envs in Serial backend).
     shared_encoder = state_encoder
 
+    # Each vectorised env slot creates its own world model and
+    # HeuristicPotentialPolicy instance (to avoid shared mutable state).
     def env_creator():
         wm = _create_world_model()
         wm.reset()
+        hp = _make_heuristic_human_policy(wm, wm.human_agent_indices)
+        hp_fn = _wrap_human_policy(hp)
+        gs_fn = _make_goal_sampler(wm)
         return MultiGridWorldModelEnv(
             world_model=wm,
-            human_policy_prior=_uniform_human_policy,
-            goal_sampler=_dummy_goal_sampler,
-            human_agent_indices=human_indices,
-            robot_agent_indices=robot_indices,
+            human_policy_prior=hp_fn,
+            goal_sampler=gs_fn,
+            human_agent_indices=wm.human_agent_indices,
+            robot_agent_indices=wm.robot_agent_indices,
             config=cfg,
             state_encoder=shared_encoder,
             # auxiliary_networks injected by trainer.train()
         )
 
     # ------------------------------------------------------------------
-    # 6. Train
+    # 7. Train
     # ------------------------------------------------------------------
     print(f"\nStarting PPO training for {args.iters} iterations …")
     metrics = trainer.train(env_creator, num_iterations=args.iters)
 
     # ------------------------------------------------------------------
-    # 7. Report results
+    # 8. Report results
     # ------------------------------------------------------------------
     if metrics:
         last = metrics[-1]
@@ -418,18 +498,24 @@ def main() -> None:
         print("No metrics returned (training may have been too short).")
 
     # ------------------------------------------------------------------
-    # 8. Generate rollout movie
+    # 9. Generate rollout movie
     # ------------------------------------------------------------------
     num_rollouts = args.rollouts
     output_dir = args.output_dir or os.path.join(
-        _PROJECT_ROOT, "outputs", "phase2_ppo_demo"
+        _PROJECT_ROOT, "outputs", "phase2_ppo_asymmetric_freeing"
     )
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"\nGenerating {num_rollouts} rollouts with learned policy …")
 
+    # Build a fresh env for rollouts (separate from training envs)
     rollout_env = _create_world_model()
     rollout_env.reset()
+    rollout_human_policy = _make_heuristic_human_policy(
+        rollout_env, rollout_env.human_agent_indices
+    )
+    rollout_goal_sampler = _make_goal_sampler(rollout_env)
+
     rollout_env.start_video_recording()
 
     for rollout_idx in range(num_rollouts):
@@ -437,10 +523,10 @@ def main() -> None:
             env=rollout_env,
             actor_critic=actor_critic,
             state_encoder=state_encoder,
-            human_policy_fn=_uniform_human_policy,
-            goal_sampler=_dummy_goal_sampler,
-            human_indices=list(human_indices),
-            robot_indices=list(robot_indices),
+            human_policy=rollout_human_policy,
+            goal_sampler=rollout_goal_sampler,
+            human_indices=list(rollout_env.human_agent_indices),
+            robot_indices=list(rollout_env.robot_agent_indices),
             device=args.device,
         )
         if (rollout_idx + 1) % 5 == 0 or rollout_idx == num_rollouts - 1:
@@ -449,7 +535,7 @@ def main() -> None:
                 f"({len(rollout_env._video_frames)} total frames)"
             )
 
-    movie_path = os.path.join(output_dir, "phase2_ppo_demo.mp4")
+    movie_path = os.path.join(output_dir, "phase2_ppo_asymmetric_freeing.mp4")
     if os.path.exists(movie_path):
         os.remove(movie_path)
     rollout_env.save_video(movie_path, fps=args.movie_fps)
