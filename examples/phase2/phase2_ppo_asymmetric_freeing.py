@@ -58,7 +58,6 @@ for _subdir in ("src", "vendor/multigrid", "vendor/ai_transport", "multigrid_wor
 # ---------------------------------------------------------------------------
 # EMPO / MultiGrid imports
 # ---------------------------------------------------------------------------
-import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 from gym_multigrid.multigrid import MultiGridEnv, SmallActions  # noqa: E402
@@ -162,9 +161,7 @@ MOVIE_FPS = 2
 SINGLE_ACTION_NAMES = ["still", "left", "right", "forward"]
 
 
-def _get_joint_action_names(
-    num_robots: int, num_actions: int = 4
-) -> List[str]:
+def _get_joint_action_names(num_robots: int, num_actions: int = 4) -> List[str]:
     """Generate joint action names for ``num_robots`` robots."""
     names = SINGLE_ACTION_NAMES[:num_actions]
     if num_robots == 1:
@@ -238,7 +235,9 @@ def run_ppo_rollout(
         lines.append("π_r probs:")
         for i, p in enumerate(probs.cpu().tolist()):
             name = joint_action_names[i] if i < len(joint_action_names) else f"a{i}"
-            marker = ">" if selected_action is not None and i == selected_action else " "
+            marker = (
+                ">" if selected_action is not None and i == selected_action else " "
+            )
             lines.append(f"{marker}{name:>{max_name_len}}: {p:.3f}")
         return lines
 
@@ -383,9 +382,6 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 2. Build heuristic human policy and goal sampler
     # ------------------------------------------------------------------
-    human_policy = _make_heuristic_human_policy(ref_env, human_indices)
-    human_policy_fn = _wrap_human_policy(human_policy)
-    goal_sampler_fn = _make_goal_sampler(ref_env)
 
     print("Human policy: HeuristicPotentialPolicy (β=1000)")
     print(
@@ -519,7 +515,7 @@ def main() -> None:
     rollout_env.start_video_recording()
 
     for rollout_idx in range(num_rollouts):
-        steps = run_ppo_rollout(
+        run_ppo_rollout(
             env=rollout_env,
             actor_critic=actor_critic,
             state_encoder=state_encoder,

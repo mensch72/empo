@@ -14,7 +14,6 @@ from typing import Any, Callable, Dict, Optional
 
 import numpy as np
 import torch
-from gymnasium import spaces
 
 from empo.learning_based.phase1_ppo.env_wrapper import Phase1PPOEnv
 from empo.learning_based.multigrid.state_encoder import MultiGridStateEncoder
@@ -214,9 +213,7 @@ class MultiGridPhase1PPOEnv(Phase1PPOEnv):
             state_features = self._state_encoder(grid_t, glob_f, agent_f, inter_f)
 
             # Encode goal
-            goal_tensor = self._goal_encoder.tensorize_goal(
-                goal, device=encoder_device
-            )
+            goal_tensor = self._goal_encoder.tensorize_goal(goal, device=encoder_device)
             goal_features = self._goal_encoder(goal_tensor)
 
             # Concatenate
