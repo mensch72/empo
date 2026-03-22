@@ -1,31 +1,32 @@
 #!/usr/bin/env python3
 """
-Phase 2 PPO Robot Policy Demo (PufferLib-backed).
+Phase 1 PPO Human Policy Prior Demo (PufferLib-backed).
 
-Demonstrates computing the robot policy using PufferLib PPO on a MultiGrid
-environment.  This is the PPO counterpart to the existing DQN-based
-``phase2_robot_policy_demo.py``.
+Demonstrates computing a goal-conditioned human policy prior using PufferLib
+PPO on a MultiGrid environment.  This is the PPO counterpart to the existing
+DQN-based ``neural_policy_prior_demo.py``.
 
 Environment: Tiny 4×6 grid with 1 human, 1 robot, and a rock.
-- Human tries to reach goals (uniform random policy prior).
-- Robot learns to act using PPO with intrinsic EMPO reward U_r(s).
-- Auxiliary networks (V_h^e, X_h, U_r) are trained alongside PPO.
+- The training human learns a goal-conditioned policy π_h(a|s,g) via PPO.
+- The robot follows a uniform random policy (placeholder).
+- Goals are sampled from all reachable cells in the grid.
 
 Output:
-    After training, generates a movie of rollouts with the learned policy,
-    showing the robot's action probabilities and value estimates.
+    After training, generates a movie of rollouts where the human follows
+    the learned policy for randomly sampled goals, annotated with π_h
+    action probabilities and V_h value estimates.
 
 Usage:
     # Inside Docker container (make shell):
-    python examples/phase2/phase2_ppo_demo.py
+    python examples/phase1/phase1_ppo_demo.py
 
     # Outside Docker:
     PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds \\
-        python examples/phase2/phase2_ppo_demo.py
+        python examples/phase1/phase1_ppo_demo.py
 
     # Quick smoke test (2 iterations, 2 rollouts):
     PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds \\
-        python examples/phase2/phase2_ppo_demo.py --iters 2 --rollouts 2
+        python examples/phase1/phase1_ppo_demo.py --iters 2 --rollouts 2
 
 Requirements:
     pip install pufferlib>=3.0
@@ -34,10 +35,9 @@ Requirements:
 from __future__ import annotations
 
 import argparse
-import itertools
 import os
 import sys
-from typing import List
+from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # Path setup (allows running the script directly without ``pip install -e``)
@@ -57,12 +57,13 @@ import torch  # noqa: E402
 
 from gym_multigrid.multigrid import MultiGridEnv, World  # noqa: E402
 
-from empo.learning_based.phase2_ppo.config import PPOPhase2Config  # noqa: E402
-from empo.learning_based.phase2_ppo.trainer import PPOPhase2Trainer  # noqa: E402
-from empo.learning_based.multigrid.phase2_ppo import (  # noqa: E402
-    MultiGridWorldModelEnv,
-    create_multigrid_ppo_networks,
+from empo.learning_based.phase1_ppo.config import PPOPhase1Config  # noqa: E402
+from empo.learning_based.phase1_ppo.trainer import PPOPhase1Trainer  # noqa: E402
+from empo.learning_based.multigrid.phase1_ppo import (  # noqa: E402
+    MultiGridPhase1PPOEnv,
+    create_multigrid_phase1_ppo_networks,
 )
+from empo.world_specific_helpers.multigrid import ReachCellGoal  # noqa: E402
 
 # ======================================================================
 # Environment helpers
@@ -87,15 +88,40 @@ def _create_world_model(max_steps: int = 20) -> MultiGridEnv:
     return env
 
 
-def _uniform_human_policy(state, human_idx, goal, world_model):
-    """Uniform random policy prior (placeholder)."""
-    n = world_model.action_space.n
-    return [1.0 / n] * n
+def _get_reachable_cells(env: MultiGridEnv) -> List[Tuple[int, int]]:
+    """Return all non-wall, non-object cells in the grid."""
+    cells = []
+    for x in range(env.width):
+        for y in range(env.height):
+            cell = env.grid.get(x, y)
+            if cell is None:
+                cells.append((x, y))
+    return cells
 
 
-def _dummy_goal_sampler(state, human_idx):
-    """Returns a dummy goal and unit weight."""
-    return f"goal_{human_idx}", 1.0
+def _make_goal_sampler(
+    env: MultiGridEnv,
+    reachable_cells: Optional[List[Tuple[int, int]]] = None,
+):
+    """Create a goal sampler that returns ReachCellGoal objects.
+
+    Uniformly samples from reachable cells.  Each call returns
+    ``(goal, weight)`` matching the sampler interface.
+    """
+    if reachable_cells is None:
+        reachable_cells = _get_reachable_cells(env)
+
+    def sampler(state: Any, h_idx: int) -> Tuple[Any, float]:
+        pos = reachable_cells[np.random.randint(len(reachable_cells))]
+        goal = ReachCellGoal(env, h_idx, pos)
+        return goal, 1.0
+
+    return sampler
+
+
+def _random_agent_policy(state: Any, agent_idx: int) -> int:
+    """Uniform random policy for non-training agents."""
+    return np.random.randint(4)
 
 
 # ======================================================================
@@ -107,16 +133,7 @@ ANNOTATION_PANEL_WIDTH = 300
 ANNOTATION_FONT_SIZE = 12
 MOVIE_FPS = 2
 
-SINGLE_ACTION_NAMES = ["still", "left", "right", "forward"]
-
-
-def _get_joint_action_names(num_robots: int, num_actions: int = 4) -> List[str]:
-    """Generate joint action names for ``num_robots`` robots."""
-    names = SINGLE_ACTION_NAMES[:num_actions]
-    if num_robots == 1:
-        return list(names)
-    combos = list(itertools.product(names, repeat=num_robots))
-    return [", ".join(c) for c in combos]
+ACTION_NAMES = ["still", "left", "right", "forward"]
 
 
 # ======================================================================
@@ -126,46 +143,40 @@ def _get_joint_action_names(num_robots: int, num_actions: int = 4) -> List[str]:
 
 def run_ppo_rollout(
     env: MultiGridEnv,
-    actor_critic,
-    state_encoder,
-    human_policy_fn,
-    goal_sampler,
-    human_indices: List[int],
-    robot_indices: List[int],
-    device: str = "cpu",
+    actor_critic: torch.nn.Module,
+    state_encoder: torch.nn.Module,
+    goal_encoder: torch.nn.Module,
+    training_human_index: int,
+    other_agent_policies: Dict[int, Any],
+    goal: Any,
 ) -> int:
     """Run a single rollout using the trained PPO actor-critic.
 
     Uses ``env``'s built-in video recording — frames are captured
     automatically via ``env.render(mode='rgb_array', ...)``.
 
-    ``human_policy_fn`` is called as ``(state, h_idx, goal, env)``
-    and returns a probability list over actions.
-
     Returns the number of environment steps taken.
     """
-    num_actions = env.action_space.n
-    joint_action_names = _get_joint_action_names(len(robot_indices), num_actions)
-    max_name_len = max(len(n) for n in joint_action_names)
     actor_critic.eval()
 
     env.reset()
     state = env.get_state()
 
-    # Sample goals for each human
-    human_goals = {}
-    for h in human_indices:
-        goal, _ = goal_sampler(state, h)
-        human_goals[h] = goal
-
     # ----- helpers -----
 
-    def _state_to_obs(s):
-        encoder_device = next(state_encoder.parameters()).device
+    def _state_to_obs(s, g):
+        """Encode state + goal to flat observation."""
+        try:
+            encoder_device = next(state_encoder.parameters()).device
+        except StopIteration:
+            encoder_device = torch.device("cpu")
         with torch.no_grad():
             tensors = state_encoder.tensorize_state(s, env, device=encoder_device)
-            features = state_encoder(*tensors)
-        return features.squeeze(0)
+            state_features = state_encoder(*tensors).squeeze(0)
+            goal_tensor = goal_encoder.tensorize_goal(g, device=encoder_device)
+            goal_features = goal_encoder(goal_tensor).squeeze(0)
+            obs = torch.cat([state_features, goal_features], dim=-1)
+        return obs
 
     def _get_policy(obs_tensor):
         with torch.no_grad():
@@ -177,20 +188,25 @@ def run_ppo_rollout(
         return torch.argmax(probs).item()
 
     def _annotation_text(s, selected_action=None):
-        obs = _state_to_obs(s)
-        probs, v_r = _get_policy(obs)
-        lines = [f"V_r: {v_r:.4f}", ""]
-        lines.append("π_r probs:")
+        obs = _state_to_obs(s, goal)
+        probs, v_h = _get_policy(obs)
+        target = getattr(goal, "target_pos", "?")
+        lines = [f"Goal: {target}", f"V_h: {v_h:.4f}", ""]
+        lines.append("π_h probs:")
         for i, p in enumerate(probs.cpu().tolist()):
-            name = joint_action_names[i] if i < len(joint_action_names) else f"a{i}"
+            name = ACTION_NAMES[i] if i < len(ACTION_NAMES) else f"a{i}"
             marker = (
                 ">" if selected_action is not None and i == selected_action else " "
             )
-            lines.append(f"{marker}{name:>{max_name_len}}: {p:.3f}")
+            lines.append(f"{marker}{name:>8}: {p:.3f}")
+        achieved = goal.is_achieved(s)
+        if achieved:
+            lines.append("")
+            lines.append("★ GOAL ACHIEVED")
         return lines
 
     # ----- initial frame -----
-    obs0 = _state_to_obs(state)
+    obs0 = _state_to_obs(state, goal)
     probs0, _ = _get_policy(obs0)
     action0 = _select_action(probs0)
     env.render(
@@ -208,29 +224,21 @@ def run_ppo_rollout(
         state = env.get_state()
         actions = [0] * len(env.agents)
 
-        # Humans use policy prior
-        for h in human_indices:
-            probs_h = human_policy_fn(state, h, human_goals[h], env)
-            actions[h] = int(np.random.choice(len(probs_h), p=probs_h))
-
-        # Robot uses trained PPO policy
-        obs = _state_to_obs(state)
+        # Training human uses learned PPO policy
+        obs = _state_to_obs(state, goal)
         probs, _ = _get_policy(obs)
-        robot_action = _select_action(probs)
+        human_action = _select_action(probs)
+        actions[training_human_index] = human_action
 
-        if len(robot_indices) == 1:
-            actions[robot_indices[0]] = robot_action
-        else:
-            remaining = robot_action
-            for r_idx in robot_indices:
-                actions[r_idx] = remaining % num_actions
-                remaining //= num_actions
+        # All other agents use their provided policies
+        for idx, policy_fn in other_agent_policies.items():
+            actions[idx] = int(policy_fn(state, idx))
 
         _, _, done, _ = env.step(actions)
         steps_taken += 1
 
         new_state = env.get_state()
-        new_obs = _state_to_obs(new_state)
+        new_obs = _state_to_obs(new_state, goal)
         new_probs, _ = _get_policy(new_obs)
         new_action = _select_action(new_probs)
         env.render(
@@ -254,7 +262,7 @@ def run_ppo_rollout(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Phase 2 PPO demo (MultiGrid)")
+    parser = argparse.ArgumentParser(description="Phase 1 PPO demo (MultiGrid)")
     parser.add_argument(
         "--iters",
         type=int,
@@ -272,6 +280,12 @@ def main() -> None:
         type=int,
         default=64,
         help="State encoder feature dimension (default: 64)",
+    )
+    parser.add_argument(
+        "--goal-feature-dim",
+        type=int,
+        default=32,
+        help="Goal encoder feature dimension (default: 32)",
     )
     parser.add_argument(
         "--hidden-dim",
@@ -295,7 +309,7 @@ def main() -> None:
         "--output-dir",
         type=str,
         default=None,
-        help="Directory for output movie (default: outputs/phase2_ppo_demo/)",
+        help="Directory for output movie (default: outputs/phase1_ppo_demo/)",
     )
     parser.add_argument(
         "--movie-fps",
@@ -306,7 +320,7 @@ def main() -> None:
     args = parser.parse_args()
 
     # ------------------------------------------------------------------
-    # 1. Create a reference environment (used to infer grid size, etc.)
+    # 1. Create a reference environment
     # ------------------------------------------------------------------
     ref_env = _create_world_model()
     ref_env.reset()
@@ -314,36 +328,32 @@ def main() -> None:
     num_actions = ref_env.action_space.n
     human_indices = ref_env.human_agent_indices
     robot_indices = ref_env.robot_agent_indices
+    training_human = human_indices[0]
+    reachable_cells = _get_reachable_cells(ref_env)
+
     print(f"Grid: {ref_env.height}×{ref_env.width}")
     print(f"Actions: {num_actions}")
     print(f"Human agents: {human_indices}")
     print(f"Robot agents: {robot_indices}")
+    print(f"Training human: {training_human}")
+    print(f"Reachable cells: {len(reachable_cells)}")
 
     # ------------------------------------------------------------------
     # 2. Configuration
     # ------------------------------------------------------------------
-    cfg = PPOPhase2Config(
+    cfg = PPOPhase1Config(
         # Theory
-        gamma_r=0.99,
         gamma_h=0.99,
-        zeta=2.0,
-        xi=1.0,
-        eta=1.1,
+        beta_h=1.0,
         # PPO
         num_actions=num_actions,
-        num_robots=len(robot_indices),
         hidden_dim=args.hidden_dim,
         ppo_rollout_length=32,
         ppo_num_minibatches=2,
         ppo_update_epochs=2,
         num_envs=args.num_envs,
         num_ppo_iterations=args.iters,
-        lr_ppo=3e-4,
-        # Auxiliary
-        aux_training_steps_per_iteration=5,
-        aux_buffer_size=5_000,
-        batch_size=32,
-        reward_freeze_interval=5,
+        lr=3e-4,
         # Environment
         steps_per_episode=20,
         # Runtime
@@ -352,25 +362,26 @@ def main() -> None:
     )
 
     # ------------------------------------------------------------------
-    # 3. Create networks (shared encoder for state → observation)
+    # 3. Create networks (shared encoders for state + goal → observation)
     # ------------------------------------------------------------------
-    actor_critic, aux_nets, state_encoder = create_multigrid_ppo_networks(
+    actor_critic, state_encoder, goal_encoder = create_multigrid_phase1_ppo_networks(
         env=ref_env,
         config=cfg,
         feature_dim=args.feature_dim,
-        use_x_h=True,
-        use_u_r=True,
+        goal_feature_dim=args.goal_feature_dim,
         device=args.device,
     )
     print(f"State encoder feature_dim: {state_encoder.feature_dim}")
-    print(f"Actor-critic joint actions: {actor_critic.num_joint_actions}")
+    print(f"Goal encoder feature_dim: {goal_encoder.feature_dim}")
+    print(
+        f"Actor-critic obs_dim: {state_encoder.feature_dim + goal_encoder.feature_dim}"
+    )
 
     # ------------------------------------------------------------------
     # 4. Build the trainer
     # ------------------------------------------------------------------
-    trainer = PPOPhase2Trainer(
+    trainer = PPOPhase1Trainer(
         actor_critic=actor_critic,
-        auxiliary_networks=aux_nets,
         config=cfg,
         device=args.device,
     )
@@ -378,28 +389,34 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 5. Define env_creator (one per vectorised slot)
     # ------------------------------------------------------------------
-    # The state encoder is shared (torch module, same parameters across
+    # The encoders are shared (torch modules, same parameters across
     # all envs in Serial backend).
-    shared_encoder = state_encoder
+    shared_state_encoder = state_encoder
+    shared_goal_encoder = goal_encoder
+
+    # Build other-agent policies: all agents except training human
+    # use uniform random policies.
+    other_agent_indices = [i for i in range(len(ref_env.agents)) if i != training_human]
 
     def env_creator():
         wm = _create_world_model()
         wm.reset()
-        return MultiGridWorldModelEnv(
+        goal_sampler = _make_goal_sampler(wm, reachable_cells)
+        other_policies = {idx: _random_agent_policy for idx in other_agent_indices}
+        return MultiGridPhase1PPOEnv(
             world_model=wm,
-            human_policy_prior=_uniform_human_policy,
-            goal_sampler=_dummy_goal_sampler,
-            human_agent_indices=human_indices,
-            robot_agent_indices=robot_indices,
+            goal_sampler=goal_sampler,
+            training_human_index=training_human,
+            other_agent_policies=other_policies,
             config=cfg,
-            state_encoder=shared_encoder,
-            # auxiliary_networks injected by trainer.train()
+            state_encoder=shared_state_encoder,
+            goal_encoder=shared_goal_encoder,
         )
 
     # ------------------------------------------------------------------
     # 6. Train
     # ------------------------------------------------------------------
-    print(f"\nStarting PPO training for {args.iters} iterations …")
+    print(f"\nStarting PPO Phase 1 training for {args.iters} iterations …")
     metrics = trainer.train(env_creator, num_iterations=args.iters)
 
     # ------------------------------------------------------------------
@@ -410,9 +427,7 @@ def main() -> None:
         print(f"\nTraining complete ({len(metrics)} iterations).")
         print(f"  Final policy_loss : {last.get('policy_loss', 'N/A')}")
         print(f"  Final value_loss  : {last.get('value_loss', 'N/A')}")
-        print(f"  Final v_h_e_loss  : {last.get('v_h_e_loss', 'N/A')}")
-        print(f"  Final x_h_loss    : {last.get('x_h_loss', 'N/A')}")
-        print(f"  Final u_r_loss    : {last.get('u_r_loss', 'N/A')}")
+        print(f"  Final entropy     : {last.get('entropy', 'N/A')}")
         print(f"  Global env steps  : {trainer.global_env_step}")
     else:
         print("No metrics returned (training may have been too short).")
@@ -422,7 +437,7 @@ def main() -> None:
     # ------------------------------------------------------------------
     num_rollouts = args.rollouts
     output_dir = args.output_dir or os.path.join(
-        _PROJECT_ROOT, "outputs", "phase2_ppo_demo"
+        _PROJECT_ROOT, "outputs", "phase1_ppo_demo"
     )
     os.makedirs(output_dir, exist_ok=True)
 
@@ -432,24 +447,25 @@ def main() -> None:
     rollout_env.reset()
     rollout_env.start_video_recording()
 
+    other_policies_rollout = {idx: _random_agent_policy for idx in other_agent_indices}
+
     for rollout_idx in range(num_rollouts):
+        # Sample a random goal for this rollout
+        pos = reachable_cells[np.random.randint(len(reachable_cells))]
+        rollout_goal = ReachCellGoal(rollout_env, training_human, pos)
+        print(f"  Rollout {rollout_idx + 1}: goal={pos}")
+
         run_ppo_rollout(
             env=rollout_env,
             actor_critic=actor_critic,
             state_encoder=state_encoder,
-            human_policy_fn=_uniform_human_policy,
-            goal_sampler=_dummy_goal_sampler,
-            human_indices=list(human_indices),
-            robot_indices=list(robot_indices),
-            device=args.device,
+            goal_encoder=goal_encoder,
+            training_human_index=training_human,
+            other_agent_policies=other_policies_rollout,
+            goal=rollout_goal,
         )
-        if (rollout_idx + 1) % 5 == 0 or rollout_idx == num_rollouts - 1:
-            print(
-                f"  Completed {rollout_idx + 1}/{num_rollouts} rollouts "
-                f"({len(rollout_env._video_frames)} total frames)"
-            )
 
-    movie_path = os.path.join(output_dir, "phase2_ppo_demo.mp4")
+    movie_path = os.path.join(output_dir, "phase1_ppo_demo.mp4")
     if os.path.exists(movie_path):
         os.remove(movie_path)
     rollout_env.save_video(movie_path, fps=args.movie_fps)

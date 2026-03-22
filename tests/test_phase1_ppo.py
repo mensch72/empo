@@ -361,9 +361,7 @@ class TestPhase1PPOEnv:
 
     def _make_env(self, config=None, **kwargs):
         wm = MockWorldModel(n_agents=2, n_actions=4)
-        cfg = config or PPOPhase1Config(
-            num_actions=4, steps_per_episode=50
-        )
+        cfg = config or PPOPhase1Config(num_actions=4, steps_per_episode=50)
         return _ZeroObsEnv(
             world_model=wm,
             goal_sampler=mock_goal_sampler,
@@ -536,7 +534,6 @@ class TestPhase1PPOEnv:
     def test_goal_resample_mid_episode(self):
         """goal_resample_prob > 0 can trigger goal resampling mid-episode."""
         resample_count = 0
-        original_goal = _DummyGoal()
 
         class _TrackingGoal(_DummyGoal):
             pass
