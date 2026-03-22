@@ -101,7 +101,6 @@ def _get_reachable_cells(env: MultiGridEnv) -> List[Tuple[int, int]]:
 
 def _make_goal_sampler(
     env: MultiGridEnv,
-    human_idx: int,
     reachable_cells: Optional[List[Tuple[int, int]]] = None,
 ):
     """Create a goal sampler that returns ReachCellGoal objects.
@@ -150,7 +149,6 @@ def run_ppo_rollout(
     training_human_index: int,
     other_agent_policies: Dict[int, Any],
     goal: Any,
-    device: str = "cpu",
 ) -> int:
     """Run a single rollout using the trained PPO actor-critic.
 
@@ -403,7 +401,7 @@ def main() -> None:
     def env_creator():
         wm = _create_world_model()
         wm.reset()
-        goal_sampler = _make_goal_sampler(wm, training_human, reachable_cells)
+        goal_sampler = _make_goal_sampler(wm, reachable_cells)
         other_policies = {idx: _random_agent_policy for idx in other_agent_indices}
         return MultiGridPhase1PPOEnv(
             world_model=wm,
@@ -465,7 +463,6 @@ def main() -> None:
             training_human_index=training_human,
             other_agent_policies=other_policies_rollout,
             goal=rollout_goal,
-            device=args.device,
         )
 
     movie_path = os.path.join(output_dir, "phase1_ppo_demo.mp4")

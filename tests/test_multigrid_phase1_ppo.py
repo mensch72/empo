@@ -239,7 +239,7 @@ class TestMultiGridPhase1PPOEnv:
         assert info_achieved["goal_achieved"] == 1.0
 
     def test_observation_includes_goal_features(self):
-        """Observation should differ when different goals are sampled."""
+        """Goal-feature slice of the observation should differ for different goals."""
         env = _make_env()
         env.reset()
         cfg = _make_config()
@@ -254,21 +254,23 @@ class TestMultiGridPhase1PPOEnv:
         def sampler_b(state, h_idx):
             return goal_b, 1.0
 
+        # Use the same seed so that the world-model state is identical
         ppo_env_a = _make_ppo_env(env, cfg, se, ge, goal_sampler=sampler_a)
-        obs_a, _ = ppo_env_a.reset()
+        obs_a, _ = ppo_env_a.reset(seed=42)
 
-        # Reset underlying env to same state
-        env.reset()
         ppo_env_b = _make_ppo_env(env, cfg, se, ge, goal_sampler=sampler_b)
-        obs_b, _ = ppo_env_b.reset()
+        obs_b, _ = ppo_env_b.reset(seed=42)
 
-        # Observations should differ because the goal features differ
-        assert obs_a.shape == obs_b.shape
-        # With different goals, at least the goal-feature portion should differ
-        # (the state portion may also differ due to reset randomness)
-        # We just check shapes are correct here
         expected_dim = se.feature_dim + ge.feature_dim
         assert obs_a.shape == (expected_dim,)
+        assert obs_b.shape == (expected_dim,)
+
+        # The goal-feature tail must differ between the two goals
+        goal_slice_a = obs_a[-ge.feature_dim :]
+        goal_slice_b = obs_b[-ge.feature_dim :]
+        assert not np.array_equal(
+            goal_slice_a, goal_slice_b
+        ), "Goal-feature slices should differ for different goals"
 
     def test_episode_truncates_at_steps_per_episode(self):
         env = _make_env()
