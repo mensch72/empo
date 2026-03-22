@@ -139,7 +139,7 @@ class MultiGridPhase1PPOEnv(Phase1PPOEnv):
         joint_action = self._build_joint_action(state, int(action))
 
         # Step world model (handles old Gym 4-tuple)
-        _, env_reward, terminated, truncated, _wm_info = self._step_world_model(
+        _, _env_reward, terminated, truncated, _wm_info = self._step_world_model(
             joint_action
         )
 
