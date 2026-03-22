@@ -413,10 +413,10 @@ def main() -> None:
         aux_buffer_size=10_000,
         batch_size=64,
         reward_freeze_interval=5,
-        # Warm-up (skip for this demo)
-        warmup_v_h_e_steps=0,
-        warmup_x_h_steps=0,
-        warmup_u_r_steps=0,
+        # Warm-up: cumulative step thresholds (must be non-decreasing)
+        warmup_v_h_e_steps=1000,  # V_h^e trains alone until step 1000
+        warmup_x_h_steps=1500,    # X_h joins at step 1000, trains until 1500
+        warmup_u_r_steps=2000,    # U_r joins at step 1500, warmup ends at 2000
         # Environment
         steps_per_episode=ref_env.max_steps,
         # Runtime
