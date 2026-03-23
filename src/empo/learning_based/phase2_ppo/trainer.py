@@ -711,11 +711,32 @@ class PPOPhase2Trainer:
             for _ in range(n_episodes):
                 env.reset()
                 for _ in range(self.config.steps_per_episode):
+                    # Save pre-env_step state so we can fall back to a direct
+                    # _compute_u_r() call only if the env_step does NOT expose U_r
+                    # via the info dict. This avoids duplicate forward passes for
+                    # neural auxiliary networks when info["u_r"] is available.
                     state = env.world_model.get_state()
-                    u_r = env._compute_u_r(state)
-                    max_abs = max(max_abs, abs(u_r))
                     action = env.action_space.sample()
-                    _, _, terminated, truncated, _ = env.step(action)
+                    _, _, terminated, truncated, info = env.step(action)
+
+                    u_r = None
+                    if isinstance(info, dict) and "u_r" in info:
+                        u_r = info["u_r"]
+                        # Many wrappers expose a scaled u_r; rescale to the
+                        # underlying U_r magnitude if _u_r_scale is present.
+                        scale_attr = getattr(env, "_u_r_scale", 1.0)
+                        try:
+                            u_r = float(u_r) * float(scale_attr)
+                        except (TypeError, ValueError):
+                            # If casting fails, skip this sample and fall back
+                            # to computing U_r directly below.
+                            u_r = None
+                    if u_r is None:
+                        # Either info had no "u_r" entry, or its value was unusable.
+                        # Fall back to the original behavior: compute U_r directly
+                        # from the saved pre-env_step state.
+                        u_r = env._compute_u_r(state)
+                    max_abs = max(max_abs, abs(float(u_r)))
                     if terminated or truncated:
                         break
         finally:
