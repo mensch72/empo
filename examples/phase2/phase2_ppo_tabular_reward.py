@@ -715,7 +715,13 @@ def main() -> None:
 
     actor_critic.eval()
     with torch.no_grad():
-        enc_device = next(state_encoder.parameters()).device
+        # Resolve device safely: prefer parameters, then buffers, then CPU.
+        enc_param = next(state_encoder.parameters(), None)
+        if enc_param is not None:
+            enc_device = enc_param.device
+        else:
+            enc_buffer = next(state_encoder.buffers(), None)
+            enc_device = enc_buffer.device if enc_buffer is not None else torch.device("cpu")
         tensors = state_encoder.tensorize_state(root_state, diag_env, device=enc_device)
         features = state_encoder(*tensors)
         logits, value = actor_critic(features)
