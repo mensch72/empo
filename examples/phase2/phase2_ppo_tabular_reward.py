@@ -421,7 +421,16 @@ def run_ppo_rollout(
         human_goals[h] = goal
 
     def _state_to_obs(s):
-        encoder_device = next(state_encoder.parameters()).device
+        # Resolve encoder device robustly: try parameters, then buffers, then CPU.
+        first_param = next(state_encoder.parameters(), None)
+        if first_param is not None:
+            encoder_device = first_param.device
+        else:
+            first_buffer = next(state_encoder.buffers(), None)
+            if first_buffer is not None:
+                encoder_device = first_buffer.device
+            else:
+                encoder_device = torch.device("cpu")
         with torch.no_grad():
             tensors = state_encoder.tensorize_state(s, env, device=encoder_device)
             features = state_encoder(*tensors)
