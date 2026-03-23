@@ -160,9 +160,10 @@ class MultiGridWorldModelEnv(EMPOWorldModelEnv):
 
         # -- EMPO finite-horizon interpretation --
         # EMPO uses backward induction over a finite horizon (max_steps).
-        # When the world_model signals `done` because it hit its own
-        # max-steps limit, we keep this as a genuine terminal state
-        # (no value bootstrapping), matching BI's finite-horizon V_r.
+        # Termination vs. time-limit truncation is normalised inside
+        # `_step_world_model`; here we only add a wrapper-level
+        # `steps_per_episode` cap below and ensure that `truncated` is
+        # set only when the world model has not already terminated.
 
         next_state = self.world_model.get_state()
         self._step_count += 1
