@@ -160,8 +160,12 @@ class TabularRewardMultiGridEnv(MultiGridWorldModelEnv):
 
         # Override theoretical bound with empirical max |U_r| from table,
         # so rewards fill [-1, ≈0] instead of being crushed near zero.
+        # Guard against all-zero (or numerically tiny) tables to avoid
+        # division-by-zero when the base class normalises by _u_r_scale.
         if u_r_table:
-            self._u_r_scale = max(abs(v) for v in u_r_table.values())
+            max_abs_u_r = max(abs(v) for v in u_r_table.values())
+            if max_abs_u_r > 1e-8:
+                self._u_r_scale = max_abs_u_r
 
     def _compute_u_r(self, state: Any) -> float:
         """Look up tabular U_r(state) from backward induction."""

@@ -218,6 +218,11 @@ class PPOPhase2Config:
                 f"warmup_x_h_steps={self.warmup_x_h_steps} <= "
                 f"warmup_u_r_steps={self.warmup_u_r_steps}"
             )
+        if self.u_r_scale is not None and self.u_r_scale <= 0:
+            raise ValueError(
+                f"u_r_scale must be > 0 (divides U_r rewards; zero/negative "
+                f"would cause division-by-zero or sign flips), got {self.u_r_scale}"
+            )
         if self.log_interval < 1:
             raise ValueError(f"log_interval must be >= 1, got {self.log_interval}")
 

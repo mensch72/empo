@@ -340,6 +340,26 @@ class TestPPOPhase2Config:
         assert cfg.get_warmup_stage(0) == 3
         assert cfg.get_total_warmup_steps() == 0
 
+    def test_u_r_scale_zero_raises(self):
+        """u_r_scale=0 must raise ValueError (would cause division-by-zero)."""
+        with pytest.raises(ValueError, match="u_r_scale"):
+            PPOPhase2Config(u_r_scale=0.0)
+
+    def test_u_r_scale_negative_raises(self):
+        """Negative u_r_scale must raise ValueError (would flip reward sign)."""
+        with pytest.raises(ValueError, match="u_r_scale"):
+            PPOPhase2Config(u_r_scale=-1.0)
+
+    def test_u_r_scale_positive_accepted(self):
+        """Positive u_r_scale must be accepted without error."""
+        cfg = PPOPhase2Config(u_r_scale=2.5)
+        assert cfg.u_r_scale == 2.5
+
+    def test_u_r_scale_none_accepted(self):
+        """u_r_scale=None (default) uses the theoretical fallback."""
+        cfg = PPOPhase2Config()
+        assert cfg.u_r_scale is None
+
 
 # ======================================================================
 # 2. EMPOActorCritic tests
@@ -734,6 +754,63 @@ class TestEMPOWorldModelEnv:
         )
         assert isinstance(env.action_space, gymnasium.spaces.Discrete)
         assert env.action_space.n == 3**2  # num_actions ** num_robots = 9
+
+    def test_u_r_scale_from_config_divides_reward(self):
+        """reward is divided by config.u_r_scale when set."""
+
+        class _KnownRewardEnv(_ZeroObsEnv):
+            """Env that returns a fixed known U_r regardless of state."""
+
+            def _compute_u_r(self, state):
+                return -4.0  # raw U_r before scaling
+
+        wm = MockWorldModel(n_agents=3, n_actions=5)
+        scale = 2.0
+        cfg = PPOPhase2Config(
+            num_actions=5, num_robots=1, steps_per_episode=50, u_r_scale=scale
+        )
+        env = _KnownRewardEnv(
+            world_model=wm,
+            human_policy_prior=mock_human_policy_prior,
+            goal_sampler=mock_goal_sampler,
+            human_agent_indices=[0, 1],
+            robot_agent_indices=[2],
+            config=cfg,
+            obs_dim=3,
+        )
+        env.reset()
+        _, reward, _, _, info = env.step(0)
+        # reward == u_r / u_r_scale == -4.0 / 2.0 == -2.0
+        assert reward == pytest.approx(-4.0 / scale)
+        # info['u_r'] should also reflect the scaled value
+        assert info["u_r"] == pytest.approx(-4.0 / scale)
+
+    def test_u_r_scale_none_uses_theoretical_fallback(self):
+        """When u_r_scale is None the wrapper uses the theoretical upper-bound."""
+
+        class _KnownRewardEnv(_ZeroObsEnv):
+            def _compute_u_r(self, state):
+                return -1.0
+
+        wm = MockWorldModel(n_agents=3, n_actions=5)
+        cfg = PPOPhase2Config(
+            num_actions=5, num_robots=1, steps_per_episode=50, u_r_scale=None
+        )
+        env = _KnownRewardEnv(
+            world_model=wm,
+            human_policy_prior=mock_human_policy_prior,
+            goal_sampler=mock_goal_sampler,
+            human_agent_indices=[0, 1],
+            robot_agent_indices=[2],
+            config=cfg,
+            obs_dim=3,
+        )
+        # Compute expected fallback scale matching env wrapper logic
+        _X_H_MIN = 1e-3
+        expected_scale = (_X_H_MIN ** (-cfg.xi)) ** cfg.eta
+        env.reset()
+        _, reward, _, _, _ = env.step(0)
+        assert reward == pytest.approx(-1.0 / expected_scale)
 
 
 # ======================================================================
@@ -1186,6 +1263,128 @@ class TestPPOPhase2Trainer:
                 trainer.writer.close()
             else:
                 assert trainer.writer is None
+
+    def test_calibrate_reward_scale_returns_empirical_max(self):
+        """calibrate_reward_scale() sets u_r_scale to max|U_r| across episodes."""
+
+        class _FixedRewardEnv(_ZeroObsEnv):
+            """Env that cycles through U_r values [-2, -1, 0] across states."""
+
+            _u_r_values = [-2.0, -1.0, 0.0]
+            _call_count = 0
+
+            def _compute_u_r(self, state):
+                val = self._u_r_values[self._call_count % len(self._u_r_values)]
+                self._call_count += 1
+                return val
+
+        wm = MockWorldModel(n_agents=3, n_actions=5)
+        cfg = PPOPhase2Config(
+            num_actions=5,
+            num_robots=1,
+            hidden_dim=16,
+            steps_per_episode=6,
+        )
+        ac = EMPOActorCritic(
+            state_encoder=None, hidden_dim=16, num_actions=5, obs_dim=3
+        )
+        v_h_e = _MockVhE()
+        aux = PPOAuxiliaryNetworks(v_h_e=v_h_e)
+        trainer = PPOPhase2Trainer(ac, aux, cfg, device="cpu")
+
+        def env_creator():
+            env = _FixedRewardEnv(
+                world_model=wm,
+                human_policy_prior=mock_human_policy_prior,
+                goal_sampler=mock_goal_sampler,
+                human_agent_indices=[0, 1],
+                robot_agent_indices=[2],
+                config=cfg,
+                obs_dim=3,
+            )
+            return env
+
+        scale = trainer.calibrate_reward_scale(env_creator, n_episodes=2)
+        # max|U_r| == 2.0
+        assert scale == pytest.approx(2.0)
+        assert trainer.config.u_r_scale == pytest.approx(2.0)
+
+    def test_calibrate_reward_scale_fallback_when_all_zero(self):
+        """calibrate_reward_scale() falls back to 1.0 when all U_r are ~0."""
+
+        class _ZeroRewardEnv(_ZeroObsEnv):
+            def _compute_u_r(self, state):
+                return 0.0
+
+        wm = MockWorldModel(n_agents=3, n_actions=5)
+        cfg = PPOPhase2Config(
+            num_actions=5,
+            num_robots=1,
+            hidden_dim=16,
+            steps_per_episode=4,
+        )
+        ac = EMPOActorCritic(
+            state_encoder=None, hidden_dim=16, num_actions=5, obs_dim=3
+        )
+        v_h_e = _MockVhE()
+        aux = PPOAuxiliaryNetworks(v_h_e=v_h_e)
+        trainer = PPOPhase2Trainer(ac, aux, cfg, device="cpu")
+
+        def env_creator():
+            return _ZeroRewardEnv(
+                world_model=wm,
+                human_policy_prior=mock_human_policy_prior,
+                goal_sampler=mock_goal_sampler,
+                human_agent_indices=[0, 1],
+                robot_agent_indices=[2],
+                config=cfg,
+                obs_dim=3,
+            )
+
+        scale = trainer.calibrate_reward_scale(env_creator, n_episodes=2)
+        # Falls back to 1.0 when max|U_r| < 1e-10
+        assert scale == pytest.approx(1.0)
+        assert trainer.config.u_r_scale == pytest.approx(1.0)
+
+    def test_calibrate_reward_scale_injects_auxiliary_networks(self):
+        """calibrate_reward_scale() injects trainer.auxiliary_networks into env."""
+        injected = []
+
+        class _InspectAuxEnv(_ZeroObsEnv):
+            def _compute_u_r(self, state):
+                injected.append(self.auxiliary_networks)
+                return 0.0
+
+        wm = MockWorldModel(n_agents=3, n_actions=5)
+        cfg = PPOPhase2Config(
+            num_actions=5,
+            num_robots=1,
+            hidden_dim=16,
+            steps_per_episode=2,
+        )
+        ac = EMPOActorCritic(
+            state_encoder=None, hidden_dim=16, num_actions=5, obs_dim=3
+        )
+        v_h_e = _MockVhE()
+        aux = PPOAuxiliaryNetworks(v_h_e=v_h_e)
+        trainer = PPOPhase2Trainer(ac, aux, cfg, device="cpu")
+
+        def env_creator():
+            return _InspectAuxEnv(
+                world_model=wm,
+                human_policy_prior=mock_human_policy_prior,
+                goal_sampler=mock_goal_sampler,
+                human_agent_indices=[0, 1],
+                robot_agent_indices=[2],
+                config=cfg,
+                obs_dim=3,
+                # auxiliary_networks NOT passed here — trainer should inject
+            )
+
+        trainer.calibrate_reward_scale(env_creator, n_episodes=1)
+        # _compute_u_r was called and auxiliary_networks was injected
+        assert len(injected) > 0
+        assert injected[0] is aux
 
 
 # ======================================================================

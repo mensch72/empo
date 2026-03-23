@@ -168,7 +168,9 @@ class MultiGridWorldModelEnv(EMPOWorldModelEnv):
         self._step_count += 1
 
         # -- Truncate if episode exceeds maximum length (wrapper-level cap) --
-        if self._step_count >= self.config.steps_per_episode:
+        # Only mark truncated when the world model hasn't already terminated the
+        # episode, so terminated and truncated remain mutually exclusive.
+        if self._step_count >= self.config.steps_per_episode and not terminated:
             truncated = True
 
         # -- Compute intrinsic reward U_r(s_t) at pre-transition state --

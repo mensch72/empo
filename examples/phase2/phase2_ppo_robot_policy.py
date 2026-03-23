@@ -23,18 +23,18 @@ Output:
 
 Usage:
     # Inside Docker container (make shell):
-    python examples/phase2/phase2_ppo_asymmetric_freeing.py
+    python examples/phase2/phase2_ppo_robot_policy.py
 
     # Use a specific world (default: trivial.yaml):
-    python examples/phase2/phase2_ppo_asymmetric_freeing.py --world jobst_challenges/asymmetric_freeing_simple
+    python examples/phase2/phase2_ppo_robot_policy.py --world jobst_challenges/asymmetric_freeing_simple
 
     # Outside Docker:
     PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds \\
-        python examples/phase2/phase2_ppo_asymmetric_freeing.py
+        python examples/phase2/phase2_ppo_robot_policy.py
 
     # Quick smoke test (2 iterations, 2 rollouts):
     PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds \\
-        python examples/phase2/phase2_ppo_asymmetric_freeing.py --iters 2 --rollouts 2
+        python examples/phase2/phase2_ppo_robot_policy.py --iters 2 --rollouts 2
 
 Requirements:
     pip install pufferlib>=3.0

@@ -699,16 +699,27 @@ class PPOPhase2Trainer:
         Returns the calibrated scale factor.
         """
         env = env_creator()
-        max_abs: float = 0.0
-        for _ in range(n_episodes):
-            env.reset()
-            for _ in range(self.config.steps_per_episode):
-                state = env.world_model.get_state()
-                u_r = env._compute_u_r(state)
-                max_abs = max(max_abs, abs(u_r))
-                action = env.action_space.sample()
-                env.step(action)
-        env.close()
+        # Mirror train()'s injection of auxiliary_networks so that
+        # _compute_u_r() has the networks it needs to produce non-zero rewards.
+        if (
+            getattr(env, "auxiliary_networks", None) is None
+            and self.auxiliary_networks is not None
+        ):
+            env.auxiliary_networks = self.auxiliary_networks
+        try:
+            max_abs: float = 0.0
+            for _ in range(n_episodes):
+                env.reset()
+                for _ in range(self.config.steps_per_episode):
+                    state = env.world_model.get_state()
+                    u_r = env._compute_u_r(state)
+                    max_abs = max(max_abs, abs(u_r))
+                    action = env.action_space.sample()
+                    _, _, terminated, truncated, _ = env.step(action)
+                    if terminated or truncated:
+                        break
+        finally:
+            env.close()
         scale = max_abs if max_abs > 1e-10 else 1.0
         self.config.u_r_scale = scale
         logger.info("Calibrated u_r_scale = %.6f (from %d episodes)", scale, n_episodes)
