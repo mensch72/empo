@@ -23,18 +23,18 @@ Output:
 
 Usage:
     # Inside Docker container (make shell):
-    python examples/phase2/phase2_ppo_asymmetric_freeing.py
+    python examples/phase2/phase2_ppo_robot_policy.py
 
     # Use a specific world (default: trivial.yaml):
-    python examples/phase2/phase2_ppo_asymmetric_freeing.py --world jobst_challenges/asymmetric_freeing_simple
+    python examples/phase2/phase2_ppo_robot_policy.py --world jobst_challenges/asymmetric_freeing_simple
 
     # Outside Docker:
     PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds \\
-        python examples/phase2/phase2_ppo_asymmetric_freeing.py
+        python examples/phase2/phase2_ppo_robot_policy.py
 
     # Quick smoke test (2 iterations, 2 rollouts):
     PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds \\
-        python examples/phase2/phase2_ppo_asymmetric_freeing.py --iters 2 --rollouts 2
+        python examples/phase2/phase2_ppo_robot_policy.py --iters 2 --rollouts 2
 
 Requirements:
     pip install pufferlib>=3.0
@@ -232,7 +232,16 @@ def run_ppo_rollout(
 
     def _state_to_obs(s):
         """Encode world-model state to a flat observation tensor."""
-        encoder_device = next(state_encoder.parameters()).device
+        # Resolve encoder device defensively: parameters → buffers → CPU
+        params = list(state_encoder.parameters())
+        if params:
+            encoder_device = params[0].device
+        else:
+            buffers = list(state_encoder.buffers())
+            if buffers:
+                encoder_device = buffers[0].device
+            else:
+                encoder_device = torch.device("cpu")
         with torch.no_grad():
             tensors = state_encoder.tensorize_state(s, env, device=encoder_device)
             features = state_encoder(*tensors)
@@ -537,17 +546,13 @@ def main() -> None:
     # V_r(root) from actor-critic
     actor_critic.eval()
     with torch.no_grad():
-        def _resolve_module_device(module: torch.nn.Module) -> torch.device:
-            # Try parameters first
-            for p in module.parameters():
-                return p.device
-            # Then try buffers (e.g., running stats in BatchNorm)
-            for b in module.buffers():
-                return b.device
-            # Fallback to CPU if the module has no parameters or buffers
-            return torch.device("cpu")
-
-        enc_device = _resolve_module_device(state_encoder)
+        # Safely determine encoder device: parameters → buffers → CPU
+        first_param = next(state_encoder.parameters(), None)
+        if first_param is not None:
+            enc_device = first_param.device
+        else:
+            first_buffer = next(state_encoder.buffers(), None)
+            enc_device = first_buffer.device if first_buffer is not None else torch.device("cpu")
         tensors = state_encoder.tensorize_state(root_state, diag_env, device=enc_device)
         features = state_encoder(*tensors)
         logits, value = actor_critic(features)
@@ -616,18 +621,9 @@ def main() -> None:
     # 9. Generate rollout movie
     # ------------------------------------------------------------------
     num_rollouts = args.rollouts
-    if args.output_dir:
-        output_dir = args.output_dir
-    else:
-        # Derive world name for the output path (strip extension)
-        world_name = args.world
-        if world_name.endswith('.yaml'):
-            world_name = world_name[:-5]
-        elif world_name.endswith('.yml'):
-            world_name = world_name[:-4]
-        output_dir = os.path.join(
-            _PROJECT_ROOT, "outputs", "phase2_ppo_demo", world_name
-        )
+    output_dir = args.output_dir or os.path.join(
+        _PROJECT_ROOT, "outputs", "phase2_ppo_asymmetric_freeing"
+    )
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"\nGenerating {num_rollouts} rollouts with learned policy …")
@@ -659,10 +655,7 @@ def main() -> None:
                 f"({len(rollout_env._video_frames)} total frames)"
             )
 
-    # Name the movie consistently with this script to avoid collisions across demos.
-    script_stem = os.path.splitext(os.path.basename(__file__))[0]
-    movie_filename = f"{script_stem}.mp4"
-    movie_path = os.path.join(output_dir, movie_filename)
+    movie_path = os.path.join(output_dir, "phase2_ppo_asymmetric_freeing.mp4")
     if os.path.exists(movie_path):
         os.remove(movie_path)
     rollout_env.save_video(movie_path, fps=args.movie_fps)

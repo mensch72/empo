@@ -677,6 +677,72 @@ class PPOPhase2Trainer:
         self.aux_training_step = checkpoint.get("aux_training_step", 0)
 
     # ------------------------------------------------------------------
+    # Reward-scale calibration
+    # ------------------------------------------------------------------
+
+    def calibrate_reward_scale(
+        self,
+        env_creator: Callable[[], Any],
+        n_episodes: int = 20,
+    ) -> float:
+        """Estimate ``u_r_scale`` by running random episodes.
+
+        Creates a temporary environment, runs *n_episodes* random
+        rollouts, and records the largest ``|U_r|`` observed.  The
+        result is written to ``self.config.u_r_scale`` so that all
+        environments created afterwards use the calibrated scale.
+
+        Call this **before** ``train()`` (or after warm-up completes
+        for neural auxiliary networks) so that vectorised envs pick up
+        the calibrated value at creation time.
+
+        Returns the calibrated scale factor.
+        """
+        env = env_creator()
+        # Mirror train()'s injection of auxiliary_networks so that
+        # _compute_u_r() has the networks it needs to produce non-zero rewards.
+        if (
+            getattr(env, "auxiliary_networks", None) is None
+            and self.auxiliary_networks is not None
+        ):
+            env.auxiliary_networks = self.auxiliary_networks
+        try:
+            max_abs: float = 0.0
+            for _ in range(n_episodes):
+                env.reset()
+                for _ in range(self.config.steps_per_episode):
+                    # Sample a random action and take an env_step. We rely on the
+                    # reward / info returned by env_step so that U_r is computed
+                    # exactly once per env_step, avoiding duplicate forward passes
+                    # through neural auxiliary networks.
+                    action = env.action_space.sample()
+                    _, reward, terminated, truncated, info = env.step(action)
+
+                    u_r = None
+                    if isinstance(info, dict) and "u_r" in info:
+                        u_r = info["u_r"]
+                    else:
+                        # Fall back to the scalar reward returned by env_step.
+                        u_r = reward
+                    # Many wrappers expose a scaled u_r; rescale to the underlying
+                    # U_r magnitude if _u_r_scale is present.
+                    scale_attr = getattr(env, "_u_r_scale", 1.0)
+                    try:
+                        u_r = float(u_r) * float(scale_attr)
+                    except (TypeError, ValueError):
+                        # If casting fails, skip this sample.
+                        continue
+                    max_abs = max(max_abs, abs(float(u_r)))
+                    if terminated or truncated:
+                        break
+        finally:
+            env.close()
+        scale = max_abs if max_abs > 1e-10 else 1.0
+        self.config.u_r_scale = scale
+        logger.info("Calibrated u_r_scale = %.6f (from %d episodes)", scale, n_episodes)
+        return scale
+
+    # ------------------------------------------------------------------
     # Full training loop  (PufferLib-backed)
     # ------------------------------------------------------------------
 

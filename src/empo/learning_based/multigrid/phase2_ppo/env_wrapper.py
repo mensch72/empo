@@ -132,9 +132,10 @@ class MultiGridWorldModelEnv(EMPOWorldModelEnv):
         result = self.world_model.step(joint_action)
         if len(result) == 5:
             return result
-        # Old-style 4-tuple: treat done as terminated, truncated=False
+        # Old-style 4-tuple: MultiGrid signals done when hitting its
+        # max_steps time limit — map to truncated (not terminated).
         obs, reward, done, info = result
-        return obs, reward, bool(done), False, info
+        return obs, reward, False, bool(done), info
 
     def step(self, action):
         """Step the environment.
@@ -157,39 +158,27 @@ class MultiGridWorldModelEnv(EMPOWorldModelEnv):
             joint_action
         )
 
-        # -- Interpret legacy MultiGrid `done` as termination vs truncation --
-        # Some MultiGrid world_models only expose a single `done` flag and
-        # manage episode length internally via `step_count` / `max_steps`.
-        # When such a world_model signals `done` because it hit its own
-        # max-steps limit, we represent this as a Gymnasium-style truncation
-        # (time-limit), not a terminal state.  This preserves correct value
-        # bootstrapping in the PPO update.
-        wm_step_count = getattr(self.world_model, "step_count", None)
-        wm_max_steps = getattr(self.world_model, "max_steps", None)
-        if (
-            truncated is False
-            and terminated
-            and wm_step_count is not None
-            and wm_max_steps is not None
-            and wm_step_count >= wm_max_steps
-        ):
-            # Time-limit inside the underlying world_model
-            terminated = False
-            truncated = True
+        # -- EMPO finite-horizon interpretation --
+        # EMPO uses backward induction over a finite horizon (max_steps).
+        # Termination vs. time-limit truncation is normalised inside
+        # `_step_world_model`; here we only add a wrapper-level
+        # `steps_per_episode` cap below and ensure that `truncated` is
+        # set only when the world model has not already terminated.
 
         next_state = self.world_model.get_state()
         self._step_count += 1
 
         # -- Truncate if episode exceeds maximum length (wrapper-level cap) --
-        # This cap is an artificial limit for PPO training and should be
-        # treated purely as a truncation.  If the world_model has already
-        # reported a genuine terminal state this step, we leave
-        # `terminated=True` and avoid forcing an additional truncation flag.
+        # Only mark truncated when the world model hasn't already terminated the
+        # episode, so terminated and truncated remain mutually exclusive.
         if self._step_count >= self.config.steps_per_episode and not terminated:
             truncated = True
 
         # -- Compute intrinsic reward U_r(s_t) at pre-transition state --
         u_r = self._compute_u_r(pre_state)
+
+        # Normalise into [-1, ≈0] so PufferLib's clamp(r, -1, 1) is benign.
+        u_r = u_r / self._u_r_scale
 
         # -- Goal resampling (stochastic, using seeded RNG) --
         if self._py_rng.random() < self.config.goal_resample_prob:
