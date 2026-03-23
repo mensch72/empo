@@ -649,7 +649,10 @@ def main() -> None:
                 f"({len(rollout_env._video_frames)} total frames)"
             )
 
-    movie_path = os.path.join(output_dir, "phase2_ppo_demo.mp4")
+    # Name the movie consistently with this script to avoid collisions across demos.
+    script_stem = os.path.splitext(os.path.basename(__file__))[0]
+    movie_filename = f"{script_stem}.mp4"
+    movie_path = os.path.join(output_dir, movie_filename)
     if os.path.exists(movie_path):
         os.remove(movie_path)
     rollout_env.save_video(movie_path, fps=args.movie_fps)
