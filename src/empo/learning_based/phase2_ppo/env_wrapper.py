@@ -193,11 +193,9 @@ class EMPOWorldModelEnv(gymnasium.Env):
         next_state = self.world_model.get_state()
         self._step_count += 1
 
-        # -- Terminate if episode exceeds maximum length --
-        # Treated as true termination (not truncation) because EMPO's
-        # backward induction computes V_r over a finite horizon.
+        # -- Truncate if episode exceeds maximum length --
         if self._step_count >= self.config.steps_per_episode:
-            terminated = True
+            truncated = True
 
         # -- Compute intrinsic reward U_r(s_t) at pre-transition state --
         u_r = self._compute_u_r(pre_state)

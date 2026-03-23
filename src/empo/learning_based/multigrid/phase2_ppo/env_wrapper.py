@@ -132,9 +132,10 @@ class MultiGridWorldModelEnv(EMPOWorldModelEnv):
         result = self.world_model.step(joint_action)
         if len(result) == 5:
             return result
-        # Old-style 4-tuple: treat done as terminated, truncated=False
+        # Old-style 4-tuple: MultiGrid signals done when hitting its
+        # max_steps time limit — map to truncated (not terminated).
         obs, reward, done, info = result
-        return obs, reward, bool(done), False, info
+        return obs, reward, False, bool(done), info
 
     def step(self, action):
         """Step the environment.
@@ -166,11 +167,9 @@ class MultiGridWorldModelEnv(EMPOWorldModelEnv):
         next_state = self.world_model.get_state()
         self._step_count += 1
 
-        # -- Terminate if episode exceeds maximum length (wrapper-level cap) --
-        # Treated as true termination (not truncation) because EMPO's
-        # backward induction computes V_r over a finite horizon.
+        # -- Truncate if episode exceeds maximum length (wrapper-level cap) --
         if self._step_count >= self.config.steps_per_episode:
-            terminated = True
+            truncated = True
 
         # -- Compute intrinsic reward U_r(s_t) at pre-transition state --
         u_r = self._compute_u_r(pre_state)
