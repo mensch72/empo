@@ -537,7 +537,17 @@ def main() -> None:
     # V_r(root) from actor-critic
     actor_critic.eval()
     with torch.no_grad():
-        enc_device = next(state_encoder.parameters()).device
+        def _resolve_module_device(module: torch.nn.Module) -> torch.device:
+            # Try parameters first
+            for p in module.parameters():
+                return p.device
+            # Then try buffers (e.g., running stats in BatchNorm)
+            for b in module.buffers():
+                return b.device
+            # Fallback to CPU if the module has no parameters or buffers
+            return torch.device("cpu")
+
+        enc_device = _resolve_module_device(state_encoder)
         tensors = state_encoder.tensorize_state(root_state, diag_env, device=enc_device)
         features = state_encoder(*tensors)
         logits, value = actor_critic(features)
