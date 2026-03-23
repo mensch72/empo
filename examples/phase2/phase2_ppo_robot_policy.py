@@ -232,7 +232,16 @@ def run_ppo_rollout(
 
     def _state_to_obs(s):
         """Encode world-model state to a flat observation tensor."""
-        encoder_device = next(state_encoder.parameters()).device
+        # Resolve encoder device defensively: parameters → buffers → CPU
+        params = list(state_encoder.parameters())
+        if params:
+            encoder_device = params[0].device
+        else:
+            buffers = list(state_encoder.buffers())
+            if buffers:
+                encoder_device = buffers[0].device
+            else:
+                encoder_device = torch.device("cpu")
         with torch.no_grad():
             tensors = state_encoder.tensorize_state(s, env, device=encoder_device)
             features = state_encoder(*tensors)
