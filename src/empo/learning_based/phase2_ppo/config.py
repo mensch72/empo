@@ -181,6 +181,15 @@ class PPOPhase2Config:
     checkpoint_interval: int = 0  # 0 = disabled; otherwise save every N PPO iters
     checkpoint_dir: Optional[str] = None
 
+    # ── Reward scaling ─────────────────────────────────────────────────────
+    # U_r is divided by ``u_r_scale`` before being passed to PufferLib as
+    # the PPO reward.  This prevents PufferLib's hard ``clamp(r, -1, 1)``
+    # from destroying the reward signal.  If ``None``, the env wrapper
+    # falls back to a conservative theoretical upper-bound.  For better
+    # signal, set this to the empirical ``max(|U_r|)`` observed during a
+    # short calibration phase (see ``PPOPhase2Trainer.calibrate_reward_scale``).
+    u_r_scale: Optional[float] = None
+
     # ── Performance flags ─────────────────────────────────────────────────
     # Transition-probability computation on every env step is expensive for
     # multi-robot (|A|^N) and currently unused by train_auxiliary_step().

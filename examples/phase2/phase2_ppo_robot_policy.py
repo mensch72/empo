@@ -606,18 +606,9 @@ def main() -> None:
     # 9. Generate rollout movie
     # ------------------------------------------------------------------
     num_rollouts = args.rollouts
-    if args.output_dir:
-        output_dir = args.output_dir
-    else:
-        # Derive world name for the output path (strip extension)
-        world_name = args.world
-        if world_name.endswith('.yaml'):
-            world_name = world_name[:-5]
-        elif world_name.endswith('.yml'):
-            world_name = world_name[:-4]
-        output_dir = os.path.join(
-            _PROJECT_ROOT, "outputs", "phase2_ppo_demo", world_name
-        )
+    output_dir = args.output_dir or os.path.join(
+        _PROJECT_ROOT, "outputs", "phase2_ppo_asymmetric_freeing"
+    )
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"\nGenerating {num_rollouts} rollouts with learned policy …")
@@ -649,7 +640,7 @@ def main() -> None:
                 f"({len(rollout_env._video_frames)} total frames)"
             )
 
-    movie_path = os.path.join(output_dir, "phase2_ppo_demo.mp4")
+    movie_path = os.path.join(output_dir, "phase2_ppo_asymmetric_freeing.mp4")
     if os.path.exists(movie_path):
         os.remove(movie_path)
     rollout_env.save_video(movie_path, fps=args.movie_fps)

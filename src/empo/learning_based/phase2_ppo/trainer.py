@@ -677,6 +677,44 @@ class PPOPhase2Trainer:
         self.aux_training_step = checkpoint.get("aux_training_step", 0)
 
     # ------------------------------------------------------------------
+    # Reward-scale calibration
+    # ------------------------------------------------------------------
+
+    def calibrate_reward_scale(
+        self,
+        env_creator: Callable[[], Any],
+        n_episodes: int = 20,
+    ) -> float:
+        """Estimate ``u_r_scale`` by running random episodes.
+
+        Creates a temporary environment, runs *n_episodes* random
+        rollouts, and records the largest ``|U_r|`` observed.  The
+        result is written to ``self.config.u_r_scale`` so that all
+        environments created afterwards use the calibrated scale.
+
+        Call this **before** ``train()`` (or after warm-up completes
+        for neural auxiliary networks) so that vectorised envs pick up
+        the calibrated value at creation time.
+
+        Returns the calibrated scale factor.
+        """
+        env = env_creator()
+        max_abs: float = 0.0
+        for _ in range(n_episodes):
+            env.reset()
+            for _ in range(self.config.steps_per_episode):
+                state = env.world_model.get_state()
+                u_r = env._compute_u_r(state)
+                max_abs = max(max_abs, abs(u_r))
+                action = env.action_space.sample()
+                env.step(action)
+        env.close()
+        scale = max_abs if max_abs > 1e-10 else 1.0
+        self.config.u_r_scale = scale
+        logger.info("Calibrated u_r_scale = %.6f (from %d episodes)", scale, n_episodes)
+        return scale
+
+    # ------------------------------------------------------------------
     # Full training loop  (PufferLib-backed)
     # ------------------------------------------------------------------
 

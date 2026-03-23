@@ -141,6 +141,17 @@ class EMPOWorldModelEnv(gymnasium.Env):
         # because reset() must be called before step()).
         self._py_rng: np.random.RandomState = np.random.RandomState(0)
 
+        # U_r normalisation: dividing by a scale factor maps U_r into
+        # [-1, ≈0], preventing PufferLib's hard ``clamp(r, -1, 1)``
+        # from destroying the reward signal.
+        # Prefer config.u_r_scale (empirical, from calibration) over
+        # the conservative theoretical upper-bound.
+        if config.u_r_scale is not None:
+            self._u_r_scale: float = config.u_r_scale
+        else:
+            _X_H_MIN = 1e-3
+            self._u_r_scale = (_X_H_MIN ** (-config.xi)) ** config.eta
+
     # ------------------------------------------------------------------
     # Gymnasium API
     # ------------------------------------------------------------------
@@ -182,12 +193,17 @@ class EMPOWorldModelEnv(gymnasium.Env):
         next_state = self.world_model.get_state()
         self._step_count += 1
 
-        # -- Truncate if episode exceeds maximum length --
+        # -- Terminate if episode exceeds maximum length --
+        # Treated as true termination (not truncation) because EMPO's
+        # backward induction computes V_r over a finite horizon.
         if self._step_count >= self.config.steps_per_episode:
-            truncated = True
+            terminated = True
 
         # -- Compute intrinsic reward U_r(s_t) at pre-transition state --
         u_r = self._compute_u_r(pre_state)
+
+        # Normalise into [-1, ≈0] so PufferLib's clamp(r, -1, 1) is benign.
+        u_r = u_r / self._u_r_scale
 
         # -- Goal resampling (stochastic, using seeded RNG) --
         if self._py_rng.random() < self.config.goal_resample_prob:
