@@ -169,6 +169,52 @@ class WorldModel(gym.Env):
         """
         raise NotImplementedError("Subclasses must implement transition_probabilities()")
     
+    def transition_durations(
+        self,
+        state: Any,
+        actions: List[int],
+        transitions: List[Tuple[float, Any]]
+    ) -> List[float]:
+        """
+        Return the expected duration for each transition outcome.
+        
+        Given a state, an action profile, and the list of (probability, successor_state)
+        outcomes from transition_probabilities(), return a list of durations D(s, a, s')
+        of the same length.
+        
+        The duration D(s, a, s') represents the certainty-equivalent expected real-time
+        elapsed between taking the action and regaining control in successor state s'.
+        For deterministic durations, this reduces to the actual elapsed time.
+        
+        The default implementation returns [1.0, ...] (unit duration for every transition),
+        preserving backward compatibility with the existing uniform-step assumption.
+        
+        Args:
+            state: The current state.
+            actions: The joint action profile.
+            transitions: The list of (probability, successor_state) tuples as returned
+                by transition_probabilities().
+        
+        Returns:
+            List of floats, one per transition outcome. Must have len == len(transitions).
+        """
+        return [1.0] * len(transitions)
+    
+    def terminal_duration(self, state: Any) -> float:
+        """
+        Return the expected duration of a terminal state before the episode ends.
+        
+        Used for terminal-state power aggregation: D(s) for terminal s.
+        Default returns 1.0.
+        
+        Args:
+            state: A terminal state.
+        
+        Returns:
+            Duration as a float.
+        """
+        return 1.0
+    
     def initial_state(self) -> Any:
         """
         Get the initial state of the environment without permanently resetting it.
@@ -463,6 +509,10 @@ class WorldModel(gym.Env):
         # Reset environment to get root state
         self.reset()
         root_state = self.get_state()
+
+        # Ensure _dag_cache is available (reset() may have cleared it)
+        if self._dag_cache is None:
+            self._dag_cache = {}
         
         # PHASE 1: Discover all states and edges using BFS
         discovered_states: List[State] = []  # Temporary list during discovery
@@ -487,7 +537,7 @@ class WorldModel(gym.Env):
         # Set up progress bar
         pbar: Optional[tqdm[int]] = None
         if not quiet:
-            pbar = tqdm(desc="Building DAG", unit=" states")
+            pbar = tqdm(desc="Building DAG", unit=" states", leave=False)
         
         states_processed = 0
         while queue:

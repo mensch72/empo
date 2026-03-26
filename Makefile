@@ -1,4 +1,4 @@
-.PHONY: help build up down down-dev restart shell logs clean test lint
+.PHONY: help build up down down-dev restart shell logs clean test test-local test-hierarchical lint
 .PHONY: build-gpu push-gpu build-sif up-gpu-docker-hub up-gpu-sif-file
 .PHONY: build-hierarchical build-gpu-hierarchical test-mineland test-mineland-integration up-hierarchical
 
@@ -32,7 +32,9 @@ help:
 	@echo "  make logs           - Show container logs"
 	@echo "  make train          - Run training script"
 	@echo "  make example        - Run simple example"
-	@echo "  make test           - Run tests"
+	@echo "  make test           - Run tests (in Docker)"
+	@echo "  make test-local     - Run tests locally (no Docker needed)"
+	@echo "  make test-hierarchical - Run hierarchical world model tests locally"
 	@echo "  make test-mineland  - Test MineLand installation (basic import tests)"
 	@echo "  make test-mineland-integration - Test MineLand + Ollama vision (full integration)"
 	@echo "  make lint           - Run linters"
@@ -118,7 +120,7 @@ train:
 	docker compose exec empo-dev python train.py --num-episodes 100
 
 example:
-	docker compose exec empo-dev python examples/simple_example.py
+	docker compose exec empo-dev python examples/multigrid/simple_example.py
 
 # Development commands
 test:
@@ -127,6 +129,30 @@ test:
 		--ignore=tests/test_mineland_installation.py \
 		--ignore=tests/debug_dag_by_timestep.py \
 		--ignore=tests/debug_dag_parallel.py
+
+# Run tests locally without Docker (requires: pip install -r setup/requirements.txt pytest)
+test-local:
+	@echo "Running tests locally..."
+	PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds python -m pytest tests/ -v \
+		--ignore=tests/test_mineland_installation.py \
+		--ignore=tests/debug_dag_by_timestep.py \
+		--ignore=tests/debug_dag_parallel.py
+
+# Run only hierarchical world model tests (Tasks 1-11) locally
+test-hierarchical:
+	@echo "Running hierarchical world model tests..."
+	PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds python -m pytest \
+		tests/test_world_model_duration.py \
+		tests/test_duration_discounting.py \
+		tests/test_hierarchical_base.py \
+		tests/test_cell_partition.py \
+		tests/test_macro_grid_env.py \
+		tests/test_multigrid_level_mapper.py \
+		tests/test_two_level_multigrid.py \
+		tests/test_macro_goals.py \
+		tests/test_macro_heuristic_policy.py \
+		tests/test_hierarchical_backward_induction.py \
+		-v
 
 lint:
 	@echo "Running linters..."
@@ -194,7 +220,7 @@ build-sif:
 	@echo ""
 	@echo "On cluster, run with:"
 	@echo "  cd ~/bega/empo/git"
-	@echo "  sbatch ../scripts/run_cluster_sif.sh"
+	@echo "  sbatch ../setup/scripts/run_cluster_sif.sh"
 
 # Build and push GPU image to Docker Hub (no Singularity needed locally)
 up-gpu-docker-hub: build-gpu push-gpu
@@ -208,7 +234,7 @@ up-gpu-docker-hub: build-gpu push-gpu
 	@echo "  mkdir -p git"
 	@echo "  cd git && git clone <your-repo-url> . && cd .."
 	@echo "  apptainer pull empo.sif docker://$(DOCKER_REGISTRY)/$(DOCKER_USERNAME)/$(DOCKER_IMAGE_NAME):$(GPU_IMAGE_TAG)"
-	@echo "  cd git && sbatch ../scripts/run_cluster_sif.sh"
+	@echo "  cd git && sbatch ../setup/scripts/run_cluster_sif.sh"
 
 # Build GPU image and convert to SIF file locally
 up-gpu-sif-file: build-gpu build-sif
@@ -221,7 +247,7 @@ up-gpu-sif-file: build-gpu build-sif
 	@echo "  scp $(SIF_FILE) user@cluster:~/bega/empo/"
 	@echo "  ssh user@cluster"
 	@echo "  cd ~/bega/empo/git"
-	@echo "  sbatch ../scripts/run_cluster_sif.sh"
+	@echo "  sbatch ../setup/scripts/run_cluster_sif.sh"
 
 # Build Docker image with hierarchical dependencies (Ollama, MineLand)
 # These are large packages that require Java JDK 17 and Node.js 18

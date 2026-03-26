@@ -121,7 +121,7 @@ However, Phase 2 Vh can be *lower* for some specific goals because the robot opt
 
 ## Demo Script
 
-### `examples/phase2_backward_induction.py`
+### `examples/phase2/phase2_backward_induction.py`
 
 Demonstrates backward induction on a small grid world:
 
@@ -140,16 +140,16 @@ The robot can push the rock to clear paths for the human to reach goal cells.
 **Usage:**
 ```bash
 # Basic usage (5 steps)
-python examples/phase2_backward_induction.py
+python examples/phase2/phase2_backward_induction.py
 
 # Longer horizon for harder goals
-python examples/phase2_backward_induction.py --steps 12
+python examples/phase2/phase2_backward_induction.py --steps 12
 
 # Emphasize goal (3,1) which requires robot to return
-python examples/phase2_backward_induction.py --steps 12 --weight31 100.0
+python examples/phase2/phase2_backward_induction.py --steps 12 --weight31 100.0
 
 # All options
-python examples/phase2_backward_induction.py \
+python examples/phase2/phase2_backward_induction.py \
     --steps 12 \
     --rollouts 20 \
     --beta_h 2.0 \
@@ -191,5 +191,5 @@ For practical use:
 
 - [API.md](API.md) - Full API reference
 - [WARMUP_DESIGN.md](WARMUP_DESIGN.md) - Phase 2 neural network training
-- `examples/human_policy_prior_example.py` - Phase 1 only example
-- `examples/lookup_table_phase2_demo.py` - Alternative Phase 2 demo
+- `examples/phase1/human_policy_prior_example.py` - Phase 1 only example
+- `examples/phase2/lookup_table_phase2_demo.py` - Alternative Phase 2 demo

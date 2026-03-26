@@ -39,9 +39,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 RUN pip install --upgrade pip setuptools wheel
 
 # Copy requirements files
-COPY requirements.txt /tmp/requirements.txt
-COPY requirements-dev.txt /tmp/requirements-dev.txt
-COPY requirements-hierarchical.txt /tmp/requirements-hierarchical.txt
+COPY setup/requirements.txt /tmp/requirements.txt
+COPY setup/requirements-dev.txt /tmp/requirements-dev.txt
+COPY setup/requirements-hierarchical.txt /tmp/requirements-hierarchical.txt
 
 # Install Python dependencies
 # Use CPU-only PyTorch to avoid downloading large CUDA packages (~2GB vs ~5GB)
@@ -132,14 +132,18 @@ RUN if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
 # Default to 1001 to match docker-compose.yml defaults
 ARG USER_ID=1001
 ARG GROUP_ID=1001
-RUN groupadd -g ${GROUP_ID} appuser && \
-    useradd -m -u ${USER_ID} -g appuser -s /bin/bash appuser
+RUN if getent group ${GROUP_ID} > /dev/null 2>&1; then \
+        useradd -m -u ${USER_ID} -g ${GROUP_ID} -s /bin/bash appuser; \
+    else \
+        groupadd -g ${GROUP_ID} appuser && \
+        useradd -m -u ${USER_ID} -g appuser -s /bin/bash appuser; \
+    fi
 
 # Create workspace directory and set permissions
 # Also fix MineLand permissions (installed as root but needs to be writable by appuser)
-RUN mkdir -p /workspace && chown -R appuser:appuser /workspace
+RUN mkdir -p /workspace && chown -R ${USER_ID}:${GROUP_ID} /workspace
 RUN if [ "$HIERARCHICAL_MODE" = "true" ] ; then \
-    chown -R appuser:appuser /opt/MineLand ; \
+    chown -R ${USER_ID}:${GROUP_ID} /opt/MineLand ; \
     fi
 
 # Switch to non-root user

@@ -1,0 +1,34 @@
+# Tiny two-room environment for hierarchical demos
+# A wall divides the grid into a left room and a right room with a
+# single-cell passage in the bottom row.  Rooms are kept very small
+# (≤ 2 walkable cells each) so that micro-level sub-problems stay
+# tractable for on-demand backward induction during rollouts.
+#
+# Layout (7×4):
+#   We We We We We We We
+#   We Ay .. We .. Ae We
+#   We We .. .. .. We We
+#   We We We We We We We
+#
+# Macro-cells (with default CellPartition):
+#   Cell 0: {(1,1)}            — left room (human start)
+#   Cell 1: {(2,1), (2,2)}    — corridor left
+#   Cell 2: {(4,1), (5,1)}    — right room (robot start)
+#   Cell 3: {(3,2), (4,2)}    — corridor right
+# Adjacency: 0↔1, 1↔3, 2↔3
+metadata:
+  name: "Tiny Two Room"
+  description: "7x4 grid split into two tiny rooms connected by a narrow passage. Designed for fast hierarchical planning demos — sub-problems are small enough for on-demand backward induction."
+  author: "EMPO Framework"
+  version: "1.0.0"
+  category: "hierarchical"
+  tags: ["hierarchical", "two-room", "human-robot", "minimal"]
+
+map: |
+  We We We We We We We
+  We Ay .. We .. Ae We
+  We We .. .. .. We We
+  We We We We We We We
+
+max_steps: 10
+action_class: "SmallActions"

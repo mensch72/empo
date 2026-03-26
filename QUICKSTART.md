@@ -17,7 +17,7 @@ For manual Colab setup:
 
 # Install dependencies
 !apt-get update -qq && apt-get install -qq graphviz > /dev/null 2>&1
-!pip install -q -r requirements-colab.txt
+!pip install -q -r setup/requirements-colab.txt
 
 # Configure Python path
 import sys, os
@@ -47,12 +47,12 @@ Kaggle offers **30 hours/week of free GPU** with reliable background execution.
 
 ```python
 # Cell 2: Setup
-%run scripts/kaggle_setup.py
+%run setup/scripts/kaggle_setup.py
 ```
 
 ```python
 # Cell 3: Run any example script
-%run examples/phase2_robot_policy_demo.py --quick
+%run examples/phase2/phase2_robot_policy_demo.py --quick
 ```
 
 ### Background Execution
@@ -67,18 +67,18 @@ For long training runs (30+ minutes):
 
 ```python
 # Quick demos (< 1 min)
-%run examples/simple_example.py
-%run examples/state_management_demo.py
+%run examples/multigrid/simple_example.py
+%run examples/multigrid/state_management_demo.py
 
 # Medium demos (1-5 min)
-%run examples/human_policy_prior_example.py --quick
-%run examples/neural_policy_prior_demo.py --quick
+%run examples/phase1/human_policy_prior_example.py --quick
+%run examples/phase1/neural_policy_prior_demo.py --quick
 
 # Phase 2 training (30-60+ min)
-%run examples/phase2_robot_policy_demo.py              # Full training
-%run examples/phase2_robot_policy_demo.py --quick      # Quick test
-%run examples/phase2_robot_policy_demo.py --ensemble   # Random environments
-%run examples/phase2_robot_policy_demo.py --tabular    # Lookup tables
+%run examples/phase2/phase2_robot_policy_demo.py              # Full training
+%run examples/phase2/phase2_robot_policy_demo.py --quick      # Quick test
+%run examples/phase2/phase2_robot_policy_demo.py --ensemble   # Random environments
+%run examples/phase2/phase2_robot_policy_demo.py --tabular    # Lookup tables
 ```
 
 See [examples/README.md](examples/README.md) for all available scripts and flags.
@@ -116,7 +116,7 @@ git clone https://github.com/pik-gane/empo.git
 cd empo
 
 # Verify setup
-bash scripts/verify_setup.sh
+bash setup/scripts/verify_setup.sh
 ```
 
 ### 2. Start Development Environment
@@ -147,7 +147,7 @@ Inside the container:
 python train.py --num-episodes 100
 
 # Run simple example
-python examples/simple_example.py
+python examples/multigrid/simple_example.py
 ```
 
 ### 5. View Results
@@ -208,7 +208,7 @@ apptainer exec --nv -B $(pwd):/workspace empo.sif \
   python /workspace/train.py --num-episodes 1000
 
 # Submit SLURM job
-sbatch scripts/run_cluster.sh
+sbatch setup/scripts/run_cluster.sh
 ```
 
 ## Common Commands

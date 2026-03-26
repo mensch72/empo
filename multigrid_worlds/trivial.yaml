@@ -1,5 +1,5 @@
 # Trivial environment - minimal test case for EMPO Phase 2
-# This is the default hardcoded environment from phase2_robot_policy_demo.py
+# This is the default hardcoded environment from examples/phase2/phase2_robot_policy_demo.py
 metadata:
   name: "Trivial"
   description: "Small 4x6 grid with 1 robot (grey), 1 human (yellow), and 1 rock. Minimal environment for quick testing of Phase 2 robot policy learning."

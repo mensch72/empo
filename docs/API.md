@@ -274,7 +274,7 @@ The vendored `gym_multigrid` in `vendor/multigrid/` extends the original with:
 | Type | Description |
 |------|-------------|
 | `Switch` | Basic overlappable switch (floor tile) |
-| `KillButton` | Overlappable button that permanently "kills" agents (restricts to "still" action only). Configured with `trigger_color` (agents that activate it) and `target_color` (agents that get killed). Has `enabled` state. Rendered as red tile with X pattern. |
+| `KillButton` | Non-overlappable switch that permanently "kills" agents (terminates them, restricts to "still" action only) when toggled by `trigger_color` agent. Configured with `trigger_color` (agents that can toggle it) and `target_color` (agents that get killed). Has `enabled` state. Rendered as red tile with X pattern. |
 | `PauseSwitch` | Non-overlappable toggle switch that pauses agents while ON. Configured with `toggle_color` (agents that can toggle), `target_color` (agents that get paused), `is_on` state, and `enabled` state. Rendered as blue tile with pause/play symbol. |
 | `DisablingSwitch` | Non-overlappable switch that toggles the `enabled` state of other objects. Configured with `toggle_color` and `target_type` ('killbutton', 'pauseswitch', or 'controlbutton'). Rendered as purple tile with disabled symbol. |
 | `ControlButton` | Non-overlappable button enabling two-step agent control: (1) Programming phase - agent of `controlled_color` toggles then performs action to memorize it; (2) Triggering phase - agent of `trigger_color` toggles to force the controlled agent's next action. Has `enabled` state, `controlled_agent`, and `triggered_action`. Rendered as green tile. |
@@ -359,6 +359,123 @@ robot_indices = [i for i, agent in enumerate(env.agents) if agent.color == 'grey
 ```
 
 **Note:** This semantic meaning is specific to the EMPO project's MultiGrid environments. Other environment types (Transport, Minecraft, etc.) may use different conventions for distinguishing agent roles. The underlying MultiGrid library itself supports arbitrary agent colors—we use this subset with defined semantics for human empowerment research.
+
+---
+
+## PPO-Based Phase 2 Training (`empo.learning_based.phase2_ppo`)
+
+The PPO path provides an alternative to the DQN-based Phase 2 trainer. It uses
+**PufferLib's PPO** to approximate/fit an explicit robot policy network π_r (actor-critic),
+while approximating the auxiliary networks (V_h^e, X_h, U_r) in a separate loop, all as
+neural solutions to the EMPO Phase 2 equations rather than standard reward-maximizing RL.
+
+> **Parallel implementation**: The PPO path lives in `learning_based/phase2_ppo/`
+> and does *not* modify any DQN-path code. Both paths can coexist.
+
+### PPOPhase2Config (`phase2_ppo.config`)
+
+Standalone configuration — intentionally duplicates theory parameters (γ_r, γ_h,
+ζ, ξ, η) to avoid coupling with the DQN config.
+
+```python
+from empo.learning_based.phase2_ppo import PPOPhase2Config
+
+cfg = PPOPhase2Config(
+    gamma_r=0.99, gamma_h=0.99, zeta=2.0, xi=1.0, eta=1.1,
+    num_actions=7, num_robots=1, steps_per_episode=50,
+    # PPO hyper-parameters
+    lr_ppo=3e-4, ppo_rollout_length=128, num_envs=16,
+    ppo_clip_coef=0.2, ppo_gae_lambda=0.95,
+    # Warm-up (cumulative thresholds)
+    warmup_v_h_e_steps=5000, warmup_x_h_steps=7500, warmup_u_r_steps=10000,
+    # Logging & checkpointing
+    tensorboard_dir="runs/ppo_phase2", checkpoint_interval=500,
+)
+```
+
+Key helpers:
+
+| Method | Returns |
+|--------|---------|
+| `cfg.is_in_warmup(step)` | `bool` — warm-up active? |
+| `cfg.get_warmup_stage(step)` | `int` — 0 (V_h^e), 1 (+X_h), 2 (+U_r), 3 (PPO) |
+| `cfg.get_active_aux_networks(step)` | `set[str]` — which aux nets to train |
+| `cfg.get_entropy_coef(step)` | `float` — annealed entropy coefficient |
+| `cfg.to_pufferlib_config()` | `dict` — PuffeRL-compatible config |
+
+### EMPOActorCritic (`phase2_ppo.actor_critic`)
+
+Combined actor-critic following PufferLib's policy convention:
+
+```python
+from empo.learning_based.phase2_ppo import EMPOActorCritic
+
+ac = EMPOActorCritic(
+    state_encoder=encoder,     # Optional shared encoder
+    hidden_dim=256,
+    num_actions=7,
+    num_robots=1,
+    obs_dim=None,              # Required when state_encoder is None
+)
+logits, value = ac(observations)  # (B, |A|^N), (B, 1)
+```
+
+### EMPOWorldModelEnv (`phase2_ppo.env_wrapper`)
+
+Gymnasium-compatible wrapper that samples human actions, computes intrinsic
+reward U_r, and stores auxiliary transition data:
+
+```python
+from empo.learning_based.phase2_ppo import EMPOWorldModelEnv
+
+env = EMPOWorldModelEnv(
+    world_model=wm,
+    human_policy_prior=policy_fn,
+    goal_sampler=sampler_fn,
+    human_agent_indices=[0, 1],
+    robot_agent_indices=[2],
+    config=cfg,
+)
+```
+
+Subclass and override `_state_to_obs(state)` for environment-specific
+observation encoding. See `MultiGridWorldModelEnv` for an example.
+
+### PPOPhase2Trainer (`phase2_ppo.trainer`)
+
+Orchestrates PufferLib PPO + auxiliary-network training:
+
+```python
+from empo.learning_based.phase2_ppo import PPOPhase2Trainer, PPOPhase2Config
+
+trainer = PPOPhase2Trainer(ac, aux_nets, cfg, device="cpu")
+metrics = trainer.train(env_creator, num_iterations=1000)
+
+# Checkpoint management
+trainer.save_checkpoint("checkpoint.pt")
+trainer.load_checkpoint("checkpoint.pt")
+```
+
+**Training stages:**
+
+1. **Warm-up stage** — random robot actions; only auxiliary networks
+   trained (V_h^e first, then X_h, then U_r).
+2. **PPO stage** — PufferLib drives the main PPO loop; auxiliary
+   networks continue training alongside.
+
+### MultiGrid Integration (`multigrid.phase2_ppo`)
+
+```python
+from empo.learning_based.multigrid.phase2_ppo import (
+    MultiGridWorldModelEnv,
+    create_multigrid_ppo_networks,
+)
+
+ac, aux_nets, encoder = create_multigrid_ppo_networks(
+    world_model=wm, config=cfg,
+    feature_dim=64, hidden_dim=64,
+)
+```
 
 ---
 

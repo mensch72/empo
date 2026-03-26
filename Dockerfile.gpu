@@ -53,8 +53,8 @@ RUN ln -sf /usr/bin/python3.11 /usr/bin/python3 && \
 RUN python3 --version && python3 -c "import sys; assert sys.version_info >= (3, 11), 'Python 3.11+ required'"
 
 # Copy requirements files
-COPY requirements.txt /tmp/requirements.txt
-COPY requirements-hierarchical.txt /tmp/requirements-hierarchical.txt
+COPY setup/requirements.txt /tmp/requirements.txt
+COPY setup/requirements-hierarchical.txt /tmp/requirements-hierarchical.txt
 
 # Install Python dependencies with CUDA support
 # Uses default PyTorch index with CUDA 12.1 support for GPU acceleration
