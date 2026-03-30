@@ -6,8 +6,7 @@ pipeline from a natural language scene description to a WorldModel instance.
 """
 
 import logging
-import os
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 from l2p.llm.base import BaseLLM
 from l2p.utils.pddl_validator import SyntaxValidator

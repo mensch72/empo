@@ -22,14 +22,13 @@ Transition function:
 
 import itertools
 import logging
-import re
 from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
 
 import gymnasium as gym
 import numpy as np
 
 from empo.world_model import WorldModel
-from empo.llm_world_model.types import ConcurrentEffect, MADomainSpec, MATaskSpec
+from empo.llm_world_model.types import MADomainSpec, MATaskSpec
 
 LOG = logging.getLogger(__name__)
 
@@ -218,8 +217,17 @@ class PddlWorldModel(WorldModel):
         self._agent_ground_actions: Dict[str, List[GroundAction]] = {}
         for agent in domain.agents:
             agent_actions = domain.agent_actions.get(agent.name, [])
+            # Use per-agent object set for agent-typed parameters to preserve
+            # agent-ownership semantics (e.g., robot1 can only act as robot1).
+            agent_owned = (
+                task.agent_objects.get(agent.name)
+                if task.agent_objects
+                else None
+            )
             self._agent_ground_actions[agent.name] = self._ground_actions(
-                agent.name, agent_actions, task.objects
+                agent.name, agent_actions, task.objects,
+                agent_objects=agent_owned,
+                agent_type=agent.agent_type,
             )
 
         # Per-agent action counts (for action space)
@@ -299,6 +307,7 @@ class PddlWorldModel(WorldModel):
 
         # Decode actions per agent
         agent_effects: Dict[str, Tuple[Set[GroundAtom], Set[GroundAtom]]] = {}
+        agent_action_names: Dict[str, str] = {}
 
         for i, agent_name in enumerate(self._agent_names):
             if i >= len(actions):
@@ -310,9 +319,11 @@ class PddlWorldModel(WorldModel):
             # action_idx == 0 is no-op, 1..N are actual actions
             if action_idx == 0 or action_idx > len(ground_actions):
                 agent_effects[agent_name] = (set(), set())
+                agent_action_names[agent_name] = ""
                 continue
 
             gaction = ground_actions[action_idx - 1]
+            agent_action_names[agent_name] = gaction.name
 
             # Check preconditions
             if self._check_preconditions(gaction, current_atoms):
@@ -323,7 +334,9 @@ class PddlWorldModel(WorldModel):
                 agent_effects[agent_name] = (set(), set())
 
         # Resolve concurrent effects
-        successor_atoms = self._resolve_concurrent(agent_effects, current_atoms)
+        successor_atoms = self._resolve_concurrent(
+            agent_effects, current_atoms, agent_action_names
+        )
         successor_state = (step_count + 1, successor_atoms)
 
         return [(1.0, successor_state)]
@@ -361,8 +374,10 @@ class PddlWorldModel(WorldModel):
         transitions = self.transition_probabilities(state, actions)
 
         if transitions is None:
+            # Time-limit reached (transition_probabilities signaled max_steps).
+            # Gymnasium semantics: this is a truncation, not a termination.
             obs = self._state_to_obs(self._current_state)
-            return obs, 0.0, True, False, {}
+            return obs, 0.0, False, True, {}
 
         # Sample from transitions
         probs = [t[0] for t in transitions]
@@ -402,6 +417,20 @@ class PddlWorldModel(WorldModel):
         for _, succ in outcomes:
             self._known_states.add(succ)
 
+    def _get_agent_info(self, agent_name: str) -> Tuple[Optional[List[str]], Optional[str]]:
+        """Return (agent_objects, agent_type) for the named agent."""
+        agent_objects = (
+            self._task.agent_objects.get(agent_name)
+            if self._task.agent_objects
+            else None
+        )
+        agent_type = None
+        for a in self._domain.agents:
+            if a.name == agent_name:
+                agent_type = a.agent_type
+                break
+        return agent_objects, agent_type
+
     def add_action_schema(self, agent_name: str, action_schema: dict):
         """Add a new action schema and re-ground."""
         if agent_name not in self._domain.agent_actions:
@@ -409,10 +438,13 @@ class PddlWorldModel(WorldModel):
         self._domain.agent_actions[agent_name].append(action_schema)
 
         # Re-ground actions for this agent
+        agent_objects, agent_type = self._get_agent_info(agent_name)
         self._agent_ground_actions[agent_name] = self._ground_actions(
             agent_name,
             self._domain.agent_actions[agent_name],
             self._task.objects,
+            agent_objects=agent_objects,
+            agent_type=agent_type,
         )
         self._agent_action_counts[agent_name] = (
             len(self._agent_ground_actions[agent_name]) + 1
@@ -441,8 +473,11 @@ class PddlWorldModel(WorldModel):
 
         for agent_name in self._agent_names:
             agent_actions = self._domain.agent_actions.get(agent_name, [])
+            agent_objects, agent_type = self._get_agent_info(agent_name)
             self._agent_ground_actions[agent_name] = self._ground_actions(
-                agent_name, agent_actions, self._task.objects
+                agent_name, agent_actions, self._task.objects,
+                agent_objects=agent_objects,
+                agent_type=agent_type,
             )
             self._agent_action_counts[agent_name] = (
                 len(self._agent_ground_actions[agent_name]) + 1
@@ -530,8 +565,21 @@ class PddlWorldModel(WorldModel):
         agent_name: str,
         actions: List[dict],
         objects: Dict[str, str],
+        agent_objects: Optional[List[str]] = None,
+        agent_type: Optional[str] = None,
     ) -> List[GroundAction]:
-        """Instantiate parameterised actions with concrete objects."""
+        """Instantiate parameterised actions with concrete objects.
+
+        Args:
+            agent_name: Name of the owning agent.
+            actions: Action schemas to ground.
+            objects: All objects in the task ({name: type}).
+            agent_objects: Object names owned by this agent (if available).
+                When provided, parameters whose type matches ``agent_type``
+                are restricted to this set to preserve agent-ownership
+                semantics.
+            agent_type: The PDDL type of the owning agent.
+        """
         objects_by_type: Dict[str, List[str]] = {}
         for name, typ in objects.items():
             objects_by_type.setdefault(typ, []).append(name)
@@ -568,7 +616,15 @@ class PddlWorldModel(WorldModel):
             param_types = list(params.values())
             param_options = []
             for ptype in param_types:
-                candidates = objects_by_type.get(ptype, [])
+                # Restrict agent-typed parameters to agent-owned objects
+                if (
+                    agent_objects is not None
+                    and agent_type
+                    and ptype == agent_type
+                ):
+                    candidates = agent_objects
+                else:
+                    candidates = objects_by_type.get(ptype, [])
                 if not candidates:
                     candidates = list(objects.keys())
                 param_options.append(candidates)
@@ -615,25 +671,66 @@ class PddlWorldModel(WorldModel):
         self,
         agent_effects: Dict[str, Tuple[Set[GroundAtom], Set[GroundAtom]]],
         state_atoms: PddlState,
+        agent_action_names: Optional[Dict[str, str]] = None,
     ) -> PddlState:
         """Apply concurrent effect resolution.
 
-        Default (commutative): union add sets, union delete sets,
+        For commutative pairs: union add sets, union delete sets,
         add wins over delete (persistence assumption).
 
-        Note: This implementation uses commutative composition for all effects.
-        ConcurrentEffect rules with effect_type "conflicting" or "synergistic"
-        are stored in the domain spec but not yet applied as overrides during
-        transition computation. A future enhancement would check each
-        ConcurrentEffect rule's pddl_condition and apply pddl_effect overrides
-        when the condition matches.
+        For conflicting pairs (as declared in ConcurrentEffect rules):
+        if two agents' actions match a conflicting rule and their effects
+        overlap (same atoms added/deleted), both agents' effects are
+        cancelled (neither succeeds).
+
+        Synergistic rules are currently treated as commutative (their
+        effects compose normally). A future enhancement could apply
+        custom pddl_effect overrides.
         """
+        # Build a lookup of conflicting action pairs for quick matching
+        conflicts: Dict[Tuple[str, str, str, str], str] = {}
+        for ce in self._concurrent_effects:
+            if ce.effect_type == "conflicting":
+                conflicts[(ce.agent_a, ce.action_a, ce.agent_b, ce.action_b)] = (
+                    ce.resolution
+                )
+                # Also index the reverse direction
+                conflicts[(ce.agent_b, ce.action_b, ce.agent_a, ce.action_a)] = (
+                    ce.resolution
+                )
+
+        # Check for conflicting action pairs and cancel overlapping effects
+        cancelled_agents: Set[str] = set()
+        if agent_action_names and conflicts:
+            agent_list = list(agent_action_names.keys())
+            for i in range(len(agent_list)):
+                for j in range(i + 1, len(agent_list)):
+                    a_name = agent_list[i]
+                    b_name = agent_list[j]
+                    a_action = agent_action_names.get(a_name, "")
+                    b_action = agent_action_names.get(b_name, "")
+                    key = (a_name, a_action, b_name, b_action)
+                    if key in conflicts:
+                        # Check if effects overlap (same atoms targeted)
+                        a_add, a_del = agent_effects.get(a_name, (set(), set()))
+                        b_add, b_del = agent_effects.get(b_name, (set(), set()))
+                        overlapping = (a_add & b_add) or (a_del & b_del)
+                        if overlapping:
+                            LOG.debug(
+                                "Conflicting actions %s.%s × %s.%s: "
+                                "cancelling overlapping effects",
+                                a_name, a_action, b_name, b_action,
+                            )
+                            cancelled_agents.add(a_name)
+                            cancelled_agents.add(b_name)
+
         total_add: Set[GroundAtom] = set()
         total_del: Set[GroundAtom] = set()
 
-        for agent_name, (add_set, del_set) in agent_effects.items():
-            total_add |= add_set
-            total_del |= del_set
+        for a_name, (add_set, del_set) in agent_effects.items():
+            if a_name not in cancelled_agents:
+                total_add |= add_set
+                total_del |= del_set
 
         # Apply: start from current state, remove deletes, add adds
         # Add wins over delete (persistence assumption)

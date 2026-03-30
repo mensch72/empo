@@ -385,6 +385,7 @@ class WorldModelDomainBuilder(DomainBuilder):
         actions = []
         new_predicates: List[Predicate] = []
         all_raw: List[str] = []
+        failed_hints: List[str] = []
 
         for hint in agent.action_hints:
             action_prompt = prompt + f"\n\nFormalize the action: {hint}"
@@ -423,9 +424,16 @@ class WorldModelDomainBuilder(DomainBuilder):
                     agent.name,
                     max_retries,
                 )
+                failed_hints.append(hint)
                 all_raw.append(f"[Failed to parse action '{hint}': {last_error}]")
 
         combined_raw = "\n---\n".join(all_raw)
+        if failed_hints:
+            validation_msg = (
+                f"Failed to parse {len(failed_hints)} action(s) for agent "
+                f"'{agent.name}': {failed_hints}"
+            )
+            return actions, new_predicates, combined_raw, (False, validation_msg)
         return actions, new_predicates, combined_raw, (True, "OK")
 
     def identify_concurrent_effects(

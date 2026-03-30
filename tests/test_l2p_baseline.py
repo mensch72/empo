@@ -5,7 +5,6 @@ Step 0 of the LLM WorldModel plan: verify that the vendored L2P library
 works with MockLLM for offline testing.
 """
 
-import sys
 import pytest
 
 

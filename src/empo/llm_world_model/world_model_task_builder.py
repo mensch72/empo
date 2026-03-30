@@ -5,7 +5,6 @@ Extends L2P's TaskBuilder to extract objects and initial state only (no goal
 state). Adds validation that all agent-owned objects are properly instantiated.
 """
 
-import json
 import logging
 import os
 import re
@@ -168,18 +167,24 @@ class WorldModelTaskBuilder(TaskBuilder):
                 objects = _parse_objects_block(raw_output)
                 initial_state = _parse_initial_block(raw_output)
 
-                # Validate that agents have corresponding objects
+                # Validate that each agent has at least one object of its type
                 validation_msgs = []
                 for agent in domain.agents:
-                    if agent.name not in objects:
+                    has_object = any(
+                        typ == agent.agent_type or name == agent.name
+                        for name, typ in objects.items()
+                    )
+                    if not has_object:
                         validation_msgs.append(
-                            f"Agent '{agent.name}' has no corresponding object"
+                            f"Agent '{agent.name}' has no object of type "
+                            f"'{agent.agent_type}'"
                         )
 
                 # Validate object types match domain types
-                valid_types = set(domain.types.keys())
+                # 'object' is always valid as the PDDL built-in top type
+                valid_types = set(domain.types.keys()) | {"object"}
                 for obj_name, obj_type in objects.items():
-                    if valid_types and obj_type not in valid_types:
+                    if obj_type not in valid_types:
                         validation_msgs.append(
                             f"Object '{obj_name}' has type '{obj_type}' "
                             f"not in domain types: {valid_types}"

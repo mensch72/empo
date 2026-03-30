@@ -8,7 +8,7 @@ No :goal section is ever produced.
 
 import json
 import os
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Union
 
 from empo.llm_world_model.types import MADomainSpec, MATaskSpec
 

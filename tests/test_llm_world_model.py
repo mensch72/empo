@@ -802,6 +802,27 @@ class TestPddlWorldModel:
         # Should have more ground atoms now
         assert wm._num_atoms >= orig_atom_count
 
+    def test_step_time_limit_is_truncation(self, simple_domain, simple_task):
+        """step() returns truncated=True (not terminated) on time limit."""
+        wm = PddlWorldModel(simple_domain, simple_task, max_steps=1)
+        wm.reset()
+        # First step succeeds
+        obs, reward, terminated, truncated, info = wm.step(0)
+        assert not terminated
+        # Second step hits the time limit
+        obs, reward, terminated, truncated, info = wm.step(0)
+        assert truncated
+        assert not terminated
+
+    def test_agent_grounding_respects_ownership(self, simple_domain, simple_task):
+        """Agent-typed parameters only ground to agent-owned objects."""
+        wm = PddlWorldModel(simple_domain, simple_task)
+        robot_actions = wm._agent_ground_actions["robot"]
+        # All robot move actions should bind the agent param to robot1
+        for ga in robot_actions:
+            if ga.name == "move":
+                assert ga.bindings.get("agent") == "robot1"
+
 
 # ===========================================================================
 # Step 7: WorldModelBuilder Tests
