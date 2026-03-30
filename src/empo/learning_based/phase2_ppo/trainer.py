@@ -789,6 +789,18 @@ class PPOPhase2Trainer:
         # ── Warm-up phase ────────────────────────────────────────────────
         warmup_metrics = self._run_warmup(env_creator)
 
+        # ── Auto-calibrate U_r reward scale after warm-up ────────────────
+        # If no explicit u_r_scale was configured, run a short calibration
+        # phase to determine the empirical max|U_r|.  This prevents the
+        # conservative theoretical bound (e.g. ~2000 for xi=1, eta=1.1)
+        # from crushing actual U_r values (typically 1-10) to near-zero and
+        # destroying the PPO reward signal via PufferLib's clamp(r, -1, 1).
+        if cfg.u_r_scale is None and cfg.get_total_warmup_steps() > 0:
+            calibrated = self.calibrate_reward_scale(env_creator, n_episodes=20)
+            logger.info(
+                "Auto-calibrated u_r_scale = %.6f after warmup", calibrated
+            )
+
         # ── PufferLib PPO phase ──────────────────────────────────────────
         # Build PufferLib config dict (PuffeRL expects a flat dict).
         # Override device/seed from the trainer to avoid mismatch between
@@ -860,6 +872,7 @@ class PPOPhase2Trainer:
 
             # --- EMPO-specific: train auxiliary networks ---
             aux_losses: Dict[str, float] = {}
+            aux_loss_counts: Dict[str, int] = {}
             active = cfg.get_active_aux_networks(self.aux_training_step)
             for _ in range(cfg.aux_training_steps_per_iteration):
                 step_losses = self.train_auxiliary_step(
@@ -867,9 +880,17 @@ class PPOPhase2Trainer:
                 )
                 for k, v in step_losses.items():
                     aux_losses[k] = aux_losses.get(k, 0.0) + v
+                    aux_loss_counts[k] = aux_loss_counts.get(k, 0) + 1
                 # Only advance aux_training_step when a gradient update actually ran.
                 if step_losses:
                     self.aux_training_step += 1
+            # Average over the number of gradient steps that actually ran,
+            # so reported losses are comparable across different
+            # aux_training_steps_per_iteration settings.
+            for k in aux_losses:
+                c = aux_loss_counts.get(k, 1)
+                if c > 1:
+                    aux_losses[k] /= c
 
             # Re-freeze auxiliary networks periodically and sync to envs
             if (iteration + 1) % cfg.reward_freeze_interval == 0:
@@ -1051,10 +1072,12 @@ class PPOPhase2Trainer:
         )
         env.close()
 
-        # Clear the aux replay buffer to discard data collected under
-        # the uniform random policy (cf. DQN trainer's buffer clear at
-        # β_r ramp-up transitions).
-        self.aux_replay_buffer.clear()
+        # Keep warmup data in the replay buffer.  V_h^e and X_h are
+        # state-value functions whose TD targets use the *current* target
+        # network regardless of the behaviour policy that generated the
+        # transitions.  Retaining warmup data provides the PPO phase with
+        # a pre-filled buffer of diverse state coverage, avoiding a cold
+        # start where the buffer is too small for auxiliary training.
 
         return warmup_metrics
 

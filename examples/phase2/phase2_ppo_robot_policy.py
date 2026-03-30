@@ -1,18 +1,11 @@
 #!/usr/bin/env python3
-"""
-Phase 2 PPO Robot Policy Demo — Asymmetric Freeing World.
+"""Phase 2 PPO Robot Policy Demo.
 
-Demonstrates Phase 2 PPO training on the "simple asymmetric freeing" challenge
-from ``multigrid_worlds/jobst_challenges/asymmetric_freeing_simple.yaml``.
-
-Environment:
-    An 8×5 grid with two humans locked behind rocks and one robot.
-    Human A (left) has fewer reachable goals than Human B (right).
-    The robot must decide which human to free first to maximise
-    aggregate human power X_h, respecting the equity parameters (ξ, η).
+Demonstrates Phase 2 PPO training on a MultiGrid world specified via
+the ``--world`` argument (default: ``trivial.yaml``).
 
 Human behaviour:
-    Both humans use the existing ``HeuristicPotentialPolicy`` (deterministic
+    Humans use the existing ``HeuristicPotentialPolicy`` (deterministic
     goal-directed policy based on shortest-path potentials) instead of a
     uniform random prior.  This makes the demo more realistic: humans
     actively pursue goals, so V_h^e training has a meaningful signal.
@@ -61,10 +54,13 @@ for _subdir in ("src", "vendor/multigrid", "vendor/ai_transport", "multigrid_wor
 # ---------------------------------------------------------------------------
 # EMPO / MultiGrid imports
 # ---------------------------------------------------------------------------
+import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
 from gym_multigrid.multigrid import MultiGridEnv, SmallActions  # noqa: E402
 
+from empo.backward_induction.phase1 import compute_human_policy_prior  # noqa: E402
+from empo.backward_induction.phase2 import compute_robot_policy  # noqa: E402
 from empo.human_policy_prior import HeuristicPotentialPolicy  # noqa: E402
 from empo.learning_based.multigrid import PathDistanceCalculator  # noqa: E402
 from empo.learning_based.phase2_ppo.config import PPOPhase2Config  # noqa: E402
@@ -341,13 +337,19 @@ def run_ppo_rollout(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Phase 2 PPO demo — Asymmetric Freeing (heuristic humans)"
+        description="Phase 2 PPO demo (heuristic humans)"
     )
     parser.add_argument(
         "--iters",
         type=int,
         default=100,
         help="Number of PPO iterations (default: 100)",
+    )
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=None,
+        help="Override max_steps per episode (default: from world YAML)",
     )
     parser.add_argument(
         "--num-envs",
@@ -391,7 +393,7 @@ def main() -> None:
         "--output-dir",
         type=str,
         default=None,
-        help="Directory for output movie (default: outputs/phase2_ppo_asymmetric_freeing/)",
+        help="Directory for output movie (default: outputs/<script_name>/<world_name>/)",
     )
     parser.add_argument(
         "--movie-fps",
@@ -399,13 +401,29 @@ def main() -> None:
         default=MOVIE_FPS,
         help=f"Movie frames per second (default: {MOVIE_FPS})",
     )
+    # Theory parameters (must match between backward induction and PPO)
+    parser.add_argument("--beta-h", type=float, default=1000.0,
+                        help="Boltzmann temperature for Phase 1 human policy (default: 1000)")
+    parser.add_argument("--beta-r", type=float, default=1e6,
+                        help="Concentration for backward induction robot policy "
+                             "(default: 1e6 ≈ argmax, matching converged PPO)")
+    parser.add_argument("--u-r-scale", type=float, default=None,
+                        help="Empirical max|U_r| for reward scaling (default: auto-calibrate "
+                             "after warmup; set to avoid PufferLib clamp crushing rewards)")
+    parser.add_argument("--warmup", type=int, default=None,
+                        help="Total warmup gradient steps (V_h_e gets first half, "
+                             "X_h joins at half; default: auto-scale with --iters)")
+    parser.add_argument("--aux-steps", type=int, default=10,
+                        help="Auxiliary gradient steps per PPO iteration (default: 10)")
+    parser.add_argument("--batch-size", type=int, default=128,
+                        help="Batch size for auxiliary network training (default: 128)")
     args = parser.parse_args()
 
     # ------------------------------------------------------------------
     # 1. Create a reference environment
     # ------------------------------------------------------------------
     world_yaml = _resolve_world_path(args.world)
-    ref_env = _create_world_model(world_yaml)
+    ref_env = _create_world_model(world_yaml, max_steps=args.steps)
     ref_env.reset()
 
     num_actions = ref_env.action_space.n
@@ -431,6 +449,18 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 3. Configuration
     # ------------------------------------------------------------------
+    # Warmup: default to 20% of total PPO aux steps but at least 500.
+    # X_h needs V_h_e to be reasonable before it can learn, so V_h_e
+    # gets the first half of warmup and X_h trains during the second half.
+    if args.warmup is not None:
+        total_warmup = args.warmup
+    else:
+        total_warmup = max(500, args.iters * args.aux_steps // 5)
+    warmup_v_h_e = total_warmup // 2
+    warmup_x_h = total_warmup
+    print(f"Warmup: {total_warmup} total steps "
+          f"(V_h_e: 0-{warmup_v_h_e}, X_h: {warmup_v_h_e}-{warmup_x_h})")
+
     cfg = PPOPhase2Config(
         # Theory
         gamma_r=0.99,
@@ -449,16 +479,18 @@ def main() -> None:
         num_ppo_iterations=args.iters,
         lr_ppo=3e-4,
         # Auxiliary
-        aux_training_steps_per_iteration=5,
+        aux_training_steps_per_iteration=args.aux_steps,
         aux_buffer_size=10_000,
-        batch_size=64,
+        batch_size=args.batch_size,
         reward_freeze_interval=5,
-        # Warm-up: shorter thresholds so meaningful rewards appear faster
-        warmup_v_h_e_steps=200,   # V_h^e trains alone until step 200
-        warmup_x_h_steps=400,     # X_h joins at step 200, trains until 400
-        warmup_u_r_steps=400,     # No U_r network (use_u_r=False), so same as x_h
+        # Warm-up: V_h_e trains alone first, then X_h joins
+        warmup_v_h_e_steps=warmup_v_h_e,
+        warmup_x_h_steps=warmup_x_h,
+        warmup_u_r_steps=warmup_x_h,  # No U_r network (use_u_r=False)
         # Environment
         steps_per_episode=ref_env.max_steps,
+        # Reward scaling
+        u_r_scale=args.u_r_scale,
         # Runtime
         device=args.device,
         seed=42,
@@ -496,7 +528,7 @@ def main() -> None:
     # Each vectorised env slot creates its own world model and
     # HeuristicPotentialPolicy instance (to avoid shared mutable state).
     def env_creator():
-        wm = _create_world_model(world_yaml)
+        wm = _create_world_model(world_yaml, max_steps=args.steps)
         wm.reset()
         hp = _make_heuristic_human_policy(wm, wm.human_agent_indices)
         hp_fn = _wrap_human_policy(hp)
@@ -534,102 +566,282 @@ def main() -> None:
         print("No metrics returned (training may have been too short).")
 
     # ------------------------------------------------------------------
-    # 8b. Diagnostics: U_r, X_h, V_h^e at root state + V_r(root)
+    # 8b. Comprehensive BI vs learned diagnostics
     # ------------------------------------------------------------------
-    diag_env = _create_world_model(world_yaml)
-    diag_env.reset()
-    root_state = diag_env.get_state()
-    _X_H_MIN = 1e-3
+    print("\n" + "=" * 70)
+    print("BI vs Learned Diagnostics: comparing across ALL states")
+    print("=" * 70)
 
-    print("\n--- Diagnostics at root state ---")
+    # Run backward induction to get exact values
+    # NOTE: BI computes V_h^e under the BI robot policy. With beta_r → ∞
+    # (default 1e6), the BI policy is essentially argmax, matching what a
+    # well-trained PPO policy converges to. This makes the comparison
+    # meaningful for a converged PPO agent.
+    print("\nRunning backward induction for exact V_h^e, X_h, U_r …")
+    bi_env = _create_world_model(world_yaml, max_steps=args.steps)
+    bi_env.reset()
 
-    # V_r(root) from actor-critic
-    actor_critic.eval()
-    with torch.no_grad():
-        # Safely determine encoder device: parameters → buffers → CPU
-        first_param = next(state_encoder.parameters(), None)
-        if first_param is not None:
-            enc_device = first_param.device
-        else:
-            first_buffer = next(state_encoder.buffers(), None)
-            enc_device = first_buffer.device if first_buffer is not None else torch.device("cpu")
-        tensors = state_encoder.tensorize_state(root_state, diag_env, device=enc_device)
-        features = state_encoder(*tensors)
-        logits, value = actor_critic(features)
-        probs = torch.softmax(logits, dim=-1).squeeze(0)
-    print(f"  V_r(root)         : {value.item():.6f}")
-    print(f"  π_r(root)         : {dict(zip(SINGLE_ACTION_NAMES, [f'{p:.4f}' for p in probs.cpu().tolist()]))}")
+    goal_generator = bi_env.possible_goal_generator
+    if goal_generator is None:
+        print("  WARNING: no possible_goal_generator — skipping BI comparison")
+    else:
+        bi_human_policy_prior = compute_human_policy_prior(
+            world_model=bi_env,
+            human_agent_indices=bi_env.human_agent_indices,
+            possible_goal_generator=goal_generator,
+            believed_others_policy=None,
+            beta_h=args.beta_h,
+            gamma_h=cfg.gamma_h,
+            level_fct=lambda state: state[0],
+            use_disk_slicing=True,
+        )
+        bi_robot_policy, bi_Vr_dict, bi_Vh_dict = compute_robot_policy(
+            world_model=bi_env,
+            human_agent_indices=bi_env.human_agent_indices,
+            robot_agent_indices=bi_env.robot_agent_indices,
+            possible_goal_generator=goal_generator,
+            human_policy_prior=bi_human_policy_prior,
+            beta_r=args.beta_r,
+            gamma_h=cfg.gamma_h,
+            gamma_r=cfg.gamma_r,
+            zeta=cfg.zeta,
+            xi=cfg.xi,
+            eta=cfg.eta,
+            level_fct=lambda state: state[0],
+            use_disk_slicing=True,
+            return_values=True,
+        )
 
-    # X_h and V_h^e per human, per goal
-    nets = aux_nets
-    x_h_net = nets.x_h
-    v_h_e_net = nets.v_h_e
-    device = args.device
-
-    if v_h_e_net is not None:
-        print("  V_h^e(root, h, g):")
-        goal_gen = diag_env.possible_goal_generator
-        goals = goal_gen.goals if hasattr(goal_gen, 'goals') else []
-        for h_idx in human_indices:
-            for goal in goals:
-                with torch.no_grad():
-                    v = v_h_e_net(root_state, diag_env, h_idx, goal, device)
-                    v = v_h_e_net.apply_hard_clamp(v)
-                goal_label = getattr(goal, 'target_pos', str(goal))
-                print(f"    h={h_idx}, g={goal_label}: {v.item():.6f}")
-
-    if x_h_net is not None:
-        print("  X_h(root, h):")
-        x_h_vals = []
-        for h_idx in human_indices:
-            with torch.no_grad():
-                x_h = x_h_net(root_state, diag_env, h_idx, device)
-                x_h_clamped = min(max(float(x_h.item()), _X_H_MIN), 1.0)
-            x_h_vals.append(x_h_clamped)
-            print(f"    h={h_idx}: {x_h.item():.6f} (clamped: {x_h_clamped:.6f})")
-
-        if x_h_vals:
-            import numpy as np
-            y = float(np.mean([x ** (-cfg.xi) for x in x_h_vals]))
-            u_r = -(y ** cfg.eta)
-            print(f"  U_r(root)         : {u_r:.6f}")
-            print(f"    y = mean(X_h^-xi): {y:.6f}")
-
-    # Also compute U_r at a few other states for comparison
-    print("\n  U_r at different states (robot moves):")
-    for action_name, action_idx in zip(SINGLE_ACTION_NAMES, range(4)):
-        diag_env.set_state(root_state)
-        # Step with only robot acting (humans stay still)
-        all_actions = [0] * len(diag_env.agents)
-        all_actions[robot_indices[0]] = action_idx
-        diag_env.step(all_actions)
-        next_state = diag_env.get_state()
-        if x_h_net is not None:
-            x_vals = []
+        # Derive BI X_h and U_r from Vh_dict
+        _X_H_MIN = 1e-3
+        bi_xh_dict = {}   # state → {h_idx: x_h}
+        bi_ur_dict = {}    # state → u_r
+        for state, vh_by_agent in bi_Vh_dict.items():
+            xh_per_human = {}
             for h_idx in human_indices:
-                with torch.no_grad():
-                    x_h = x_h_net(next_state, diag_env, h_idx, device)
-                    x_vals.append(min(max(float(x_h.item()), _X_H_MIN), 1.0))
-            if x_vals:
-                import numpy as np
-                y = float(np.mean([x ** (-cfg.xi) for x in x_vals]))
-                u_r_next = -(y ** cfg.eta)
-                print(f"    After robot={action_name:>7}: U_r={u_r_next:.6f}, X_h={x_vals}")
-    diag_env.set_state(root_state)  # restore
+                if h_idx not in vh_by_agent:
+                    continue
+                goal_dict = vh_by_agent[h_idx]
+                if not goal_dict:
+                    continue
+                v_powers = [max(v, 0.0) ** cfg.zeta for v in goal_dict.values()]
+                xh = sum(v_powers) / len(v_powers) if v_powers else 0.0
+                xh = max(xh, _X_H_MIN)
+                xh = min(xh, 1.0)
+                xh_per_human[h_idx] = xh
+            bi_xh_dict[state] = xh_per_human
+            if xh_per_human:
+                y = float(np.mean([x ** (-cfg.xi)
+                                   for x in xh_per_human.values()]))
+                bi_ur_dict[state] = -(y ** cfg.eta)
+            else:
+                bi_ur_dict[state] = 0.0
+
+        # ----- Compare V_h^e across all states, humans, goals -----
+        diag_env = _create_world_model(world_yaml, max_steps=args.steps)
+        diag_env.reset()
+        nets = aux_nets
+        v_h_e_net = nets.v_h_e
+        x_h_net = nets.x_h
+        device = args.device
+        goals = (goal_generator.goals
+                 if hasattr(goal_generator, 'goals') else [])
+
+        print(f"\n  States in BI: {len(bi_Vh_dict)}")
+        print(f"  Goals: {len(goals)}")
+        print(f"  Humans: {human_indices}")
+
+        # V_h^e comparison
+        if v_h_e_net is not None and goals:
+            v_h_e_net.eval()
+            vhe_errors = []  # (state, h, g, bi_val, nn_val)
+            n_states_done = 0
+            for state, vh_by_agent in bi_Vh_dict.items():
+                for h_idx in human_indices:
+                    if h_idx not in vh_by_agent:
+                        continue
+                    goal_dict = vh_by_agent[h_idx]
+                    for goal, bi_v in goal_dict.items():
+                        with torch.no_grad():
+                            nn_v = v_h_e_net(state, diag_env, h_idx, goal,
+                                             device)
+                            nn_v = float(
+                                v_h_e_net.apply_hard_clamp(nn_v).item())
+                        vhe_errors.append(
+                            (state, h_idx, goal, float(bi_v), nn_v))
+                n_states_done += 1
+
+            if vhe_errors:
+                bi_vals = np.array([e[3] for e in vhe_errors])
+                nn_vals = np.array([e[4] for e in vhe_errors])
+                abs_err = np.abs(bi_vals - nn_vals)
+                print("\n  --- V_h^e comparison ---")
+                print(f"  Samples: {len(vhe_errors)}")
+                print(f"  BI  range: [{bi_vals.min():.6f}, "
+                      f"{bi_vals.max():.6f}]  mean={bi_vals.mean():.6f}")
+                print(f"  NN  range: [{nn_vals.min():.6f}, "
+                      f"{nn_vals.max():.6f}]  mean={nn_vals.mean():.6f}")
+                print(f"  MAE: {abs_err.mean():.6f}  "
+                      f"max: {abs_err.max():.6f}")
+                if bi_vals.std() > 1e-8:
+                    corr = np.corrcoef(bi_vals, nn_vals)[0, 1]
+                    print(f"  Correlation: {corr:.6f}")
+                # Show worst cases
+                worst_idx = np.argsort(-abs_err)[:5]
+                print("  Worst errors:")
+                for idx in worst_idx:
+                    s, h, g, bv, nv = vhe_errors[idx]
+                    gl = getattr(g, 'target_pos', str(g))
+                    print(f"    h={h} g={gl} t={s[0]}: "
+                          f"BI={bv:.4f} NN={nv:.4f} err={abs(bv-nv):.4f}")
+
+        # X_h comparison
+        if x_h_net is not None and bi_xh_dict:
+            x_h_net.eval()
+            xh_errors = []  # (state, h_idx, bi_xh, nn_xh)
+            for state, xh_by_h in bi_xh_dict.items():
+                for h_idx, bi_xh in xh_by_h.items():
+                    with torch.no_grad():
+                        nn_xh = x_h_net(state, diag_env, h_idx, device)
+                        nn_xh = float(
+                            x_h_net.apply_hard_clamp(nn_xh).item())
+                    xh_errors.append((state, h_idx, bi_xh, nn_xh))
+
+            if xh_errors:
+                bi_xh_arr = np.array([e[2] for e in xh_errors])
+                nn_xh_arr = np.array([e[3] for e in xh_errors])
+                abs_err = np.abs(bi_xh_arr - nn_xh_arr)
+                print("\n  --- X_h comparison ---")
+                print(f"  Samples: {len(xh_errors)}")
+                print(f"  BI  range: [{bi_xh_arr.min():.6f}, "
+                      f"{bi_xh_arr.max():.6f}]  mean={bi_xh_arr.mean():.6f}")
+                print(f"  NN  range: [{nn_xh_arr.min():.6f}, "
+                      f"{nn_xh_arr.max():.6f}]  mean={nn_xh_arr.mean():.6f}")
+                print(f"  MAE: {abs_err.mean():.6f}  "
+                      f"max: {abs_err.max():.6f}")
+                if bi_xh_arr.std() > 1e-8:
+                    corr = np.corrcoef(bi_xh_arr, nn_xh_arr)[0, 1]
+                    print(f"  Correlation: {corr:.6f}")
+                worst_idx = np.argsort(-abs_err)[:5]
+                print("  Worst errors:")
+                for idx in worst_idx:
+                    s, h, bx, nx = xh_errors[idx]
+                    print(f"    h={h} t={s[0]}: "
+                          f"BI={bx:.4f} NN={nx:.4f} err={abs(bx-nx):.4f}")
+
+        # U_r comparison (derived from X_h)
+        if x_h_net is not None and bi_ur_dict:
+            ur_errors = []  # (state, bi_ur, nn_ur)
+            for state, bi_ur in bi_ur_dict.items():
+                x_vals = []
+                for h_idx in human_indices:
+                    with torch.no_grad():
+                        xv = x_h_net(state, diag_env, h_idx, device)
+                        xv = float(x_h_net.apply_hard_clamp(xv).item())
+                    x_vals.append(max(min(xv, 1.0), _X_H_MIN))
+                if x_vals:
+                    y = float(np.mean([x ** (-cfg.xi) for x in x_vals]))
+                    nn_ur = -(y ** cfg.eta)
+                else:
+                    nn_ur = 0.0
+                ur_errors.append((state, bi_ur, nn_ur))
+
+            if ur_errors:
+                bi_ur_arr = np.array([e[1] for e in ur_errors])
+                nn_ur_arr = np.array([e[2] for e in ur_errors])
+                abs_err = np.abs(bi_ur_arr - nn_ur_arr)
+                print("\n  --- U_r comparison (derived from X_h) ---")
+                print(f"  Samples: {len(ur_errors)}")
+                print(f"  BI  range: [{bi_ur_arr.min():.6f}, "
+                      f"{bi_ur_arr.max():.6f}]  mean={bi_ur_arr.mean():.6f}")
+                print(f"  NN  range: [{nn_ur_arr.min():.6f}, "
+                      f"{nn_ur_arr.max():.6f}]  mean={nn_ur_arr.mean():.6f}")
+                print(f"  MAE: {abs_err.mean():.6f}  "
+                      f"max: {abs_err.max():.6f}")
+                if bi_ur_arr.std() > 1e-8:
+                    corr = np.corrcoef(bi_ur_arr, nn_ur_arr)[0, 1]
+                    print(f"  Correlation: {corr:.6f}")
+
+                # Show U_r scale diagnostic
+                empirical_max_ur = max(abs(v) for v in bi_ur_arr)
+                theoretical_scale = (_X_H_MIN ** (-cfg.xi)) ** cfg.eta
+                print(f"\n  U_r scale diagnostic:")
+                print(f"    Empirical max|U_r|:   {empirical_max_ur:.6f}")
+                print(f"    Theoretical bound:    {theoretical_scale:.6f}")
+                print(f"    Ratio (emp/theo):     "
+                      f"{empirical_max_ur/theoretical_scale:.6f}")
+                print(f"    Config u_r_scale:     {cfg.u_r_scale}")
+                if cfg.u_r_scale is None:
+                    print(f"    WARNING: u_r_scale=None → using theoretical "
+                          f"bound {theoretical_scale:.1f}")
+                    print(f"    This crushes rewards by factor "
+                          f"{empirical_max_ur/theoretical_scale:.4f}")
+                    print(f"    → Consider setting --u-r-scale or calling "
+                          f"calibrate_reward_scale()")
+
+                worst_idx = np.argsort(-abs_err)[:5]
+                print("  Worst U_r errors:")
+                for idx in worst_idx:
+                    s, bu, nu = ur_errors[idx]
+                    print(f"    t={s[0]}: "
+                          f"BI={bu:.4f} NN={nu:.4f} err={abs(bu-nu):.4f}")
+
+        # V_r comparison at root
+        bi_env.reset()
+        root_state = bi_env.get_state()
+        actor_critic.eval()
+        with torch.no_grad():
+            first_param = next(state_encoder.parameters(), None)
+            if first_param is not None:
+                enc_device = first_param.device
+            else:
+                first_buf = next(state_encoder.buffers(), None)
+                enc_device = (first_buf.device if first_buf is not None
+                              else torch.device("cpu"))
+            tensors = state_encoder.tensorize_state(
+                root_state, diag_env, device=enc_device)
+            features = state_encoder(*tensors)
+            logits, value = actor_critic(features)
+            probs = torch.softmax(logits, dim=-1).squeeze(0)
+
+        bi_vr_root = bi_Vr_dict.get(root_state)
+        print(f"\n  --- Root state summary ---")
+        print(f"  PPO V_r(root):  {value.item():.6f}")
+        print(f"  BI  V_r(root):  "
+              f"{bi_vr_root:.6f}" if bi_vr_root is not None else "  N/A")
+        print(f"  PPO π_r(root):  "
+              f"{dict(zip(SINGLE_ACTION_NAMES, [f'{p:.4f}' for p in probs.cpu().tolist()]))}")
+        bi_root_policy = bi_robot_policy(root_state)
+        if bi_root_policy:
+            action_names_map = ["still", "left", "right", "forward"]
+            bi_probs = {}
+            for profile, prob in bi_root_policy.items():
+                a_name = (action_names_map[profile[0]]
+                          if len(profile) == 1 else str(profile))
+                bi_probs[a_name] = f"{prob:.4f}"
+            print(f"  BI  π_r(root):  {bi_probs}")
+
+        bi_env.close()
+        diag_env.close()
 
     # ------------------------------------------------------------------
     # 9. Generate rollout movie
     # ------------------------------------------------------------------
     num_rollouts = args.rollouts
+    # Derive world name for output directory: strip extension and replace
+    # path separators so that e.g. "jobst_challenges/asymmetric_freeing_simple"
+    # becomes "asymmetric_freeing_simple".
+    world_basename = os.path.splitext(os.path.basename(args.world))[0]
+    script_name = os.path.splitext(os.path.basename(__file__))[0]
     output_dir = args.output_dir or os.path.join(
-        _PROJECT_ROOT, "outputs", "phase2_ppo_asymmetric_freeing"
+        _PROJECT_ROOT, "outputs", script_name, world_basename
     )
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"\nGenerating {num_rollouts} rollouts with learned policy …")
 
     # Build a fresh env for rollouts (separate from training envs)
-    rollout_env = _create_world_model(world_yaml)
+    rollout_env = _create_world_model(world_yaml, max_steps=args.steps)
     rollout_env.reset()
     rollout_human_policy = _make_heuristic_human_policy(
         rollout_env, rollout_env.human_agent_indices
@@ -655,7 +867,7 @@ def main() -> None:
                 f"({len(rollout_env._video_frames)} total frames)"
             )
 
-    movie_path = os.path.join(output_dir, "phase2_ppo_asymmetric_freeing.mp4")
+    movie_path = os.path.join(output_dir, f"{script_name}_{world_basename}.mp4")
     if os.path.exists(movie_path):
         os.remove(movie_path)
     rollout_env.save_video(movie_path, fps=args.movie_fps)

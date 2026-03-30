@@ -171,7 +171,11 @@ class EMPOWorldModelEnv(gymnasium.Env):
         # Sample initial goals for each human
         self._resample_goals(state)
         self._step_count = 0
-        self._aux_buffer.clear()
+        # NOTE: Do NOT clear _aux_buffer here.  PufferLib's auto-reset
+        # calls reset() inline during rollouts (Serial.send), and clearing
+        # the buffer would wipe all accumulated transitions before the
+        # trainer can drain them in _collect_aux_data_from_rollout().
+        # The deque's maxlen prevents unbounded growth.
 
         obs = self._state_to_obs(state)
         info: Dict[str, Any] = {"state": state}
