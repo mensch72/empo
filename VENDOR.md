@@ -240,9 +240,9 @@ vendor/l2p/l2p/
 
 Like Multigrid and ai_transport, the vendored L2P is imported via **PYTHONPATH**:
 
-- The Dockerfile sets: `PYTHONPATH=/workspace/src:/workspace/vendor/multigrid:/workspace/vendor/ai_transport:/workspace/vendor/l2p`
-- This allows Python to import `l2p` directly from the vendored source
-- **No container rebuild needed** when you modify the source code
+- The current Dockerfile sets: `PYTHONPATH=/workspace:/workspace/src:/workspace/vendor/multigrid:/workspace/vendor/ai_transport`
+- To use the vendored `l2p` inside Docker, extend `PYTHONPATH` to include `/workspace/vendor/l2p` (for example via your shell or CI configuration)
+- With `PYTHONPATH` set appropriately, Python can import `l2p` directly from the vendored source without rebuilding the container
 
 ### Purpose
 
