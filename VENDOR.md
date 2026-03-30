@@ -213,6 +213,82 @@ git ls-remote https://github.com/ArnaudFickinger/gym-multigrid.git
 git subtree pull --prefix=vendor/multigrid https://github.com/ArnaudFickinger/gym-multigrid.git <commit-hash> --squash
 ```
 
+## L2P (Language to Planning)
+
+We vendor the L2P library to provide LLM-driven extraction of PDDL domain and problem specifications from natural language descriptions.
+
+### Location
+
+The L2P source code is located in:
+```
+vendor/l2p/
+```
+
+The main Python package is at:
+```
+vendor/l2p/l2p/
+```
+
+### Source Repository
+
+- **Repository**: https://github.com/AI-Planning/l2p
+- **Version**: 0.3.3
+- **License**: MIT (Copyright 2024 Marcus Tantakoun)
+- **Description**: A framework for LLM-driven extraction of PDDL specifications from natural language
+
+### How It Works
+
+Like Multigrid and ai_transport, the vendored L2P is imported via **PYTHONPATH**:
+
+- The current Dockerfile sets: `PYTHONPATH=/workspace:/workspace/src:/workspace/vendor/multigrid:/workspace/vendor/ai_transport`
+- To use the vendored `l2p` inside Docker, extend `PYTHONPATH` to include `/workspace/vendor/l2p` (for example via your shell or CI configuration)
+- With `PYTHONPATH` set appropriately, Python can import `l2p` directly from the vendored source without rebuilding the container
+
+### Purpose
+
+L2P is used as the foundation for the `WorldModelBuilder` module, which constructs
+stochastic game forms (WorldModel instances) from natural language scene descriptions.
+The EMPO project adapts L2P to support:
+
+- Multi-agent (MA-PDDL) domain extraction
+- Per-agent action schemas with ownership
+- Concurrent action effects (commutative, conflicting, interacting)
+- Probabilistic effects (PPDDL)
+- Goal-free world model construction (dynamics only, no goal/reward)
+
+### Dependencies
+
+Core L2P dependencies:
+- retry
+- pddl
+- typing_extensions
+- pyyaml
+
+Optional LLM provider dependencies:
+- openai>=1.0 (for OpenAI provider)
+- tiktoken (for token counting)
+
+### Pulling Updates
+
+```bash
+# Manual update from upstream
+cd /tmp && git clone https://github.com/AI-Planning/l2p.git
+cp -r /tmp/l2p/l2p/ vendor/l2p/l2p/
+rm -rf /tmp/l2p
+```
+
+### For Local Development (Outside Docker)
+
+```bash
+# Option 1: Set PYTHONPATH
+export PYTHONPATH=/path/to/empo/src:/path/to/empo/vendor/multigrid:/path/to/empo/vendor/ai_transport:/path/to/empo/vendor/l2p:$PYTHONPATH
+
+# Option 2: Install in editable mode
+pip install -e ./vendor/l2p
+```
+
+---
+
 ## Why Use PYTHONPATH Instead of pip install?
 
 For actively developed dependencies like Multigrid, using PYTHONPATH provides several advantages:
