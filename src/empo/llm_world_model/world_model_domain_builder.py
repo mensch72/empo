@@ -417,6 +417,12 @@ class WorldModelDomainBuilder(DomainBuilder):
                         e,
                     )
             else:
+                LOG.warning(
+                    "Failed to parse action '%s' for agent '%s' after %d attempts",
+                    hint,
+                    agent.name,
+                    max_retries,
+                )
                 all_raw.append(f"[Failed to parse action '{hint}': {last_error}]")
 
         combined_raw = "\n---\n".join(all_raw)

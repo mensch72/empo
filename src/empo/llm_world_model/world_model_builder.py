@@ -57,6 +57,9 @@ class WorldModelBuilder:
         self._task_builder = WorldModelTaskBuilder()
         self._writer = MAPddlWriter()
 
+        self._last_domain: Optional[MADomainSpec] = None
+        self._last_task: Optional[MATaskSpec] = None
+
     def build(
         self,
         scene_desc: str,
@@ -120,6 +123,10 @@ class WorldModelBuilder:
             {n: c for n, c in world_model._agent_action_counts.items()},
         )
 
+        # Store for later access
+        self._last_domain = domain
+        self._last_task = task
+
         return world_model
 
     def build_and_export(
@@ -156,9 +163,9 @@ class WorldModelBuilder:
     @property
     def domain(self) -> Optional[MADomainSpec]:
         """The last built domain spec (if any)."""
-        return getattr(self._domain_builder, "_last_domain", None)
+        return self._last_domain
 
     @property
     def task(self) -> Optional[MATaskSpec]:
         """The last built task spec (if any)."""
-        return getattr(self._task_builder, "_last_task", None)
+        return self._last_task

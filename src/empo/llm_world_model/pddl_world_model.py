@@ -39,7 +39,16 @@ PddlState = FrozenSet[GroundAtom]
 
 
 class GroundAction:
-    """A fully grounded (instantiated) PDDL action."""
+    """A fully grounded (instantiated) PDDL action.
+
+    Attributes:
+        name: Action schema name (e.g. "move", "pick_up").
+        agent: Name of the owning agent.
+        bindings: Parameter name → object name mapping used for this grounding.
+        precondition_atoms: List of (positive?, ground_atom) tuples that must hold.
+        add_effects: Ground atoms added to the state when this action is applied.
+        del_effects: Ground atoms removed from the state when this action is applied.
+    """
 
     __slots__ = ("name", "agent", "bindings", "precondition_atoms", "add_effects", "del_effects")
 
@@ -611,6 +620,13 @@ class PddlWorldModel(WorldModel):
 
         Default (commutative): union add sets, union delete sets,
         add wins over delete (persistence assumption).
+
+        Note: This implementation uses commutative composition for all effects.
+        ConcurrentEffect rules with effect_type "conflicting" or "synergistic"
+        are stored in the domain spec but not yet applied as overrides during
+        transition computation. A future enhancement would check each
+        ConcurrentEffect rule's pddl_condition and apply pddl_effect overrides
+        when the condition matches.
         """
         total_add: Set[GroundAtom] = set()
         total_del: Set[GroundAtom] = set()

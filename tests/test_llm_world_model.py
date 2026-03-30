@@ -767,11 +767,10 @@ class TestPddlWorldModel:
         """Action grounding produces the correct number of actions."""
         wm = PddlWorldModel(simple_domain, simple_task)
         robot_actions = wm._agent_ground_actions["robot"]
-        # move: robot × 3 rooms × 3 rooms = 9 groundings (but self-loops have no connected)
-        # pick_up: robot × 2 objects × 3 rooms = 6 groundings
+        # move: 1 robot × 3 rooms(from) × 3 rooms(to) = 9 groundings
+        # pick_up: 1 robot × 2 objects × 3 rooms = 6 groundings
         # Total: 15 grounded actions for robot
-        # (not all will have satisfied preconditions, but all are grounded)
-        assert len(robot_actions) > 0
+        assert len(robot_actions) == 15
 
     def test_add_state(self, simple_domain, simple_task):
         """add_state registers a new known state."""
