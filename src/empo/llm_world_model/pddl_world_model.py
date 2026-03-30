@@ -248,8 +248,9 @@ class PddlWorldModel(WorldModel):
         # Known states set
         self._known_states: Set[PddlState] = {self._initial_state}
 
-        # Concurrent effect rules
+        # Concurrent effect rules — build index for quick conflict lookup
         self._concurrent_effects = domain.concurrent_effects
+        self._conflict_index = self._build_conflict_index()
 
         # Set up Gymnasium spaces
         n_agents = len(self._agent_names)
@@ -656,6 +657,22 @@ class PddlWorldModel(WorldModel):
 
         return ground_actions
 
+    def _build_conflict_index(
+        self,
+    ) -> Dict[Tuple[str, str, str, str], str]:
+        """Build a lookup index of conflicting action pairs from ConcurrentEffect rules."""
+        conflicts: Dict[Tuple[str, str, str, str], str] = {}
+        for ce in self._concurrent_effects:
+            if ce.effect_type == "conflicting":
+                conflicts[(ce.agent_a, ce.action_a, ce.agent_b, ce.action_b)] = (
+                    ce.resolution
+                )
+                # Also index the reverse direction
+                conflicts[(ce.agent_b, ce.action_b, ce.agent_a, ce.action_a)] = (
+                    ce.resolution
+                )
+        return conflicts
+
     def _check_preconditions(
         self, action: GroundAction, state_atoms: PddlState
     ) -> bool:
@@ -680,28 +697,17 @@ class PddlWorldModel(WorldModel):
 
         For conflicting pairs (as declared in ConcurrentEffect rules):
         if two agents' actions match a conflicting rule and their effects
-        overlap (same atoms added/deleted), both agents' effects are
-        cancelled (neither succeeds).
+        interfere (same atoms targeted for add/delete, or cross-interference
+        where one agent adds what another deletes), both agents' effects
+        are cancelled (neither succeeds).
 
         Synergistic rules are currently treated as commutative (their
         effects compose normally). A future enhancement could apply
         custom pddl_effect overrides.
         """
-        # Build a lookup of conflicting action pairs for quick matching
-        conflicts: Dict[Tuple[str, str, str, str], str] = {}
-        for ce in self._concurrent_effects:
-            if ce.effect_type == "conflicting":
-                conflicts[(ce.agent_a, ce.action_a, ce.agent_b, ce.action_b)] = (
-                    ce.resolution
-                )
-                # Also index the reverse direction
-                conflicts[(ce.agent_b, ce.action_b, ce.agent_a, ce.action_a)] = (
-                    ce.resolution
-                )
-
         # Check for conflicting action pairs and cancel overlapping effects
         cancelled_agents: Set[str] = set()
-        if agent_action_names and conflicts:
+        if agent_action_names and self._conflict_index:
             agent_list = list(agent_action_names.keys())
             for i in range(len(agent_list)):
                 for j in range(i + 1, len(agent_list)):
@@ -710,15 +716,21 @@ class PddlWorldModel(WorldModel):
                     a_action = agent_action_names.get(a_name, "")
                     b_action = agent_action_names.get(b_name, "")
                     key = (a_name, a_action, b_name, b_action)
-                    if key in conflicts:
-                        # Check if effects overlap (same atoms targeted)
+                    if key in self._conflict_index:
+                        # Check if effects interfere (same atoms targeted
+                        # in same or opposite directions)
                         a_add, a_del = agent_effects.get(a_name, (set(), set()))
                         b_add, b_del = agent_effects.get(b_name, (set(), set()))
-                        overlapping = (a_add & b_add) or (a_del & b_del)
-                        if overlapping:
+                        interfering = (
+                            (a_add & b_add)      # both add same atom
+                            or (a_del & b_del)   # both delete same atom
+                            or (a_add & b_del)   # one adds what other deletes
+                            or (a_del & b_add)   # one deletes what other adds
+                        )
+                        if interfering:
                             LOG.debug(
                                 "Conflicting actions %s.%s × %s.%s: "
-                                "cancelling overlapping effects",
+                                "cancelling interfering effects",
                                 a_name, a_action, b_name, b_action,
                             )
                             cancelled_agents.add(a_name)
