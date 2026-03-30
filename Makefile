@@ -133,7 +133,7 @@ test:
 # Run tests locally without Docker (requires: pip install -r setup/requirements.txt pytest)
 test-local:
 	@echo "Running tests locally..."
-	PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds python -m pytest tests/ -v \
+	PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:vendor/l2p:multigrid_worlds python -m pytest tests/ -v \
 		--ignore=tests/test_mineland_installation.py \
 		--ignore=tests/debug_dag_by_timestep.py \
 		--ignore=tests/debug_dag_parallel.py
@@ -141,7 +141,7 @@ test-local:
 # Run only hierarchical world model tests (Tasks 1-11) locally
 test-hierarchical:
 	@echo "Running hierarchical world model tests..."
-	PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds python -m pytest \
+	PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:vendor/l2p:multigrid_worlds python -m pytest \
 		tests/test_world_model_duration.py \
 		tests/test_duration_discounting.py \
 		tests/test_hierarchical_base.py \
