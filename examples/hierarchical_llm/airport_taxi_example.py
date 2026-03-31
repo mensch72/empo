@@ -52,7 +52,8 @@ SCENARIO = (
 class AirportMockLLM:
     """Returns plausible canned responses for the airport-taxi scenario."""
 
-    def query(self, prompt: str) -> str:  # noqa: D401
+    def query(self, prompt: str) -> str:
+        """Return a deterministic JSON response based on prompt keywords."""
         # --- Robot actions ---
         if "action options the robot" in prompt:
             n = _extract_n(prompt)

@@ -212,9 +212,9 @@ class NLWorldModel(WorldModel):
     def V_r_estimate(self, state: Any) -> float:
         """Return the LLM-estimated empowerment value for a (terminal) state.
 
-        If the state has no stored estimate, returns ``math.log(1) == 0``.
-        The value is ``log2`` of the raw estimate so that it behaves like a
-        channel capacity / empowerment measure.
+        If the state has no stored estimate, returns 0.0 (equivalent to
+        ``log2(1)``).  The value is ``log2`` of the raw estimate so that it
+        behaves like a channel capacity / empowerment measure.
         """
         raw = self._empowerment.get(state)
         if raw is None or raw <= 0:

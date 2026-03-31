@@ -276,7 +276,7 @@ def _expand_humansreaction(
             }
         ]
 
-    # Normalise probabilities so they sum to 1
+    # Normalize probabilities so they sum to 1
     probs = [float(c.get("probability", 1.0)) for c in consequences]
     total = sum(probs)
     if total <= 0:
