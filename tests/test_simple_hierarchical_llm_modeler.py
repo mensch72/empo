@@ -466,6 +466,26 @@ class TestHierarchicalHelpers:
         )
         assert status == "still in progress"
 
+    def test_check_status_null_value_defaults(self):
+        """If the LLM returns {"status": null}, default to 'still in progress'."""
+
+        class NullStatusLLM:
+            def query(self, prompt: str) -> str:
+                return json.dumps({"status": None})
+
+        status = check_hierarchical_status(NullStatusLLM(), "ctx", "act", "state", [])
+        assert status == "still in progress"
+
+    def test_check_status_non_string_defaults(self):
+        """If the LLM returns {"status": 42}, default to 'still in progress'."""
+
+        class IntStatusLLM:
+            def query(self, prompt: str) -> str:
+                return json.dumps({"status": 42})
+
+        status = check_hierarchical_status(IntStatusLLM(), "ctx", "act", "state", [])
+        assert status == "still in progress"
+
     def test_match_consequence_returns_match(self):
         llm = MockLLM()
         idx, new = match_consequence(

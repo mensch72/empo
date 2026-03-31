@@ -60,6 +60,8 @@ def check_hierarchical_status(
     except ValueError:
         status = "still in progress"
 
+    if not isinstance(status, str):
+        return "still in progress"
     normalised = status.strip().lower()
     if normalised in ("success", "failure", "still in progress"):
         return normalised

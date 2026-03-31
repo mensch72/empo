@@ -16,7 +16,7 @@ def _history_block(history: List[str]) -> str:
     return "\n".join(lines)
 
 
-# ── Phase: robot action generation ────────────────────────────────────────────
+# ── Step: robot action generation ─────────────────────────────────────────────
 
 
 def robot_actions_prompt(
@@ -42,7 +42,7 @@ def robot_actions_prompt(
     )
 
 
-# ── Phase: humans reaction generation ────────────────────────────────────────
+# ── Step: humans reaction generation ──────────────────────────────────────────
 
 
 def humans_reactions_prompt(
@@ -68,7 +68,7 @@ def humans_reactions_prompt(
     )
 
 
-# ── Phase: consequence generation ─────────────────────────────────────────────
+# ── Step: consequence generation ──────────────────────────────────────────────
 
 
 def consequences_prompt(
@@ -95,7 +95,7 @@ def consequences_prompt(
     )
 
 
-# ── Phase: terminal empowerment estimation ────────────────────────────────────
+# ── Step: terminal empowerment estimation ─────────────────────────────────────
 
 
 def empowerment_prompt(

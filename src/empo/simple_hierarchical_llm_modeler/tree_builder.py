@@ -213,10 +213,10 @@ def _expand_state(
             node=child,
             initial_state=initial_state,
             n_steps=n_steps,
+            n_robotactions=n_robotactions,
             n_humansreactions=n_humansreactions,
             n_consequences=n_consequences,
             higher_level_context=higher_level_context,
-            n_robotactions=n_robotactions,
         )
 
 
@@ -225,10 +225,10 @@ def _expand_robotaction(
     node: TreeNode,
     initial_state: str,
     n_steps: int,
+    n_robotactions: int,  # forwarded to recursive _expand_state via _expand_humansreaction
     n_humansreactions: int,
     n_consequences: int,
     higher_level_context: Optional[str],
-    n_robotactions: int,
 ) -> None:
     """Expand a *robotaction* node by generating humans' reactions."""
     assert node.node_type == "robotaction"
@@ -276,8 +276,8 @@ def _expand_humansreaction(
     n_steps: int,
     n_consequences: int,
     higher_level_context: Optional[str],
-    n_robotactions: int,
-    n_humansreactions: int,
+    n_robotactions: int,  # kept for recursive _expand_state call
+    n_humansreactions: int,  # kept for recursive _expand_state call
 ) -> None:
     """Expand a *humansreaction* node by generating probabilistic consequences."""
     assert node.node_type == "humansreaction"
