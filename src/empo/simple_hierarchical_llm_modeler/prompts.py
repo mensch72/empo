@@ -84,12 +84,23 @@ def consequences_prompt(
         f"{ctx}"
         f"Situation: {initial_state}\n\n"
         f"Assume the following happened so far:\n{_history_block(history)}\n\n"
-        f"Please name {n_consequences} distinct high-level consequences and their "
-        f"probabilities that this can have that differ in their implications on the "
-        f"empowerment of all humans.\n\n"
+        f"Please name {n_consequences} distinct observable consequences and their "
+        f"probabilities.\n\n"
+        f"A consequence is something that happens in the environment as a direct "
+        f"result of the actions already taken — NOT a subsequent action by the "
+        f"robot or humans. Subsequent actions will be asked about separately.\n\n"
+        f"Each consequence description must state concretely what changed in the "
+        f"situation — what can be directly observed (e.g. a door opened, traffic "
+        f"appeared, rain started, a message was displayed, an object moved). "
+        f"Do NOT describe implications for empowerment or decision-making in the "
+        f"consequence description; put that analysis in the rationale instead.\n\n"
+        f"The {n_consequences} consequences should differ in their implications on "
+        f"the empowerment of all affected humans.\n\n"
         f"Return ONLY a JSON list of exactly {n_consequences} objects, each with keys "
-        f'"consequence" (concise consequence description), "probability" (float 0-1), '
-        f'and "rationale" (brief rationale).  Probabilities must sum to 1.\n'
+        f'"consequence" (concise description of the observable state change), '
+        f'"probability" (float 0-1), '
+        f'and "rationale" (brief analysis of empowerment implications).  '
+        f"Probabilities must sum to 1.\n"
         f"Example: "
         f'[{{"consequence": "...", "probability": 0.6, "rationale": "..."}}, ...]'
     )
@@ -110,12 +121,25 @@ def empowerment_prompt(
         f"{ctx}"
         f"Situation: {initial_state}\n\n"
         f"Assume the following happened so far:\n{_history_block(history)}\n\n"
-        f"Please estimate the total number of meaningfully different futures the "
-        f"affected humans can bring about together with sufficient reliability "
-        f"from this point on.\n\n"
+        f"We want to estimate how much effective power (empowerment) the affected "
+        f"humans collectively have in this situation.\n\n"
+        f"To do this, think step by step:\n"
+        f"1. List the key independent choices or decisions the affected humans "
+        f"can still make from this point on (e.g. where to go, what to say, "
+        f"whether to cooperate, etc.).\n"
+        f"2. For each choice, estimate roughly how many meaningfully different "
+        f"options they have.\n"
+        f"3. Multiply the numbers of options across all independent choices to "
+        f"get the total number of meaningfully different futures they can "
+        f"bring about together with sufficient reliability.\n\n"
         f"Return ONLY a JSON object with keys "
-        f'"estimate" (a positive number) and "rationale" (brief rationale).\n'
-        f'Example: {{"estimate": 12, "rationale": "..."}}'
+        f'"choices" (list of objects with "choice" and "n_options"), '
+        f'"estimate" (the product of all n_options, as a positive number), '
+        f'and "rationale" (brief summary).\n'
+        f"Example: "
+        f'{{"choices": [{{"choice": "where to go", "n_options": 3}}, '
+        f'{{"choice": "whether to cooperate", "n_options": 2}}], '
+        f'"estimate": 6, "rationale": "3 destinations × 2 cooperation modes"}}'
     )
 
 

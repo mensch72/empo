@@ -15,12 +15,15 @@ from retry import retry
 from typing_extensions import override
 from .base import BaseLLM, load_yaml
 
+import os as _os
+_DEFAULT_CONFIG = _os.path.join(_os.path.dirname(__file__), "utils", "openaiSDK.yaml")
+
 
 class OPENAI(BaseLLM):
     def __init__(
         self,
         model: str,
-        config_path: str = "l2p/llm/utils/openaiSDK.yaml",
+        config_path: str = _DEFAULT_CONFIG,
         provider: str = "openai",
         api_key: str | None = None,
         base_url: str = "https://api.openai.com/v1/",
@@ -137,10 +140,15 @@ class OPENAI(BaseLLM):
                     "temperature": self.temperature,
                     "max_completion_tokens": requested_tokens,
                     "top_p": self.top_p,
-                    "frequency_penalty": self.frequency_penalty,
-                    "presence_penalty": self.presence_penalty,
-                    "stop": self.stop,
                 }
+
+                if self.stop is not None:
+                    kwargs["stop"] = self.stop
+
+                # These parameters are not supported by all providers (e.g. Google Gemini)
+                if self.provider != "google":
+                    kwargs["frequency_penalty"] = self.frequency_penalty
+                    kwargs["presence_penalty"] = self.presence_penalty
 
                 # only add reasoning_effort if it is not None
                 if self.reasoning_effort is not None:

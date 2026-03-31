@@ -22,10 +22,12 @@ Any object satisfying the :class:`LLMConnector` protocol can be used.  The
 """
 
 from empo.simple_hierarchical_llm_modeler.llm_connector import (
+    CachedLLMConnector,
     L2PConnector,
     LLMConnector,
 )
 from empo.simple_hierarchical_llm_modeler.tree_builder import (
+    LiveTreeRenderer,
     TreeNode,
     build_tree,
     collect_leaves,
@@ -44,7 +46,9 @@ __all__ = [
     # LLM connector
     "LLMConnector",
     "L2PConnector",
+    "CachedLLMConnector",
     # Tree builder
+    "LiveTreeRenderer",
     "TreeNode",
     "build_tree",
     "count_nodes",

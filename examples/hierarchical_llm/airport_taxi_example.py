@@ -26,7 +26,7 @@ Usage
     # Mock mode (no API key needed):
     PYTHONPATH=src:vendor/multigrid:vendor/l2p python examples/hierarchical_llm/airport_taxi_example.py
 
-    # Live mode (requires OPENAI_API_KEY):
+    # Live mode (requires GOOGLE_API_KEY):
     PYTHONPATH=src:vendor/multigrid:vendor/l2p python examples/hierarchical_llm/airport_taxi_example.py --live
 """
 
@@ -41,11 +41,9 @@ import textwrap
 # Mock LLM – deterministic, no network access
 # ---------------------------------------------------------------------------
 
-SCENARIO = (
+DEFAULT_SCENARIO = (
     "A robot taxi driver and two potential passengers (Alice and Bob) stand "
-    "in front of the departure building of an airport. Alice needs to go to "
-    "the city centre and Bob needs to go to the train station, which is on "
-    "the way to the city centre."
+    "in front of the departure building of an airport."
 )
 
 
@@ -194,13 +192,33 @@ def main() -> None:
     parser.add_argument(
         "--live", action="store_true", help="Use a real LLM (needs API key)"
     )
+    parser.add_argument(
+        "--depth", type=int, default=1, help="Number of full expansion cycles (default: 1)"
+    )
+    parser.add_argument(
+        "--situation", type=str, default=DEFAULT_SCENARIO,
+        help="Initial situation description (default: airport taxi scenario)"
+    )
+    parser.add_argument(
+        "--export", type=str, default=None, metavar="PATH",
+        help="Export tree to file. Format is inferred from extension: "
+             ".json (default), .yaml/.yml, or .html"
+    )
     args = parser.parse_args()
+
+    scenario = args.situation
 
     if args.live:
         try:
+            import os
             from l2p.llm.openai import OPENAI
 
-            llm = OPENAI(model="gpt-4o-mini")
+            llm = OPENAI(
+                model="gemini-2.5-flash",
+                provider="google",
+                api_key=os.environ.get("GOOGLE_API_KEY"),
+                base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+            )
         except Exception as exc:
             print(f"Cannot initialise live LLM: {exc}")
             print("Falling back to mock mode.")
@@ -211,6 +229,8 @@ def main() -> None:
 
     # Import after path setup
     from empo.simple_hierarchical_llm_modeler import (
+        CachedLLMConnector,
+        LiveTreeRenderer,
         build_tree,
         build_two_level_model,
         collect_leaves,
@@ -218,57 +238,105 @@ def main() -> None:
         NLWorldModel,
     )
 
+    # Wrap live LLM with a disk cache to avoid re-querying on restarts.
+    # Mock mode is deterministic and instant, so no caching needed.
+    if args.live:
+        llm = CachedLLMConnector(llm, cache_dir="outputs/llm_cache/airport_taxi")
+
     # ── Single-level demo ──────────────────────────────────────────────────
-    print("=" * 70)
-    print("STEP 1: Build a single-level trajectory tree (depth=1)")
-    print("=" * 70)
+    if not args.live:
+        print("=" * 70)
+        print("STEP 1: Build a single-level trajectory tree (depth=1)")
+        print("=" * 70)
+
+    renderer = LiveTreeRenderer(root_label=scenario) if args.live else None
 
     tree = build_tree(
         llm,
-        SCENARIO,
-        n_steps=1,
+        scenario,
+        n_steps=args.depth,
         n_robotactions=3,
         n_humansreactions=2,
         n_consequences=2,
+        on_update=renderer.update if renderer else None,
     )
+    if renderer:
+        renderer.finish()
+        import time; time.sleep(2)
+        renderer.close()
     print(
         f"\nTree has {count_nodes(tree)} nodes, {len(collect_leaves(tree))} leaves.\n"
     )
-    print_tree(tree)
+    if not args.live:
+        print(tree.render(root_label=scenario))
 
-    model = NLWorldModel.from_tree(tree, SCENARIO)
-    print_world_model(model)
+    # Export if requested
+    if args.export:
+        ext = args.export.rsplit(".", 1)[-1].lower() if "." in args.export else "json"
+        fmt = {"json": "json", "yaml": "yaml", "yml": "yaml", "html": "html"}.get(ext, "json")
+        tree.export(args.export, fmt=fmt, root_label=scenario)
+        print(f"Tree exported to {args.export} ({fmt})")
+
+    model = NLWorldModel.from_tree(tree, scenario)
+    if not args.live:
+        print_world_model(model)
 
     # ── Two-level hierarchical demo ────────────────────────────────────────
-    print("\n" + "=" * 70)
-    print("STEP 2: Build a two-level hierarchical world model (lazy)")
-    print("=" * 70)
+    if not args.live:
+        print("\n" + "=" * 70)
+        print("STEP 2: Build a two-level hierarchical world model (lazy)")
+        print("=" * 70)
+
+    renderer2 = LiveTreeRenderer(root_label=scenario) if args.live else None
 
     hmodel = build_two_level_model(
         llm,
-        SCENARIO,
-        coarse_n_steps=1,
-        fine_n_steps=1,
+        scenario,
+        coarse_n_steps=args.depth,
+        fine_n_steps=args.depth,
         n_robotactions=3,
         n_humansreactions=2,
         n_consequences=2,
+        on_update=renderer2.update if renderer2 else None,
     )
-    print(f"\nLazy hierarchical model: {hmodel.num_levels} levels")
-    print(f"Fine model built yet? {hmodel.finest() is not None}")
+    if renderer2:
+        renderer2.finish()
+        import time; time.sleep(2)
+        renderer2.close()
+    if not args.live:
+        print(f"\nLazy hierarchical model: {hmodel.num_levels} levels")
+        print(f"Fine model built yet? {hmodel.finest() is not None}")
 
-    print("\n--- Coarse level (Level 0) ---")
-    print_world_model(hmodel.coarsest())
+    if not args.live:
+        print("\n--- Coarse level (Level 0) ---")
+        if hmodel._coarse_tree is not None:
+            print(hmodel._coarse_tree.render(root_label=scenario))
+        print_world_model(hmodel.coarsest())
 
     # Now simulate taking the first coarse action -> fine model built lazily
     coarse_labels = hmodel.coarsest().robot_action_labels()
     if coarse_labels:
         chosen_action = coarse_labels[0]
-        print(f"\n--- Taking coarse action: {chosen_action} ---")
-        print("(Fine model is built lazily now...)")
+        if not args.live:
+            print(f"\n--- Taking coarse action: {chosen_action} ---")
+            print("(Fine model is built lazily now...)")
+        # Build fine model (renderer2 will be reused if live)
+        if renderer2:
+            renderer2.root = None
+            renderer2._node_count = 0
+            renderer2._status.clear()
         fine, mapper = hmodel.get_fine_model(chosen_action)
-        print(f"Fine model built? {hmodel.finest() is not None}")
-        print("\n--- Fine level (Level 1) ---")
-        print_world_model(fine)
+        if renderer2:
+            renderer2.finish()
+            import time; time.sleep(2)
+            renderer2.close()
+        if not args.live:
+            print(f"Fine model built? {hmodel.finest() is not None}")
+            print("\n--- Fine level (Level 1) ---")
+            fine_tree = hmodel._fine_trees.get(chosen_action)
+            if fine_tree is not None:
+                print(fine_tree.render(root_label=scenario))
+            print_world_model(fine)
 
     print("\nDone!")
 

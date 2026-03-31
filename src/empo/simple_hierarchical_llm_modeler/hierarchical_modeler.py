@@ -15,7 +15,7 @@ not actually taken.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from empo.hierarchical.hierarchical_world_model import HierarchicalWorldModel
 from empo.hierarchical.level_mapper import LevelMapper
@@ -26,6 +26,7 @@ from empo.simple_hierarchical_llm_modeler.prompts import (
     match_consequence_prompt,
 )
 from empo.simple_hierarchical_llm_modeler.tree_builder import (
+    TreeNode,
     _parse_json_object,
     build_tree,
 )
@@ -240,6 +241,7 @@ class LazyTwoLevelModel:
         n_robotactions: int = 3,
         n_humansreactions: int = 3,
         n_consequences: int = 2,
+        on_update: Optional[Callable[[Optional["TreeNode"], str], None]] = None,
     ) -> None:
         self.llm = llm
         self.initial_state_description = initial_state_description
@@ -248,9 +250,14 @@ class LazyTwoLevelModel:
         self._n_robotactions = n_robotactions
         self._n_humansreactions = n_humansreactions
         self._n_consequences = n_consequences
+        self._on_update = on_update
 
         # Cache: coarse action label -> (fine_model, mapper)
         self._fine_cache: Dict[str, Tuple[NLWorldModel, NLLevelMapper]] = {}
+
+        # Source trees (coarse set by build_two_level_model, fine set lazily)
+        self._coarse_tree: Optional[TreeNode] = None
+        self._fine_trees: Dict[str, TreeNode] = {}
 
         # Currently active fine model / mapper (set by get_fine_model)
         self._active_fine: Optional[NLWorldModel] = None
@@ -296,6 +303,7 @@ class LazyTwoLevelModel:
                 n_humansreactions=self._n_humansreactions,
                 n_consequences=self._n_consequences,
                 higher_level_context=higher_ctx,
+                on_update=self._on_update,
             )
             fine_model = NLWorldModel.from_tree(
                 fine_tree, self.initial_state_description
@@ -309,6 +317,7 @@ class LazyTwoLevelModel:
                 initial_state_description=self.initial_state_description,
             )
             self._fine_cache[coarse_action_label] = (fine_model, mapper)
+            self._fine_trees[coarse_action_label] = fine_tree
 
         self._active_fine = fine_model
         self._active_mapper = mapper
@@ -341,6 +350,7 @@ def build_two_level_model(
     n_robotactions: int = 3,
     n_humansreactions: int = 3,
     n_consequences: int = 2,
+    on_update: Optional[Callable[[Optional[TreeNode], str], None]] = None,
 ) -> LazyTwoLevelModel:
     """Build a lazy two-level hierarchical model from NL descriptions.
 
@@ -369,10 +379,11 @@ def build_two_level_model(
         n_robotactions=n_robotactions,
         n_humansreactions=n_humansreactions,
         n_consequences=n_consequences,
+        on_update=on_update,
     )
     coarse_model = NLWorldModel.from_tree(coarse_tree, initial_state_description)
 
-    return LazyTwoLevelModel(
+    model = LazyTwoLevelModel(
         llm=llm,
         initial_state_description=initial_state_description,
         coarse_model=coarse_model,
@@ -380,4 +391,7 @@ def build_two_level_model(
         n_robotactions=n_robotactions,
         n_humansreactions=n_humansreactions,
         n_consequences=n_consequences,
+        on_update=on_update,
     )
+    model._coarse_tree = coarse_tree
+    return model

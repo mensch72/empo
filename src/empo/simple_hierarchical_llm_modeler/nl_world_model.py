@@ -77,6 +77,9 @@ class NLWorldModel(WorldModel):
         ]
         self.action_space = gym.spaces.Discrete(1)  # placeholder, updated later
 
+        # Source tree (set by from_tree)
+        self._tree: Optional[TreeNode] = None
+
     # ------------------------------------------------------------------
     # Factory
     # ------------------------------------------------------------------
@@ -96,6 +99,7 @@ class NLWorldModel(WorldModel):
             A fully-initialised :class:`NLWorldModel`.
         """
         model = cls()
+        model._tree = root
         model._initial_state = tuple(root.history) if root.history else ()
         model._current_state = model._initial_state
         model._state_descriptions[model._initial_state] = initial_state_description
