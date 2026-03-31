@@ -29,6 +29,7 @@ from empo.simple_hierarchical_llm_modeler.tree_builder import (
 )
 from empo.simple_hierarchical_llm_modeler.nl_world_model import NLWorldModel
 from empo.simple_hierarchical_llm_modeler.hierarchical_modeler import (
+    LazyTwoLevelModel,
     NLLevelMapper,
     build_two_level_model,
     check_hierarchical_status,
@@ -480,6 +481,41 @@ class TestHierarchicalHelpers:
         assert idx == 0
         assert new is None
 
+    def test_match_consequence_out_of_range_treated_as_unmatched(self):
+        """An out-of-range 1-based index from the LLM is treated as no match."""
+
+        class OutOfRangeLLM:
+            def query(self, prompt: str) -> str:
+                # Return match=99, way beyond the list length
+                return json.dumps({"match": 99, "new_consequence": None})
+
+        llm = OutOfRangeLLM()
+        idx, new = match_consequence(
+            llm,
+            "ctx",
+            "action",
+            ["only one consequence"],
+            "success",
+            "state",
+            [],
+        )
+        assert idx is None
+        assert new is not None  # Falls through to novel outcome
+
+    def test_match_consequence_zero_index_treated_as_unmatched(self):
+        """A 0 (invalid 1-based) index from the LLM is treated as no match."""
+
+        class ZeroIndexLLM:
+            def query(self, prompt: str) -> str:
+                return json.dumps({"match": 0, "new_consequence": None})
+
+        llm = ZeroIndexLLM()
+        idx, new = match_consequence(
+            llm, "ctx", "action", ["a", "b"], "failure", "state", []
+        )
+        assert idx is None
+        assert new is not None
+
 
 # ============================================================================
 # Tests: NLLevelMapper
@@ -517,10 +553,97 @@ class TestNLLevelMapper:
         mapper = NLLevelMapper(coarse, fine)
         assert isinstance(mapper, LevelMapper)
 
-    def test_super_state(self):
+    def test_super_state_root_maps_to_root(self):
         coarse, fine = self._make_models()
         mapper = NLLevelMapper(coarse, fine)
+        assert mapper.super_state(()) == ()
+
+    def test_super_state_in_progress_without_llm(self):
+        """Without an LLM, super_state returns 'still in progress' -> root."""
+        coarse, fine = self._make_models()
+        mapper = NLLevelMapper(coarse, fine)  # no llm
         assert mapper.super_state(("any", "state")) == ()
+
+    def test_super_state_with_llm_still_in_progress(self):
+        """With LLM returning 'still in progress', stays at coarse root."""
+        coarse, fine = self._make_models()
+        llm = MockLLM()  # MockLLM returns "still in progress" for status
+        mapper = NLLevelMapper(
+            coarse,
+            fine,
+            llm=llm,
+            higher_level_context="ctx",
+            higher_level_action="act",
+            initial_state_description="desc",
+        )
+        assert mapper.super_state(("Robot: do something",)) == ()
+
+    def test_super_state_switches_on_success(self):
+        """On 'success', super_state returns a distinct terminal marker."""
+
+        class SuccessLLM:
+            def query(self, prompt: str) -> str:
+                return json.dumps({"status": "success"})
+
+        coarse, fine = self._make_models()
+        mapper = NLLevelMapper(
+            coarse,
+            fine,
+            llm=SuccessLLM(),
+            higher_level_context="ctx",
+            higher_level_action="act",
+            initial_state_description="desc",
+        )
+        result = mapper.super_state(("Robot: done",))
+        assert result != ()
+        assert result == ("_completed", "success")
+
+    def test_return_control_false_while_in_progress(self):
+        coarse, fine = self._make_models()
+        llm = MockLLM()  # returns "still in progress"
+        mapper = NLLevelMapper(
+            coarse,
+            fine,
+            llm=llm,
+            higher_level_context="ctx",
+            higher_level_action="act",
+            initial_state_description="desc",
+        )
+        assert (
+            mapper.return_control((0,), ("s",), (1,), ("Robot: still going",)) is False
+        )
+
+    def test_return_control_true_on_success(self):
+        class SuccessLLM:
+            def query(self, prompt: str) -> str:
+                return json.dumps({"status": "success"})
+
+        coarse, fine = self._make_models()
+        mapper = NLLevelMapper(
+            coarse,
+            fine,
+            llm=SuccessLLM(),
+            higher_level_context="ctx",
+            higher_level_action="act",
+            initial_state_description="desc",
+        )
+        assert mapper.return_control((0,), ("s",), (1,), ("Robot: done",)) is True
+
+    def test_return_control_true_on_failure(self):
+        class FailureLLM:
+            def query(self, prompt: str) -> str:
+                return json.dumps({"status": "failure"})
+
+        coarse, fine = self._make_models()
+        mapper = NLLevelMapper(
+            coarse,
+            fine,
+            llm=FailureLLM(),
+            higher_level_context="ctx",
+            higher_level_action="act",
+            initial_state_description="desc",
+        )
+        assert mapper.return_control((0,), ("s",), (1,), ("Robot: failed",)) is True
 
     def test_is_feasible_always_true(self):
         coarse, fine = self._make_models()
@@ -539,9 +662,7 @@ class TestNLLevelMapper:
 
 
 class TestTwoLevelModel:
-    def test_build_produces_hierarchical_model(self):
-        from empo.hierarchical.hierarchical_world_model import HierarchicalWorldModel
-
+    def test_build_produces_lazy_model(self):
         llm = MockLLM()
         hmodel = build_two_level_model(
             llm,
@@ -552,10 +673,11 @@ class TestTwoLevelModel:
             n_humansreactions=1,
             n_consequences=1,
         )
-        assert isinstance(hmodel, HierarchicalWorldModel)
+        assert isinstance(hmodel, LazyTwoLevelModel)
         assert hmodel.num_levels == 2
         assert isinstance(hmodel.coarsest(), NLWorldModel)
-        assert isinstance(hmodel.finest(), NLWorldModel)
+        # No fine model built yet
+        assert hmodel.finest() is None
 
     def test_coarse_has_transitions(self):
         llm = MockLLM()
@@ -573,7 +695,7 @@ class TestTwoLevelModel:
         trans = coarse.transition_probabilities(coarse.get_state(), [0, 0])
         assert trans is not None
 
-    def test_fine_has_transitions(self):
+    def test_fine_built_lazily_on_get(self):
         llm = MockLLM()
         hmodel = build_two_level_model(
             llm,
@@ -584,10 +706,70 @@ class TestTwoLevelModel:
             n_humansreactions=1,
             n_consequences=1,
         )
-        fine = hmodel.finest()
+        # Get action labels from coarse model
+        coarse = hmodel.coarsest()
+        labels = coarse.robot_action_labels()
+        assert len(labels) > 0
+
+        # Lazily build fine model for the first action
+        fine, mapper = hmodel.get_fine_model(labels[0])
         assert isinstance(fine, NLWorldModel)
+        assert isinstance(mapper, NLLevelMapper)
+        assert hmodel.finest() is fine
+
+        # Fine model has transitions
         trans = fine.transition_probabilities(fine.get_state(), [0, 0])
         assert trans is not None
+
+    def test_fine_cached_across_calls(self):
+        llm = MockLLM()
+        hmodel = build_two_level_model(
+            llm,
+            "Airport taxi scenario",
+            coarse_n_steps=1,
+            fine_n_steps=1,
+            n_robotactions=2,
+            n_humansreactions=1,
+            n_consequences=1,
+        )
+        label = hmodel.coarsest().robot_action_labels()[0]
+        fine1, mapper1 = hmodel.get_fine_model(label)
+        fine2, mapper2 = hmodel.get_fine_model(label)
+        assert fine1 is fine2
+        assert mapper1 is mapper2
+
+    def test_to_hierarchical_after_fine_built(self):
+        from empo.hierarchical.hierarchical_world_model import HierarchicalWorldModel
+
+        llm = MockLLM()
+        hmodel = build_two_level_model(
+            llm,
+            "Airport taxi scenario",
+            coarse_n_steps=1,
+            fine_n_steps=1,
+            n_robotactions=2,
+            n_humansreactions=1,
+            n_consequences=1,
+        )
+        label = hmodel.coarsest().robot_action_labels()[0]
+        hmodel.get_fine_model(label)
+        hwm = hmodel.to_hierarchical()
+        assert isinstance(hwm, HierarchicalWorldModel)
+        assert hwm.num_levels == 2
+
+    def test_to_hierarchical_raises_without_fine(self):
+        llm = MockLLM()
+        hmodel = build_two_level_model(
+            llm,
+            "Airport taxi scenario",
+            coarse_n_steps=1,
+            fine_n_steps=1,
+            n_robotactions=2,
+            n_humansreactions=1,
+            n_consequences=1,
+        )
+        with pytest.raises(RuntimeError, match="No fine model"):
+            hmodel.to_hierarchical()
 
 
 # ============================================================================
@@ -606,6 +788,7 @@ class TestExports:
         assert hasattr(pkg, "count_nodes")
         assert hasattr(pkg, "collect_leaves")
         assert hasattr(pkg, "NLWorldModel")
+        assert hasattr(pkg, "LazyTwoLevelModel")
         assert hasattr(pkg, "NLLevelMapper")
         assert hasattr(pkg, "build_two_level_model")
         assert hasattr(pkg, "check_hierarchical_status")

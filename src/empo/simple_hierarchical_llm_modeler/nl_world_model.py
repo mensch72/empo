@@ -126,8 +126,11 @@ class NLWorldModel(WorldModel):
                 max_hr = max(max_hr, max(hr_indices) + 1 if hr_indices else 0)
         model._n_robot_actions = max(max_ra, 1)
         model._n_humans_reactions = max(max_hr, 1)
+        # action_space.n is interpreted by WorldModel as the per-agent
+        # action count, not the size of the joint space.  Use the maximum
+        # of the two per-agent counts as a common upper bound.
         model.action_space = gym.spaces.Discrete(
-            model._n_robot_actions * model._n_humans_reactions
+            max(model._n_robot_actions, model._n_humans_reactions)
         )
 
         return model

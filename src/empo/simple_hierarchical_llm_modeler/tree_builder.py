@@ -184,6 +184,12 @@ def _expand_state(
         LOG.warning("Failed to parse robot actions; creating single fallback action")
         actions = [{"action": "do nothing", "rationale": "fallback"}]
 
+    if not actions:
+        LOG.warning(
+            "Parsed robot actions but received empty list; creating single fallback action"
+        )
+        actions = [{"action": "do nothing", "rationale": "fallback"}]
+
     for act in actions:
         action_desc = act.get("action", "unknown action")
         child = TreeNode(
@@ -227,6 +233,12 @@ def _expand_robotaction(
         LOG.warning("Failed to parse human reactions; creating single fallback")
         reactions = [{"reaction": "do nothing", "rationale": "fallback"}]
 
+    if not reactions:
+        LOG.warning(
+            "Parsed human reactions but received empty list; creating single fallback"
+        )
+        reactions = [{"reaction": "do nothing", "rationale": "fallback"}]
+
     for react in reactions:
         reaction_desc = react.get("reaction", "unknown reaction")
         child = TreeNode(
@@ -268,6 +280,18 @@ def _expand_humansreaction(
         consequences = _parse_json_list(raw)
     except ValueError:
         LOG.warning("Failed to parse consequences; creating single fallback")
+        consequences = [
+            {
+                "consequence": "nothing notable happens",
+                "probability": 1.0,
+                "rationale": "fallback",
+            }
+        ]
+
+    if not consequences:
+        LOG.warning(
+            "Parsed consequences but received empty list; creating single fallback"
+        )
         consequences = [
             {
                 "consequence": "nothing notable happens",

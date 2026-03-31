@@ -241,7 +241,7 @@ def main() -> None:
 
     # ── Two-level hierarchical demo ────────────────────────────────────────
     print("\n" + "=" * 70)
-    print("STEP 2: Build a two-level hierarchical world model")
+    print("STEP 2: Build a two-level hierarchical world model (lazy)")
     print("=" * 70)
 
     hmodel = build_two_level_model(
@@ -253,11 +253,22 @@ def main() -> None:
         n_humansreactions=2,
         n_consequences=2,
     )
-    print(f"\nHierarchical model: {hmodel.num_levels} levels")
+    print(f"\nLazy hierarchical model: {hmodel.num_levels} levels")
+    print(f"Fine model built yet? {hmodel.finest() is not None}")
+
     print("\n--- Coarse level (Level 0) ---")
     print_world_model(hmodel.coarsest())
-    print("\n--- Fine level (Level 1) ---")
-    print_world_model(hmodel.finest())
+
+    # Now simulate taking the first coarse action -> fine model built lazily
+    coarse_labels = hmodel.coarsest().robot_action_labels()
+    if coarse_labels:
+        chosen_action = coarse_labels[0]
+        print(f"\n--- Taking coarse action: {chosen_action} ---")
+        print("(Fine model is built lazily now...)")
+        fine, mapper = hmodel.get_fine_model(chosen_action)
+        print(f"Fine model built? {hmodel.finest() is not None}")
+        print("\n--- Fine level (Level 1) ---")
+        print_world_model(fine)
 
     print("\nDone!")
 

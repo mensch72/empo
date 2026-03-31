@@ -33,6 +33,7 @@ from empo.simple_hierarchical_llm_modeler.tree_builder import (
 )
 from empo.simple_hierarchical_llm_modeler.nl_world_model import NLWorldModel
 from empo.simple_hierarchical_llm_modeler.hierarchical_modeler import (
+    LazyTwoLevelModel,
     NLLevelMapper,
     build_two_level_model,
     check_hierarchical_status,
@@ -51,6 +52,7 @@ __all__ = [
     # NL world model
     "NLWorldModel",
     # Hierarchical
+    "LazyTwoLevelModel",
     "NLLevelMapper",
     "build_two_level_model",
     "check_hierarchical_status",

@@ -5,12 +5,17 @@ awareness, success/failure detection, and consequence matching.
 This module produces :class:`~empo.hierarchical.HierarchicalWorldModel`
 instances by building two (or more) levels of NL world models and connecting
 them with an :class:`NLLevelMapper`.
+
+The fine-level model is built *lazily*: only when a coarse-level action is
+actually taken in ``step()`` does the code query the LLM to construct the
+corresponding fine-level tree.  This avoids unnecessary detail for actions
+not actually taken.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from empo.hierarchical.hierarchical_world_model import HierarchicalWorldModel
 from empo.hierarchical.level_mapper import LevelMapper
@@ -95,8 +100,13 @@ def match_consequence(
     match_idx = data.get("match")
     new_cons = data.get("new_consequence")
     if match_idx is not None:
-        # Convert 1-based to 0-based
-        return int(match_idx) - 1, None
+        # LLM returns 1-based index; convert to 0-based and validate.
+        try:
+            idx = int(match_idx) - 1
+        except (TypeError, ValueError):
+            idx = None
+        if idx is not None and 0 <= idx < len(known_consequences):
+            return idx, None
     return None, new_cons or f"Novel {status} outcome"
 
 
@@ -106,24 +116,67 @@ def match_consequence(
 
 
 class NLLevelMapper(LevelMapper):
-    """Minimal LevelMapper connecting two NL world models.
+    """LevelMapper connecting two NL world models with LLM-based status checks.
 
-    Since NL world model states are history tuples, the coarse state is
-    derived by extracting the prefix up to the matching depth.
+    ``super_state`` returns the coarse root state while the higher-level
+    activity is ``"still in progress"`` and switches to a terminal coarse
+    state once the LLM reports ``"success"`` or ``"failure"``.
+
+    ``return_control`` returns ``True`` exactly when the LLM says the
+    higher-level activity is ``"success"`` or ``"failure"``.
     """
 
     def __init__(
         self,
         coarse_model: NLWorldModel,
         fine_model: NLWorldModel,
-        coarse_action_desc: str = "",
+        *,
+        llm: Optional[LLMConnector] = None,
+        higher_level_context: str = "",
+        higher_level_action: str = "",
+        initial_state_description: str = "",
     ) -> None:
         super().__init__(coarse_model, fine_model)
-        self._coarse_action_desc = coarse_action_desc
+        self._llm = llm
+        self._higher_level_context = higher_level_context
+        self._higher_level_action = higher_level_action
+        self._initial_state_description = initial_state_description
+        # Cache the last LLM status check result per fine state
+        self._status_cache: Dict[tuple, str] = {}
+
+    def _get_status(self, fine_state: Any) -> str:
+        """Return the hierarchical status for *fine_state*, with caching."""
+        key = fine_state if isinstance(fine_state, tuple) else (fine_state,)
+        if key in self._status_cache:
+            return self._status_cache[key]
+        if self._llm is None:
+            return "still in progress"
+        history = list(key) if isinstance(fine_state, tuple) else []
+        status = check_hierarchical_status(
+            self._llm,
+            self._higher_level_context,
+            self._higher_level_action,
+            self._initial_state_description,
+            history,
+        )
+        self._status_cache[key] = status
+        return status
 
     def super_state(self, fine_state: Any) -> Any:
-        """Map fine state back to coarse state (empty tuple = coarse root)."""
-        return ()
+        """Map fine state to coarse state.
+
+        While the higher-level activity is ``"still in progress"``, returns
+        the coarse root state (empty tuple).  On ``"success"`` or
+        ``"failure"``, returns a distinct coarse terminal marker so that
+        macro-level decisions can condition on progress.
+        """
+        if fine_state is None or fine_state == ():
+            return ()
+        status = self._get_status(fine_state)
+        if status == "still in progress":
+            return ()
+        # Return a distinguishable coarse state for completed activities
+        return ("_completed", status)
 
     def super_agent(self, fine_agent_index: int) -> int:
         return fine_agent_index
@@ -151,12 +204,130 @@ class NLLevelMapper(LevelMapper):
         fine_action_profile: Tuple[int, ...],
         fine_successor_state: Any,
     ) -> bool:
-        return False
+        """Return control to the coarse level iff the LLM says success/failure."""
+        status = self._get_status(fine_successor_state)
+        return status in ("success", "failure")
 
 
 # ---------------------------------------------------------------------------
-# Two-level builder
+# Lazy two-level world model
 # ---------------------------------------------------------------------------
+
+
+class LazyTwoLevelModel:
+    """Two-level hierarchical model that builds fine models on demand.
+
+    Only the coarse model is built upfront.  Fine-level models are
+    constructed lazily the first time a coarse-level action is actually
+    taken (via :meth:`get_fine_model`).
+
+    This class intentionally does **not** subclass
+    :class:`HierarchicalWorldModel` because the latter requires all levels
+    to be provided at construction time.  Instead it provides a compatible
+    interface and can produce a :class:`HierarchicalWorldModel` snapshot
+    via :meth:`to_hierarchical` once a fine model has been built.
+    """
+
+    def __init__(
+        self,
+        llm: LLMConnector,
+        initial_state_description: str,
+        coarse_model: NLWorldModel,
+        *,
+        fine_n_steps: int = 2,
+        n_robotactions: int = 3,
+        n_humansreactions: int = 3,
+        n_consequences: int = 2,
+    ) -> None:
+        self.llm = llm
+        self.initial_state_description = initial_state_description
+        self.coarse_model = coarse_model
+        self._fine_n_steps = fine_n_steps
+        self._n_robotactions = n_robotactions
+        self._n_humansreactions = n_humansreactions
+        self._n_consequences = n_consequences
+
+        # Cache: coarse action label -> (fine_model, mapper)
+        self._fine_cache: Dict[str, Tuple[NLWorldModel, NLLevelMapper]] = {}
+
+        # Currently active fine model / mapper (set by get_fine_model)
+        self._active_fine: Optional[NLWorldModel] = None
+        self._active_mapper: Optional[NLLevelMapper] = None
+        self._active_action: Optional[str] = None
+
+    @property
+    def num_levels(self) -> int:
+        return 2
+
+    def coarsest(self) -> NLWorldModel:
+        return self.coarse_model
+
+    def finest(self) -> Optional[NLWorldModel]:
+        """Return the currently active fine model, or ``None`` if none built."""
+        return self._active_fine
+
+    def get_fine_model(
+        self, coarse_action_label: str
+    ) -> Tuple[NLWorldModel, NLLevelMapper]:
+        """Get (or lazily build) the fine model for *coarse_action_label*.
+
+        Args:
+            coarse_action_label: Human-readable description of the coarse
+                robot action that was chosen.
+
+        Returns:
+            ``(fine_model, mapper)`` pair.
+        """
+        if coarse_action_label in self._fine_cache:
+            fine_model, mapper = self._fine_cache[coarse_action_label]
+        else:
+            higher_ctx = (
+                f"{self.initial_state_description}. "
+                f"Higher-level decision: The robot has chosen to: "
+                f"{coarse_action_label}"
+            )
+            fine_tree = build_tree(
+                llm=self.llm,
+                initial_state_description=self.initial_state_description,
+                n_steps=self._fine_n_steps,
+                n_robotactions=self._n_robotactions,
+                n_humansreactions=self._n_humansreactions,
+                n_consequences=self._n_consequences,
+                higher_level_context=higher_ctx,
+            )
+            fine_model = NLWorldModel.from_tree(
+                fine_tree, self.initial_state_description
+            )
+            mapper = NLLevelMapper(
+                self.coarse_model,
+                fine_model,
+                llm=self.llm,
+                higher_level_context=self.initial_state_description,
+                higher_level_action=coarse_action_label,
+                initial_state_description=self.initial_state_description,
+            )
+            self._fine_cache[coarse_action_label] = (fine_model, mapper)
+
+        self._active_fine = fine_model
+        self._active_mapper = mapper
+        self._active_action = coarse_action_label
+        return fine_model, mapper
+
+    def to_hierarchical(self) -> HierarchicalWorldModel:
+        """Snapshot the current state as a :class:`HierarchicalWorldModel`.
+
+        Requires that a fine model has already been built via
+        :meth:`get_fine_model`.
+
+        Raises:
+            RuntimeError: If no fine model has been built yet.
+        """
+        if self._active_fine is None or self._active_mapper is None:
+            raise RuntimeError("No fine model built yet.  Call get_fine_model() first.")
+        return HierarchicalWorldModel(
+            levels=[self.coarse_model, self._active_fine],
+            mappers=[self._active_mapper],
+        )
 
 
 def build_two_level_model(
@@ -168,28 +339,27 @@ def build_two_level_model(
     n_robotactions: int = 3,
     n_humansreactions: int = 3,
     n_consequences: int = 2,
-) -> HierarchicalWorldModel:
-    """Build a two-level :class:`HierarchicalWorldModel` from NL descriptions.
+) -> LazyTwoLevelModel:
+    """Build a lazy two-level hierarchical model from NL descriptions.
 
-    1. Build a **coarse** (level-0) tree with ``coarse_n_steps`` cycles.
-    2. For each coarse-level robot action at the root, build a **fine**
-       (level-1) tree using the coarse action as ``higher_level_context``.
-    3. Wrap both in :class:`NLWorldModel` instances and connect them with an
-       :class:`NLLevelMapper`.
+    Only the **coarse** (level-0) tree is built immediately.  Fine-level
+    models are constructed on demand via
+    :meth:`LazyTwoLevelModel.get_fine_model` when a coarse-level action
+    is actually taken.
 
     Args:
         llm: LLM connector.
         initial_state_description: Starting situation in natural language.
         coarse_n_steps: Depth of the coarse tree.
-        fine_n_steps: Depth of each fine tree.
+        fine_n_steps: Depth of each fine tree (built lazily).
         n_robotactions: Robot actions per expansion.
         n_humansreactions: Human reactions per expansion.
         n_consequences: Consequences per expansion.
 
     Returns:
-        A :class:`HierarchicalWorldModel` with two levels.
+        A :class:`LazyTwoLevelModel` with the coarse model ready and fine
+        models built on demand.
     """
-    # --- Level 0 (coarse) ---
     coarse_tree = build_tree(
         llm=llm,
         initial_state_description=initial_state_description,
@@ -200,30 +370,12 @@ def build_two_level_model(
     )
     coarse_model = NLWorldModel.from_tree(coarse_tree, initial_state_description)
 
-    # --- Level 1 (fine) – one per coarse robot action ---
-    # For simplicity, we build the fine model for the *first* coarse robot
-    # action at the root. A full implementation would build one per action and
-    # merge them, but that is left for future work.
-    coarse_ra_labels = coarse_model.robot_action_labels(coarse_model._initial_state)
-    if coarse_ra_labels:
-        first_ra = coarse_ra_labels[0]
-    else:
-        first_ra = "proceed with the plan"
-
-    higher_ctx = (
-        f"{initial_state_description}. "
-        f"Higher-level decision: The robot has chosen to: {first_ra}"
-    )
-    fine_tree = build_tree(
+    return LazyTwoLevelModel(
         llm=llm,
         initial_state_description=initial_state_description,
-        n_steps=fine_n_steps,
+        coarse_model=coarse_model,
+        fine_n_steps=fine_n_steps,
         n_robotactions=n_robotactions,
         n_humansreactions=n_humansreactions,
         n_consequences=n_consequences,
-        higher_level_context=higher_ctx,
     )
-    fine_model = NLWorldModel.from_tree(fine_tree, initial_state_description)
-
-    mapper = NLLevelMapper(coarse_model, fine_model, coarse_action_desc=first_ra)
-    return HierarchicalWorldModel(levels=[coarse_model, fine_model], mappers=[mapper])
