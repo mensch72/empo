@@ -214,6 +214,22 @@ class WorldModel(gym.Env):
             Duration as a float.
         """
         return 1.0
+
+    def V_r_estimate(self, state: Any) -> float:
+        """
+        Return an external estimate of the robot's value (returns-to-go) for a
+        terminal state.
+
+        The default implementation returns 0.0.  Subclasses that have access to
+        extrinsic value estimates (e.g. from an LLM) should override this.
+
+        Args:
+            state: A terminal state as returned by get_state().
+
+        Returns:
+            Estimated value (returns-to-go) for the terminal state.
+        """
+        return 0.0
     
     def initial_state(self) -> Any:
         """
