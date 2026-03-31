@@ -29,6 +29,16 @@ from empo.simple_hierarchical_llm_modeler.prompts import (
 
 LOG = logging.getLogger(__name__)
 
+_FALLBACK_ACTION = [{"action": "do nothing", "rationale": "fallback"}]
+_FALLBACK_REACTION = [{"reaction": "do nothing", "rationale": "fallback"}]
+_FALLBACK_CONSEQUENCE = [
+    {
+        "consequence": "nothing notable happens",
+        "probability": 1.0,
+        "rationale": "fallback",
+    }
+]
+
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -182,13 +192,13 @@ def _expand_state(
         actions = _parse_json_list(raw)
     except ValueError:
         LOG.warning("Failed to parse robot actions; creating single fallback action")
-        actions = [{"action": "do nothing", "rationale": "fallback"}]
+        actions = list(_FALLBACK_ACTION)
 
     if not actions:
         LOG.warning(
             "Parsed robot actions but received empty list; creating single fallback action"
         )
-        actions = [{"action": "do nothing", "rationale": "fallback"}]
+        actions = list(_FALLBACK_ACTION)
 
     for act in actions:
         action_desc = act.get("action", "unknown action")
@@ -231,13 +241,13 @@ def _expand_robotaction(
         reactions = _parse_json_list(raw)
     except ValueError:
         LOG.warning("Failed to parse human reactions; creating single fallback")
-        reactions = [{"reaction": "do nothing", "rationale": "fallback"}]
+        reactions = list(_FALLBACK_REACTION)
 
     if not reactions:
         LOG.warning(
             "Parsed human reactions but received empty list; creating single fallback"
         )
-        reactions = [{"reaction": "do nothing", "rationale": "fallback"}]
+        reactions = list(_FALLBACK_REACTION)
 
     for react in reactions:
         reaction_desc = react.get("reaction", "unknown reaction")
@@ -280,25 +290,13 @@ def _expand_humansreaction(
         consequences = _parse_json_list(raw)
     except ValueError:
         LOG.warning("Failed to parse consequences; creating single fallback")
-        consequences = [
-            {
-                "consequence": "nothing notable happens",
-                "probability": 1.0,
-                "rationale": "fallback",
-            }
-        ]
+        consequences = list(_FALLBACK_CONSEQUENCE)
 
     if not consequences:
         LOG.warning(
             "Parsed consequences but received empty list; creating single fallback"
         )
-        consequences = [
-            {
-                "consequence": "nothing notable happens",
-                "probability": 1.0,
-                "rationale": "fallback",
-            }
-        ]
+        consequences = list(_FALLBACK_CONSEQUENCE)
 
     # Normalize probabilities so they sum to 1
     probs = [float(c.get("probability", 1.0)) for c in consequences]
