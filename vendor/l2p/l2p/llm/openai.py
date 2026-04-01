@@ -11,6 +11,9 @@ Users can also define their own custom models and parameters by extending the YA
 configuration using the same format template.
 """
 
+import math
+import time as _time
+
 from retry import retry
 from typing_extensions import override
 from .base import BaseLLM, load_yaml
@@ -94,7 +97,7 @@ class OPENAI(BaseLLM):
         for key, default in defaults.items():
             setattr(self, key, parameters.get(key, default))
 
-    @retry(tries=2, delay=60)
+    @retry(tries=2, delay=15, backoff=math.sqrt(2))
     def connect_openai(self, client, model, messages, **kwargs):
         """Send a request to OpenAI API"""
 
@@ -185,9 +188,11 @@ class OPENAI(BaseLLM):
                 conn_success = True
 
             except Exception as e:
-                print(f"[ERROR] LLM error: {e}")
+                delay = 15 * (math.sqrt(2) ** n_retry)
+                print(f"[ERROR] LLM error: {e}  (retrying in {delay:.0f}s)")
                 if end_when_error:
                     break
+                _time.sleep(delay)
 
             n_retry += 1
 

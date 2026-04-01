@@ -16,6 +16,10 @@ pyyaml
 # See: https://github.com/ollama/ollama-python
 ollama>=0.1.0
 
+# Anthropic - Python client for Claude API
+# See: https://github.com/anthropics/anthropic-sdk-python
+anthropic>=0.39.0
+
 # Pillow - Image processing library (needed for vision LLM integration)
 Pillow>=10.0.0
 

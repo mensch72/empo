@@ -241,6 +241,7 @@ class LazyTwoLevelModel:
         n_robotactions: int = 3,
         n_humansreactions: int = 3,
         n_consequences: int = 2,
+        fine_time_horizon: Optional[str] = None,
         on_update: Optional[Callable[[Optional["TreeNode"], str], None]] = None,
     ) -> None:
         self.llm = llm
@@ -250,14 +251,15 @@ class LazyTwoLevelModel:
         self._n_robotactions = n_robotactions
         self._n_humansreactions = n_humansreactions
         self._n_consequences = n_consequences
+        self._fine_time_horizon = fine_time_horizon
         self._on_update = on_update
 
-        # Cache: coarse action label -> (fine_model, mapper)
-        self._fine_cache: Dict[str, Tuple[NLWorldModel, NLLevelMapper]] = {}
+        # Cache: (coarse action, human reaction) -> (fine_model, mapper)
+        self._fine_cache: Dict[Tuple[str, Optional[str]], Tuple[NLWorldModel, NLLevelMapper]] = {}
 
         # Source trees (coarse set by build_two_level_model, fine set lazily)
         self._coarse_tree: Optional[TreeNode] = None
-        self._fine_trees: Dict[str, TreeNode] = {}
+        self._fine_trees: Dict[Tuple[str, Optional[str]], TreeNode] = {}
 
         # Currently active fine model / mapper (set by get_fine_model)
         self._active_fine: Optional[NLWorldModel] = None
@@ -276,24 +278,64 @@ class LazyTwoLevelModel:
         return self._active_fine
 
     def get_fine_model(
-        self, coarse_action_label: str
+        self,
+        coarse_action_label: str,
+        coarse_human_reaction_label: Optional[str] = None,
+        on_update: Optional[Callable[[Optional[TreeNode], str], None]] = None,
     ) -> Tuple[NLWorldModel, NLLevelMapper]:
         """Get (or lazily build) the fine model for *coarse_action_label*.
 
         Args:
             coarse_action_label: Human-readable description of the coarse
                 robot action that was chosen.
+            coarse_human_reaction_label: Human-readable description of the
+                coarse human reaction that was selected.  When provided,
+                the fine-level context states this as the *actual* human
+                choice rather than listing all possible reactions.
+            on_update: Optional callback override for live rendering of
+                the fine-level tree.  If ``None``, uses the callback passed
+                at construction time.
 
         Returns:
             ``(fine_model, mapper)`` pair.
         """
-        if coarse_action_label in self._fine_cache:
-            fine_model, mapper = self._fine_cache[coarse_action_label]
+        cb = on_update if on_update is not None else self._on_update
+        cache_key = (coarse_action_label, coarse_human_reaction_label)
+        if cache_key in self._fine_cache:
+            fine_model, mapper = self._fine_cache[cache_key]
         else:
+            # Build a rich higher-level context including coarse human reactions
+            human_context = ""
+            if coarse_human_reaction_label:
+                # Specific human reaction was selected
+                human_context = (
+                    f" Reacting to that decision, the humans have formed this plan: "
+                    f"{coarse_human_reaction_label}."
+                )
+            elif self._coarse_tree is not None:
+                for label, _, child in self._coarse_tree.children:
+                    if label == coarse_action_label:
+                        # child is the robotaction node; its children are humansreaction nodes
+                        if child.children:
+                            reactions = [lbl for lbl, _, _ in child.children]
+                            human_context = (
+                                " At the higher level, humans may react by: "
+                                + "; OR ".join(reactions)
+                                + "."
+                            )
+                        break
+
             higher_ctx = (
-                f"{self.initial_state_description}. "
-                f"Higher-level decision: The robot has chosen to: "
-                f"{coarse_action_label}"
+                f"The robot is executing a HIGHER-LEVEL PLAN: "
+                f"{coarse_action_label}.{human_context}\n"
+                f"You must now explore the SUB-ACTIVITIES within this "
+                f"higher-level plan, on a SHORTER TIME HORIZON. The actions, "
+                f"reactions, and consequences should be about WHAT HAPPENS "
+                f"DURING this activity — not about the activity itself.\n"
+                f"For example, if the higher-level plan is 'drive passengers "
+                f"to destination', fine-level actions might be categories like "
+                f"'handle luggage and boarding', 'navigate the route', "
+                f"'manage in-ride communication'."
             )
             fine_tree = build_tree(
                 llm=self.llm,
@@ -303,7 +345,8 @@ class LazyTwoLevelModel:
                 n_humansreactions=self._n_humansreactions,
                 n_consequences=self._n_consequences,
                 higher_level_context=higher_ctx,
-                on_update=self._on_update,
+                time_horizon=self._fine_time_horizon,
+                on_update=cb,
             )
             fine_model = NLWorldModel.from_tree(
                 fine_tree, self.initial_state_description
@@ -316,8 +359,8 @@ class LazyTwoLevelModel:
                 higher_level_action=coarse_action_label,
                 initial_state_description=self.initial_state_description,
             )
-            self._fine_cache[coarse_action_label] = (fine_model, mapper)
-            self._fine_trees[coarse_action_label] = fine_tree
+            self._fine_cache[cache_key] = (fine_model, mapper)
+            self._fine_trees[cache_key] = fine_tree
 
         self._active_fine = fine_model
         self._active_mapper = mapper
@@ -350,6 +393,8 @@ def build_two_level_model(
     n_robotactions: int = 3,
     n_humansreactions: int = 3,
     n_consequences: int = 2,
+    coarse_time_horizon: Optional[str] = None,
+    fine_time_horizon: Optional[str] = None,
     on_update: Optional[Callable[[Optional[TreeNode], str], None]] = None,
 ) -> LazyTwoLevelModel:
     """Build a lazy two-level hierarchical model from NL descriptions.
@@ -379,6 +424,7 @@ def build_two_level_model(
         n_robotactions=n_robotactions,
         n_humansreactions=n_humansreactions,
         n_consequences=n_consequences,
+        time_horizon=coarse_time_horizon,
         on_update=on_update,
     )
     coarse_model = NLWorldModel.from_tree(coarse_tree, initial_state_description)
@@ -391,6 +437,7 @@ def build_two_level_model(
         n_robotactions=n_robotactions,
         n_humansreactions=n_humansreactions,
         n_consequences=n_consequences,
+        fine_time_horizon=fine_time_horizon,
         on_update=on_update,
     )
     model._coarse_tree = coarse_tree

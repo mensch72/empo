@@ -27,6 +27,7 @@ from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 from empo.simple_hierarchical_llm_modeler.llm_connector import LLMConnector
 from empo.simple_hierarchical_llm_modeler.prompts import (
+    batch_empowerment_prompt,
     consequences_prompt,
     empowerment_prompt,
     humans_reactions_prompt,
@@ -57,7 +58,7 @@ def _truncate_ansi(line: str, width: int) -> str:
     return "".join(result)
 
 
-_FALLBACK_ACTION = [{"action": "do nothing", "rationale": "fallback"}]
+_FALLBACK_ACTION = [{"activity": "do nothing", "rationale": "fallback"}]
 _FALLBACK_REACTION = [{"reaction": "do nothing", "rationale": "fallback"}]
 _FALLBACK_CONSEQUENCE = [
     {
@@ -73,7 +74,7 @@ _FALLBACK_CONSEQUENCE = [
 # ---------------------------------------------------------------------------
 
 
-@dataclass
+@dataclass(eq=False)
 class TreeNode:
     """A single node in the trajectory tree.
 
@@ -101,7 +102,7 @@ class TreeNode:
     _COLORS = {
         "state":          "\033[96m",   # light cyan/blue
         "robotaction":    "\033[37m",   # light grey
-        "humansreaction": "\033[93m",   # yellow
+        "humansreaction": "\033[33;1m",   # bright/bold yellow
     }
     _RESET = "\033[0m"
     _BLINK_MARKER = "\033[5;91m██\033[0m"  # blinking red double-wide square
@@ -112,6 +113,7 @@ class TreeNode:
         root_label: str | None = None,
         active_node: "TreeNode | None" = None,
         blink_inline: bool = False,
+        collapsed: "set[TreeNode] | None" = None,
     ) -> str:
         """Return a compact, colour-coded text representation of the tree.
 
@@ -123,6 +125,7 @@ class TreeNode:
             blink_inline: If *True*, the blinker appears at the end of the
                 active node's label.  If *False* (default), it appears on a
                 separate line below at the child-branch position.
+            collapsed: Set of nodes whose children should be hidden.
 
         Returns:
             A multi-line string with ASCII-art connectors.
@@ -130,7 +133,7 @@ class TreeNode:
         lines: List[str] = []
         self._render(lines, prefix="", connector="", is_last=True, color=color,
                      root_label=root_label, active_node=active_node,
-                     blink_inline=blink_inline)
+                     blink_inline=blink_inline, collapsed=collapsed)
         return "\n".join(lines)
 
     def _render(
@@ -143,6 +146,7 @@ class TreeNode:
         root_label: str | None = None,
         active_node: "TreeNode | None" = None,
         blink_inline: bool = False,
+        collapsed: "set[TreeNode] | None" = None,
     ) -> None:
         c = self._COLORS.get(self.node_type, "") if color else ""
         r = self._RESET if color and c else ""
@@ -167,6 +171,11 @@ class TreeNode:
             child_prefix = prefix + ("  " if is_last else "│ ")
         else:
             child_prefix = prefix
+
+        # If this node is collapsed, show indicator and skip children
+        if collapsed and self in collapsed and self.children:
+            lines[-1] += f" \033[90m⋯\033[0m"
+            return
 
         # If this node is being expanded, show the blinker.
         # blink_inline=True  → blinker at end of label (empowerment estimation).
@@ -197,6 +206,7 @@ class TreeNode:
                 root_label=None,
                 active_node=active_node,
                 blink_inline=blink_inline,
+                collapsed=collapsed,
             )
 
     # ---- serialisation / export ------------------------------------------
@@ -270,57 +280,77 @@ class TreeNode:
             raise ValueError(f"Unknown export format: {fmt!r}. Use 'json', 'yaml', or 'html'.")
 
 
-def _tree_to_html(data: Dict[str, Any]) -> str:
-    """Generate a self-contained expandable HTML page from a tree dict."""
+def _node_html(node: Dict[str, Any], prob: float | None = None) -> str:
+    """Render a single tree node (and its children) as nested HTML."""
     import html as html_mod
 
-    def _node_html(node: Dict[str, Any], edge_label: str = "", prob: float | None = None) -> str:
-        label = html_mod.escape(node["label"])
-        ntype = node["node_type"]
-        color = {"state": "#5ec4c4", "robotaction": "#b0b0b0", "humansreaction": "#e6c84c"}.get(ntype, "#ccc")
+    label = html_mod.escape(node["label"])
+    ntype = node["node_type"]
+    color = {"state": "#5ec4c4", "robotaction": "#b0b0b0", "humansreaction": "#e6c84c"}.get(ntype, "#ccc")
 
-        parts = [f'<span style="color:{color};font-weight:bold">{label}</span>']
-        if "empowerment_estimate" in node:
-            parts.append(f' <span style="color:#8f8">[emp\u2248{node["empowerment_estimate"]:.0f}]</span>')
-        if "rationale" in node:
-            parts.append(f'<div style="margin-left:1em;color:#999;font-size:0.85em">\u2192 {html_mod.escape(node["rationale"])}</div>')
-        if "empowerment_rationale" in node:
-            parts.append(f'<div style="margin-left:1em;color:#9d9;font-size:0.85em">\u2192 {html_mod.escape(node["empowerment_rationale"])}</div>')
+    # Probability prefix for consequence (state) edges, matching terminal output
+    prob_prefix = f"(p={prob:.2f}) " if prob is not None else ""
 
-        edge_prefix = ""
-        if edge_label:
-            p_str = f" (p={prob:.2f})" if prob is not None else ""
-            edge_prefix = f'<span style="color:#888">{html_mod.escape(edge_label)}{p_str}</span>: '
+    parts = [f'<span style="color:{color};font-weight:bold">{prob_prefix}{label}</span>']
+    if "empowerment_estimate" in node:
+        parts.append(f' <span style="color:#8f8">[emp\u2248{node["empowerment_estimate"]:.0f}]</span>')
+    if "rationale" in node:
+        parts.append(f'<div style="margin-left:1em;color:#999;font-size:0.85em">\u2192 {html_mod.escape(node["rationale"])}</div>')
+    if "empowerment_rationale" in node:
+        parts.append(f'<div style="margin-left:1em;color:#9d9;font-size:0.85em">\u2192 {html_mod.escape(node["empowerment_rationale"])}</div>')
 
-        children = node.get("children", [])
-        if children:
-            child_items = []
-            for ch in children:
-                ch_prob = ch.get("probability")
-                child_items.append(_node_html(ch["node"], ch.get("edge_label", ""), ch_prob))
-            inner = "\n".join(f"<li>{c}</li>" for c in child_items)
-            return (
-                f"<details open><summary>{edge_prefix}{''.join(parts)}</summary>"
-                f"<ul>{inner}</ul></details>"
-            )
-        else:
-            return f"{edge_prefix}{''.join(parts)}"
+    children = node.get("children", [])
+    if children:
+        child_items = []
+        for ch in children:
+            ch_prob = ch.get("probability")
+            child_items.append(_node_html(ch["node"], ch_prob))
+        inner = "\n".join(f"<li>{c}</li>" for c in child_items)
+        return (
+            f"<details open><summary>{''.join(parts)}</summary>"
+            f"<ul>{inner}</ul></details>"
+        )
+    else:
+        return f"{''.join(parts)}"
 
+
+_HTML_HEADER = (
+    "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+    "<title>Tree Export</title>"
+    "<style>"
+    "body{font-family:monospace;background:#1e1e1e;color:#ddd;padding:1em}"
+    "h2{color:#fff;border-bottom:1px solid #555;padding-bottom:0.3em}"
+    "details{margin-left:1.5em}"
+    "summary{cursor:pointer;list-style:disclosure-closed}"
+    "details[open]>summary{list-style:disclosure-open}"
+    "ul{list-style:none;padding-left:1em}"
+    "li{margin:0.2em 0}"
+    "</style></head><body>"
+)
+_HTML_FOOTER = "</body></html>"
+
+
+def _tree_to_html(data: Dict[str, Any]) -> str:
+    """Generate a self-contained expandable HTML page from a tree dict."""
     body = _node_html(data)
-    return (
-        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-        "<title>Tree Export</title>"
-        "<style>"
-        "body{font-family:monospace;background:#1e1e1e;color:#ddd;padding:1em}"
-        "details{margin-left:1.5em}"
-        "summary{cursor:pointer;list-style:disclosure-closed}"
-        "details[open]>summary{list-style:disclosure-open}"
-        "ul{list-style:none;padding-left:1em}"
-        "li{margin:0.2em 0}"
-        "</style></head><body>"
-        f"{body}"
-        "</body></html>"
-    )
+    return f"{_HTML_HEADER}{body}{_HTML_FOOTER}"
+
+
+def _trees_to_html(
+    sections: List[Tuple[str, Dict[str, Any]]],
+) -> str:
+    """Generate an HTML page with multiple labelled tree sections.
+
+    Args:
+        sections: List of ``(heading, tree_dict)`` pairs.
+    """
+    parts = [_HTML_HEADER]
+    for heading, data in sections:
+        import html as html_mod
+        parts.append(f"<h2>{html_mod.escape(heading)}</h2>")
+        parts.append(_node_html(data))
+    parts.append(_HTML_FOOTER)
+    return "".join(parts)
 
 
 # ---------------------------------------------------------------------------
@@ -356,10 +386,12 @@ class LiveTreeRenderer:
         self,
         root: TreeNode | None = None,
         root_label: str | None = None,
+        context_lines: List[str] | None = None,
         stream: Any = None,
     ) -> None:
         self.root = root
         self.root_label = root_label
+        self.context_lines = context_lines or []
         self._stream = stream or sys.stderr
         self._status: Deque[str] = collections.deque(maxlen=self._STATUS_LINES)
         self._started = False
@@ -377,56 +409,136 @@ class LiveTreeRenderer:
         except (AttributeError, ValueError, OSError):
             return 120, 40
 
+    def _build_tree_lines(
+        self,
+        active_node: TreeNode | None,
+        cols: int,
+        collapsed: "set[TreeNode] | None" = None,
+    ) -> List[str]:
+        """Render tree to a list of truncated, ANSI-decorated lines."""
+        if self.root is None:
+            return []
+
+        text = self.root.render(
+            color=True, root_label=self.root_label, active_node=active_node,
+            blink_inline=self._blink_inline, collapsed=collapsed,
+        )
+        blink = TreeNode._BLINK_MARKER
+        emp_re = re.compile(r" \[emp≈\d+\]")
+        tree_lines = []
+        for ln in text.split("\n"):
+            plain = _ANSI_RE.sub("", ln)
+            emp_match = emp_re.search(plain)
+            has_blink = blink in ln
+
+            # Compute suffix to always preserve at end of line
+            suffix = ""
+            suffix_vis = 0
+            if emp_match:
+                suffix += emp_match.group()
+                suffix_vis += len(emp_match.group())
+            if has_blink:
+                suffix += f" {blink}"
+                suffix_vis += 3  # " ██" = 3 visible chars
+
+            if suffix:
+                trunc = _truncate_ansi(ln, cols - suffix_vis)
+                # Strip suffix parts that survived truncation
+                trunc_plain = _ANSI_RE.sub("", trunc)
+                if emp_match and emp_match.group() in trunc_plain:
+                    # emp tag survived — remove it so we don't double it
+                    trunc = trunc.replace(emp_match.group(), "", 1)
+                if has_blink and blink in trunc:
+                    trunc = trunc.replace(f" {blink}", "", 1)
+                # Strip trailing reset before appending suffix
+                if trunc.endswith("\033[0m"):
+                    trunc = trunc[:-4]
+                trunc += f"\033[0m{suffix}"
+                tree_lines.append(trunc)
+            else:
+                tree_lines.append(_truncate_ansi(ln, cols))
+        return tree_lines
+
+    @staticmethod
+    def _ancestors_of(root: TreeNode, target: TreeNode | None) -> "set[TreeNode]":
+        """Return the set of all ancestors of *target* (inclusive)."""
+        if target is None:
+            return set()
+        result: set[TreeNode] = set()
+
+        def _find(node: TreeNode, path: List[TreeNode]) -> bool:
+            path.append(node)
+            if node is target:
+                result.update(path)
+                return True
+            for _, _, child in node.children:
+                if _find(child, path):
+                    return True
+            path.pop()
+            return False
+
+        _find(root, [])
+        return result
+
+    @staticmethod
+    def _subtree_size(node: TreeNode) -> int:
+        """Count all nodes in the subtree rooted at *node*."""
+        total = 1
+        for _, _, child in node.children:
+            total += LiveTreeRenderer._subtree_size(child)
+        return total
+
+    @staticmethod
+    def _collapsible_by_size(
+        root: TreeNode, ancestors: "set[TreeNode]",
+    ) -> "List[TreeNode]":
+        """Return all non-ancestor internal nodes, sorted smallest-subtree-first.
+
+        This ensures we always collapse the branch that removes the fewest
+        lines, preventing large top-level branches from being collapsed
+        when smaller sub-branches would suffice.
+        """
+        result: List[TreeNode] = []
+
+        def _walk(node: TreeNode) -> None:
+            for _, _, child in node.children:
+                if child in ancestors:
+                    _walk(child)
+                elif child.children:
+                    # Collect this node AND recurse into it for finer targets
+                    result.append(child)
+                    _walk(child)
+
+        _walk(root)
+        result.sort(key=LiveTreeRenderer._subtree_size)
+        return result
+
     def _paint(self, active_node: TreeNode | None) -> None:
         """Redraw the full screen: tree at top, status at bottom."""
         cols, rows = self._term_size()
 
-        # Render tree lines
-        if self.root is not None:
-            text = self.root.render(
-                color=True, root_label=self.root_label, active_node=active_node,
-                blink_inline=self._blink_inline,
-            )
-            blink = TreeNode._BLINK_MARKER
-            emp_re = re.compile(r" \[emp≈\d+\]")
-            tree_lines = []
-            for ln in text.split("\n"):
-                plain = _ANSI_RE.sub("", ln)
-                emp_match = emp_re.search(plain)
-                has_blink = blink in ln
+        # Context lines (higher-level path) shown in magenta/pink above the tree
+        ctx_lines = []
+        for cl in self.context_lines:
+            ctx_lines.append(_truncate_ansi(f"\033[35m{cl}\033[0m", cols))
 
-                # Compute suffix to always preserve at end of line
-                suffix = ""
-                suffix_vis = 0
-                if emp_match:
-                    suffix += emp_match.group()
-                    suffix_vis += len(emp_match.group())
-                if has_blink:
-                    suffix += f" {blink}"
-                    suffix_vis += 3  # " ██" = 3 visible chars
-
-                if suffix:
-                    trunc = _truncate_ansi(ln, cols - suffix_vis)
-                    # Strip suffix parts that survived truncation
-                    trunc_plain = _ANSI_RE.sub("", trunc)
-                    if emp_match and emp_match.group() in trunc_plain:
-                        # emp tag survived — remove it so we don't double it
-                        trunc = trunc.replace(emp_match.group(), "", 1)
-                    if has_blink and blink in trunc:
-                        trunc = trunc.replace(f" {blink}", "", 1)
-                    # Strip trailing reset before appending suffix
-                    if trunc.endswith("\033[0m"):
-                        trunc = trunc[:-4]
-                    trunc += f"\033[0m{suffix}"
-                    tree_lines.append(trunc)
-                else:
-                    tree_lines.append(_truncate_ansi(ln, cols))
-        else:
-            tree_lines = []
-
-        # Reserve space: 1 dashed separator + _STATUS_LINES status lines
+        # Reserve space: context lines + 1 dashed separator + _STATUS_LINES
         status_height = 1 + self._STATUS_LINES
-        tree_area = rows - status_height
+        tree_area = rows - status_height - len(ctx_lines)
+
+        # First pass: render tree without collapsing
+        tree_lines = self._build_tree_lines(active_node, cols)
+
+        # Auto-collapse completed subtrees top-to-bottom if tree overflows
+        if len(tree_lines) > tree_area and self.root is not None:
+            ancestors = self._ancestors_of(self.root, active_node)
+            collapsible = self._collapsible_by_size(self.root, ancestors)
+            collapsed: set[TreeNode] = set()
+            for node in collapsible:
+                collapsed.add(node)
+                tree_lines = self._build_tree_lines(active_node, cols, collapsed)
+                if len(tree_lines) <= tree_area:
+                    break
 
         # Truncate / pad tree lines to fit
         shown_tree = tree_lines[:tree_area]
@@ -437,6 +549,10 @@ class LiveTreeRenderer:
         w(f"\033[1;{rows}r")
         # Home cursor (top-left)
         w("\033[H")
+
+        # Context lines (higher-level path in pink)
+        for cl in ctx_lines:
+            w(f"\033[2K{cl}\n")
 
         for line in shown_tree:
             w(f"\033[2K{line}\n")
@@ -579,6 +695,7 @@ def build_tree(
     n_humansreactions: int = 3,
     n_consequences: int = 2,
     higher_level_context: Optional[str] = None,
+    time_horizon: Optional[str] = None,
     on_update: Optional[Callable[[Optional[TreeNode], str], None]] = None,
 ) -> TreeNode:
     """Build a trajectory tree by recursively querying the LLM.
@@ -594,6 +711,7 @@ def build_tree(
         n_consequences: Number of distinct consequences per human reaction.
         higher_level_context: Optional higher-level context text for
             hierarchical mode.
+        time_horizon: Optional time-horizon label (e.g. ``"the next hour"``).
         on_update: Optional callback invoked with the node currently being
             expanded (or ``None`` when expansion finishes). Used by
             :class:`LiveTreeRenderer` for in-place display.
@@ -611,6 +729,16 @@ def build_tree(
         n_humansreactions=n_humansreactions,
         n_consequences=n_consequences,
         higher_level_context=higher_level_context,
+        time_horizon=time_horizon,
+        on_update=on_update,
+    )
+    # Batch-estimate empowerment for all terminal nodes
+    terminals = collect_leaves(root)
+    _batch_estimate_empowerment(
+        llm=llm,
+        terminals=terminals,
+        initial_state=initial_state_description,
+        higher_level_context=higher_level_context,
         on_update=on_update,
     )
     if on_update is not None:
@@ -627,31 +755,22 @@ def _expand_state(
     n_humansreactions: int,
     n_consequences: int,
     higher_level_context: Optional[str],
+    time_horizon: Optional[str] = None,
     on_update: Optional[Callable[[Optional[TreeNode], str], None]] = None,
 ) -> None:
     """Expand a *state* node by generating robot actions (or terminal estimates)."""
     assert node.node_type == "state"
 
     if node.depth >= n_steps:
-        # Terminal depth – ask for empowerment estimate
-        if on_update is not None:
-            on_update(node, "Estimating empowerment")
-        prompt = empowerment_prompt(initial_state, node.history, higher_level_context)
-        raw = llm.query(prompt)
-        try:
-            data = _parse_json_object(raw)
-            node.empowerment_estimate = float(data.get("estimate", 1.0))
-            node.empowerment_rationale = data.get("rationale")
-        except (ValueError, TypeError):
-            LOG.warning("Failed to parse empowerment estimate, defaulting to 1.0")
-            node.empowerment_estimate = 1.0
+        # Terminal depth – empowerment will be estimated in batch later
         return
 
     # Ask for robot actions
     if on_update is not None:
         on_update(node, "Querying robot actions")
     prompt = robot_actions_prompt(
-        initial_state, node.history, n_robotactions, higher_level_context
+        initial_state, node.history, n_robotactions, higher_level_context,
+        time_horizon,
     )
     raw = llm.query(prompt)
     try:
@@ -668,7 +787,7 @@ def _expand_state(
 
     # Create ALL child nodes first so the tree shows full breadth
     for act in actions:
-        action_desc = act.get("action", "unknown action")
+        action_desc = act.get("activity", act.get("action", "unknown action"))
         child = TreeNode(
             history=node.history + [f"Robot: {action_desc}"],
             node_type="robotaction",
@@ -688,6 +807,7 @@ def _expand_state(
             n_humansreactions=n_humansreactions,
             n_consequences=n_consequences,
             higher_level_context=higher_level_context,
+            time_horizon=time_horizon,
             on_update=on_update,
         )
 
@@ -701,6 +821,7 @@ def _expand_robotaction(
     n_humansreactions: int,
     n_consequences: int,
     higher_level_context: Optional[str],
+    time_horizon: Optional[str] = None,
     on_update: Optional[Callable[[Optional[TreeNode], str], None]] = None,
 ) -> None:
     """Expand a *robotaction* node by generating humans' reactions."""
@@ -710,7 +831,8 @@ def _expand_robotaction(
         on_update(node, "Querying humans' reactions")
 
     prompt = humans_reactions_prompt(
-        initial_state, node.history, n_humansreactions, higher_level_context
+        initial_state, node.history, n_humansreactions, higher_level_context,
+        time_horizon,
     )
     raw = llm.query(prompt)
     try:
@@ -747,6 +869,7 @@ def _expand_robotaction(
             higher_level_context=higher_level_context,
             n_robotactions=n_robotactions,
             n_humansreactions=n_humansreactions,
+            time_horizon=time_horizon,
             on_update=on_update,
         )
 
@@ -760,6 +883,7 @@ def _expand_humansreaction(
     higher_level_context: Optional[str],
     n_robotactions: int,
     n_humansreactions: int,
+    time_horizon: Optional[str] = None,
     on_update: Optional[Callable[[Optional[TreeNode], str], None]] = None,
 ) -> None:
     """Expand a *humansreaction* node by generating probabilistic consequences."""
@@ -769,7 +893,8 @@ def _expand_humansreaction(
         on_update(node, "Querying consequences")
 
     prompt = consequences_prompt(
-        initial_state, node.history, n_consequences, higher_level_context
+        initial_state, node.history, n_consequences, higher_level_context,
+        time_horizon,
     )
     raw = llm.query(prompt)
     try:
@@ -814,8 +939,125 @@ def _expand_humansreaction(
             n_humansreactions=n_humansreactions,
             n_consequences=n_consequences,
             higher_level_context=higher_level_context,
+            time_horizon=time_horizon,
             on_update=on_update,
         )
+
+
+# ---------------------------------------------------------------------------
+# Batched empowerment estimation
+# ---------------------------------------------------------------------------
+
+# Rough token estimate: ~4 chars per token
+_CHARS_PER_TOKEN = 4
+
+
+def _batch_estimate_empowerment(
+    llm: LLMConnector,
+    terminals: List[TreeNode],
+    initial_state: str,
+    higher_level_context: Optional[str],
+    on_update: Optional[Callable[[Optional[TreeNode], str], None]] = None,
+) -> None:
+    """Estimate empowerment for all terminal nodes using batched prompts.
+
+    Groups terminals into batches sized to fit the LLM's context window,
+    sends one prompt per batch, and parses the list of results back onto
+    the nodes.  This ensures cross-consistent scoring within each batch.
+    """
+    if not terminals:
+        return
+
+    ctx_len = getattr(llm, "context_length", 4096)
+    # Reserve tokens for the response (~200 tokens per terminal for JSON)
+    response_reserve = 200 * len(terminals)
+    # Available tokens for prompt content
+    available = max(ctx_len - response_reserve, ctx_len // 2)
+    available_chars = available * _CHARS_PER_TOKEN
+
+    # Estimate per-terminal cost: history lines
+    def _terminal_chars(node: TreeNode) -> int:
+        return sum(len(line) for line in node.history) + 40 * len(node.history)
+
+    # Build the shared preamble size (situation + instructions)
+    preamble_probe = batch_empowerment_prompt(
+        initial_state, [[]], higher_level_context
+    )
+    preamble_chars = len(preamble_probe)
+
+    # Partition terminals into batches that fit the context window
+    batches: List[List[TreeNode]] = []
+    current_batch: List[TreeNode] = []
+    current_chars = preamble_chars
+    for node in terminals:
+        node_chars = _terminal_chars(node)
+        if current_batch and current_chars + node_chars > available_chars:
+            batches.append(current_batch)
+            current_batch = []
+            current_chars = preamble_chars
+        current_batch.append(node)
+        current_chars += node_chars
+    if current_batch:
+        batches.append(current_batch)
+
+    # Process each batch, collecting reference examples from the first
+    reference_examples: List[dict] = []
+    for batch_idx, batch in enumerate(batches):
+        if on_update is not None:
+            on_update(batch[0], f"Estimating empowerment (batch of {len(batch)})")
+
+        histories = [node.history for node in batch]
+        prompt = batch_empowerment_prompt(
+            initial_state, histories, higher_level_context,
+            reference_examples=reference_examples if batch_idx > 0 else None,
+        )
+        raw = llm.query(prompt)
+
+        try:
+            results = _parse_json_list(raw)
+        except ValueError:
+            LOG.warning(
+                "Failed to parse batch empowerment response; "
+                "falling back to individual estimates"
+            )
+            results = []
+
+        # Assign results back to nodes
+        for i, node in enumerate(batch):
+            if i < len(results):
+                try:
+                    node.empowerment_estimate = float(
+                        results[i].get("estimate", 1.0)
+                    )
+                    node.empowerment_rationale = results[i].get("rationale")
+                except (ValueError, TypeError):
+                    LOG.warning(
+                        "Bad empowerment entry at index %d; defaulting to 1.0", i
+                    )
+                    node.empowerment_estimate = 1.0
+            else:
+                LOG.warning(
+                    "Batch response missing entry %d; defaulting to 1.0", i
+                )
+                node.empowerment_estimate = 1.0
+
+        # After the first batch, collect ~20% of results as reference examples
+        if batch_idx == 0 and len(batches) > 1 and results:
+            n_ref = max(1, len(results) // 5)
+            # Pick evenly spaced examples for diverse calibration
+            step = max(1, len(results) // n_ref)
+            for k in range(0, len(results), step):
+                if len(reference_examples) >= n_ref:
+                    break
+                reference_examples.append({
+                    "history": batch[k].history,
+                    "result": results[k],
+                })
+
+        # Update display for each node that now has an estimate
+        if on_update is not None:
+            for node in batch:
+                on_update(node, "Estimating empowerment")
 
 
 # ---------------------------------------------------------------------------
