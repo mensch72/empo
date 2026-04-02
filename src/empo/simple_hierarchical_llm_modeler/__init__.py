@@ -35,7 +35,11 @@ from empo.simple_hierarchical_llm_modeler.tree_builder import (
     collect_leaves,
     count_nodes,
 )
-from empo.simple_hierarchical_llm_modeler.nl_world_model import NLWorldModel
+from empo.simple_hierarchical_llm_modeler.nl_world_model import (
+    NLWorldModel,
+    AllSingleStatesGoalGenerator,
+    SingleStateGoal,
+)
 from empo.simple_hierarchical_llm_modeler.hierarchical_modeler import (
     LazyTwoLevelModel,
     NLLevelMapper,
@@ -59,6 +63,8 @@ __all__ = [
     "collect_leaves",
     # NL world model
     "NLWorldModel",
+    "AllSingleStatesGoalGenerator",
+    "SingleStateGoal",
     # Hierarchical
     "LazyTwoLevelModel",
     "NLLevelMapper",

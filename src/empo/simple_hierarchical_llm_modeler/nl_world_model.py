@@ -18,11 +18,12 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import gymnasium as gym
 
 from empo.world_model import WorldModel
+from empo.possible_goal import PossibleGoal, PossibleGoalGenerator
 from empo.simple_hierarchical_llm_modeler.tree_builder import TreeNode
 
 
@@ -81,6 +82,15 @@ class NLWorldModel(WorldModel):
         self._tree: Optional[TreeNode] = None
 
     # ------------------------------------------------------------------
+    # Per-agent action counts
+    # ------------------------------------------------------------------
+
+    @property
+    def num_actions_per_agent(self) -> List[int]:
+        """Return per-agent action counts: [n_robot_actions, n_humans_reactions]."""
+        return [self._n_robot_actions, self._n_humans_reactions]
+
+    # ------------------------------------------------------------------
     # Factory
     # ------------------------------------------------------------------
 
@@ -130,10 +140,8 @@ class NLWorldModel(WorldModel):
                 max_hr = max(max_hr, max(hr_indices) + 1 if hr_indices else 0)
         model._n_robot_actions = max(max_ra, 1)
         model._n_humans_reactions = max(max_hr, 1)
-        # action_space.n is interpreted by WorldModel.get_dag() as the
-        # per-agent action count (it enumerates n^num_agents joint profiles).
-        # We use the max of the two per-agent counts as a common upper bound;
-        # transition_probabilities() returns None for out-of-range indices.
+        # action_space.n is set to the max per-agent count for gym compatibility.
+        # The actual per-agent counts are provided by num_actions_per_agent.
         model.action_space = gym.spaces.Discrete(
             max(model._n_robot_actions, model._n_humans_reactions)
         )
@@ -271,3 +279,54 @@ class NLWorldModel(WorldModel):
     @property
     def robot_agent_indices(self) -> List[int]:
         return [0]
+
+
+# ---------------------------------------------------------------------------
+# Goal classes for NL world models
+# ---------------------------------------------------------------------------
+
+
+class SingleStateGoal(PossibleGoal):
+    """A goal that is achieved iff the current state equals a target state."""
+
+    def __init__(self, env: Any, target_state: tuple):
+        super().__init__(env)
+        self.target_state = target_state
+        self._hash = hash(("SingleStateGoal", target_state))
+        super()._freeze()
+
+    def is_achieved(self, state) -> int:
+        return 1 if state == self.target_state else 0
+
+    def __hash__(self) -> int:
+        return self._hash
+
+    def __eq__(self, other) -> bool:
+        return (
+            isinstance(other, SingleStateGoal)
+            and self.target_state == other.target_state
+        )
+
+    def __repr__(self) -> str:
+        return f"SingleStateGoal({self.target_state!r})"
+
+
+class AllSingleStatesGoalGenerator(PossibleGoalGenerator):
+    """Yields one :class:`SingleStateGoal` for every state in the world model.
+
+    Each goal is weighted uniformly (``1 / n_states``), so the aggregate
+    empowerment metric treats all states as equally important objectives.
+    """
+
+    def __init__(self, env: "NLWorldModel"):
+        super().__init__(env)
+        self._goals: List[SingleStateGoal] = [
+            SingleStateGoal(env, s) for s in env.states
+        ]
+        self._weight = 1.0 / len(self._goals) if self._goals else 1.0
+
+    def generate(
+        self, state, human_agent_index: int
+    ) -> Iterator[Tuple[PossibleGoal, float]]:
+        for g in self._goals:
+            yield g, self._weight

@@ -20,6 +20,12 @@ ollama>=0.1.0
 # See: https://github.com/anthropics/anthropic-sdk-python
 anthropic>=0.39.0
 
+# OpenAI - Python client for OpenAI API (used by vendored l2p library)
+openai>=1.0.0
+
+# tiktoken - Token counter for OpenAI models (required by l2p OPENAI connector)
+tiktoken>=0.5.0
+
 # Pillow - Image processing library (needed for vision LLM integration)
 Pillow>=10.0.0
 
