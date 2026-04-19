@@ -1,0 +1,301 @@
+{
+  "repo_notes": [
+    {
+      "content": ""
+    }
+  ],
+  "pages": [
+    {
+      "title": "EMPO Overview",
+      "purpose": "High-level introduction to the EMPO framework: its purpose (soft maximization of aggregate human power), the two-phase architecture (human policy prior + robot policy), the distinction from standard RL, and key concepts. Links to all major child sections.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Getting Started",
+      "purpose": "Setup instructions covering Docker-based local development, Google Colab quick-start, Kaggle notebooks, and environment variable configuration. Covers the notebooks/ directory and .devcontainer setup.",
+      "parent": "EMPO Overview",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Theoretical Background",
+      "purpose": "Explains the mathematical framework: human empowerment, Phase 1 vs Phase 2, the Bellman-like recursive equations, the role of beta_h/beta_r/gamma_h/gamma_r, and why this is model-based planning rather than standard RL optimization.",
+      "parent": "EMPO Overview",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Core Abstractions",
+      "purpose": "Overview of the foundational interfaces in src/empo/ that all environments and algorithms build upon. Links to child pages covering WorldModel, goals, and human policy priors.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "WorldModel Interface",
+      "purpose": "Detailed documentation of the WorldModel abstract base class: get_state/set_state, transition_probabilities, get_dag/get_dag_parallel, is_terminal, plot_dag, and the DAG caching mechanism. Covers the distinction between WorldModel and a standard gymnasium Env.",
+      "parent": "Core Abstractions",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Goals and Goal Generators",
+      "purpose": "Documents PossibleGoal, PossibleGoalGenerator, PossibleGoalSampler, ConfigGoalGenerator, and ConfigGoalSampler. Explains the is_achieved() binary reward, goal immutability (_freeze), and how YAML possible_goals specs are parsed.",
+      "parent": "Core Abstractions",
+      "page_notes": [
+        {
+          "content": "be aware that the aggregation weights returned by goal sampler/generator do *not* have the interpretation of likelihoods. the robot never tries to model what goals are likely."
+        }
+      ]
+    },
+    {
+      "title": "Human Policy Prior",
+      "purpose": "Documents the HumanPolicyPrior abstract base class, TabularHumanPolicyPrior, HeuristicPotentialPolicy, and the profile_distribution/sample interfaces. Explains marginal distributions, Boltzmann rationality, and the PathDistanceCalculator-based heuristic.",
+      "parent": "Core Abstractions",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Simulation Environments",
+      "purpose": "Overview of the three world model implementations used in EMPO: MultiGrid, Transport, and Minecraft/MineLand. Links to child pages for each environment.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "MultiGrid Environment",
+      "purpose": "Comprehensive documentation of MultiGridEnv: WorldObj hierarchy, Actions/SmallActions, map parsing, YAML world configs, HRI control mechanisms (KillButton, PauseSwitch, ControlButton), stochastic terrain (UnsteadyGround, MagicWall), and pushing physics (Block, Rock). Covers the multigrid_worlds/ directory.",
+      "parent": "Simulation Environments",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Transport Environment",
+      "purpose": "Documents the ai_transport parallel_env: graph-based road network, four-phase action cycle (routing/unboarding/boarding/departing), observation scenarios (full/local/statistical), agent attributes, and video rendering. Covers vendor/ai_transport/.",
+      "parent": "Simulation Environments",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Minecraft / MineLand Integration",
+      "purpose": "Documents the MineLand-based Minecraft world model: setup_three_player_world, three-player asymmetric resource world, Xvfb headless rendering, Ollama vision-language model integration, and the llm_hierarchical_modeler module.",
+      "parent": "Simulation Environments",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Backward Induction (Exact Planning)",
+      "purpose": "Overview of the exact planning algorithms for finite state spaces. Explains the two-phase backward induction pipeline and links to child pages for Phase 1 and Phase 2 solvers.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Phase 1: Human Policy Prior via Backward Induction",
+      "purpose": "Documents compute_human_policy_prior, TabularHumanPolicyPrior, the Boltzmann softmax induction process, SlicedAttainmentCache, DefaultBelievedOthersPolicy, and parallel execution with shared memory. Covers phase1.py and helpers.py.",
+      "parent": "Backward Induction (Exact Planning)",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Phase 2: Robot Policy via Backward Induction",
+      "purpose": "Documents compute_robot_policy, TabularRobotPolicy, the power-law policy formula, Vhe/Xh/Ur computation, DiskBasedDAG slicing, MemoryMonitor, archival, and duration-aware discounting. Covers phase2.py.",
+      "parent": "Backward Induction (Exact Planning)",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "DAG Construction and Memory Management",
+      "purpose": "Documents DiskBasedDAG, dag_slicing, SharedDAG (shared memory), MemoryMonitor, VhValuesSmall, archive_value_slices, and the topological sort pipeline. Covers scalability strategies for large state spaces.",
+      "parent": "Backward Induction (Exact Planning)",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Learning-Based Policy Approximation",
+      "purpose": "Overview of the DRL-based approximation methods for Phase 1 and Phase 2 when exact backward induction is intractable. Explains the shared network architecture and links to child pages for DQN-based and PPO-based trainers.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Neural Network Architecture",
+      "purpose": "Documents MultiGridStateEncoder, MultiGridGoalEncoder, the shared-plus-own encoder strategy, gradient flow design, compressed grid format, cross-grid policy transfer, and the five network types (Qr, Vr, Vhe, Xh, Ur). Covers docs/ENCODER_ARCHITECTURE.md.",
+      "parent": "Learning-Based Policy Approximation",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Phase 1 PPO Trainer",
+      "purpose": "Documents PPOPhase1Trainer, Phase1PPOEnv, MultiGridPhase1PPOEnv, GoalConditionedActorCritic, PufferLib integration, goal-conditioned reward, reward shaping, and entropy annealing schedule.",
+      "parent": "Learning-Based Policy Approximation",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Phase 2 DQN-Based Trainer",
+      "purpose": "Documents BasePhase2Trainer, Phase2Config, Phase2Networks, the 7-stage warmup, power-law policy, model-based targets, RND curiosity, human action RND, count-based curiosity, adaptive learning rates, and async actor-learner mode.",
+      "parent": "Learning-Based Policy Approximation",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Phase 2 PPO Trainer",
+      "purpose": "Documents PPOPhase2Trainer, EMPOWorldModelEnv, EMPOActorCritic, PPOPhase2Config, the auxiliary network warm-up stages, target network management, reward scaling, PufferLib integration, and the MultiGrid-specific env_wrapper and networks.",
+      "parent": "Learning-Based Policy Approximation",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Hierarchical Planning",
+      "purpose": "Overview of the two-level hierarchical world model system for long-horizon tasks. Explains macro vs micro levels, the HierarchicalWorldModel container, and links to child pages for the environment, mapper, and policy.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "MacroGridEnv and CellPartition",
+      "purpose": "Documents MacroGridEnv (the M0 WorldModel), CellPartition (agglomerative rectangular partitioning), passage flags, MACRO_PASS/WALK actions, transition_durations, available_actions, and the TwoLevelMultigrid wrapper.",
+      "parent": "Hierarchical Planning",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "LevelMapper and MultiGridLevelMapper",
+      "purpose": "Documents the LevelMapper ABC (super_state, is_feasible, return_control, is_abort), the MultiGridLevelMapper concrete implementation, feasibility filtering, control transfer lifecycle, and direction-to-vector mapping.",
+      "parent": "Hierarchical Planning",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Hierarchical Robot Policy and Sub-Problem Solving",
+      "purpose": "Documents HierarchicalRobotPolicy (sample/observe_transition/reset), compute_hierarchical_robot_policy, build_sub_problem_dag (BFS + feasibility filtering + Kahn sort), _backward_induction_on_sub_dag, macro-to-micro value stitching, and the MacroHeuristicPolicy.",
+      "parent": "Hierarchical Planning",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Infrastructure and Deployment",
+      "purpose": "Overview of the containerized development and deployment infrastructure. Links to child pages for Docker/Makefile setup, CI/CD, and cluster deployment.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Docker and Development Environment",
+      "purpose": "Documents Dockerfile and Dockerfile.gpu (multi-stage builds, HIERARCHICAL_MODE, DEV_MODE, USER_ID/GROUP_ID), docker-compose.yml (empo-dev service, ollama service, volume mounts, PYTHONPATH), and the make targets for local development.",
+      "parent": "Infrastructure and Deployment",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "CI/CD and Pre-built Images",
+      "purpose": "Documents the GitHub Actions docker-build workflow, pre-built images on GHCR, devcontainer configuration for Codespaces and VS Code, and the CONTRIBUTING guide.",
+      "parent": "Infrastructure and Deployment",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Cluster and HPC Deployment",
+      "purpose": "Documents Singularity/Apptainer SIF file generation, SLURM job scripts (run_cluster.sh, run_cluster_sif.sh), setup_cluster_image.sh, Kaggle setup, and the parameter sweep HPC deployment workflow.",
+      "parent": "Infrastructure and Deployment",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Experiments and Examples",
+      "purpose": "Overview of the experiments/ and examples/ directories. Links to child pages for parameter sweep experiments and the example scripts library.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Parameter Sweep Experiments",
+      "purpose": "Documents the backward induction parameter sweep: the asymmetric_freeing and deactivate_pause_or_destroy scenarios, parameters varied (beta_h, gamma_h, gamma_r, zeta, eta, xi, max_steps), Monte Carlo simulation, logistic regression analysis, and HPC batch execution.",
+      "parent": "Experiments and Examples",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    }
+  ]
+}
