@@ -2,6 +2,8 @@
 
 A framework for studying the soft maximization of aggregate human power by AI agents in multigrid and other multi-agent model worlds related to [this theoretical paper](https://arxiv.org/html/2508.00159v2).
 
+*See the Devin-generated interactive Wiki here: https://deepwiki.com/mensch72/empo*
+
 ## What this is and what this is *not*
 
 The fact that some of the code uses reinforcement learning (RL) algorithms can lead to certain confusions about the purpose of those algorithms in the context of this project. To avoid confusion, we want to clarify what this project is and is *not*: 
