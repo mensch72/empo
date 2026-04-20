@@ -238,9 +238,16 @@ def _rp_process_single_state(
     # Use log-space computation for numerical stability:
     # pi_r(a) ∝ (-Q_r(a))^{-beta_r} = exp(-beta_r * log(-Q_r(a)))
     log_neg_Qr = np.log(-Qr_values)  # Q_r values are always negative
-    log_powers = -beta_r * log_neg_Qr
-    log_normalizer = logsumexp(log_powers)
-    ps = np.exp(log_powers - log_normalizer)
+    if np.isinf(beta_r):
+        # Deterministic: uniform over actions with the smallest -Q_r (= largest Q_r)
+        min_val = log_neg_Qr.min()
+        best_mask = (log_neg_Qr == min_val)
+        ps = best_mask.astype(np.float64)
+        ps /= ps.sum()
+    else:
+        log_powers = -beta_r * log_neg_Qr
+        log_normalizer = logsumexp(log_powers)
+        ps = np.exp(log_powers - log_normalizer)
     robot_policy = {robot_action_profile: ps[idx] 
                    for idx, robot_action_profile in enumerate(robot_action_profiles)}
     
@@ -975,7 +982,12 @@ class TabularRobotPolicy(RobotPolicy):
         
         profiles = list(dist.keys())
         probs = np.fromiter((dist[p] for p in profiles), dtype=np.float64, count=len(profiles))
-        probs = probs / probs.sum()  # normalize
+        total = probs.sum()
+        if total > 0 and np.isfinite(total):
+            probs = probs / total
+        else:
+            # Fallback for NaN/inf/zero: uniform over all profiles
+            probs = np.ones(len(profiles)) / len(profiles)
         idx = np.random.choice(len(profiles), p=probs)
         return profiles[idx]
     
