@@ -165,6 +165,8 @@ class EMPOWorldModelEnv(gymnasium.Env):
         self._u_r_warmup_buffer: deque = deque(
             maxlen=config.ppo_rollout_length * 100
         )  # buffer ~100 rollouts
+        # Stddev of the reward signal used by PPO; updated by trainer each iteration.
+        self._u_r_signal_std: float = 0.0
 
     # ------------------------------------------------------------------
     # Gymnasium API
@@ -255,6 +257,7 @@ class EMPOWorldModelEnv(gymnasium.Env):
             "u_r_ppo": u_r_ppo,
             # Dashboard prints 3 decimals; this reveals proximity to -1.0.
             "u_r_plus1": (u_r_raw + 1.0),
+            "u_r_signal_std": self._u_r_signal_std,
         }
 
         # Decode flat joint-action index to per-robot action tuple for

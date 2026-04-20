@@ -627,6 +627,26 @@ class PPOPhase2Trainer:
             if hasattr(inner, "freeze_u_r_normalization"):
                 inner.freeze_u_r_normalization()
 
+    @staticmethod
+    def _broadcast_stat_to_envs(vecenv: Any, attr: str, value: float) -> None:
+        """Set a scalar attribute on all unwrapped env instances."""
+        envs = getattr(vecenv, "envs", None)
+        if envs is None:
+            envs = getattr(vecenv, "single_env", None)
+            if envs is not None:
+                envs = [envs]
+        if not envs:
+            return
+        _MAX_UNWRAP_DEPTH = 20
+        for env in envs:
+            inner = env
+            depth = 0
+            while hasattr(inner, "env") and depth < _MAX_UNWRAP_DEPTH:
+                inner = inner.env
+                depth += 1
+            if hasattr(inner, attr):
+                setattr(inner, attr, value)
+
     def _collect_aux_data_from_rollout(self, pufferl: Any, vecenv: Any) -> None:
         """Extract auxiliary transition data from environment aux buffers.
 
@@ -1073,6 +1093,7 @@ class PPOPhase2Trainer:
 
             # Monitor stddev of the exact reward signal used by PPO.
             u_r_signal_std = self._compute_reward_signal_std(pufferl)
+            self._broadcast_stat_to_envs(vecenv, "_u_r_signal_std", float(u_r_signal_std))
 
             # --- Extract auxiliary data from rollout info dicts ---
             self._collect_aux_data_from_rollout(pufferl, vecenv)
