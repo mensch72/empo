@@ -2037,21 +2037,24 @@ class BasePhase2Trainer(ABC):
                 #   X_h(s) = 1 + gamma_h^zeta * q_h(s,s')^zeta * X_h_target(s')
                 # where q_h(s,s') = max_{a_h} P(s'|s, a_h, pi_{-h}), computed via world model.
                 # x_h_batch transitions supply (state s, next_state s') pairs.
+                # Terminal next_states use X_h(s') = 1 exactly (no bootstrapping).
                 with torch.no_grad():
-                    # Build aligned list of next_states matching x_h_states / x_h_human_indices.
-                    # Do not re-sample humans here: x_h_states/x_h_human_indices were already
-                    # built earlier with a fixed random.sample(). The count of humans contributed
-                    # by each transition is deterministic (min(x_h_sample_humans, len(t.goals))),
-                    # so replicate next_state that many times without another random draw.
+                    # Build aligned lists of next_states and terminal flags matching
+                    # x_h_states / x_h_human_indices.  Do not re-sample humans here:
+                    # the count contributed by each transition is deterministic
+                    # (min(x_h_sample_humans, len(t.goals))), so replicate next_state
+                    # and terminal that many times without another random draw.
                     x_h_next_states = []
+                    x_h_terminals = []
                     for t in x_h_batch:
                         if self.config.x_h_sample_humans is None:
                             num_humans_for_x_h = len(t.goals)
                         else:
                             num_humans_for_x_h = min(self.config.x_h_sample_humans, len(t.goals))
                         x_h_next_states.extend([t.next_state] * num_humans_for_x_h)
+                        x_h_terminals.extend([t.terminal] * num_humans_for_x_h)
                     target_x_h = self._compute_simplified_x_h_td_target(
-                        x_h_states, x_h_next_states, x_h_human_indices
+                        x_h_states, x_h_next_states, x_h_human_indices, x_h_terminals
                     )
             else:
                 # Standard target from V_h^e target network
@@ -2346,41 +2349,62 @@ class BasePhase2Trainer(ABC):
         states: List[Any],
         next_states: List[Any],
         human_indices: List[int],
+        terminals: Optional[List[bool]] = None,
     ) -> torch.Tensor:
         """
         Compute simplified X_h TD targets via the goal-agnostic recursion.
 
-        For each (s, h, s') triplet in the batch:
+        This is a per-sample (stochastic) TD estimator for the fixed-point equation:
+            X_h(s) = 1 + gamma_h^zeta * sum_{s'} q_h(s,s')^zeta * X_h(s')
+        For each observed transition (s, s') the unbiased per-sample target is:
+            target(s, s') = 1 + gamma_h^zeta * q_h(s, s')^zeta * X_h_target(s')
+        where:
             q_h(s, s') = max_{a_h} P(s'|s, a_h, pi_{-h}(·|s))
         With bounded rationality (x_h_epsilon_h > 0):
             q_h = (1 - eps) * max_{a_h} P(...) + eps * mean_{a_h} P(...)
-        TD target:
-            target = 1 + gamma_h^zeta * q_h(s, s')^zeta * X_h_target(s')
 
-        Uses the world model (self.env) to compute transition probabilities for
-        each a_h value. Robot policy pi_r is approximated via Q_r target network.
-        Terminal next_states (where X_h = 1) are handled correctly.
+        When `terminals[i]` is True the next state is terminal, so X_h(s') = 1
+        exactly and no bootstrapping from the target network is needed.
+
+        Other humans (pi_{-h}) are marginalized out using their goal-agnostic
+        policy prior (self.human_policy_prior). Robot actions are marginalized
+        using the Q_r target network's Boltzmann policy.
 
         Args:
-            states: Source states s.
-            next_states: Observed successor states s'.
+            states: Source states s, one per sample.
+            next_states: Observed successor states s', one per sample.
             human_indices: Human agent indices, one per (s, s') pair.
+            terminals: Boolean flags indicating whether each next_state is terminal.
+                When True, X_h(next_state) is fixed to 1.0 (no bootstrapping).
+                If None, treated as all False.
 
         Returns:
             Target tensor of shape (batch_size,).
         """
+        from empo.human_policy_prior import HumanPolicyPrior
+
         gamma_h_zeta = self.config.gamma_h ** self.config.zeta
         epsilon_h = self.config.x_h_epsilon_h
         num_actions = self.env.action_space.n
         effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
 
+        if terminals is None:
+            terminals = [False] * len(states)
+
         # Get X_h_target(s') for all next_states in a single batched call.
-        # Clamp to [1, inf) since simplified X_h >= 1.
+        # Override with 1.0 for terminal next_states after clamping.
         with torch.no_grad():
             x_h_next = self.networks.x_h_target.forward_batch(
                 next_states, human_indices, self.env, self.device
             ).squeeze()
             x_h_next = torch.clamp(x_h_next, min=1.0)
+            # Terminal next_states have X_h = 1 exactly (no bootstrapping error).
+            for i, is_terminal in enumerate(terminals):
+                if is_terminal:
+                    if x_h_next.dim() > 0:
+                        x_h_next[i] = 1.0
+                    else:
+                        x_h_next = torch.ones_like(x_h_next)
 
         # Get robot policy pi_r(a_r | s) for all unique states in a single forward pass.
         unique_states = list(dict.fromkeys(states))  # preserve order, deduplicate
@@ -2394,7 +2418,10 @@ class BasePhase2Trainer(ABC):
 
         state_to_pi_r_idx = {s: i for i, s in enumerate(unique_states)}
 
-        from empo.human_policy_prior import HumanPolicyPrior
+        # Cache other-human joint distributions per (state, h_idx) to avoid
+        # redundant policy-prior calls when the same (state, h_idx) pair appears
+        # multiple times in the batch.
+        other_joint_dist_cache: Dict[Any, List] = {}
 
         targets = []
         for i, (state, next_state, h_idx) in enumerate(
@@ -2403,22 +2430,25 @@ class BasePhase2Trainer(ABC):
             pi_r_idx = state_to_pi_r_idx[state]
             pi_r = pi_r_batch[pi_r_idx]  # (num_robot_actions,)
 
-            # Pre-compute other humans' marginal action distributions at this state.
-            # Only h_idx's action is fixed to a_h_val; other humans are marginalized
-            # over using their goal-agnostic policy prior.
-            other_humans = [h for h in self.human_agent_indices if h != h_idx]
-            if other_humans:
-                other_marginals = [
-                    HumanPolicyPrior._to_probability_array(
-                        self.human_policy_prior(state, oh)
+            # Look up (or compute and cache) the other-human joint distribution.
+            cache_key = (state, h_idx)
+            if cache_key not in other_joint_dist_cache:
+                other_humans = [h for h in self.human_agent_indices if h != h_idx]
+                if other_humans:
+                    other_marginals = [
+                        HumanPolicyPrior._to_probability_array(
+                            self.human_policy_prior(state, oh)
+                        )
+                        for oh in other_humans
+                    ]
+                    dist = self.human_policy_prior._profile_distribution_numpy(
+                        other_marginals
                     )
-                    for oh in other_humans
-                ]
-                other_joint_dist = self.human_policy_prior._profile_distribution_numpy(
-                    other_marginals
-                )
-            else:
-                other_joint_dist = [(1.0, [])]
+                else:
+                    other_humans = []
+                    dist = [(1.0, [])]
+                other_joint_dist_cache[cache_key] = (other_humans, dist)
+            other_humans, other_joint_dist = other_joint_dist_cache[cache_key]
 
             # Compute P(next_state | state, a_h_val, pi_{-h}) for each a_h value.
             # P(s'|s, a_h, pi_{-h}) = sum_{a_r} pi_r(a_r)
@@ -2462,6 +2492,7 @@ class BasePhase2Trainer(ABC):
             targets.append(target)
 
         return torch.tensor(targets, device=self.device, dtype=torch.float32)
+
 
     def _compute_u_r_from_v_h_e_samples(self, states: List[Any]) -> torch.Tensor:
         """

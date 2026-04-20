@@ -6,7 +6,8 @@ Implements X_h(s) from equation (7) of the EMPO paper:
 
 When use_simplified_x_h=True, the simplified goal-agnostic recursion is used
 instead (see Phase2Config.use_simplified_x_h). In that case the feasible range
-is [1, +∞) because terminal states have X_h = 1 and all other states X_h > 1.
+is [1, +∞) because the recursion guarantees X_h >= 1; terminal states have
+X_h = 1, and some non-terminal states may also have X_h = 1.
 """
 
 import torch

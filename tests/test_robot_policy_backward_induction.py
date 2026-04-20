@@ -727,7 +727,7 @@ class TestSimplifiedXh:
             quiet=True
         )
         for state, vr in Vr.items():
-            if vr != 0.0:  # Skip terminal states (V_r = 0 by convention)
+            if vr != 0.0:  # Skip exact-zero entries; terminal V_r is terminal_Vr (default -1e-10), not 0
                 assert vr < 0, f"V_r must be negative; got {vr} for state {state}"
 
 
