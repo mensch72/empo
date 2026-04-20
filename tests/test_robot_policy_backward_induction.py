@@ -615,5 +615,121 @@ class TestRobotPolicyParameters:
         assert isinstance(robot_policy, TabularRobotPolicy)
 
 
+class TestSimplifiedXh:
+    """Tests for the simplified goal-agnostic X_h computation (issue #83)."""
+
+    def _setup(self, grid_size=3, max_steps=2):
+        """Create env, goal generator, and human policy prior for testing."""
+        env = TinyTwoAgentEnv()
+        env.max_steps = max_steps
+        env.reset()
+        goal_gen = WholeMapGoalGenerator(env, grid_size=grid_size)
+        human_policy = compute_human_policy_prior(
+            env, [0], goal_gen,
+            beta_h=5.0, gamma_h=0.99, quiet=True
+        )
+        return env, goal_gen, human_policy
+
+    def test_simplified_x_h_runs(self):
+        """Test that use_simplified_x_h=True executes without errors."""
+        env, goal_gen, human_policy = self._setup()
+
+        robot_policy = compute_robot_policy(
+            env, [0], [1], goal_gen, human_policy,
+            beta_r=5.0, gamma_h=0.99, gamma_r=0.99,
+            zeta=1.0, xi=1.0, eta=1.0,
+            use_simplified_x_h=True,
+            quiet=True
+        )
+        assert isinstance(robot_policy, TabularRobotPolicy)
+
+    def test_simplified_x_h_returns_xh_values(self):
+        """Test that return_values=True with simplified mode returns Xh dict."""
+        env, goal_gen, human_policy = self._setup()
+
+        robot_policy, Vr, Xh = compute_robot_policy(
+            env, [0], [1], goal_gen, human_policy,
+            beta_r=5.0, gamma_h=0.99, gamma_r=0.99,
+            zeta=1.5, xi=1.0, eta=1.0,
+            use_simplified_x_h=True,
+            return_values=True,
+            quiet=True
+        )
+        assert isinstance(Xh, dict), "Xh should be a dict mapping state -> agent_idx -> value"
+        # All X_h values must be >= 1.0 (terminal states X_h = 1)
+        for state, agent_xh in Xh.items():
+            for agent_idx, xh_val in agent_xh.items():
+                assert xh_val >= 1.0 - 1e-9, \
+                    f"X_h must be >= 1.0 (simplified mode); got {xh_val} for state {state}"
+
+    def test_simplified_x_h_zeta_invariant(self):
+        """Test that simplified X_h works for any zeta value, not just close to 1."""
+        env, goal_gen, human_policy = self._setup()
+
+        for zeta in [1.0, 1.5, 2.0, 3.0]:
+            robot_policy, Vr, Xh = compute_robot_policy(
+                env, [0], [1], goal_gen, human_policy,
+                beta_r=5.0, gamma_h=0.99, gamma_r=0.99,
+                zeta=zeta, xi=1.0, eta=1.0,
+                use_simplified_x_h=True,
+                return_values=True,
+                quiet=True
+            )
+            for state, agent_xh in Xh.items():
+                for _, xh_val in agent_xh.items():
+                    assert xh_val >= 1.0 - 1e-9, \
+                        f"X_h >= 1.0 violated at zeta={zeta}: {xh_val}"
+
+    def test_simplified_x_h_epsilon_h_bounded_rationality(self):
+        """Test bounded-rationality variant: epsilon_h > 0 changes X_h values."""
+        env, goal_gen, human_policy = self._setup()
+
+        _, Vr_plain, Xh_plain = compute_robot_policy(
+            env, [0], [1], goal_gen, human_policy,
+            beta_r=5.0, gamma_h=0.99, gamma_r=0.99,
+            zeta=1.5, xi=1.0, eta=1.0,
+            use_simplified_x_h=True,
+            epsilon_h=0.0,
+            return_values=True,
+            quiet=True
+        )
+        _, Vr_eps, Xh_eps = compute_robot_policy(
+            env, [0], [1], goal_gen, human_policy,
+            beta_r=5.0, gamma_h=0.99, gamma_r=0.99,
+            zeta=1.5, xi=1.0, eta=1.0,
+            use_simplified_x_h=True,
+            epsilon_h=0.3,
+            return_values=True,
+            quiet=True
+        )
+        # epsilon_h > 0 mixes best action with uniform, so X_h values change
+        # (epsilon_h reduces the effective max, so X_h(s) should be <= X_h_plain(s))
+        for state in Xh_plain:
+            if state in Xh_eps:
+                for agent_idx in Xh_plain[state]:
+                    if agent_idx in Xh_eps[state]:
+                        xh_p = Xh_plain[state][agent_idx]
+                        xh_e = Xh_eps[state][agent_idx]
+                        # With mixing, q_h is lower => X_h is lower
+                        assert xh_e <= xh_p + 1e-9, \
+                            f"epsilon_h>0 should reduce X_h: plain={xh_p}, eps={xh_e}"
+
+    def test_simplified_x_h_vr_negative(self):
+        """Test that V_r values remain strictly negative in simplified mode."""
+        env, goal_gen, human_policy = self._setup()
+
+        _, Vr, Xh = compute_robot_policy(
+            env, [0], [1], goal_gen, human_policy,
+            beta_r=5.0, gamma_h=0.99, gamma_r=0.99,
+            zeta=2.0, xi=1.0, eta=1.0,
+            use_simplified_x_h=True,
+            return_values=True,
+            quiet=True
+        )
+        for state, vr in Vr.items():
+            if vr != 0.0:  # Skip terminal states (V_r = 0 by convention)
+                assert vr < 0, f"V_r must be negative; got {vr} for state {state}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

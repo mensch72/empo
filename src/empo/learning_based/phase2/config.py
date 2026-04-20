@@ -296,6 +296,23 @@ class Phase2Config:
     # error since X_h = E_g[V_h^e(s, g)^ζ] can be computed exactly from V_h^e samples.
     # When False, the goal sampler is used at each step to sample goals and compute X_h.
     x_h_use_network: bool = True
+
+    # =========================================================================
+    # Simplified goal-agnostic X_h computation
+    # =========================================================================
+    # When use_simplified_x_h=True, X_h is computed via the goal-agnostic recursion
+    #   X_h(s) = 1 + gamma_h^zeta * sum_{s'} q_h(s,s')^zeta * X_h(s')
+    # where q_h(s,s') = max_{a_h} P(s'|s, a_h, pi_{-h}).
+    # This bypasses V_h^e entirely. X_h >= 1 for all states (terminal states X_h = 1).
+    # The option is available for any value of zeta (not just close to 1).
+    #
+    # Bounded rationality: when x_h_epsilon_h > 0, q_h mixes the best human action
+    # with a uniform prior over actions:
+    #   q_h(s,s') = (1 - eps) * max_{a_h} P(s'|s, a_h, pi_{-h})
+    #               + eps * mean_{a_h} P(s'|s, a_h, pi_{-h})
+    # This parameter is distinct from epsilon_h_start/epsilon_h_end (exploration).
+    use_simplified_x_h: bool = False
+    x_h_epsilon_h: float = 0.0   # Bounded-rationality mixing coefficient for simplified X_h
     
     # Whether to include step count (remaining time) in state encoding.
     # Set to False to verify that identical grid states get identical values.

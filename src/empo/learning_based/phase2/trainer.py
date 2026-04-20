@@ -2032,18 +2032,44 @@ class BasePhase2Trainer(ABC):
                     self.env, self.device
                 )
             
-            # Target from V_h^e target network
-            with torch.no_grad():
-                v_h_e_for_x = self.networks.v_h_e_target.forward_batch(
-                    x_h_states, x_h_goals, x_h_human_indices,
-                    self.env, self.device
-                )
-                # Hard clamp for inference
-                v_h_e_for_x = self.networks.v_h_e_target.apply_hard_clamp(v_h_e_for_x)
-            
-            # Compute targets: w_h * V_h^e(s, g_h)^zeta
-            x_h_weights_tensor = torch.tensor(x_h_goal_weights, device=self.device, dtype=torch.float32)
-            target_x_h = self.networks.x_h.compute_target(v_h_e_for_x.squeeze(), x_h_weights_tensor)
+            if self.config.use_simplified_x_h:
+                # Simplified goal-agnostic target:
+                #   X_h(s) = 1 + gamma_h^zeta * q_h(s,s')^zeta * X_h_target(s')
+                # where q_h(s,s') = max_{a_h} P(s'|s, a_h, pi_{-h}), computed via world model.
+                # x_h_batch transitions supply (state s, next_state s') pairs.
+                with torch.no_grad():
+                    x_h_next_states = [t.next_state for t in x_h_batch
+                                       for h in (self.human_agent_indices
+                                                 if self.config.x_h_sample_humans is None
+                                                 else random.sample(list(self.human_agent_indices),
+                                                                    min(self.config.x_h_sample_humans,
+                                                                        len(self.human_agent_indices))))]
+                    # Rebuild aligned lists (same order as x_h_states / x_h_human_indices)
+                    x_h_next_states = []
+                    for t in x_h_batch:
+                        if self.config.x_h_sample_humans is None:
+                            humans_for = list(t.goals.keys())
+                        else:
+                            n_s = min(self.config.x_h_sample_humans, len(t.goals))
+                            humans_for = random.sample(list(t.goals.keys()), n_s)
+                        for _ in humans_for:
+                            x_h_next_states.append(t.next_state)
+                    target_x_h = self._compute_simplified_x_h_td_target(
+                        x_h_states, x_h_next_states, x_h_human_indices
+                    )
+            else:
+                # Standard target from V_h^e target network
+                with torch.no_grad():
+                    v_h_e_for_x = self.networks.v_h_e_target.forward_batch(
+                        x_h_states, x_h_goals, x_h_human_indices,
+                        self.env, self.device
+                    )
+                    # Hard clamp for inference
+                    v_h_e_for_x = self.networks.v_h_e_target.apply_hard_clamp(v_h_e_for_x)
+                
+                # Compute targets: w_h * V_h^e(s, g_h)^zeta
+                x_h_weights_tensor = torch.tensor(x_h_goal_weights, device=self.device, dtype=torch.float32)
+                target_x_h = self.networks.x_h.compute_target(v_h_e_for_x.squeeze(), x_h_weights_tensor)
             
             losses['x_h'] = ((x_h_pred.squeeze() - target_x_h) ** 2).mean()
             
@@ -2295,7 +2321,12 @@ class BasePhase2Trainer(ABC):
             
             # Reshape to (n_states, n_humans) and compute mean over humans
             x_h_reshaped = x_h_all.view(n_states, n_humans)
-            x_h_clamped = torch.clamp(x_h_reshaped, min=1e-3, max=1.0)
+
+            if self.config.use_simplified_x_h:
+                # Simplified X_h >= 1 (terminal state X_h = 1 is the minimum)
+                x_h_clamped = torch.clamp(x_h_reshaped, min=1.0)
+            else:
+                x_h_clamped = torch.clamp(x_h_reshaped, min=1e-3, max=1.0)
             
             # y = E[X_h^{-xi}] = mean over humans
             y = (x_h_clamped ** (-self.config.xi)).mean(dim=1)
@@ -2309,6 +2340,104 @@ class BasePhase2Trainer(ABC):
             # U_r = -(E_h[X_h^{-xi}])^eta
             return self._compute_u_r_from_v_h_e_samples(states)
     
+    def _compute_simplified_x_h_td_target(
+        self,
+        states: List[Any],
+        next_states: List[Any],
+        human_indices: List[int],
+    ) -> torch.Tensor:
+        """
+        Compute simplified X_h TD targets via the goal-agnostic recursion.
+
+        For each (s, h, s') triplet in the batch:
+            q_h(s, s') = max_{a_h} P(s'|s, a_h, pi_{-h}(·|s))
+        With bounded rationality (x_h_epsilon_h > 0):
+            q_h = (1 - eps) * max_{a_h} P(...) + eps * mean_{a_h} P(...)
+        TD target:
+            target = 1 + gamma_h^zeta * q_h(s, s')^zeta * X_h_target(s')
+
+        Uses the world model (self.env) to compute transition probabilities for
+        each a_h value. Robot policy pi_r is approximated via Q_r target network.
+        Terminal next_states (where X_h = 1) are handled correctly.
+
+        Args:
+            states: Source states s.
+            next_states: Observed successor states s'.
+            human_indices: Human agent indices, one per (s, s') pair.
+
+        Returns:
+            Target tensor of shape (batch_size,).
+        """
+        gamma_h_zeta = self.config.gamma_h ** self.config.zeta
+        epsilon_h = self.config.x_h_epsilon_h
+        num_actions = self.env.action_space.n
+        effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
+
+        # Get X_h_target(s') for all next_states in a single batched call.
+        # Clamp to [1, inf) since simplified X_h >= 1.
+        with torch.no_grad():
+            x_h_next = self.networks.x_h_target.forward_batch(
+                next_states, human_indices, self.env, self.device
+            ).squeeze()
+            x_h_next = torch.clamp(x_h_next, min=1.0)
+
+        # Get robot policy pi_r(a_r | s) for all unique states in a single forward pass.
+        unique_states = list(dict.fromkeys(states))  # preserve order, deduplicate
+        with torch.no_grad():
+            q_r_batch = self.networks.q_r_target.forward_batch(
+                unique_states, self.env, self.device
+            )
+            pi_r_batch = self.networks.q_r_target.get_policy(
+                q_r_batch, beta_r=effective_beta_r
+            )  # (n_unique, num_robot_actions)
+
+        state_to_pi_r_idx = {s: i for i, s in enumerate(unique_states)}
+
+        targets = []
+        for i, (state, next_state, h_idx) in enumerate(
+            zip(states, next_states, human_indices)
+        ):
+            pi_r_idx = state_to_pi_r_idx[state]
+            pi_r = pi_r_batch[pi_r_idx]  # (num_robot_actions,)
+
+            # Compute P(next_state | state, a_h_val, pi_r) for each a_h value.
+            # P(s'|s, a_h, pi_r) = sum_{a_r} pi_r(a_r) * P(s'|s, a_h, a_r)
+            p_per_ah = []
+            for a_h_val in range(num_actions):
+                p_total = 0.0
+                for a_r_idx in range(pi_r.shape[0]):
+                    robot_prob = float(pi_r[a_r_idx])
+                    if robot_prob == 0.0:
+                        continue
+                    # Build joint action list indexed by agent position.
+                    actions = [0] * self.num_agents
+                    for pos, h in enumerate(self.human_agent_indices):
+                        actions[h] = a_h_val
+                    for pos, r in enumerate(self.robot_agent_indices):
+                        # Decode the robot action profile index back to per-agent actions
+                        r_action = (a_r_idx // (num_actions ** pos)) % num_actions
+                        actions[r] = r_action
+                    trans = self.env.transition_probabilities(state, actions)
+                    if trans is None:
+                        continue
+                    for prob, ns in trans:
+                        if ns == next_state:
+                            p_total += robot_prob * float(prob)
+                p_per_ah.append(p_total)
+
+            max_p = max(p_per_ah)
+            if epsilon_h > 0.0:
+                mean_p = sum(p_per_ah) / num_actions
+                q_h = (1.0 - epsilon_h) * max_p + epsilon_h * mean_p
+            else:
+                q_h = max_p
+
+            x_h_s_prime = float(x_h_next[i]) if x_h_next.dim() > 0 else float(x_h_next)
+            target = 1.0 + gamma_h_zeta * (q_h ** self.config.zeta) * x_h_s_prime
+            targets.append(target)
+
+        return torch.tensor(targets, device=self.device, dtype=torch.float32)
+
     def _compute_u_r_from_v_h_e_samples(self, states: List[Any]) -> torch.Tensor:
         """
         Compute U_r directly from V_h^e samples (when x_h_use_network=False).

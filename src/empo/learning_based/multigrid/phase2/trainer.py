@@ -567,10 +567,17 @@ def create_phase2_networks(
         
         x_h = None
         if config.x_h_use_network:
-            x_h = LookupTableAggregateGoalAbilityNetwork(
-                default_x_h=config.get_lookup_default('x_h'),
-                include_step_count=config.include_step_count,
-            )
+            if config.use_simplified_x_h:
+                x_h = LookupTableAggregateGoalAbilityNetwork(
+                    default_x_h=1.0,
+                    feasible_range=(1.0, float('inf')),
+                    include_step_count=config.include_step_count,
+                )
+            else:
+                x_h = LookupTableAggregateGoalAbilityNetwork(
+                    default_x_h=config.get_lookup_default('x_h'),
+                    include_step_count=config.include_step_count,
+                )
         
         u_r = None
         if config.u_r_use_network:
@@ -815,6 +822,7 @@ def create_phase2_networks(
     x_h = None
     if config.x_h_use_network:
         if use_neural_x_h:
+            x_h_feasible_range = (1.0, float('inf')) if config.use_simplified_x_h else (0.0, 1.0)
             x_h = MultiGridAggregateGoalAbilityNetwork(
                 grid_height=grid_height,
                 grid_width=grid_width,
@@ -829,13 +837,21 @@ def create_phase2_networks(
                 agent_encoder=shared_agent_encoder,       # From V_h^e (SHARED, used detached)
                 own_state_encoder=x_h_own_state_encoder,  # OWN (trained with X_h)
                 own_agent_encoder=x_h_own_agent_encoder,  # OWN (trained with X_h)
+                feasible_range=x_h_feasible_range,
             ).to(device)
         else:
             from empo.learning_based.phase2.lookup import LookupTableAggregateGoalAbilityNetwork
-            x_h = LookupTableAggregateGoalAbilityNetwork(
-                default_x_h=config.get_lookup_default('x_h'),
-                include_step_count=config.include_step_count,
-            )
+            if config.use_simplified_x_h:
+                x_h = LookupTableAggregateGoalAbilityNetwork(
+                    default_x_h=1.0,
+                    feasible_range=(1.0, float('inf')),
+                    include_step_count=config.include_step_count,
+                )
+            else:
+                x_h = LookupTableAggregateGoalAbilityNetwork(
+                    default_x_h=config.get_lookup_default('x_h'),
+                    include_step_count=config.include_step_count,
+                )
     
     # U_r network (optional)
     u_r = None
