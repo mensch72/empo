@@ -205,6 +205,11 @@ class BasePhase2Trainer(ABC):
                 global_step=0
             )
             self.writer.add_text('GradNorm/remark', "Gradients are clipped.", global_step=0)
+            self.writer.add_text('GradMetrics/remark',
+                "EMA of gradient norm tracks scale; cosine similarity of successive "
+                "gradients tracks descent direction consistency (→0 near convergence).",
+                global_step=0
+            )
             if config.async_training:
                 max_steps = config.max_env_steps_per_training_step
                 if max_steps is not None:
@@ -272,6 +277,12 @@ class BasePhase2Trainer(ABC):
         # This provides more detailed insight than hashes alone
         self._position_visit_counts: Dict[tuple, int] = {}
         
+        # Gradient-based convergence metrics (issue #122)
+        # EMA of gradient norm and cosine similarity between successive gradients
+        self._grad_norm_ema: Dict[str, float] = {}
+        self._grad_cosine_sim: Dict[str, float] = {}
+        self._prev_flat_grads: Dict[str, Optional[Tuple[torch.Tensor, float]]] = {}
+        
         # Initialize memory monitor
         self._memory_monitor = MemoryMonitor(
             min_free_fraction=config.min_free_memory_fraction,
@@ -306,6 +317,8 @@ class BasePhase2Trainer(ABC):
         # Don't pickle state visit counts dict - large and only needed in learner
         state['_state_visit_counts'] = {}
         state['_position_visit_counts'] = {}
+        # Don't pickle gradient metric tensors - only needed in learner
+        state['_prev_flat_grads'] = {}
         return state
     
     def __setstate__(self, state):
@@ -776,6 +789,97 @@ class BasePhase2Trainer(ABC):
                     total_norm += p.grad.data.norm(2).item() ** 2
             norms[name] = total_norm ** 0.5
         return norms
+    
+    def _get_configured_network_map(self) -> Dict[str, nn.Module]:
+        """Return dict of configured/present network names to modules.
+        
+        This returns networks that are configured and instantiated, regardless of
+        warm-up stage. For warm-up-aware network selection, use
+        self.config.get_active_networks(training_step) instead.
+        
+        For RND modules, the trainable *predictor* sub-network is returned
+        (not the full RNDModule which also contains the frozen target network).
+        """
+        networks: Dict[str, nn.Module] = {
+            'q_r': self.networks.q_r,
+            'v_h_e': self.networks.v_h_e,
+        }
+        if self.config.x_h_use_network and self.networks.x_h is not None:
+            networks['x_h'] = self.networks.x_h
+        if self.config.u_r_use_network and self.networks.u_r is not None:
+            networks['u_r'] = self.networks.u_r
+        if self.config.v_r_use_network and self.networks.v_r is not None:
+            networks['v_r'] = self.networks.v_r
+        if self.config.use_rnd and self.networks.rnd is not None:
+            networks['rnd'] = self.networks.rnd.predictor
+        if (self.config.use_rnd and self.config.use_human_action_rnd
+                and self.networks.human_rnd is not None):
+            networks['human_rnd'] = self.networks.human_rnd.predictor
+        return networks
+    
+    def _flatten_network_grads(self, net: nn.Module) -> Optional[torch.Tensor]:
+        """Flatten all gradient tensors for a network into a single 1D CPU vector.
+        
+        Args:
+            net: The network module whose parameter gradients to flatten.
+        
+        Returns None if the network has no gradients.
+        """
+        grads = [p.grad.detach().flatten().cpu() for p in net.parameters() if p.grad is not None]
+        if not grads:
+            return None
+        return torch.cat(grads)
+    
+    def _update_grad_metrics(self, grad_norms: Dict[str, float]) -> None:
+        """Update gradient-based convergence metrics.
+        
+        Computes per-network:
+        - EMA of gradient L2 norm (tracks gradient scale over time)
+        - Cosine similarity between successive gradients (tracks descent direction consistency)
+        
+        Networks present in the configured network map get both EMA norm and
+        cosine similarity.  Networks absent from the map (e.g. a network name
+        that appears in grad_norms but whose module is not exposed) still get
+        EMA norm tracking but cosine similarity is skipped.
+        
+        Results are stored in self._grad_norm_ema and self._grad_cosine_sim.
+        """
+        decay = self.config.grad_metrics_ema_decay
+        configured = self._get_configured_network_map()
+        
+        for name, norm in grad_norms.items():
+            # Update EMA of gradient norm
+            if name in self._grad_norm_ema:
+                self._grad_norm_ema[name] = decay * self._grad_norm_ema[name] + (1 - decay) * norm
+            else:
+                self._grad_norm_ema[name] = norm
+            
+            # Skip cosine similarity for networks not in the configured map
+            if name not in configured:
+                continue
+            
+            # Compute cosine similarity with previous gradient
+            flat_grad = self._flatten_network_grads(configured[name])
+            if flat_grad is None:
+                # No current gradients: clear stored metrics to avoid stale values
+                self._grad_cosine_sim.pop(name, None)
+                self._prev_flat_grads.pop(name, None)
+                continue
+
+            prev_flat, prev_norm = self._prev_flat_grads.get(name, (None, None))
+            if prev_flat is not None and prev_flat.shape == flat_grad.shape:
+                dot = torch.dot(flat_grad, prev_flat).item()
+                denom = norm * prev_norm if prev_norm else 0.0
+                cos = dot / denom if denom > 0 else 0.0
+                # Clamp to [-1, 1] to guard against floating-point drift
+                # (dot product on CPU vs norms from GPU .item() can overshoot)
+                self._grad_cosine_sim[name] = max(-1.0, min(1.0, cos))
+            else:
+                # Shape mismatch or missing previous gradient: clear any stale cosine metric
+                self._grad_cosine_sim.pop(name, None)
+            
+            # Store current gradient and its norm for next step
+            self._prev_flat_grads[name] = (flat_grad, norm)
     
     def update_target_networks(self):
         """Update target networks (hard copy) at their individual intervals."""
@@ -2741,21 +2845,30 @@ class BasePhase2Trainer(ABC):
         if rnd_lr_scales:
             prediction_stats['rnd_adaptive_lr'] = rnd_lr_scales
         
+        # Only compute gradient convergence metrics when TensorBoard logging is active;
+        # _update_grad_metrics flattens full gradient vectors to CPU each training step.
+        if getattr(self, "writer", None) is not None:
+            self._update_grad_metrics(grad_norms)
+        
         return loss_values, grad_norms, prediction_stats
     
     def _compute_single_grad_norm(self, network_name: str) -> float:
         """Compute gradient L2 norm for a single network."""
-        networks = {
+        networks: Dict[str, nn.Module] = {
             'q_r': self.networks.q_r,
             'v_h_e': self.networks.v_h_e,
         }
         if self.config.x_h_use_network and self.networks.x_h is not None:
             networks['x_h'] = self.networks.x_h
-        if self.config.u_r_use_network:
+        if self.config.u_r_use_network and self.networks.u_r is not None:
             networks['u_r'] = self.networks.u_r
-        # Only include V_r if using network mode
-        if self.config.v_r_use_network:
+        if self.config.v_r_use_network and self.networks.v_r is not None:
             networks['v_r'] = self.networks.v_r
+        if self.config.use_rnd and self.networks.rnd is not None:
+            networks['rnd'] = self.networks.rnd.predictor
+        if (self.config.use_rnd and self.config.use_human_action_rnd
+                and self.networks.human_rnd is not None):
+            networks['human_rnd'] = self.networks.human_rnd.predictor
         if network_name not in networks:
             return 0.0
         net = networks[network_name]
@@ -2956,6 +3069,14 @@ class BasePhase2Trainer(ABC):
                     if key == 'u_r' and not self.config.u_r_use_network:
                         continue
                     self.writer.add_scalar(f'GradNorm/{key}', value, self.training_step_count)
+                for key, value in self._grad_norm_ema.items():
+                    if key == 'u_r' and not self.config.u_r_use_network:
+                        continue
+                    self.writer.add_scalar(f'GradMetrics/{key}_ema_norm', value, self.training_step_count)
+                for key, value in self._grad_cosine_sim.items():
+                    if key == 'u_r' and not self.config.u_r_use_network:
+                        continue
+                    self.writer.add_scalar(f'GradMetrics/{key}_cosine_sim', value, self.training_step_count)
                 for key, stats in pred_stats.items():
                     # RND stats have different keys (running_mean/std instead of mean/std)
                     if key == 'rnd':

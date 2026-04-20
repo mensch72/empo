@@ -275,6 +275,12 @@ class Phase2Config:
     auto_grad_clip: bool = True
     auto_grad_clip_reference_lr: float = 1e-4  # Reference LR for scaling
     
+    # Gradient-based convergence metrics (EMA of gradient norm + cosine similarity)
+    # These are cheap monitoring diagnostics that don't require extra forward/backward passes.
+    # EMA of ∥g_t∥ tracks gradient scale; cosine similarity cos(g_t, g_{t-1}) tracks
+    # whether there's still a consistent descent direction (→0 near convergence).
+    grad_metrics_ema_decay: float = 0.99  # EMA decay rate for gradient norm tracking
+    
     # Dropout rate for hidden layers (not input/output) of each network
     q_r_dropout: float = 0.5
     v_r_dropout: float = 0.5
@@ -438,6 +444,12 @@ class Phase2Config:
                 "For neural network mode, prefer RND.",
                 UserWarning,
                 stacklevel=2
+            )
+        
+        # Validate gradient metrics settings
+        if not (0.0 <= self.grad_metrics_ema_decay < 1.0):
+            raise ValueError(
+                f"grad_metrics_ema_decay must be in [0, 1), got {self.grad_metrics_ema_decay}"
             )
         
         # Recommend count-based curiosity for lookup tables
@@ -1324,6 +1336,9 @@ class Phase2Config:
                     'u_r_grad_clip': self.u_r_grad_clip,
                     'auto_grad_clip': self.auto_grad_clip,
                     'auto_grad_clip_reference_lr': self.auto_grad_clip_reference_lr,
+                },
+                'gradient_metrics': {
+                    'grad_metrics_ema_decay': self.grad_metrics_ema_decay,
                 },
                 'dropout': {
                     'q_r_dropout': self.q_r_dropout,
