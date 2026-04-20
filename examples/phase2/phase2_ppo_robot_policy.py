@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import itertools
+import math
 import os
 import sys
 from typing import List
@@ -343,11 +344,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Phase 2 PPO demo — Asymmetric Freeing (heuristic humans)"
     )
+    ppo_rollout_length = 64
     parser.add_argument(
         "--iters",
         type=int,
-        default=100,
-        help="Number of PPO iterations (default: 100)",
+        default=None,
+        help="Number of PPO iterations (override; default: derived from --total-steps)",
+    )
+    parser.add_argument(
+        "--total-steps",
+        type=int,
+        default=200_000,
+        help="Total environment steps budget for PPO training (default: 200000)",
     )
     parser.add_argument(
         "--num-envs",
@@ -445,12 +453,24 @@ def main() -> None:
     human_indices = ref_env.human_agent_indices
     robot_indices = ref_env.robot_agent_indices
 
+    # Derive outer-iteration budget from total env steps unless explicitly overridden.
+    steps_per_iteration = args.num_envs * ppo_rollout_length
+    derived_iters = max(1, math.ceil(args.total_steps / max(1, steps_per_iteration)))
+    train_iters = args.iters if args.iters is not None else derived_iters
+
     print(f"World: {world_yaml}")
     print(f"Grid : {ref_env.width}×{ref_env.height}")
     print(f"Actions: {num_actions}")
     print(f"Human agents: {human_indices}")
     print(f"Robot agents: {robot_indices}")
     print(f"Max steps: {ref_env.max_steps}")
+    print(
+        "Training budget: "
+        f"total_steps={args.total_steps}, "
+        f"num_envs={args.num_envs}, "
+        f"rollout_length={ppo_rollout_length}, "
+        f"iters={train_iters}"
+    )
 
     # ------------------------------------------------------------------
     # 2. Build heuristic human policy and goal sampler
@@ -493,14 +513,14 @@ def main() -> None:
         num_actions=num_actions,
         num_robots=len(robot_indices),
         hidden_dim=args.hidden_dim,
-        ppo_rollout_length=64,
+        ppo_rollout_length=ppo_rollout_length,
         ppo_num_minibatches=4,
         ppo_update_epochs=4,
         ppo_ent_coef_start=ent_coef_start,
         ppo_ent_coef_end=ent_coef_end,
         ppo_ent_anneal_steps=args.ent_anneal_steps,
         num_envs=args.num_envs,
-        num_ppo_iterations=args.iters,
+        num_ppo_iterations=train_iters,
         lr_ppo=3e-4,
         # Auxiliary
         aux_training_steps_per_iteration=5,
@@ -576,8 +596,8 @@ def main() -> None:
         if args.load_checkpoint:
             print(f"\nRestoring from checkpoint: {args.load_checkpoint}")
             trainer.load_checkpoint(args.load_checkpoint)
-        print(f"\nStarting PPO training for {args.iters} iterations …")
-        metrics = trainer.train(env_creator, num_iterations=args.iters)
+        print(f"\nStarting PPO training for {train_iters} iterations …")
+        metrics = trainer.train(env_creator, num_iterations=train_iters)
 
     # ------------------------------------------------------------------
     # 9. Save checkpoint & report results
