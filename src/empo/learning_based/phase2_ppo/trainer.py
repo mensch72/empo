@@ -710,6 +710,26 @@ class PPOPhase2Trainer:
                     terminal=terminal,
                 )
 
+    @staticmethod
+    def _compute_reward_signal_std(pufferl: Any) -> float:
+        """Stddev of the rollout reward signal used by PPO training.
+
+        Uses PuffeRL's internal reward buffer (same signal used for
+        advantage computation) and computes population stddev over finite
+        entries for robust monitoring.
+        """
+        rewards = getattr(pufferl, "rewards", None)
+        if rewards is None:
+            return 0.0
+        try:
+            flat = rewards.detach().reshape(-1)
+            finite = flat[torch.isfinite(flat)]
+            if finite.numel() == 0:
+                return 0.0
+            return float(torch.std(finite, unbiased=False).item())
+        except Exception:
+            return 0.0
+
     # ------------------------------------------------------------------
     # TensorBoard helpers
     # ------------------------------------------------------------------
@@ -1055,6 +1075,9 @@ class PPOPhase2Trainer:
             # --- PufferLib: collect rollout + PPO update ---
             pufferl.evaluate()
 
+            # Monitor stddev of the exact reward signal used by PPO.
+            u_r_signal_std = self._compute_reward_signal_std(pufferl)
+
             # --- Extract auxiliary data from rollout info dicts ---
             self._collect_aux_data_from_rollout(pufferl, vecenv)
 
@@ -1086,6 +1109,7 @@ class PPOPhase2Trainer:
             metrics = {
                 **pufferl.losses,
                 **aux_losses,
+                "u_r_signal_std": u_r_signal_std,
                 "iteration": iteration,
                 "global_step": pufferl.global_step,
             }
@@ -1116,6 +1140,7 @@ class PPOPhase2Trainer:
                     pufferl.losses.get("u_r_clipped", 0),
                     step,
                 )
+                self._log_scalar("Reward/u_r_signal_std", u_r_signal_std, step)
                 cur_stage = cfg.get_warmup_stage(step)
                 self._log_scalar("Warmup/stage", cur_stage, step)
                 if cur_stage != prev_stage:
@@ -1129,12 +1154,13 @@ class PPOPhase2Trainer:
 
             if iteration % 100 == 0:
                 logger.info(
-                    "PPO iter %d (step %d): policy_loss=%.4f value_loss=%.4f u_r_clip_frac=%.3f",
+                    "PPO iter %d (step %d): policy_loss=%.4f value_loss=%.4f u_r_clip_frac=%.3f u_r_signal_std=%.4f",
                     iteration,
                     pufferl.global_step,
                     pufferl.losses.get("policy_loss", 0),
                     pufferl.losses.get("value_loss", 0),
                     pufferl.losses.get("u_r_clipped", 0),
+                    u_r_signal_std,
                 )
 
             # ── Checkpointing ────────────────────────────────────────────
