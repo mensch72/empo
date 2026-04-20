@@ -230,12 +230,12 @@ class EMPOWorldModelEnv(gymnasium.Env):
         if not self._u_r_frozen:
             self._u_r_warmup_buffer.append(u_r_raw)
             u_r = u_r_raw  # Raw U_r during warmup
+            # Scale during warmup (only scale, no variance normalization yet)
+            u_r = u_r / self._u_r_scale
         else:
-            # Normalize: (U_r - μ) / (σ + ε)
+            # After warmup: use variance normalization, skip scale factor
+            # (variance normalization IS the reward scaling strategy)
             u_r = (u_r_raw - self._u_r_mean) / (self._u_r_std + 1e-8)
-
-        # Normalise by scale factor for stable PPO advantage estimation.
-        u_r = u_r / self._u_r_scale
 
         # -- Goal resampling (stochastic, using seeded RNG) --
         if self._py_rng.random() < self.config.goal_resample_prob:
