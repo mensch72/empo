@@ -193,12 +193,15 @@ class PPOPhase2Trainer:
     def freeze_auxiliary_networks(self) -> None:
         """Create frozen copies of auxiliary networks for reward computation."""
         nets = self.auxiliary_networks
-        nets.v_h_e_target = copy.deepcopy(nets.v_h_e)
-        nets.v_h_e_target.eval()
-        for p in nets.v_h_e_target.parameters():
-            p.requires_grad = False
-        if hasattr(nets.v_h_e_target, "to"):
-            nets.v_h_e_target.to(self.device)
+        if self.config.use_simplified_x_h:
+            nets.v_h_e_target = None
+        else:
+            nets.v_h_e_target = copy.deepcopy(nets.v_h_e)
+            nets.v_h_e_target.eval()
+            for p in nets.v_h_e_target.parameters():
+                p.requires_grad = False
+            if hasattr(nets.v_h_e_target, "to"):
+                nets.v_h_e_target.to(self.device)
         if nets.x_h is not None:
             nets.x_h_target = copy.deepcopy(nets.x_h)
             nets.x_h_target.eval()

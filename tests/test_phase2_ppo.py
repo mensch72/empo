@@ -297,6 +297,19 @@ class TestPPOPhase2Config:
         assert cfg.get_active_aux_networks(20) == {"v_h_e", "x_h", "u_r"}
         assert cfg.get_active_aux_networks(30) == {"v_h_e", "x_h", "u_r"}
 
+    def test_active_aux_networks_simplified_x_h(self):
+        """Simplified X_h mode skips V_h^e and starts X_h immediately."""
+        cfg = PPOPhase2Config(
+            use_simplified_x_h=True,
+            warmup_v_h_e_steps=10,
+            warmup_x_h_steps=20,
+            warmup_u_r_steps=30,
+        )
+        assert cfg.get_active_aux_networks(0) == {"x_h"}
+        assert cfg.get_active_aux_networks(10) == {"x_h"}
+        assert cfg.get_active_aux_networks(20) == {"x_h", "u_r"}
+        assert cfg.get_active_aux_networks(30) == {"x_h", "u_r"}
+
     def test_is_in_warmup(self):
         cfg = PPOPhase2Config(
             warmup_v_h_e_steps=30,
@@ -319,6 +332,31 @@ class TestPPOPhase2Config:
         assert "PPO" in cfg.get_warmup_stage_name(
             30
         ).upper() or "full" in cfg.get_warmup_stage_name(30)
+
+    def test_warmup_stage_name_simplified_x_h(self):
+        cfg = PPOPhase2Config(
+            use_simplified_x_h=True,
+            warmup_v_h_e_steps=10,
+            warmup_x_h_steps=20,
+            warmup_u_r_steps=30,
+        )
+        assert "X_h" in cfg.get_warmup_stage_name(0)
+        assert "U_r" in cfg.get_warmup_stage_name(25)
+        assert "V_h^e" not in cfg.get_warmup_stage_name(0)
+
+    def test_warmup_stage_boundaries_simplified_x_h(self):
+        """Simplified X_h mode starts with X_h immediately and skips stage 2."""
+        cfg = PPOPhase2Config(
+            use_simplified_x_h=True,
+            warmup_v_h_e_steps=100,
+            warmup_x_h_steps=200,
+            warmup_u_r_steps=300,
+        )
+        assert cfg.get_warmup_stage(0) == 0
+        assert cfg.get_warmup_stage(199) == 0
+        assert cfg.get_warmup_stage(200) == 1
+        assert cfg.get_warmup_stage(299) == 1
+        assert cfg.get_warmup_stage(300) == 3
 
     def test_warmup_threshold_validation(self):
         """warmup thresholds must be non-decreasing."""

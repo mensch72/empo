@@ -243,9 +243,10 @@ class PPOPhase2Config:
         """Total training steps consumed by warm-up (stages 0-2).
 
         The warm-up stage boundaries are cumulative thresholds:
-        - Stage 0 → 1: ``warmup_v_h_e_steps``
-        - Stage 1 → 2: ``warmup_x_h_steps``
-        - Stage 2 → end: ``warmup_u_r_steps`` (the final threshold)
+                - Standard mode: Stage 0 → 1 at ``warmup_v_h_e_steps``,
+                    Stage 1 → 2 at ``warmup_x_h_steps``
+                - Simplified-X_h mode: X_h starts immediately; only the
+                    ``warmup_x_h_steps`` → ``warmup_u_r_steps`` boundary matters
 
         So ``warmup_u_r_steps`` is the cumulative total of all warm-up.
         """
@@ -260,11 +261,23 @@ class PPOPhase2Config:
 
         Stages::
 
+            Standard mode:
             0: V_h^e only            (0 ≤ step < warmup_v_h_e_steps)
             1: V_h^e + X_h           (warmup_v_h_e_steps ≤ step < warmup_x_h_steps)
             2: V_h^e + X_h + U_r     (warmup_x_h_steps ≤ step < warmup_u_r_steps)
+
+            Simplified-X_h mode:
+            0: X_h only              (0 ≤ step < warmup_x_h_steps)
+            1: X_h + U_r             (warmup_x_h_steps ≤ step < warmup_u_r_steps)
+
             3: Full PPO training     (step ≥ warmup_u_r_steps)
         """
+        if self.use_simplified_x_h:
+            if training_step < self.warmup_x_h_steps:
+                return 0
+            if training_step < self.warmup_u_r_steps:
+                return 1
+            return 3
         if training_step < self.warmup_v_h_e_steps:
             return 0
         if training_step < self.warmup_x_h_steps:
@@ -273,23 +286,41 @@ class PPOPhase2Config:
             return 2
         return 3
 
-    _WARMUP_STAGE_NAMES = {
+    _STANDARD_WARMUP_STAGE_NAMES = {
         0: "V_h^e only",
         1: "V_h^e + X_h",
         2: "V_h^e + X_h + U_r",
         3: "full PPO",
     }
 
+    _SIMPLIFIED_WARMUP_STAGE_NAMES = {
+        0: "X_h only",
+        1: "X_h + U_r",
+        3: "full PPO",
+    }
+
     def get_warmup_stage_name(self, training_step: int) -> str:
         """Human-readable name for the current warm-up stage."""
-        return self._WARMUP_STAGE_NAMES[self.get_warmup_stage(training_step)]
+        stage = self.get_warmup_stage(training_step)
+        if self.use_simplified_x_h:
+            return self._SIMPLIFIED_WARMUP_STAGE_NAMES[stage]
+        return self._STANDARD_WARMUP_STAGE_NAMES[stage]
 
     def get_active_aux_networks(self, training_step: int) -> Set[str]:
         """Set of auxiliary-network names to train at *training_step*.
 
-        V_h^e is always active; X_h and U_r are added according to the
-        staged warm-up schedule.
+        In standard mode, V_h^e is always active and X_h/U_r are added
+        according to the staged warm-up schedule.
+
+        In simplified-X_h mode, V_h^e is bypassed entirely. X_h is active
+        from the start, and U_r is added at ``warmup_x_h_steps``.
         """
+        if self.use_simplified_x_h:
+            active: Set[str] = {"x_h"}
+            if training_step >= self.warmup_x_h_steps:
+                active.add("u_r")
+            return active
+
         active: Set[str] = {"v_h_e"}
         if training_step >= self.warmup_v_h_e_steps:
             active.add("x_h")
@@ -298,7 +329,7 @@ class PPOPhase2Config:
         return active
 
     def get_entropy_coef(self, training_step: int) -> float:
-        """Cosine-annealed entropy coefficient.
+        r"""Cosine-annealed entropy coefficient.
 
         Uses a half-cosine schedule that stays high early (maximising
         exploration) and decays smoothly toward ``ppo_ent_coef_end``:
