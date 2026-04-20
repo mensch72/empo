@@ -301,6 +301,7 @@ class PPOPhase2Trainer:
 
         # --- X_h target values for next_states ---
         x_h_target_net = nets.x_h_target or nets.x_h
+        x_h_floor = 1.0 if cfg.use_simplified_x_h else _X_H_MIN
         with torch.no_grad():
             x_h_next_list = []
             for ns, h_idx, is_term in zip(next_states, human_indices, terminals):
@@ -308,7 +309,8 @@ class PPOPhase2Trainer:
                     x_h_next_list.append(torch.tensor(1.0, device=self.device))
                 else:
                     val = x_h_target_net(ns, world_model, h_idx, self.device)
-                    val = torch.clamp(val.squeeze(), min=1.0)
+                    val = torch.as_tensor(val.squeeze(), device=self.device)
+                    val = torch.clamp(val, min=x_h_floor)
                     x_h_next_list.append(val)
             x_h_next_values = torch.stack(x_h_next_list)
 
@@ -440,7 +442,6 @@ class PPOPhase2Trainer:
                                 goal,
                                 self.device,
                             )
-                            next_v = target_net.apply_hard_clamp(next_v)
                             target = cfg.gamma_h * next_v.squeeze()
                     v_h_e_targets.append(target)
 
@@ -510,7 +511,6 @@ class PPOPhase2Trainer:
                             v_for_x = v_target_net(
                                 t.state, world_model, h_idx, goal, self.device
                             )
-                            v_for_x = v_target_net.apply_hard_clamp(v_for_x)
                             x_target = nets.x_h.compute_target(
                                 v_for_x.squeeze(),
                                 goal_weight=weight,
@@ -549,14 +549,13 @@ class PPOPhase2Trainer:
 
                 with torch.no_grad():
                     x_vals: List[float] = []
-                    # Simplified mode: X_h >= 1; standard mode: X_h in [1e-3, 1.0].
+                    # Keep only the required lower bound on X_h for numerical stability.
                     x_h_floor = 1.0 if cfg.use_simplified_x_h else _X_H_MIN
                     if x_h_target_net is not None:
                         for h_idx in t.goals.keys():
                             xv = x_h_target_net(
                                 t.state, world_model, h_idx, self.device
                             )
-                            xv = x_h_target_net.apply_hard_clamp(xv)
                             x_vals.append(max(xv.squeeze().item(), x_h_floor))
                     if x_vals:
                         x_t = torch.tensor(x_vals, device=self.device)
