@@ -2038,16 +2038,18 @@ class BasePhase2Trainer(ABC):
                 # where q_h(s,s') = max_{a_h} P(s'|s, a_h, pi_{-h}), computed via world model.
                 # x_h_batch transitions supply (state s, next_state s') pairs.
                 with torch.no_grad():
-                    # Build aligned list of next_states matching x_h_states / x_h_human_indices
+                    # Build aligned list of next_states matching x_h_states / x_h_human_indices.
+                    # Do not re-sample humans here: x_h_states/x_h_human_indices were already
+                    # built earlier with a fixed random.sample(). The count of humans contributed
+                    # by each transition is deterministic (min(x_h_sample_humans, len(t.goals))),
+                    # so replicate next_state that many times without another random draw.
                     x_h_next_states = []
                     for t in x_h_batch:
                         if self.config.x_h_sample_humans is None:
-                            humans_for = list(t.goals.keys())
+                            num_humans_for_x_h = len(t.goals)
                         else:
-                            n_s = min(self.config.x_h_sample_humans, len(t.goals))
-                            humans_for = random.sample(list(t.goals.keys()), n_s)
-                        for _ in humans_for:
-                            x_h_next_states.append(t.next_state)
+                            num_humans_for_x_h = min(self.config.x_h_sample_humans, len(t.goals))
+                        x_h_next_states.extend([t.next_state] * num_humans_for_x_h)
                     target_x_h = self._compute_simplified_x_h_td_target(
                         x_h_states, x_h_next_states, x_h_human_indices
                     )
@@ -2387,6 +2389,8 @@ class BasePhase2Trainer(ABC):
 
         state_to_pi_r_idx = {s: i for i, s in enumerate(unique_states)}
 
+        from empo.human_policy_prior import HumanPolicyPrior
+
         targets = []
         for i, (state, next_state, h_idx) in enumerate(
             zip(states, next_states, human_indices)
@@ -2394,8 +2398,26 @@ class BasePhase2Trainer(ABC):
             pi_r_idx = state_to_pi_r_idx[state]
             pi_r = pi_r_batch[pi_r_idx]  # (num_robot_actions,)
 
-            # Compute P(next_state | state, a_h_val, pi_r) for each a_h value.
-            # P(s'|s, a_h, pi_r) = sum_{a_r} pi_r(a_r) * P(s'|s, a_h, a_r)
+            # Pre-compute other humans' marginal action distributions at this state.
+            # Only h_idx's action is fixed to a_h_val; other humans are marginalized
+            # over using their goal-agnostic policy prior.
+            other_humans = [h for h in self.human_agent_indices if h != h_idx]
+            if other_humans:
+                other_marginals = [
+                    HumanPolicyPrior._to_probability_array(
+                        self.human_policy_prior(state, oh)
+                    )
+                    for oh in other_humans
+                ]
+                other_joint_dist = self.human_policy_prior._profile_distribution_numpy(
+                    other_marginals
+                )
+            else:
+                other_joint_dist = [(1.0, [])]
+
+            # Compute P(next_state | state, a_h_val, pi_{-h}) for each a_h value.
+            # P(s'|s, a_h, pi_{-h}) = sum_{a_r} pi_r(a_r)
+            #                          * sum_{a_{-h}} pi_{-h}(a_{-h}|s) * P(s'|s, a_h, a_r, a_{-h})
             p_per_ah = []
             for a_h_val in range(num_actions):
                 p_total = 0.0
@@ -2403,20 +2425,24 @@ class BasePhase2Trainer(ABC):
                     robot_prob = float(pi_r[a_r_idx])
                     if robot_prob == 0.0:
                         continue
-                    # Build joint action list indexed by agent position.
-                    actions = [0] * self.num_agents
-                    for pos, h in enumerate(self.human_agent_indices):
-                        actions[h] = a_h_val
-                    for pos, r in enumerate(self.robot_agent_indices):
-                        # Decode the robot action profile index back to per-agent actions
-                        r_action = (a_r_idx // (num_actions ** pos)) % num_actions
-                        actions[r] = r_action
-                    trans = self.env.transition_probabilities(state, actions)
-                    if trans is None:
-                        continue
-                    for prob, ns in trans:
-                        if ns == next_state:
-                            p_total += robot_prob * float(prob)
+                    robot_action_tuple = self.networks.q_r_target.action_index_to_tuple(a_r_idx)
+                    for oh_prob, oh_actions in other_joint_dist:
+                        w = robot_prob * oh_prob
+                        if w == 0.0:
+                            continue
+                        # Build joint action vector: only h_idx is fixed to a_h_val.
+                        actions = [0] * self.num_agents
+                        actions[h_idx] = a_h_val
+                        for r, r_a in zip(self.robot_agent_indices, robot_action_tuple):
+                            actions[r] = r_a
+                        for oh, oa in zip(other_humans, oh_actions):
+                            actions[oh] = oa
+                        trans = self.env.transition_probabilities(state, actions)
+                        if trans is None:
+                            continue
+                        for prob, ns in trans:
+                            if ns == next_state:
+                                p_total += w * float(prob)
                 p_per_ah.append(p_total)
 
             max_p = max(p_per_ah)
