@@ -204,6 +204,8 @@ class MultiGridWorldModelEnv(EMPOWorldModelEnv):
             ),
             "u_r": u_r_raw,
             "u_r_ppo": u_r_ppo,
+            # Dashboard prints 3 decimals; this reveals proximity to -1.0.
+            "u_r_plus1": (u_r_raw + 1.0),
         }
 
         # Decode flat joint-action index to per-robot action tuple
