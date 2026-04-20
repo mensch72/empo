@@ -175,10 +175,14 @@ class MultiGridWorldModelEnv(EMPOWorldModelEnv):
             truncated = True
 
         # -- Compute intrinsic reward U_r(s_t) at pre-transition state --
-        u_r = self._compute_u_r(pre_state)
+        u_r_raw = self._compute_u_r(pre_state)
 
-        # Normalise into [-1, ≈0] so PufferLib's clamp(r, -1, 1) is benign.
-        u_r = u_r / self._u_r_scale
+        # Collect statistics during warmup; scale by std after freezing.
+        if not self._u_r_frozen:
+            self._u_r_warmup_buffer.append(u_r_raw)
+            u_r_ppo = u_r_raw / self._u_r_scale
+        else:
+            u_r_ppo = u_r_raw / (self._u_r_std + 1e-8)
 
         # -- Goal resampling (stochastic, using seeded RNG) --
         if self._py_rng.random() < self.config.goal_resample_prob:
@@ -198,7 +202,8 @@ class MultiGridWorldModelEnv(EMPOWorldModelEnv):
                 if hasattr(env_reward, "__len__")
                 else float(env_reward)
             ),
-            "u_r": u_r,
+            "u_r": u_r_raw,
+            "u_r_ppo": u_r_ppo,
         }
 
         # Decode flat joint-action index to per-robot action tuple
@@ -224,7 +229,7 @@ class MultiGridWorldModelEnv(EMPOWorldModelEnv):
                 "terminal": bool(terminated or truncated),
             }
         )
-        return obs, u_r, terminated, truncated, info
+        return obs, u_r_ppo, terminated, truncated, info
 
     # ------------------------------------------------------------------
     # Observation encoding
