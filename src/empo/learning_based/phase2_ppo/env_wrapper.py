@@ -141,9 +141,9 @@ class EMPOWorldModelEnv(gymnasium.Env):
         # because reset() must be called before step()).
         self._py_rng: np.random.RandomState = np.random.RandomState(0)
 
-        # U_r normalisation: dividing by a scale factor maps U_r into
-        # [-1, ≈0], preventing PufferLib's hard ``clamp(r, -1, 1)``
-        # from destroying the reward signal.
+        # U_r normalisation: dividing by a scale factor normalises the
+        # variance of U_r for stable PPO training.  PufferLib's hard reward
+        # clamp has been patched out (see vendor/pufferlib/pufferl.py).
         # Prefer config.u_r_scale (empirical, from calibration) over
         # the conservative theoretical upper-bound.
         if config.u_r_scale is not None:
@@ -207,9 +207,8 @@ class EMPOWorldModelEnv(gymnasium.Env):
         # -- Compute intrinsic reward U_r(s_t) at pre-transition state --
         u_r = self._compute_u_r(pre_state)
 
-        # Normalise into [-1, ≈0] so PufferLib's clamp(r, -1, 1) is benign.
+        # Normalise by scale factor for stable PPO advantage estimation.
         u_r = u_r / self._u_r_scale
-        u_r_clipped = 1.0 if u_r < -1.0 or u_r > 1.0 else 0.0
 
         # -- Goal resampling (stochastic, using seeded RNG) --
         if self._py_rng.random() < self.config.goal_resample_prob:
@@ -232,7 +231,6 @@ class EMPOWorldModelEnv(gymnasium.Env):
         info: Dict[str, Any] = {
             "env_reward": env_reward,
             "u_r": u_r,
-            "u_r_clipped": u_r_clipped,
         }
 
         # Decode flat joint-action index to per-robot action tuple for
