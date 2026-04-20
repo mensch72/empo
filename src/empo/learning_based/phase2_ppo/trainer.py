@@ -603,6 +603,34 @@ class PPOPhase2Trainer:
         # immediately visible.  Nothing to do here.
         pass
 
+    @staticmethod
+    def _freeze_u_r_normalization_in_envs(vecenv: Any) -> None:
+        """Freeze U_r variance statistics in all environments.
+
+        Called after warmup phase ends. Each environment freezes its collected
+        U_r samples into mean and std, then normalizes all subsequent rewards.
+        """
+        envs = getattr(vecenv, "envs", None)
+        if envs is None:
+            envs = getattr(vecenv, "single_env", None)
+            if envs is not None:
+                envs = [envs]
+        if not envs:
+            return
+
+        _MAX_UNWRAP_DEPTH = 20
+
+        for env in envs:
+            # Unwrap PufferLib emulation layers to reach EMPOWorldModelEnv.
+            inner = env
+            depth = 0
+            while hasattr(inner, "env") and depth < _MAX_UNWRAP_DEPTH:
+                inner = inner.env
+                depth += 1
+            # Call freeze method if it exists
+            if hasattr(inner, "freeze_u_r_normalization"):
+                inner.freeze_u_r_normalization()
+
     def _collect_aux_data_from_rollout(self, pufferl: Any, vecenv: Any) -> None:
         """Extract auxiliary transition data from environment aux buffers.
 
@@ -998,6 +1026,9 @@ class PPOPhase2Trainer:
         # Initial freeze of auxiliary networks and sync into envs
         self.freeze_auxiliary_networks()
         self._sync_aux_nets_to_envs(vecenv)
+
+        # Freeze U_r variance statistics after warmup phase completes
+        self._freeze_u_r_normalization_in_envs(vecenv)
 
         all_metrics: List[Dict[str, float]] = warmup_metrics
         iteration = 0

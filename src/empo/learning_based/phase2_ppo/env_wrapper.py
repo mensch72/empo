@@ -157,6 +157,17 @@ class EMPOWorldModelEnv(gymnasium.Env):
                 _X_H_MIN = 1e-3
                 self._u_r_scale = (_X_H_MIN ** (-config.xi)) ** config.eta
 
+        # Running variance normalization for U_r:
+        # - During warmup: collect U_r samples to estimate mean and std
+        # - After warmup: freeze statistics and normalize U_r → (U_r - μ) / (σ + ε)
+        # - Normalized rewards are returned by step() (before scaling by u_r_scale)
+        self._u_r_frozen: bool = False  # True after warmup ends
+        self._u_r_mean: float = 0.0
+        self._u_r_std: float = 1.0
+        self._u_r_warmup_buffer: deque = deque(
+            maxlen=config.ppo_rollout_length * 100
+        )  # buffer ~100 rollouts
+
     # ------------------------------------------------------------------
     # Gymnasium API
     # ------------------------------------------------------------------
@@ -206,6 +217,13 @@ class EMPOWorldModelEnv(gymnasium.Env):
 
         # -- Compute intrinsic reward U_r(s_t) at pre-transition state --
         u_r = self._compute_u_r(pre_state)
+
+        # Collect statistics during warmup; normalize after freezing.
+        if not self._u_r_frozen:
+            self._u_r_warmup_buffer.append(u_r)
+        else:
+            # Normalize: (U_r - μ) / (σ + ε)
+            u_r = (u_r - self._u_r_mean) / (self._u_r_std + 1e-8)
 
         # Normalise by scale factor for stable PPO advantage estimation.
         u_r = u_r / self._u_r_scale
@@ -260,6 +278,32 @@ class EMPOWorldModelEnv(gymnasium.Env):
             }
         )
         return obs, u_r, terminated, truncated, info
+
+    # ------------------------------------------------------------------
+    # Variance normalization control
+    # ------------------------------------------------------------------
+
+    def freeze_u_r_normalization(self) -> None:
+        """Freeze U_r variance statistics and switch to normalized rewards.
+
+        Called by trainer after warmup phase ends. Estimates mean and std from
+        collected samples, then applies (U_r - μ) / (σ + ε) normalization to
+        all subsequent U_r values.
+        """
+        if self._u_r_frozen:
+            return  # Already frozen
+
+        if len(self._u_r_warmup_buffer) > 0:
+            u_r_array = np.array(list(self._u_r_warmup_buffer))
+            self._u_r_mean = float(np.mean(u_r_array))
+            self._u_r_std = float(np.std(u_r_array))
+        else:
+            # No samples collected (unusual), use defaults
+            self._u_r_mean = 0.0
+            self._u_r_std = 1.0
+
+        self._u_r_frozen = True
+        self._u_r_warmup_buffer.clear()  # Free memory
 
     # ------------------------------------------------------------------
     # Internal helpers
