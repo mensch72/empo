@@ -9,11 +9,17 @@ Tests the modular architecture with:
 
 
 import torch
+import numpy as np
 
 from empo.learning_based.phase2 import (
     Phase2Config,
     Phase2ReplayBuffer,
     Phase2Transition,
+)
+from empo.learning_based.phase2.replay_buffer import (
+    PrioritizedPhase2ReplayBuffer,
+    PrioritizedBatch,
+    SumTree,
 )
 from empo.learning_based.multigrid.phase2 import (
     MultiGridRobotQNetwork,
@@ -167,6 +173,188 @@ def test_phase2_replay_buffer():
     print("  ✓ Clear works")
     
     print("  ✓ Phase2ReplayBuffer test passed!")
+
+
+def test_sum_tree():
+    """Test the SumTree data structure."""
+    print("Testing SumTree...")
+    
+    tree = SumTree(capacity=8)
+    
+    # Initially all zeros
+    assert tree.total() == 0.0
+    print("  ✓ Initial total is 0")
+    
+    # Update some leaves
+    tree.update(0, 1.0)
+    tree.update(1, 2.0)
+    tree.update(2, 3.0)
+    assert abs(tree.total() - 6.0) < 1e-10
+    print(f"  ✓ Total after updates: {tree.total()}")
+    
+    # Get individual priorities
+    assert abs(tree.get(0) - 1.0) < 1e-10
+    assert abs(tree.get(1) - 2.0) < 1e-10
+    assert abs(tree.get(2) - 3.0) < 1e-10
+    print("  ✓ Individual priorities correct")
+    
+    # Min priority
+    assert abs(tree.min(3) - 1.0) < 1e-10
+    print("  ✓ Min priority correct")
+    
+    # Sampling: values in [0,1) should map to leaf 0, [1,3) to leaf 1, [3,6) to leaf 2
+    assert tree.sample(0.5) == 0
+    assert tree.sample(1.5) == 1
+    assert tree.sample(4.0) == 2
+    print("  ✓ Proportional sampling correct")
+    
+    # Update a leaf and verify total changes
+    tree.update(0, 5.0)
+    assert abs(tree.total() - 10.0) < 1e-10
+    print("  ✓ Priority update propagates correctly")
+    
+    # Clear
+    tree.clear()
+    assert tree.total() == 0.0
+    print("  ✓ Clear works")
+    
+    print("  ✓ SumTree test passed!")
+
+
+def test_prioritized_replay_buffer():
+    """Test the PrioritizedPhase2ReplayBuffer."""
+    print("Testing PrioritizedPhase2ReplayBuffer...")
+    
+    buffer = PrioritizedPhase2ReplayBuffer(
+        capacity=100, alpha=0.6, beta_start=0.4, beta_end=1.0, epsilon=1e-6
+    )
+    
+    state = create_mock_state()
+    robot_action = (0, 1)
+    goals = {0: MockGoal((5, 5)), 1: MockGoal((3, 3))}
+    goal_weights = {0: 1.0, 1: 1.0}
+    human_actions = [2, 3]
+    next_state = create_mock_state()
+    
+    # Add transitions
+    for i in range(50):
+        buffer.push(state, robot_action, goals, goal_weights, human_actions, next_state)
+    
+    assert len(buffer) == 50
+    print(f"  ✓ Buffer length: {len(buffer)}")
+    
+    # Sample batch - should return PrioritizedBatch
+    result = buffer.sample(16)
+    assert isinstance(result, PrioritizedBatch)
+    assert len(result.transitions) == 16
+    assert len(result.indices) == 16
+    assert len(result.is_weights) == 16
+    assert all(isinstance(t, Phase2Transition) for t in result.transitions)
+    print(f"  ✓ PrioritizedBatch: {len(result.transitions)} transitions, "
+          f"{len(result.indices)} indices, {len(result.is_weights)} IS weights")
+    
+    # IS weights should be positive
+    assert all(w > 0 for w in result.is_weights)
+    # IS weights should be <= 1.0 (normalized by max weight)
+    assert all(w <= 1.0 + 1e-6 for w in result.is_weights)
+    print(f"  ✓ IS weights: min={min(result.is_weights):.4f}, max={max(result.is_weights):.4f}")
+    
+    # Indices should be valid
+    assert all(0 <= idx < len(buffer) for idx in result.indices)
+    print("  ✓ Indices within valid range")
+    
+    # Test transition fields
+    t = result.transitions[0]
+    assert t.robot_action == robot_action
+    assert t.human_actions == human_actions
+    print("  ✓ Transition fields correct")
+    
+    # Test priority update
+    new_priorities = [float(i + 1) for i in range(16)]
+    buffer.update_priorities(result.indices, new_priorities)
+    print("  ✓ Priority update works")
+    
+    # After updating with different priorities, sampling should be non-uniform
+    # Sample many times and check that higher-priority transitions are sampled more
+    sample_counts = {}
+    for _ in range(1000):
+        result2 = buffer.sample(1)
+        idx = result2.indices[0]
+        sample_counts[idx] = sample_counts.get(idx, 0) + 1
+    
+    # Updated indices should be sampled
+    updated_indices = set(result.indices)
+    sampled_updated = sum(1 for idx in sample_counts if idx in updated_indices)
+    assert sampled_updated > 0
+    print(f"  ✓ Updated transitions are sampled ({sampled_updated} unique updated indices seen)")
+    
+    # Test capacity overflow
+    buffer2 = PrioritizedPhase2ReplayBuffer(capacity=10)
+    for i in range(20):
+        buffer2.push(state, (i % 4, i % 4), goals, goal_weights, human_actions, next_state)
+    assert len(buffer2) == 10
+    print("  ✓ Capacity overflow handled correctly")
+    
+    # Test clear
+    buffer.clear()
+    assert len(buffer) == 0
+    print("  ✓ Clear works")
+    
+    # Test push with explicit priority
+    buffer3 = PrioritizedPhase2ReplayBuffer(capacity=10, alpha=1.0)
+    buffer3.push(state, robot_action, goals, goal_weights, human_actions, next_state, priority=10.0)
+    buffer3.push(state, robot_action, goals, goal_weights, human_actions, next_state, priority=1.0)
+    
+    # Sample many times - higher priority should be sampled more often
+    high_count = 0
+    for _ in range(1000):
+        r = buffer3.sample(1)
+        if r.indices[0] == 0:
+            high_count += 1
+    
+    # With alpha=1.0 and priorities 10 vs 1, first transition should be sampled ~10x more
+    # Expected proportion: 10/(10+1) ≈ 0.909, so ~909/1000. Using 700 (70%) as a conservative
+    # threshold to avoid flaky failures from random sampling variance.
+    assert high_count > 700, f"Expected >700 samples from high-priority transition, got {high_count}"
+    print(f"  ✓ Higher priority sampled more: {high_count}/1000 from priority=10")
+    
+    # Test beta annealing
+    beta_start = buffer3.get_beta(0, 1000)
+    beta_mid = buffer3.get_beta(500, 1000)
+    beta_end = buffer3.get_beta(1000, 1000)
+    assert abs(beta_start - 0.4) < 1e-6
+    assert abs(beta_mid - 0.7) < 1e-6
+    assert abs(beta_end - 1.0) < 1e-6
+    print(f"  ✓ Beta annealing: start={beta_start:.2f}, mid={beta_mid:.2f}, end={beta_end:.2f}")
+    
+    print("  ✓ PrioritizedPhase2ReplayBuffer test passed!")
+
+
+def test_prioritized_replay_config():
+    """Test Phase2Config with prioritised replay options."""
+    print("Testing Phase2Config with prioritised replay...")
+    
+    # Default: prioritised replay disabled
+    config = Phase2Config()
+    assert not config.use_prioritized_replay
+    print("  ✓ Default: prioritised replay disabled")
+    
+    # Enable prioritised replay
+    config = Phase2Config(
+        use_prioritized_replay=True,
+        priority_alpha=0.8,
+        priority_beta_start=0.5,
+        priority_beta_end=1.0,
+        priority_epsilon=1e-5
+    )
+    assert config.use_prioritized_replay
+    assert config.priority_alpha == 0.8
+    assert config.priority_beta_start == 0.5
+    assert config.priority_beta_end == 1.0
+    assert config.priority_epsilon == 1e-5
+    print("  ✓ Prioritised replay config set correctly")
+    
+    print("  ✓ Phase2Config prioritised replay test passed!")
 
 
 def test_multigrid_robot_q_network():
@@ -768,6 +956,15 @@ def run_all_tests():
     print()
     
     test_ensure_negative()
+    print()
+    
+    test_sum_tree()
+    print()
+    
+    test_prioritized_replay_buffer()
+    print()
+    
+    test_prioritized_replay_config()
     print()
     
     print("=" * 60)
