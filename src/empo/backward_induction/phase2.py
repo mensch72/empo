@@ -1088,7 +1088,13 @@ def compute_robot_policy(
     use_disk_slicing: bool = False,
     use_compression: bool = False,
     use_float16: bool = True,
-) -> Tuple[TabularRobotPolicy, Dict[State, float], Dict[State, Dict[int, Dict[PossibleGoal, float]]]]: ...
+    use_simplified_x_h: bool = False,
+    epsilon_h: float = 0.0,
+) -> Tuple[
+    TabularRobotPolicy,
+    Dict[State, float],
+    Union[Dict[State, Dict[int, Dict[PossibleGoal, float]]], Dict[State, Dict[int, float]]],
+]: ...
 
 
 @overload
@@ -1160,8 +1166,8 @@ def compute_robot_policy(
 ) -> Union[
     TabularRobotPolicy,
     Tuple[TabularRobotPolicy, MarkovChain],
-    Tuple[TabularRobotPolicy, Dict[State, float], Dict[State, Dict[int, Dict[PossibleGoal, float]]]],
-    Tuple[TabularRobotPolicy, Dict[State, float], Dict[State, Dict[int, Dict[PossibleGoal, float]]], MarkovChain],
+    Tuple[TabularRobotPolicy, Dict[State, float], Union[Dict[State, Dict[int, Dict[PossibleGoal, float]]], Dict[State, Dict[int, float]]]],
+    Tuple[TabularRobotPolicy, Dict[State, float], Union[Dict[State, Dict[int, Dict[PossibleGoal, float]]], Dict[State, Dict[int, float]]], MarkovChain],
 ]:
     """
     Compute robot policy via backward induction on the state DAG.

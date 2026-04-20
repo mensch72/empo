@@ -401,6 +401,23 @@ class Phase2Config:
     
     def __post_init__(self):
         """Compute cumulative warmup thresholds and apply network flags."""
+        # Validate x_h_epsilon_h range: it is a mixing probability
+        if not 0.0 <= self.x_h_epsilon_h <= 1.0:
+            raise ValueError(
+                f"x_h_epsilon_h must be in [0.0, 1.0], got {self.x_h_epsilon_h!r}"
+            )
+        
+        # Warn if simplified X_h is requested but the X_h network is disabled,
+        # since the simplified recursion target is only applied when learning X_h.
+        if self.use_simplified_x_h and not self.x_h_use_network:
+            warnings.warn(
+                "use_simplified_x_h=True while x_h_use_network=False. "
+                "The simplified recursion target is only used when approximating X_h "
+                "with a network, so this combination is likely unintended.",
+                UserWarning,
+                stacklevel=2,
+            )
+        
         # Override X_h warmup duration to 0 if not using X_h network
         if not self.x_h_use_network:
             self.warmup_x_h_steps = 0
