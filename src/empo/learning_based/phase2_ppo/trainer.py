@@ -906,16 +906,23 @@ class PPOPhase2Trainer:
                     _, reward, terminated, truncated, info = env.step(action)
 
                     u_r = None
-                    if isinstance(info, dict) and "u_r" in info:
-                        u_r = info["u_r"]
-                    else:
-                        # Fall back to the scalar reward returned by env_step.
-                        u_r = reward
-                    # Many wrappers expose a scaled u_r; rescale to the underlying
-                    # U_r magnitude if _u_r_scale is present.
-                    scale_attr = getattr(env, "_u_r_scale", 1.0)
+                    if isinstance(info, dict):
+                        # Preferred key: raw theoretical U_r.
+                        if "u_r" in info:
+                            u_r = info["u_r"]
+                        # Backward compatibility: wrappers that expose only scaled PPO reward.
+                        elif "u_r_ppo" in info:
+                            scale_attr = getattr(env, "_u_r_scale", 1.0)
+                            u_r = float(info["u_r_ppo"]) * float(scale_attr)
+                    if u_r is None:
+                        # Fall back to scalar reward returned by env_step (likely scaled).
+                        scale_attr = getattr(env, "_u_r_scale", 1.0)
+                        try:
+                            u_r = float(reward) * float(scale_attr)
+                        except (TypeError, ValueError):
+                            continue
                     try:
-                        u_r = float(u_r) * float(scale_attr)
+                        u_r = float(u_r)
                     except (TypeError, ValueError):
                         # If casting fails, skip this sample.
                         continue

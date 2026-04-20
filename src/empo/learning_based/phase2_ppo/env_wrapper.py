@@ -227,6 +227,11 @@ class EMPOWorldModelEnv(gymnasium.Env):
             # After warmup: std-only scaling (no centering).
             u_r = u_r_raw / (self._u_r_std + 1e-8)
 
+        # Distinguish theory quantity from PPO training reward.
+        # - u_r_raw: theoretical U_r(s) (must remain non-positive)
+        # - u_r: reward returned to PPO (scaled for stable optimization)
+        u_r_ppo = u_r
+
         # -- Goal resampling (stochastic, using seeded RNG) --
         if self._py_rng.random() < self.config.goal_resample_prob:
             self._resample_goals(next_state)
@@ -247,7 +252,8 @@ class EMPOWorldModelEnv(gymnasium.Env):
         # Rich auxiliary data is instead stored in ``_aux_buffer`` below.
         info: Dict[str, Any] = {
             "env_reward": env_reward,
-            "u_r": u_r,
+            "u_r": u_r_raw,
+            "u_r_ppo": u_r_ppo,
         }
 
         # Decode flat joint-action index to per-robot action tuple for
@@ -276,7 +282,7 @@ class EMPOWorldModelEnv(gymnasium.Env):
                 "terminal": bool(terminated or truncated),
             }
         )
-        return obs, u_r, terminated, truncated, info
+        return obs, u_r_ppo, terminated, truncated, info
 
     # ------------------------------------------------------------------
     # Variance normalization control
