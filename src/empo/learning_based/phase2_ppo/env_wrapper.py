@@ -149,8 +149,13 @@ class EMPOWorldModelEnv(gymnasium.Env):
         if config.u_r_scale is not None:
             self._u_r_scale: float = config.u_r_scale
         else:
-            _X_H_MIN = 1e-3
-            self._u_r_scale = (_X_H_MIN ** (-config.xi)) ** config.eta
+            if config.use_simplified_x_h:
+                # Simplified mode has X_h >= 1 so y = mean(X_h^-xi) <= 1,
+                # hence U_r = -(y^eta) is naturally in [-1, 0].
+                self._u_r_scale = 1.0
+            else:
+                _X_H_MIN = 1e-3
+                self._u_r_scale = (_X_H_MIN ** (-config.xi)) ** config.eta
 
     # ------------------------------------------------------------------
     # Gymnasium API
@@ -321,8 +326,10 @@ class EMPOWorldModelEnv(gymnasium.Env):
         within a rollout.  Falls back to the online networks when targets
         are absent.
 
-        X_h values are floored at ``_X_H_MIN`` (1e-3) to prevent
-        numerical instability in the X_h^{-ξ} exponentiation.
+        X_h values are lower-bounded to prevent numerical instability in
+        the X_h^{-ξ} exponentiation:
+        - Standard mode: floor at 1e-3.
+        - Simplified mode: floor at 1.0 (no upper clamp).
 
         The device is inferred from the auxiliary network parameters
         to avoid device-mismatch errors when running on CUDA.
@@ -332,8 +339,8 @@ class EMPOWorldModelEnv(gymnasium.Env):
 
         import torch
 
-        # Floor value matching trainer.py
-        _X_H_MIN = 1e-3
+        # Lower-bound values matching trainer.py semantics.
+        x_h_floor = 1.0 if self.config.use_simplified_x_h else 1e-3
 
         nets = self.auxiliary_networks
 
@@ -359,16 +366,19 @@ class EMPOWorldModelEnv(gymnasium.Env):
             # Option A: dedicated U_r network
             if u_r_net is not None:
                 _, u_r = u_r_net(state, self.world_model, device)
-                return float(u_r.item())
+                # U_r must be non-positive by construction.
+                return min(float(u_r.item()), 0.0)
             # Option B: compute from X_h values directly (eq. 8)
             if x_h_net is not None:
                 x_h_vals = []
                 for h_idx in self.human_agent_indices:
                     x_h = x_h_net(state, self.world_model, h_idx, device)
-                    x_h_vals.append(min(max(float(x_h.item()), _X_H_MIN), 1.0))
+                    x_h_vals.append(max(float(x_h.item()), x_h_floor))
                 if x_h_vals:
                     y = float(np.mean([x ** (-self.config.xi) for x in x_h_vals]))
-                    return -(y**self.config.eta)
+                    u_r = -(y**self.config.eta)
+                    # Guard against numerical/model drift to positive values.
+                    return min(u_r, 0.0)
         return 0.0
 
     def _compute_transition_probs(

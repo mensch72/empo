@@ -850,6 +850,34 @@ class TestEMPOWorldModelEnv:
         _, reward, _, _, _ = env.step(0)
         assert reward == pytest.approx(-1.0 / expected_scale)
 
+    def test_u_r_scale_none_uses_unity_fallback_in_simplified_mode(self):
+        """Simplified X_h mode defaults to u_r_scale=1.0 (no extra shrinking)."""
+
+        class _KnownRewardEnv(_ZeroObsEnv):
+            def _compute_u_r(self, state):
+                return -1.0
+
+        wm = MockWorldModel(n_agents=3, n_actions=5)
+        cfg = PPOPhase2Config(
+            num_actions=5,
+            num_robots=1,
+            steps_per_episode=50,
+            u_r_scale=None,
+            use_simplified_x_h=True,
+        )
+        env = _KnownRewardEnv(
+            world_model=wm,
+            human_policy_prior=mock_human_policy_prior,
+            goal_sampler=mock_goal_sampler,
+            human_agent_indices=[0, 1],
+            robot_agent_indices=[2],
+            config=cfg,
+            obs_dim=3,
+        )
+        env.reset()
+        _, reward, _, _, _ = env.step(0)
+        assert reward == pytest.approx(-1.0)
+
 
 # ======================================================================
 # 4. PPOPhase2Trainer tests
