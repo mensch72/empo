@@ -2091,8 +2091,13 @@ class BasePhase2Trainer(ABC):
                     self.env, self.device
                 ).squeeze()
                 
-                # Clamp X_h values and compute X_h^{-xi}
-                x_h_clamped = torch.clamp(x_h_all, min=1e-3, max=1.0)
+                # Clamp X_h values and compute X_h^{-xi}.
+                # Simplified mode: X_h >= 1 (no upper bound).
+                # Standard mode: X_h in [1e-3, 1.0].
+                if self.config.use_simplified_x_h:
+                    x_h_clamped = torch.clamp(x_h_all, min=1.0)
+                else:
+                    x_h_clamped = torch.clamp(x_h_all, min=1e-3, max=1.0)
                 x_h_power = x_h_clamped ** (-self.config.xi)
                 
                 # Aggregate by state using scatter_add: sum X_h^{-xi} for each state
