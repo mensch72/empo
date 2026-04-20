@@ -413,9 +413,13 @@ def main() -> None:
                         help="Intertemporal inequality aversion (default: 1.1)")
     parser.add_argument("--simple-power", action="store_true",
                         help="Use simplified (goal-agnostic) power metric X_h")
-    parser.add_argument("--ent-coef-start", type=float, default=0.1,
-                        help="Initial entropy coefficient (default: 0.1)")
-    parser.add_argument("--ent-coef-end", type=float, default=0.01,
+    parser.add_argument("--beta_r", type=float, default=None,
+                        help="Robot soft-max concentration (theory parameter). "
+                             "Translated to entropy coef via α ≈ 1/β_r. "
+                             "Overrides --ent-coef-end when given.")
+    parser.add_argument("--ent-coef-start", type=float, default=None,
+                        help="Initial entropy coefficient (default: 10× ent-coef-end)")
+    parser.add_argument("--ent-coef-end", type=float, default=None,
                         help="Final entropy coefficient (default: 0.01)")
     parser.add_argument("--ent-anneal-steps", type=int, default=10_000,
                         help="Steps over which to anneal entropy coef (default: 10000)")
@@ -458,7 +462,22 @@ def main() -> None:
     )
 
     # ------------------------------------------------------------------
-    # 3. Configuration
+    # 3. Translate beta_r → entropy coefficient schedule
+    # ------------------------------------------------------------------
+    # Approximate mapping: in entropy-regularised RL the optimal policy
+    # satisfies π(a) ∝ exp(Q(a)/α), so α plays the role of 1/β_r.
+    # The U_r rewards are normalised into roughly [-1, 0], so the
+    # Q-value spread is O(1) and α ≈ 1/β_r is a reasonable default.
+    if args.beta_r is not None:
+        ent_coef_end = 1.0 / args.beta_r
+        ent_coef_start = args.ent_coef_start if args.ent_coef_start is not None else 10.0 * ent_coef_end
+        print(f"β_r={args.beta_r} → ent_coef: {ent_coef_start:.6f} → {ent_coef_end:.6f}")
+    else:
+        ent_coef_end = args.ent_coef_end if args.ent_coef_end is not None else 0.01
+        ent_coef_start = args.ent_coef_start if args.ent_coef_start is not None else 10.0 * ent_coef_end
+
+    # ------------------------------------------------------------------
+    # 4. Configuration
     # ------------------------------------------------------------------
     cfg = PPOPhase2Config(
         # Theory
@@ -475,8 +494,8 @@ def main() -> None:
         ppo_rollout_length=64,
         ppo_num_minibatches=4,
         ppo_update_epochs=4,
-        ppo_ent_coef_start=args.ent_coef_start,
-        ppo_ent_coef_end=args.ent_coef_end,
+        ppo_ent_coef_start=ent_coef_start,
+        ppo_ent_coef_end=ent_coef_end,
         ppo_ent_anneal_steps=args.ent_anneal_steps,
         num_envs=args.num_envs,
         num_ppo_iterations=args.iters,
@@ -498,7 +517,7 @@ def main() -> None:
     )
 
     # ------------------------------------------------------------------
-    # 4. Create networks
+    # 5. Create networks
     # ------------------------------------------------------------------
     actor_critic, aux_nets, state_encoder = create_multigrid_ppo_networks(
         env=ref_env,
@@ -512,7 +531,7 @@ def main() -> None:
     print(f"Actor-critic joint actions: {actor_critic.num_joint_actions}")
 
     # ------------------------------------------------------------------
-    # 5. Build the trainer
+    # 6. Build the trainer
     # ------------------------------------------------------------------
     trainer = PPOPhase2Trainer(
         actor_critic=actor_critic,
@@ -522,7 +541,7 @@ def main() -> None:
     )
 
     # ------------------------------------------------------------------
-    # 6. Define env_creator
+    # 7. Define env_creator
     # ------------------------------------------------------------------
     shared_encoder = state_encoder
 
@@ -546,7 +565,7 @@ def main() -> None:
         )
 
     # ------------------------------------------------------------------
-    # 7. Train (or skip if --use-checkpoint)
+    # 8. Train (or skip if --use-checkpoint)
     # ------------------------------------------------------------------
     if args.use_checkpoint:
         print(f"\nLoading checkpoint (skipping training): {args.use_checkpoint}")
@@ -559,7 +578,7 @@ def main() -> None:
         metrics = trainer.train(env_creator, num_iterations=args.iters)
 
     # ------------------------------------------------------------------
-    # 8. Save checkpoint & report results
+    # 9. Save checkpoint & report results
     # ------------------------------------------------------------------
     if args.output_dir:
         output_dir = args.output_dir
@@ -595,7 +614,7 @@ def main() -> None:
         print("No metrics returned (training may have been too short).")
 
     # ------------------------------------------------------------------
-    # 8b. Diagnostics: U_r, X_h, V_h^e at root state + V_r(root)
+    # 9b. Diagnostics: U_r, X_h, V_h^e at root state + V_r(root)
     # ------------------------------------------------------------------
     diag_env = _create_world_model(world_yaml, max_steps=args.steps)
     diag_env.reset()
@@ -679,7 +698,7 @@ def main() -> None:
     diag_env.set_state(root_state)  # restore
 
     # ------------------------------------------------------------------
-    # 9. Generate rollout movie
+    # 10. Generate rollout movie
     # ------------------------------------------------------------------
     num_rollouts = args.rollouts
 
