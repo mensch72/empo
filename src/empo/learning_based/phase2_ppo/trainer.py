@@ -605,10 +605,10 @@ class PPOPhase2Trainer:
 
     @staticmethod
     def _freeze_u_r_normalization_in_envs(vecenv: Any) -> None:
-        """Freeze U_r variance statistics in all environments.
+        """Freeze U_r scale statistics in all environments.
 
         Called after warmup phase ends. Each environment freezes its collected
-        U_r samples into mean and std, then normalizes all subsequent rewards.
+        U_r samples into a std estimate used for post-warmup scaling.
         """
         envs = getattr(vecenv, "envs", None)
         if envs is None:
@@ -616,16 +616,11 @@ class PPOPhase2Trainer:
             if envs is not None:
                 envs = [envs]
         if not envs:
-            import sys
-            print("[U_r Freeze] WARNING: No environments found in vecenv", file=sys.stderr)
             return
 
         _MAX_UNWRAP_DEPTH = 20
-        
-        import sys
-        print(f"[U_r Freeze] Freezing U_r normalization in {len(envs)} environment(s)", file=sys.stderr)
 
-        for i, env in enumerate(envs):
+        for env in envs:
             # Unwrap PufferLib emulation layers to reach EMPOWorldModelEnv.
             inner = env
             depth = 0
@@ -634,10 +629,7 @@ class PPOPhase2Trainer:
                 depth += 1
             # Call freeze method if it exists
             if hasattr(inner, "freeze_u_r_normalization"):
-                print(f"[U_r Freeze] Freezing environment {i} (unwrap depth={depth})", file=sys.stderr)
                 inner.freeze_u_r_normalization()
-            else:
-                print(f"[U_r Freeze] WARNING: Environment {i} has no freeze_u_r_normalization method", file=sys.stderr)
 
     def _collect_aux_data_from_rollout(self, pufferl: Any, vecenv: Any) -> None:
         """Extract auxiliary transition data from environment aux buffers.
@@ -1035,7 +1027,7 @@ class PPOPhase2Trainer:
         self.freeze_auxiliary_networks()
         self._sync_aux_nets_to_envs(vecenv)
 
-        # Freeze U_r variance statistics after warmup phase completes
+        # Freeze U_r post-warmup scaling statistics.
         self._freeze_u_r_normalization_in_envs(vecenv)
 
         all_metrics: List[Dict[str, float]] = warmup_metrics
