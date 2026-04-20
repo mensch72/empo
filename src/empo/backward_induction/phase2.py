@@ -111,7 +111,7 @@ def _rp_process_single_state(
     epsilon_h: float = 0.0,
     Xh_values: Optional[List[Dict[int, float]]] = None,
 ) -> Tuple[
-    Dict[int, Dict[PossibleGoal, float]],  # vh_results: agent -> goal -> value (empty when use_simplified_x_h=True)
+    Dict[int, Dict[PossibleGoal, float]],  # vh_results: agent -> goal -> V_h^e value; empty dict when use_simplified_x_h=True
     float,  # vr_result
     Optional[Dict[RobotActionProfile, float]],  # robot_policy (None for terminal)
     Dict[int, float],  # successor_probs: successor state_index -> transition probability
@@ -359,7 +359,8 @@ def _rp_process_single_state(
                     q_h = max_p
 
                 if q_h > 0.0:
-                    # Successor X_h(s'): default 1.0 for terminal states
+                    # X_h(s'): use computed value; default 1.0 for terminal states
+                    # (terminal states have X_h = 1 by definition in the simplified recursion)
                     xh_s_prime = Xh_values[s_prime_idx].get(agent_index, 1.0)
                     xh += gamma_h_zeta * (q_h ** zeta) * xh_s_prime
 

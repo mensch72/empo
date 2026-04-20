@@ -9,7 +9,6 @@ instead (see Phase2Config.use_simplified_x_h). In that case the feasible range
 is [1, +∞) because terminal states have X_h = 1 and all other states X_h > 1.
 """
 
-import math
 import torch
 import torch.nn as nn
 from abc import ABC, abstractmethod
@@ -62,14 +61,14 @@ class BaseAggregateGoalAbilityNetwork(nn.Module, ABC):
         if zeta < 1.0:
             raise ValueError(f"zeta must be >= 1.0, got {zeta}")
         
-        self._unbounded_above = math.isinf(feasible_range[1])
+        # Simplified mode: only a lower bound is needed (X_h >= 1, no upper bound).
+        self._unbounded_above = feasible_range[1] == float('inf')
         if self._unbounded_above:
-            # Simplified mode: only enforce lower bound.
-            # Soft lower bound: relu(x - lb) + lb (≥ lb always, gradient = 1 when x > lb).
+            # Soft lower bound: relu(x - lb) + lb  (>= lb always; gradient = 1 when x > lb).
             self.soft_clamp: Optional[SoftClamp] = None
             self._lower_bound = float(feasible_range[0])
         else:
-            # Standard mode: use SoftClamp for bounding to [a, b].
+            # Standard mode: SoftClamp for bounding to [a, b].
             self.soft_clamp = SoftClamp(a=feasible_range[0], b=feasible_range[1])
             self._lower_bound = float(feasible_range[0])
     

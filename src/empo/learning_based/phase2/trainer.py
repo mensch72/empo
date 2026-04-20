@@ -2038,13 +2038,7 @@ class BasePhase2Trainer(ABC):
                 # where q_h(s,s') = max_{a_h} P(s'|s, a_h, pi_{-h}), computed via world model.
                 # x_h_batch transitions supply (state s, next_state s') pairs.
                 with torch.no_grad():
-                    x_h_next_states = [t.next_state for t in x_h_batch
-                                       for h in (self.human_agent_indices
-                                                 if self.config.x_h_sample_humans is None
-                                                 else random.sample(list(self.human_agent_indices),
-                                                                    min(self.config.x_h_sample_humans,
-                                                                        len(self.human_agent_indices))))]
-                    # Rebuild aligned lists (same order as x_h_states / x_h_human_indices)
+                    # Build aligned list of next_states matching x_h_states / x_h_human_indices
                     x_h_next_states = []
                     for t in x_h_batch:
                         if self.config.x_h_sample_humans is None:
