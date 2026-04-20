@@ -1,0 +1,215 @@
+"""
+Shared helper for computing simplified (goal-agnostic) X_h TD targets.
+
+Used by both the DQN-based and PPO-based Phase 2 trainers when
+``use_simplified_x_h=True``.
+
+The simplified recursion is::
+
+    X_h(s) = 1 + gamma_h^zeta * sum_{s'} q_h(s,s')^zeta * X_h(s')
+
+where::
+
+    q_h(s,s') = max_{a_h} P(s'|s, a_h, pi_{-h})
+"""
+
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+import numpy as np
+import torch
+
+
+def _joint_distribution_numpy(
+    marginals: List[np.ndarray],
+) -> List[Tuple[float, List[int]]]:
+    """Compute joint distribution from independent marginals.
+
+    Fast paths for 0, 1, and 2 agents; general N-agent fallback.
+    Returns a list of ``(probability, action_list)`` pairs with non-zero
+    probability only.
+    """
+    if not marginals:
+        return [(1.0, [])]
+    if len(marginals) == 1:
+        m = marginals[0]
+        return [(float(m[a]), [int(a)]) for a in np.nonzero(m > 0)[0]]
+    if len(marginals) == 2:
+        m0, m1 = marginals[0], marginals[1]
+        joint = np.outer(m0, m1)
+        ii, jj = np.nonzero(joint > 0)
+        probs = joint[ii, jj]
+        return [
+            (float(probs[k]), [int(ii[k]), int(jj[k])])
+            for k in range(len(probs))
+        ]
+    # General case: iterative outer product
+    from itertools import product as itertools_product
+
+    indices = [np.nonzero(m > 0)[0] for m in marginals]
+    result = []
+    for combo in itertools_product(*indices):
+        p = 1.0
+        for m, a in zip(marginals, combo):
+            p *= float(m[a])
+        if p > 0:
+            result.append((p, [int(a) for a in combo]))
+    return result
+
+
+def _to_prob_array(dist) -> np.ndarray:
+    """Convert an action distribution (dict, list, or ndarray) to a
+    normalised numpy probability array."""
+    if isinstance(dist, dict):
+        arr = np.array([dist[i] for i in range(len(dist))], dtype=np.float64)
+    else:
+        arr = np.asarray(dist, dtype=np.float64)
+    s = arr.sum()
+    if s > 0:
+        arr /= s
+    else:
+        arr[:] = 1.0 / len(arr)
+    return arr
+
+
+def compute_simplified_x_h_td_targets(
+    states: List[Any],
+    next_states: List[Any],
+    human_indices: List[int],
+    *,
+    gamma_h: float,
+    zeta: float,
+    epsilon_h: float,
+    num_actions: int,
+    num_agents: int,
+    human_agent_indices: List[int],
+    robot_agent_indices: List[int],
+    x_h_next_values: torch.Tensor,
+    robot_policy_per_state: Dict[Any, torch.Tensor],
+    action_index_to_tuple: Callable[[int], Tuple[int, ...]],
+    other_human_probs_fn: Callable[[Any, int], np.ndarray],
+    world_model: Any,
+    device: str = "cpu",
+) -> torch.Tensor:
+    """Compute simplified X_h TD targets via the goal-agnostic recursion.
+
+    This is a per-sample (stochastic) TD estimator for the fixed-point
+    equation::
+
+        X_h(s) = 1 + gamma_h^zeta * sum_{s'} q_h(s,s')^zeta * X_h(s')
+
+    For each observed transition ``(s, s')`` the per-sample target is::
+
+        target(s, s') = 1 + gamma_h^zeta * q_h(s, s')^zeta * X_h_target(s')
+
+    where::
+
+        q_h(s, s') = max_{a_h} P(s'|s, a_h, pi_{-h}(·|s))
+
+    With bounded rationality ``(epsilon_h > 0)``::
+
+        q_h = (1 - eps) * max_{a_h} P(...) + eps * mean_{a_h} P(...)
+
+    Parameters
+    ----------
+    states, next_states : list
+        Source / successor states, one per sample.
+    human_indices : list[int]
+        Focal human agent index for each sample.
+    gamma_h, zeta, epsilon_h : float
+        Theory parameters.
+    num_actions : int
+        Number of actions per agent.
+    num_agents : int
+        Total number of agents (humans + robots).
+    human_agent_indices, robot_agent_indices : list[int]
+        Agent index lists.
+    x_h_next_values : Tensor, shape ``(batch,)``
+        Pre-computed ``X_h_target(s')`` for every next_state.
+        Terminal states should already have value 1.0.
+    robot_policy_per_state : dict[state → Tensor]
+        Maps each unique state to a 1-D tensor of robot joint-action
+        probabilities.
+    action_index_to_tuple : callable
+        Flat robot joint-action index → per-robot action tuple.
+    other_human_probs_fn : callable ``(state, agent_index) → np.ndarray``
+        Returns a normalised probability array over actions for the given
+        human agent (goal-agnostic / marginal).  Framework-agnostic:
+        callers wrap their own ``HumanPolicyPrior`` or PPO callable.
+    world_model : WorldModel
+        Provides ``transition_probabilities(state, actions)``.
+    device : str
+        Torch device for the returned tensor.
+
+    Returns
+    -------
+    Tensor of shape ``(batch,)`` with TD targets.
+    """
+    gamma_h_zeta = gamma_h ** zeta
+
+    # Cache other-human joint distributions per (state, h_idx)
+    other_joint_cache: Dict[Any, Tuple[List[int], list]] = {}
+
+    targets = []
+    for i, (state, next_state, h_idx) in enumerate(
+        zip(states, next_states, human_indices)
+    ):
+        pi_r = robot_policy_per_state[state]  # (num_robot_joint_actions,)
+
+        # Compute (or look up) the joint distribution of other humans.
+        cache_key = (state, h_idx)
+        if cache_key not in other_joint_cache:
+            other_humans = [h for h in human_agent_indices if h != h_idx]
+            if other_humans:
+                marginals = [
+                    _to_prob_array(other_human_probs_fn(state, oh))
+                    for oh in other_humans
+                ]
+                dist = _joint_distribution_numpy(marginals)
+            else:
+                other_humans = []
+                dist = [(1.0, [])]
+            other_joint_cache[cache_key] = (other_humans, dist)
+        other_humans, other_joint_dist = other_joint_cache[cache_key]
+
+        # P(next_state | state, a_h, pi_{-h}) for every a_h
+        p_per_ah = []
+        for a_h_val in range(num_actions):
+            p_total = 0.0
+            for a_r_idx in range(pi_r.shape[0]):
+                robot_prob = float(pi_r[a_r_idx])
+                if robot_prob == 0.0:
+                    continue
+                robot_action_tuple = action_index_to_tuple(a_r_idx)
+                for oh_prob, oh_actions in other_joint_dist:
+                    w = robot_prob * oh_prob
+                    if w == 0.0:
+                        continue
+                    actions = [0] * num_agents
+                    actions[h_idx] = a_h_val
+                    for r, r_a in zip(robot_agent_indices, robot_action_tuple):
+                        actions[r] = r_a
+                    for oh, oa in zip(other_humans, oh_actions):
+                        actions[oh] = oa
+                    trans = world_model.transition_probabilities(state, actions)
+                    if trans is None:
+                        continue
+                    for prob, ns in trans:
+                        if ns == next_state:
+                            p_total += w * float(prob)
+            p_per_ah.append(p_total)
+
+        max_p = max(p_per_ah)
+        if epsilon_h > 0.0:
+            mean_p = sum(p_per_ah) / num_actions
+            q_h = (1.0 - epsilon_h) * max_p + epsilon_h * mean_p
+        else:
+            q_h = max_p
+
+        x_h_sp = (
+            float(x_h_next_values[i])
+            if x_h_next_values.dim() > 0
+            else float(x_h_next_values)
+        )
+        targets.append(1.0 + gamma_h_zeta * (q_h ** zeta) * x_h_sp)
+
+    return torch.tensor(targets, device=device, dtype=torch.float32)

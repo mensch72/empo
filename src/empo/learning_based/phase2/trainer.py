@@ -2354,21 +2354,10 @@ class BasePhase2Trainer(ABC):
         """
         Compute simplified X_h TD targets via the goal-agnostic recursion.
 
-        This is a per-sample (stochastic) TD estimator for the fixed-point equation:
-            X_h(s) = 1 + gamma_h^zeta * sum_{s'} q_h(s,s')^zeta * X_h(s')
-        For each observed transition (s, s') the unbiased per-sample target is:
-            target(s, s') = 1 + gamma_h^zeta * q_h(s, s')^zeta * X_h_target(s')
-        where:
-            q_h(s, s') = max_{a_h} P(s'|s, a_h, pi_{-h}(·|s))
-        With bounded rationality (x_h_epsilon_h > 0):
-            q_h = (1 - eps) * max_{a_h} P(...) + eps * mean_{a_h} P(...)
-
-        When `terminals[i]` is True the next state is terminal, so X_h(s') = 1
-        exactly and no bootstrapping from the target network is needed.
-
-        Other humans (pi_{-h}) are marginalized out using their goal-agnostic
-        policy prior (self.human_policy_prior). Robot actions are marginalized
-        using the Q_r target network's Boltzmann policy.
+        Delegates the core q_h computation to the shared helper
+        :func:`~empo.learning_based.phase2.simplified_x_h.compute_simplified_x_h_td_targets`
+        after preparing DQN-specific inputs (robot policy from Q_r target
+        network, X_h targets from batched x_h_target forward pass).
 
         Args:
             states: Source states s, one per sample.
@@ -2382,23 +2371,21 @@ class BasePhase2Trainer(ABC):
             Target tensor of shape (batch_size,).
         """
         from empo.human_policy_prior import HumanPolicyPrior
+        from empo.learning_based.phase2.simplified_x_h import (
+            compute_simplified_x_h_td_targets,
+        )
 
-        gamma_h_zeta = self.config.gamma_h ** self.config.zeta
-        epsilon_h = self.config.x_h_epsilon_h
-        num_actions = self.env.action_space.n
         effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
 
         if terminals is None:
             terminals = [False] * len(states)
 
         # Get X_h_target(s') for all next_states in a single batched call.
-        # Override with 1.0 for terminal next_states after clamping.
         with torch.no_grad():
             x_h_next = self.networks.x_h_target.forward_batch(
                 next_states, human_indices, self.env, self.device
             ).squeeze()
             x_h_next = torch.clamp(x_h_next, min=1.0)
-            # Terminal next_states have X_h = 1 exactly (no bootstrapping error).
             for i, is_terminal in enumerate(terminals):
                 if is_terminal:
                     if x_h_next.dim() > 0:
@@ -2406,92 +2393,43 @@ class BasePhase2Trainer(ABC):
                     else:
                         x_h_next = torch.ones_like(x_h_next)
 
-        # Get robot policy pi_r(a_r | s) for all unique states in a single forward pass.
-        unique_states = list(dict.fromkeys(states))  # preserve order, deduplicate
+        # Get robot policy pi_r(a_r | s) for all unique states.
+        unique_states = list(dict.fromkeys(states))
         with torch.no_grad():
             q_r_batch = self.networks.q_r_target.forward_batch(
                 unique_states, self.env, self.device
             )
             pi_r_batch = self.networks.q_r_target.get_policy(
                 q_r_batch, beta_r=effective_beta_r
-            )  # (n_unique, num_robot_actions)
+            )
+        robot_policy_per_state = {
+            s: pi_r_batch[i] for i, s in enumerate(unique_states)
+        }
 
-        state_to_pi_r_idx = {s: i for i, s in enumerate(unique_states)}
+        # Wrap HumanPolicyPrior to the expected (state, agent_index) → ndarray.
+        hpp = self.human_policy_prior
 
-        # Cache other-human joint distributions per (state, h_idx) to avoid
-        # redundant policy-prior calls when the same (state, h_idx) pair appears
-        # multiple times in the batch.
-        other_joint_dist_cache: Dict[Any, List] = {}
+        def _other_human_probs(state, agent_index):
+            return HumanPolicyPrior._to_probability_array(hpp(state, agent_index))
 
-        targets = []
-        for i, (state, next_state, h_idx) in enumerate(
-            zip(states, next_states, human_indices)
-        ):
-            pi_r_idx = state_to_pi_r_idx[state]
-            pi_r = pi_r_batch[pi_r_idx]  # (num_robot_actions,)
-
-            # Look up (or compute and cache) the other-human joint distribution.
-            cache_key = (state, h_idx)
-            if cache_key not in other_joint_dist_cache:
-                other_humans = [h for h in self.human_agent_indices if h != h_idx]
-                if other_humans:
-                    other_marginals = [
-                        HumanPolicyPrior._to_probability_array(
-                            self.human_policy_prior(state, oh)
-                        )
-                        for oh in other_humans
-                    ]
-                    dist = self.human_policy_prior._profile_distribution_numpy(
-                        other_marginals
-                    )
-                else:
-                    other_humans = []
-                    dist = [(1.0, [])]
-                other_joint_dist_cache[cache_key] = (other_humans, dist)
-            other_humans, other_joint_dist = other_joint_dist_cache[cache_key]
-
-            # Compute P(next_state | state, a_h_val, pi_{-h}) for each a_h value.
-            # P(s'|s, a_h, pi_{-h}) = sum_{a_r} pi_r(a_r)
-            #                          * sum_{a_{-h}} pi_{-h}(a_{-h}|s) * P(s'|s, a_h, a_r, a_{-h})
-            p_per_ah = []
-            for a_h_val in range(num_actions):
-                p_total = 0.0
-                for a_r_idx in range(pi_r.shape[0]):
-                    robot_prob = float(pi_r[a_r_idx])
-                    if robot_prob == 0.0:
-                        continue
-                    robot_action_tuple = self.networks.q_r_target.action_index_to_tuple(a_r_idx)
-                    for oh_prob, oh_actions in other_joint_dist:
-                        w = robot_prob * oh_prob
-                        if w == 0.0:
-                            continue
-                        # Build joint action vector: only h_idx is fixed to a_h_val.
-                        actions = [0] * self.num_agents
-                        actions[h_idx] = a_h_val
-                        for r, r_a in zip(self.robot_agent_indices, robot_action_tuple):
-                            actions[r] = r_a
-                        for oh, oa in zip(other_humans, oh_actions):
-                            actions[oh] = oa
-                        trans = self.env.transition_probabilities(state, actions)
-                        if trans is None:
-                            continue
-                        for prob, ns in trans:
-                            if ns == next_state:
-                                p_total += w * float(prob)
-                p_per_ah.append(p_total)
-
-            max_p = max(p_per_ah)
-            if epsilon_h > 0.0:
-                mean_p = sum(p_per_ah) / num_actions
-                q_h = (1.0 - epsilon_h) * max_p + epsilon_h * mean_p
-            else:
-                q_h = max_p
-
-            x_h_s_prime = float(x_h_next[i]) if x_h_next.dim() > 0 else float(x_h_next)
-            target = 1.0 + gamma_h_zeta * (q_h ** self.config.zeta) * x_h_s_prime
-            targets.append(target)
-
-        return torch.tensor(targets, device=self.device, dtype=torch.float32)
+        return compute_simplified_x_h_td_targets(
+            states,
+            next_states,
+            human_indices,
+            gamma_h=self.config.gamma_h,
+            zeta=self.config.zeta,
+            epsilon_h=self.config.x_h_epsilon_h,
+            num_actions=self.env.action_space.n,
+            num_agents=self.num_agents,
+            human_agent_indices=self.human_agent_indices,
+            robot_agent_indices=self.robot_agent_indices,
+            x_h_next_values=x_h_next,
+            robot_policy_per_state=robot_policy_per_state,
+            action_index_to_tuple=self.networks.q_r_target.action_index_to_tuple,
+            other_human_probs_fn=_other_human_probs,
+            world_model=self.env,
+            device=self.device,
+        )
 
 
     def _compute_u_r_from_v_h_e_samples(self, states: List[Any]) -> torch.Tensor:

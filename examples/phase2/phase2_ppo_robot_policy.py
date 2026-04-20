@@ -255,8 +255,8 @@ def run_ppo_rollout(
         return probs, value.squeeze().item()
 
     def _select_action(probs):
-        """Greedy action selection for rollout visualisation."""
-        return torch.argmax(probs).item()
+        """Sample action from the policy distribution."""
+        return torch.multinomial(probs, 1).item()
 
     def _annotation_text(s, selected_action=None):
         """Build annotation lines for the current state."""
@@ -391,7 +391,7 @@ def main() -> None:
         "--output-dir",
         type=str,
         default=None,
-        help="Directory for output movie (default: outputs/phase2_ppo_asymmetric_freeing/)",
+        help="Directory for output movie (default: outputs/phase2_ppo_robot_policy/)",
     )
     parser.add_argument(
         "--movie-fps",
@@ -399,13 +399,42 @@ def main() -> None:
         default=MOVIE_FPS,
         help=f"Movie frames per second (default: {MOVIE_FPS})",
     )
+    parser.add_argument("--steps", type=int, default=None,
+                        help="Max environment steps per episode (default: from YAML)")
+    parser.add_argument("--gamma_h", type=float, default=0.999,
+                        help="Human discount factor (default: 0.999)")
+    parser.add_argument("--gamma_r", type=float, default=0.999,
+                        help="Robot discount factor (default: 0.999)")
+    parser.add_argument("--zeta", type=float, default=1.1,
+                        help="Risk/reliability preference (default: 1.1)")
+    parser.add_argument("--xi", type=float, default=1.0,
+                        help="Inter-human inequality aversion (default: 1.0)")
+    parser.add_argument("--eta", type=float, default=1.1,
+                        help="Intertemporal inequality aversion (default: 1.1)")
+    parser.add_argument("--simple-power", action="store_true",
+                        help="Use simplified (goal-agnostic) power metric X_h")
+    parser.add_argument("--ent-coef-start", type=float, default=0.1,
+                        help="Initial entropy coefficient (default: 0.1)")
+    parser.add_argument("--ent-coef-end", type=float, default=0.01,
+                        help="Final entropy coefficient (default: 0.01)")
+    parser.add_argument("--ent-anneal-steps", type=int, default=10_000,
+                        help="Steps over which to anneal entropy coef (default: 10000)")
+    parser.add_argument("--save-checkpoint", type=str, default=None, metavar="PATH",
+                        help="Save trained networks to PATH after training "
+                             "(default: <output-dir>/checkpoint.pt)")
+    parser.add_argument("--load-checkpoint", type=str, default=None, metavar="PATH",
+                        help="Restore networks from PATH before training "
+                             "(resume training from checkpoint)")
+    parser.add_argument("--use-checkpoint", type=str, default=None, metavar="PATH",
+                        help="Skip training, load checkpoint from PATH, "
+                             "and only run rollouts")
     args = parser.parse_args()
 
     # ------------------------------------------------------------------
     # 1. Create a reference environment
     # ------------------------------------------------------------------
     world_yaml = _resolve_world_path(args.world)
-    ref_env = _create_world_model(world_yaml)
+    ref_env = _create_world_model(world_yaml, max_steps=args.steps)
     ref_env.reset()
 
     num_actions = ref_env.action_space.n
@@ -433,11 +462,12 @@ def main() -> None:
     # ------------------------------------------------------------------
     cfg = PPOPhase2Config(
         # Theory
-        gamma_r=0.99,
-        gamma_h=0.99,
-        zeta=2.0,
-        xi=1.0,
-        eta=1.1,
+        gamma_r=args.gamma_r,
+        gamma_h=args.gamma_h,
+        zeta=args.zeta,
+        xi=args.xi,
+        eta=args.eta,
+        use_simplified_x_h=args.simple_power,
         # PPO
         num_actions=num_actions,
         num_robots=len(robot_indices),
@@ -445,6 +475,9 @@ def main() -> None:
         ppo_rollout_length=64,
         ppo_num_minibatches=4,
         ppo_update_epochs=4,
+        ppo_ent_coef_start=args.ent_coef_start,
+        ppo_ent_coef_end=args.ent_coef_end,
+        ppo_ent_anneal_steps=args.ent_anneal_steps,
         num_envs=args.num_envs,
         num_ppo_iterations=args.iters,
         lr_ppo=3e-4,
@@ -496,7 +529,7 @@ def main() -> None:
     # Each vectorised env slot creates its own world model and
     # HeuristicPotentialPolicy instance (to avoid shared mutable state).
     def env_creator():
-        wm = _create_world_model(world_yaml)
+        wm = _create_world_model(world_yaml, max_steps=args.steps)
         wm.reset()
         hp = _make_heuristic_human_policy(wm, wm.human_agent_indices)
         hp_fn = _wrap_human_policy(hp)
@@ -513,15 +546,43 @@ def main() -> None:
         )
 
     # ------------------------------------------------------------------
-    # 7. Train
+    # 7. Train (or skip if --use-checkpoint)
     # ------------------------------------------------------------------
-    print(f"\nStarting PPO training for {args.iters} iterations …")
-    metrics = trainer.train(env_creator, num_iterations=args.iters)
+    if args.use_checkpoint:
+        print(f"\nLoading checkpoint (skipping training): {args.use_checkpoint}")
+        trainer.load_checkpoint(args.use_checkpoint)
+    else:
+        if args.load_checkpoint:
+            print(f"\nRestoring from checkpoint: {args.load_checkpoint}")
+            trainer.load_checkpoint(args.load_checkpoint)
+        print(f"\nStarting PPO training for {args.iters} iterations …")
+        metrics = trainer.train(env_creator, num_iterations=args.iters)
 
     # ------------------------------------------------------------------
-    # 8. Report results
+    # 8. Save checkpoint & report results
     # ------------------------------------------------------------------
-    if metrics:
+    if args.output_dir:
+        output_dir = args.output_dir
+    else:
+        # Derive a world-name subfolder, matching the DQN demo convention
+        world_name = args.world
+        for ext in (".yaml", ".yml"):
+            if world_name.endswith(ext):
+                world_name = world_name[: -len(ext)]
+        output_dir = os.path.join(
+            _PROJECT_ROOT, "outputs", "phase2_ppo_robot_policy", world_name
+        )
+    os.makedirs(output_dir, exist_ok=True)
+
+    if not args.use_checkpoint:
+        # Save checkpoint (always, to enable later --use-checkpoint runs)
+        ckpt_path = args.save_checkpoint or os.path.join(output_dir, "checkpoint.pt")
+        actual_path = trainer.save_checkpoint(ckpt_path)
+        print(f"\nCheckpoint saved to: {actual_path}")
+        if actual_path != ckpt_path:
+            print(f"  (requested: {ckpt_path})")
+
+    if not args.use_checkpoint and metrics:
         last = metrics[-1]
         print(f"\nTraining complete ({len(metrics)} iterations).")
         print(f"  Final policy_loss : {last.get('policy_loss', 'N/A')}")
@@ -530,13 +591,13 @@ def main() -> None:
         print(f"  Final x_h_loss    : {last.get('x_h_loss', 'N/A')}")
         print(f"  Final u_r_loss    : {last.get('u_r_loss', 'N/A')}")
         print(f"  Global env steps  : {trainer.global_env_step}")
-    else:
+    elif not args.use_checkpoint:
         print("No metrics returned (training may have been too short).")
 
     # ------------------------------------------------------------------
     # 8b. Diagnostics: U_r, X_h, V_h^e at root state + V_r(root)
     # ------------------------------------------------------------------
-    diag_env = _create_world_model(world_yaml)
+    diag_env = _create_world_model(world_yaml, max_steps=args.steps)
     diag_env.reset()
     root_state = diag_env.get_state()
     _X_H_MIN = 1e-3
@@ -621,15 +682,11 @@ def main() -> None:
     # 9. Generate rollout movie
     # ------------------------------------------------------------------
     num_rollouts = args.rollouts
-    output_dir = args.output_dir or os.path.join(
-        _PROJECT_ROOT, "outputs", "phase2_ppo_asymmetric_freeing"
-    )
-    os.makedirs(output_dir, exist_ok=True)
 
     print(f"\nGenerating {num_rollouts} rollouts with learned policy …")
 
     # Build a fresh env for rollouts (separate from training envs)
-    rollout_env = _create_world_model(world_yaml)
+    rollout_env = _create_world_model(world_yaml, max_steps=args.steps)
     rollout_env.reset()
     rollout_human_policy = _make_heuristic_human_policy(
         rollout_env, rollout_env.human_agent_indices
@@ -655,7 +712,7 @@ def main() -> None:
                 f"({len(rollout_env._video_frames)} total frames)"
             )
 
-    movie_path = os.path.join(output_dir, "phase2_ppo_asymmetric_freeing.mp4")
+    movie_path = os.path.join(output_dir, "phase2_ppo_robot_policy.mp4")
     if os.path.exists(movie_path):
         os.remove(movie_path)
     rollout_env.save_video(movie_path, fps=args.movie_fps)

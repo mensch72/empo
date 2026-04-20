@@ -204,6 +204,7 @@ class EMPOWorldModelEnv(gymnasium.Env):
 
         # Normalise into [-1, ≈0] so PufferLib's clamp(r, -1, 1) is benign.
         u_r = u_r / self._u_r_scale
+        u_r_clipped = 1.0 if u_r < -1.0 or u_r > 1.0 else 0.0
 
         # -- Goal resampling (stochastic, using seeded RNG) --
         if self._py_rng.random() < self.config.goal_resample_prob:
@@ -226,6 +227,7 @@ class EMPOWorldModelEnv(gymnasium.Env):
         info: Dict[str, Any] = {
             "env_reward": env_reward,
             "u_r": u_r,
+            "u_r_clipped": u_r_clipped,
         }
 
         # Decode flat joint-action index to per-robot action tuple for

@@ -158,6 +158,17 @@ class PPOPhase2Config:
     # ── Optional flags ───────────────────────────────────────────────────
     use_z_space_transform: bool = False
 
+    # ── Simplified goal-agnostic X_h computation ─────────────────────────
+    # When use_simplified_x_h=True, X_h is computed via the goal-agnostic
+    # recursion X_h(s) = 1 + gamma_h^zeta * sum_{s'} q_h(s,s')^zeta * X_h(s')
+    # where q_h(s,s') = max_{a_h} P(s'|s, a_h, pi_{-h}).
+    # This bypasses V_h^e entirely.  X_h >= 1 for all states (terminal X_h = 1).
+    # Bounded rationality: when x_h_epsilon_h > 0, q_h mixes best human action
+    # with a uniform prior:
+    #   q_h = (1-eps)*max_{a_h} P(...) + eps*mean_{a_h} P(...)
+    use_simplified_x_h: bool = False
+    x_h_epsilon_h: float = 0.0
+
     # ── Auxiliary-network regularisation ──────────────────────────────────
     v_h_e_weight_decay: float = 1e-4
     x_h_weight_decay: float = 1e-4
@@ -289,14 +300,8 @@ class PPOPhase2Config:
     def get_entropy_coef(self, training_step: int) -> float:
         """Linearly-annealed entropy coefficient.
 
-        .. note::
-
-           PufferLib's ``PuffeRL`` does not support per-iteration entropy
-           coefficient updates.  ``to_pufferlib_config()`` sets a fixed
-           ``ent_coef`` equal to ``ppo_ent_coef_start``.  This method is
-           provided for callers that implement custom training loops
-           outside PufferLib, or for future PufferLib versions that expose
-           a mutable ``ent_coef`` field.
+        The trainer mutates ``pufferl.config['ent_coef']`` before each
+        ``pufferl.train()`` call so the annealed value is used.
         """
         if training_step >= self.ppo_ent_anneal_steps:
             return self.ppo_ent_coef_end

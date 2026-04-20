@@ -241,6 +241,133 @@ class PPOPhase2Trainer:
             terminal=terminal,
         )
 
+    # ------------------------------------------------------------------
+    # Simplified X_h target computation
+    # ------------------------------------------------------------------
+
+    def _compute_simplified_x_h_td_target(
+        self,
+        states: List[Any],
+        next_states: List[Any],
+        human_indices: List[int],
+        terminals: Optional[List[bool]] = None,
+        world_model: Any = None,
+    ) -> torch.Tensor:
+        """Compute simplified X_h TD targets for the PPO path.
+
+        Delegates the heavy lifting to
+        :func:`~empo.learning_based.phase2.simplified_x_h.compute_simplified_x_h_td_targets`
+        after preparing PPO-specific inputs (robot policy from actor-critic,
+        X_h targets from auxiliary target network).
+
+        Parameters
+        ----------
+        states, next_states : list
+            Source / successor states, one per sample.
+        human_indices : list[int]
+            Focal human agent index for each sample.
+        terminals : list[bool] or None
+            Terminal flags.  ``True`` → X_h(s') = 1.
+        world_model : WorldModel or None
+            If ``None``, uses ``self._empo_env.world_model``.
+
+        Returns
+        -------
+        Tensor of shape ``(batch,)`` with TD targets.
+        """
+        from empo.learning_based.phase2.simplified_x_h import (
+            compute_simplified_x_h_td_targets,
+        )
+        from .env_wrapper import _flat_index_to_tuple
+
+        empo_env = getattr(self, "_empo_env", None)
+        if empo_env is None:
+            raise RuntimeError(
+                "_compute_simplified_x_h_td_target requires self._empo_env "
+                "to be set (call train() first, or set it manually)."
+            )
+
+        if world_model is None:
+            world_model = empo_env.world_model
+
+        cfg = self.config
+        nets = self.auxiliary_networks
+
+        if terminals is None:
+            terminals = [False] * len(states)
+
+        # --- X_h target values for next_states ---
+        x_h_target_net = nets.x_h_target or nets.x_h
+        with torch.no_grad():
+            x_h_next_list = []
+            for ns, h_idx, is_term in zip(next_states, human_indices, terminals):
+                if is_term:
+                    x_h_next_list.append(torch.tensor(1.0, device=self.device))
+                else:
+                    val = x_h_target_net(ns, world_model, h_idx, self.device)
+                    val = torch.clamp(val.squeeze(), min=1.0)
+                    x_h_next_list.append(val)
+            x_h_next_values = torch.stack(x_h_next_list)
+
+        # --- Robot policy per unique state (from actor-critic) ---
+        unique_states = list(dict.fromkeys(states))
+        robot_policy_per_state: Dict[Any, torch.Tensor] = {}
+        with torch.no_grad():
+            for state in unique_states:
+                obs = empo_env._state_to_obs(state)
+                obs_t = torch.tensor(obs, dtype=torch.float32, device=self.device)
+                if obs_t.dim() == 1:
+                    obs_t = obs_t.unsqueeze(0)
+                logits, _ = self.actor_critic(obs_t)
+                probs = torch.softmax(logits.squeeze(0), dim=-1)
+                robot_policy_per_state[state] = probs
+
+        # --- Other-human goal-agnostic probs function ---
+        # The PPO env wrapper's human_policy_prior has signature
+        # (state, h_idx, goal, world_model).  Passing goal=None yields the
+        # goal-agnostic marginal for HumanPolicyPrior subclasses.  For
+        # plain callables that ignore the goal (e.g. uniform priors) this
+        # also works.
+        hpp = empo_env.human_policy_prior
+        wm_ref = world_model
+
+        def _other_human_probs(state: Any, agent_index: int):
+            from empo.human_policy_prior import HumanPolicyPrior as _HPP
+
+            if isinstance(hpp, _HPP):
+                return hpp(state, agent_index)
+            return hpp(state, agent_index, None, wm_ref)
+
+        # --- action_index_to_tuple using env wrapper's convention ---
+        num_actions = cfg.num_actions
+        num_robots = cfg.num_robots
+
+        def _action_index_to_tuple(idx: int):
+            return _flat_index_to_tuple(idx, num_actions, num_robots)
+
+        human_agent_indices = empo_env.human_agent_indices
+        robot_agent_indices = empo_env.robot_agent_indices
+        num_agents = max(human_agent_indices + robot_agent_indices) + 1
+
+        return compute_simplified_x_h_td_targets(
+            states,
+            next_states,
+            human_indices,
+            gamma_h=cfg.gamma_h,
+            zeta=cfg.zeta,
+            epsilon_h=cfg.x_h_epsilon_h,
+            num_actions=num_actions,
+            num_agents=num_agents,
+            human_agent_indices=human_agent_indices,
+            robot_agent_indices=robot_agent_indices,
+            x_h_next_values=x_h_next_values,
+            robot_policy_per_state=robot_policy_per_state,
+            action_index_to_tuple=_action_index_to_tuple,
+            other_human_probs_fn=_other_human_probs,
+            world_model=world_model,
+            device=self.device,
+        )
+
     def train_auxiliary_step(
         self,
         world_model: Any = None,
@@ -330,7 +457,7 @@ class PPOPhase2Trainer:
                 losses["v_h_e_loss"] = loss_v.item()
 
         # -----------------------------------------------------------------
-        # X_h loss: MSE between X_h(s, h) and w_h * V_h^e(s, g_h)^ζ
+        # X_h loss: MSE between X_h(s, h) and target
         # -----------------------------------------------------------------
         if (
             nets.x_h is not None
@@ -341,23 +468,51 @@ class PPOPhase2Trainer:
             x_h_preds: List[torch.Tensor] = []
             x_h_targets_list: List[torch.Tensor] = []
 
-            for t in batch:
-                for h_idx, goal in t.goals.items():
-                    weight = t.goal_weights.get(h_idx, 1.0)
-                    pred = nets.x_h(t.state, world_model, h_idx, self.device)
-                    x_h_preds.append(pred.squeeze())
+            if cfg.use_simplified_x_h:
+                # Simplified goal-agnostic target via the recursion
+                #   X_h(s) = 1 + gamma_h^zeta * q_h(s,s')^zeta * X_h_target(s')
+                # Collect (state, next_state, h_idx, terminal) per sample.
+                simp_states: List[Any] = []
+                simp_next: List[Any] = []
+                simp_hidx: List[int] = []
+                simp_term: List[bool] = []
 
+                for t in batch:
+                    for h_idx in t.goals.keys():
+                        pred = nets.x_h(t.state, world_model, h_idx, self.device)
+                        x_h_preds.append(pred.squeeze())
+                        simp_states.append(t.state)
+                        simp_next.append(t.next_state)
+                        simp_hidx.append(h_idx)
+                        simp_term.append(t.terminal)
+
+                if x_h_preds:
                     with torch.no_grad():
-                        v_target_net = nets.v_h_e_target or nets.v_h_e
-                        v_for_x = v_target_net(
-                            t.state, world_model, h_idx, goal, self.device
+                        target_x_h = self._compute_simplified_x_h_td_target(
+                            simp_states, simp_next, simp_hidx,
+                            terminals=simp_term,
+                            world_model=world_model,
                         )
-                        v_for_x = v_target_net.apply_hard_clamp(v_for_x)
-                        x_target = nets.x_h.compute_target(
-                            v_for_x.squeeze(),
-                            goal_weight=weight,
-                        )
-                    x_h_targets_list.append(x_target)
+                    x_h_targets_list = list(target_x_h.unbind())
+            else:
+                # Standard target from V_h^e: w_h * V_h^e(s, g_h)^ζ
+                for t in batch:
+                    for h_idx, goal in t.goals.items():
+                        weight = t.goal_weights.get(h_idx, 1.0)
+                        pred = nets.x_h(t.state, world_model, h_idx, self.device)
+                        x_h_preds.append(pred.squeeze())
+
+                        with torch.no_grad():
+                            v_target_net = nets.v_h_e_target or nets.v_h_e
+                            v_for_x = v_target_net(
+                                t.state, world_model, h_idx, goal, self.device
+                            )
+                            v_for_x = v_target_net.apply_hard_clamp(v_for_x)
+                            x_target = nets.x_h.compute_target(
+                                v_for_x.squeeze(),
+                                goal_weight=weight,
+                            )
+                        x_h_targets_list.append(x_target)
 
             if x_h_preds:
                 xp = torch.stack(x_h_preds)
@@ -391,13 +546,15 @@ class PPOPhase2Trainer:
 
                 with torch.no_grad():
                     x_vals: List[float] = []
+                    # Simplified mode: X_h >= 1; standard mode: X_h in [1e-3, 1.0].
+                    x_h_floor = 1.0 if cfg.use_simplified_x_h else _X_H_MIN
                     if x_h_target_net is not None:
                         for h_idx in t.goals.keys():
                             xv = x_h_target_net(
                                 t.state, world_model, h_idx, self.device
                             )
                             xv = x_h_target_net.apply_hard_clamp(xv)
-                            x_vals.append(max(xv.squeeze().item(), _X_H_MIN))
+                            x_vals.append(max(xv.squeeze().item(), x_h_floor))
                     if x_vals:
                         x_t = torch.tensor(x_vals, device=self.device)
                         y_t = (x_t ** (-cfg.xi)).mean()
@@ -778,6 +935,8 @@ class PPOPhase2Trainer:
             Per-iteration loss / metric dictionaries.
         """
         cfg = self.config
+        if cfg.use_simplified_x_h:
+            logger.info("Using simplified (goal-agnostic) power metric X_h")
         if num_iterations is None:
             n_iters = cfg.num_ppo_iterations
         else:
@@ -845,6 +1004,9 @@ class PPOPhase2Trainer:
         # the pattern in _collect_aux_data_from_rollout().
         wm = self._unwrap_world_model(vecenv.driver_env)
 
+        # Store environment wrapper reference for simplified X_h computation.
+        self._empo_env = self._unwrap_empo_env(vecenv.driver_env)
+
         prev_stage = cfg.get_warmup_stage(self.aux_training_step)
 
         while pufferl.global_step < total_timesteps and iteration < n_iters:
@@ -855,6 +1017,11 @@ class PPOPhase2Trainer:
 
             # --- Extract auxiliary data from rollout info dicts ---
             self._collect_aux_data_from_rollout(pufferl, vecenv)
+
+            # Anneal entropy coefficient before each PPO update
+            pufferl.config['ent_coef'] = cfg.get_entropy_coef(
+                self.aux_training_step
+            )
 
             pufferl.train()
 
@@ -904,6 +1071,11 @@ class PPOPhase2Trainer:
                 self._log_scalar("PPO/iteration", iteration, step)
                 self._log_scalar("PPO/global_env_step", pufferl.global_step, step)
                 self._log_scalar("PPO/entropy_coef", cfg.get_entropy_coef(step), step)
+                self._log_scalar(
+                    "Reward/u_r_clip_frac",
+                    pufferl.losses.get("u_r_clipped", 0),
+                    step,
+                )
                 cur_stage = cfg.get_warmup_stage(step)
                 self._log_scalar("Warmup/stage", cur_stage, step)
                 if cur_stage != prev_stage:
@@ -917,11 +1089,12 @@ class PPOPhase2Trainer:
 
             if iteration % 100 == 0:
                 logger.info(
-                    "PPO iter %d (step %d): policy_loss=%.4f value_loss=%.4f",
+                    "PPO iter %d (step %d): policy_loss=%.4f value_loss=%.4f u_r_clip_frac=%.3f",
                     iteration,
                     pufferl.global_step,
                     pufferl.losses.get("policy_loss", 0),
                     pufferl.losses.get("value_loss", 0),
+                    pufferl.losses.get("u_r_clipped", 0),
                 )
 
             # ── Checkpointing ────────────────────────────────────────────
@@ -973,6 +1146,9 @@ class PPOPhase2Trainer:
         self.freeze_auxiliary_networks()
 
         wm = getattr(env, "world_model", None)
+
+        # Store EMPO env reference for simplified X_h computation.
+        self._empo_env = self._unwrap_empo_env(env) or env
 
         warmup_metrics: List[Dict[str, float]] = []
         obs, info = env.reset()
@@ -1072,6 +1248,23 @@ class PPOPhase2Trainer:
             wm = getattr(current, "world_model", None)
             if wm is not None:
                 return wm
+            if hasattr(current, "env"):
+                current = current.env
+            else:
+                return None
+        return None
+
+    @staticmethod
+    def _unwrap_empo_env(env: Any) -> Any:
+        """Unwrap nested env wrappers to find the ``EMPOWorldModelEnv``."""
+        from .env_wrapper import EMPOWorldModelEnv
+
+        current = env
+        for _ in range(20):
+            if current is None:
+                return None
+            if isinstance(current, EMPOWorldModelEnv):
+                return current
             if hasattr(current, "env"):
                 current = current.env
             else:
