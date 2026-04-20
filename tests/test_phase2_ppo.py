@@ -843,12 +843,9 @@ class TestEMPOWorldModelEnv:
             config=cfg,
             obs_dim=3,
         )
-        # Compute expected fallback scale matching env wrapper logic
-        _X_H_MIN = 1e-3
-        expected_scale = (_X_H_MIN ** (-cfg.xi)) ** cfg.eta
         env.reset()
         _, reward, _, _, _ = env.step(0)
-        assert reward == pytest.approx(-1.0 / expected_scale)
+        assert reward == pytest.approx(-1.0 / 1.0)
 
     def test_u_r_scale_none_uses_unity_fallback_in_simplified_mode(self):
         """Simplified X_h mode defaults to u_r_scale=1.0 (no extra shrinking)."""

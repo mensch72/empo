@@ -84,9 +84,6 @@ from .config import PPOPhase2Config
 
 logger = logging.getLogger(__name__)
 
-# Floor for X_h values to prevent numerical instability in X_h^{-ξ}
-# (division by zero / explosion when X_h → 0).  Matches the DQN path.
-_X_H_MIN = 1e-3
 
 
 # ======================================================================
@@ -301,7 +298,6 @@ class PPOPhase2Trainer:
 
         # --- X_h target values for next_states ---
         x_h_target_net = nets.x_h_target or nets.x_h
-        x_h_floor = 1.0 if cfg.use_simplified_x_h else _X_H_MIN
         with torch.no_grad():
             x_h_next_list = []
             for ns, h_idx, is_term in zip(next_states, human_indices, terminals):
@@ -310,7 +306,8 @@ class PPOPhase2Trainer:
                 else:
                     val = x_h_target_net(ns, world_model, h_idx, self.device)
                     val = torch.as_tensor(val.squeeze(), device=self.device)
-                    val = torch.clamp(val, min=x_h_floor)
+                    # Clamp to tiny epsilon only to avoid division by zero in x^(-xi)
+                    val = torch.clamp(val, min=1e-10)
                     x_h_next_list.append(val)
             x_h_next_values = torch.stack(x_h_next_list)
 
@@ -549,14 +546,13 @@ class PPOPhase2Trainer:
 
                 with torch.no_grad():
                     x_vals: List[float] = []
-                    # Keep only the required lower bound on X_h for numerical stability.
-                    x_h_floor = 1.0 if cfg.use_simplified_x_h else _X_H_MIN
                     if x_h_target_net is not None:
                         for h_idx in t.goals.keys():
                             xv = x_h_target_net(
                                 t.state, world_model, h_idx, self.device
                             )
-                            x_vals.append(max(xv.squeeze().item(), x_h_floor))
+                            # Clamp to tiny epsilon only to avoid division by zero in x^(-xi)
+                            x_vals.append(max(xv.squeeze().item(), 1e-10))
                     if x_vals:
                         x_t = torch.tensor(x_vals, device=self.device)
                         y_t = (x_t ** (-cfg.xi)).mean()

@@ -154,8 +154,7 @@ class EMPOWorldModelEnv(gymnasium.Env):
                 # hence U_r = -(y^eta) is naturally in [-1, 0].
                 self._u_r_scale = 1.0
             else:
-                _X_H_MIN = 1e-3
-                self._u_r_scale = (_X_H_MIN ** (-config.xi)) ** config.eta
+                self._u_r_scale = 1.0
 
         # Running scale normalization for U_r:
         # - During warmup: collect U_r samples to estimate std
@@ -388,9 +387,6 @@ class EMPOWorldModelEnv(gymnasium.Env):
 
         import torch
 
-        # Lower-bound values matching trainer.py semantics.
-        x_h_floor = 1.0 if self.config.use_simplified_x_h else 1e-3
-
         nets = self.auxiliary_networks
 
         # Prefer frozen target networks for stationary reward during rollouts.
@@ -422,9 +418,10 @@ class EMPOWorldModelEnv(gymnasium.Env):
                 x_h_vals = []
                 for h_idx in self.human_agent_indices:
                     x_h = x_h_net(state, self.world_model, h_idx, device)
-                    x_h_vals.append(max(float(x_h.item()), x_h_floor))
+                    x_h_vals.append(max(float(x_h.item()), 0.0))
                 if x_h_vals:
-                    y = float(np.mean([x ** (-self.config.xi) for x in x_h_vals]))
+                    # Clamp to tiny epsilon only to avoid division by zero in x^(-xi)
+                    y = float(np.mean([max(x, 1e-10) ** (-self.config.xi) for x in x_h_vals]))
                     u_r = -(y**self.config.eta)
                     # Guard against numerical/model drift to positive values.
                     return min(u_r, 0.0)
