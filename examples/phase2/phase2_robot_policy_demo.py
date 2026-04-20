@@ -876,7 +876,7 @@ def run_policy_rollout(
                             x_h_clamped = torch.clamp(weighted_v_h_e_tensor.mean(), min=0.0)
                     x_h_vals.append(x_h_clamped)
                 if x_h_vals:
-                    x_h_tensor = torch.stack(x_h_vals).clamp(min=1e-10)
+                    x_h_tensor = torch.stack(x_h_vals)
                     xi = config.xi if config else 1.0
                     eta = config.eta if config else 1.1
                     y = (x_h_tensor ** (-xi)).mean()

@@ -307,7 +307,7 @@ class PPOPhase2Trainer:
                     val = x_h_target_net(ns, world_model, h_idx, self.device)
                     val = torch.as_tensor(val.squeeze(), device=self.device)
                     # Clamp to tiny epsilon only to avoid division by zero in x^(-xi)
-                    val = torch.clamp(val, min=1e-10)
+                    val = torch.clamp(val, min=0.0)
                     x_h_next_list.append(val)
             x_h_next_values = torch.stack(x_h_next_list)
 
@@ -552,7 +552,7 @@ class PPOPhase2Trainer:
                                 t.state, world_model, h_idx, self.device
                             )
                             # Clamp to tiny epsilon only to avoid division by zero in x^(-xi)
-                            x_vals.append(max(xv.squeeze().item(), 1e-10))
+                            x_vals.append(xv.squeeze().item())
                     if x_vals:
                         x_t = torch.tensor(x_vals, device=self.device)
                         y_t = (x_t ** (-cfg.xi)).mean()

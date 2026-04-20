@@ -690,7 +690,7 @@ def main() -> None:
 
         if x_h_vals:
             import numpy as np
-            y = float(np.mean([max(x, 1e-10) ** (-cfg.xi) for x in x_h_vals]))
+            y = float(np.mean([x ** (-cfg.xi) for x in x_h_vals]))
             u_r = -(y ** cfg.eta)
             print(f"  U_r(root)         : {u_r:.6f}")
             print(f"    y = mean(X_h^-xi): {y:.6f}")
@@ -712,7 +712,7 @@ def main() -> None:
                     x_vals.append(max(float(x_h.item()), 0.0))
             if x_vals:
                 import numpy as np
-                y = float(np.mean([max(x, 1e-10) ** (-cfg.xi) for x in x_vals]))
+                y = float(np.mean([x ** (-cfg.xi) for x in x_vals]))
                 u_r_next = -(y ** cfg.eta)
                 print(f"    After robot={action_name:>7}: U_r={u_r_next:.6f}, X_h={x_vals}")
     diag_env.set_state(root_state)  # restore

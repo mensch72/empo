@@ -421,7 +421,7 @@ class EMPOWorldModelEnv(gymnasium.Env):
                     x_h_vals.append(max(float(x_h.item()), 0.0))
                 if x_h_vals:
                     # Clamp to tiny epsilon only to avoid division by zero in x^(-xi)
-                    y = float(np.mean([max(x, 1e-10) ** (-self.config.xi) for x in x_h_vals]))
+                    y = float(np.mean([x ** (-self.config.xi) for x in x_h_vals]))
                     u_r = -(y**self.config.eta)
                     # Guard against numerical/model drift to positive values.
                     return min(u_r, 0.0)
