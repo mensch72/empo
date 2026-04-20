@@ -257,6 +257,14 @@ class EMPOWorldModelEnv(gymnasium.Env):
             "u_r_ppo": u_r_ppo,
             # Dashboard prints 3 decimals; this reveals proximity to -1.0.
             "u_r_plus1": (u_r_raw + 1.0),
+            # Mean absolute deviation from -1 reveals variation even when
+            # the dashboard rounds the mean itself to -1.000.
+            "u_r_absdev_from_minus1": abs(u_r_raw + 1.0),
+            "u_r_ppo_absdev_from_minus1": abs(u_r_ppo + 1.0),
+            # Milli-scaled versions make small deviations visible despite
+            # the dashboard's coarse 3-decimal rounding.
+            "u_r_absdev_milli_from_minus1": 1e3 * abs(u_r_raw + 1.0),
+            "u_r_ppo_absdev_milli_from_minus1": 1e3 * abs(u_r_ppo + 1.0),
             "u_r_signal_std": self._u_r_signal_std,
         }
 
@@ -421,9 +429,8 @@ class EMPOWorldModelEnv(gymnasium.Env):
                 x_h_vals = []
                 for h_idx in self.human_agent_indices:
                     x_h = x_h_net(state, self.world_model, h_idx, device)
-                    x_h_vals.append(max(float(x_h.item()), 0.0))
+                    x_h_vals.append(float(x_h.item()))
                 if x_h_vals:
-                    # Clamp to tiny epsilon only to avoid division by zero in x^(-xi)
                     y = float(np.mean([x ** (-self.config.xi) for x in x_h_vals]))
                     u_r = -(y**self.config.eta)
                     # Guard against numerical/model drift to positive values.

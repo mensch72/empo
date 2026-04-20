@@ -177,6 +177,7 @@ def create_multigrid_ppo_networks(
             state_feature_dim=actual_state_feature_dim,
             hidden_dim=config.hidden_dim,
             zeta=config.zeta,
+            feasible_range=(1.0, float('inf')) if config.use_simplified_x_h else (0.0, 1.0),
             max_agents=max_agents,
             agent_embedding_dim=agent_embedding_dim,
             state_encoder=state_encoder,
