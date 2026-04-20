@@ -298,17 +298,27 @@ class PPOPhase2Config:
         return active
 
     def get_entropy_coef(self, training_step: int) -> float:
-        """Linearly-annealed entropy coefficient.
+        """Cosine-annealed entropy coefficient.
+
+        Uses a half-cosine schedule that stays high early (maximising
+        exploration) and decays smoothly toward ``ppo_ent_coef_end``:
+
+        .. math::
+
+            \alpha(t) = \alpha_e
+                + \tfrac12 (\alpha_s - \alpha_e)
+                  \bigl(1 + \cos(\pi\, t / T)\bigr)
 
         The trainer mutates ``pufferl.config['ent_coef']`` before each
         ``pufferl.train()`` call so the annealed value is used.
         """
+        import math
         if training_step >= self.ppo_ent_anneal_steps:
             return self.ppo_ent_coef_end
         frac = training_step / max(1, self.ppo_ent_anneal_steps)
-        return self.ppo_ent_coef_start + frac * (
-            self.ppo_ent_coef_end - self.ppo_ent_coef_start
-        )
+        return self.ppo_ent_coef_end + 0.5 * (
+            self.ppo_ent_coef_start - self.ppo_ent_coef_end
+        ) * (1.0 + math.cos(math.pi * frac))
 
     @property
     def num_joint_actions(self) -> int:

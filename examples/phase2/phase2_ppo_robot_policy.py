@@ -413,7 +413,7 @@ def main() -> None:
                         help="Intertemporal inequality aversion (default: 1.1)")
     parser.add_argument("--simple-power", action="store_true",
                         help="Use simplified (goal-agnostic) power metric X_h")
-    parser.add_argument("--beta_r", type=float, default=None,
+    parser.add_argument("--beta_r", type=float, default=1e10,
                         help="Robot soft-max concentration (theory parameter). "
                              "Translated to entropy coef via α ≈ 1/β_r. "
                              "Overrides --ent-coef-end when given.")
@@ -464,17 +464,19 @@ def main() -> None:
     # ------------------------------------------------------------------
     # 3. Translate beta_r → entropy coefficient schedule
     # ------------------------------------------------------------------
-    # Approximate mapping: in entropy-regularised RL the optimal policy
-    # satisfies π(a) ∝ exp(Q(a)/α), so α plays the role of 1/β_r.
-    # The U_r rewards are normalised into roughly [-1, 0], so the
-    # Q-value spread is O(1) and α ≈ 1/β_r is a reasonable default.
+    # The entropy coefficient serves two independent purposes:
+    #   - ent_coef_start: controls exploration during training.
+    #     Must be proportional to the *reward scale* (U_r is normalised
+    #     into [-1, 0], so 0.01 is a sensible default).
+    #   - ent_coef_end: controls final policy concentration.
+    #     Related to beta_r via α ≈ 1/β_r.
+    # These are decoupled: beta_r only sets the end value.
     if args.beta_r is not None:
         ent_coef_end = 1.0 / args.beta_r
-        ent_coef_start = args.ent_coef_start if args.ent_coef_start is not None else 10.0 * ent_coef_end
-        print(f"β_r={args.beta_r} → ent_coef: {ent_coef_start:.6f} → {ent_coef_end:.6f}")
     else:
         ent_coef_end = args.ent_coef_end if args.ent_coef_end is not None else 0.01
-        ent_coef_start = args.ent_coef_start if args.ent_coef_start is not None else 10.0 * ent_coef_end
+    ent_coef_start = args.ent_coef_start if args.ent_coef_start is not None else 0.01
+    print(f"Entropy coef: {ent_coef_start:.6f} → {ent_coef_end:.6f} (cosine)")
 
     # ------------------------------------------------------------------
     # 4. Configuration
