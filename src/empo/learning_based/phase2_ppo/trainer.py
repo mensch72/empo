@@ -616,11 +616,16 @@ class PPOPhase2Trainer:
             if envs is not None:
                 envs = [envs]
         if not envs:
+            import sys
+            print("[U_r Freeze] WARNING: No environments found in vecenv", file=sys.stderr)
             return
 
         _MAX_UNWRAP_DEPTH = 20
+        
+        import sys
+        print(f"[U_r Freeze] Freezing U_r normalization in {len(envs)} environment(s)", file=sys.stderr)
 
-        for env in envs:
+        for i, env in enumerate(envs):
             # Unwrap PufferLib emulation layers to reach EMPOWorldModelEnv.
             inner = env
             depth = 0
@@ -629,7 +634,10 @@ class PPOPhase2Trainer:
                 depth += 1
             # Call freeze method if it exists
             if hasattr(inner, "freeze_u_r_normalization"):
+                print(f"[U_r Freeze] Freezing environment {i} (unwrap depth={depth})", file=sys.stderr)
                 inner.freeze_u_r_normalization()
+            else:
+                print(f"[U_r Freeze] WARNING: Environment {i} has no freeze_u_r_normalization method", file=sys.stderr)
 
     def _collect_aux_data_from_rollout(self, pufferl: Any, vecenv: Any) -> None:
         """Extract auxiliary transition data from environment aux buffers.

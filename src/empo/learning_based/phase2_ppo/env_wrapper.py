@@ -167,6 +167,14 @@ class EMPOWorldModelEnv(gymnasium.Env):
         self._u_r_warmup_buffer: deque = deque(
             maxlen=config.ppo_rollout_length * 100
         )  # buffer ~100 rollouts
+        
+        # Log initialization for diagnostics
+        import sys
+        print(
+            f"[EMPOWorldModelEnv] U_r scale initialized: {self._u_r_scale:.6f} "
+            f"(warmup_buffer_max_size={config.ppo_rollout_length * 100})",
+            file=sys.stderr,
+        )
 
     # ------------------------------------------------------------------
     # Gymnasium API
@@ -216,14 +224,15 @@ class EMPOWorldModelEnv(gymnasium.Env):
             truncated = True
 
         # -- Compute intrinsic reward U_r(s_t) at pre-transition state --
-        u_r = self._compute_u_r(pre_state)
+        u_r_raw = self._compute_u_r(pre_state)
 
         # Collect statistics during warmup; normalize after freezing.
         if not self._u_r_frozen:
-            self._u_r_warmup_buffer.append(u_r)
+            self._u_r_warmup_buffer.append(u_r_raw)
+            u_r = u_r_raw  # Raw U_r during warmup
         else:
             # Normalize: (U_r - μ) / (σ + ε)
-            u_r = (u_r - self._u_r_mean) / (self._u_r_std + 1e-8)
+            u_r = (u_r_raw - self._u_r_mean) / (self._u_r_std + 1e-8)
 
         # Normalise by scale factor for stable PPO advantage estimation.
         u_r = u_r / self._u_r_scale
@@ -249,6 +258,12 @@ class EMPOWorldModelEnv(gymnasium.Env):
         info: Dict[str, Any] = {
             "env_reward": env_reward,
             "u_r": u_r,
+            "u_r_raw": u_r_raw,  # Diagnostic: raw U_r before normalization and scaling
+            "u_r_mean": self._u_r_mean,  # Diagnostic: running mean of U_r
+            "u_r_std": self._u_r_std,  # Diagnostic: running std of U_r
+            "u_r_scale": self._u_r_scale,  # Diagnostic: scale factor
+            "u_r_frozen": float(self._u_r_frozen),  # Diagnostic: whether frozen
+            "u_r_warmup_samples": len(self._u_r_warmup_buffer),  # Diagnostic: warmup buffer size
         }
 
         # Decode flat joint-action index to per-robot action tuple for
@@ -297,10 +312,24 @@ class EMPOWorldModelEnv(gymnasium.Env):
             u_r_array = np.array(list(self._u_r_warmup_buffer))
             self._u_r_mean = float(np.mean(u_r_array))
             self._u_r_std = float(np.std(u_r_array))
+            
+            # Log computed statistics
+            import sys
+            print(
+                f"[U_r Freeze] Computed statistics from {len(self._u_r_warmup_buffer)} samples: "
+                f"μ={self._u_r_mean:.6f}, σ={self._u_r_std:.6f}, "
+                f"min={np.min(u_r_array):.6f}, max={np.max(u_r_array):.6f}",
+                file=sys.stderr,
+            )
         else:
             # No samples collected (unusual), use defaults
             self._u_r_mean = 0.0
             self._u_r_std = 1.0
+            import sys
+            print(
+                "[U_r Freeze] WARNING: No warmup samples collected, using defaults μ=0, σ=1",
+                file=sys.stderr,
+            )
 
         self._u_r_frozen = True
         self._u_r_warmup_buffer.clear()  # Free memory
@@ -408,8 +437,13 @@ class EMPOWorldModelEnv(gymnasium.Env):
             # Option A: dedicated U_r network
             if u_r_net is not None:
                 _, u_r = u_r_net(state, self.world_model, device)
+                u_r_val = float(u_r.item())
                 # U_r must be non-positive by construction.
-                return min(float(u_r.item()), 0.0)
+                result = min(u_r_val, 0.0)
+                if u_r_val != result:
+                    import sys
+                    print(f"[_compute_u_r] Network output {u_r_val:.6f} clamped to {result:.6f}", file=sys.stderr)
+                return result
             # Option B: compute from X_h values directly (eq. 8)
             if x_h_net is not None:
                 x_h_vals = []
@@ -420,7 +454,11 @@ class EMPOWorldModelEnv(gymnasium.Env):
                     y = float(np.mean([x ** (-self.config.xi) for x in x_h_vals]))
                     u_r = -(y**self.config.eta)
                     # Guard against numerical/model drift to positive values.
-                    return min(u_r, 0.0)
+                    result = min(u_r, 0.0)
+                    if u_r != result:
+                        import sys
+                        print(f"[_compute_u_r] Computed value {u_r:.6f} clamped to {result:.6f}", file=sys.stderr)
+                    return result
         return 0.0
 
     def _compute_transition_probs(
