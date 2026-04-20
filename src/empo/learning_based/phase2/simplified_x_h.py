@@ -148,6 +148,10 @@ def compute_simplified_x_h_td_targets(
 
     # Cache other-human joint distributions per (state, h_idx)
     other_joint_cache: Dict[Any, Tuple[List[int], list]] = {}
+    # Cache P(s' | s, a_h, pi_-h) mass maps per (state, h_idx).
+    # Each entry is a list of length num_actions where element a_h is a dict
+    # mapping successor states to total probability mass under that action.
+    transition_mass_cache: Dict[Any, List[Dict[Any, float]]] = {}
 
     targets = []
     for i, (state, next_state, h_idx) in enumerate(
@@ -171,32 +175,38 @@ def compute_simplified_x_h_td_targets(
             other_joint_cache[cache_key] = (other_humans, dist)
         other_humans, other_joint_dist = other_joint_cache[cache_key]
 
-        # P(next_state | state, a_h, pi_{-h}) for every a_h
-        p_per_ah = []
-        for a_h_val in range(num_actions):
-            p_total = 0.0
-            for a_r_idx in range(pi_r.shape[0]):
-                robot_prob = float(pi_r[a_r_idx])
-                if robot_prob == 0.0:
-                    continue
-                robot_action_tuple = action_index_to_tuple(a_r_idx)
-                for oh_prob, oh_actions in other_joint_dist:
-                    w = robot_prob * oh_prob
-                    if w == 0.0:
+        mass_key = (state, h_idx)
+        if mass_key not in transition_mass_cache:
+            per_action_next_mass: List[Dict[Any, float]] = []
+            for a_h_val in range(num_actions):
+                next_mass: Dict[Any, float] = {}
+                for a_r_idx in range(pi_r.shape[0]):
+                    robot_prob = float(pi_r[a_r_idx])
+                    if robot_prob == 0.0:
                         continue
-                    actions = [0] * num_agents
-                    actions[h_idx] = a_h_val
-                    for r, r_a in zip(robot_agent_indices, robot_action_tuple):
-                        actions[r] = r_a
-                    for oh, oa in zip(other_humans, oh_actions):
-                        actions[oh] = oa
-                    trans = world_model.transition_probabilities(state, actions)
-                    if trans is None:
-                        continue
-                    for prob, ns in trans:
-                        if ns == next_state:
-                            p_total += w * float(prob)
-            p_per_ah.append(p_total)
+                    robot_action_tuple = action_index_to_tuple(a_r_idx)
+                    for oh_prob, oh_actions in other_joint_dist:
+                        w = robot_prob * oh_prob
+                        if w == 0.0:
+                            continue
+                        actions = [0] * num_agents
+                        actions[h_idx] = a_h_val
+                        for r, r_a in zip(robot_agent_indices, robot_action_tuple):
+                            actions[r] = r_a
+                        for oh, oa in zip(other_humans, oh_actions):
+                            actions[oh] = oa
+                        trans = world_model.transition_probabilities(state, actions)
+                        if trans is None:
+                            continue
+                        for prob, ns in trans:
+                            next_mass[ns] = next_mass.get(ns, 0.0) + w * float(prob)
+                per_action_next_mass.append(next_mass)
+            transition_mass_cache[mass_key] = per_action_next_mass
+
+        p_per_ah = [
+            per_action_next_mass.get(next_state, 0.0)
+            for per_action_next_mass in transition_mass_cache[mass_key]
+        ]
 
         max_p = max(p_per_ah)
         if epsilon_h > 0.0:
