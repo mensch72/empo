@@ -53,6 +53,7 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         state_feature_dim: int = 256,
         hidden_dim: int = 256,
         zeta: float = 2.0,
+        gamma_h: float = 0.99,
         feasible_range: Tuple[float, float] = (0.0, 1.0),
         dropout: float = 0.0,
         max_kill_buttons: int = 4,
@@ -66,7 +67,7 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         own_state_encoder: Optional[MultiGridStateEncoder] = None,
         own_agent_encoder: Optional[AgentIdentityEncoder] = None
     ):
-        super().__init__(zeta=zeta, feasible_range=feasible_range)
+        super().__init__(zeta=zeta, gamma_h=gamma_h, feasible_range=feasible_range)
         
         self.grid_height = grid_height
         self.grid_width = grid_width
@@ -222,8 +223,20 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         # Compute raw value
         raw_value = self.value_head(combined).squeeze(-1)
         
-        # Apply soft clamp to keep in (0, 1]
-        return self.apply_clamp(raw_value)
+        # Apply soft/hard clamp with dynamic time lower bound
+        # In global_features (B, 4), the 0-th feature is remaining_steps
+        remaining_steps = global_features[:, 0] if global_features is not None else None
+        
+        if self._unbounded_above and remaining_steps is not None:
+            gamma_z = self.gamma_h ** self.zeta
+            if gamma_z < 1.0:
+                k = remaining_steps.clamp(min=0)
+                lb = (1.0 - torch.pow(gamma_z, k + 1.0)) / (1.0 - gamma_z)
+                # Biasing the final layer dynamically: shift the raw value so that at initialization
+                # (when value_head is near zero) it outputs roughly the theoretical lower bound.
+                raw_value = raw_value + lb
+        
+        return self.apply_clamp(raw_value, remaining_steps)
     
     def forward(
         self,

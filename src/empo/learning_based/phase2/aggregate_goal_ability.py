@@ -53,10 +53,12 @@ class BaseAggregateGoalAbilityNetwork(nn.Module, ABC):
     def __init__(
         self,
         zeta: float = 2.0,
+        gamma_h: float = 0.99,
         feasible_range: Tuple[float, float] = (0.0, 1.0)
     ):
         super().__init__()
         self.zeta = zeta
+        self.gamma_h = gamma_h
         self.feasible_range = feasible_range
         
         if zeta < 1.0:
@@ -100,7 +102,7 @@ class BaseAggregateGoalAbilityNetwork(nn.Module, ABC):
     def get_config(self) -> Dict[str, Any]:
         """Return configuration dict for save/load."""
     
-    def apply_clamp(self, raw_values: torch.Tensor) -> torch.Tensor:
+    def apply_clamp(self, raw_values: torch.Tensor, remaining_steps: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Apply clamping based on training mode.
         
@@ -109,28 +111,37 @@ class BaseAggregateGoalAbilityNetwork(nn.Module, ABC):
             During eval: hard clamp.
         
         Simplified mode (unbounded above, lower bound only):
+            If remaining_steps is provided, lb = (1 - (gamma_h^zeta)^(k+1)) / (1 - gamma_h^zeta).
             During training: relu(x - lb) + lb (soft lower bound, gradient preserved).
             During eval: hard lower bound clamp.
         
         Args:
             raw_values: Unbounded network output.
+            remaining_steps: Tensor of shape identical to raw_values indicating remaining horizon (optional).
         
         Returns:
             Clamped values.
         """
         if self._unbounded_above:
+            gamma_z = self.gamma_h ** self.zeta
+            lb = self._lower_bound
+            
+            if remaining_steps is not None and gamma_z < 1.0:
+                k = remaining_steps.clamp(min=0)
+                lb = (1.0 - torch.pow(gamma_z, k + 1.0)) / (1.0 - gamma_z)
+                
             if self.training:
-                return torch.relu(raw_values - self._lower_bound) + self._lower_bound
+                return torch.relu(raw_values - lb) + lb
             else:
-                return self.apply_hard_clamp(raw_values)
+                return self.apply_hard_clamp(raw_values, remaining_steps)
         else:
             if self.training:
                 assert self.soft_clamp is not None
                 return self.soft_clamp(raw_values)
             else:
-                return self.apply_hard_clamp(raw_values)
+                return self.apply_hard_clamp(raw_values, remaining_steps)
     
-    def apply_hard_clamp(self, values: torch.Tensor) -> torch.Tensor:
+    def apply_hard_clamp(self, values: torch.Tensor, remaining_steps: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
         Apply hard clamping during prediction/inference.
         
@@ -139,12 +150,24 @@ class BaseAggregateGoalAbilityNetwork(nn.Module, ABC):
         
         Args:
             values: Values to clamp (typically soft-clamped during forward).
+            remaining_steps: Optional tensor of remaining steps.
         
         Returns:
-            Hard-clamped values in [a, b] (standard) or [a, +∞) (simplified).
+            Hard-clamped values in [a, b] (standard) or (dynamically bounded) (simplified).
         """
         if self._unbounded_above:
-            return torch.clamp(values, min=self._lower_bound)
+            gamma_z = self.gamma_h ** self.zeta
+            lb = self._lower_bound
+            
+            if remaining_steps is not None and gamma_z < 1.0:
+                k = remaining_steps.clamp(min=0)
+                lb = (1.0 - torch.pow(gamma_z, k + 1.0)) / (1.0 - gamma_z)
+                
+            if isinstance(lb, torch.Tensor):
+                return torch.maximum(values, lb)
+            else:
+                return torch.clamp(values, min=lb)
+            
         return torch.clamp(
             values,
             self.feasible_range[0],
