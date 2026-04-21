@@ -167,6 +167,9 @@ class EMPOWorldModelEnv(gymnasium.Env):
         )  # buffer ~100 rollouts
         # Stddev of the reward signal used by PPO; updated by trainer each iteration.
         self._u_r_signal_std: float = 0.0
+        self._u_r_signal_mean: float = 0.0
+        self._u_r_signal_min: float = 0.0
+        self._u_r_signal_max: float = 0.0
 
     # ------------------------------------------------------------------
     # Gymnasium API
@@ -255,17 +258,11 @@ class EMPOWorldModelEnv(gymnasium.Env):
             "env_reward": env_reward,
             "u_r": u_r_raw,
             "u_r_ppo": u_r_ppo,
-            # Dashboard prints 3 decimals; this reveals proximity to -1.0.
-            "u_r_plus1": (u_r_raw + 1.0),
-            # Mean absolute deviation from -1 reveals variation even when
-            # the dashboard rounds the mean itself to -1.000.
-            "u_r_absdev_from_minus1": abs(u_r_raw + 1.0),
-            "u_r_ppo_absdev_from_minus1": abs(u_r_ppo + 1.0),
-            # Milli-scaled versions make small deviations visible despite
-            # the dashboard's coarse 3-decimal rounding.
-            "u_r_absdev_milli_from_minus1": 1e3 * abs(u_r_raw + 1.0),
-            "u_r_ppo_absdev_milli_from_minus1": 1e3 * abs(u_r_ppo + 1.0),
+            "u_r_scale_factor": self._u_r_std,
             "u_r_signal_std": self._u_r_signal_std,
+            "u_r_signal_mean": self._u_r_signal_mean,
+            "u_r_signal_min": self._u_r_signal_min,
+            "u_r_signal_max": self._u_r_signal_max,
         }
 
         # Decode flat joint-action index to per-robot action tuple for
@@ -313,10 +310,21 @@ class EMPOWorldModelEnv(gymnasium.Env):
         if len(self._u_r_warmup_buffer) > 0:
             u_r_array = np.array(list(self._u_r_warmup_buffer))
             self._u_r_std = float(np.std(u_r_array))
+            
+            print(f"\n[WARMUP U_R STATS] Computed over {len(u_r_array)} samples:")
+            print(f"   Mean: {float(np.mean(u_r_array)):.6f}")
+            print(f"   Min:  {float(np.min(u_r_array)):.6f}")
+            print(f"   Max:  {float(np.max(u_r_array)):.6f}")
+            print(f"   Std:  {self._u_r_std:.6f}")
+            
             if self._u_r_std <= 0.0:
+                print("   -> Std is <= 0.0, falling back to scale factor 1.0\n")
                 self._u_r_std = 1.0
+            else:
+                print("   -> Using computed std as scale factor\n")
         else:
             # No samples collected (unusual), use defaults
+            print("\n[WARMUP U_R STATS] No samples collected, falling back to scale factor 1.0\n")
             self._u_r_std = 1.0
 
         self._u_r_frozen = True
@@ -385,10 +393,10 @@ class EMPOWorldModelEnv(gymnasium.Env):
         within a rollout.  Falls back to the online networks when targets
         are absent.
 
-        X_h values are lower-bounded to prevent numerical instability in
-        the X_h^{-ξ} exponentiation:
-        - Standard mode: floor at 1e-3.
-        - Simplified mode: floor at 1.0 (no upper clamp).
+        In both standard and simplified modes, U_r limits are strictly 
+        enforced by the network architectures themselves via their
+        ``feasible_range`` arguments, so no manual clipping (bottom
+        or top) is applied to the raw outputs here.
 
         The device is inferred from the auxiliary network parameters
         to avoid device-mismatch errors when running on CUDA.

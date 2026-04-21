@@ -179,6 +179,7 @@ class PPOPhase2Trainer:
         self.global_env_step: int = 0
         self.ppo_iteration: int = 0
         self.aux_training_step: int = 0  # cumulative warm-up + in-loop aux steps
+        self._warmup_u_r_std: Optional[float] = None
 
         # TensorBoard writer (initialised lazily in train())
         self.writer: Optional[Any] = None  # type: Optional[SummaryWriter]
@@ -248,9 +249,7 @@ class PPOPhase2Trainer:
     def _compute_simplified_x_h_td_target(
         self,
         states: List[Any],
-        next_states: List[Any],
         human_indices: List[int],
-        terminals: Optional[List[bool]] = None,
         world_model: Any = None,
     ) -> torch.Tensor:
         """Compute simplified X_h TD targets for the PPO path.
@@ -293,21 +292,18 @@ class PPOPhase2Trainer:
         cfg = self.config
         nets = self.auxiliary_networks
 
-        if terminals is None:
-            terminals = [False] * len(states)
-
-        # --- X_h target values for next_states ---
+        # --- Network evaluator for non-terminal successor states ---
         x_h_target_net = nets.x_h_target or nets.x_h
-        with torch.no_grad():
-            x_h_next_list = []
-            for ns, h_idx, is_term in zip(next_states, human_indices, terminals):
-                if is_term:
-                    x_h_next_list.append(torch.tensor(1.0, device=self.device))
-                else:
-                    val = x_h_target_net(ns, world_model, h_idx, self.device)
-                    val = torch.as_tensor(val.squeeze(), device=self.device)
-                    x_h_next_list.append(val)
-            x_h_next_values = torch.stack(x_h_next_list)
+        def _evaluate_x_h_targets(ns_list, h_idx_list):
+            if not ns_list:
+                return []
+            vals = []
+            with torch.no_grad():
+                # Sequential eval. Could be batched if network allows.
+                for ns, h in zip(ns_list, h_idx_list):
+                    v = x_h_target_net(ns, world_model, h, self.device)
+                    vals.append(float(v.squeeze().item()))
+            return vals
 
         # --- Robot policy per unique state (from actor-critic) ---
         unique_states = list(dict.fromkeys(states))
@@ -351,7 +347,6 @@ class PPOPhase2Trainer:
 
         return compute_simplified_x_h_td_targets(
             states,
-            next_states,
             human_indices,
             gamma_h=cfg.gamma_h,
             zeta=cfg.zeta,
@@ -360,7 +355,7 @@ class PPOPhase2Trainer:
             num_agents=num_agents,
             human_agent_indices=human_agent_indices,
             robot_agent_indices=robot_agent_indices,
-            x_h_next_values=x_h_next_values,
+            evaluate_x_h_target_fn=_evaluate_x_h_targets,
             robot_policy_per_state=robot_policy_per_state,
             action_index_to_tuple=_action_index_to_tuple,
             other_human_probs_fn=_other_human_probs,
@@ -488,8 +483,7 @@ class PPOPhase2Trainer:
                 if x_h_preds:
                     with torch.no_grad():
                         target_x_h = self._compute_simplified_x_h_td_target(
-                            simp_states, simp_next, simp_hidx,
-                            terminals=simp_term,
+                            simp_states, simp_hidx,
                             world_model=world_model,
                         )
                     x_h_targets_list = list(target_x_h.unbind())
@@ -597,11 +591,14 @@ class PPOPhase2Trainer:
         pass
 
     @staticmethod
-    def _freeze_u_r_normalization_in_envs(vecenv: Any) -> None:
-        """Freeze U_r scale statistics in all environments.
+    def _freeze_u_r_normalization_in_envs(
+        vecenv: Any, u_r_std: Optional[float] = None
+    ) -> None:
+        """Freeze/apply U_r normalization statistics in all environments.
 
-        Called after warmup phase ends. Each environment freezes its collected
-        U_r samples into a std estimate used for post-warmup scaling.
+        If ``u_r_std`` is provided, apply this warmup std directly to each
+        environment and mark normalization as frozen. Otherwise each env
+        freezes from its own local warmup buffer.
         """
         envs = getattr(vecenv, "envs", None)
         if envs is None:
@@ -620,9 +617,16 @@ class PPOPhase2Trainer:
             while hasattr(inner, "env") and depth < _MAX_UNWRAP_DEPTH:
                 inner = inner.env
                 depth += 1
-            # Call freeze method if it exists
-            if hasattr(inner, "freeze_u_r_normalization"):
-                inner.freeze_u_r_normalization()
+            if u_r_std is not None:
+                if hasattr(inner, "_u_r_std"):
+                    inner._u_r_std = float(u_r_std)
+                if hasattr(inner, "_u_r_frozen"):
+                    inner._u_r_frozen = True
+                if hasattr(inner, "_u_r_warmup_buffer"):
+                    inner._u_r_warmup_buffer.clear()
+            else:
+                if hasattr(inner, "freeze_u_r_normalization"):
+                    inner.freeze_u_r_normalization()
 
     @staticmethod
     def _broadcast_stat_to_envs(vecenv: Any, attr: str, value: float) -> None:
@@ -724,24 +728,44 @@ class PPOPhase2Trainer:
                 )
 
     @staticmethod
-    def _compute_reward_signal_std(pufferl: Any) -> float:
-        """Stddev of the rollout reward signal used by PPO training.
+    def _compute_reward_signal_stats(pufferl: Any) -> Dict[str, float]:
+        """Stats of the rollout reward signal used by PPO training.
 
         Uses PuffeRL's internal reward buffer (same signal used for
-        advantage computation) and computes population stddev over finite
-        entries for robust monitoring.
+        advantage computation) and computes robust summary statistics over
+        finite entries.
         """
         rewards = getattr(pufferl, "rewards", None)
         if rewards is None:
-            return 0.0
+            return {
+                "std": 0.0,
+                "mean": 0.0,
+                "min": 0.0,
+                "max": 0.0,
+            }
         try:
             flat = rewards.detach().reshape(-1)
             finite = flat[torch.isfinite(flat)]
             if finite.numel() == 0:
-                return 0.0
-            return float(torch.std(finite, unbiased=False).item())
+                return {
+                    "std": 0.0,
+                    "mean": 0.0,
+                    "min": 0.0,
+                    "max": 0.0,
+                }
+            return {
+                "std": float(torch.std(finite, unbiased=False).item()),
+                "mean": float(torch.mean(finite).item()),
+                "min": float(torch.min(finite).item()),
+                "max": float(torch.max(finite).item()),
+            }
         except Exception:
-            return 0.0
+            return {
+                "std": 0.0,
+                "mean": 0.0,
+                "min": 0.0,
+                "max": 0.0,
+            }
 
     # ------------------------------------------------------------------
     # TensorBoard helpers
@@ -1068,7 +1092,9 @@ class PPOPhase2Trainer:
         self._sync_aux_nets_to_envs(vecenv)
 
         # Freeze U_r post-warmup scaling statistics.
-        self._freeze_u_r_normalization_in_envs(vecenv)
+        # Reuse warmup std from the single-env warmup phase so PPO vecenvs do
+        # not default to std=1 due to empty local warmup buffers.
+        self._freeze_u_r_normalization_in_envs(vecenv, self._warmup_u_r_std)
 
         all_metrics: List[Dict[str, float]] = warmup_metrics
         iteration = 0
@@ -1088,9 +1114,21 @@ class PPOPhase2Trainer:
             # --- PufferLib: collect rollout + PPO update ---
             pufferl.evaluate()
 
-            # Monitor stddev of the exact reward signal used by PPO.
-            u_r_signal_std = self._compute_reward_signal_std(pufferl)
-            self._broadcast_stat_to_envs(vecenv, "_u_r_signal_std", float(u_r_signal_std))
+            # Monitor exact reward-signal stats from PuffeRL rollout buffer.
+            reward_signal = self._compute_reward_signal_stats(pufferl)
+            u_r_signal_std = reward_signal["std"]
+            self._broadcast_stat_to_envs(
+                vecenv, "_u_r_signal_std", float(reward_signal["std"])
+            )
+            self._broadcast_stat_to_envs(
+                vecenv, "_u_r_signal_mean", float(reward_signal["mean"])
+            )
+            self._broadcast_stat_to_envs(
+                vecenv, "_u_r_signal_min", float(reward_signal["min"])
+            )
+            self._broadcast_stat_to_envs(
+                vecenv, "_u_r_signal_max", float(reward_signal["max"])
+            )
 
             # --- Extract auxiliary data from rollout info dicts ---
             self._collect_aux_data_from_rollout(pufferl, vecenv)
@@ -1123,7 +1161,10 @@ class PPOPhase2Trainer:
             metrics = {
                 **pufferl.losses,
                 **aux_losses,
-                "u_r_signal_std": u_r_signal_std,
+                "u_r_signal_std": reward_signal["std"],
+                "u_r_signal_mean": reward_signal["mean"],
+                "u_r_signal_min": reward_signal["min"],
+                "u_r_signal_max": reward_signal["max"],
                 "iteration": iteration,
                 "global_step": pufferl.global_step,
             }
@@ -1155,6 +1196,9 @@ class PPOPhase2Trainer:
                     step,
                 )
                 self._log_scalar("Reward/u_r_signal_std", u_r_signal_std, step)
+                self._log_scalar("Reward/u_r_signal_mean", reward_signal["mean"], step)
+                self._log_scalar("Reward/u_r_signal_min", reward_signal["min"], step)
+                self._log_scalar("Reward/u_r_signal_max", reward_signal["max"], step)
                 cur_stage = cfg.get_warmup_stage(step)
                 self._log_scalar("Warmup/stage", cur_stage, step)
                 if cur_stage != prev_stage:
@@ -1305,6 +1349,18 @@ class PPOPhase2Trainer:
         logger.info(
             "Warm-up complete after %d aux training steps", self.aux_training_step
         )
+
+        # Capture the warmup-estimated U_r std from the warmup env so it can
+        # be applied to PPO vector envs (which otherwise have empty warmup
+        # buffers and would fall back to std=1).
+        self._warmup_u_r_std = None
+        if hasattr(env, "freeze_u_r_normalization"):
+            env.freeze_u_r_normalization()
+            std_val = getattr(env, "_u_r_std", None)
+            if std_val is not None:
+                self._warmup_u_r_std = float(std_val)
+                logger.info("Warm-up u_r std = %.6f", self._warmup_u_r_std)
+
         env.close()
 
         # Clear the aux replay buffer to discard data collected under

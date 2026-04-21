@@ -204,17 +204,11 @@ class MultiGridWorldModelEnv(EMPOWorldModelEnv):
             ),
             "u_r": u_r_raw,
             "u_r_ppo": u_r_ppo,
-            # Dashboard prints 3 decimals; this reveals proximity to -1.0.
-            "u_r_plus1": (u_r_raw + 1.0),
-            # Mean absolute deviation from -1 reveals variation even when
-            # the dashboard rounds the mean itself to -1.000.
-            "u_r_absdev_from_minus1": abs(u_r_raw + 1.0),
-            "u_r_ppo_absdev_from_minus1": abs(u_r_ppo + 1.0),
-            # Milli-scaled versions make small deviations visible despite
-            # the dashboard's coarse 3-decimal rounding.
-            "u_r_absdev_milli_from_minus1": 1e3 * abs(u_r_raw + 1.0),
-            "u_r_ppo_absdev_milli_from_minus1": 1e3 * abs(u_r_ppo + 1.0),
+            "u_r_scale_factor": self._u_r_std,
             "u_r_signal_std": self._u_r_signal_std,
+            "u_r_signal_mean": self._u_r_signal_mean,
+            "u_r_signal_min": self._u_r_signal_min,
+            "u_r_signal_max": self._u_r_signal_max,
         }
 
         # Decode flat joint-action index to per-robot action tuple

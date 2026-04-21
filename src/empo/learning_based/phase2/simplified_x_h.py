@@ -73,7 +73,7 @@ def _to_prob_array(dist) -> np.ndarray:
 
 def compute_simplified_x_h_td_targets(
     states: List[Any],
-    next_states: List[Any],
+
     human_indices: List[int],
     *,
     gamma_h: float,
@@ -83,7 +83,7 @@ def compute_simplified_x_h_td_targets(
     num_agents: int,
     human_agent_indices: List[int],
     robot_agent_indices: List[int],
-    x_h_next_values: torch.Tensor,
+    evaluate_x_h_target_fn: Callable[[List[Any], List[int]], List[float]],
     robot_policy_per_state: Dict[Any, torch.Tensor],
     action_index_to_tuple: Callable[[int], Tuple[int, ...]],
     other_human_probs_fn: Callable[[Any, int], np.ndarray],
@@ -111,8 +111,8 @@ def compute_simplified_x_h_td_targets(
 
     Parameters
     ----------
-    states, next_states : list
-        Source / successor states, one per sample.
+    states : list
+        Source states, one per sample.
     human_indices : list[int]
         Focal human agent index for each sample.
     gamma_h, zeta, epsilon_h : float
@@ -123,9 +123,8 @@ def compute_simplified_x_h_td_targets(
         Total number of agents (humans + robots).
     human_agent_indices, robot_agent_indices : list[int]
         Agent index lists.
-    x_h_next_values : Tensor, shape ``(batch,)``
-        Pre-computed ``X_h_target(s')`` for every next_state.
-        Terminal states should already have value 1.0.
+    evaluate_x_h_target_fn : callable
+        Function ``(next_states, h_indices) -> List[float]`` returning target values for (ns, h_idx).
     robot_policy_per_state : dict[state → Tensor]
         Maps each unique state to a 1-D tensor of robot joint-action
         probabilities.
@@ -153,10 +152,11 @@ def compute_simplified_x_h_td_targets(
     # mapping successor states to total probability mass under that action.
     transition_mass_cache: Dict[Any, List[Dict[Any, float]]] = {}
 
-    targets = []
-    for i, (state, next_state, h_idx) in enumerate(
-        zip(states, next_states, human_indices)
-    ):
+    # Step 1: Collect transition mass caches and required target evaluations
+    required_evals = set()
+    states_data = []
+
+    for i, (state, h_idx) in enumerate(zip(states, human_indices)):
         pi_r = robot_policy_per_state[state]  # (num_robot_joint_actions,)
 
         # Compute (or look up) the joint distribution of other humans.
@@ -201,25 +201,52 @@ def compute_simplified_x_h_td_targets(
                         for prob, ns in trans:
                             next_mass[ns] = next_mass.get(ns, 0.0) + w * float(prob)
                 per_action_next_mass.append(next_mass)
+                for ns in next_mass:
+                    required_evals.add((ns, h_idx))
             transition_mass_cache[mass_key] = per_action_next_mass
 
-        p_per_ah = [
-            per_action_next_mass.get(next_state, 0.0)
-            for per_action_next_mass in transition_mass_cache[mass_key]
-        ]
+        states_data.append((state, h_idx, transition_mass_cache[mass_key]))
 
-        max_p = max(p_per_ah)
-        if epsilon_h > 0.0:
-            mean_p = sum(p_per_ah) / num_actions
-            q_h = (1.0 - epsilon_h) * max_p + epsilon_h * mean_p
+    # Step 2: Batch compute required targets
+    ns_list = []
+    h_idx_list = []
+    x_h_cache = {}
+    
+    for ns, h_idx in required_evals:
+        if world_model.is_terminal(ns):
+            x_h_cache[(ns, h_idx)] = 1.0
         else:
-            q_h = max_p
+            ns_list.append(ns)
+            h_idx_list.append(h_idx)
+            
+    if ns_list:
+        target_vals = evaluate_x_h_target_fn(ns_list, h_idx_list)
+        for ns, h_idx, val in zip(ns_list, h_idx_list, target_vals):
+            x_h_cache[(ns, h_idx)] = val
 
-        x_h_sp = (
-            float(x_h_next_values[i])
-            if x_h_next_values.dim() > 0
-            else float(x_h_next_values)
-        )
-        targets.append(1.0 + gamma_h_zeta * (q_h ** zeta) * x_h_sp)
+    # Step 3: Compute exact sum over all reachable next_states
+    targets = []
+    for state, h_idx, per_action_next_mass in states_data:
+        # Find all unique next_states reachable from this state
+        all_ns = set()
+        for next_mass in per_action_next_mass:
+            all_ns.update(next_mass.keys())
+            
+        sum_s_prime = 0.0
+        for ns in all_ns:
+            p_per_ah = [
+                m.get(ns, 0.0) for m in per_action_next_mass
+            ]
+            max_p = max(p_per_ah)
+            if epsilon_h > 0.0:
+                mean_p = sum(p_per_ah) / num_actions
+                q_h = (1.0 - epsilon_h) * max_p + epsilon_h * mean_p
+            else:
+                q_h = max_p
+                
+            if q_h > 0.0:
+                sum_s_prime += (q_h ** zeta) * x_h_cache[(ns, h_idx)]
+                
+        targets.append(1.0 + gamma_h_zeta * sum_s_prime)
 
     return torch.tensor(targets, device=device, dtype=torch.float32)
