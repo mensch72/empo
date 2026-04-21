@@ -117,7 +117,8 @@ class TestSuperStateConsistency:
         h = TwoLevelMultigrid(_make_rock_gateway(), seed=42)
         micro_state = h.micro_env.get_state()
         macro_state = h.mapper.super_state(micro_state)
-        assert macro_state[0] == h.micro_env.max_steps - micro_state[0]
+        # Check both use the same remaining_steps value now
+        assert macro_state[0] == micro_state[0]
 
     def test_super_state_after_micro_step(self):
         """super_state is consistent after a micro-level transition."""

@@ -96,10 +96,10 @@ def test_initial_state_method():
     # Verify the initial state is what we'd get from a fresh reset
     env.reset()
     env.get_state()
-    # Note: Due to RNG state, we can't directly compare, but we can verify step_count is 0
-    # Compact state format: (step_count, agent_states, mobile_objects, mutable_objects)
-    step_count = init_state[0]
-    assert step_count == 0, "Initial state should have step_count of 0"
+    # Note: Due to RNG state, we can't directly compare, but we can verify remaining_steps
+    # Compact state format: (remaining_steps, agent_states, mobile_objects, mutable_objects)
+    remaining_steps = init_state[0]
+    assert remaining_steps == env.max_steps, "Initial state should have remaining_steps equal to max_steps"
 
 
 def test_is_terminal_method():

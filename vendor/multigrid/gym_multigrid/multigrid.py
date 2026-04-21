@@ -4787,7 +4787,7 @@ class MultiGridEnv(WorldModel):
         4. Uses fixed ordering instead of serializing entire grid
         
         Format:
-        - step_count: int
+        - remaining_steps: int (max_steps - step_count)
         - agent_states: tuple of (pos_x, pos_y, dir, terminated, started, paused, carrying_type, carrying_color, forced_next_action)
         - mobile_objects: tuple of (obj_type, pos_x, pos_y) for blocks/rocks
         - mutable_objects: tuple of (obj_type, x, y, mutable_state...) for doors/boxes/magic walls
@@ -4903,7 +4903,7 @@ class MultiGridEnv(WorldModel):
         mobile_objects.sort(key=lambda obj: (obj[0], obj[1], obj[2]))
         
         return (
-            self.step_count,
+            self.max_steps - self.step_count,
             tuple(agent_states),
             tuple(mobile_objects),
             tuple(mutable_objects),
@@ -4960,9 +4960,9 @@ class MultiGridEnv(WorldModel):
         Args:
             state: A compact state tuple as returned by get_state()
         """
-        step_count, agent_states, mobile_objects, mutable_objects = state
+        remaining_steps, agent_states, mobile_objects, mutable_objects = state
         
-        self.step_count = step_count
+        self.step_count = self.max_steps - remaining_steps
         
         # Restore agent states in TWO PASSES to handle agents swapping positions correctly.
         # If we remove and place in the same pass, an agent moving to another agent's old 
@@ -5199,9 +5199,9 @@ class MultiGridEnv(WorldModel):
                   Returns None if the state is terminal
                   or if any action is not feasible in the given state.
         """
-        # Check if we're in a terminal state (state[0] is step_count in compact format)
-        step_count = state[0]
-        if step_count >= self.max_steps:
+        # Check if we're in a terminal state (state[0] is remaining_steps in compact format)
+        remaining_steps = state[0]
+        if remaining_steps <= 0:
             return None
         
         # Check if all actions are valid

@@ -63,7 +63,7 @@ class ReachCellGoal(PossibleGoal):
     
     def is_achieved(self, state) -> int:
         """Check if agent is at the target cell."""
-        step_count, agent_states, mobile_objects, mutable_objects = state
+        remaining_steps, agent_states, mobile_objects, mutable_objects = state
         if self.human_agent_index < len(agent_states):
             agent_state = agent_states[self.human_agent_index]
             x, y = int(agent_state[0]), int(agent_state[1])
@@ -119,7 +119,7 @@ class ReachRectangleGoal(PossibleGoal):
     
     def is_achieved(self, state) -> int:
         """Check if agent is inside the rectangle."""
-        step_count, agent_states, mobile_objects, mutable_objects = state
+        remaining_steps, agent_states, mobile_objects, mutable_objects = state
         if self.human_agent_index < len(agent_states):
             agent_state = agent_states[self.human_agent_index]
             x, y = int(agent_state[0]), int(agent_state[1])

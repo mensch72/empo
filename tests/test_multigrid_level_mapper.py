@@ -37,7 +37,8 @@ class TestSuperState:
         h = _make_hierarchy()
         micro_state = h.micro_env.get_state()
         macro_state = h.mapper.super_state(micro_state)
-        expected = h.micro_env.max_steps - micro_state[0]
+        # In new encoding, micro_state[0] is already remaining_steps!
+        expected = micro_state[0]
         assert macro_state[0] == expected
 
     def test_agent_cell_matches_micro_position(self):
