@@ -35,7 +35,7 @@ class BaseAggregateGoalAbilityNetwork(nn.Module, ABC):
     - ζ > 1 introduces risk aversion (prefer certain outcomes)
     
     Key properties (simplified mode, feasible_range[0] >= 1):
-    - X_h(s) = 1 + gamma_h^zeta * sum_{s'} q_h(s,s')^zeta * X_h(s')
+    - X_h(s) = 1 + gamma_h^zeta * sum_{s'} inverse_dynamics(s,s')^zeta * X_h(s')
     - X_h >= 1 (terminal states have X_h = 1; X_h = 1 is the lower bound)
     - No upper bound on X_h
     

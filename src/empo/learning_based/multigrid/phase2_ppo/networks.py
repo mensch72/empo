@@ -32,6 +32,9 @@ from empo.learning_based.multigrid.phase2.aggregate_goal_ability import (
 from empo.learning_based.multigrid.phase2.intrinsic_reward_network import (
     MultiGridIntrinsicRewardNetwork,
 )
+from empo.learning_based.multigrid.phase2.inverse_dynamics import (
+    MultiGridInverseDynamicsNetwork,
+)
 
 
 def create_multigrid_ppo_networks(
@@ -198,10 +201,34 @@ def create_multigrid_ppo_networks(
             state_encoder=state_encoder,
         ).to(device)
 
+
+
+
+    # ── InverseDynamics (optional, for transition dynamics) ─────────────────────────
+    inverse_dynamics = None
+    if config.use_simplified_x_h:
+        inverse_dynamics = MultiGridInverseDynamicsNetwork(
+            config=config,
+            num_actions=config.num_actions,
+            grid_height=grid_height,
+            grid_width=grid_width,
+            num_agents_per_color=num_agents_per_color,
+            num_agent_colors=7,
+            state_feature_dim=actual_state_feature_dim,
+            hidden_dim=config.hidden_dim,
+            max_agents=max_agents,
+            agent_embedding_dim=agent_embedding_dim,
+            state_encoder=state_encoder,
+            agent_encoder=agent_encoder,
+            own_state_encoder=None,
+            own_agent_encoder=None,
+        ).to(device)
+
     auxiliary_networks = PPOAuxiliaryNetworks(
         v_h_e=v_h_e,
         x_h=x_h,
         u_r=u_r,
+        inverse_dynamics=inverse_dynamics,
     )
 
     return actor_critic, auxiliary_networks, state_encoder

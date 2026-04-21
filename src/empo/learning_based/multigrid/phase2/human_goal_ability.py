@@ -107,11 +107,13 @@ class MultiGridHumanGoalAchievementNetwork(BaseHumanGoalAchievementNetwork):
         if agent_encoder is not None:
             self.agent_encoder = agent_encoder
         else:
+            use_enc = getattr(self.state_encoder, 'use_encoders', True)
             self.agent_encoder = AgentIdentityEncoder(
                 num_agents=max_agents,
                 embedding_dim=agent_embedding_dim,
                 grid_height=grid_height,
-                grid_width=grid_width
+                grid_width=grid_width,
+                use_encoders=use_enc
             )
         
         # Value head: combines state + goal + agent identity features

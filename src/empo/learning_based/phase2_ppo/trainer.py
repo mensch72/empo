@@ -75,6 +75,7 @@ from empo.learning_based.phase2.human_goal_ability import (
 from empo.learning_based.phase2.aggregate_goal_ability import (
     BaseAggregateGoalAbilityNetwork,
 )
+from empo.learning_based.phase2.inverse_dynamics import BaseInverseDynamicsNetwork
 from empo.learning_based.phase2.intrinsic_reward_network import (
     BaseIntrinsicRewardNetwork,
 )
@@ -103,6 +104,7 @@ class PPOAuxiliaryNetworks:
     v_h_e: BaseHumanGoalAchievementNetwork
     x_h: Optional[BaseAggregateGoalAbilityNetwork] = None
     u_r: Optional[BaseIntrinsicRewardNetwork] = None
+    inverse_dynamics: Optional[BaseInverseDynamicsNetwork] = None
 
     # Frozen copies for reward computation during rollouts
     v_h_e_target: Optional[BaseHumanGoalAchievementNetwork] = None
@@ -147,7 +149,7 @@ class PPOPhase2Trainer:
 
         # Move auxiliary networks to the same device as the actor-critic
         # to prevent device-mismatch errors in forward() calls.
-        for net_name in ("v_h_e", "x_h", "u_r"):
+        for net_name in ("v_h_e", "x_h", "u_r", "inverse_dynamics"):
             net = getattr(auxiliary_networks, net_name, None)
             if net is not None and hasattr(net, "to"):
                 net.to(device)
@@ -170,6 +172,12 @@ class PPOPhase2Trainer:
                 auxiliary_networks.u_r.parameters(),
                 lr=config.lr_u_r,
                 weight_decay=config.u_r_weight_decay,
+            )
+        if auxiliary_networks.inverse_dynamics is not None:
+            self.aux_optimizers["inverse_dynamics"] = optim.Adam(
+                auxiliary_networks.inverse_dynamics.parameters(),
+                lr=1e-3, # Use a default or config.lr_inverse_dynamics if available
+                weight_decay=1e-5,
             )
 
         # Auxiliary replay buffer
@@ -214,6 +222,13 @@ class PPOPhase2Trainer:
                 p.requires_grad = False
             if hasattr(nets.u_r_target, "to"):
                 nets.u_r_target.to(self.device)
+        if nets.inverse_dynamics is not None:
+            nets.inverse_dynamics_target = copy.deepcopy(nets.inverse_dynamics)
+            nets.inverse_dynamics_target.eval()
+            for p in nets.inverse_dynamics_target.parameters():
+                p.requires_grad = False
+            if hasattr(nets.inverse_dynamics_target, "to"):
+                nets.inverse_dynamics_target.to(self.device)
 
     # ------------------------------------------------------------------
     # Auxiliary training
@@ -249,7 +264,9 @@ class PPOPhase2Trainer:
     def _compute_simplified_x_h_td_target(
         self,
         states: List[Any],
+        next_states: List[Any],
         human_indices: List[int],
+        terminals: Optional[List[bool]] = None,
         world_model: Any = None,
     ) -> torch.Tensor:
         """Compute simplified X_h TD targets for the PPO path.
@@ -292,18 +309,21 @@ class PPOPhase2Trainer:
         cfg = self.config
         nets = self.auxiliary_networks
 
-        # --- Network evaluator for non-terminal successor states ---
+        if terminals is None:
+            terminals = [False] * len(states)
+
+        # --- X_h target values for next_states ---
         x_h_target_net = nets.x_h_target or nets.x_h
-        def _evaluate_x_h_targets(ns_list, h_idx_list):
-            if not ns_list:
-                return []
-            vals = []
-            with torch.no_grad():
-                # Sequential eval. Could be batched if network allows.
-                for ns, h in zip(ns_list, h_idx_list):
-                    v = x_h_target_net(ns, world_model, h, self.device)
-                    vals.append(float(v.squeeze().item()))
-            return vals
+        with torch.no_grad():
+            x_h_next_list = []
+            for ns, h_idx, is_term in zip(next_states, human_indices, terminals):
+                if is_term:
+                    x_h_next_list.append(torch.tensor(1.0, device=self.device))
+                else:
+                    val = x_h_target_net(ns, world_model, h_idx, self.device)
+                    val = torch.as_tensor(val.squeeze(), device=self.device)
+                    x_h_next_list.append(val)
+            x_h_next_values = torch.stack(x_h_next_list)
 
         # --- Robot policy per unique state (from actor-critic) ---
         unique_states = list(dict.fromkeys(states))
@@ -347,6 +367,7 @@ class PPOPhase2Trainer:
 
         return compute_simplified_x_h_td_targets(
             states,
+            next_states,
             human_indices,
             gamma_h=cfg.gamma_h,
             zeta=cfg.zeta,
@@ -355,11 +376,12 @@ class PPOPhase2Trainer:
             num_agents=num_agents,
             human_agent_indices=human_agent_indices,
             robot_agent_indices=robot_agent_indices,
-            evaluate_x_h_target_fn=_evaluate_x_h_targets,
+            x_h_next_values=x_h_next_values,
             robot_policy_per_state=robot_policy_per_state,
             action_index_to_tuple=_action_index_to_tuple,
             other_human_probs_fn=_other_human_probs,
             world_model=world_model,
+            inverse_dynamics_network=self.auxiliary_networks.inverse_dynamics if cfg.use_simplified_x_h else None,
             device=self.device,
         )
 
@@ -464,7 +486,7 @@ class PPOPhase2Trainer:
 
             if cfg.use_simplified_x_h:
                 # Simplified goal-agnostic target via the recursion
-                #   X_h(s) = 1 + gamma_h^zeta * q_h(s,s')^zeta * X_h_target(s')
+                #   X_h(s) = 1 + gamma_h^zeta * inverse_dynamics(s,s')^zeta * X_h_target(s')
                 # Collect (state, next_state, h_idx, terminal) per sample.
                 simp_states: List[Any] = []
                 simp_next: List[Any] = []
@@ -483,7 +505,8 @@ class PPOPhase2Trainer:
                 if x_h_preds:
                     with torch.no_grad():
                         target_x_h = self._compute_simplified_x_h_td_target(
-                            simp_states, simp_hidx,
+                            simp_states, simp_next, simp_hidx,
+                            terminals=simp_term,
                             world_model=world_model,
                         )
                     x_h_targets_list = list(target_x_h.unbind())
@@ -563,6 +586,45 @@ class PPOPhase2Trainer:
                     nn.utils.clip_grad_norm_(nets.u_r.parameters(), cfg.u_r_grad_clip)
                 opt.step()
                 losses["u_r_loss"] = loss_u.item()
+
+        # -----------------------------------------------------------------
+        # inverse_dynamics loss: Cross-Entropy between predicted action logits and actual human actions
+        # -----------------------------------------------------------------
+        if (
+            nets.inverse_dynamics is not None
+            and world_model is not None
+            and "inverse_dynamics" in self.aux_optimizers
+            and (active_networks is None or "inverse_dynamics" in active_networks)
+            and cfg.use_simplified_x_h
+        ):
+            q_preds_list: List[torch.Tensor] = []
+            q_targets_list: List[torch.Tensor] = []
+
+            for t in batch:
+                for h_idx in t.goals.keys():
+                    if t.human_actions is None:
+                        continue
+                    # Ensure human action logic is properly hooked up
+                    # t.human_actions typically is a tuple per agent
+                    # Make sure humans are taking valid actions (not NOOP)
+                    # We might need the human's actual action integer from the tuple:
+                    
+                    if h_idx < len(t.human_actions):
+                        human_action = t.human_actions[h_idx]
+                        logits = nets.inverse_dynamics(t.state, t.next_state, world_model, h_idx, self.device)
+                        q_preds_list.append(logits)
+                        q_targets_list.append(torch.tensor(human_action, dtype=torch.long, device=self.device))
+            
+            if q_preds_list:
+                qp = torch.stack(q_preds_list)
+                qt = torch.stack(q_targets_list)
+                
+                loss_inv_dyn = torch.nn.functional.cross_entropy(qp, qt)
+                opt = self.aux_optimizers["inverse_dynamics"]
+                opt.zero_grad()
+                loss_inv_dyn.backward()
+                opt.step()
+                losses["inverse_dynamics_loss"] = loss_inv_dyn.item()
 
         return losses
 

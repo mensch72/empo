@@ -14,6 +14,7 @@ from gym_multigrid.multigrid import MultiGridEnv
 from empo.learning_based.phase2.config import Phase2Config
 from empo.learning_based.phase2.trainer import BasePhase2Trainer, Phase2Networks
 from empo.learning_based.phase2.network_factory import create_count_based_curiosity
+from empo.learning_based.multigrid.phase2.inverse_dynamics import MultiGridInverseDynamicsNetwork
 from empo.learning_based.multigrid import MultiGridStateEncoder
 from empo.learning_based.multigrid.goal_encoder import MultiGridGoalEncoder
 from empo.learning_based.multigrid.agent_encoder import AgentIdentityEncoder
@@ -538,8 +539,9 @@ def create_phase2_networks(
     use_neural_x_h = config.x_h_use_network and not config.should_use_lookup_table('x_h')
     use_neural_u_r = config.u_r_use_network and not config.should_use_lookup_table('u_r')
     use_neural_v_r = config.v_r_use_network and not config.should_use_lookup_table('v_r')
+    use_neural_inverse_dynamics = config.use_simplified_x_h and not config.should_use_lookup_table('v_h_e') # TODO inverse_dynamics uses v_h_e lookup flag for now
     
-    any_neural = use_neural_q_r or use_neural_v_h_e or use_neural_x_h or use_neural_u_r or use_neural_v_r
+    any_neural = use_neural_q_r or use_neural_v_h_e or use_neural_x_h or use_neural_u_r or use_neural_v_r or use_neural_inverse_dynamics
     
     # If no neural networks needed, use all lookup tables
     if not any_neural:
@@ -618,6 +620,7 @@ def create_phase2_networks(
             x_h=x_h,
             u_r=u_r,
             v_r=v_r,
+        inverse_dynamics=inverse_dynamics,
             rnd=rnd,
             count_curiosity=count_curiosity,
         )
@@ -652,10 +655,9 @@ def create_phase2_networks(
     grid_width = env.width
     
     # =========================================================================
-    # Create V_h^e first (it provides shared encoders to other networks)
+    # Create top-level Shared Encoders
     # =========================================================================
-    if use_neural_v_h_e:
-        # Neural V_h^e: create real encoders that will be trained
+    if use_neural_v_h_e or use_neural_inverse_dynamics:
         shared_state_encoder = MultiGridStateEncoder(
             grid_height=grid_height,
             grid_width=grid_width,
@@ -682,7 +684,25 @@ def create_phase2_networks(
             grid_width=grid_width,
             use_encoders=config.use_encoders,
         ).to(device)
-        
+    else:
+        # Use simple exact states (via NullEncoders pointing to the hashable state) if everything is lookup.
+        from empo.learning_based.phase2.lookup.human_goal_ability import LookupTableHumanGoalAbilityNetwork
+        temp_v_h_e = LookupTableHumanGoalAbilityNetwork(
+            gamma_h=config.gamma_h,
+            default_v_h_e=config.get_lookup_default('v_h_e'),
+            include_step_count=config.include_step_count,
+            state_feature_dim=hidden_dim,
+            goal_feature_dim=goal_feature_dim,
+            agent_feature_dim=agent_embedding_dim + agent_position_feature_dim + agent_feature_dim,
+        )
+        shared_state_encoder = temp_v_h_e.state_encoder
+        shared_agent_encoder = temp_v_h_e.agent_encoder
+        shared_goal_encoder = temp_v_h_e.goal_encoder
+
+    # =========================================================================
+    # Create V_h^e
+    # =========================================================================
+    if use_neural_v_h_e:
         v_h_e = MultiGridHumanGoalAchievementNetwork(
             grid_height=grid_height,
             grid_width=grid_width,
@@ -699,7 +719,7 @@ def create_phase2_networks(
             agent_encoder=shared_agent_encoder,
         ).to(device)
     else:
-        # Lookup V_h^e: provides NullEncoders that output zeros
+        # Lookup V_h^e
         from empo.learning_based.phase2.lookup import LookupTableHumanGoalAbilityNetwork
         v_h_e = LookupTableHumanGoalAbilityNetwork(
             gamma_h=config.gamma_h,
@@ -709,9 +729,7 @@ def create_phase2_networks(
             goal_feature_dim=goal_feature_dim,
             agent_feature_dim=agent_embedding_dim + agent_position_feature_dim + agent_feature_dim,
         )
-        # Get null encoders from lookup V_h^e
-        shared_state_encoder = v_h_e.state_encoder
-        shared_agent_encoder = v_h_e.agent_encoder
+        # Even if we created shared_state_encoder natively for InverseDynamics, V_h_e doesn't use it, it uses exact states.
     
     # =========================================================================
     # Create OWN encoders for Q_r and X_h (trained with their respective losses)
@@ -899,6 +917,34 @@ def create_phase2_networks(
                 include_step_count=config.include_step_count,
             )
     
+    
+
+    
+    # InverseDynamics network (optional, for transition dynamics)
+    inverse_dynamics = None
+    if config.use_simplified_x_h:
+        if use_neural_inverse_dynamics:
+            inverse_dynamics = MultiGridInverseDynamicsNetwork(
+                config=config,
+                num_actions=num_actions,
+                grid_height=grid_height,
+                grid_width=grid_width,
+                num_agents_per_color=num_agents_per_color,
+                num_agent_colors=7,
+                state_feature_dim=hidden_dim,
+                hidden_dim=hidden_dim,
+                max_agents=max_agents,
+                agent_embedding_dim=agent_embedding_dim,
+                state_encoder=shared_state_encoder,
+                agent_encoder=shared_agent_encoder,
+                own_state_encoder=None,  # Handled inside the init if None
+                own_agent_encoder=None,
+            ).to(device)
+        else:
+            # We do not have a lookup table version of InverseDynamics yet.
+            # But we can fallback to None, since use_neural_inverse_dynamics handles it.
+            pass
+
     # =========================================================================
     # Create RND module for curiosity-driven exploration (optional)
     # =========================================================================
@@ -982,6 +1028,7 @@ def create_phase2_networks(
         x_h=x_h,
         u_r=u_r,
         v_r=v_r,
+        inverse_dynamics=inverse_dynamics,
         rnd=rnd,
         rnd_encoder_dims=rnd_encoder_dims,  # Store for coefficient computation
         human_rnd=human_rnd,

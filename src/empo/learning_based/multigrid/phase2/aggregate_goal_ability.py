@@ -97,11 +97,13 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         if agent_encoder is not None:
             self.agent_encoder = agent_encoder
         else:
+            use_enc = getattr(self.state_encoder, 'use_encoders', True)
             self.agent_encoder = AgentIdentityEncoder(
                 num_agents=max_agents,
                 embedding_dim=agent_embedding_dim,
                 grid_height=grid_height,
-                grid_width=grid_width
+                grid_width=grid_width,
+                use_encoders=use_enc
             )
         
         # Own state encoder for X_h-specific features (trained with X_h loss)
@@ -110,6 +112,8 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         if own_state_encoder is not None:
             self.own_state_encoder = own_state_encoder
         else:
+            # Must inherit use_encoders to prevent mismatch from state_encoder
+            use_enc = getattr(self.state_encoder, 'use_encoders', True)
             self.own_state_encoder = MultiGridStateEncoder(
                 grid_height=grid_height,
                 grid_width=grid_width,
@@ -120,6 +124,7 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
                 max_pause_switches=max_pause_switches,
                 max_disabling_switches=max_disabling_switches,
                 max_control_buttons=max_control_buttons,
+                use_encoders=use_enc,
                 share_cache_with=self.state_encoder
             )
         
@@ -129,11 +134,13 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         if own_agent_encoder is not None:
             self.own_agent_encoder = own_agent_encoder
         else:
+            use_enc = getattr(self.agent_encoder, 'use_encoders', True)
             self.own_agent_encoder = AgentIdentityEncoder(
                 num_agents=max_agents,
                 embedding_dim=agent_embedding_dim,
                 grid_height=grid_height,
                 grid_width=grid_width,
+                use_encoders=use_enc,
                 share_cache_with=self.agent_encoder
             )
         

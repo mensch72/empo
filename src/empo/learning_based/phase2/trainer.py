@@ -42,6 +42,7 @@ from .intrinsic_reward_network import BaseIntrinsicRewardNetwork
 from .robot_value_network import BaseRobotValueNetwork, compute_v_r_from_components
 from .lookup import get_all_lookup_tables, get_total_table_size
 from .rnd import RNDModule, HumanActionRNDModule
+from .inverse_dynamics import BaseInverseDynamicsNetwork
 from .count_based_curiosity import CountBasedCuriosity
 from .value_transforms import to_z_space, y_to_z_space
 
@@ -62,6 +63,7 @@ class Phase2Networks:
     x_h: Optional[BaseAggregateGoalAbilityNetwork] = None
     u_r: Optional[BaseIntrinsicRewardNetwork] = None
     v_r: Optional[BaseRobotValueNetwork] = None
+    inverse_dynamics: Optional[BaseInverseDynamicsNetwork] = None
     
     # RND module for robot curiosity-driven exploration (optional, for neural networks)
     rnd: Optional[RNDModule] = None
@@ -1973,10 +1975,33 @@ class BasePhase2Trainer(ABC):
         }
         if self.config.x_h_use_network:
             losses['x_h'] = torch.tensor(0.0, device=self.device)
+        if self.config.use_simplified_x_h and hasattr(self.networks, 'inverse_dynamics') and self.networks.inverse_dynamics is not None:
+            losses['inverse_dynamics'] = torch.tensor(0.0, device=self.device)
         if self.config.u_r_use_network:
             losses['u_r'] = torch.tensor(0.0, device=self.device)
         if self.config.v_r_use_network:
             losses['v_r'] = torch.tensor(0.0, device=self.device)
+            
+        # ----- inverse_dynamics loss -----
+        if self.config.use_simplified_x_h and hasattr(self.networks, 'inverse_dynamics') and self.networks.inverse_dynamics is not None:
+            # Prepare data
+            q_preds_list = []
+            q_targets_list = []
+            for t in batch:
+                if t.human_actions is None:
+                    continue
+                for h_idx in t.goals.keys():
+                    if h_idx < len(t.human_actions):
+                        human_action = t.human_actions[h_idx]
+                        logits = self.networks.inverse_dynamics(t.state, t.next_state, self.env.world_model, h_idx, self.device)
+                        q_preds_list.append(logits)
+                        q_targets_list.append(torch.tensor(human_action, dtype=torch.long, device=self.device))
+            
+            if q_preds_list:
+                qp = torch.stack(q_preds_list)
+                qt = torch.stack(q_targets_list)
+                loss_inv_dyn = torch.nn.functional.cross_entropy(qp, qt)
+                losses['inverse_dynamics'] = loss_inv_dyn
         
         # ----- V_h^e loss -----
         if v_h_e_states:
@@ -2034,8 +2059,8 @@ class BasePhase2Trainer(ABC):
             
             if self.config.use_simplified_x_h:
                 # Simplified goal-agnostic target:
-                #   X_h(s) = 1 + gamma_h^zeta * q_h(s,s')^zeta * X_h_target(s')
-                # where q_h(s,s') = max_{a_h} P(s'|s, a_h, pi_{-h}), computed via world model.
+                #   X_h(s) = 1 + gamma_h^zeta * inverse_dynamics(s,s')^zeta * X_h_target(s')
+                # where inverse_dynamics(s,s') = max_{a_h} P(s'|s, a_h, pi_{-h}), computed via world model.
                 # x_h_batch transitions supply (state s, next_state s') pairs.
                 # Terminal next_states use X_h(s') = 1 exactly (no bootstrapping).
                 with torch.no_grad():
@@ -2354,7 +2379,7 @@ class BasePhase2Trainer(ABC):
         """
         Compute simplified X_h TD targets via the goal-agnostic recursion.
 
-        Delegates the core q_h computation to the shared helper
+        Delegates the core inverse_dynamics computation to the shared helper
         :func:`~empo.learning_based.phase2.simplified_x_h.compute_simplified_x_h_td_targets`
         after preparing DQN-specific inputs (robot policy from Q_r target
         network, X_h targets from batched x_h_target forward pass).
@@ -2428,6 +2453,7 @@ class BasePhase2Trainer(ABC):
             action_index_to_tuple=self.networks.q_r_target.action_index_to_tuple,
             other_human_probs_fn=_other_human_probs,
             world_model=self.env,
+            inverse_dynamics_network=self.networks.inverse_dynamics if self.config.use_simplified_x_h else None,
             device=self.device,
         )
 
