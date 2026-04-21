@@ -188,6 +188,12 @@ class PPOPhase2Trainer:
         self.ppo_iteration: int = 0
         self.aux_training_step: int = 0  # cumulative warm-up + in-loop aux steps
         self._warmup_u_r_std: Optional[float] = None
+        self._latest_inverse_dynamics_stats: Dict[str, float] = {
+            "loss": 0.0,
+            "acc": 0.0,
+            "true_prob": 0.0,
+            "entropy": 0.0,
+        }
 
         # TensorBoard writer (initialised lazily in train())
         self.writer: Optional[Any] = None  # type: Optional[SummaryWriter]
@@ -616,15 +622,29 @@ class PPOPhase2Trainer:
                         q_targets_list.append(torch.tensor(human_action, dtype=torch.long, device=self.device))
             
             if q_preds_list:
-                qp = torch.stack(q_preds_list)
+                qp = torch.cat(q_preds_list, dim=0)
                 qt = torch.stack(q_targets_list)
-                
+
                 loss_inv_dyn = torch.nn.functional.cross_entropy(qp, qt)
                 opt = self.aux_optimizers["inverse_dynamics"]
                 opt.zero_grad()
                 loss_inv_dyn.backward()
                 opt.step()
                 losses["inverse_dynamics_loss"] = loss_inv_dyn.item()
+
+                with torch.no_grad():
+                    probs = torch.softmax(qp, dim=-1)
+                    pred_actions = probs.argmax(dim=-1)
+                    true_prob = probs.gather(1, qt.unsqueeze(1)).mean().item()
+                    entropy = (
+                        -(probs * probs.clamp_min(1e-8).log()).sum(dim=-1).mean().item()
+                    )
+                    self._latest_inverse_dynamics_stats = {
+                        "loss": float(loss_inv_dyn.item()),
+                        "acc": float((pred_actions == qt).float().mean().item()),
+                        "true_prob": float(true_prob),
+                        "entropy": float(entropy),
+                    }
 
         return losses
 
@@ -1215,6 +1235,20 @@ class PPOPhase2Trainer:
                 if step_losses:
                     self.aux_training_step += 1
 
+            inv_dyn_stats = self._latest_inverse_dynamics_stats
+            self._broadcast_stat_to_envs(
+                vecenv, "_inv_dyn_loss", float(inv_dyn_stats["loss"])
+            )
+            self._broadcast_stat_to_envs(
+                vecenv, "_inv_dyn_acc", float(inv_dyn_stats["acc"])
+            )
+            self._broadcast_stat_to_envs(
+                vecenv, "_inv_dyn_true_prob", float(inv_dyn_stats["true_prob"])
+            )
+            self._broadcast_stat_to_envs(
+                vecenv, "_inv_dyn_entropy", float(inv_dyn_stats["entropy"])
+            )
+
             # Re-freeze auxiliary networks periodically and sync to envs
             if (iteration + 1) % cfg.reward_freeze_interval == 0:
                 self.freeze_auxiliary_networks()
@@ -1227,6 +1261,10 @@ class PPOPhase2Trainer:
                 "u_r_signal_mean": reward_signal["mean"],
                 "u_r_signal_min": reward_signal["min"],
                 "u_r_signal_max": reward_signal["max"],
+                "inv_dyn_loss": inv_dyn_stats["loss"],
+                "inv_dyn_acc": inv_dyn_stats["acc"],
+                "inv_dyn_true_prob": inv_dyn_stats["true_prob"],
+                "inv_dyn_entropy": inv_dyn_stats["entropy"],
                 "iteration": iteration,
                 "global_step": pufferl.global_step,
             }
@@ -1261,6 +1299,22 @@ class PPOPhase2Trainer:
                 self._log_scalar("Reward/u_r_signal_mean", reward_signal["mean"], step)
                 self._log_scalar("Reward/u_r_signal_min", reward_signal["min"], step)
                 self._log_scalar("Reward/u_r_signal_max", reward_signal["max"], step)
+                self._log_scalar(
+                    "Diagnostics/inv_dyn_loss", inv_dyn_stats["loss"], step
+                )
+                self._log_scalar(
+                    "Diagnostics/inv_dyn_acc", inv_dyn_stats["acc"], step
+                )
+                self._log_scalar(
+                    "Diagnostics/inv_dyn_true_prob",
+                    inv_dyn_stats["true_prob"],
+                    step,
+                )
+                self._log_scalar(
+                    "Diagnostics/inv_dyn_entropy",
+                    inv_dyn_stats["entropy"],
+                    step,
+                )
                 cur_stage = cfg.get_warmup_stage(step)
                 self._log_scalar("Warmup/stage", cur_stage, step)
                 if cur_stage != prev_stage:

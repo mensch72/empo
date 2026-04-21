@@ -209,6 +209,10 @@ class MultiGridWorldModelEnv(EMPOWorldModelEnv):
             "u_r_signal_mean": self._u_r_signal_mean,
             "u_r_signal_min": self._u_r_signal_min,
             "u_r_signal_max": self._u_r_signal_max,
+            "inv_dyn_loss": self._inv_dyn_loss,
+            "inv_dyn_acc": self._inv_dyn_acc,
+            "inv_dyn_true_prob": self._inv_dyn_true_prob,
+            "inv_dyn_entropy": self._inv_dyn_entropy,
         }
 
         # Decode flat joint-action index to per-robot action tuple
