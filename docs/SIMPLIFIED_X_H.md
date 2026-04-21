@@ -1,11 +1,14 @@
 # Simplified X_h Computation
 
-This document explains the simplified, goal-agnostic `X_h` computation in two layers:
+This document explains three related but distinct objects:
 
-1. the theory: what quantity is being approximated and why it differs from standard `X_h`
-2. the code: how the current tabular, DQN, and PPO implementations construct and train that quantity
+1. standard `X_h`, which aggregates goal-conditioned `V_h^e(s, g_h)`
+2. exact simplified `X_h`, which removes explicit goals and uses a successor-state recursion
+3. the current learning-based approximation, which estimates the simplified recursion from an inverse-dynamics ratio
 
-The relevant implementation files are:
+The key point is that simplified `X_h` is not just “standard `X_h` without goals”. It changes the object being approximated.
+
+The main implementation files are:
 
 - `src/empo/backward_induction/phase2.py`
 - `src/empo/learning_based/phase2/simplified_x_h.py`
@@ -13,295 +16,240 @@ The relevant implementation files are:
 - `src/empo/learning_based/phase2_ppo/trainer.py`
 - `src/empo/learning_based/phase2/inverse_dynamics.py`
 - `src/empo/learning_based/multigrid/phase2/inverse_dynamics.py`
+- `src/empo/learning_based/multigrid/phase2/trainer.py`
+- `src/empo/learning_based/multigrid/phase2_ppo/networks.py`
 
-## Why simplified `X_h` exists
+## Standard `X_h`
 
-In the standard Phase 2 formulation, `X_h` is built from the goal-conditioned human attainment quantity `V_h^e(s, g_h)`. That path depends on Phase 1 style goal reasoning:
+In the standard Phase 2 formulation, `X_h` is built from the goal-conditioned attainment quantity `V_h^e(s, g_h)`:
 
 $$
 X_h(s) = \mathbb{E}_{g_h}\left[V_h^e(s, g_h)^\zeta\right].
 $$
 
-This is the most direct implementation of the theory when we want `X_h` to summarize power by aggregating over hypothetical goals.
+That is the ordinary goal-aggregation path. It depends on explicit hypothetical goals and Phase 1 style human-policy reasoning.
 
-The simplified mode removes the explicit goal dimension and replaces it with a goal-agnostic recursion over successor states. This is useful when:
+When `use_simplified_x_h=False`, this is still the object the learning-based code is approximating.
 
-- we want a power-like quantity without enumerating or sampling goals at every update
-- we want terminal states to have an explicit lower bound `X_h = 1`
+## Exact simplified `X_h`
 
-In code, this mode is enabled with `use_simplified_x_h=True` in Phase 2 config objects.
-
-## The theoretical object
-
-The simplified `X_h` is the solution to the fixed-point equation
+Simplified mode replaces the goal dimension by a recursion over successor states. The exact object is
 
 $$
 X_h(s) = 1 + \gamma_h^\zeta \sum_{s'} q_h(s, s')^\zeta X_h(s').
 $$
 
-Here:
+Here `h` is the focal human and
 
-- `h` is the focal human agent
-- `\gamma_h` is the human discount factor
-- `\zeta` is the risk / power curvature parameter from the theory
-- `q_h(s, s')` is the goal-agnostic probability mass that human `h` can force onto successor state `s'`, given the robot policy and the other humans' policies:
 $$
 q_h(s, s') = \max_{a_h} P(s' \mid s, a_h, \pi_{-h}).
 $$
 
-This version of `X_h` is actually a special case of the general one: humans are perfectly rational, and each possible goal is a finite trajectory of states.
+So simplified `X_h` measures one-step successor-state control power and then bootstraps future control power from the successor state.
+
+This is the object implemented exactly in the tabular backward-induction code in `src/empo/backward_induction/phase2.py`.
 
 ### Boundary condition
 
-Terminal states are assigned
+Terminal states use
 
 $$
 X_h(s_{\mathrm{terminal}}) = 1.
 $$
 
-That makes `1` the natural lower bound in simplified mode. This is why simplified `X_h` networks use the feasible range `(1, \infty)` rather than `(0, 1)`.
+That is why simplified-mode neural `X_h` networks use feasible range `(1, \infty)`.
 
 ### Bounded rationality
 
-When `x_h_epsilon_h > 0`, the code does not use a pure best action. Instead it mixes the best human action with a uniform prior over human actions:
+When `x_h_epsilon_h > 0`, the best action is mixed with the mean over actions:
 
 $$
 q_h(s, s') = (1 - \epsilon_h) \max_{a_h} P(s' \mid s, a_h, \pi_{-h})
 + \epsilon_h \operatorname{mean}_{a_h} P(s' \mid s, a_h, \pi_{-h}).
 $$
 
-This should be read as bounded rationality in the simplified power recursion. It is distinct from exploration schedules such as `epsilon_h_start` / `epsilon_h_end`.
+This is a theory-side bounded-rationality interpolation for simplified `X_h`. It is not an exploration schedule.
 
-## What `q_h(s, s')` means operationally
+## Why inverse dynamics appears
 
-The definition
+The exact quantity `q_h(s, s')` is expensive in learning-based training because evaluating it directly requires reconstructing one-step transition mass for each candidate human action.
 
-$$
-q_h(s, s') = \max_{a_h} P(s' \mid s, a_h, \pi_{-h})
-$$
-
-packs several policy assumptions into a single scalar:
-
-1. Fix the current state `s`.
-2. Fix a focal human `h`.
-3. Let the robot act according to its current policy `\pi_r`.
-4. Let all non-focal humans act according to their current policy priors.
-5. For each action `a_h` available to human `h`, compute the total probability of reaching `s'` in one step.
-6. Keep the largest of those probabilities.
-
-So simplified `X_h` is not asking, "How much can human `h` achieve goal `g`?" It is asking, "How much successor-state control can human `h` exert from here, and how much future control does that successor state still contain?"
-
-## Tabular reference implementation
-
-The most faithful implementation of the theory is the backward-induction path in `src/empo/backward_induction/phase2.py`.
-
-That code is useful as the semantic reference because it works directly with exact transition probabilities from the world model and solves the recursion over the reachable state graph. Conceptually it does the following:
-
-1. Enumerate reachable states.
-2. For each focal human and each state, compute `q_h(s, s')` from exact transition probabilities.
-3. Solve the fixed-point recursion for `X_h` using the model-based structure of the environment.
-4. Feed the resulting `X_h` values into the rest of Phase 2.
-
-When reading the learning-based code, it helps to treat the tabular implementation as the ground-truth definition and the neural code as an approximation strategy for the same quantity.
-
-## Learning-based implementation: shared helper
-
-The shared helper lives in `src/empo/learning_based/phase2/simplified_x_h.py` and is used by both the DQN and PPO trainers.
-
-Its public entrypoint is:
-
-```python
-compute_simplified_x_h_td_targets(...)
-```
-
-This helper does not solve the fixed-point exactly. Instead it builds one-step TD targets for sampled transitions `(s, s')` collected during training.
-
-The target used in the helper is:
+The agreed approximation strategy is to learn an inverse-dynamics model
 
 $$
-\widehat{X}_h^{\mathrm{target}}(s, s') = 1 + \gamma_h^\zeta q_h(s, s')^\zeta X_h^{\mathrm{target}}(s').
+P_\theta(a_h \mid s, s')
 $$
 
-This is a stochastic one-step backup, not the full exact sum over all reachable successor states. In other words:
+and use Bayes' rule to rank actions by how strongly they explain the observed successor state.
 
-- the tabular code implements the fixed-point directly
-- the learning-based code trains a network from sampled one-step TD targets derived from that fixed-point
+More precisely, the dependence on the non-focal agents' current policies is implicit throughout this section. The exact simplified quantity is based on
 
-### Inputs expected by the helper
+$$
+P(s' \mid s, a_h, \pi_{-h}),
+$$
 
-The helper requires the trainers to prepare the pieces that are specific to each learning setup:
+and the inverse-dynamics approximation is trying to recover the action ordering induced by that one-step quantity.
 
-- `states`, `next_states`, `human_indices`: aligned samples
-- `x_h_next_values`: bootstrap values `X_h_target(s')`
-- `robot_policy_per_state`: the robot policy for each unique source state
-- `action_index_to_tuple`: how a flat robot action index maps to per-robot actions
-- `other_human_probs_fn`: a goal-agnostic marginal policy for other humans
-- `world_model.transition_probabilities(state, actions)`: exact one-step dynamics
+Starting from
 
-### What the helper computes internally
+$$
+P(a_h \mid s, s') = \frac{P(s' \mid s, a_h, \pi_{-h})\,\pi_h(a_h \mid s)}{P(s' \mid s, \pi_{-h})},
+$$
 
-Inside `compute_simplified_x_h_td_targets`, the computation is:
+we get
 
-1. Build the joint action distribution of the non-focal humans from independent marginals.
-2. For each sampled `(state, focal_human)` pair, cache a transition-mass table for every possible human action `a_h`.
-3. For each human action, sum over robot actions and other-human actions under their respective policies.
-4. Query `world_model.transition_probabilities(state, joint_actions)`.
-5. Extract the probability mass assigned to the observed `next_state` for each candidate `a_h`.
-6. Take the max over `a_h`, or the `epsilon_h` mixture of max and mean.
-7. Form the TD target `1 + gamma_h^zeta * q_h^zeta * X_h_target(next_state)`.
+$$
+P(s' \mid s, a_h, \pi_{-h}) = \frac{P(a_h \mid s, s')}{\pi_h(a_h \mid s)} P(s' \mid s, \pi_{-h}).
+$$
 
-This is the core reason the helper is shared: the expensive part is not DQN- or PPO-specific. It is the reconstruction of `q_h(s, s')` from the world model.
+For fixed `(s, s')`, the factor $P(s' \mid s, \pi_{-h})$ does not depend on $a_h$, so maximizing over $a_h$ is equivalent to maximizing the ratio
+
+$$
+\frac{P(a_h \mid s, s')}{\pi_h(a_h \mid s)}.
+$$
+
+That is the basis of the approximation used in the learning-based code.
+
+Important limitation: this only preserves the action ranking up to a common multiplicative factor. The ratio is therefore not itself a probability mass and can exceed `1`.
+
+## What the learning-based code now does
+
+The shared helper `compute_simplified_x_h_td_targets(...)` in `src/empo/learning_based/phase2/simplified_x_h.py` supports two modes.
+
+### Mode 1: inverse-dynamics ratio path
+
+If an `inverse_dynamics_network` is provided, the helper computes logits for
+
+$$
+P_\theta(a_h \mid s, s')
+$$
+
+turns them into probabilities, divides by the focal-human policy prior `\pi_h(a_h \mid s)`, and forms the sampled controllability score
+
+$$
+\widehat{q}_h(s, s') =
+\begin{cases}
+\max_{a_h} \dfrac{P_\theta(a_h \mid s, s')}{\pi_h(a_h \mid s)} & \text{if } \epsilon_h = 0, \\
+(1-\epsilon_h) \max_{a_h} \dfrac{P_\theta(a_h \mid s, s')}{\pi_h(a_h \mid s)}
++ \epsilon_h \operatorname{mean}_{a_h} \dfrac{P_\theta(a_h \mid s, s')}{\pi_h(a_h \mid s)} & \text{otherwise.}
+\end{cases}
+$$
+
+The actual TD target is then
+
+$$
+\widehat{X}_h^{\mathrm{target}}(s, s') = 1 + \gamma_h^\zeta \widehat{q}_h(s, s')^\zeta X_h^{\mathrm{target}}(s').
+$$
+
+Important detail: the implementation uses the ratio itself as the sampled score. It does not reconstruct the common factor $P(s' \mid s)$. So this is an approximation to the exact simplified recursion, not an exact algebraic rewrite.
+
+Also, this is only “model-free” in the sense that it avoids exact transition-probability enumeration. The current implementation still passes `world_model` into the inverse-dynamics network so the network can tensorize or encode states.
+
+### Mode 2: exact fallback path
+
+If no inverse-dynamics network is provided, the same helper falls back to the older exact one-step reconstruction:
+
+1. enumerate candidate focal-human actions
+2. combine them with robot joint-action probabilities and non-focal human marginals
+3. query `world_model.transition_probabilities(state, actions)`
+4. extract the probability mass of the observed `next_state`
+5. apply the same max or epsilon-mixed reduction over actions
+
+So the helper now contains both:
+
+- the preferred learning-based inverse-dynamics approximation
+- the exact world-model fallback
+
+But the fallback is exact only for the local one-step quantity `q_h(s, s')` on the sampled transition. The overall learning-based update is still a sampled one-step TD backup, not the full tabular fixed-point solution.
 
 ## DQN path
 
-The DQN trainer integration is in `src/empo/learning_based/phase2/trainer.py`.
+The DQN entry point is `BasePhase2Trainer._compute_simplified_x_h_td_target(...)` in `src/empo/learning_based/phase2/trainer.py`.
 
-The relevant method is:
+That method:
 
-```python
-BasePhase2Trainer._compute_simplified_x_h_td_target(...)
-```
+1. computes `X_h_target(s')` from `self.networks.x_h_target`
+2. gets the current robot policy from `q_r_target`
+3. builds the focal-human policy prior `\pi_h(a_h \mid s)` in array form
+4. passes `self.networks.inverse_dynamics` into `compute_simplified_x_h_td_targets(...)`
 
-That method prepares DQN-specific inputs for the shared helper:
+So in simplified DQN mode, the `X_h` TD target now uses the inverse-dynamics ratio path when that network exists.
 
-1. It computes `X_h_target(s')` with `self.networks.x_h_target.forward_batch(...)`.
-2. It clamps non-terminal simplified values to be at least `1.0`.
-3. It obtains the robot policy from `q_r_target` using the current effective `beta_r`.
-4. It wraps the human policy prior into the helper's expected `(state, agent_index) -> probability array` form.
-5. It calls `compute_simplified_x_h_td_targets(...)`.
+If no inverse-dynamics network is present, the same helper falls back to exact local `q_h(s, s')` reconstruction from `transition_probabilities(...)`.
 
-The X_h loss then uses MSE between:
-
-- the online network prediction `x_h_pred = X_h_\theta(s, h)`
-- the helper-generated TD target
-
-### Where this is used in training
-
-During auxiliary training, when `use_simplified_x_h=True`, the DQN trainer no longer builds `X_h` targets from `V_h^e(s, g_h)`. Instead it collects aligned `(state, next_state, human_idx, terminal)` samples from replay and uses the simplified target path.
-
-That changes the meaning of the `X_h` network:
-
-- standard mode: learn an aggregation of goal-conditioned human attainment values
-- simplified mode: learn a goal-agnostic control recursion over successor states
+In multigrid, the inverse-dynamics network is created in `src/empo/learning_based/multigrid/phase2/trainer.py` when simplified mode is active and `v_h_e` is neural.
 
 ## PPO path
 
-The PPO integration is in `src/empo/learning_based/phase2_ppo/trainer.py`.
+The PPO entry point is `PPOPhase2Trainer._compute_simplified_x_h_td_target(...)` in `src/empo/learning_based/phase2_ppo/trainer.py`.
 
-The analogous method is:
+That method:
 
-```python
-PPOPhase2Trainer._compute_simplified_x_h_td_target(...)
-```
+1. computes `X_h_target(s')` from `x_h_target` or `x_h`
+2. computes the robot policy from the PPO actor-critic logits
+3. constructs the focal-human policy prior array
+4. passes a frozen `inverse_dynamics_target` if available, otherwise the online inverse-dynamics network
 
-Its structure mirrors the DQN path, but the robot policy is obtained from the actor-critic rather than from a `q_r_target` network:
+So PPO uses a target copy for the simplified `X_h` bootstrap path in the same spirit that it uses frozen copies for the other auxiliary reward computations.
 
-1. Compute `X_h_target(s')` from `x_h_target` or `x_h`.
-2. Convert each unique source state to PPO observations with the env wrapper.
-3. Run the actor-critic to get action logits.
-4. Softmax those logits to obtain `\pi_r(a_r \mid s)`.
-5. Wrap the human prior into a goal-agnostic other-human policy function.
-6. Call the shared helper.
+In multigrid PPO, the inverse-dynamics network is created in `src/empo/learning_based/multigrid/phase2_ppo/networks.py` whenever `config.use_simplified_x_h` and `use_x_h` are both true.
 
-During `train_auxiliary_step`, simplified mode changes the `X_h` branch exactly as in DQN: the target becomes the successor-state recursion rather than a `V_h^e` aggregate.
+## Inverse-dynamics training objective
+
+The inverse-dynamics network itself is defined abstractly in `src/empo/learning_based/phase2/inverse_dynamics.py` and concretely for multigrid in `src/empo/learning_based/multigrid/phase2/inverse_dynamics.py`.
+
+Its output semantics are straightforward:
+
+$$
+\\text{logits}_\theta(s, s', h) \longrightarrow P_\theta(a_h \mid s, s').
+$$
+
+The trainers also optimize an auxiliary cross-entropy loss on observed focal-human actions. That auxiliary loss is what teaches the network to approximate the posterior action distribution used in the simplified `X_h` target.
 
 ## Relationship to `U_r`
 
-Once `X_h` is available, the rest of the power pipeline is unchanged in form.
-
-The code computes the intermediate quantity
+Once simplified `X_h` is available, the downstream structure stays the same:
 
 $$
-y(s) = \mathbb{E}_h[X_h(s, h)^{-\xi}]
+y(s) = \mathbb{E}_h[X_h(s, h)^{-\xi}],
 $$
-
-and then the robot intrinsic reward is
 
 $$
 U_r(s) = -y(s)^\eta.
 $$
 
-Simplified mode therefore changes `U_r` indirectly by changing the semantics and scale of `X_h`:
+What changes is the meaning and scale of `X_h`:
 
-- standard mode: `X_h` is goal-attainment based and typically lives in a bounded range
-- simplified mode: `X_h` has lower bound `1` and no finite upper bound
+- standard mode: goal-conditioned attainment aggregation
+- simplified mode: successor-state control recursion, approximated from inverse dynamics in the learning-based path
 
-That is why the code clamps simplified `X_h` at `min=1.0` before using it in the `U_r` computation.
+Because terminal simplified `X_h` is `1`, the code consistently clamps simplified-mode values to be at least `1.0` before they are used downstream.
 
-## Feasible range and numerical conventions
+## Exact reference vs current approximation
 
-In simplified mode, the code consistently treats:
+It is important to keep these separate.
 
-- terminal `X_h` as exactly `1`
-- valid non-terminal `X_h` as `\ge 1`
-- the feasible range of learned `X_h` as `(1.0, inf)`
+The exact semantic reference is:
 
-This differs from the standard mode, where `X_h` is treated as bounded and often clamped into `[10^{-3}, 1]` for stability.
+- tabular backward induction in `src/empo/backward_induction/phase2.py`
 
-That difference appears in both the network factories and the `U_r` target computation.
+Within the learning-based helper, the exact fallback branch in `src/empo/learning_based/phase2/simplified_x_h.py` computes the exact local one-step quantity `q_h(s, s')` for the sampled transition, but it does not replace the tabular fixed-point solution.
 
-## Inverse-dynamics network classes
+The current learning-based approximation is:
 
-There are now inverse-dynamics modules in:
+- train `P_\theta(a_h \mid s, s')`
+- score each sampled transition by the Bayes-ratio surrogate
+- bootstrap `X_h` from that sampled controllability score
 
-- `src/empo/learning_based/phase2/inverse_dynamics.py`
-- `src/empo/learning_based/multigrid/phase2/inverse_dynamics.py`
+So the code is no longer merely “adding inverse-dynamics diagnostics”. It is actually using the inverse-dynamics model inside the simplified `X_h` target construction.
 
-These define a learned model that takes `(state, next_state, focal_human)` and predicts a distribution over the focal human action.
+## Practical reading order
 
-The intended interpretation is:
+If you want the shortest reliable path through the code, read in this order:
 
-$$
-P_\theta(a_h \mid s, s').
-$$
-
-The trainer code also adds an auxiliary cross-entropy loss on observed human actions when simplified mode is enabled.
-
-### Important current distinction
-
-The exact simplified-`X_h` target construction still lives in the shared helper in `src/empo/learning_based/phase2/simplified_x_h.py`, and that helper is still written around exact world-model transition masses `q_h(s, s')`.
-
-So there are two layers to keep separate:
-
-1. the current authoritative target construction: exact world-model `q_h` from `transition_probabilities(...)`
-2. the inverse-dynamics scaffolding: a learned approximation path being introduced around the same conceptual quantity
-
-The config comments use the name `inverse_dynamics(s, s')` for the quantity that the theory previously called `q_h(s, s')`. In the code today, the cleanest reference implementation is still the exact helper and the tabular backward-induction path.
-
-## End-to-end code flow summary
-
-When `use_simplified_x_h=True`, the learning-based path is:
-
-1. Collect a transition `(s, a, s')` in replay.
-2. For each focal human in that transition, evaluate the online `X_h` network at `s`.
-3. Evaluate the target `X_h` network at `s'`, unless `s'` is terminal, in which case use `1`.
-4. Recover the robot policy `\pi_r` at `s`.
-5. Recover the non-focal human action marginals at `s`.
-6. Use the world model to compute the one-step state-control quantity `q_h(s, s')`.
-7. Build the TD target `1 + \gamma_h^\zeta q_h(s, s')^\zeta X_h^{\mathrm{target}}(s')`.
-8. Fit the `X_h` network by MSE to that target.
-9. Use the resulting `X_h` values downstream in `U_r` and therefore in robot policy computation.
-
-## Interpretation
-
-The simplified recursion changes the semantics of `X_h` from
-
-- "aggregate discounted goal achievement ability"
-
-to
-
-- "aggregate discounted successor-state control power"
-
-under the current robot policy and the current other-human policies.
-
-That makes simplified `X_h` especially natural when the goal set is large, expensive to sample, or not the right abstraction for the question being studied.
-
-## Practical reading guide
-
-If you want to understand the code in the shortest reliable order, read it in this sequence:
-
-1. `src/empo/backward_induction/phase2.py` for the exact mathematical definition
-2. `src/empo/learning_based/phase2/simplified_x_h.py` for the shared TD target construction
-3. `src/empo/learning_based/phase2/trainer.py` for the DQN integration
-4. `src/empo/learning_based/phase2_ppo/trainer.py` for the PPO integration
-5. `src/empo/learning_based/phase2/inverse_dynamics.py` and `src/empo/learning_based/multigrid/phase2/inverse_dynamics.py` for the learned approximation layer being added around the same idea
+1. `src/empo/backward_induction/phase2.py` for the exact simplified object
+2. `src/empo/learning_based/phase2/simplified_x_h.py` for the shared TD target helper
+3. `src/empo/learning_based/phase2/inverse_dynamics.py` for the abstract inverse-dynamics interface
+4. `src/empo/learning_based/phase2/trainer.py` for the DQN integration
+5. `src/empo/learning_based/phase2_ppo/trainer.py` for the PPO integration
+6. `src/empo/learning_based/multigrid/phase2/trainer.py` and `src/empo/learning_based/multigrid/phase2_ppo/networks.py` for the actual multigrid network construction

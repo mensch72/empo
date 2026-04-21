@@ -110,6 +110,7 @@ class PPOAuxiliaryNetworks:
     v_h_e_target: Optional[BaseHumanGoalAchievementNetwork] = None
     x_h_target: Optional[BaseAggregateGoalAbilityNetwork] = None
     u_r_target: Optional[BaseIntrinsicRewardNetwork] = None
+    inverse_dynamics_target: Optional[BaseInverseDynamicsNetwork] = None
 
 
 # ======================================================================
@@ -387,7 +388,12 @@ class PPOPhase2Trainer:
             action_index_to_tuple=_action_index_to_tuple,
             other_human_probs_fn=_other_human_probs,
             world_model=world_model,
-            inverse_dynamics_network=self.auxiliary_networks.inverse_dynamics if cfg.use_simplified_x_h else None,
+            inverse_dynamics_network=(
+                self.auxiliary_networks.inverse_dynamics_target
+                or self.auxiliary_networks.inverse_dynamics
+            )
+            if cfg.use_simplified_x_h
+            else None,
             device=self.device,
         )
 
@@ -492,7 +498,9 @@ class PPOPhase2Trainer:
 
             if cfg.use_simplified_x_h:
                 # Simplified goal-agnostic target via the recursion
-                #   X_h(s) = 1 + gamma_h^zeta * inverse_dynamics(s,s')^zeta * X_h_target(s')
+                #   X_h(s) = 1 + gamma_h^zeta * q_h(s,s')^zeta * X_h_target(s')
+                # In the learning-based path, q_h is approximated from the
+                # inverse-dynamics ratio P_theta(a_h | s, s') / pi_h(a_h | s).
                 # Collect (state, next_state, h_idx, terminal) per sample.
                 simp_states: List[Any] = []
                 simp_next: List[Any] = []

@@ -301,15 +301,18 @@ class Phase2Config:
     # Simplified goal-agnostic X_h computation
     # =========================================================================
     # When use_simplified_x_h=True, X_h is computed via the goal-agnostic recursion
-    #   X_h(s) = 1 + gamma_h^zeta * sum_{s'} inverse_dynamics(s,s')^zeta * X_h(s')
-    # where inverse_dynamics(s,s') = max_{a_h} P(s'|s, a_h, pi_{-h}).
+    #   X_h(s) = 1 + gamma_h^zeta * sum_{s'} q_h(s,s')^zeta * X_h(s')
+    # where q_h(s,s') = max_{a_h} P(s'|s, a_h, pi_{-h}).
     # This bypasses V_h^e entirely. X_h >= 1 for all states (terminal states X_h = 1).
     # The option is available for any value of zeta (not just close to 1).
     #
-    # Bounded rationality: when x_h_epsilon_h > 0, inverse_dynamics mixes the best human action
+    # In the learning-based path, q_h is approximated from the inverse-dynamics
+    # ratio P_theta(a_h | s, s') / pi_h(a_h | s).
+    #
+    # Bounded rationality: when x_h_epsilon_h > 0, q_h mixes the best human action
     # with a uniform prior over actions:
-    #   inverse_dynamics(s,s') = (1 - eps) * max_{a_h} P(s'|s, a_h, pi_{-h})
-    #               + eps * mean_{a_h} P(s'|s, a_h, pi_{-h})
+    #   q_h(s,s') = (1 - eps) * max_{a_h} P(s'|s, a_h, pi_{-h})
+    #             + eps * mean_{a_h} P(s'|s, a_h, pi_{-h})
     # This parameter is distinct from epsilon_h_start/epsilon_h_end (exploration).
     use_simplified_x_h: bool = False
     x_h_epsilon_h: float = 0.0   # Bounded-rationality mixing coefficient for simplified X_h

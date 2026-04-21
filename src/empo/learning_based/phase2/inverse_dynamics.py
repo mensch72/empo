@@ -5,10 +5,11 @@ from abc import ABC, abstractmethod
 
 class BaseInverseDynamicsNetwork(nn.Module, ABC):
     """
-    Learns to predict the transition probability P(s' | s, a_h, pi_{-h})
-    Takes (s, s') as input and the central agent h index, and outputs 
-    a vector of length num_actions containing logits to predict a_h.
-    This acts as an inverse dynamics model trained via cross-entropy loss.
+    Learns the inverse-dynamics posterior P_theta(a_h | s, s').
+
+    Takes (s, s') and the focal human index as input and outputs a vector of
+    length num_actions containing logits over the focal human action.
+    This acts as an inverse-dynamics model trained via cross-entropy loss.
     """
     def __init__(self, config: Any, num_actions: int):
         super().__init__()

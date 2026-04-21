@@ -16,6 +16,19 @@ class CountingWorldModel:
         return [(1.0, ("right",))]
 
 
+class NoTransitionWorldModel:
+    def transition_probabilities(self, state, actions):
+        raise AssertionError("inverse-dynamics path should not query transitions")
+
+
+class DummyInverseDynamics:
+    def __init__(self, probs):
+        self._logits = torch.log(torch.tensor([probs], dtype=torch.float32))
+
+    def forward(self, state, next_state, world_model, human_agent_idx, device="cpu"):
+        return self._logits.to(device)
+
+
 def test_compute_simplified_x_h_td_targets_caches_transition_mass():
     world_model = CountingWorldModel()
     states = [("s",), ("s",), ("s",)]
@@ -45,3 +58,33 @@ def test_compute_simplified_x_h_td_targets_caches_transition_mass():
 
     assert torch.allclose(targets, torch.tensor([2.0, 2.0, 2.0]))
     assert world_model.calls == 2
+
+
+def test_compute_simplified_x_h_td_targets_uses_inverse_dynamics_ratio_target():
+    world_model = NoTransitionWorldModel()
+    inverse_dynamics = DummyInverseDynamics([0.3, 0.7])
+
+    targets = compute_simplified_x_h_td_targets(
+        [("s",)],
+        [("s_prime",)],
+        [0],
+        gamma_h=0.5,
+        zeta=1.0,
+        epsilon_h=0.25,
+        num_actions=2,
+        num_agents=1,
+        human_agent_indices=[0],
+        robot_agent_indices=[],
+        x_h_next_values=torch.tensor([2.0]),
+        robot_policy_per_state={("s",): torch.tensor([1.0])},
+        action_index_to_tuple=lambda idx: (),
+        other_human_probs_fn=lambda state, agent_index: [0.75, 0.25],
+        world_model=world_model,
+        inverse_dynamics_network=inverse_dynamics,
+        device="cpu",
+    )
+
+    expected_ratio = 0.75 * (0.7 / 0.25) + 0.25 * ((0.3 / 0.75 + 0.7 / 0.25) / 2.0)
+    expected_target = 1.0 + 0.5 * expected_ratio * 2.0
+
+    assert torch.allclose(targets, torch.tensor([expected_target], dtype=torch.float32))

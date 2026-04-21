@@ -2059,8 +2059,9 @@ class BasePhase2Trainer(ABC):
             
             if self.config.use_simplified_x_h:
                 # Simplified goal-agnostic target:
-                #   X_h(s) = 1 + gamma_h^zeta * inverse_dynamics(s,s')^zeta * X_h_target(s')
-                # where inverse_dynamics(s,s') = max_{a_h} P(s'|s, a_h, pi_{-h}), computed via world model.
+                #   X_h(s) = 1 + gamma_h^zeta * q_h(s,s')^zeta * X_h_target(s')
+                # In the learning-based path, q_h is approximated from the
+                # inverse-dynamics ratio P_theta(a_h | s, s') / pi_h(a_h | s).
                 # x_h_batch transitions supply (state s, next_state s') pairs.
                 # Terminal next_states use X_h(s') = 1 exactly (no bootstrapping).
                 with torch.no_grad():
