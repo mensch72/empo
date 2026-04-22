@@ -174,7 +174,10 @@ class PPOPhase1Config:
     # ── Convenience helpers ──────────────────────────────────────────────
 
     def get_entropy_coef(self, training_step: int) -> float:
-        """Linearly-annealed entropy coefficient.
+        """Cosine-annealed entropy coefficient.
+
+        Uses a half-cosine schedule that stays high early (maximising
+        exploration) and decays smoothly toward ``ppo_ent_coef_end``.
 
         .. note::
 
@@ -185,12 +188,13 @@ class PPOPhase1Config:
            outside PufferLib, or for future PufferLib versions that expose
            a mutable ``ent_coef`` field.
         """
+        import math
         if training_step >= self.ppo_ent_anneal_steps:
             return self.ppo_ent_coef_end
         frac = training_step / max(1, self.ppo_ent_anneal_steps)
-        return self.ppo_ent_coef_start + frac * (
-            self.ppo_ent_coef_end - self.ppo_ent_coef_start
-        )
+        return self.ppo_ent_coef_end + 0.5 * (
+            self.ppo_ent_coef_start - self.ppo_ent_coef_end
+        ) * (1.0 + math.cos(math.pi * frac))
 
     def to_pufferlib_config(self) -> dict:
         """Build the flat config dict expected by ``pufferlib.pufferl.PuffeRL``.

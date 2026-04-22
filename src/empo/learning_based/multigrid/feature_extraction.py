@@ -298,9 +298,8 @@ def extract_global_world_features(
     features = torch.zeros(4, device=device)
     
     if include_step_count:
-        step_count = state[0] if state else 0
-        max_steps = getattr(world_model, 'max_steps', 100) if world_model else 100
-        features[0] = float(max_steps - step_count)  # remaining_time (raw integer)
+        remaining_steps = state[0] if state else 100
+        features[0] = float(remaining_steps)  # remaining_time (raw integer)
     # else: features[0] remains 0
     
     if world_model is not None:

@@ -248,7 +248,6 @@ def compute_tabular_u_r(
     # X_h(s) = mean_g[V_h^e(s, h, g)^zeta]
     human_indices = env.human_agent_indices
     u_r_table: Dict[Any, float] = {}
-    _X_H_MIN = 1e-3
 
     for state, vh_by_agent in Vh_dict.items():
         x_h_vals = []
@@ -258,15 +257,13 @@ def compute_tabular_u_r(
             goal_dict = vh_by_agent[h_idx]
             if not goal_dict:
                 continue
-            # X_h = mean over goals of V_h^e^zeta
+            # X_h = mean over goals of V_h^e^zeta (X_h >= 0 with no positive floor)
             v_powers = [max(v, 0.0) ** zeta for v in goal_dict.values()]
             x_h = sum(v_powers) / len(v_powers) if v_powers else 0.0
-            x_h = max(x_h, _X_H_MIN)
-            x_h = min(x_h, 1.0)
             x_h_vals.append(x_h)
 
         if x_h_vals:
-            y = float(np.mean([x ** (-xi) for x in x_h_vals]))
+            y = float(np.mean([max(x, 1e-10) ** (-xi) for x in x_h_vals]))
             u_r_table[state] = -(y ** eta)
         else:
             u_r_table[state] = 0.0
@@ -277,10 +274,7 @@ def compute_tabular_u_r(
         print(f"  U_r range: [{min(vals):.6f}, {max(vals):.6f}]")
         print(f"  U_r mean:  {np.mean(vals):.6f}")
         empirical_scale = max(abs(v) for v in vals)
-        _X_H_MIN = 1e-3
-        theoretical_scale = (_X_H_MIN ** (-xi)) ** eta
         print(f"  Empirical  max|U_r|:  {empirical_scale:.6f}  (used as scale)")
-        print(f"  Theoretical bound:    {theoretical_scale:.6f}  (not used)")
         print(f"  U_r/scale range: [{min(vals)/empirical_scale:.6f}, {max(vals)/empirical_scale:.6f}]")
 
     # Also print V_r(root) for reference

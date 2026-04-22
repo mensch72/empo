@@ -42,6 +42,7 @@ from .intrinsic_reward_network import BaseIntrinsicRewardNetwork
 from .robot_value_network import BaseRobotValueNetwork, compute_v_r_from_components
 from .lookup import get_all_lookup_tables, get_total_table_size
 from .rnd import RNDModule, HumanActionRNDModule
+from .inverse_dynamics import BaseInverseDynamicsNetwork
 from .count_based_curiosity import CountBasedCuriosity
 from .value_transforms import to_z_space, y_to_z_space
 
@@ -62,6 +63,7 @@ class Phase2Networks:
     x_h: Optional[BaseAggregateGoalAbilityNetwork] = None
     u_r: Optional[BaseIntrinsicRewardNetwork] = None
     v_r: Optional[BaseRobotValueNetwork] = None
+    inverse_dynamics: Optional[BaseInverseDynamicsNetwork] = None
     
     # RND module for robot curiosity-driven exploration (optional, for neural networks)
     rnd: Optional[RNDModule] = None
@@ -469,6 +471,12 @@ class BasePhase2Trainer(ABC):
                 self.networks.x_h,
                 lr=self.config.lr_x_h,
                 weight_decay=self.config.x_h_weight_decay
+            )
+        if self.config.use_simplified_x_h and self.networks.inverse_dynamics is not None:
+            optimizers['inverse_dynamics'] = make_optimizer(
+                self.networks.inverse_dynamics,
+                lr=self.config.lr_x_h,
+                weight_decay=self.config.x_h_weight_decay,
             )
         # Only create U_r optimizer if using network (not direct computation)
         if self.config.u_r_use_network:
@@ -1973,10 +1981,33 @@ class BasePhase2Trainer(ABC):
         }
         if self.config.x_h_use_network:
             losses['x_h'] = torch.tensor(0.0, device=self.device)
+        if self.config.use_simplified_x_h and hasattr(self.networks, 'inverse_dynamics') and self.networks.inverse_dynamics is not None:
+            losses['inverse_dynamics'] = torch.tensor(0.0, device=self.device)
         if self.config.u_r_use_network:
             losses['u_r'] = torch.tensor(0.0, device=self.device)
         if self.config.v_r_use_network:
             losses['v_r'] = torch.tensor(0.0, device=self.device)
+            
+        # ----- inverse_dynamics loss -----
+        if self.config.use_simplified_x_h and hasattr(self.networks, 'inverse_dynamics') and self.networks.inverse_dynamics is not None:
+            # Prepare data
+            q_preds_list = []
+            q_targets_list = []
+            for t in batch:
+                if t.human_actions is None:
+                    continue
+                for h_idx in t.goals.keys():
+                    if h_idx < len(t.human_actions):
+                        human_action = t.human_actions[h_idx]
+                        logits = self.networks.inverse_dynamics(t.state, t.next_state, self.env.world_model, h_idx, self.device)
+                        q_preds_list.append(logits)
+                        q_targets_list.append(torch.tensor(human_action, dtype=torch.long, device=self.device))
+            
+            if q_preds_list:
+                qp = torch.stack(q_preds_list)
+                qt = torch.stack(q_targets_list)
+                loss_inv_dyn = torch.nn.functional.cross_entropy(qp, qt)
+                losses['inverse_dynamics'] = loss_inv_dyn
         
         # ----- V_h^e loss -----
         if v_h_e_states:
@@ -2032,18 +2063,44 @@ class BasePhase2Trainer(ABC):
                     self.env, self.device
                 )
             
-            # Target from V_h^e target network
-            with torch.no_grad():
-                v_h_e_for_x = self.networks.v_h_e_target.forward_batch(
-                    x_h_states, x_h_goals, x_h_human_indices,
-                    self.env, self.device
-                )
-                # Hard clamp for inference
-                v_h_e_for_x = self.networks.v_h_e_target.apply_hard_clamp(v_h_e_for_x)
-            
-            # Compute targets: w_h * V_h^e(s, g_h)^zeta
-            x_h_weights_tensor = torch.tensor(x_h_goal_weights, device=self.device, dtype=torch.float32)
-            target_x_h = self.networks.x_h.compute_target(v_h_e_for_x.squeeze(), x_h_weights_tensor)
+            if self.config.use_simplified_x_h:
+                # Simplified goal-agnostic target:
+                #   X_h(s) = 1 + gamma_h^zeta * q_h(s,s')^zeta * X_h_target(s')
+                # In the learning-based path, q_h is approximated from the
+                # inverse-dynamics ratio P_theta(a_h | s, s') / pi_h(a_h | s).
+                # x_h_batch transitions supply (state s, next_state s') pairs.
+                # Terminal next_states use X_h(s') = 1 exactly (no bootstrapping).
+                with torch.no_grad():
+                    # Build aligned lists of next_states and terminal flags matching
+                    # x_h_states / x_h_human_indices.  Do not re-sample humans here:
+                    # the count contributed by each transition is deterministic
+                    # (min(x_h_sample_humans, len(t.goals))), so replicate next_state
+                    # and terminal that many times without another random draw.
+                    x_h_next_states = []
+                    x_h_terminals = []
+                    for t in x_h_batch:
+                        if self.config.x_h_sample_humans is None:
+                            num_humans_for_x_h = len(t.goals)
+                        else:
+                            num_humans_for_x_h = min(self.config.x_h_sample_humans, len(t.goals))
+                        x_h_next_states.extend([t.next_state] * num_humans_for_x_h)
+                        x_h_terminals.extend([t.terminal] * num_humans_for_x_h)
+                    target_x_h = self._compute_simplified_x_h_td_target(
+                        x_h_states, x_h_next_states, x_h_human_indices, x_h_terminals
+                    )
+            else:
+                # Standard target from V_h^e target network
+                with torch.no_grad():
+                    v_h_e_for_x = self.networks.v_h_e_target.forward_batch(
+                        x_h_states, x_h_goals, x_h_human_indices,
+                        self.env, self.device
+                    )
+                    # Hard clamp for inference
+                    v_h_e_for_x = self.networks.v_h_e_target.apply_hard_clamp(v_h_e_for_x)
+                
+                # Compute targets: w_h * V_h^e(s, g_h)^zeta
+                x_h_weights_tensor = torch.tensor(x_h_goal_weights, device=self.device, dtype=torch.float32)
+                target_x_h = self.networks.x_h.compute_target(v_h_e_for_x.squeeze(), x_h_weights_tensor)
             
             losses['x_h'] = ((x_h_pred.squeeze() - target_x_h) ** 2).mean()
             
@@ -2069,8 +2126,13 @@ class BasePhase2Trainer(ABC):
                     self.env, self.device
                 ).squeeze()
                 
-                # Clamp X_h values and compute X_h^{-xi}
-                x_h_clamped = torch.clamp(x_h_all, min=1e-3, max=1.0)
+                # Clamp X_h values and compute X_h^{-xi}.
+                # Simplified mode: X_h >= 1 (no upper bound).
+                # Standard mode: X_h in [1e-3, 1.0].
+                if self.config.use_simplified_x_h:
+                    x_h_clamped = torch.clamp(x_h_all, min=1.0)
+                else:
+                    x_h_clamped = torch.clamp(x_h_all, min=1e-3, max=1.0)
                 x_h_power = x_h_clamped ** (-self.config.xi)
                 
                 # Aggregate by state using scatter_add: sum X_h^{-xi} for each state
@@ -2295,7 +2357,12 @@ class BasePhase2Trainer(ABC):
             
             # Reshape to (n_states, n_humans) and compute mean over humans
             x_h_reshaped = x_h_all.view(n_states, n_humans)
-            x_h_clamped = torch.clamp(x_h_reshaped, min=1e-3, max=1.0)
+
+            if self.config.use_simplified_x_h:
+                # Simplified X_h >= 1 (terminal state X_h = 1 is the minimum)
+                x_h_clamped = torch.clamp(x_h_reshaped, min=1.0)
+            else:
+                x_h_clamped = torch.clamp(x_h_reshaped, min=1e-3, max=1.0)
             
             # y = E[X_h^{-xi}] = mean over humans
             y = (x_h_clamped ** (-self.config.xi)).mean(dim=1)
@@ -2309,6 +2376,95 @@ class BasePhase2Trainer(ABC):
             # U_r = -(E_h[X_h^{-xi}])^eta
             return self._compute_u_r_from_v_h_e_samples(states)
     
+    def _compute_simplified_x_h_td_target(
+        self,
+        states: List[Any],
+        next_states: List[Any],
+        human_indices: List[int],
+        terminals: Optional[List[bool]] = None,
+    ) -> torch.Tensor:
+        """
+        Compute simplified X_h TD targets via the goal-agnostic recursion.
+
+        Delegates the core inverse_dynamics computation to the shared helper
+        :func:`~empo.learning_based.phase2.simplified_x_h.compute_simplified_x_h_td_targets`
+        after preparing DQN-specific inputs (robot policy from Q_r target
+        network, X_h targets from batched x_h_target forward pass).
+
+        Args:
+            states: Source states s, one per sample.
+            next_states: Observed successor states s', one per sample.
+            human_indices: Human agent indices, one per (s, s') pair.
+            terminals: Boolean flags indicating whether each next_state is terminal.
+                When True, X_h(next_state) is fixed to 1.0 (no bootstrapping).
+                If None, treated as all False.
+
+        Returns:
+            Target tensor of shape (batch_size,).
+        """
+        from empo.human_policy_prior import HumanPolicyPrior
+        from empo.learning_based.phase2.simplified_x_h import (
+            compute_simplified_x_h_td_targets,
+        )
+
+        effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
+
+        if terminals is None:
+            terminals = [False] * len(states)
+
+        # Get X_h_target(s') for all next_states in a single batched call.
+        with torch.no_grad():
+            x_h_next = self.networks.x_h_target.forward_batch(
+                next_states, human_indices, self.env, self.device
+            ).squeeze()
+            x_h_next = torch.clamp(x_h_next, min=1.0)
+            for i, is_terminal in enumerate(terminals):
+                if is_terminal:
+                    if x_h_next.dim() > 0:
+                        x_h_next[i] = 1.0
+                    else:
+                        x_h_next = torch.ones_like(x_h_next)
+
+        # Get robot policy pi_r(a_r | s) for all unique states.
+        unique_states = list(dict.fromkeys(states))
+        with torch.no_grad():
+            q_r_batch = self.networks.q_r_target.forward_batch(
+                unique_states, self.env, self.device
+            )
+            pi_r_batch = self.networks.q_r_target.get_policy(
+                q_r_batch, beta_r=effective_beta_r
+            )
+        robot_policy_per_state = {
+            s: pi_r_batch[i] for i, s in enumerate(unique_states)
+        }
+
+        # Wrap HumanPolicyPrior to the expected (state, agent_index) → ndarray.
+        hpp = self.human_policy_prior
+
+        def _other_human_probs(state, agent_index):
+            return HumanPolicyPrior._to_probability_array(hpp(state, agent_index))
+
+        return compute_simplified_x_h_td_targets(
+            states,
+            next_states,
+            human_indices,
+            gamma_h=self.config.gamma_h,
+            zeta=self.config.zeta,
+            epsilon_h=self.config.x_h_epsilon_h,
+            num_actions=self.env.action_space.n,
+            num_agents=self.num_agents,
+            human_agent_indices=self.human_agent_indices,
+            robot_agent_indices=self.robot_agent_indices,
+            x_h_next_values=x_h_next,
+            robot_policy_per_state=robot_policy_per_state,
+            action_index_to_tuple=self.networks.q_r_target.action_index_to_tuple,
+            other_human_probs_fn=_other_human_probs,
+            world_model=self.env,
+            inverse_dynamics_network=self.networks.inverse_dynamics if self.config.use_simplified_x_h else None,
+            device=self.device,
+        )
+
+
     def _compute_u_r_from_v_h_e_samples(self, states: List[Any]) -> torch.Tensor:
         """
         Compute U_r directly from V_h^e samples (when x_h_use_network=False).
@@ -2666,6 +2822,8 @@ class BasePhase2Trainer(ABC):
             network_map['u_r'] = self.networks.u_r
         if self.config.v_r_use_network:
             network_map['v_r'] = self.networks.v_r
+        if self.config.use_simplified_x_h and self.networks.inverse_dynamics is not None:
+            network_map['inverse_dynamics'] = self.networks.inverse_dynamics
         if self.config.use_rnd and self.networks.rnd is not None:
             network_map['rnd'] = self.networks.rnd.predictor  # Only predictor is trained
         

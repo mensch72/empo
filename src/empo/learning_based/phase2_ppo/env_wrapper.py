@@ -141,16 +141,39 @@ class EMPOWorldModelEnv(gymnasium.Env):
         # because reset() must be called before step()).
         self._py_rng: np.random.RandomState = np.random.RandomState(0)
 
-        # U_r normalisation: dividing by a scale factor maps U_r into
-        # [-1, ≈0], preventing PufferLib's hard ``clamp(r, -1, 1)``
-        # from destroying the reward signal.
+        # U_r normalisation: dividing by a scale factor normalises the
+        # variance of U_r for stable PPO training.  PufferLib's hard reward
+        # clamp has been patched out (see vendor/pufferlib/pufferl.py).
         # Prefer config.u_r_scale (empirical, from calibration) over
         # the conservative theoretical upper-bound.
         if config.u_r_scale is not None:
             self._u_r_scale: float = config.u_r_scale
         else:
-            _X_H_MIN = 1e-3
-            self._u_r_scale = (_X_H_MIN ** (-config.xi)) ** config.eta
+            if config.use_simplified_x_h:
+                # Simplified mode has X_h >= 1 so y = mean(X_h^-xi) <= 1,
+                # hence U_r = -(y^eta) is naturally in [-1, 0].
+                self._u_r_scale = 1.0
+            else:
+                self._u_r_scale = 1.0
+
+        # Running scale normalization for U_r:
+        # - During warmup: collect U_r samples to estimate std
+        # - After warmup: freeze std and scale U_r → U_r / (σ + ε)
+        # This preserves the sign of U_r (non-positive by construction).
+        self._u_r_frozen: bool = False  # True after warmup ends
+        self._u_r_std: float = 1.0
+        self._u_r_warmup_buffer: deque = deque(
+            maxlen=config.ppo_rollout_length * 100
+        )  # buffer ~100 rollouts
+        # Stddev of the reward signal used by PPO; updated by trainer each iteration.
+        self._u_r_signal_std: float = 0.0
+        self._u_r_signal_mean: float = 0.0
+        self._u_r_signal_min: float = 0.0
+        self._u_r_signal_max: float = 0.0
+        self._inv_dyn_loss: float = 0.0
+        self._inv_dyn_acc: float = 0.0
+        self._inv_dyn_true_prob: float = 0.0
+        self._inv_dyn_entropy: float = 0.0
 
     # ------------------------------------------------------------------
     # Gymnasium API
@@ -200,10 +223,22 @@ class EMPOWorldModelEnv(gymnasium.Env):
             truncated = True
 
         # -- Compute intrinsic reward U_r(s_t) at pre-transition state --
-        u_r = self._compute_u_r(pre_state)
+        u_r_raw = self._compute_u_r(pre_state)
 
-        # Normalise into [-1, ≈0] so PufferLib's clamp(r, -1, 1) is benign.
-        u_r = u_r / self._u_r_scale
+        # Collect statistics during warmup; scale by std after freezing.
+        if not self._u_r_frozen:
+            self._u_r_warmup_buffer.append(u_r_raw)
+            u_r = u_r_raw  # Raw U_r during warmup
+            # Scale during warmup (only scale, no variance normalization yet)
+            u_r = u_r / self._u_r_scale
+        else:
+            # After warmup: std-only scaling (no centering).
+            u_r = u_r_raw / (self._u_r_std + 1e-8)
+
+        # Distinguish theory quantity from PPO training reward.
+        # - u_r_raw: theoretical U_r(s) (must remain non-positive)
+        # - u_r: reward returned to PPO (scaled for stable optimization)
+        u_r_ppo = u_r
 
         # -- Goal resampling (stochastic, using seeded RNG) --
         if self._py_rng.random() < self.config.goal_resample_prob:
@@ -225,7 +260,17 @@ class EMPOWorldModelEnv(gymnasium.Env):
         # Rich auxiliary data is instead stored in ``_aux_buffer`` below.
         info: Dict[str, Any] = {
             "env_reward": env_reward,
-            "u_r": u_r,
+            "u_r": u_r_raw,
+            "u_r_ppo": u_r_ppo,
+            "u_r_scale_factor": self._u_r_std,
+            "u_r_signal_std": self._u_r_signal_std,
+            "u_r_signal_mean": self._u_r_signal_mean,
+            "u_r_signal_min": self._u_r_signal_min,
+            "u_r_signal_max": self._u_r_signal_max,
+            "inv_dyn_loss": self._inv_dyn_loss,
+            "inv_dyn_acc": self._inv_dyn_acc,
+            "inv_dyn_true_prob": self._inv_dyn_true_prob,
+            "inv_dyn_entropy": self._inv_dyn_entropy,
         }
 
         # Decode flat joint-action index to per-robot action tuple for
@@ -254,7 +299,44 @@ class EMPOWorldModelEnv(gymnasium.Env):
                 "terminal": bool(terminated or truncated),
             }
         )
-        return obs, u_r, terminated, truncated, info
+        return obs, u_r_ppo, terminated, truncated, info
+
+    # ------------------------------------------------------------------
+    # Variance normalization control
+    # ------------------------------------------------------------------
+
+    def freeze_u_r_normalization(self) -> None:
+        """Freeze U_r scale statistics and switch to std-scaled rewards.
+
+        Called by trainer after warmup phase ends. Estimates std from
+        collected samples, then applies U_r / (σ + ε) to all subsequent
+        U_r values.
+        """
+        if self._u_r_frozen:
+            return  # Already frozen
+
+        if len(self._u_r_warmup_buffer) > 0:
+            u_r_array = np.array(list(self._u_r_warmup_buffer))
+            self._u_r_std = float(np.std(u_r_array))
+            
+            print(f"\n[WARMUP U_R STATS] Computed over {len(u_r_array)} samples:")
+            print(f"   Mean: {float(np.mean(u_r_array)):.6f}")
+            print(f"   Min:  {float(np.min(u_r_array)):.6f}")
+            print(f"   Max:  {float(np.max(u_r_array)):.6f}")
+            print(f"   Std:  {self._u_r_std:.6f}")
+            
+            if self._u_r_std <= 0.0:
+                print("   -> Std is <= 0.0, falling back to scale factor 1.0\n")
+                self._u_r_std = 1.0
+            else:
+                print("   -> Using computed std as scale factor\n")
+        else:
+            # No samples collected (unusual), use defaults
+            print("\n[WARMUP U_R STATS] No samples collected, falling back to scale factor 1.0\n")
+            self._u_r_std = 1.0
+
+        self._u_r_frozen = True
+        self._u_r_warmup_buffer.clear()  # Free memory
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -319,8 +401,10 @@ class EMPOWorldModelEnv(gymnasium.Env):
         within a rollout.  Falls back to the online networks when targets
         are absent.
 
-        X_h values are floored at ``_X_H_MIN`` (1e-3) to prevent
-        numerical instability in the X_h^{-ξ} exponentiation.
+        In both standard and simplified modes, U_r limits are strictly 
+        enforced by the network architectures themselves via their
+        ``feasible_range`` arguments, so no manual clipping (bottom
+        or top) is applied to the raw outputs here.
 
         The device is inferred from the auxiliary network parameters
         to avoid device-mismatch errors when running on CUDA.
@@ -329,9 +413,6 @@ class EMPOWorldModelEnv(gymnasium.Env):
             return 0.0
 
         import torch
-
-        # Floor value matching trainer.py
-        _X_H_MIN = 1e-3
 
         nets = self.auxiliary_networks
 
@@ -357,16 +438,19 @@ class EMPOWorldModelEnv(gymnasium.Env):
             # Option A: dedicated U_r network
             if u_r_net is not None:
                 _, u_r = u_r_net(state, self.world_model, device)
-                return float(u_r.item())
+                # U_r must be non-positive by construction.
+                return min(float(u_r.item()), 0.0)
             # Option B: compute from X_h values directly (eq. 8)
             if x_h_net is not None:
                 x_h_vals = []
                 for h_idx in self.human_agent_indices:
                     x_h = x_h_net(state, self.world_model, h_idx, device)
-                    x_h_vals.append(min(max(float(x_h.item()), _X_H_MIN), 1.0))
+                    x_h_vals.append(float(x_h.item()))
                 if x_h_vals:
                     y = float(np.mean([x ** (-self.config.xi) for x in x_h_vals]))
-                    return -(y**self.config.eta)
+                    u_r = -(y**self.config.eta)
+                    # Guard against numerical/model drift to positive values.
+                    return min(u_r, 0.0)
         return 0.0
 
     def _compute_transition_probs(

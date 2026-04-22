@@ -61,6 +61,13 @@ COPY setup/requirements-hierarchical.txt /tmp/requirements-hierarchical.txt
 RUN --mount=type=cache,target=/root/.cache/pip,uid=0,gid=0 \
     pip install -r /tmp/requirements.txt
 
+# Patch pufferlib: remove hard reward clamp so U_r can be unbounded.
+COPY vendor/pufferlib/pufferl.py /tmp/pufferlib_pufferl_patch.py
+RUN python -c "\
+import pufferlib, shutil, os; \
+shutil.copy('/tmp/pufferlib_pufferl_patch.py', \
+            os.path.join(os.path.dirname(pufferlib.__file__), 'pufferl.py'))"
+
 # Install hierarchical dependencies only if HIERARCHICAL_MODE is set
 # MineLand requires Java JDK 17, Node.js 18.x, and xvfb for headless rendering
 # MineLand is a multi-agent Minecraft RL platform from https://github.com/cocacola-lab/MineLand

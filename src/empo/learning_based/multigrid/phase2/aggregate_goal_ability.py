@@ -53,6 +53,7 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         state_feature_dim: int = 256,
         hidden_dim: int = 256,
         zeta: float = 2.0,
+        gamma_h: float = 0.99,
         feasible_range: Tuple[float, float] = (0.0, 1.0),
         dropout: float = 0.0,
         max_kill_buttons: int = 4,
@@ -66,7 +67,7 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         own_state_encoder: Optional[MultiGridStateEncoder] = None,
         own_agent_encoder: Optional[AgentIdentityEncoder] = None
     ):
-        super().__init__(zeta=zeta, feasible_range=feasible_range)
+        super().__init__(zeta=zeta, gamma_h=gamma_h, feasible_range=feasible_range)
         
         self.grid_height = grid_height
         self.grid_width = grid_width
@@ -96,11 +97,13 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         if agent_encoder is not None:
             self.agent_encoder = agent_encoder
         else:
+            use_enc = getattr(self.state_encoder, 'use_encoders', True)
             self.agent_encoder = AgentIdentityEncoder(
                 num_agents=max_agents,
                 embedding_dim=agent_embedding_dim,
                 grid_height=grid_height,
-                grid_width=grid_width
+                grid_width=grid_width,
+                use_encoders=use_enc
             )
         
         # Own state encoder for X_h-specific features (trained with X_h loss)
@@ -109,6 +112,8 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         if own_state_encoder is not None:
             self.own_state_encoder = own_state_encoder
         else:
+            # Must inherit use_encoders to prevent mismatch from state_encoder
+            use_enc = getattr(self.state_encoder, 'use_encoders', True)
             self.own_state_encoder = MultiGridStateEncoder(
                 grid_height=grid_height,
                 grid_width=grid_width,
@@ -119,6 +124,7 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
                 max_pause_switches=max_pause_switches,
                 max_disabling_switches=max_disabling_switches,
                 max_control_buttons=max_control_buttons,
+                use_encoders=use_enc,
                 share_cache_with=self.state_encoder
             )
         
@@ -128,11 +134,13 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         if own_agent_encoder is not None:
             self.own_agent_encoder = own_agent_encoder
         else:
+            use_enc = getattr(self.agent_encoder, 'use_encoders', True)
             self.own_agent_encoder = AgentIdentityEncoder(
                 num_agents=max_agents,
                 embedding_dim=agent_embedding_dim,
                 grid_height=grid_height,
                 grid_width=grid_width,
+                use_encoders=use_enc,
                 share_cache_with=self.agent_encoder
             )
         
@@ -222,8 +230,20 @@ class MultiGridAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         # Compute raw value
         raw_value = self.value_head(combined).squeeze(-1)
         
-        # Apply soft clamp to keep in (0, 1]
-        return self.apply_clamp(raw_value)
+        # Apply soft/hard clamp with dynamic time lower bound
+        # In global_features (B, 4), the 0-th feature is remaining_steps
+        remaining_steps = global_features[:, 0] if global_features is not None else None
+        
+        if self._unbounded_above and remaining_steps is not None:
+            gamma_z = self.gamma_h ** self.zeta
+            if gamma_z < 1.0:
+                k = remaining_steps.clamp(min=0)
+                lb = (1.0 - torch.pow(gamma_z, k + 1.0)) / (1.0 - gamma_z)
+                # Biasing the final layer dynamically: shift the raw value so that at initialization
+                # (when value_head is near zero) it outputs roughly the theoretical lower bound.
+                raw_value = raw_value + lb
+        
+        return self.apply_clamp(raw_value, remaining_steps)
     
     def forward(
         self,

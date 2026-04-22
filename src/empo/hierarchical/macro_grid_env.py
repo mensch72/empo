@@ -336,10 +336,9 @@ class MacroGridEnv(WorldModel):
         ``micro_env.set_state(micro_state)`` first if needed) because
         passage flags are computed from the grid.
         """
-        step_count, micro_agents, mobile_objects, mutable_objects = \
+        remaining_time, micro_agents, mobile_objects, mutable_objects = \
             micro_state
 
-        remaining_time = self.micro_env.max_steps - step_count
         passage_flags = self._compute_passage_flags()
 
         agent_states = tuple(
