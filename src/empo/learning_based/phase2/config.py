@@ -735,7 +735,7 @@ class Phase2Config:
             step: Current training step.
             
         Returns:
-            Set of network names to train: subset of {'v_h_e', 'x_h', 'inverse_dynamics', 'u_r', 'q_r', 'v_r', 'rnd'}
+            Set of network names to train: subset of {'v_h_e', 'x_h', 'u_r', 'q_r', 'v_r', 'rnd'}
         """
         active = set()
         
@@ -749,8 +749,6 @@ class Phase2Config:
         # X_h starts after V_h^e warmup (only if using network mode)
         if step >= self._warmup_v_h_e_end and self.x_h_use_network:
             active.add('x_h')
-            if self.use_simplified_x_h:
-                active.add('inverse_dynamics')
         
         # U_r starts after X_h warmup (only if using network mode)
         if step >= self._warmup_x_h_end and self.u_r_use_network:

@@ -472,12 +472,6 @@ class BasePhase2Trainer(ABC):
                 lr=self.config.lr_x_h,
                 weight_decay=self.config.x_h_weight_decay
             )
-        if self.config.use_simplified_x_h and self.networks.inverse_dynamics is not None:
-            optimizers['inverse_dynamics'] = make_optimizer(
-                self.networks.inverse_dynamics,
-                lr=self.config.lr_x_h,
-                weight_decay=self.config.x_h_weight_decay,
-            )
         # Only create U_r optimizer if using network (not direct computation)
         if self.config.u_r_use_network:
             optimizers['u_r'] = make_optimizer(
@@ -2822,8 +2816,6 @@ class BasePhase2Trainer(ABC):
             network_map['u_r'] = self.networks.u_r
         if self.config.v_r_use_network:
             network_map['v_r'] = self.networks.v_r
-        if self.config.use_simplified_x_h and self.networks.inverse_dynamics is not None:
-            network_map['inverse_dynamics'] = self.networks.inverse_dynamics
         if self.config.use_rnd and self.networks.rnd is not None:
             network_map['rnd'] = self.networks.rnd.predictor  # Only predictor is trained
         
