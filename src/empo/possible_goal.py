@@ -557,7 +557,7 @@ class TabularGoalSampler(PossibleGoalSampler):
         # Find all walkable cells (not containing immovable non-overlappable objects)
         # Agents can never stand on these cell types:
         non_walkable_types = {
-            'wall', 'lava', 'magicwall',
+            'wall', 'lava', 'magicwall', 'bush',
             'killbutton', 'pauseswitch', 'disablingswitch', 'controlbutton',
         }
         uncovered = []
@@ -689,7 +689,7 @@ class TabularGoalGenerator(PossibleGoalGenerator):
         # Find all walkable cells (not containing immovable non-overlappable objects)
         # Agents can never stand on these cell types:
         non_walkable_types = {
-            'wall', 'lava', 'magicwall',
+            'wall', 'lava', 'magicwall', 'bush',
             'killbutton', 'pauseswitch', 'disablingswitch', 'controlbutton',
         }
         uncovered = []

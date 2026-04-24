@@ -1,0 +1,27 @@
+
+map: |
+  We We We We We
+  We We Ay We We
+  We We Bu We We
+  We Bu Ae Bu We
+  We Bu Bu Bu We
+  We Bu Ay Bu We
+  We We We We We
+
+max_steps: 20
+orientations: ["s", "n", "n"]
+can_push_rocks: "e"
+partial_obs: false
+
+possible_goals:
+  - "2,1"
+  - "2,2"
+  - "2,3"
+  - "2,4"
+  - "2,5"
+  - "1,3"
+  - "3,3"
+  - "1,4"
+  - "3,4"
+  - "1,5"
+  - "3,5"

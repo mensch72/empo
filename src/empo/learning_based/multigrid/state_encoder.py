@@ -641,6 +641,15 @@ class MultiGridStateEncoder(BaseStateEncoder):
                     magic_state = MAGICWALL_STATE_INACTIVE
                 current = (current & ~COMPRESSED_GRID_MAGIC_MASK) | (magic_state << COMPRESSED_GRID_MAGIC_SHIFT)
                 compressed[y, x] = current
+
+            elif obj_type == 'bush':
+                trampled = obj_data[3] if len(obj_data) > 3 else False
+                current = int(compressed[y, x].item())
+                current = current & ~COMPRESSED_GRID_OBJECT_TYPE_MASK
+                current = current & ~COMPRESSED_GRID_OTHER_MASK
+                if not trampled:
+                    current |= OBJECT_TYPE_TO_CHANNEL.get('bush', 0)
+                compressed[y, x] = current
         
         # Third pass: encode mobile objects (overwrite object type at their positions)
         for obj_data in mobile_objects:
@@ -892,6 +901,16 @@ class MultiGridStateEncoder(BaseStateEncoder):
                         self._encode_other_object(cell, cell_type, x, y, grid_tensor)
         
         # Encode mobile objects
+        for obj_data in mutable_objects:
+            if obj_data[0] != 'bush':
+                continue
+            x, y = obj_data[1], obj_data[2]
+            trampled = obj_data[3] if len(obj_data) > 3 else False
+            if 0 <= x < W and 0 <= y < H:
+                bush_channel = OBJECT_TYPE_TO_CHANNEL.get('bush')
+                if bush_channel is not None:
+                    grid_tensor[0, bush_channel, y, x] = 0.0 if trampled else 1.0
+
         if mobile_objects:
             for obj_data in mobile_objects:
                 obj_type, obj_x, obj_y = obj_data[0], obj_data[1], obj_data[2]

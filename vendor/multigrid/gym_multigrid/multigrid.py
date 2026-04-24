@@ -316,7 +316,7 @@ class ConfigGoalGenerator:
         # Find all walkable cells (not containing immovable non-overlappable objects)
         # Agents can never stand on these cell types:
         non_walkable_types = {
-            'wall', 'lava', 'magicwall',
+            'wall', 'lava', 'magicwall', 'bush',
             'killbutton', 'pauseswitch', 'disablingswitch', 'controlbutton',
         }
         uncovered = []
@@ -493,7 +493,7 @@ class ConfigGoalSampler:
         # Find all walkable cells (not containing immovable non-overlappable objects)
         # Agents can never stand on these cell types:
         non_walkable_types = {
-            'wall', 'lava', 'magicwall',
+            'wall', 'lava', 'magicwall', 'bush',
             'killbutton', 'pauseswitch', 'disablingswitch', 'controlbutton',
         }
         uncovered = []
@@ -650,7 +650,8 @@ class World:
         'killbutton': 17,
         'pauseswitch': 18,
         'disablingswitch': 19,
-        'controlbutton': 20
+        'controlbutton': 20,
+        'bush': 21,
     }
     IDX_TO_OBJECT = dict(zip(OBJECT_TO_IDX.values(), OBJECT_TO_IDX.keys()))
 
@@ -1838,6 +1839,62 @@ class Rock(WorldObj):
         fill_coords(img, point_in_circle(0.65, 0.55, 0.10), darker_grey)
 
 
+class Bush(WorldObj):
+    """
+    Dense bush that blocks humans until a robot tramples it.
+
+    A bush is mutable but immobile. Before trampling it is non-overlappable.
+    When an authorized robot-like agent moves forward into it, the bush is
+    marked trampled and removed from the grid, making the cell empty for all
+    agents afterwards.
+    """
+
+    def __init__(self, world, trampled=False):
+        super(Bush, self).__init__(world, 'bush', 'green')
+        self.trampled = trampled
+
+    def can_overlap(self):
+        return False
+
+    def can_pickup(self):
+        return False
+
+    def can_be_trampled_by(self, agent):
+        return (
+            getattr(agent, 'can_push_rocks', False) or
+            getattr(agent, 'can_enter_magic_walls', False) or
+            getattr(agent, 'color', None) == 'grey'
+        )
+
+    def encode(self, world, current_agent=False):
+        if world.encode_dim == 3:
+            return (
+                world.OBJECT_TO_IDX[self.type],
+                world.COLOR_TO_IDX[self.color],
+                1 if self.trampled else 0,
+            )
+        return (
+            world.OBJECT_TO_IDX[self.type],
+            world.COLOR_TO_IDX[self.color],
+            1 if self.trampled else 0,
+            0,
+            0,
+            0,
+        )
+
+    def render(self, img):
+        if self.trampled:
+            return
+
+        c = COLORS[self.color]
+        dark = np.array([20, 90, 30])
+        light = np.array([90, 180, 75])
+        fill_coords(img, point_in_circle(0.35, 0.48, 0.28), c)
+        fill_coords(img, point_in_circle(0.58, 0.42, 0.30), light)
+        fill_coords(img, point_in_circle(0.56, 0.62, 0.26), c)
+        fill_coords(img, point_in_circle(0.42, 0.58, 0.22), dark)
+
+
 class Agent(WorldObj):
     def __init__(self, world, index=0, view_size=7, can_enter_magic_walls=False, can_push_rocks=False):
         super(Agent, self).__init__(world, 'agent', world.IDX_TO_COLOR[index])
@@ -2493,6 +2550,7 @@ def parse_map_string(map_spec, objects_set=World):
     - Wc : wall of color c
     - Bl : block
     - Ro : rock  
+    - Bu : bush (robot-tramplable obstacle)
     - Lc : locked door of color c
     - Cc : closed door of color c
     - Oc : open door of color c
@@ -2618,6 +2676,8 @@ def _parse_cell(cell_str, objects_set):
         return ('block', {})
     elif full_cell_code == 'Ro':
         return ('rock', {})
+    elif full_cell_code == 'Bu':
+        return ('bush', {})
     elif full_cell_code == 'La':
         return ('lava', {})
     elif full_cell_code == 'Sw':
@@ -2713,6 +2773,8 @@ def create_object_from_spec(cell_spec, objects_set, actions_set=None, stumble_pr
         return Block(objects_set)
     elif obj_type == 'rock':
         return Rock(objects_set)
+    elif obj_type == 'bush':
+        return Bush(objects_set, trampled=params.get('trampled', False))
     elif obj_type == 'lava':
         return Lava(objects_set)
     elif obj_type == 'switch':
@@ -3173,7 +3235,7 @@ class MultiGridEnv(WorldModel):
         # Track cells where stumbling occurred in the current step (for visual feedback)
         self.stumbled_cells = set()
         
-        # Build cache of mobile objects (blocks, rocks) and mutable objects (doors, boxes, magic walls)
+        # Build cache of mobile objects (blocks, rocks) and mutable objects (doors, boxes, magic walls, bushes)
         # This avoids full grid scans in get_state()
         self._build_object_cache()
         
@@ -3194,7 +3256,7 @@ class MultiGridEnv(WorldModel):
         Build cache of mobile and mutable objects to avoid full grid scans in get_state().
         
         Mobile objects: blocks and rocks (can be pushed)
-        Mutable objects: doors, boxes, magic walls, killbuttons, pauseswitches, controlbuttons (have mutable state)
+        Mutable objects: doors, boxes, magic walls, bushes, killbuttons, pauseswitches, controlbuttons (have mutable state)
         
         This cache stores references to the objects themselves, not their positions.
         Positions are read from the grid when get_state() is called.
@@ -3214,8 +3276,8 @@ class MultiGridEnv(WorldModel):
                 if obj_type in ('block', 'rock'):
                     self._mobile_objects.append(((i, j), cell))
                 
-                # Mutable objects: doors, boxes, magic walls, killbuttons, pauseswitches, controlbuttons
-                elif obj_type in ('door', 'box', 'magicwall', 'killbutton', 'pauseswitch', 'controlbutton'):
+                # Mutable objects: doors, boxes, magic walls, bushes, killbuttons, pauseswitches, controlbuttons
+                elif obj_type in ('door', 'box', 'magicwall', 'bush', 'killbutton', 'pauseswitch', 'controlbutton'):
                     self._mutable_objects.append(((i, j), cell))
         
         # Sort mobile objects by initial position for deterministic ordering
@@ -3315,6 +3377,7 @@ class MultiGridEnv(WorldModel):
             'box': 'B',
             'goal': 'G',
             'lava': 'V',
+            'bush': 'U',
         }
 
         # Short string for opened door
@@ -3532,6 +3595,9 @@ class MultiGridEnv(WorldModel):
                 return False
             can_push, _, _ = self._can_push_objects(agent, np.array([fwd_x, fwd_y]))
             return can_push
+
+        if fwd_cell.type == 'bush':
+            return fwd_cell.can_be_trampled_by(agent)
         
         # Check for magic walls
         if fwd_cell.type == 'magicwall' and fwd_cell.active:
@@ -3657,6 +3723,16 @@ class MultiGridEnv(WorldModel):
         
         # Set new position
         self.grid.set(*self.agents[agent_idx].pos, self.agents[agent_idx])
+
+    def _trample_bush(self, agent_idx, target_pos, bush):
+        """Trample a bush and move the agent into its now-empty cell."""
+        if not bush.can_be_trampled_by(self.agents[agent_idx]):
+            return False
+
+        bush.trampled = True
+        self.grid.set(*target_pos, None)
+        self._move_agent_to_cell(agent_idx, target_pos, None)
+        return True
     
     def _handle_switch(self, i, rewards, fwd_pos, fwd_cell):
         pass
@@ -3909,6 +3985,8 @@ class MultiGridEnv(WorldModel):
                     done = True
                     self._reward(agent_idx, rewards, 1)
                     self._move_agent_to_cell(agent_idx, fwd_pos, fwd_cell)
+                elif fwd_cell.type == 'bush':
+                    self._trample_bush(agent_idx, fwd_pos, fwd_cell)
                 elif fwd_cell.type == 'switch':
                     self._handle_switch(agent_idx, rewards, fwd_pos, fwd_cell)
                     self._move_agent_to_cell(agent_idx, fwd_pos, fwd_cell)
@@ -4068,6 +4146,8 @@ class MultiGridEnv(WorldModel):
                         done = True
                         self._reward(i, rewards, 1)
                         can_move = True
+                    elif fwd_cell.type == 'bush':
+                        can_move = self._trample_bush(i, fwd_pos, fwd_cell)
                     elif fwd_cell.type == 'switch':
                         self._handle_switch(i, rewards, fwd_pos, fwd_cell)
                         can_move = True
@@ -4080,7 +4160,7 @@ class MultiGridEnv(WorldModel):
                 else:
                     can_move = False
             
-            if can_move:
+            if can_move and not (fwd_cell is not None and fwd_cell.type == 'bush'):
                 self._move_agent_to_cell(i, fwd_pos, fwd_cell)
                 self._handle_special_moves(i, rewards, fwd_pos, fwd_cell)
         
@@ -4790,7 +4870,7 @@ class MultiGridEnv(WorldModel):
         - step_count: int
         - agent_states: tuple of (pos_x, pos_y, dir, terminated, started, paused, carrying_type, carrying_color, forced_next_action)
         - mobile_objects: tuple of (obj_type, pos_x, pos_y) for blocks/rocks
-        - mutable_objects: tuple of (obj_type, x, y, mutable_state...) for doors/boxes/magic walls
+        - mutable_objects: tuple of (obj_type, x, y, mutable_state...) for doors/boxes/magic walls/bushes
         
         Note: on_unsteady_ground is NOT stored in the state - it is derived from the
         agent's position and the terrain_grid when set_state() is called.
@@ -4828,7 +4908,7 @@ class MultiGridEnv(WorldModel):
             for j in range(self.grid.height):
                 for i in range(self.grid.width):
                     cell = self.grid.get(i, j)
-                    if cell is not None and cell.type in ('block', 'rock', 'door', 'box', 'magicwall', 'killbutton', 'pauseswitch', 'controlbutton'):
+                    if cell is not None and cell.type in ('block', 'rock', 'door', 'box', 'magicwall', 'bush', 'killbutton', 'pauseswitch', 'controlbutton'):
                         has_trackable = True
                         break
                 if has_trackable:
@@ -4875,6 +4955,12 @@ class MultiGridEnv(WorldModel):
                     'magicwall',
                     x, y,
                     obj.active,
+                ))
+            elif obj.type == 'bush':
+                mutable_objects.append((
+                    'bush',
+                    x, y,
+                    obj.trampled,
                 ))
             elif obj.type == 'killbutton':
                 mutable_objects.append((
@@ -5081,7 +5167,7 @@ class MultiGridEnv(WorldModel):
                 obj.cur_pos = np.array([x, y])
                 self.grid.set(x, y, obj)
         
-        # Restore mutable objects (doors, boxes, magic walls, killbuttons, pauseswitches)
+        # Restore mutable objects (doors, boxes, magic walls, bushes, killbuttons, pauseswitches)
         for mutable_obj in mutable_objects:
             obj_type = mutable_obj[0]
             x, y = mutable_obj[1], mutable_obj[2]
@@ -5111,6 +5197,26 @@ class MultiGridEnv(WorldModel):
                 active = mutable_obj[3]
                 if cell is not None and cell.type == 'magicwall':
                     cell.active = active
+
+            elif obj_type == 'bush':
+                trampled = mutable_obj[3]
+                cached_bush = None
+                if hasattr(self, '_mutable_objects'):
+                    for (obj_x, obj_y), obj in self._mutable_objects:
+                        if obj_x == x and obj_y == y and obj.type == 'bush':
+                            cached_bush = obj
+                            break
+
+                if cached_bush is not None:
+                    cached_bush.trampled = trampled
+                    terrain_cell = self.terrain_grid.get(x, y)
+                    if trampled:
+                        if cell is not None and cell is cached_bush:
+                            self.grid.set(x, y, None)
+                        if terrain_cell is cached_bush:
+                            self.terrain_grid.set(x, y, None)
+                    elif cell is None:
+                        self.grid.set(x, y, cached_bush)
             
             elif obj_type == 'killbutton':
                 enabled = mutable_obj[3]

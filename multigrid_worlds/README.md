@@ -48,6 +48,7 @@ Maps use two-character codes separated by spaces. The `|` syntax in YAML preserv
 - `Ar`, `Ag`, `Ab`, `Ap`, `Ay`, `Ae` - Agent (red, green, blue, purple, yellow, grey)
 - `Bl` - Block (pushable)
 - `Ro` - Rock (pushable by certain agents)
+- `Bu` - Bush (blocks humans until trampled by a robot)
 - `La` - Lava
 - `Un` - Unsteady ground
 - `Gr`, `Gg`, `Gb`, etc. - Goal (with color)

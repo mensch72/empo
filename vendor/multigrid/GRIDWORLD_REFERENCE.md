@@ -627,12 +627,13 @@ Episodes end when:
 ## Summary
 
 **Key Points**:
-- **19 object types**: wall, floor, door, key, ball, box, goal, objgoal, lava, switch, block, rock, unsteady ground, magic wall, killbutton, pauseswitch, disablingswitch, controlbutton, and agent
+- **20 object types**: wall, floor, door, key, ball, box, goal, objgoal, lava, switch, block, rock, bush, unsteady ground, magic wall, killbutton, pauseswitch, disablingswitch, controlbutton, and agent
 - **8 standard actions**: still, left, right, forward, pickup, drop, toggle, done
 - **Single agent type**: No distinction between robot/human or different agent classes (though rocks can have agent-specific push permissions and agents can have magic wall entry capability)
 - **Boxes are NOT pushable**: Must be picked up and carried
 - **Blocks ARE pushable**: Can be pushed by any agent using forward action
 - **Rocks ARE pushable with restrictions**: Can only be pushed by specific agents based on `can_push_rocks` attribute
+- **Bushes can be trampled by robots**: Robot-like agents can clear bushes, after which all agents can pass through the cell
 - **Unsteady ground introduces stochasticity**: Agents may stumble when moving forward on unsteady ground
 - **Magic walls introduce stochasticity**: Agents with `can_enter_magic_walls=True` can attempt entry with configurable probability from one specific direction
 - **Keys are reusable**: Not consumed when unlocking doors

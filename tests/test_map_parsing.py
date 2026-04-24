@@ -96,7 +96,7 @@ def test_all_object_types():
     """Test all object types are parsed correctly."""
     test_map = """
     We We We We We We We We We We
-    We Bl Ro La Sw Un .. .. .. We
+    We Bl Ro Bu La Sw Un .. .. We
     We Gr Kr Br Xr .. .. .. .. We
     We Lr Cr Or .. .. .. .. .. We
     We Mn Ms Mw Me Ma .. .. .. We
@@ -115,14 +115,17 @@ def test_all_object_types():
     # Check rock
     assert cells[1][2] == ('rock', {})
     
+    # Check bush
+    assert cells[1][3] == ('bush', {})
+
     # Check lava
-    assert cells[1][3] == ('lava', {})
+    assert cells[1][4] == ('lava', {})
     
     # Check switch
-    assert cells[1][4] == ('switch', {})
+    assert cells[1][5] == ('switch', {})
     
     # Check unsteady
-    assert cells[1][5] == ('unsteady', {})
+    assert cells[1][6] == ('unsteady', {})
     
     # Check goal
     assert cells[2][1] == ('goal', {'color': 'red'})
