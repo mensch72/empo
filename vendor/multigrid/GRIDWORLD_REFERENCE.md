@@ -340,7 +340,51 @@ Each cell in the grid can contain:
   - Remote control mechanisms where humans guide robot movement
   - Teaching scenarios where robots pre-program actions for humans to trigger
 
-### 19. Agent
+### 19. Bush
+- **Type**: `bush`
+- **Map Code**: `Bu`
+- **Color**: Green
+- **Appearance**: Layered overlapping circles in dark and light green
+- **Properties**:
+  - Cannot be overlapped (blocks movement for humans and non-trampling agents)
+  - Immobile (cannot be pushed)
+  - **Mutable**: Can be trampled by authorized robot-like agents
+  - Once trampled, the bush is removed from the grid and the cell becomes empty for all agents
+- **Attributes**:
+  - `trampled`: Whether the bush has been trampled (default: False)
+  - `trample_probability`: Probability (0.0 to 1.0) that a trampling attempt succeeds (default: 1.0)
+- **Who Can Trample**:
+  - Agents with `can_push_rocks=True`, `can_enter_magic_walls=True`, or `color='grey'`
+  - Human-like agents (yellow) cannot trample bushes
+- **Trampling Mechanic**:
+  - Authorized robot uses **forward action** when facing an untrampled bush
+  - With `trample_probability == 1.0` (default): trampling always succeeds, agent moves into the cell
+  - With `trample_probability < 1.0`: trampling is **stochastic**:
+    - With probability `trample_probability`: bush is trampled, agent moves into the cell
+    - With probability `1 - trample_probability`: nothing happens, agent stays, bush remains
+  - Trampled bush is removed from the grid; all agents can then pass through that cell freely
+- **Probabilistic Trampling**:
+  - Set via `trample_probability` parameter on `MultiGridEnv` (applies to all map-parsed bushes) or per-bush via `Bush(world, trample_probability=p)`
+  - Config file key: `trample_probability` (e.g., `trample_probability: 0.7`)
+  - Smooths the human-power reward signal: even a partially-cleared multi-bush path
+    increases human reachability, because the probability of traversing the remaining
+    bushes is higher than traversing all of them
+- **Special Processing Order**:
+  - Probabilistic bush-trampling agents are processed **last** (after normal, unsteady, and magic-wall agents)
+- **Transition Probabilities**:
+  - With `trample_probability == 1.0`: single deterministic outcome (bush trampled)
+  - With `trample_probability < 1.0`: two outcomes in `transition_probabilities()`:
+    1. Succeed (agent moves into cell, bush trampled): probability = `trample_probability`
+    2. Fail (agent stays, bush remains): probability = `1 - trample_probability`
+- **State Representation**:
+  - Tracked in mutable objects: `('bush', x, y, trampled_bool)`
+  - `set_state()` restores both trampled and untrampled bushes correctly
+- **Use Cases**:
+  - Obstacles that only robots can clear
+  - Reward shaping via probabilistic clearing of multi-bush paths
+  - Separating human and robot reachable zones
+
+### 20. Agent
 - **Type**: `agent`
 - **Color**: Red, green, blue, purple, yellow, grey (assigned by index)
 - **Properties**:
@@ -465,7 +509,7 @@ Most individual actions are **deterministic**:
 
 ### Sources of Non-Determinism
 
-There are **two sources** of stochasticity in the environment:
+There are **three sources** of stochasticity in the environment:
 
 #### 1. Agent Execution Order (Multi-Agent Conflicts)
 - When multiple agents act simultaneously, they execute in random order
@@ -478,6 +522,11 @@ There are **two sources** of stochasticity in the environment:
 - Agent may stumble with probability defined by the cell's `stumble_probability` parameter
 - If stumbling occurs, the forward action is replaced by left+forward or right+forward (50-50 chance)
 - This introduces action-level stochasticity independent of agent ordering
+
+#### 3. Probabilistic Bush Trampling
+- When an authorized robot-like agent attempts to trample a bush with `trample_probability < 1.0`
+- Trampling succeeds with probability `trample_probability`; otherwise agent stays in place
+- Trampling attempts are processed **last** in each step (after normal and unsteady agents)
 
 ### When Order Matters (Probabilistic Outcomes from Conflicts)
 
@@ -506,6 +555,14 @@ Movement becomes probabilistic when:
    - If agents target the same cell (after stumbling), none move forward
    - This creates complex probability distributions combining stumbling and conflicts
 
+### When Probabilistic Bush Trampling Matters
+
+Trampling becomes stochastic when:
+1. **Authorized agent moves forward into a bush with `trample_probability < 1.0`**:
+   - With probability `trample_probability`: bush is cleared, agent moves into the cell
+   - With probability `1 - trample_probability`: nothing happens, agent stays, bush remains
+   - This is the primary mechanism for smoothing multi-bush reward signals
+
 ### When Order Doesn't Matter (Deterministic Outcomes)
 
 Transitions remain deterministic when:
@@ -513,6 +570,7 @@ Transitions remain deterministic when:
 - All agents only rotate (rotations never interfere)
 - Agents act on independent, non-overlapping resources
 - No agents are on unsteady ground attempting forward action
+- No agents are trampling a bush with `trample_probability < 1.0`
 
 ## Object Movement
 
@@ -633,7 +691,7 @@ Episodes end when:
 - **Boxes are NOT pushable**: Must be picked up and carried
 - **Blocks ARE pushable**: Can be pushed by any agent using forward action
 - **Rocks ARE pushable with restrictions**: Can only be pushed by specific agents based on `can_push_rocks` attribute
-- **Bushes can be trampled by robots**: Robot-like agents can clear bushes, after which all agents can pass through the cell
+- **Bushes can be trampled by robots**: Robot-like agents can clear bushes after which all agents can pass through the cell; trampling can be made stochastic via `trample_probability`
 - **Unsteady ground introduces stochasticity**: Agents may stumble when moving forward on unsteady ground
 - **Magic walls introduce stochasticity**: Agents with `can_enter_magic_walls=True` can attempt entry with configurable probability from one specific direction
 - **Keys are reusable**: Not consumed when unlocking doors
@@ -647,6 +705,7 @@ Episodes end when:
   1. Agent execution order (random permutation for normal agents)
   2. Unsteady ground stumbling (configurable probability per cell)
   3. Magic wall entry (configurable probability per wall)
+  4. Bush trampling (configurable probability per bush or globally via `trample_probability`)
 - **No agent subtypes**: All agents have same capabilities, distinguished by color/index only
 
 This gridworld focuses on **multi-agent coordination** and **object manipulation**, including Sokoban-style pushing mechanics for blocks and rocks, stochastic movement on unsteady ground and magic wall entry, and **human-robot interaction** via control buttons and switches.

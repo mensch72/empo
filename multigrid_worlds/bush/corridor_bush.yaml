@@ -12,6 +12,7 @@ max_steps: 20
 orientations: ["s", "n", "n"]
 can_push_rocks: "e"
 partial_obs: false
+trample_probability: 0.7
 
 possible_goals:
   - "2,1"
