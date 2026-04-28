@@ -512,7 +512,9 @@ class TestActionEffects:
 
         state = env.get_state()
         # Agent 0 acquires tool 0 (reachable → take), agent 1 acquires tool 0 (idle)
-        trans = env.transition_probabilities(state, [_action_acquire(0), _action_acquire(0)])
+        trans = env.transition_probabilities(
+            state, [_action_acquire(0), _action_acquire(0)]
+        )
         assert trans is not None
         _, ns = trans[0]
         _, wb, holds, _ = ns
@@ -543,8 +545,7 @@ class TestActionEffects:
         give_action = _action_give_idx(gt0.index(1), env.n_tools)
         # Agent 1 does a give (no-op since not holding anything)
         noop_1 = _action_give_idx(0, env.n_tools)
-        trans = env.transition_probabilities(
-            state, [give_action, noop_1])
+        trans = env.transition_probabilities(state, [give_action, noop_1])
         assert trans is not None
         _, ns = trans[0]
         _, wb, holds, _ = ns
@@ -629,7 +630,9 @@ class TestActionEffects:
 
         state = env.get_state()
         # Agent 0 acquires tool, agent 1 acquires tool 0 (idle)
-        trans = env.transition_probabilities(state, [_action_acquire(0), _action_acquire(0)])
+        trans = env.transition_probabilities(
+            state, [_action_acquire(0), _action_acquire(0)]
+        )
         assert trans is not None
         # Should have ≤ 3 successors (no-fail, agent0-fails, agent1-fails)
         assert len(trans) <= 3
@@ -657,7 +660,9 @@ class TestActionEffects:
 
         state = env.get_state()
         # Both agents try to acquire tool 0
-        trans = env.transition_probabilities(state, [_action_acquire(0), _action_acquire(0)])
+        trans = env.transition_probabilities(
+            state, [_action_acquire(0), _action_acquire(0)]
+        )
         assert trans is not None
         _, ns = trans[0]
         _, wb, holds, _ = ns
@@ -687,7 +692,9 @@ class TestActionEffects:
 
         state = env.get_state()
         # Both try to acquire tool 0
-        trans = env.transition_probabilities(state, [_action_acquire(0), _action_acquire(0)])
+        trans = env.transition_probabilities(
+            state, [_action_acquire(0), _action_acquire(0)]
+        )
         assert trans is not None
         _, ns = trans[0]
         _, wb, holds, _ = ns
@@ -724,3 +731,154 @@ class TestActionEffects:
         s = env.get_state()
         with pytest.raises(ValueError, match="agent_index"):
             env.perceived_state(s, 5)
+
+
+# ---- parameter validation ----
+
+
+class TestParameterValidation:
+    """Tests for Waxman, grab_prob, and agent index validation in __init__."""
+
+    def test_waxman_hear_alpha_out_of_range(self):
+        with pytest.raises(ValueError, match="waxman_hear_alpha"):
+            ToolsWorldModel(
+                n_agents=2, n_tools=1, max_steps=3, seed=0, waxman_hear_alpha=1.5
+            )
+
+    def test_waxman_hear_alpha_negative(self):
+        with pytest.raises(ValueError, match="waxman_hear_alpha"):
+            ToolsWorldModel(
+                n_agents=2, n_tools=1, max_steps=3, seed=0, waxman_hear_alpha=-0.1
+            )
+
+    def test_waxman_reach_alpha_out_of_range(self):
+        with pytest.raises(ValueError, match="waxman_reach_alpha"):
+            ToolsWorldModel(
+                n_agents=2, n_tools=1, max_steps=3, seed=0, waxman_reach_alpha=2.0
+            )
+
+    def test_waxman_hear_beta_zero(self):
+        with pytest.raises(ValueError, match="waxman_hear_beta"):
+            ToolsWorldModel(
+                n_agents=2, n_tools=1, max_steps=3, seed=0, waxman_hear_beta=0.0
+            )
+
+    def test_waxman_hear_beta_negative(self):
+        with pytest.raises(ValueError, match="waxman_hear_beta"):
+            ToolsWorldModel(
+                n_agents=2, n_tools=1, max_steps=3, seed=0, waxman_hear_beta=-1.0
+            )
+
+    def test_waxman_reach_beta_zero(self):
+        with pytest.raises(ValueError, match="waxman_reach_beta"):
+            ToolsWorldModel(
+                n_agents=2, n_tools=1, max_steps=3, seed=0, waxman_reach_beta=0.0
+            )
+
+    def test_grab_prob_out_of_range(self):
+        with pytest.raises(ValueError, match="grab_prob"):
+            ToolsWorldModel(n_agents=2, n_tools=1, max_steps=3, seed=0, grab_prob=1.5)
+
+    def test_grab_prob_negative(self):
+        with pytest.raises(ValueError, match="grab_prob"):
+            ToolsWorldModel(n_agents=2, n_tools=1, max_steps=3, seed=0, grab_prob=-0.1)
+
+    def test_robot_waxman_overrides_validated(self):
+        with pytest.raises(ValueError, match="robot_waxman_hear_alpha"):
+            ToolsWorldModel(
+                n_agents=2, n_tools=1, max_steps=3, seed=0, robot_waxman_hear_alpha=5.0
+            )
+        with pytest.raises(ValueError, match="robot_waxman_reach_beta"):
+            ToolsWorldModel(
+                n_agents=2, n_tools=1, max_steps=3, seed=0, robot_waxman_reach_beta=-1.0
+            )
+        with pytest.raises(ValueError, match="robot_grab_prob"):
+            ToolsWorldModel(
+                n_agents=2, n_tools=1, max_steps=3, seed=0, robot_grab_prob=2.0
+            )
+
+    def test_valid_waxman_params_accepted(self):
+        env = ToolsWorldModel(
+            n_agents=2,
+            n_tools=1,
+            max_steps=3,
+            seed=0,
+            waxman_hear_alpha=0.5,
+            waxman_hear_beta=0.3,
+            waxman_reach_alpha=0.4,
+            waxman_reach_beta=0.2,
+            grab_prob=0.7,
+        )
+        assert env.n_agents == 2
+
+    def test_robot_agent_index_out_of_range(self):
+        with pytest.raises(ValueError, match="robot_agent_indices"):
+            ToolsWorldModel(
+                n_agents=2, n_tools=1, max_steps=3, seed=0, robot_agent_indices=[5]
+            )
+
+    def test_robot_agent_index_duplicate(self):
+        with pytest.raises(ValueError, match="duplicate"):
+            ToolsWorldModel(
+                n_agents=3, n_tools=1, max_steps=3, seed=0, robot_agent_indices=[0, 0]
+            )
+
+    def test_robot_human_overlap(self):
+        with pytest.raises(ValueError, match="disjoint"):
+            ToolsWorldModel(
+                n_agents=3,
+                n_tools=1,
+                max_steps=3,
+                seed=0,
+                robot_agent_indices=[0, 1],
+                human_agent_indices_list=[1, 2],
+            )
+
+    def test_robot_human_incomplete_coverage(self):
+        with pytest.raises(ValueError, match="cover all agents"):
+            ToolsWorldModel(
+                n_agents=3,
+                n_tools=1,
+                max_steps=3,
+                seed=0,
+                robot_agent_indices=[0],
+                human_agent_indices_list=[1],
+            )
+
+    def test_p_failure_out_of_range(self):
+        with pytest.raises(ValueError, match="p_failure"):
+            ToolsWorldModel(n_agents=2, n_tools=1, max_steps=3, seed=0, p_failure=1.5)
+
+
+# ---- pickle safety ----
+
+
+class TestPickleSafety:
+    """Verify ToolsWorldModel survives pickle round-trip."""
+
+    def test_pickle_roundtrip(self, small_env):
+        import pickle
+
+        small_env.reset(seed=42)
+        s1 = small_env.get_state()
+        data = pickle.dumps(small_env)
+        env2 = pickle.loads(data)
+        s2 = env2.get_state()
+        assert s1 == s2
+
+    def test_pickle_preserves_graphs(self, small_env):
+        import pickle
+
+        data = pickle.dumps(small_env)
+        env2 = pickle.loads(data)
+        assert (small_env.can_hear == env2.can_hear).all()
+        assert (small_env.can_reach == env2.can_reach).all()
+        assert (small_env.can_grab == env2.can_grab).all()
+
+    def test_pickle_preserves_roles(self, small_env):
+        import pickle
+
+        data = pickle.dumps(small_env)
+        env2 = pickle.loads(data)
+        assert env2.robot_agent_indices == small_env.robot_agent_indices
+        assert env2.human_agent_indices == small_env.human_agent_indices

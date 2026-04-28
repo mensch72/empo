@@ -43,7 +43,11 @@ from empo.world_model import WorldModel
 from empo.possible_goal import PossibleGoal, PossibleGoalGenerator, PossibleGoalSampler
 from empo.human_policy_prior import HumanPolicyPrior, TabularHumanPolicyPrior
 from empo.robot_policy import RobotPolicy
-from empo.backward_induction import compute_human_policy_prior, TabularRobotPolicy
+from empo.backward_induction import (
+    compute_human_policy_prior,
+    compute_robot_policy,
+    TabularRobotPolicy,
+)
 from empo.hierarchical import HierarchicalWorldModel, LevelMapper
 from empo.util.memory_monitor import MemoryMonitor, check_memory
 
@@ -82,6 +86,7 @@ __all__ = [
     "TabularRobotPolicy",
     # Backward Induction
     "compute_human_policy_prior",
+    "compute_robot_policy",
     # Hierarchical
     "HierarchicalWorldModel",
     "LevelMapper",

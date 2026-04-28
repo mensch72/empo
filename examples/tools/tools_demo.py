@@ -41,12 +41,9 @@ from empo.backward_induction import (
     compute_robot_policy,
 )
 from empo.world_specific_helpers.tools import (
-    HoldGoal,
-    IdleGoal,
     ToolsGoalGenerator,
     ToolsGoalSampler,
     ToolsHeuristicPolicy,
-    WorkbenchGoal,
     action_name,
     create_tools_env,
     render_tools_state,
@@ -183,7 +180,10 @@ def run_rollout(env, robot_policy, human_policy_prior, goal_sampler, goal_gen, a
                 actions[hi] = np.random.choice(len(dist), p=dist)
 
         # Print step summary
-        action_strs = [action_name(a, env.n_tools, env.give_targets[i]) for i, a in enumerate(actions)]
+        action_strs = [
+            action_name(a, env.n_tools, env.give_targets[i])
+            for i, a in enumerate(actions)
+        ]
         print(
             f"  Step {step + 1}/{args.steps}  remaining={remaining}  "
             f"actions={action_strs}"
@@ -195,7 +195,12 @@ def run_rollout(env, robot_policy, human_policy_prior, goal_sampler, goal_gen, a
 
         # Insert interpolated transition frames showing tool motion
         transition_frames = render_tools_transition(
-            env, state, new_state, actions, goals=goals_list, n_interp=10,
+            env,
+            state,
+            new_state,
+            actions,
+            goals=goals_list,
+            n_interp=10,
         )
         frames.extend(transition_frames)
 
@@ -244,16 +249,12 @@ def main():
     # Print adjacency graphs
     print("can_hear adjacency:")
     for i in range(env.n_agents):
-        row = " ".join(
-            "1" if env.can_hear[i, j] else "." for j in range(env.n_agents)
-        )
+        row = " ".join("1" if env.can_hear[i, j] else "." for j in range(env.n_agents))
         print(f"  Agent {i}: [{row}]")
     print()
     print("can_reach adjacency:")
     for i in range(env.n_agents):
-        row = " ".join(
-            "1" if env.can_reach[i, j] else "." for j in range(env.n_agents)
-        )
+        row = " ".join("1" if env.can_reach[i, j] else "." for j in range(env.n_agents))
         print(f"  Agent {i}: [{row}]")
     print()
 

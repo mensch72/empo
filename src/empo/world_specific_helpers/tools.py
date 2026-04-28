@@ -226,6 +226,50 @@ class ToolsWorldModel(WorldModel):
                     f"robots={sorted(robot_set)}, humans={sorted(human_set)})"
                 )
 
+        # Validate Waxman and grab parameters
+        if not 0.0 <= waxman_hear_alpha <= 1.0:
+            raise ValueError(
+                f"waxman_hear_alpha must be in [0, 1], got {waxman_hear_alpha}"
+            )
+        if not 0.0 <= waxman_reach_alpha <= 1.0:
+            raise ValueError(
+                f"waxman_reach_alpha must be in [0, 1], got {waxman_reach_alpha}"
+            )
+        if waxman_hear_beta <= 0:
+            raise ValueError(f"waxman_hear_beta must be > 0, got {waxman_hear_beta}")
+        if waxman_reach_beta <= 0:
+            raise ValueError(f"waxman_reach_beta must be > 0, got {waxman_reach_beta}")
+        if not 0.0 <= grab_prob <= 1.0:
+            raise ValueError(f"grab_prob must be in [0, 1], got {grab_prob}")
+
+        # Validate robot Waxman overrides when provided
+        if (
+            robot_waxman_hear_alpha is not None
+            and not 0.0 <= robot_waxman_hear_alpha <= 1.0
+        ):
+            raise ValueError(
+                f"robot_waxman_hear_alpha must be in [0, 1], got {robot_waxman_hear_alpha}"
+            )
+        if (
+            robot_waxman_reach_alpha is not None
+            and not 0.0 <= robot_waxman_reach_alpha <= 1.0
+        ):
+            raise ValueError(
+                f"robot_waxman_reach_alpha must be in [0, 1], got {robot_waxman_reach_alpha}"
+            )
+        if robot_waxman_hear_beta is not None and robot_waxman_hear_beta <= 0:
+            raise ValueError(
+                f"robot_waxman_hear_beta must be > 0, got {robot_waxman_hear_beta}"
+            )
+        if robot_waxman_reach_beta is not None and robot_waxman_reach_beta <= 0:
+            raise ValueError(
+                f"robot_waxman_reach_beta must be > 0, got {robot_waxman_reach_beta}"
+            )
+        if robot_grab_prob is not None and not 0.0 <= robot_grab_prob <= 1.0:
+            raise ValueError(
+                f"robot_grab_prob must be in [0, 1], got {robot_grab_prob}"
+            )
+
         # Validate and normalise failure probability
         if not 0.0 <= p_failure <= 1.0:
             raise ValueError(f"p_failure must be in [0, 1], got {p_failure}")
@@ -427,10 +471,13 @@ class ToolsWorldModel(WorldModel):
 
         Uses Gymnasium keyword-only signature for compatibility with
         wrappers.  ``seed`` re-seeds the internal RNG; ``options`` is
-        accepted but unused.
+        accepted but unused.  When no seed is provided the stored
+        ``_init_seed`` is re-used so that ``initial_state()`` (which
+        calls ``reset()`` internally) always returns the same state.
         """
-        if seed is not None:
-            self._rng = np.random.RandomState(seed)
+        effective_seed = seed if seed is not None else self._init_seed
+        if effective_seed is not None:
+            self._rng = np.random.RandomState(effective_seed)
         self._remaining = self.max_steps
         self._init_tools()
         self._dag_cache = None
@@ -616,15 +663,31 @@ class ToolsWorldModel(WorldModel):
                         pass  # tool already claimed this timestep
                     else:
                         ok = self._apply(
-                            i, atype, param, m, n,
-                            self.can_reach, self.can_grab, wb, hd, rq,
+                            i,
+                            atype,
+                            param,
+                            m,
+                            n,
+                            self.can_reach,
+                            self.can_grab,
+                            wb,
+                            hd,
+                            rq,
                         )
                         if ok and hd[i][param]:
                             claimed_tools.add(param)
                 elif atype == "give":
                     self._apply(
-                        i, atype, param, m, n,
-                        self.can_reach, self.can_grab, wb, hd, rq,
+                        i,
+                        atype,
+                        param,
+                        m,
+                        n,
+                        self.can_reach,
+                        self.can_grab,
+                        wb,
+                        hd,
+                        rq,
                     )
 
             new_state = (
@@ -1265,8 +1328,9 @@ def _tool_owner(k, wb, holds, n):
     return None, None
 
 
-def _draw_partial_arc(ax, start, end, frac, rad=-0.2, color="royalblue",
-                      lw=2.5, alpha=0.7):
+def _draw_partial_arc(
+    ax, start, end, frac, rad=-0.2, color="royalblue", lw=2.5, alpha=0.7
+):
     """Draw fraction *frac* of a quadratic Bezier arc from *start* to *end*.
 
     The control point is offset perpendicular to the start→end midpoint by
@@ -1283,12 +1347,15 @@ def _draw_partial_arc(ax, start, end, frac, rad=-0.2, color="royalblue",
     ctrl = mid + rad * perp  # control point (same convention as mpl)
     n_pts = max(int(50 * frac), 2)
     ts = np.linspace(0, frac, n_pts)
-    pts = np.column_stack([
-        (1 - ts)**2 * start[0] + 2 * (1 - ts) * ts * ctrl[0] + ts**2 * end[0],
-        (1 - ts)**2 * start[1] + 2 * (1 - ts) * ts * ctrl[1] + ts**2 * end[1],
-    ])
-    ax.plot(pts[:, 0], pts[:, 1], color=color, lw=lw, alpha=alpha,
-            solid_capstyle="round")
+    pts = np.column_stack(
+        [
+            (1 - ts) ** 2 * start[0] + 2 * (1 - ts) * ts * ctrl[0] + ts**2 * end[0],
+            (1 - ts) ** 2 * start[1] + 2 * (1 - ts) * ts * ctrl[1] + ts**2 * end[1],
+        ]
+    )
+    ax.plot(
+        pts[:, 0], pts[:, 1], color=color, lw=lw, alpha=alpha, solid_capstyle="round"
+    )
 
 
 def render_tools_transition(
@@ -1312,6 +1379,7 @@ def render_tools_transition(
     Returns a list of *n_interp* RGB numpy frames.
     """
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
@@ -1381,26 +1449,53 @@ def render_tools_transition(
                 if i == j:
                     continue
                 if env.can_grab[i, j]:
-                    ax.annotate("", xy=pos[j], xytext=pos[i],
-                                arrowprops=dict(arrowstyle="->", color="grey",
-                                                lw=2.0, alpha=0.35))
+                    ax.annotate(
+                        "",
+                        xy=pos[j],
+                        xytext=pos[i],
+                        arrowprops=dict(
+                            arrowstyle="->", color="grey", lw=2.0, alpha=0.35
+                        ),
+                    )
                 elif env.can_reach[i, j]:
-                    ax.annotate("", xy=pos[j], xytext=pos[i],
-                                arrowprops=dict(arrowstyle="->", color="grey",
-                                                lw=1.0, alpha=0.3))
+                    ax.annotate(
+                        "",
+                        xy=pos[j],
+                        xytext=pos[i],
+                        arrowprops=dict(
+                            arrowstyle="->", color="grey", lw=1.0, alpha=0.3
+                        ),
+                    )
                 elif env.can_hear[i, j]:
-                    ax.annotate("", xy=pos[j], xytext=pos[i],
-                                arrowprops=dict(arrowstyle="->", color="grey",
-                                                lw=0.5, alpha=0.2,
-                                                linestyle="dotted"))
+                    ax.annotate(
+                        "",
+                        xy=pos[j],
+                        xytext=pos[i],
+                        arrowprops=dict(
+                            arrowstyle="->",
+                            color="grey",
+                            lw=0.5,
+                            alpha=0.2,
+                            linestyle="dotted",
+                        ),
+                    )
 
         # ---- agents ----
         for i in range(n):
             c = _agent_color(i, env._robot_indices)
             label = f"R{i}" if i in env._robot_indices else f"H{i}"
             ax.plot(pos[i, 0], pos[i, 1], "o", color=c, markersize=18, zorder=5)
-            ax.text(pos[i, 0], pos[i, 1], label, ha="center", va="center",
-                    fontsize=7, fontweight="bold", color="white", zorder=6)
+            ax.text(
+                pos[i, 0],
+                pos[i, 1],
+                label,
+                ha="center",
+                va="center",
+                fontsize=7,
+                fontweight="bold",
+                color="white",
+                zorder=6,
+            )
 
         # ---- static tools (old state positions) ----
         for k in static_tools:
@@ -1411,20 +1506,33 @@ def render_tools_transition(
                 color = "black" if kind == "held" else "dimgrey"
                 msize = 10 if kind == "held" else 7
                 zord = 7 if kind == "held" else 4
-                ax.plot(tp[0], tp[1], marker, color=color,
-                        markersize=msize, zorder=zord)
-                ax.text(tp[0] + 0.015, tp[1], f"T{k}",
-                        fontsize=6 if kind == "held" else 5,
-                        color=color, zorder=zord)
+                ax.plot(
+                    tp[0], tp[1], marker, color=color, markersize=msize, zorder=zord
+                )
+                ax.text(
+                    tp[0] + 0.015,
+                    tp[1],
+                    f"T{k}",
+                    fontsize=6 if kind == "held" else 5,
+                    color=color,
+                    zorder=zord,
+                )
 
         # ---- moving tools (interpolated) + T-shaped indicators ----
         for k, mv in moves.items():
             tool_pos = (1 - t) * mv["old"] + t * mv["new"]
             marker = _TOOL_MARKERS[k % len(_TOOL_MARKERS)]
-            ax.plot(tool_pos[0], tool_pos[1], marker, color="black",
-                    markersize=10, zorder=8)
-            ax.text(tool_pos[0] + 0.015, tool_pos[1], f"T{k}",
-                    fontsize=6, color="black", zorder=8)
+            ax.plot(
+                tool_pos[0], tool_pos[1], marker, color="black", markersize=10, zorder=8
+            )
+            ax.text(
+                tool_pos[0] + 0.015,
+                tool_pos[1],
+                f"T{k}",
+                fontsize=6,
+                color="black",
+                zorder=8,
+            )
 
             # T-shaped indicator
             actor = mv["actor"]
@@ -1448,12 +1556,22 @@ def render_tools_transition(
                     tbar_right = tbar_center - perp * tbar_half
 
                     clr = "red" if mv["type"] == "give" else "green"
-                    ax.plot([actor_pos[0], tool_pos[0]],
-                            [actor_pos[1], tool_pos[1]],
-                            color=clr, lw=2.5, zorder=9, alpha=0.7)
-                    ax.plot([tbar_left[0], tbar_right[0]],
-                            [tbar_left[1], tbar_right[1]],
-                            color=clr, lw=3.0, zorder=9, alpha=0.7)
+                    ax.plot(
+                        [actor_pos[0], tool_pos[0]],
+                        [actor_pos[1], tool_pos[1]],
+                        color=clr,
+                        lw=2.5,
+                        zorder=9,
+                        alpha=0.7,
+                    )
+                    ax.plot(
+                        [tbar_left[0], tbar_right[0]],
+                        [tbar_left[1], tbar_right[1]],
+                        color=clr,
+                        lw=3.0,
+                        zorder=9,
+                        alpha=0.7,
+                    )
 
         # ---- goal arrows ----
         if goals:
@@ -1464,14 +1582,27 @@ def render_tools_transition(
                         mv = moves[g.tool_idx]
                         tp = (1 - t) * mv["old"] + t * mv["new"]
                     if tp is not None:
-                        ax.annotate("", xy=tp, xytext=pos[g.agent_idx],
-                                    arrowprops=dict(arrowstyle="->", color="blue",
-                                                    lw=3.0, linestyle="dashed",
-                                                    connectionstyle="arc3,rad=-0.3"))
+                        ax.annotate(
+                            "",
+                            xy=tp,
+                            xytext=pos[g.agent_idx],
+                            arrowprops=dict(
+                                arrowstyle="->",
+                                color="blue",
+                                lw=3.0,
+                                linestyle="dashed",
+                                connectionstyle="arc3,rad=-0.3",
+                            ),
+                        )
                 elif isinstance(g, IdleGoal):
-                    circle = plt.Circle(pos[g.agent_idx], 0.06, fill=False,
-                                        edgecolor="blue", linestyle="dashed",
-                                        linewidth=3.0)
+                    circle = plt.Circle(
+                        pos[g.agent_idx],
+                        0.06,
+                        fill=False,
+                        edgecolor="blue",
+                        linestyle="dashed",
+                        linewidth=3.0,
+                    )
                     ax.add_patch(circle)
 
         # ---- persistent request arcs (already in old_state matrix) ----
@@ -1491,10 +1622,17 @@ def render_tools_transition(
                         else:
                             perp = np.array([0.0, 0.0])
                         off = _REQ_OFFSET * perp
-                        ax.annotate("", xy=tp + off, xytext=pos[i] + off,
-                                    arrowprops=dict(arrowstyle="->",
-                                                    color="royalblue", lw=2.5,
-                                                    connectionstyle="arc3,rad=-0.3"))
+                        ax.annotate(
+                            "",
+                            xy=tp + off,
+                            xytext=pos[i] + off,
+                            arrowprops=dict(
+                                arrowstyle="->",
+                                color="royalblue",
+                                lw=2.5,
+                                connectionstyle="arc3,rad=-0.3",
+                            ),
+                        )
 
         # ---- animated request arcs (acquire that resulted in a new request) ----
         for i in range(n):
@@ -1516,9 +1654,16 @@ def render_tools_transition(
                     else:
                         perp = np.array([0.0, 0.0])
                     off = _REQ_OFFSET * perp
-                    _draw_partial_arc(ax, pos[i] + off, tp + off, t,
-                                      rad=-0.3, color="royalblue",
-                                      lw=2.5, alpha=0.7)
+                    _draw_partial_arc(
+                        ax,
+                        pos[i] + off,
+                        tp + off,
+                        t,
+                        rad=-0.3,
+                        color="royalblue",
+                        lw=2.5,
+                        alpha=0.7,
+                    )
 
         fig.tight_layout()
         fig.canvas.draw()
