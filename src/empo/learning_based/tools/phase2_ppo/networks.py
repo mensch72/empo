@@ -9,7 +9,7 @@ the same state encoder.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -110,6 +110,27 @@ class ToolsHumanGoalAchievementNetwork(BaseHumanGoalAchievementNetwork):
         raw = self.head(combined)
         return self.apply_clamp(raw.squeeze(0))
 
+    def forward_batch(
+        self,
+        states: List[Any],
+        goals: List[Any],
+        human_indices: List[int],
+        world_model: Any,
+        device: str = "cpu",
+    ) -> torch.Tensor:
+        """Batch forward: vectorise states/goals/humans."""
+        feats = []
+        for state, goal, h_idx in zip(states, goals, human_indices):
+            x = self.state_encoder.tensorize_state(state, world_model, device=device)
+            state_feat = self.state_encoder(x).squeeze(0)
+            goal_feat = self._encode_goal(goal, device=device)
+            agent_oh = torch.zeros(self.n_agents, device=device)
+            agent_oh[h_idx] = 1.0
+            feats.append(torch.cat([state_feat, goal_feat, agent_oh]))
+        batch = torch.stack(feats)  # (B, input_dim)
+        raw = self.head(batch)  # (B, 1)
+        return self.apply_clamp(raw.squeeze(-1))
+
     def get_config(self) -> Dict[str, Any]:
         return {
             "n_agents": self.n_agents,
@@ -161,6 +182,25 @@ class ToolsAggregateGoalAbilityNetwork(BaseAggregateGoalAbilityNetwork):
         raw = self.head(combined)
         return self.apply_clamp(raw.squeeze(0))
 
+    def forward_batch(
+        self,
+        states: List[Any],
+        human_indices: List[int],
+        world_model: Any,
+        device: str = "cpu",
+    ) -> torch.Tensor:
+        """Batch forward: vectorise states/humans."""
+        feats = []
+        for state, h_idx in zip(states, human_indices):
+            x = self.state_encoder.tensorize_state(state, world_model, device=device)
+            state_feat = self.state_encoder(x).squeeze(0)
+            agent_oh = torch.zeros(self.n_agents, device=device)
+            agent_oh[h_idx] = 1.0
+            feats.append(torch.cat([state_feat, agent_oh]))
+        batch = torch.stack(feats)
+        raw = self.head(batch)
+        return self.apply_clamp(raw.squeeze(-1))
+
     def get_config(self) -> Dict[str, Any]:
         return {
             "n_agents": self.n_agents,
@@ -203,6 +243,24 @@ class ToolsIntrinsicRewardNetwork(BaseIntrinsicRewardNetwork):
             state_feat = self.state_encoder(x).squeeze(0)
         y_raw = self.head(state_feat.unsqueeze(0)).squeeze(0)
         # y should be positive (mean of X_h^{-xi})
+        y = torch.clamp(y_raw, min=1e-6)
+        u_r = -(y**self.eta)
+        return y, u_r
+
+    def forward_batch(
+        self,
+        states: List[Any],
+        world_model: Any,
+        device: str = "cpu",
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Batch forward: vectorise states."""
+        feats = []
+        for state in states:
+            x = self.state_encoder.tensorize_state(state, world_model, device=device)
+            state_feat = self.state_encoder(x).squeeze(0)
+            feats.append(state_feat)
+        batch = torch.stack(feats)
+        y_raw = self.head(batch).squeeze(-1)
         y = torch.clamp(y_raw, min=1e-6)
         u_r = -(y**self.eta)
         return y, u_r
