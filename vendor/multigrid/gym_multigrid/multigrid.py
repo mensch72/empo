@@ -1841,17 +1841,24 @@ class Rock(WorldObj):
 
 class Bush(WorldObj):
     """
-    Dense bush that blocks humans until a robot tramples it.
+    Dense bush that all agents can attempt to walk through.
 
-    A bush is mutable but immobile. Before trampling it is non-overlappable.
-    When an authorized robot-like agent moves forward into it, the bush is
-    marked trampled and removed from the grid, making the cell empty for all
-    agents afterwards.
+    A bush is mutable but immobile. It is non-overlappable in the normal
+    sense, but all agents can attempt to enter it via the forward action:
 
-    trample_probability: Probability (0.0 to 1.0) that a trampling attempt
-        succeeds. At 1.0 (default) trampling is certain. Values below 1.0
-        make trampling stochastic, which smooths the human-power reward
-        signal—partially cleared paths already increase reachability.
+    - Robot-like agents (``can_be_trampled_by`` returns True) always trample
+      the bush with certainty and move into the cell.
+    - All other agents (humans) trample the bush with probability
+      ``trample_probability`` (default 1.0, i.e. certain by default).
+
+    When trampling succeeds, the bush is removed from the grid and the cell
+    becomes empty for all agents afterwards.
+
+    trample_probability: Probability (0.0 to 1.0) that a non-robot (human)
+        agent's trampling attempt succeeds. Robots are unaffected—they always
+        succeed. Values below 1.0 make human entry stochastic, which smooths
+        the human-power reward signal—partially cleared paths already increase
+        reachability.
     """
 
     def __init__(self, world, trampled=False, trample_probability=1.0):
@@ -3616,7 +3623,9 @@ class MultiGridEnv(WorldModel):
             return can_push
 
         if fwd_cell.type == 'bush':
-            return fwd_cell.can_be_trampled_by(agent)
+            # All agents can attempt to enter a bush.
+            # Robots always succeed; humans succeed with trample_probability.
+            return True
         
         # Check for magic walls
         if fwd_cell.type == 'magicwall' and fwd_cell.active:
@@ -3744,10 +3753,12 @@ class MultiGridEnv(WorldModel):
         self.grid.set(*self.agents[agent_idx].pos, self.agents[agent_idx])
 
     def _trample_bush(self, agent_idx, target_pos, bush):
-        """Trample a bush and move the agent into its now-empty cell."""
-        if not bush.can_be_trampled_by(self.agents[agent_idx]):
-            return False
-
+        """Trample a bush and move the agent into its now-empty cell.
+        
+        This should only be called when trampling is permitted (either a
+        robot-like agent, or a human whose stochastic outcome has already
+        been resolved to 'succeed').
+        """
         bush.trampled = True
         self.grid.set(*target_pos, None)
         self._move_agent_to_cell(agent_idx, target_pos, None)
@@ -4238,16 +4249,20 @@ class MultiGridEnv(WorldModel):
     def _is_probabilistic_bush_trample(self, agent_idx, fwd_cell):
         """
         Return True when an agent facing fwd_cell would perform a stochastic bush trampling.
-        
-        A trampling is stochastic when the cell is an untrampled bush that the agent can
-        trample and whose trample_probability is strictly less than 1.0.
+
+        Robots (agents for which ``fwd_cell.can_be_trampled_by()`` returns True) always
+        trample with certainty — they are never stochastic.  Only non-robot (human) agents
+        facing an untrampled bush whose ``trample_probability`` is strictly less than 1.0
+        produce a stochastic transition.
         """
-        return (
-            fwd_cell is not None and
-            fwd_cell.type == 'bush' and
-            fwd_cell.can_be_trampled_by(self.agents[agent_idx]) and
-            fwd_cell.trample_probability < 1.0
-        )
+        if fwd_cell is None or fwd_cell.type != 'bush':
+            return False
+        agent = self.agents[agent_idx]
+        # Robots always succeed with certainty - not stochastic
+        if fwd_cell.can_be_trampled_by(agent):
+            return False
+        # Human agent: stochastic if trample_probability < 1.0
+        return fwd_cell.trample_probability < 1.0
     
     def _categorize_agents(self, actions, active_agents=None):
         """
