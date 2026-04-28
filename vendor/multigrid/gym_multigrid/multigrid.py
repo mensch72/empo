@@ -1848,29 +1848,29 @@ class Bush(WorldObj):
 
     - **Robot-like agents** (``can_be_trampled_by`` returns True) **trample** the
       bush: it is permanently removed from the grid and the cell becomes empty.
-      Robots always trample with certainty, regardless of ``trample_probability``.
+      Robots always trample with certainty, regardless of ``enter_bush_success_prob``.
 
     - **Human agents** (all others) **enter** the bush without trampling it: the
       bush stays intact. The agent occupies the cell alongside the bush (like
       terrain), and the bush is restored to the grid when the human leaves the
       cell. Success is stochastic: it occurs with probability
-      ``trample_probability`` (default 1.0, i.e. always succeeds by default).
+      ``enter_bush_success_prob`` (default 1.0, i.e. always succeeds by default).
       When the attempt fails the agent stays put and the bush is unchanged.
 
-    trample_probability: Probability (0.0 to 1.0) that a human agent's forward
+    enter_bush_success_prob: Probability (0.0 to 1.0) that a human agent's forward
         attempt to enter a bush succeeds. Robots are unaffected — they always
         trample with certainty. Values below 1.0 make human entry stochastic,
         which smooths the human-power reward signal: even partial bush paths
         increase reachability.
     """
 
-    def __init__(self, world, trampled=False, trample_probability=1.0):
+    def __init__(self, world, trampled=False, enter_bush_success_prob=1.0):
         super(Bush, self).__init__(world, 'bush', 'green')
         self.trampled = trampled
-        assert 0.0 <= trample_probability <= 1.0, (
-            f"trample_probability must be between 0.0 and 1.0, got {trample_probability}"
+        assert 0.0 <= enter_bush_success_prob <= 1.0, (
+            f"enter_bush_success_prob must be between 0.0 and 1.0, got {enter_bush_success_prob}"
         )
-        self.trample_probability = trample_probability
+        self.enter_bush_success_prob = enter_bush_success_prob
 
     def can_overlap(self):
         return False
@@ -2767,7 +2767,7 @@ def _parse_cell(cell_str, objects_set):
         raise ValueError(f"Unknown cell type: {cell_str}")
 
 
-def create_object_from_spec(cell_spec, objects_set, actions_set=None, stumble_probability=0.5, solidify_probability=0.1, trample_probability=1.0):
+def create_object_from_spec(cell_spec, objects_set, actions_set=None, stumble_probability=0.5, solidify_probability=0.1, enter_bush_success_prob=1.0):
     """
     Create a WorldObj from a cell specification.
     
@@ -2777,7 +2777,7 @@ def create_object_from_spec(cell_spec, objects_set, actions_set=None, stumble_pr
         actions_set: The Actions class to use (optional, needed for ControlButton)
         stumble_probability: Default stumble probability for UnsteadyGround (0.0 to 1.0)
         solidify_probability: Default solidify probability for MagicWall (0.0 to 1.0)
-        trample_probability: Default trample probability for Bush (0.0 to 1.0)
+        enter_bush_success_prob: Default probability for a human agent to successfully enter a Bush (0.0 to 1.0)
         
     Returns:
         WorldObj or None for empty cells
@@ -2795,7 +2795,7 @@ def create_object_from_spec(cell_spec, objects_set, actions_set=None, stumble_pr
         return Rock(objects_set)
     elif obj_type == 'bush':
         return Bush(objects_set, trampled=params.get('trampled', False),
-                    trample_probability=params.get('trample_probability', trample_probability))
+                    enter_bush_success_prob=params.get('enter_bush_success_prob', enter_bush_success_prob))
     elif obj_type == 'lava':
         return Lava(objects_set)
     elif obj_type == 'switch':
@@ -2899,7 +2899,7 @@ class MultiGridEnv(WorldModel):
             config=None,
             stumble_probability=0.5,
             solidify_probability=0.1,
-            trample_probability=1.0
+            enter_bush_success_prob=1.0
     ):
         """
         Initialize a MultiGridEnv.
@@ -2933,7 +2933,7 @@ class MultiGridEnv(WorldModel):
                    If both config and config_file are provided, config_file takes precedence.
             stumble_probability: Default probability of stumbling on UnsteadyGround (0.0 to 1.0)
             solidify_probability: Default probability of MagicWall solidifying on failed entry (0.0 to 1.0)
-            trample_probability: Default probability that a robot successfully tramples a Bush (0.0 to 1.0)
+            enter_bush_success_prob: Default probability that a human agent successfully enters a Bush (0.0 to 1.0). Robots always trample with certainty regardless of this value.
         """
         # Load config from config file or dict if provided
         if config_file is not None:
@@ -2973,8 +2973,8 @@ class MultiGridEnv(WorldModel):
                 stumble_probability = config['stumble_probability']
             if solidify_probability == 0.1 and 'solidify_probability' in config:  # default: 0.1
                 solidify_probability = config['solidify_probability']
-            if trample_probability == 1.0 and 'trample_probability' in config:  # default: 1.0
-                trample_probability = config['trample_probability']
+            if enter_bush_success_prob == 1.0 and 'enter_bush_success_prob' in config:  # default: 1.0
+                enter_bush_success_prob = config['enter_bush_success_prob']
             # Handle action_class from config
             if actions_set is Actions and 'action_class' in config:
                 action_class_name = config['action_class']
@@ -3010,8 +3010,8 @@ class MultiGridEnv(WorldModel):
         # Store solidify_probability for use by MagicWall objects
         self.solidify_probability = solidify_probability
         
-        # Store trample_probability as the default for Bush objects
-        self.trample_probability = trample_probability
+        # Store enter_bush_success_prob as the default for Bush objects
+        self.enter_bush_success_prob = enter_bush_success_prob
         
         # Initialize RNG early so we can use it for random orientations
         # This is done before reset() to allow random orientations to be drawn in __init__
@@ -3478,7 +3478,7 @@ class MultiGridEnv(WorldModel):
                     obj = create_object_from_spec(cell_spec, self.objects, self.actions, 
                                                   stumble_probability=self.stumble_probability,
                                                   solidify_probability=self.solidify_probability,
-                                                  trample_probability=self.trample_probability)
+                                                  enter_bush_success_prob=self.enter_bush_success_prob)
                     if obj is not None:
                         self.grid.set(x, y, obj)
         
@@ -3627,7 +3627,7 @@ class MultiGridEnv(WorldModel):
 
         if fwd_cell.type == 'bush':
             # All agents can attempt to enter a bush.
-            # Robots always succeed; humans succeed with trample_probability.
+            # Robots always succeed; humans succeed with enter_bush_success_prob.
             return True
         
         # Check for magic walls
@@ -4295,7 +4295,7 @@ class MultiGridEnv(WorldModel):
 
         Robots (agents for which ``fwd_cell.can_be_trampled_by()`` returns True) always
         trample with certainty — they are never stochastic.  Only non-robot (human) agents
-        facing an untrampled bush whose ``trample_probability`` is strictly less than 1.0
+        facing an untrampled bush whose ``enter_bush_success_prob`` is strictly less than 1.0
         produce a stochastic transition.
         """
         if fwd_cell is None or fwd_cell.type != 'bush':
@@ -4304,8 +4304,8 @@ class MultiGridEnv(WorldModel):
         # Robots always succeed with certainty - not stochastic
         if fwd_cell.can_be_trampled_by(agent):
             return False
-        # Human agent: stochastic if trample_probability < 1.0
-        return fwd_cell.trample_probability < 1.0
+        # Human agent: stochastic if enter_bush_success_prob < 1.0
+        return fwd_cell.enter_bush_success_prob < 1.0
     
     def _categorize_agents(self, actions, active_agents=None):
         """
@@ -5607,7 +5607,7 @@ class MultiGridEnv(WorldModel):
         for agent_idx in bush_agents:
             fwd_pos = self.agents[agent_idx].front_pos
             fwd_cell = self.grid.get(*fwd_pos)
-            trample_prob = fwd_cell.trample_probability if fwd_cell else 1.0
+            trample_prob = fwd_cell.enter_bush_success_prob if fwd_cell else 1.0
             outcomes = [
                 (trample_prob, 'succeed'),
                 (1.0 - trample_prob, 'fail'),

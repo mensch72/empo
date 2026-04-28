@@ -354,31 +354,31 @@ Each cell in the grid can contain:
 - **Attributes**:
   - `trampled`: Whether the bush has been trampled by a robot (default: False). Once True
     the bush is permanently gone from the grid.
-  - `trample_probability`: Probability (0.0 to 1.0) that a **human** (non-robot) agent's
+  - `enter_bush_success_prob`: Probability (0.0 to 1.0) that a **human** (non-robot) agent's
     forward-into-bush attempt succeeds (default: 1.0). Robots are unaffected and always trample.
 - **Who Can Enter / Trample**:
   - **All agents** can attempt to enter a bush via the forward action
   - **Robot-like agents** (those for whom `can_push_rocks=True`, `can_enter_magic_walls=True`, or
     `color='grey'`) always **trample** the bush with certainty (probability 1.0), regardless of
-    `trample_probability`. The bush is permanently removed from the grid.
+    `enter_bush_success_prob`. The bush is permanently removed from the grid.
   - **Human-like agents** **enter** the bush without trampling it (bush stays intact). Success
-    occurs with probability `trample_probability` (default 1.0). On success the agent occupies
+    occurs with probability `enter_bush_success_prob` (default 1.0). On success the agent occupies
     the cell alongside the bush (like terrain); the bush is restored when the agent leaves.
-    With probability `1 - trample_probability` the attempt fails and the agent stays put.
+    With probability `1 - enter_bush_success_prob` the attempt fails and the agent stays put.
 - **Robot Trampling Mechanic**:
   - Robot uses **forward action** when facing an untrampled bush
   - Always succeeds — agent moves into cell, bush `trampled=True` and removed from the grid
   - Cell becomes permanently empty for all agents
 - **Human Entry Mechanic**:
   - Human uses **forward action** when facing an untrampled bush
-  - With probability `trample_probability`: agent moves onto the bush cell; bush **stays** (like
+  - With probability `enter_bush_success_prob`: agent moves onto the bush cell; bush **stays** (like
     terrain underfoot). State records `trampled=False`. When human leaves the cell the bush is
     restored to the grid automatically.
-  - With probability `1 - trample_probability`: nothing happens; agent stays, bush unchanged.
+  - With probability `1 - enter_bush_success_prob`: nothing happens; agent stays, bush unchanged.
 - **Probabilistic Entry** (for humans):
-  - Set globally via `trample_probability` parameter on `MultiGridEnv` (applies to all map-parsed
-    bushes) or per-bush via `Bush(world, trample_probability=p)`
-  - Config file key: `trample_probability` (e.g., `trample_probability: 0.7`)
+  - Set globally via `enter_bush_success_prob` parameter on `MultiGridEnv` (applies to all map-parsed
+    bushes) or per-bush via `Bush(world, enter_bush_success_prob=p)`
+  - Config file key: `enter_bush_success_prob` (e.g., `enter_bush_success_prob: 0.7`)
   - Smooths the human-power reward signal: each bush a human can traverse with some probability
     increases reachability even without the robot having cleared it
 - **Special Processing Order**:
@@ -386,11 +386,11 @@ Each cell in the grid can contain:
     magic-wall agents). Robot bush-trampling is deterministic and processed as a normal action.
 - **Transition Probabilities**:
   - Robot forward into bush: always a single deterministic outcome (trampled, agent moves in)
-  - Human forward into bush with `trample_probability == 1.0`: single deterministic outcome
+  - Human forward into bush with `enter_bush_success_prob == 1.0`: single deterministic outcome
     (agent on bush cell, bush `trampled=False`)
-  - Human forward into bush with `trample_probability < 1.0`: two outcomes:
-    1. Succeed (agent moves onto bush cell, bush stays `trampled=False`): probability = `trample_probability`
-    2. Fail (agent stays, bush remains): probability = `1 - trample_probability`
+  - Human forward into bush with `enter_bush_success_prob < 1.0`: two outcomes:
+    1. Succeed (agent moves onto bush cell, bush stays `trampled=False`): probability = `enter_bush_success_prob`
+    2. Fail (agent stays, bush remains): probability = `1 - enter_bush_success_prob`
 - **State Representation**:
   - Tracked in mutable objects: `('bush', x, y, trampled_bool)`
   - `trampled=True` only when a robot has entered; a human on the bush gives `trampled=False`
@@ -541,8 +541,8 @@ There are **three sources** of stochasticity in the environment:
 - This introduces action-level stochasticity independent of agent ordering
 
 #### 3. Probabilistic Bush Entry (for humans)
-- When a **human** (non-robot) agent attempts to enter a bush with `trample_probability < 1.0`
-- Entry succeeds with probability `trample_probability`; otherwise agent stays in place
+- When a **human** (non-robot) agent attempts to enter a bush with `enter_bush_success_prob < 1.0`
+- Entry succeeds with probability `enter_bush_success_prob`; otherwise agent stays in place
 - On success, the bush **stays intact** (the human occupies the cell alongside the bush)
 - Robot-like agents always trample with certainty (single deterministic outcome, bush removed)
 - Probabilistic (human) entry attempts are processed **last** in each step
@@ -577,10 +577,10 @@ Movement becomes probabilistic when:
 ### When Probabilistic Bush Entry Matters
 
 Bush entry is stochastic only for **human** (non-robot) agents:
-1. **Human agent moves forward into a bush with `trample_probability < 1.0`**:
-   - With probability `trample_probability`: agent enters the cell; **bush stays intact**
+1. **Human agent moves forward into a bush with `enter_bush_success_prob < 1.0`**:
+   - With probability `enter_bush_success_prob`: agent enters the cell; **bush stays intact**
      (unlike robot trampling, the bush is not removed)
-   - With probability `1 - trample_probability`: nothing happens, agent stays, bush remains
+   - With probability `1 - enter_bush_success_prob`: nothing happens, agent stays, bush remains
    - Robot-like agents always trample (destroy) the bush deterministically (single outcome)
    - This is the primary mechanism for smoothing multi-bush reward signals
 
@@ -591,7 +591,7 @@ Transitions remain deterministic when:
 - All agents only rotate (rotations never interfere)
 - Agents act on independent, non-overlapping resources
 - No agents are on unsteady ground attempting forward action
-- No agents are trampling a bush with `trample_probability < 1.0` (only applies to human agents; robot trampling is always deterministic)
+- No agents are trampling a bush with `enter_bush_success_prob < 1.0` (only applies to human agents; robot trampling is always deterministic)
 
 ## Object Movement
 
@@ -712,7 +712,7 @@ Episodes end when:
 - **Boxes are NOT pushable**: Must be picked up and carried
 - **Blocks ARE pushable**: Can be pushed by any agent using forward action
 - **Rocks ARE pushable with restrictions**: Can only be pushed by specific agents based on `can_push_rocks` attribute
-- **Bushes can be entered by all agents**: Robots always trample with certainty; humans succeed with configurable `trample_probability` (default 1.0)
+- **Bushes can be entered by all agents**: Robots always trample with certainty; humans succeed with configurable `enter_bush_success_prob` (default 1.0)
 - **Unsteady ground introduces stochasticity**: Agents may stumble when moving forward on unsteady ground
 - **Magic walls introduce stochasticity**: Agents with `can_enter_magic_walls=True` can attempt entry with configurable probability from one specific direction
 - **Keys are reusable**: Not consumed when unlocking doors
@@ -726,7 +726,7 @@ Episodes end when:
   1. Agent execution order (random permutation for normal agents)
   2. Unsteady ground stumbling (configurable probability per cell)
   3. Magic wall entry (configurable probability per wall)
-  4. Human bush entry (configurable probability per bush or globally via `trample_probability`; robots always trample deterministically)
+  4. Human bush entry (configurable probability per bush or globally via `enter_bush_success_prob`; robots always trample deterministically)
 - **No agent subtypes**: All agents have same capabilities, distinguished by color/index only
 
 This gridworld focuses on **multi-agent coordination** and **object manipulation**, including Sokoban-style pushing mechanics for blocks and rocks, stochastic movement on unsteady ground and magic wall entry, and **human-robot interaction** via control buttons and switches.

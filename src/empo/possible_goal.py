@@ -557,7 +557,7 @@ class TabularGoalSampler(PossibleGoalSampler):
         # Find all walkable cells (not containing immovable non-overlappable objects)
         # Agents can never stand on these cell types.
         # Note: 'bush' is intentionally excluded — all agents can attempt to enter a bush
-        # (humans with trample_probability, robots with certainty), so bush cells are
+        # (humans with enter_bush_success_prob, robots with certainty), so bush cells are
         # potentially occupiable and must be covered by goals.
         non_walkable_types = {
             'wall', 'lava', 'magicwall',
@@ -692,7 +692,7 @@ class TabularGoalGenerator(PossibleGoalGenerator):
         # Find all walkable cells (not containing immovable non-overlappable objects)
         # Agents can never stand on these cell types.
         # Note: 'bush' is intentionally excluded — all agents can attempt to enter a bush
-        # (humans with trample_probability, robots with certainty), so bush cells are
+        # (humans with enter_bush_success_prob, robots with certainty), so bush cells are
         # potentially occupiable and must be covered by goals.
         non_walkable_types = {
             'wall', 'lava', 'magicwall',
