@@ -1857,7 +1857,9 @@ class Bush(WorldObj):
     def __init__(self, world, trampled=False, trample_probability=1.0):
         super(Bush, self).__init__(world, 'bush', 'green')
         self.trampled = trampled
-        assert 0.0 <= trample_probability <= 1.0, "trample_probability must be between 0.0 and 1.0"
+        assert 0.0 <= trample_probability <= 1.0, (
+            f"trample_probability must be between 0.0 and 1.0, got {trample_probability}"
+        )
         self.trample_probability = trample_probability
 
     def can_overlap(self):
@@ -4233,6 +4235,20 @@ class MultiGridEnv(WorldModel):
         
         return done
     
+    def _is_probabilistic_bush_trample(self, agent_idx, fwd_cell):
+        """
+        Return True when an agent facing fwd_cell would perform a stochastic bush trampling.
+        
+        A trampling is stochastic when the cell is an untrampled bush that the agent can
+        trample and whose trample_probability is strictly less than 1.0.
+        """
+        return (
+            fwd_cell is not None and
+            fwd_cell.type == 'bush' and
+            fwd_cell.can_be_trampled_by(self.agents[agent_idx]) and
+            fwd_cell.trample_probability < 1.0
+        )
+    
     def _categorize_agents(self, actions, active_agents=None):
         """
         Helper function to categorize agents into normal, unsteady-forward, magic-wall-entry, and bush-trampling groups.
@@ -4302,9 +4318,7 @@ class MultiGridEnv(WorldModel):
             if actions[i] == self.actions.forward:
                 fwd_pos = self.agents[i].front_pos
                 fwd_cell = self.grid.get(*fwd_pos)
-                if (fwd_cell is not None and fwd_cell.type == 'bush' and
-                        fwd_cell.can_be_trampled_by(self.agents[i]) and
-                        fwd_cell.trample_probability < 1.0):
+                if self._is_probabilistic_bush_trample(i, fwd_cell):
                     bush_agents.append(i)
                     continue
                 
@@ -5415,11 +5429,8 @@ class MultiGridEnv(WorldModel):
                                 is_stochastic = True
                     if not is_stochastic:
                         # Check if agent is trampling a probabilistic bush
-                        fwd_pos = self.agents[agent_idx].front_pos
-                        fwd_cell = self.grid.get(*fwd_pos)
-                        if (fwd_cell is not None and fwd_cell.type == 'bush' and
-                                fwd_cell.can_be_trampled_by(self.agents[agent_idx]) and
-                                fwd_cell.trample_probability < 1.0):
+                        fwd_cell = self.grid.get(*self.agents[agent_idx].front_pos)
+                        if self._is_probabilistic_bush_trample(agent_idx, fwd_cell):
                             is_stochastic = True
             
             if not is_stochastic:
@@ -5448,11 +5459,7 @@ class MultiGridEnv(WorldModel):
                         fwd_cell.type == 'magicwall' and
                         (self.agents[i].dir + 2) % 4 == fwd_cell.magic_side):
                     return True
-                if (fwd_cell.type == 'bush' and
-                        fwd_cell.can_be_trampled_by(self.agents[i]) and
-                        fwd_cell.trample_probability < 1.0):
-                    return True
-                return False
+                return self._is_probabilistic_bush_trample(i, fwd_cell)
             has_stochastic = any(_is_stochastic_forward(i) for i in active_agents)
             if not has_stochastic:
                 # Rotations are commutative and no stochastic agents - result is deterministic
@@ -6038,6 +6045,10 @@ class MultiGridEnv(WorldModel):
                     unsteady_forward_agents_list.append(i)
                     unsteady_outcomes_dict[i] = outcome_type
             elif not self._is_still_action(action):
+                # The categorization below is mutually exclusive by construction:
+                # _categorize_agents() puts each agent in exactly one bucket (magic_wall,
+                # bush, unsteady, or normal) so an agent index can appear in at most one of
+                # magic_wall_outcomes and bush_outcomes.
                 # Check if this is a magic wall agent
                 if magic_wall_outcomes and i in magic_wall_outcomes:
                     magic_wall_agents_list.append(i)
