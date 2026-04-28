@@ -4,7 +4,6 @@ Lookup Table Human Goal Achievement Network for Phase 2.
 Implements V_h^e(s, g_h) as a dictionary-based lookup table with one entry
 per unique (state, goal, map_hash) triple. The map_hash distinguishes states
 from different map configurations in ensemble mode.
-logger = logging.getLogger(__name__)
 
 """
 
@@ -15,6 +14,8 @@ from typing import Any, Dict, Hashable, List, Optional, Tuple
 
 from ..human_goal_ability import BaseHumanGoalAchievementNetwork
 from .robot_q_network import _get_map_hash
+
+logger = logging.getLogger(__name__)
 
 
 class LookupTableHumanGoalAbilityNetwork(BaseHumanGoalAchievementNetwork):

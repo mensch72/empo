@@ -1,4 +1,6 @@
 import logging
+import tokenize
+from io import StringIO
 from pathlib import Path
 
 from empo.util.logging import configure_logging
@@ -25,4 +27,8 @@ def test_configure_logging_uses_env_var(monkeypatch):
 def test_src_tree_has_no_print_calls():
     for relative_path in ('src/empo', 'src/llm_hierarchical_modeler'):
         for path in (PROJECT_ROOT / relative_path).rglob('*.py'):
-            assert 'print(' not in path.read_text(), f"Unexpected print() in {path}"
+            tokens = tokenize.generate_tokens(StringIO(path.read_text()).readline)
+            assert all(
+                not (token.type == tokenize.NAME and token.string == "print")
+                for token in tokens
+            ), f"Unexpected print() in {path}"
