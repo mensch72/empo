@@ -611,7 +611,7 @@ def train_multigrid_neural_policy_prior(
     reward_fn = compute_shaped_reward if reward_shaping else None
     
     # Use generic Trainer with exploration_policy and reward function
-    from ..trainer import Trainer
+    from empo.learning_based.phase1.trainer import Trainer
     trainer = Trainer(
         q_network=q_network,
         target_network=target_network,
