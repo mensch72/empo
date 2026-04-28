@@ -277,7 +277,9 @@ class PPOPhase2Trainer:
         # -----------------------------------------------------------------
         # V_h^e loss: MSE between V_h^e(s, g_h) and TD target
         # -----------------------------------------------------------------
-        if world_model is not None and (active_networks is None or "v_h_e" in active_networks):
+        if world_model is not None and (
+            active_networks is None or "v_h_e" in active_networks
+        ):
             v_h_e_preds: List[torch.Tensor] = []
             v_h_e_targets: List[torch.Tensor] = []
 
@@ -292,7 +294,9 @@ class PPOPhase2Trainer:
                         target_net = nets.v_h_e_target or nets.v_h_e
                         # Check if goal achieved in next_state
                         achieved = (
-                            goal.is_achieved(t.next_state) if hasattr(goal, "is_achieved") else 0
+                            goal.is_achieved(t.next_state)
+                            if hasattr(goal, "is_achieved")
+                            else 0
                         )
                         if achieved:
                             target = torch.tensor(1.0, device=self.device)
@@ -319,7 +323,9 @@ class PPOPhase2Trainer:
                 opt.zero_grad()
                 loss_v.backward()
                 if cfg.v_h_e_grad_clip is not None:
-                    nn.utils.clip_grad_norm_(nets.v_h_e.parameters(), cfg.v_h_e_grad_clip)
+                    nn.utils.clip_grad_norm_(
+                        nets.v_h_e.parameters(), cfg.v_h_e_grad_clip
+                    )
                 opt.step()
                 losses["v_h_e_loss"] = loss_v.item()
 
@@ -343,7 +349,9 @@ class PPOPhase2Trainer:
 
                     with torch.no_grad():
                         v_target_net = nets.v_h_e_target or nets.v_h_e
-                        v_for_x = v_target_net(t.state, world_model, h_idx, goal, self.device)
+                        v_for_x = v_target_net(
+                            t.state, world_model, h_idx, goal, self.device
+                        )
                         v_for_x = v_target_net.apply_hard_clamp(v_for_x)
                         x_target = nets.x_h.compute_target(
                             v_for_x.squeeze(),
@@ -385,7 +393,9 @@ class PPOPhase2Trainer:
                     x_vals: List[float] = []
                     if x_h_target_net is not None:
                         for h_idx in t.goals.keys():
-                            xv = x_h_target_net(t.state, world_model, h_idx, self.device)
+                            xv = x_h_target_net(
+                                t.state, world_model, h_idx, self.device
+                            )
                             xv = x_h_target_net.apply_hard_clamp(xv)
                             x_vals.append(max(xv.squeeze().item(), _X_H_MIN))
                     if x_vals:
@@ -598,7 +608,9 @@ class PPOPhase2Trainer:
                 tempfile.gettempdir(),
                 f"empo_ppo_checkpoint_{os.path.basename(path)}",
             )
-            logger.warning("Cannot save to %s: %s — falling back to %s", path, exc, fallback)
+            logger.warning(
+                "Cannot save to %s: %s — falling back to %s", path, exc, fallback
+            )
             torch.save(checkpoint, fallback)
             return fallback
 
@@ -689,7 +701,10 @@ class PPOPhase2Trainer:
         env = env_creator()
         # Mirror train()'s injection of auxiliary_networks so that
         # _compute_u_r() has the networks it needs to produce non-zero rewards.
-        if getattr(env, "auxiliary_networks", None) is None and self.auxiliary_networks is not None:
+        if (
+            getattr(env, "auxiliary_networks", None) is None
+            and self.auxiliary_networks is not None
+        ):
             env.auxiliary_networks = self.auxiliary_networks
         try:
             max_abs: float = 0.0
@@ -805,7 +820,9 @@ class PPOPhase2Trainer:
                     env.auxiliary_networks = aux_nets
                 return env
 
-            return pufferlib.emulation.GymnasiumPufferEnv(env_creator=_create, buf=buf, seed=seed)
+            return pufferlib.emulation.GymnasiumPufferEnv(
+                env_creator=_create, buf=buf, seed=seed
+            )
 
         # Create vectorised environments via PufferLib
         vecenv = pufferlib.vector.make(
@@ -845,7 +862,9 @@ class PPOPhase2Trainer:
             aux_losses: Dict[str, float] = {}
             active = cfg.get_active_aux_networks(self.aux_training_step)
             for _ in range(cfg.aux_training_steps_per_iteration):
-                step_losses = self.train_auxiliary_step(world_model=wm, active_networks=active)
+                step_losses = self.train_auxiliary_step(
+                    world_model=wm, active_networks=active
+                )
                 for k, v in step_losses.items():
                     aux_losses[k] = aux_losses.get(k, 0.0) + v
                 # Only advance aux_training_step when a gradient update actually ran.
@@ -1027,7 +1046,9 @@ class PPOPhase2Trainer:
             if self.aux_training_step % max(1, cfg.reward_freeze_interval) == 0:
                 self.freeze_auxiliary_networks()
 
-        logger.info("Warm-up complete after %d aux training steps", self.aux_training_step)
+        logger.info(
+            "Warm-up complete after %d aux training steps", self.aux_training_step
+        )
         env.close()
 
         # Clear the aux replay buffer to discard data collected under
