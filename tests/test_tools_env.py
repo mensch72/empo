@@ -420,7 +420,7 @@ class TestGoalGenSampler:
         g, w = sampler.sample(
             example_env.get_state(), example_env.human_agent_indices[0]
         )
-        assert isinstance(g, (HoldGoal, WorkbenchGoal))
+        assert isinstance(g, (HoldGoal, WorkbenchGoal, IdleGoal))
         assert w == 1.0
 
 
