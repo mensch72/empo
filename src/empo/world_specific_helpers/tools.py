@@ -124,6 +124,93 @@ def action_name(action: int, n_tools: int, give_targets: List[int]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Fast action-application helpers (module-level to avoid method-call overhead)
+# ---------------------------------------------------------------------------
+def _apply_action(
+    agent: int,
+    k: int,
+    n_tools: int,
+    reachable: List[int],
+    grabbable: List[int],
+    wb: List[List[int]],
+    hd: List[List[int]],
+    rq: List[List[int]],
+) -> bool:
+    """Apply an acquire action for *agent* on tool *k* in-place.
+
+    *reachable* and *grabbable* are precomputed lists of agent indices
+    that *agent* can reach / grab from.  Returns True if the action
+    succeeded (tool acquired or request placed).
+    """
+    # Already holding → no-op (success)
+    if hd[agent][k]:
+        return True
+    # Try to take from reachable workbench
+    source = -1
+    stype = 0  # 0=wb, 1=hd
+    for j in reachable:
+        if wb[j][k]:
+            source = j
+            break
+    if source == -1:
+        # Try to grab from someone's hand
+        for j in grabbable:
+            if hd[j][k]:
+                source = j
+                stype = 1
+                break
+    if source != -1:
+        # take path: put down current tool, grab k
+        agent_hd = hd[agent]
+        for k2 in range(n_tools):
+            if agent_hd[k2]:
+                agent_hd[k2] = 0
+                wb[agent][k2] = 1
+                break
+        if stype == 0:
+            wb[source][k] = 0
+        else:
+            hd[source][k] = 0
+        agent_hd[k] = 1
+        rq[agent][k] = 0
+        return True
+    # Cannot take → request path
+    if wb[agent][k]:
+        return False  # already on own workbench → no request
+    # cancel previous request and set new one
+    agent_rq = rq[agent]
+    for k2 in range(n_tools):
+        agent_rq[k2] = 0
+    agent_rq[k] = 1
+    return True
+
+
+def _apply_give(
+    agent: int,
+    target: int,
+    reachable: List[int],
+    n_tools: int,
+    wb: List[List[int]],
+    hd: List[List[int]],
+    rq: List[List[int]],
+) -> bool:
+    """Apply a give action for *agent* giving to *target* in-place."""
+    # target must be reachable (by construction of give_targets, but check)
+    agent_hd = hd[agent]
+    held = -1
+    for k in range(n_tools):
+        if agent_hd[k]:
+            held = k
+            break
+    if held == -1:
+        return False
+    agent_hd[held] = 0
+    wb[target][held] = 1
+    rq[target][held] = 0
+    return True
+
+
+# ---------------------------------------------------------------------------
 # ToolsWorldModel
 # ---------------------------------------------------------------------------
 class ToolsWorldModel(WorldModel):
@@ -400,6 +487,15 @@ class ToolsWorldModel(WorldModel):
             for i in range(n_agents)
         ]
 
+        # Precomputed reachability/grabbability lists for fast _apply
+        self._reachable_from: List[List[int]] = [
+            [j for j in range(n_agents) if self.can_reach[i, j]]
+            for i in range(n_agents)
+        ]
+        self._grabbable_from: List[List[int]] = [
+            [j for j in range(n_agents) if self.can_grab[i, j]] for i in range(n_agents)
+        ]
+
         # Per-agent action counts: acquire(m) + give(|give_targets[i]|)
         self._n_actions_per_agent: List[int] = [
             n_tools + len(self.give_targets[i]) for i in range(n_agents)
@@ -409,11 +505,17 @@ class ToolsWorldModel(WorldModel):
         self.n_actions = max(self._n_actions_per_agent)
         self.action_space = gym.spaces.Discrete(self.n_actions)
 
-        # --- mutable state ---
+        # Cached zero-row tuple for perceived_state masking
+        self._zero_row: Tuple[int, ...] = tuple(0 for _ in range(n_tools))
+
+        # Precomputed p_fail as list for fast indexing
+        self._p_fail_list: List[float] = self.p_fail.tolist()
+
+        # --- mutable state (stored as tuples for zero-cost get_state) ---
         self._remaining: int = max_steps
-        self._workbench = np.zeros((n_agents, n_tools), dtype=bool)
-        self._holds = np.zeros((n_agents, n_tools), dtype=bool)
-        self._requested = np.zeros((n_agents, n_tools), dtype=bool)
+        self._workbench: Tuple[Tuple[int, ...], ...] = ()
+        self._holds: Tuple[Tuple[int, ...], ...] = ()
+        self._requested: Tuple[Tuple[int, ...], ...] = ()
         self._init_tools()
 
     # ----- helpers for construction -----
@@ -446,12 +548,14 @@ class ToolsWorldModel(WorldModel):
 
     def _init_tools(self):
         """Clear all mutable state and place each tool on a random workbench."""
-        self._workbench[:] = False
-        self._holds[:] = False
-        self._requested[:] = False
-        for k in range(self.n_tools):
-            owner = self._rng.randint(self.n_agents)
-            self._workbench[owner, k] = True
+        n, m = self.n_agents, self.n_tools
+        wb = [[0] * m for _ in range(n)]
+        for k in range(m):
+            owner = self._rng.randint(n)
+            wb[owner][k] = 1
+        self._workbench = tuple(tuple(row) for row in wb)
+        self._holds = tuple(self._zero_row for _ in range(n))
+        self._requested = tuple(self._zero_row for _ in range(n))
 
     # ----- WorldModel interface -----
     @property
@@ -488,33 +592,64 @@ class ToolsWorldModel(WorldModel):
 
         The observation is always ``0`` (matching ``observation_space =
         Discrete(1)``).  Use :meth:`get_state` for the full state tuple.
+
+        Optimised: samples the failure scenario first and computes only
+        a single successor state instead of enumerating all branches.
         """
         if not isinstance(actions, (list, tuple)):
             actions = [actions]
-        current_state = self.get_state()
-        transitions = self.transition_probabilities(current_state, list(actions))
-        if transitions is None:
+
+        remaining = self._remaining
+        if remaining <= 0:
             return 0, 0.0, True, False, {}
-        probabilities = [prob for prob, _ in transitions]
-        successor_states = [state for _, state in transitions]
-        chosen_idx = self._rng.choice(len(transitions), p=probabilities)
-        self.set_state(successor_states[chosen_idx])
-        terminated = self.is_terminal(successor_states[chosen_idx])
-        return 0, 0.0, terminated, False, {}
+
+        n = self.n_agents
+        m = self.n_tools
+
+        # Sample failure scenario
+        if self._rng.rand() < self.p_failure:
+            failed = int(self._rng.choice(n, p=self.p_fail))
+        else:
+            failed = -1
+
+        # Mutable copies from current tuple state
+        wb = [list(row) for row in self._workbench]
+        hd = [list(row) for row in self._holds]
+        rq = [list(row) for row in self._requested]
+
+        reachable = self._reachable_from
+        grabbable = self._grabbable_from
+
+        claimed_tools: set = set()
+        for i in range(n):
+            if i == failed:
+                continue
+            atype, param = decode_action(actions[i], m, self.give_targets[i])
+            if atype == "acquire":
+                if param not in claimed_tools:
+                    ok = _apply_action(
+                        i, param, m, reachable[i], grabbable[i], wb, hd, rq
+                    )
+                    if ok and hd[i][param]:
+                        claimed_tools.add(param)
+            else:  # give
+                _apply_give(i, param, reachable[i], m, wb, hd, rq)
+
+        new_remaining = remaining - 1
+        self._remaining = new_remaining
+        self._workbench = tuple(tuple(r) for r in wb)
+        self._holds = tuple(tuple(r) for r in hd)
+        self._requested = tuple(tuple(r) for r in rq)
+        return 0, 0.0, new_remaining <= 0, False, {}
 
     def get_state(self) -> Hashable:
-        return (
-            self._remaining,
-            tuple(tuple(int(x) for x in row) for row in self._workbench),
-            tuple(tuple(int(x) for x in row) for row in self._holds),
-            tuple(tuple(int(x) for x in row) for row in self._requested),
-        )
+        return (self._remaining, self._workbench, self._holds, self._requested)
 
     def set_state(self, state) -> None:
         self._remaining = state[0]
-        self._workbench = np.array(state[1], dtype=bool)
-        self._holds = np.array(state[2], dtype=bool)
-        self._requested = np.array(state[3], dtype=bool)
+        self._workbench = state[1]
+        self._holds = state[2]
+        self._requested = state[3]
 
     def perceived_state(self, state, agent_index: int):
         """Perceived state masks ``has_requested`` entries the agent cannot hear."""
@@ -524,14 +659,12 @@ class ToolsWorldModel(WorldModel):
                 f"{self.n_agents - 1} (inclusive)"
             )
         remaining, workbench, holds, requested = state
-        m = self.n_tools
-        new_req: list = []
-        for j in range(self.n_agents):
-            if self.can_hear[agent_index, j]:
-                new_req.append(requested[j])
-            else:
-                new_req.append(tuple(0 for _ in range(m)))
-        return (remaining, workbench, holds, tuple(new_req))
+        can_hear_row = self.can_hear[agent_index]
+        zero = self._zero_row
+        new_req = tuple(
+            requested[j] if can_hear_row[j] else zero for j in range(self.n_agents)
+        )
+        return (remaining, workbench, holds, new_req)
 
     # ----- action feasibility (operates on tuple state components) -----
     def is_feasible(self, action: int, agent: int, workbench, holds) -> bool:
@@ -548,79 +681,6 @@ class ToolsWorldModel(WorldModel):
             return any(holds[agent])
         return False
 
-    # ----- apply a single agent's action (mutates lists in-place) -----
-    @staticmethod
-    def _apply(
-        agent: int,
-        action_type: str,
-        param: int,
-        n_tools: int,
-        n_agents: int,
-        can_reach: np.ndarray,
-        can_grab: np.ndarray,
-        wb: List[List[int]],
-        hd: List[List[int]],
-        rq: List[List[int]],
-    ) -> bool:
-        """Apply one agent's action in-place; return True if it succeeded."""
-
-        if action_type == "acquire":
-            k = param
-            # Already holding → no-op (success)
-            if hd[agent][k]:
-                return True
-            # Try to take from reachable workbench or grabbable hand
-            source, stype = None, None
-            for j in range(n_agents):
-                if can_reach[agent, j] and wb[j][k]:
-                    source, stype = j, "wb"
-                    break
-            if source is None:
-                for j in range(n_agents):
-                    if can_grab[agent, j] and hd[j][k]:
-                        source, stype = j, "hd"
-                        break
-            if source is not None:
-                # take path: put down current tool, grab k
-                for k2 in range(n_tools):
-                    if hd[agent][k2]:
-                        hd[agent][k2] = 0
-                        wb[agent][k2] = 1
-                        break
-                if stype == "wb":
-                    wb[source][k] = 0
-                else:
-                    hd[source][k] = 0
-                hd[agent][k] = 1
-                rq[agent][k] = 0
-                return True
-            # Cannot take → request path
-            if hd[agent][k] or wb[agent][k]:
-                return False  # already have it on own workbench → no request
-            # cancel previous request and set new one
-            for k2 in range(n_tools):
-                rq[agent][k2] = 0
-            rq[agent][k] = 1
-            return True
-
-        if action_type == "give":
-            j = param
-            if not can_reach[agent, j]:
-                return False
-            held = None
-            for k in range(n_tools):
-                if hd[agent][k]:
-                    held = k
-                    break
-            if held is None:
-                return False
-            hd[agent][held] = 0
-            wb[j][held] = 1
-            rq[j][held] = 0
-            return True
-
-        return False
-
     # ----- transition probabilities -----
     def transition_probabilities(self, state, actions):
         remaining = state[0]
@@ -635,14 +695,24 @@ class ToolsWorldModel(WorldModel):
                 f"Expected {n} actions (one per agent), got {len(actions)}"
             )
 
+        # Pre-decode all actions once (same across fail scenarios)
+        give_targets = self.give_targets
+        decoded = [decode_action(actions[i], m, give_targets[i]) for i in range(n)]
+
+        reachable = self._reachable_from
+        grabbable = self._grabbable_from
+        p_failure = self.p_failure
+        p_fail_list = self._p_fail_list
+        new_remaining = remaining - 1
+
         results: Dict[Any, float] = {}
 
         for fail_idx in range(n + 1):
             if fail_idx == 0:
-                prob = 1.0 - self.p_failure
+                prob = 1.0 - p_failure
                 failed = -1
             else:
-                prob = self.p_failure * self.p_fail[fail_idx - 1]
+                prob = p_failure * p_fail_list[fail_idx - 1]
                 failed = fail_idx - 1
             if prob <= 0.0:
                 continue
@@ -656,42 +726,19 @@ class ToolsWorldModel(WorldModel):
             for i in range(n):
                 if i == failed:
                     continue
-                gt = self.give_targets[i]
-                atype, param = decode_action(actions[i], m, gt)
+                atype, param = decoded[i]
                 if atype == "acquire":
-                    if param in claimed_tools:
-                        pass  # tool already claimed this timestep
-                    else:
-                        ok = self._apply(
-                            i,
-                            atype,
-                            param,
-                            m,
-                            n,
-                            self.can_reach,
-                            self.can_grab,
-                            wb,
-                            hd,
-                            rq,
+                    if param not in claimed_tools:
+                        ok = _apply_action(
+                            i, param, m, reachable[i], grabbable[i], wb, hd, rq
                         )
                         if ok and hd[i][param]:
                             claimed_tools.add(param)
-                elif atype == "give":
-                    self._apply(
-                        i,
-                        atype,
-                        param,
-                        m,
-                        n,
-                        self.can_reach,
-                        self.can_grab,
-                        wb,
-                        hd,
-                        rq,
-                    )
+                else:  # give
+                    _apply_give(i, param, reachable[i], m, wb, hd, rq)
 
             new_state = (
-                remaining - 1,
+                new_remaining,
                 tuple(tuple(r) for r in wb),
                 tuple(tuple(r) for r in hd),
                 tuple(tuple(r) for r in rq),
@@ -701,6 +748,11 @@ class ToolsWorldModel(WorldModel):
         if not results:
             return None
         return [(p, s) for s, p in results.items()]
+
+    def is_terminal(self, state=None) -> bool:
+        if state is None:
+            return self._remaining <= 0
+        return state[0] <= 0
 
     # ----- reconstruction helpers (for parallel DAG) -----
     def _get_construction_kwargs(self) -> dict:

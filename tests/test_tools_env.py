@@ -506,9 +506,11 @@ class TestActionEffects:
         )
         env.reset(seed=0)
         # Ensure tool 0 is on agent 0's workbench
-        env._workbench[:] = False
-        env._holds[:] = False
-        env._workbench[0, 0] = True
+        remaining = env.max_steps
+        wb = ((1,), (0,))
+        hd = ((0,), (0,))
+        rq = ((0,), (0,))
+        env.set_state((remaining, wb, hd, rq))
 
         state = env.get_state()
         # Agent 0 acquires tool 0 (reachable → take), agent 1 acquires tool 0 (idle)
@@ -535,9 +537,11 @@ class TestActionEffects:
         )
         env.reset(seed=0)
         # Agent 0 holds tool 0
-        env._workbench[:] = False
-        env._holds[:] = False
-        env._holds[0, 0] = True
+        remaining = env.max_steps
+        wb = ((0,), (0,))
+        hd = ((1,), (0,))
+        rq = ((0,), (0,))
+        env.set_state((remaining, wb, hd, rq))
 
         state = env.get_state()
         # Agent 0 gives to agent 1 (agent 1 is in give_targets[0])
@@ -566,10 +570,11 @@ class TestActionEffects:
         )
         env.reset(seed=0)
         # Ensure agent 0 does NOT have tool 1
-        env._workbench[:] = False
-        env._holds[:] = False
-        env._workbench[1, 0] = True  # tool 0 on agent 1's wb
-        env._workbench[1, 1] = True  # tool 1 on agent 1's wb
+        remaining = env.max_steps
+        wb = ((0, 0), (1, 1))
+        hd = ((0, 0), (0, 0))
+        rq = ((0, 0), (0, 0))
+        env.set_state((remaining, wb, hd, rq))
 
         state = env.get_state()
         # Agent 0 acquires tool 1 → not reachable → sets request
@@ -594,11 +599,11 @@ class TestActionEffects:
             can_hear=np.ones((2, 2), dtype=bool),
         )
         env.reset(seed=0)
-        env._workbench[:] = False
-        env._holds[:] = False
-        env._workbench[1, 0] = True
-        env._workbench[1, 1] = True
-        env._requested[0, 0] = True  # agent 0 already requested tool 0
+        remaining = env.max_steps
+        wb = ((0, 0), (1, 1))
+        hd = ((0, 0), (0, 0))
+        rq = ((1, 0), (0, 0))  # agent 0 already requested tool 0
+        env.set_state((remaining, wb, hd, rq))
 
         state = env.get_state()
         # Agent 0 now acquires tool 1 (unreachable → request, cancels old)
@@ -624,9 +629,11 @@ class TestActionEffects:
             can_hear=np.ones((2, 2), dtype=bool),
         )
         env.reset(seed=0)
-        env._workbench[:] = False
-        env._holds[:] = False
-        env._workbench[0, 0] = True
+        remaining = env.max_steps
+        wb = ((1,), (0,))
+        hd = ((0,), (0,))
+        rq = ((0,), (0,))
+        env.set_state((remaining, wb, hd, rq))
 
         state = env.get_state()
         # Agent 0 acquires tool, agent 1 acquires tool 0 (idle)
@@ -654,9 +661,11 @@ class TestActionEffects:
             can_hear=np.ones((2, 2), dtype=bool),
         )
         env.reset(seed=0)
-        env._workbench[:] = False
-        env._holds[:] = False
-        env._workbench[0, 0] = True  # tool on agent 0's workbench
+        remaining = env.max_steps
+        wb_t = ((1,), (0,))
+        hd_t = ((0,), (0,))
+        rq_t = ((0,), (0,))
+        env.set_state((remaining, wb_t, hd_t, rq_t))
 
         state = env.get_state()
         # Both agents try to acquire tool 0
@@ -686,9 +695,11 @@ class TestActionEffects:
             can_hear=np.ones((2, 2), dtype=bool),
         )
         env.reset(seed=0)
-        env._workbench[:] = False
-        env._holds[:] = False
-        env._workbench[0, 0] = True  # tool on agent 0's workbench
+        remaining = env.max_steps
+        wb_t = ((1,), (0,))
+        hd_t = ((0,), (0,))
+        rq_t = ((0,), (0,))
+        env.set_state((remaining, wb_t, hd_t, rq_t))
 
         state = env.get_state()
         # Both try to acquire tool 0
