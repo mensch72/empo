@@ -27,7 +27,7 @@ This package works with the vendored MultiGrid environment in `vendor/multigrid/
 which has been extended with:
 - Explicit state management (get_state, set_state)
 - Transition probability computation
-- New object types: Block, Rock, UnsteadyGround, MagicWall
+- New object types: Block, Rock, Bush, UnsteadyGround, MagicWall
 - Map-based environment specification
 
 Example usage:

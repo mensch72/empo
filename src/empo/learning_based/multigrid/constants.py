@@ -40,26 +40,27 @@ OBJECT_TYPE_TO_CHANNEL = {
     'pauseswitch': 11,
     'disablingswitch': 12,
     'controlbutton': 13,
+    'bush': 14,
 }
-NUM_BASE_OBJECT_CHANNELS = 14
+NUM_BASE_OBJECT_CHANNELS = 15
 
 # Per-color door channels: value encodes state (1=open, 2=closed, 3=locked)
-DOOR_CHANNEL_START = NUM_BASE_OBJECT_CHANNELS  # 14
+DOOR_CHANNEL_START = NUM_BASE_OBJECT_CHANNELS  # 15
 DOOR_STATE_NONE = 0
 DOOR_STATE_OPEN = 1
 DOOR_STATE_CLOSED = 2
 DOOR_STATE_LOCKED = 3
 
 # Per-color key channels: value = 1 if present
-KEY_CHANNEL_START = DOOR_CHANNEL_START + NUM_STANDARD_COLORS  # 21
+KEY_CHANNEL_START = DOOR_CHANNEL_START + NUM_STANDARD_COLORS  # 22
 
 # Magic wall channel: value encodes magic_side (1-5) or inactive (6)
-MAGICWALL_CHANNEL = KEY_CHANNEL_START + NUM_STANDARD_COLORS  # 28
+MAGICWALL_CHANNEL = KEY_CHANNEL_START + NUM_STANDARD_COLORS  # 29
 MAGICWALL_STATE_NONE = 0
 MAGICWALL_STATE_ACTIVE_BASE = 1  # Add magic_side (0-4) to get 1-5
 MAGICWALL_STATE_INACTIVE = 6
 
-NUM_OBJECT_TYPE_CHANNELS = MAGICWALL_CHANNEL + 1  # 29
+NUM_OBJECT_TYPE_CHANNELS = MAGICWALL_CHANNEL + 1  # 30
 
 # =============================================================================
 # OBJECT CATEGORIES
@@ -70,7 +71,7 @@ OVERLAPPABLE_OBJECTS = {
     'unsteadyground', 'objectgoal'
 }
 NON_OVERLAPPABLE_IMMOBILE_OBJECTS = {
-    'wall', 'magicwall', 'lava', 'door', 'killbutton', 'pauseswitch', 'disablingswitch', 'controlbutton'
+    'wall', 'magicwall', 'lava', 'door', 'killbutton', 'pauseswitch', 'disablingswitch', 'controlbutton', 'bush'
 }
 NON_OVERLAPPABLE_MOBILE_OBJECTS = {'block', 'rock'}
 
@@ -141,7 +142,7 @@ SMALL_ACTION_ENCODING = {
 # =============================================================================
 # 
 # Each cell is encoded as a single int32 with the following bit layout:
-# Bits 0-4 (5 bits): object_type (0-31, maps to OBJECT_TYPE_TO_CHANNEL or special values)
+# Bits 0-4 (5 bits): object_type (0-29 standard channels, 30/31 special values)
 # Bits 5-7 (3 bits): object_color (0-7, maps to COLOR_TO_IDX)
 # Bits 8-9 (2 bits): object_state (0-3, for doors: 0=none, 1=open, 2=closed, 3=locked)
 # Bits 10-12 (3 bits): agent_color (0-7, 7 means no agent)
