@@ -75,6 +75,33 @@ class ToolsWorldModelEnv(EMPOWorldModelEnv):
         )
 
     # ------------------------------------------------------------------
+    # Human action sampling (per-agent action counts)
+    # ------------------------------------------------------------------
+
+    def _sample_human_actions(self, state):
+        """Sample human actions using per-agent action counts.
+
+        The base class uses ``config.num_actions`` (the robot's count) for
+        the no-goal fallback, but tools agents may have different numbers
+        of valid actions.  This override reads the per-agent counts from
+        the world model.
+        """
+        all_indices = self.human_agent_indices + self.robot_agent_indices
+        n_agents = max(all_indices) + 1 if all_indices else 0
+        actions = [0] * n_agents
+        per_agent = self.world_model.n_actions_per_agent
+        for h_idx in self.human_agent_indices:
+            goal = self._goals.get(h_idx)
+            if goal is None:
+                actions[h_idx] = int(self._py_rng.randint(per_agent[h_idx]))
+            else:
+                probs = self.human_policy_prior(state, h_idx, goal, self.world_model)
+                actions[h_idx] = int(
+                    self._py_rng.choice(len(probs), p=np.asarray(probs))
+                )
+        return actions
+
+    # ------------------------------------------------------------------
     # Observation encoding
     # ------------------------------------------------------------------
 

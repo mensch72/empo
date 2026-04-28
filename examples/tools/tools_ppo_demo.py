@@ -341,9 +341,12 @@ def main() -> None:
     )
     ref_env.reset(seed=args.seed)
 
-    num_actions = ref_env.action_space.n
     human_indices = ref_env.human_agent_indices
     robot_indices = ref_env.robot_agent_indices
+
+    # Use the robot's per-agent action count (may be smaller than
+    # env.action_space.n which is the max across all agents).
+    num_actions = ref_env.n_actions_per_agent[robot_indices[0]]
 
     print("=" * 60)
     print("  Tools Workshop PPO Demo")
