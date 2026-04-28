@@ -17,7 +17,11 @@ from gym_multigrid.multigrid import Agent, Bush, Grid, MultiGridEnv, Wall, World
 
 
 class BushTestEnv(MultiGridEnv):
-    """Small corridor with a bush between an agent and open floor."""
+    """Small corridor with a bush at (2,2), one step ahead of the agent.
+
+    Use ``robot=True`` (default) for a grey robot that always tramples; use
+    ``robot=False`` for a yellow human whose success depends on ``trample_probability``.
+    """
 
     def __init__(self, robot=True, trample_probability=1.0):
         agent = Agent(

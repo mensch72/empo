@@ -3754,10 +3754,18 @@ class MultiGridEnv(WorldModel):
 
     def _trample_bush(self, agent_idx, target_pos, bush):
         """Trample a bush and move the agent into its now-empty cell.
-        
+
         This should only be called when trampling is permitted (either a
         robot-like agent, or a human whose stochastic outcome has already
         been resolved to 'succeed').
+
+        Args:
+            agent_idx: Index of the agent doing the trampling.
+            target_pos: Grid position (x, y) of the bush to trample.
+            bush: The Bush object at target_pos.
+        
+        Returns:
+            bool: Always True (trampling always succeeds when this is called).
         """
         bush.trampled = True
         self.grid.set(*target_pos, None)

@@ -346,7 +346,9 @@ Each cell in the grid can contain:
 - **Color**: Green
 - **Appearance**: Layered overlapping circles in dark and light green
 - **Properties**:
-  - Cannot be overlapped in the normal sense, but all agents can attempt to walk through it
+  - Non-overlappable: agents cannot simply step onto a bush; instead they must enter it via
+    the forward action, which triggers trampling (removing the bush). This differs from
+    overlappable terrain (e.g. unsteady ground) where the object remains after the agent steps on it.
   - Immobile (cannot be pushed)
   - **Mutable**: Trampled when any agent successfully enters; once trampled the bush is removed
     and the cell is permanently empty for all agents
