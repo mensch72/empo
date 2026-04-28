@@ -16,9 +16,12 @@ a clean shutdown with checkpoint saving.
 Also provides deep_sizeof() for measuring actual memory usage of nested objects.
 """
 
+import logging
 import sys
 import time
 from typing import Optional, Any, Set
+
+logger = logging.getLogger(__name__)
 
 try:
     import psutil
@@ -49,7 +52,7 @@ def deep_sizeof(obj: Any, seen: Optional[Set[int]] = None) -> int:
         
     Example:
         >>> data = {'a': [1, 2, 3], 'b': {'nested': [4, 5]}}
-        >>> print(f"Size: {deep_sizeof(data) / 1024**2:.2f} MB")
+        >>> deep_sizeof(data) / 1024**2
     """
     if seen is None:
         seen = set()
@@ -155,7 +158,7 @@ class MemoryMonitor:
         # Warn if psutil is not available
         if not HAS_PSUTIL and enabled:
             if verbose:
-                print("[MemoryMonitor] Warning: psutil not available. Memory monitoring disabled.")
+                logger.warning("[MemoryMonitor] Warning: psutil not available. Memory monitoring disabled.")
             self.enabled = False
     
     def __enter__(self) -> 'MemoryMonitor':
@@ -248,7 +251,7 @@ class MemoryMonitor:
         free = self.get_free_memory_fraction()
         if self.verbose:
             free_pct = free * 100 if free is not None else 0
-            print(f"\n[MemoryMonitor] Warning: Free memory ({free_pct:.1f}%) is below "
+            logger.warning(f"\n[MemoryMonitor] Warning: Free memory ({free_pct:.1f}%) is below "
                   f"threshold ({self.min_free_fraction * 100:.1f}%). "
                   f"Pausing for {self.pause_duration:.0f} seconds...")
         
@@ -260,7 +263,7 @@ class MemoryMonitor:
             free = self.get_free_memory_fraction()
             free_pct = free * 100 if free is not None else 0
             if self.verbose:
-                print(f"[MemoryMonitor] Free memory ({free_pct:.1f}%) still below threshold "
+                logger.info(f"[MemoryMonitor] Free memory ({free_pct:.1f}%) still below threshold "
                       f"after pause. Raising KeyboardInterrupt for graceful shutdown...")
             
             # Raise KeyboardInterrupt for graceful shutdown
@@ -270,7 +273,7 @@ class MemoryMonitor:
             if self.verbose:
                 free = self.get_free_memory_fraction()
                 free_pct = free * 100 if free is not None else 0
-                print(f"[MemoryMonitor] Memory recovered ({free_pct:.1f}% free). Resuming computation...")
+                logger.info(f"[MemoryMonitor] Memory recovered ({free_pct:.1f}% free). Resuming computation...")
 
 
 def check_memory(
@@ -317,7 +320,7 @@ def check_memory(
     
     # Memory is low
     if verbose:
-        print(f"\n[MemoryMonitor] Warning: Free memory ({free_fraction * 100:.1f}%) is below "
+        logger.warning(f"\n[MemoryMonitor] Warning: Free memory ({free_fraction * 100:.1f}%) is below "
               f"threshold ({min_free_fraction * 100:.1f}%). "
               f"Pausing for {pause_duration:.0f} seconds...")
     
@@ -329,9 +332,9 @@ def check_memory(
     
     if free_fraction < min_free_fraction:
         if verbose:
-            print(f"[MemoryMonitor] Free memory ({free_fraction * 100:.1f}%) still below threshold "
+            logger.info(f"[MemoryMonitor] Free memory ({free_fraction * 100:.1f}%) still below threshold "
                   f"after pause. Raising KeyboardInterrupt for graceful shutdown...")
         raise KeyboardInterrupt("Memory limit exceeded - free memory below threshold")
     else:
         if verbose:
-            print(f"[MemoryMonitor] Memory recovered ({free_fraction * 100:.1f}% free). Resuming computation...")
+            logger.info(f"[MemoryMonitor] Memory recovered ({free_fraction * 100:.1f}% free). Resuming computation...")

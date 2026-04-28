@@ -345,7 +345,7 @@ def observation_to_graph_data(
         >>> env = create_transport_env(num_humans=4, num_vehicles=2, num_nodes=12)
         >>> env.reset(seed=42)
         >>> graph_data = observation_to_graph_data(env, query_agent_idx=0)
-        >>> print(graph_data['node_features'].shape)
+        >>> graph_data['node_features'].shape
         torch.Size([12, 26])
     """
     # Extract all features

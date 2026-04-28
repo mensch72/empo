@@ -5,6 +5,7 @@ This module provides the training function for Phase 2 of the EMPO framework
 (equations 4-9) specialized for multigrid environments.
 """
 
+import logging
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
@@ -23,6 +24,8 @@ from .human_goal_ability import MultiGridHumanGoalAchievementNetwork
 from .aggregate_goal_ability import MultiGridAggregateGoalAbilityNetwork
 from .intrinsic_reward_network import MultiGridIntrinsicRewardNetwork
 from .robot_value_network import MultiGridRobotValueNetwork
+
+logger = logging.getLogger(__name__)
 
 # Lookup table network imports
 
@@ -1068,12 +1071,12 @@ def train_multigrid_phase2(
     num_robots = len(robot_agent_indices)
     
     if verbose:
-        print(f"Creating Phase 2 networks:")
-        print(f"  Grid: {world_model.width}x{world_model.height}")
-        print(f"  Humans: {len(human_agent_indices)}")
-        print(f"  Robots: {num_robots}")
-        print(f"  Actions per robot: {num_actions}")
-        print(f"  Joint action space: {num_actions ** num_robots} actions")
+        logger.info("Creating Phase 2 networks:")
+        logger.info(f"  Grid: {world_model.width}x{world_model.height}")
+        logger.info(f"  Humans: {len(human_agent_indices)}")
+        logger.info(f"  Robots: {num_robots}")
+        logger.info(f"  Actions per robot: {num_actions}")
+        logger.info(f"  Joint action space: {num_actions ** num_robots} actions")
     
     # Create networks
     networks = create_phase2_networks(
@@ -1090,11 +1093,11 @@ def train_multigrid_phase2(
     )
     
     if debug:
-        print("[DEBUG] Creating trainer...")
+        logger.debug("[DEBUG] Creating trainer...")
         # Enable debug output for V_h^e new key creation (lookup tables only)
         # Use setattr since the attribute is read via getattr with default
         networks.v_h_e.debug_new_keys = True
-        print("[DEBUG] Enabled V_h^e debug_new_keys for tracking new lookup table entries")
+        logger.debug("[DEBUG] Enabled V_h^e debug_new_keys for tracking new lookup table entries")
     
     # Create trainer
     trainer = MultiGridPhase2Trainer(
@@ -1120,32 +1123,32 @@ def train_multigrid_phase2(
     # Restore networks if checkpoint provided (skips warmup/rampup since already done)
     if restore_networks_path is not None:
         if verbose:
-            print(f"\nRestoring networks from: {restore_networks_path}")
+            logger.info(f"\nRestoring networks from: {restore_networks_path}")
         trainer.load_all_networks(restore_networks_path)
         if verbose:
-            print(f"  Restored networks at env step {trainer.total_env_steps}")
-            print(f"  Warmup/rampup stages will be skipped")
+            logger.info(f"  Restored networks at env step {trainer.total_env_steps}")
+            logger.info("  Warmup/rampup stages will be skipped")
     
     if verbose:
-        print(f"\nTraining for {config.num_training_steps} training steps...")
-        print(f"  Steps per episode: {config.steps_per_episode}")
-        print(f"  Training steps per env step: {config.training_steps_per_env_step}")
-        print(f"  Batch size: {config.batch_size}")
-        print(f"  Buffer size: {config.buffer_size}")
+        logger.info(f"\nTraining for {config.num_training_steps} training steps...")
+        logger.info(f"  Steps per episode: {config.steps_per_episode}")
+        logger.info(f"  Training steps per env step: {config.training_steps_per_env_step}")
+        logger.info(f"  Batch size: {config.batch_size}")
+        logger.info(f"  Buffer size: {config.buffer_size}")
         if config.use_rnd:
-            print(f"  Curiosity (RND): enabled (bonus_coef_r={config.rnd_bonus_coef_r})")
+            logger.info(f"  Curiosity (RND): enabled (bonus_coef_r={config.rnd_bonus_coef_r})")
         if tensorboard_dir:
-            print(f"  TensorBoard: {tensorboard_dir}")
+            logger.info(f"  TensorBoard: {tensorboard_dir}")
         # Print stages table
-        print(f"\n{config.format_stages_table()}")
+        logger.info(f"\n{config.format_stages_table()}")
     
     # Train
     history = trainer.train(config.num_training_steps)
     
     if verbose:
-        print(f"\nTraining completed!")
+        logger.info("\nTraining completed!")
         if history:
             final_losses = history[-1]
-            print(f"  Final losses: {final_losses}")
+            logger.info(f"  Final losses: {final_losses}")
     
     return networks.q_r, networks, history, trainer

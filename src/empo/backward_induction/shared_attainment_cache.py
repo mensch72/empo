@@ -31,11 +31,14 @@ Usage:
     cleanup_shared_attainment_cache()
 """
 
+import logging
 import pickle
 from multiprocessing import shared_memory
 from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 import numpy as np
 import numpy.typing as npt
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from empo.possible_goal import PossibleGoal
@@ -219,6 +222,6 @@ def cleanup_shared_attainment_cache() -> None:
         try:
             _shared_attainment_cache.cleanup()
         except Exception:
-            pass
+            logger.exception("Failed to clean up shared attainment cache")
         _shared_attainment_cache = None
         _shared_attainment_cache_info = None
