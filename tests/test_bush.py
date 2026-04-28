@@ -1,14 +1,29 @@
 """
-Tests for robot-tramplable bushes.
+Tests for bush semantics.
 
-Semantics after refactor
-------------------------
-* All agents can attempt to walk through a bush via the forward action.
-* Robot-like agents (can_push_rocks or can_enter_magic_walls or grey) always
-  succeed and trample the bush with certainty (probability 1.0), regardless of
-  the bush's ``trample_probability`` setting.
-* Human agents succeed with probability ``trample_probability`` (default 1.0).
-  When they succeed the bush is trampled and removed just like for a robot.
+Semantics
+---------
+* **Robots** (can_push_rocks / can_enter_magic_walls / grey) always **trample** the
+  bush with certainty: the bush is permanently removed from the grid and the cell
+  becomes empty.  ``trample_probability`` does not affect robots.
+
+* **Human** agents (all others) **enter** the bush without trampling it.  The agent
+  occupies the cell alongside the bush (like terrain); when the agent leaves the
+  cell the bush is restored.  Success is stochastic with probability
+  ``trample_probability`` (default 1.0, i.e. always succeeds by default).
+
+Key invariants tested here
+--------------------------
+* After a robot enters a bush  -> bush is gone (trampled=True).
+* After a human enters a bush  -> bush is still there (trampled=False), agent at (2,2).
+* When a human leaves the bush cell -> bush is still there (restored to grid).
+* ``can_forward()`` returns True for both agent types when facing a bush.
+* ``transition_probabilities()`` returns a single outcome for robots and for humans
+  with ``trample_probability==1.0``.
+* ``transition_probabilities()`` returns two outcomes for humans with
+  ``trample_probability<1.0``: succeed (agent on bush, bush intact) and fail (agent
+  stays, bush intact).
+* ``set_state()`` correctly restores a state where a human is on a bush.
 """
 
 import numpy as np
@@ -17,10 +32,11 @@ from gym_multigrid.multigrid import Agent, Bush, Grid, MultiGridEnv, Wall, World
 
 
 class BushTestEnv(MultiGridEnv):
-    """Small corridor with a bush at (2,2), one step ahead of the agent.
+    """Small 5x5 corridor: agent at (1,2) facing right, bush at (2,2).
 
-    Use ``robot=True`` (default) for a grey robot that always tramples; use
-    ``robot=False`` for a yellow human whose success depends on ``trample_probability``.
+    Use ``robot=True`` (default) for a grey robot that always tramples;
+    use ``robot=False`` for a yellow human whose success depends on
+    ``trample_probability``.
     """
 
     def __init__(self, robot=True, trample_probability=1.0):
@@ -128,11 +144,11 @@ def test_human_can_forward_into_bush():
 
 
 # ---------------------------------------------------------------------------
-# Deterministic trampling (trample_probability == 1.0)
+# Robot trampling: bush is permanently removed
 # ---------------------------------------------------------------------------
 
 def test_robot_tramples_bush_and_state_tracks_it():
-    """Robots always trample with certainty."""
+    """Robots always trample with certainty; bush is removed from grid."""
     env = BushTestEnv(robot=True)
     env.reset()
 
@@ -143,54 +159,30 @@ def test_robot_tramples_bush_and_state_tracks_it():
     assert ('bush', 2, 2, True) in env.get_state()[3]
 
 
-def test_human_enters_bush_with_certainty_when_probability_is_1():
-    """When trample_probability==1.0 a human tramples the bush just like a robot."""
-    env = BushTestEnv(robot=False, trample_probability=1.0)
-    env.reset()
-
-    obs, rewards, done, info = env.step([3])
-
-    assert np.array_equal(env.agents[0].pos, [2, 2])
-    assert env.grid.get(2, 2) is env.agents[0]
-    assert ('bush', 2, 2, True) in env.get_state()[3]
-
-
-def test_human_cannot_enter_bush_when_probability_is_zero():
-    """When trample_probability==0.0 a human can never enter the bush."""
-    env = BushTestEnv(robot=False, trample_probability=0.0)
-    env.reset()
-
-    obs, rewards, done, info = env.step([3])
-
-    assert np.array_equal(env.agents[0].pos, [1, 2])
-    bush = env.grid.get(2, 2)
-    assert bush is not None
-    assert bush.type == 'bush'
-    assert bush.trampled is False
-
-
 def test_robot_always_tramples_regardless_of_trample_probability():
     """Robots trample with certainty even when trample_probability is set low."""
     env = BushTestEnv(robot=True, trample_probability=0.1)
     env.reset()
 
-    # step() should always succeed for a robot
     obs, rewards, done, info = env.step([3])
 
     assert np.array_equal(env.agents[0].pos, [2, 2])
     assert ('bush', 2, 2, True) in env.get_state()[3]
 
 
-def test_human_can_pass_after_robot_tramples_bush():
-    env = BushHumanPassageEnv()
+def test_robot_transition_is_always_deterministic_single_outcome():
+    """Robots always produce a single (p=1.0) outcome regardless of trample_probability."""
+    env = BushTestEnv(robot=True, trample_probability=0.3)
     env.reset()
 
-    env.step([3, 0])  # Robot tramples bush, human waits.
-    env.step([3, 3])  # Robot leaves; human's target was occupied at step start.
-    env.step([0, 3])  # Human can now enter the cleared cell.
+    state = env.get_state()
+    outcomes = env.transition_probabilities(state, [3])
 
-    assert np.array_equal(env.agents[1].pos, [2, 2])
-    assert ('bush', 2, 2, True) in env.get_state()[3]
+    assert outcomes is not None
+    assert len(outcomes) == 1, (
+        f"Expected 1 deterministic outcome for robot, got {len(outcomes)}"
+    )
+    assert abs(outcomes[0][0] - 1.0) < 1e-9
 
 
 def test_set_state_restores_untrampled_bush():
@@ -208,24 +200,113 @@ def test_set_state_restores_untrampled_bush():
     assert bush.trampled is False
 
 
-# ---------------------------------------------------------------------------
-# Stochastic trampling — now applies to HUMAN agents
-# ---------------------------------------------------------------------------
-
-def test_robot_transition_is_always_deterministic_single_outcome():
-    """Robots always produce a single (p=1.0) outcome regardless of trample_probability."""
-    env = BushTestEnv(robot=True, trample_probability=0.3)
+def test_human_can_pass_after_robot_tramples_bush():
+    """After a robot tramples a bush, the cell is empty and a human can pass freely."""
+    env = BushHumanPassageEnv()
     env.reset()
 
+    env.step([3, 0])  # Robot tramples bush, human waits.
+    env.step([3, 3])  # Robot leaves; human's target was occupied at step start.
+    env.step([0, 3])  # Human can now enter the cleared cell.
+
+    assert np.array_equal(env.agents[1].pos, [2, 2])
+    assert ('bush', 2, 2, True) in env.get_state()[3]
+
+
+# ---------------------------------------------------------------------------
+# Human entry: bush stays intact
+# ---------------------------------------------------------------------------
+
+def test_human_enters_bush_with_certainty_when_probability_is_1():
+    """With trample_probability==1.0 a human always enters, but the bush stays."""
+    env = BushTestEnv(robot=False, trample_probability=1.0)
+    env.reset()
+
+    obs, rewards, done, info = env.step([3])
+
+    # Agent moved to (2,2)
+    assert np.array_equal(env.agents[0].pos, [2, 2])
+    # Bush is still intact (untrampled) -- stored in terrain_grid
+    assert ('bush', 2, 2, False) in env.get_state()[3]
+    # Grid shows agent; bush is in terrain_grid
+    assert env.grid.get(2, 2) is env.agents[0]
+    terrain_cell = env.terrain_grid.get(2, 2)
+    assert terrain_cell is not None
+    assert terrain_cell.type == 'bush'
+
+
+def test_human_cannot_enter_bush_when_probability_is_zero():
+    """When trample_probability==0.0 a human can never enter the bush."""
+    env = BushTestEnv(robot=False, trample_probability=0.0)
+    env.reset()
+
+    obs, rewards, done, info = env.step([3])
+
+    assert np.array_equal(env.agents[0].pos, [1, 2])
+    bush = env.grid.get(2, 2)
+    assert bush is not None
+    assert bush.type == 'bush'
+    assert bush.trampled is False
+
+
+def test_human_exits_bush_and_bush_is_restored():
+    """After a human enters a bush and then leaves, the bush is still there."""
+    env = BushTestEnv(robot=False, trample_probability=1.0)
+    env.reset()
+
+    env.step([3])  # Human enters bush at (2,2)
+    assert np.array_equal(env.agents[0].pos, [2, 2])
+
+    env.step([3])  # Human moves forward to (3,2), leaving the bush
+    assert np.array_equal(env.agents[0].pos, [3, 2])
+
+    # Bush should be restored at (2,2)
+    bush = env.grid.get(2, 2)
+    assert bush is not None
+    assert bush.type == 'bush'
+    assert bush.trampled is False
+
+
+def test_human_state_after_entering_bush():
+    """get_state() reports the bush as untrampled (False) when a human is on it."""
+    env = BushTestEnv(robot=False, trample_probability=1.0)
+    env.reset()
+
+    env.step([3])
+
     state = env.get_state()
-    outcomes = env.transition_probabilities(state, [3])
+    agent_x, agent_y = state[1][0][0], state[1][0][1]
+    assert agent_x == 2 and agent_y == 2, "Agent should be on the bush cell"
+    # Bush should still be there, untrampled
+    assert ('bush', 2, 2, False) in state[3]
 
-    assert outcomes is not None
-    assert len(outcomes) == 1, (
-        f"Expected 1 deterministic outcome for robot, got {len(outcomes)}"
-    )
-    assert abs(outcomes[0][0] - 1.0) < 1e-9
 
+def test_set_state_with_human_on_bush():
+    """set_state() correctly restores a state where a human is on a bush."""
+    env = BushTestEnv(robot=False, trample_probability=1.0)
+    env.reset()
+
+    env.step([3])  # Human enters bush
+    on_bush_state = env.get_state()
+
+    # Restore to a different state, then restore the on-bush state
+    env.step([0])  # Turn left (so internal state changes)
+    env.set_state(on_bush_state)
+
+    # Agent should be at (2,2), bush should be in terrain_grid
+    assert np.array_equal(env.agents[0].pos, [2, 2])
+    assert env.terrain_grid.get(2, 2) is not None
+    assert env.terrain_grid.get(2, 2).type == 'bush'
+    # Advance one step to make the human leave; bush should be restored to the grid
+    env.step([3])  # Move forward to (3,2)
+    bush = env.grid.get(2, 2)
+    assert bush is not None
+    assert bush.type == 'bush'
+
+
+# ---------------------------------------------------------------------------
+# Stochastic human entry
+# ---------------------------------------------------------------------------
 
 def test_human_probabilistic_bush_transition_probabilities():
     """For humans with trample_probability < 1, transition_probabilities returns 2 outcomes."""
@@ -242,8 +323,8 @@ def test_human_probabilistic_bush_transition_probabilities():
     assert abs(probs[1] - 0.4) < 1e-9, f"Expected fail prob 0.4, got {probs[1]}"
 
 
-def test_human_probabilistic_bush_succeed_outcome_moves_agent():
-    """When human trampling succeeds, agent moves into the cell and bush is trampled."""
+def test_human_probabilistic_bush_succeed_outcome_moves_agent_bush_intact():
+    """When human entry succeeds, agent moves to bush cell and bush remains (untrampled)."""
     env = BushTestEnv(robot=False, trample_probability=0.6)
     env.reset()
 
@@ -259,11 +340,12 @@ def test_human_probabilistic_bush_succeed_outcome_moves_agent():
 
     assert succeed_state is not None, "No succeed outcome found"
     assert abs(succeed_state[0] - 0.6) < 1e-9
-    assert ('bush', 2, 2, True) in succeed_state[1][3]
+    # Bush must still be UNTRAMPLED -- human entered, did not trample
+    assert ('bush', 2, 2, False) in succeed_state[1][3]
 
 
 def test_human_probabilistic_bush_fail_outcome_keeps_agent():
-    """When human trampling fails, agent stays put and bush remains."""
+    """When human entry fails, agent stays put and bush remains."""
     env = BushTestEnv(robot=False, trample_probability=0.6)
     env.reset()
 
@@ -279,6 +361,7 @@ def test_human_probabilistic_bush_fail_outcome_keeps_agent():
 
     assert fail_state is not None, "No fail outcome found"
     assert abs(fail_state[0] - 0.4) < 1e-9
+    # Bush is still untrampled
     assert ('bush', 2, 2, False) in fail_state[1][3]
 
 

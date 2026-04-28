@@ -347,51 +347,59 @@ Each cell in the grid can contain:
 - **Appearance**: Layered overlapping circles in dark and light green
 - **Properties**:
   - Non-overlappable: agents cannot simply step onto a bush; instead they must enter it via
-    the forward action, which triggers trampling (removing the bush). This differs from
-    overlappable terrain (e.g. unsteady ground) where the object remains after the agent steps on it.
+    the forward action. For robots the bush is destroyed; for humans the bush remains.
   - Immobile (cannot be pushed)
-  - **Mutable**: Trampled when any agent successfully enters; once trampled the bush is removed
-    and the cell is permanently empty for all agents
+  - **Mutable**: Destroyed (trampled) permanently when a robot enters it; survives when a
+    human enters it
 - **Attributes**:
-  - `trampled`: Whether the bush has been trampled (default: False)
+  - `trampled`: Whether the bush has been trampled by a robot (default: False). Once True
+    the bush is permanently gone from the grid.
   - `trample_probability`: Probability (0.0 to 1.0) that a **human** (non-robot) agent's
-    forward-into-bush attempt succeeds (default: 1.0). Robots are unaffected and always succeed.
+    forward-into-bush attempt succeeds (default: 1.0). Robots are unaffected and always trample.
 - **Who Can Enter / Trample**:
   - **All agents** can attempt to enter a bush via the forward action
   - **Robot-like agents** (those for whom `can_push_rocks=True`, `can_enter_magic_walls=True`, or
-    `color='grey'`) always trample with certainty (probability 1.0), regardless of `trample_probability`
-  - **Human-like agents** succeed with probability `trample_probability` (default 1.0, i.e. certain
-    unless overridden). With probability `1 - trample_probability` they stay put.
-- **Trampling Mechanic**:
-  - Any agent uses **forward action** when facing an untrampled bush
-  - Robots: always succeed — agent moves into cell, bush trampled and removed
-  - Humans: succeed with probability `trample_probability`:
-    - With probability `trample_probability`: bush is trampled, agent moves into the cell
-    - With probability `1 - trample_probability`: nothing happens, agent stays, bush remains
-  - Trampled bush is removed from the grid; all agents can then pass freely
-- **Probabilistic Trampling** (for humans):
+    `color='grey'`) always **trample** the bush with certainty (probability 1.0), regardless of
+    `trample_probability`. The bush is permanently removed from the grid.
+  - **Human-like agents** **enter** the bush without trampling it (bush stays intact). Success
+    occurs with probability `trample_probability` (default 1.0). On success the agent occupies
+    the cell alongside the bush (like terrain); the bush is restored when the agent leaves.
+    With probability `1 - trample_probability` the attempt fails and the agent stays put.
+- **Robot Trampling Mechanic**:
+  - Robot uses **forward action** when facing an untrampled bush
+  - Always succeeds — agent moves into cell, bush `trampled=True` and removed from the grid
+  - Cell becomes permanently empty for all agents
+- **Human Entry Mechanic**:
+  - Human uses **forward action** when facing an untrampled bush
+  - With probability `trample_probability`: agent moves onto the bush cell; bush **stays** (like
+    terrain underfoot). State records `trampled=False`. When human leaves the cell the bush is
+    restored to the grid automatically.
+  - With probability `1 - trample_probability`: nothing happens; agent stays, bush unchanged.
+- **Probabilistic Entry** (for humans):
   - Set globally via `trample_probability` parameter on `MultiGridEnv` (applies to all map-parsed
     bushes) or per-bush via `Bush(world, trample_probability=p)`
   - Config file key: `trample_probability` (e.g., `trample_probability: 0.7`)
-  - Smooths the human-power reward signal: even the first cleared bush in a multi-bush path
-    increases human reachability, because each successive bush has probability `trample_probability`
-    of being traversed
+  - Smooths the human-power reward signal: each bush a human can traverse with some probability
+    increases reachability even without the robot having cleared it
 - **Special Processing Order**:
   - Human agents doing probabilistic bush entry are processed **last** (after normal, unsteady, and
     magic-wall agents). Robot bush-trampling is deterministic and processed as a normal action.
 - **Transition Probabilities**:
   - Robot forward into bush: always a single deterministic outcome (trampled, agent moves in)
   - Human forward into bush with `trample_probability == 1.0`: single deterministic outcome
+    (agent on bush cell, bush `trampled=False`)
   - Human forward into bush with `trample_probability < 1.0`: two outcomes:
-    1. Succeed (agent moves into cell, bush trampled): probability = `trample_probability`
+    1. Succeed (agent moves onto bush cell, bush stays `trampled=False`): probability = `trample_probability`
     2. Fail (agent stays, bush remains): probability = `1 - trample_probability`
 - **State Representation**:
   - Tracked in mutable objects: `('bush', x, y, trampled_bool)`
-  - `set_state()` restores both trampled and untrampled bushes correctly
+  - `trampled=True` only when a robot has entered; a human on the bush gives `trampled=False`
+  - `set_state()` restores both trampled and untrampled bushes; if an agent is on a bush cell
+    the bush is saved to `terrain_grid` so it persists correctly
 - **Use Cases**:
-  - Obstacles robots can always clear, humans only sometimes (probabilistic difficulty)
-  - Reward shaping via probabilistic clearing of multi-bush paths
-  - Smooth human-power gradients in environments with bush corridors
+  - Obstacles robots can always clear, humans sometimes enter (probabilistic difficulty)
+  - Reward shaping via probabilistic human traversal of multi-bush corridors
+  - Smooth human-power gradients: even uncleared bushes increase reachability if p > 0
 
 ### 20. Agent
 - **Type**: `agent`
@@ -532,11 +540,12 @@ There are **three sources** of stochasticity in the environment:
 - If stumbling occurs, the forward action is replaced by left+forward or right+forward (50-50 chance)
 - This introduces action-level stochasticity independent of agent ordering
 
-#### 3. Probabilistic Bush Trampling
+#### 3. Probabilistic Bush Entry (for humans)
 - When a **human** (non-robot) agent attempts to enter a bush with `trample_probability < 1.0`
-- Trampling succeeds with probability `trample_probability`; otherwise agent stays in place
-- Robot-like agents always trample with certainty and are processed deterministically
-- Probabilistic (human) trampling attempts are processed **last** in each step
+- Entry succeeds with probability `trample_probability`; otherwise agent stays in place
+- On success, the bush **stays intact** (the human occupies the cell alongside the bush)
+- Robot-like agents always trample with certainty (single deterministic outcome, bush removed)
+- Probabilistic (human) entry attempts are processed **last** in each step
 
 ### When Order Matters (Probabilistic Outcomes from Conflicts)
 
@@ -565,13 +574,14 @@ Movement becomes probabilistic when:
    - If agents target the same cell (after stumbling), none move forward
    - This creates complex probability distributions combining stumbling and conflicts
 
-### When Probabilistic Bush Trampling Matters
+### When Probabilistic Bush Entry Matters
 
-Trampling becomes stochastic only for **human** (non-robot) agents:
+Bush entry is stochastic only for **human** (non-robot) agents:
 1. **Human agent moves forward into a bush with `trample_probability < 1.0`**:
-   - With probability `trample_probability`: bush is cleared, agent moves into the cell
+   - With probability `trample_probability`: agent enters the cell; **bush stays intact**
+     (unlike robot trampling, the bush is not removed)
    - With probability `1 - trample_probability`: nothing happens, agent stays, bush remains
-   - Robot-like agents are always deterministic (always succeed) and produce a single outcome
+   - Robot-like agents always trample (destroy) the bush deterministically (single outcome)
    - This is the primary mechanism for smoothing multi-bush reward signals
 
 ### When Order Doesn't Matter (Deterministic Outcomes)

@@ -1843,22 +1843,25 @@ class Bush(WorldObj):
     """
     Dense bush that all agents can attempt to walk through.
 
-    A bush is mutable but immobile. It is non-overlappable in the normal
-    sense, but all agents can attempt to enter it via the forward action:
+    A bush is mutable but immobile. All agents can attempt to enter it via the
+    forward action, but the two agent types interact with it differently:
 
-    - Robot-like agents (``can_be_trampled_by`` returns True) always trample
-      the bush with certainty and move into the cell.
-    - All other agents (humans) trample the bush with probability
-      ``trample_probability`` (default 1.0, i.e. certain by default).
+    - **Robot-like agents** (``can_be_trampled_by`` returns True) **trample** the
+      bush: it is permanently removed from the grid and the cell becomes empty.
+      Robots always trample with certainty, regardless of ``trample_probability``.
 
-    When trampling succeeds, the bush is removed from the grid and the cell
-    becomes empty for all agents afterwards.
+    - **Human agents** (all others) **enter** the bush without trampling it: the
+      bush stays intact. The agent occupies the cell alongside the bush (like
+      terrain), and the bush is restored to the grid when the human leaves the
+      cell. Success is stochastic: it occurs with probability
+      ``trample_probability`` (default 1.0, i.e. always succeeds by default).
+      When the attempt fails the agent stays put and the bush is unchanged.
 
-    trample_probability: Probability (0.0 to 1.0) that a non-robot (human)
-        agent's trampling attempt succeeds. Robots are unaffected—they always
-        succeed. Values below 1.0 make human entry stochastic, which smooths
-        the human-power reward signal—partially cleared paths already increase
-        reachability.
+    trample_probability: Probability (0.0 to 1.0) that a human agent's forward
+        attempt to enter a bush succeeds. Robots are unaffected — they always
+        trample with certainty. Values below 1.0 make human entry stochastic,
+        which smooths the human-power reward signal: even partial bush paths
+        increase reachability.
     """
 
     def __init__(self, world, trampled=False, trample_probability=1.0):
@@ -3755,9 +3758,8 @@ class MultiGridEnv(WorldModel):
     def _trample_bush(self, agent_idx, target_pos, bush):
         """Trample a bush and move the agent into its now-empty cell.
 
-        This should only be called when trampling is permitted (either a
-        robot-like agent, or a human whose stochastic outcome has already
-        been resolved to 'succeed').
+        Only called for robot-like agents (can_be_trampled_by returns True).
+        The bush is permanently removed from the grid.
 
         Args:
             agent_idx: Index of the agent doing the trampling.
@@ -3770,6 +3772,33 @@ class MultiGridEnv(WorldModel):
         bush.trampled = True
         self.grid.set(*target_pos, None)
         self._move_agent_to_cell(agent_idx, target_pos, None)
+        return True
+
+    def _enter_bush(self, agent_idx, target_pos, bush):
+        """Move a human agent onto a bush without trampling it.
+
+        The bush stays intact. It is saved to terrain_grid so it persists
+        under the agent and is restored to the grid when the agent leaves the
+        cell — exactly the same mechanism used for unsteady ground and magic
+        walls.
+
+        Only called for non-robot (human) agents when their bush-entry attempt
+        has already been resolved to 'succeed'.
+
+        Args:
+            agent_idx: Index of the agent entering the bush.
+            target_pos: Grid position (x, y) of the bush cell.
+            bush: The Bush object at target_pos.
+
+        Returns:
+            bool: Always True (entry always succeeds when this is called).
+        """
+        # Pre-save the bush to terrain_grid so _move_agent_to_cell keeps it.
+        # _move_agent_to_cell only auto-saves cells with can_overlap() == True;
+        # by pre-saving we ensure the bush survives the move (same pattern as
+        # magic wall entry in _process_magic_wall_agents).
+        self.terrain_grid.set(*target_pos, bush)
+        self._move_agent_to_cell(agent_idx, target_pos, bush)
         return True
     
     def _handle_switch(self, i, rewards, fwd_pos, fwd_cell):
@@ -4024,7 +4053,10 @@ class MultiGridEnv(WorldModel):
                     self._reward(agent_idx, rewards, 1)
                     self._move_agent_to_cell(agent_idx, fwd_pos, fwd_cell)
                 elif fwd_cell.type == 'bush':
-                    self._trample_bush(agent_idx, fwd_pos, fwd_cell)
+                    if fwd_cell.can_be_trampled_by(self.agents[agent_idx]):
+                        self._trample_bush(agent_idx, fwd_pos, fwd_cell)
+                    else:
+                        self._enter_bush(agent_idx, fwd_pos, fwd_cell)
                 elif fwd_cell.type == 'switch':
                     self._handle_switch(agent_idx, rewards, fwd_pos, fwd_cell)
                     self._move_agent_to_cell(agent_idx, fwd_pos, fwd_cell)
@@ -4185,7 +4217,10 @@ class MultiGridEnv(WorldModel):
                         self._reward(i, rewards, 1)
                         can_move = True
                     elif fwd_cell.type == 'bush':
-                        can_move = self._trample_bush(i, fwd_pos, fwd_cell)
+                        if fwd_cell.can_be_trampled_by(self.agents[i]):
+                            can_move = self._trample_bush(i, fwd_pos, fwd_cell)
+                        else:
+                            can_move = self._enter_bush(i, fwd_pos, fwd_cell)
                     elif fwd_cell.type == 'switch':
                         self._handle_switch(i, rewards, fwd_pos, fwd_cell)
                         can_move = True
@@ -5169,6 +5204,11 @@ class MultiGridEnv(WorldModel):
                     self.terrain_grid.set(*agent.pos, current_cell)
                     # Derive on_unsteady_ground from the terrain
                     agent.on_unsteady_ground = (current_cell.type == 'unsteadyground')
+                elif current_cell is not None and current_cell.type == 'bush':
+                    # Human agent is on an untrampled bush — the bush persists as
+                    # terrain under the agent (same pattern as magic wall entry).
+                    self.terrain_grid.set(*agent.pos, current_cell)
+                    agent.on_unsteady_ground = False
                 else:
                     self.terrain_grid.set(*agent.pos, None)
                     agent.on_unsteady_ground = False
@@ -6139,18 +6179,19 @@ class MultiGridEnv(WorldModel):
                         fwd_cell.active = False
                 # If outcome is 'fail', agent stays in place and wall stays magic (no action)
         
-        # Process bush trampling agents (deterministic based on pre-sampled outcome)
+        # Process bush agents (deterministic based on pre-sampled outcome).
+        # Agents in bush_agents_list are always non-robot (human) agents —
+        # robots are placed in normal_agents and handled deterministically above.
+        # On success, the human enters the bush without trampling it (bush stays).
         if bush_agents_list:
             for i in bush_agents_list:
                 outcome = bush_outcomes[i]
                 if outcome == 'succeed':
-                    # Trampling succeeds: remove bush and move agent into the cell
+                    # Human enters bush: bush stays, agent occupies the cell alongside it.
                     fwd_pos = self.agents[i].front_pos
                     fwd_cell = self.grid.get(*fwd_pos)
                     if fwd_cell is not None and fwd_cell.type == 'bush':
-                        fwd_cell.trampled = True
-                        self.grid.set(*fwd_pos, None)
-                        self._move_agent_to_cell(i, fwd_pos, None)
+                        self._enter_bush(i, fwd_pos, fwd_cell)
                 # If outcome is 'fail', agent stays in place and bush remains (no action)
         
         # Check if max steps reached
