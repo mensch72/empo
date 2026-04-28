@@ -15,8 +15,11 @@ Functions:
 - setup_three_player_world(): Applies terrain to a running MineLand server
 """
 
+import logging
 from typing import Any
 
+
+logger = logging.getLogger(__name__)
 
 # =============================================================================
 # World Configuration Constants (single source of truth)
@@ -75,7 +78,7 @@ def get_spawn_points() -> list[dict[str, Any]]:
 
     Example:
         >>> spawns = get_spawn_points()
-        >>> print(spawns[0])
+        >>> spawns[0]
         {'name': 'robot', 'x': 0, 'y': 70, 'z': 0, 'role': 'robot', ...}
     """
     return SPAWN_POINTS.copy()
@@ -98,9 +101,9 @@ def generate_world_commands() -> list[str]:
 
     Example:
         >>> commands = generate_world_commands()
-        >>> print(len(commands))
+        >>> len(commands)
         4358
-        >>> print(commands[0])
+        >>> commands[0]
         fill -100 55 -100 100 60 100 minecraft:stone
     """
     commands = []
@@ -252,7 +255,7 @@ def generate_teleport_commands() -> list[str]:
 
     Example:
         >>> commands = generate_teleport_commands()
-        >>> print(commands[0])
+        >>> commands[0]
         tp robot 0 70 0
     """
     return [f"tp {sp['name']} {sp['x']} {sp['y']} {sp['z']}" for sp in SPAWN_POINTS]
@@ -291,19 +294,19 @@ def setup_three_player_world(env: Any) -> None:
             "Make sure you're using a local MineLand server."
         )
 
-    print("Building custom world terrain...")
+    logger.info("Building custom world terrain...")
     for cmd in generate_world_commands():
         server_manager.execute(cmd)
         time.sleep(0.01)
 
     time.sleep(2)
 
-    print("Teleporting players to spawn points...")
+    logger.info("Teleporting players to spawn points...")
     for cmd in generate_teleport_commands():
         server_manager.execute(cmd)
 
     time.sleep(1)
-    print("World setup complete!")
+    logger.info("World setup complete!")
 
 
 # =============================================================================

@@ -30,7 +30,7 @@ Usage:
     >>> obs = env.reset(seed=42)
     >>> # Action mask is in observation AND available via method
     >>> masks = env.action_masks()
-    >>> print(obs[0]['action_mask'])  # Same as masks[0]
+    >>> obs[0]['action_mask']  # Same as masks[0]
     >>> # Step with a list of actions
     >>> obs, rewards, done, info = env.step([0, 1, 0, 2, 0, 1])
 """
@@ -969,7 +969,7 @@ class TransportGoalGenerator(PossibleGoalGenerator):
         >>> env = create_transport_env(num_humans=2, num_vehicles=1, num_nodes=5)
         >>> generator = TransportGoalGenerator(env)
         >>> for goal, weight in generator.generate(state=None, human_agent_index=0):
-        ...     print(f"{goal} with weight {weight}")
+        ...     f"{goal} with weight {weight}"
     """
     
     def __init__(self, env: TransportEnvWrapper):
@@ -1015,7 +1015,7 @@ class TransportGoalSampler(PossibleGoalSampler):
         >>> env = create_transport_env(num_humans=2, num_vehicles=1, num_nodes=100)
         >>> sampler = TransportGoalSampler(env)
         >>> goal, weight = sampler.sample(state=None, human_agent_index=0)
-        >>> print(f"Sampled {goal} with weight {weight}")
+        >>> f"Sampled {goal} with weight {weight}"
     """
     
     def __init__(self, env: TransportEnvWrapper, seed: Optional[int] = None):
@@ -1145,7 +1145,7 @@ class TransportClusterGoalGenerator(PossibleGoalGenerator):
         >>> env = create_transport_env(num_humans=2, num_vehicles=1, num_nodes=20, num_clusters=5)
         >>> generator = TransportClusterGoalGenerator(env)
         >>> for goal, weight in generator.generate(state=None, human_agent_index=0):
-        ...     print(f"{goal} with weight {weight}")
+        ...     f"{goal} with weight {weight}"
     """
     
     def __init__(self, env: TransportEnvWrapper):
@@ -1189,7 +1189,7 @@ class TransportClusterGoalSampler(PossibleGoalSampler):
         >>> env = create_transport_env(num_humans=2, num_vehicles=1, num_nodes=50, num_clusters=10)
         >>> sampler = TransportClusterGoalSampler(env)
         >>> goal, weight = sampler.sample(state=None, human_agent_index=0)
-        >>> print(f"Sampled {goal} with weight {weight}")
+        >>> f"Sampled {goal} with weight {weight}"
     """
     
     def __init__(self, env: TransportEnvWrapper, seed: Optional[int] = None):

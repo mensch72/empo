@@ -4,8 +4,11 @@ Lookup Table Human Goal Achievement Network for Phase 2.
 Implements V_h^e(s, g_h) as a dictionary-based lookup table with one entry
 per unique (state, goal, map_hash) triple. The map_hash distinguishes states
 from different map configurations in ensemble mode.
+logger = logging.getLogger(__name__)
+
 """
 
+import logging
 import torch
 import torch.nn as nn
 from typing import Any, Dict, Hashable, List, Optional, Tuple
@@ -158,7 +161,7 @@ class LookupTableHumanGoalAbilityNetwork(BaseHumanGoalAchievementNetwork):
             if getattr(self, 'debug_new_keys', False):
                 goal_hash = hash(goal_for_debug) if goal_for_debug else 'unknown'
                 goal_target = getattr(goal_for_debug, 'target_pos', str(goal_for_debug)[:30]) if goal_for_debug else 'unknown'
-                print(f"[DEBUG V_h^e NEW #{len(self.table)+1}] key={key} = hash((state={state_for_debug}, goal={goal_hash} ({goal_target}), map_hash={map_hash_for_debug})), init_value={self.default_v_h_e:.4f}")
+                logger.debug(f"[DEBUG V_h^e NEW #{len(self.table)+1}] key={key} = hash((state={state_for_debug}, goal={goal_hash} ({goal_target}), map_hash={map_hash_for_debug})), init_value={self.default_v_h_e:.4f}")
             # Store raw value that will become default_v_h_e after clamping
             param = nn.Parameter(
                 torch.tensor([self.default_v_h_e], dtype=torch.float32, device=device)
@@ -172,7 +175,7 @@ class LookupTableHumanGoalAbilityNetwork(BaseHumanGoalAchievementNetwork):
             goal_target = getattr(goal_for_debug, 'target_pos', str(goal_for_debug)[:30]) if goal_for_debug else 'unknown'
             status = "NEW (not found!)" if is_new else "exists"
             value = self.table[key].item()
-            print(f"[DEBUG V_h^e LOOKUP] key={key} = hash((state={state_for_debug}, goal={goal_hash} ({goal_target}), map_hash={map_hash_for_debug})) -> {status}, value={value:.4f}")
+            logger.debug(f"[DEBUG V_h^e LOOKUP] key={key} = hash((state={state_for_debug}, goal={goal_hash} ({goal_target}), map_hash={map_hash_for_debug})) -> {status}, value={value:.4f}")
         
         return self.table[key]
     
@@ -215,7 +218,7 @@ class LookupTableHumanGoalAbilityNetwork(BaseHumanGoalAchievementNetwork):
                 if key in key_to_inputs:
                     prev_goal = key_to_inputs[key]
                     if prev_goal != goal_target:
-                        print(f"[DEBUG] HASH COLLISION! key={key} maps to both {prev_goal} and {goal_target}")
+                        logger.debug(f"[DEBUG] HASH COLLISION! key={key} maps to both {prev_goal} and {goal_target}")
                 else:
                     key_to_inputs[key] = goal_target
             param = self._get_or_create_entry(key, device, state_for_debug=normalized_state, goal_for_debug=goal, map_hash_for_debug=map_hash)

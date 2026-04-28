@@ -5,6 +5,7 @@ This module provides the training loop and loss computation for Phase 2
 of the EMPO framework (equations 4-9).
 """
 
+import logging
 import glob
 import os
 import random
@@ -24,6 +25,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
 
 try:
     HAS_PSUTIL = True
@@ -196,7 +199,7 @@ class BasePhase2Trainer(ABC):
             self.writer = SummaryWriter(log_dir=tensorboard_dir)
             if verbose:
                 import os
-                print(f"[TensorBoard] Created SummaryWriter for pid={os.getpid()} in {tensorboard_dir}")
+                logger.info(f"[TensorBoard] Created SummaryWriter for pid={os.getpid()} in {tensorboard_dir}")
             # Add static remarks to TensorBoard
             self.writer.add_text(
                 'Loss/caution',
@@ -227,19 +230,19 @@ class BasePhase2Trainer(ABC):
                 )
         
         if self.debug:
-            print("[DEBUG] BasePhase2Trainer.__init__: Initializing target networks...")
+            logger.debug("[DEBUG] BasePhase2Trainer.__init__: Initializing target networks...")
         
         # Initialize target networks
         self._init_target_networks()
         
         if self.debug:
-            print("[DEBUG] BasePhase2Trainer.__init__: Initializing optimizers...")
+            logger.debug("[DEBUG] BasePhase2Trainer.__init__: Initializing optimizers...")
         
         # Initialize optimizers
         self.optimizers = self._init_optimizers()
         
         if self.debug:
-            print("[DEBUG] BasePhase2Trainer.__init__: Creating replay buffer...")
+            logger.debug("[DEBUG] BasePhase2Trainer.__init__: Creating replay buffer...")
         
         # Replay buffer
         self.replay_buffer = Phase2ReplayBuffer(capacity=config.buffer_size)
@@ -282,7 +285,7 @@ class BasePhase2Trainer(ABC):
         )
         
         if self.debug:
-            print("[DEBUG] BasePhase2Trainer.__init__: Initialization complete.")
+            logger.debug("[DEBUG] BasePhase2Trainer.__init__: Initialization complete.")
     
     def __getstate__(self):
         """Exclude unpicklable objects for async training (multiprocessing).
@@ -361,20 +364,20 @@ class BasePhase2Trainer(ABC):
                 os.remove(event_file)
             
             if self.verbose:
-                print(f"[TensorBoard] Archived {len(event_files)} old event files to {archive_name}")
+                logger.info(f"[TensorBoard] Archived {len(event_files)} old event files to {archive_name}")
         except Exception as e:
             # Archiving failed (likely permission issues from Docker UID mismatch)
             # Delete entire tensorboard dir and recreate to allow new writes
-            print(f"[TensorBoard] Warning: Failed to archive old data: {e}")
-            print(f"[TensorBoard] Deleting and recreating tensorboard directory...")
+            logger.warning(f"[TensorBoard] Warning: Failed to archive old data: {e}")
+            logger.info("[TensorBoard] Deleting and recreating tensorboard directory...")
             try:
                 import shutil
                 shutil.rmtree(tensorboard_dir)
                 os.makedirs(tensorboard_dir, exist_ok=True)
                 if self.verbose:
-                    print(f"[TensorBoard] Successfully recreated {tensorboard_dir}")
+                    logger.info(f"[TensorBoard] Successfully recreated {tensorboard_dir}")
             except Exception as e2:
-                print(f"[TensorBoard] Warning: Could not recreate tensorboard dir: {e2}")
+                logger.warning(f"[TensorBoard] Warning: Could not recreate tensorboard dir: {e2}")
     
     def _init_target_networks(self):
         """Initialize target networks as copies of main networks."""
@@ -551,7 +554,7 @@ class BasePhase2Trainer(ABC):
         
         if self.debug and total_new > 0:
             total_entries = get_total_table_size(self.networks)
-            print(f"[DEBUG] Added {total_new} new params to optimizers "
+            logger.debug(f"[DEBUG] Added {total_new} new params to optimizers "
                   f"(step {self.training_step_count}, {total_entries} total entries)")
     
     def _apply_adaptive_lr_scaling(self) -> None:
@@ -1177,6 +1180,7 @@ class BasePhase2Trainer(ABC):
             try:
                 transitions = self.env.transition_probabilities(state, actions)
             except Exception:
+                logger.exception("Failed to compute transition probabilities for RND curiosity")
                 continue
             
             if transitions is None or len(transitions) == 0:
@@ -1334,6 +1338,7 @@ class BasePhase2Trainer(ABC):
         try:
             all_novelty_scores = self.compute_novelty_for_states(all_next_states)
         except Exception:
+            logger.exception("Failed to compute novelty scores for successor states")
             return None
         
         # Aggregate back to per-action expected novelty
@@ -1494,14 +1499,14 @@ class BasePhase2Trainer(ABC):
             Tuple of (transition, next_state).
         """
         if self.debug:
-            print(f"[DEBUG] collect_transition: sampling human actions first...")
+            logger.debug("[DEBUG] collect_transition: sampling human actions first...")
         
         # Step 1: Sample human actions FIRST (before robot, so we can compute transition_probs once)
         with self.profiler.section("sample_human_actions"):
             human_actions = self.sample_human_actions(state, goals)
         
         if self.debug:
-            print(f"[DEBUG] collect_transition: human_actions={human_actions}, computing transition probs...")
+            logger.debug(f"[DEBUG] collect_transition: human_actions={human_actions}, computing transition probs...")
         
         # Step 2: Pre-compute transition probabilities for all robot actions ONCE
         # This is reused for both curiosity bonus and replay buffer
@@ -1513,21 +1518,21 @@ class BasePhase2Trainer(ABC):
                 )
         
         if self.debug:
-            print(f"[DEBUG] collect_transition: sampling robot action (with transition_probs)...")
+            logger.debug("[DEBUG] collect_transition: sampling robot action (with transition_probs)...")
         
         # Step 3: Sample robot action, passing transition_probs for curiosity bonus
         with self.profiler.section("sample_robot_action"):
             robot_action = self.sample_robot_action(state, transition_probs_by_action)
         
         if self.debug:
-            print(f"[DEBUG] collect_transition: robot_action={robot_action}, stepping environment...")
+            logger.debug(f"[DEBUG] collect_transition: robot_action={robot_action}, stepping environment...")
         
         # Step 4: Step environment to get the actual next state
         with self.profiler.section("step_environment"):
             next_state = self.step_environment(state, robot_action, human_actions)
         
         if self.debug:
-            print(f"[DEBUG] collect_transition: environment stepped, creating transition...")
+            logger.debug("[DEBUG] collect_transition: environment stepped, creating transition...")
         
         # Create transition - reusing the same transition_probs_by_action
         # When using model-based targets, we intentionally do NOT store next_state
@@ -1549,7 +1554,7 @@ class BasePhase2Trainer(ABC):
         )
         
         if self.debug:
-            print(f"[DEBUG] collect_transition: done")
+            logger.debug("[DEBUG] collect_transition: done")
         
         return transition, next_state
     
@@ -1996,7 +2001,7 @@ class BasePhase2Trainer(ABC):
             # Debug logging for targets
             if self.debug and self.training_step_count % 100 == 0:
                 n_total = len(v_h_e_data)
-                print(f"[DEBUG V_h^e] step={self.training_step_count}, n_samples={n_total}, "
+                logger.debug(f"[DEBUG V_h^e] step={self.training_step_count}, n_samples={n_total}, "
                       f"target_mean={target_v_h_e.mean().item():.4f}, "
                       f"pred_mean={v_h_e_pred.mean().item():.4f}")
                 # Log per-goal statistics
@@ -2011,7 +2016,7 @@ class BasePhase2Trainer(ABC):
                     n = len(data['targets'])
                     mean_target = sum(data['targets']) / n
                     mean_pred = sum(data['preds']) / n
-                    print(f"[DEBUG V_h^e]   Goal {goal_key}: n={n}, "
+                    logger.debug(f"[DEBUG V_h^e]   Goal {goal_key}: n={n}, "
                           f"mean_target={mean_target:.4f}, mean_pred={mean_pred:.4f}")
             
             losses['v_h_e'] = ((v_h_e_pred.squeeze() - target_v_h_e) ** 2).mean()
@@ -2814,7 +2819,7 @@ class BasePhase2Trainer(ABC):
         is_terminal = (actor_state.env_step_count + 1) >= self.config.steps_per_episode
         
         if self.debug and is_terminal:
-            print(f"[DEBUG] Terminal transition! env_step={actor_state.env_step_count}, "
+            logger.debug(f"[DEBUG] Terminal transition! env_step={actor_state.env_step_count}, "
                   f"steps_per_episode={self.config.steps_per_episode}")
         
         # Collect one transition
@@ -3123,11 +3128,11 @@ class BasePhase2Trainer(ABC):
                 active = self.config.get_active_networks(self.training_step_count)
                 
                 if self.verbose:
-                    print(f"\n[Warmup] Stage transition at training step {self.training_step_count}:")
-                    print(f"  {learner_state.prev_stage_name} -> {current_stage_name} ({current_stage_duration:,} steps)")
-                    print(f"  Active networks: {active}")
+                    logger.info(f"\n[Warmup] Stage transition at training step {self.training_step_count}:")
+                    logger.info(f"  {learner_state.prev_stage_name} -> {current_stage_name} ({current_stage_duration:,} steps)")
+                    logger.info(f"  Active networks: {active}")
                     effective_beta = self.config.get_effective_beta_r(self.training_step_count)
-                    print(f"  Effective beta_r: {effective_beta:.4f}")
+                    logger.info(f"  Effective beta_r: {effective_beta:.4f}")
                 
                 if self.writer is not None:
                     self.writer.add_scalar('Warmup/stage_transition', 1.0, self.training_step_count)
@@ -3145,9 +3150,9 @@ class BasePhase2Trainer(ABC):
                         with self._shared_env_steps.get_lock():
                             self._shared_env_steps.value = 0
                         if self.verbose:
-                            print(f"  [Async] Reset shared_env_steps to 0 to unthrottle actors")
+                            logger.info("  [Async] Reset shared_env_steps to 0 to unthrottle actors")
                     if self.verbose:
-                        print(f"  [Training] Cleared replay buffer ({buffer_size_before} transitions) at start of β_r ramp-up")
+                        logger.info(f"  [Training] Cleared replay buffer ({buffer_size_before} transitions) at start of β_r ramp-up")
                     if self.writer is not None:
                         self.writer.add_text('Warmup/events', 
                                             f"Cleared replay buffer ({buffer_size_before} transitions) at start of β_r ramp-up",
@@ -3162,9 +3167,9 @@ class BasePhase2Trainer(ABC):
                         with self._shared_env_steps.get_lock():
                             self._shared_env_steps.value = 0
                         if self.verbose:
-                            print(f"  [Async] Reset shared_env_steps to 0 to unthrottle actors")
+                            logger.info("  [Async] Reset shared_env_steps to 0 to unthrottle actors")
                     if self.verbose:
-                        print(f"  [Training] Cleared replay buffer ({buffer_size_before} transitions) after β_r ramp-up")
+                        logger.info(f"  [Training] Cleared replay buffer ({buffer_size_before} transitions) after β_r ramp-up")
                     if self.writer is not None:
                         self.writer.add_text('Warmup/events', 
                                             f"Cleared replay buffer ({buffer_size_before} transitions) after β_r ramp-up",
@@ -3180,8 +3185,8 @@ class BasePhase2Trainer(ABC):
                 # Transition from constant LR to decay phase
                 decay_type = "1/t" if self.config.constant_lr_then_1_over_t else "1/√t"
                 if self.verbose:
-                    print(f"\n[LR Schedule] Entering {decay_type} decay phase at training step {self.training_step_count}")
-                    print(f"  Learning rates will now decay smoothly proportional to {decay_type}")
+                    logger.info(f"\n[LR Schedule] Entering {decay_type} decay phase at training step {self.training_step_count}")
+                    logger.info(f"  Learning rates will now decay smoothly proportional to {decay_type}")
                 
                 if self.writer is not None:
                     self.writer.add_scalar('LearningRate/decay_phase_start', 1.0, self.training_step_count)
@@ -3199,7 +3204,7 @@ class BasePhase2Trainer(ABC):
             
             if self.debug:
                 stage = self.config.get_warmup_stage_name(self.training_step_count)
-                print(f"Step {self.training_step_count} ({stage}): {losses}")
+                logger.info(f"Step {self.training_step_count} ({stage}): {losses}")
             
             if self.writer is not None:
                 self.writer.flush()
@@ -3257,7 +3262,7 @@ class BasePhase2Trainer(ABC):
         # Log initial stage
         if self.verbose:
             active = self.config.get_active_networks(self.training_step_count)
-            print(f"[Warmup] Starting in stage {learner_state.prev_stage}: {learner_state.prev_stage_name} (active networks: {active})")
+            logger.info(f"[Warmup] Starting in stage {learner_state.prev_stage}: {learner_state.prev_stage_name} (active networks: {active})")
         
         # Log stage transition steps to TensorBoard at start
         if self.writer is not None:
@@ -3332,17 +3337,17 @@ class BasePhase2Trainer(ABC):
                         self.save_all_networks(self.checkpoint_path)
                         last_checkpoint_step = self.training_step_count
                         if self.verbose:
-                            print(f"\n[Checkpoint] Saved at step {self.training_step_count} to {self.checkpoint_path}")
+                            logger.info(f"\n[Checkpoint] Saved at step {self.training_step_count} to {self.checkpoint_path}")
         
         except KeyboardInterrupt:
             self._interrupted = True
             if self.verbose:
-                print(f"\n[Training] Interrupted at step {self.training_step_count}. Saving checkpoint...")
+                logger.info(f"\n[Training] Interrupted at step {self.training_step_count}. Saving checkpoint...")
             # Save checkpoint on interrupt
             if self.checkpoint_path is not None:
                 self.save_all_networks(self.checkpoint_path)
                 if self.verbose:
-                    print(f"[Training] Checkpoint saved to {self.checkpoint_path}")
+                    logger.info(f"[Training] Checkpoint saved to {self.checkpoint_path}")
         
         # Stop profiling
         self.profiler.stop_profiling()
@@ -3351,7 +3356,7 @@ class BasePhase2Trainer(ABC):
         
         # Print profiler report if it's a TrainingProfiler
         if hasattr(self.profiler, 'report') and hasattr(self.profiler, '_total_time'):
-            print(self.profiler.report())
+            logger.info(self.profiler.report())
             # Save to file if save_report method exists
             if hasattr(self.profiler, 'save_report') and self.output_dir:
                 self.profiler.save_report(self.output_dir, "profiler_report")
@@ -3498,7 +3503,7 @@ class BasePhase2Trainer(ABC):
             actors.append(p)
         
         if self.verbose:
-            print(f"[Async] Started {self.config.num_actors} actor processes")
+            logger.info(f"[Async] Started {self.config.num_actors} actor processes")
         
         # Run learner loop in main process
         history = self._learner_loop(
@@ -3519,7 +3524,7 @@ class BasePhase2Trainer(ABC):
                 p.terminate()
         
         if self.verbose:
-            print(f"[Async] Training complete. All actors stopped.")
+            logger.info("[Async] Training complete. All actors stopped.")
         
         return history
     
@@ -3576,7 +3581,7 @@ class BasePhase2Trainer(ABC):
                 policy_lock=policy_lock,
             )
         except Exception as e:
-            print(f"[Actor {actor_id}] Error: {e}")
+            logger.info(f"[Actor {actor_id}] Error: {e}")
             import traceback
             traceback.print_exc()
     
@@ -3662,7 +3667,7 @@ class BasePhase2Trainer(ABC):
                         shared_env_steps.value += 1
                 except Exception:
                     # Queue full or serialization error - skip transition
-                    pass  # TODO: revisit!
+                    logger.exception("Skipping transition after queue put failure")
 
     def _learner_loop(
         self,
@@ -3701,12 +3706,12 @@ class BasePhase2Trainer(ABC):
         
         if self.verbose:
             active = self.config.get_active_networks(self.training_step_count)
-            print(f"[Learner] Starting in warmup stage {learner_state.prev_stage}: {learner_state.prev_stage_name} (active: {active})")
+            logger.info(f"[Learner] Starting in warmup stage {learner_state.prev_stage}: {learner_state.prev_stage_name} (active: {active})")
             if self.writer is not None:
                 import os
-                print(f"[Learner] TensorBoard writer active (pid={os.getpid()})")
+                logger.info(f"[Learner] TensorBoard writer active (pid={os.getpid()})")
             else:
-                print(f"[Learner] TensorBoard writer is None (logging disabled)")
+                logger.info("[Learner] TensorBoard writer is None (logging disabled)")
         
         # Progress bar measured in training steps
         pbar = tqdm(total=num_training_steps, desc="Async Training", unit="steps")
@@ -3720,7 +3725,7 @@ class BasePhase2Trainer(ABC):
         self._shared_env_steps = shared_env_steps
         
         if self.verbose:
-            print(f"[Learner] Waiting for {self.config.async_min_buffer_size} transitions...")
+            logger.info(f"[Learner] Waiting for {self.config.async_min_buffer_size} transitions...")
         
         while len(self.replay_buffer) < self.config.async_min_buffer_size:
             self._consume_transitions(transition_queue, max_items=100)
@@ -3728,7 +3733,7 @@ class BasePhase2Trainer(ABC):
                 break
         
         if self.verbose:
-            print(f"[Learner] Buffer ready with {len(self.replay_buffer)} transitions. Starting training.")
+            logger.info(f"[Learner] Buffer ready with {len(self.replay_buffer)} transitions. Starting training.")
         
         # Track last checkpoint step
         last_checkpoint_step = self.training_step_count
@@ -3777,17 +3782,17 @@ class BasePhase2Trainer(ABC):
                         self.save_all_networks(self.checkpoint_path)
                         last_checkpoint_step = self.training_step_count
                         if self.verbose:
-                            print(f"\n[Checkpoint] Saved at step {self.training_step_count} to {self.checkpoint_path}")
+                            logger.info(f"\n[Checkpoint] Saved at step {self.training_step_count} to {self.checkpoint_path}")
         
         except KeyboardInterrupt:
             self._interrupted = True
             if self.verbose:
-                print(f"\n[Training] Interrupted at step {self.training_step_count}. Saving checkpoint...")
+                logger.info(f"\n[Training] Interrupted at step {self.training_step_count}. Saving checkpoint...")
             # Save checkpoint on interrupt
             if self.checkpoint_path is not None:
                 self.save_all_networks(self.checkpoint_path)
                 if self.verbose:
-                    print(f"[Training] Checkpoint saved to {self.checkpoint_path}")
+                    logger.info(f"[Training] Checkpoint saved to {self.checkpoint_path}")
         
         # Stop profiling and print report
         self.profiler.stop_profiling()
@@ -3796,13 +3801,13 @@ class BasePhase2Trainer(ABC):
         
         # Print profiler report if it's a TrainingProfiler
         if hasattr(self.profiler, 'report') and hasattr(self.profiler, '_total_time'):
-            print(self.profiler.report())
+            logger.info(self.profiler.report())
             # Save to file if save_report method exists
             if hasattr(self.profiler, 'save_report') and self.output_dir:
                 self.profiler.save_report(self.output_dir, "profiler_report")
         
         if self.verbose:
-            print(f"[Learner] Completed {self.training_step_count} training steps, {policy_updates} policy updates")
+            logger.info(f"[Learner] Completed {self.training_step_count} training steps, {policy_updates} policy updates")
         
         # Set all networks to eval mode (disables dropout for rollouts)
         self.networks.q_r.eval()
@@ -3855,6 +3860,7 @@ class BasePhase2Trainer(ABC):
             except Empty:
                 break
             except Exception:
+                logger.exception("Failed to consume transition from async queue")
                 break
         
         return consumed
@@ -3928,8 +3934,8 @@ class BasePhase2Trainer(ABC):
             # Fall back to tmp file to prevent data loss
             basename = os.path.basename(path)
             tmp_path = os.path.join(tempfile.gettempdir(), f'empo_fallback_{basename}')
-            print(f"WARNING: Cannot save to {path}: {e}")
-            print(f"Saving to fallback location: {tmp_path}")
+            logger.warning(f"WARNING: Cannot save to {path}: {e}")
+            logger.info(f"Saving to fallback location: {tmp_path}")
             torch.save(checkpoint, tmp_path)
             return tmp_path
     
@@ -4016,8 +4022,8 @@ class BasePhase2Trainer(ABC):
             # Fall back to tmp file to prevent data loss
             basename = os.path.basename(path)
             tmp_path = os.path.join(tempfile.gettempdir(), f'empo_fallback_{basename}')
-            print(f"WARNING: Cannot save to {path}: {e}")
-            print(f"Saving to fallback location: {tmp_path}")
+            logger.warning(f"WARNING: Cannot save to {path}: {e}")
+            logger.info(f"Saving to fallback location: {tmp_path}")
             torch.save(checkpoint, tmp_path)
             return tmp_path
 

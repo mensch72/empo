@@ -5,6 +5,7 @@ This module provides utility functions used by both Phase 1 (human policy prior)
 and Phase 2 (robot policy) backward induction algorithms.
 """
 
+import logging
 import numpy as np
 import numpy.typing as npt
 import pickle
@@ -12,6 +13,8 @@ from collections import defaultdict
 from itertools import product
 from pathlib import Path
 from typing import Optional, Callable, List, Tuple, Dict, Any, TypeAlias, TYPE_CHECKING, Generic, TypeVar
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from empo.possible_goal import PossibleGoal, PossibleGoalGenerator
@@ -870,7 +873,7 @@ def archive_value_slices(
     
     if not quiet:
         clear_msg = " (cleared from memory)" if not return_values else ""
-        print(f"    Archived {total_states} states from {len(archivable_levels)} level(s) to {filepath.name}{clear_msg}")
+        logger.info(f"    Archived {total_states} states from {len(archivable_levels)} level(s) to {filepath.name}{clear_msg}")
 
 
 def load_archived_value_slices(filepath: Path):

@@ -20,10 +20,13 @@ Usage:
     shared_dag.cleanup()
 """
 
+import logging
 import pickle
 from multiprocessing import shared_memory
 from typing import Any, List, Optional, Tuple
 
+
+logger = logging.getLogger(__name__)
 
 # Type aliases
 State = Any
@@ -230,7 +233,7 @@ def init_shared_dag(states: List[State], transitions: Optional[List[List[Transit
         try:
             _shared_dag.cleanup()
         except Exception:
-            pass  # TODO: log warning?
+            logger.exception("Failed to clean up existing shared DAG before reinitialization")
     
     _shared_dag = SharedDAG.from_dag(states, transitions)
     names = _shared_dag.get_shm_names()
@@ -274,6 +277,6 @@ def cleanup_shared_dag() -> None:
         try:
             _shared_dag.cleanup()
         except Exception:
-            pass  # TODO: log warning?
+            logger.exception("Failed to clean up shared DAG")
         _shared_dag = None
         _shared_dag_info = None

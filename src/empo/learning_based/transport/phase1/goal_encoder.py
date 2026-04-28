@@ -38,7 +38,7 @@ class TransportGoalEncoder(BaseGoalEncoder):
         >>> # Encode a node goal
         >>> goal_tensor = encoder.tensorize_goal(goal, device='cpu')
         >>> encoded = encoder(goal_tensor)
-        >>> print(encoded.shape)
+        >>> encoded.shape
         torch.Size([1, 32])
     """
     

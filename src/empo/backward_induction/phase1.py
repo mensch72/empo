@@ -21,6 +21,7 @@ Parameters:
     gamma_h: Human discount factor (γ).
 """
 
+import logging
 import gc
 import math
 import numpy as np
@@ -65,6 +66,8 @@ from .helpers import (
     VhValues,
     VhValuesSmall,
 )
+
+logger = logging.getLogger(__name__)
 
 # Type aliases
 HumanPolicyDict = Dict[State, Dict[int, Dict[PossibleGoal, npt.NDArray[np.floating[Any]]]]]  # state -> agent -> goal -> probs
@@ -160,7 +163,7 @@ def _hpp_process_single_state(
     if is_terminal:
         # Terminal state: V_h^m = 0 for all goals
         if DEBUG:
-            print(f"  Terminal state {state_index}")
+            logger.debug(f"  Terminal state {state_index}")
         return v_results, None
     
     # Non-terminal state: compute both V-values and policies
@@ -185,7 +188,7 @@ def _hpp_process_single_state(
                 ps[0] = 1.0  # Assume action 0 is 'stay still'
                 pres[key] = ps
                 if DEBUG:
-                    print(f"    Goal achieved in state, agent {agent_index}: V = 0, remain still policy")
+                    logger.debug(f"    Goal achieved in state, agent {agent_index}: V = 0, remain still policy")
             else:
                 # Compute Q values as expected future V values
                 q = np.zeros(num_actions)
@@ -279,7 +282,7 @@ def _hpp_process_single_state(
                 pres[key] = p
                 
                 if DEBUG:
-                    print(f"    Agent {agent_index}, goal {possible_goal}: V = {v_results[agent_index].get(possible_goal, 0):.4f}")
+                    logger.debug(f"    Agent {agent_index}, goal {possible_goal}: V = {v_results[agent_index].get(possible_goal, 0):.4f}")
     
     return v_results, p_results
 
@@ -331,7 +334,7 @@ def _hpp_compute_sequential(
         n_goals = possible_goal_generator.n_goals
         vres0 = np.zeros(n_goals, dtype=np.float16)
         pres0 = np.zeros((n_goals, num_actions), dtype=np.float16)
-        print(f"Using indexed goals: VhValuesSmall with numpy arrays (n_goals={n_goals})")
+        logger.info(f"Using indexed goals: VhValuesSmall with numpy arrays (n_goals={n_goals})")
     else:
         vres0 = {}
         pres0 = {}
@@ -514,16 +517,16 @@ def _hpp_compute_sequential(
         
         # Periodic memory reporting
         if not quiet and states_processed > 0 and states_processed % memory_report_interval == 0:
-            print(f"\n[Memory @ {states_processed}/{total_states} states] RSS: {get_process_memory_mb():.1f} MB")
+            logger.info(f"\n[Memory @ {states_processed}/{total_states} states] RSS: {get_process_memory_mb():.1f} MB")
             if memory_profile:
                 # Detailed profiling with deep_sizeof (adds O(total_size) overhead)
                 vh_mb = deep_sizeof(Vh_values) / (1024**2)
                 pol_mb = deep_sizeof(system2_policies) / (1024**2)
                 cache_mb = deep_sizeof(slice_cache) / (1024**2) if slice_cache is not None else 0.0
-                print(f"  Vh_values: {vh_mb:.1f} MB, policies: {pol_mb:.1f} MB, cache: {cache_mb:.1f} MB")
+                logger.info(f"  Vh_values: {vh_mb:.1f} MB, policies: {pol_mb:.1f} MB, cache: {cache_mb:.1f} MB")
         
         if DEBUG:
-            print(f"Processing state {state_index}")
+            logger.debug(f"Processing state {state_index}")
         
         state = states[state_index]
         
@@ -1099,31 +1102,31 @@ def compute_human_policy_prior(
                                        include_cache=use_attainment_cache,
                                        num_humans=len(human_agent_indices),
                                        num_robots=len(robot_agent_indices))
-        print(f"\nMemory estimate:")
-        print(f"  States: {mem_stats['num_states']:,} ({mem_stats['states_mb']:.1f} MB)")
-        print(f"  Transitions: {mem_stats['num_transitions']:,} ({mem_stats['transitions_mb']:.1f} MB)")
-        print(f"  Phase 1 Vh_values: {mem_stats['phase1_vh_mb']:.1f} MB")
-        print(f"  Phase 1 policies: {mem_stats['phase1_policies_mb']:.1f} MB")
-        print(f"  Phase 2 Vh_values: {mem_stats['phase2_vh_mb']:.1f} MB")
-        print(f"  Phase 2 Vr_values: {mem_stats['phase2_vr_mb']:.1f} MB")
-        print(f"  Phase 2 robot_policy: {mem_stats['phase2_robot_policy_mb']:.1f} MB")
+        logger.info("\nMemory estimate:")
+        logger.info(f"  States: {mem_stats['num_states']:,} ({mem_stats['states_mb']:.1f} MB)")
+        logger.info(f"  Transitions: {mem_stats['num_transitions']:,} ({mem_stats['transitions_mb']:.1f} MB)")
+        logger.info(f"  Phase 1 Vh_values: {mem_stats['phase1_vh_mb']:.1f} MB")
+        logger.info(f"  Phase 1 policies: {mem_stats['phase1_policies_mb']:.1f} MB")
+        logger.info(f"  Phase 2 Vh_values: {mem_stats['phase2_vh_mb']:.1f} MB")
+        logger.info(f"  Phase 2 Vr_values: {mem_stats['phase2_vr_mb']:.1f} MB")
+        logger.info(f"  Phase 2 robot_policy: {mem_stats['phase2_robot_policy_mb']:.1f} MB")
         if 'attainment_cache_mb' in mem_stats:
-            print(f"  Attainment cache: {mem_stats['attainment_cache_mb']:.1f} MB")
+            logger.info(f"  Attainment cache: {mem_stats['attainment_cache_mb']:.1f} MB")
         else:
-            print(f"  Attainment cache: DISABLED (use_attainment_cache=False)")
-        print(f"  Python baseline: {mem_stats['python_baseline_mb']:.0f} MB")
-        print(f"  TOTAL (recommended allocation): {mem_stats['total_mb']:.0f} MB")
+            logger.info("  Attainment cache: DISABLED (use_attainment_cache=False)")
+        logger.info(f"  Python baseline: {mem_stats['python_baseline_mb']:.0f} MB")
+        logger.info(f"  TOTAL (recommended allocation): {mem_stats['total_mb']:.0f} MB")
         
         # Measure ACTUAL memory of DAG structures
-        print(f"\nActual memory usage (after DAG build):")
-        print(f"  Process RSS: {get_process_memory_mb():.1f} MB")
+        logger.info("\nActual memory usage (after DAG build):")
+        logger.info(f"  Process RSS: {get_process_memory_mb():.1f} MB")
         states_actual = deep_sizeof(states) / (1024**2)
-        print(f"  states: {states_actual:.1f} MB (estimate: {mem_stats['states_mb']:.1f} MB)")
+        logger.info(f"  states: {states_actual:.1f} MB (estimate: {mem_stats['states_mb']:.1f} MB)")
         transitions_actual = deep_sizeof(transitions) / (1024**2)
-        print(f"  transitions: {transitions_actual:.1f} MB (estimate: {mem_stats['transitions_mb']:.1f} MB)")
+        logger.info(f"  transitions: {transitions_actual:.1f} MB (estimate: {mem_stats['transitions_mb']:.1f} MB)")
         successors_actual = deep_sizeof(successors) / (1024**2)
-        print(f"  successors: {successors_actual:.1f} MB (not in estimate)")
-        print(f"  Total DAG: {states_actual + transitions_actual + successors_actual:.1f} MB")
+        logger.info(f"  successors: {successors_actual:.1f} MB (not in estimate)")
+        logger.info(f"  Total DAG: {states_actual + transitions_actual + successors_actual:.1f} MB")
     
     # Handle disk-based slicing if requested
     disk_dag: Optional[DiskBasedDAG] = None
@@ -1135,7 +1138,7 @@ def compute_human_policy_prior(
         num_action_profiles_for_cache = num_actions ** num_agents
         
         if not quiet:
-            print(f"\nCreating disk-based DAG slices...")
+            logger.info("\nCreating disk-based DAG slices...")
         
         disk_dag = DiskBasedDAG.from_dag(
             states, transitions, level_fct,
@@ -1169,15 +1172,15 @@ def compute_human_policy_prior(
             if not parallel or archive_dir is None:
                 freed_msg += " and successors"
             freed_msg += " freed from memory."
-            print(f"  Disk slicing complete. {freed_msg}")
-            print(f"  Loaded DAG memory: {disk_dag.get_loaded_memory_mb():.1f} MB")
-            print(f"  Attainment cache will also be saved to disk during computation.")
+            logger.info(f"  Disk slicing complete. {freed_msg}")
+            logger.info(f"  Loaded DAG memory: {disk_dag.get_loaded_memory_mb():.1f} MB")
+            logger.info("  Attainment cache will also be saved to disk during computation.")
             est_per_timestep = mem_stats['total_mb'] / (disk_dag.max_timestep + 1)
-            print(f"  Estimated peak memory per timestep: {est_per_timestep:.1f} MB")
+            logger.info(f"  Estimated peak memory per timestep: {est_per_timestep:.1f} MB")
     elif use_float16:
         # Just convert to float16 without disk slicing
         if not quiet:
-            print(f"\nConverting transitions to float16...")
+            logger.info("\nConverting transitions to float16...")
         transitions = convert_transitions_to_float16(transitions)
     
     
@@ -1209,17 +1212,17 @@ def compute_human_policy_prior(
     # Measure Vh_values initial structure
     if not quiet:
         vh_initial = deep_sizeof(Vh_values) / (1024**2)
-        print(f"\nActual memory (after Vh_values init): Process RSS = {get_process_memory_mb():.1f} MB")
-        print(f"  Vh_values (empty): {vh_initial:.1f} MB")
+        logger.info(f"\nActual memory (after Vh_values init): Process RSS = {get_process_memory_mb():.1f} MB")
+        logger.info(f"  Vh_values (empty): {vh_initial:.1f} MB")
     
     # ============================================================================
     # WARN if parallel mode was requested
     # ============================================================================
     if parallel:
         if not quiet:
-            print("WARNING: Parallel mode is currently disabled due to bugs.")
-            print("         Running in sequential mode instead.")
-            print("         See docs/plans/bwind_parallel.md for status.")
+            logger.warning("WARNING: Parallel mode is currently disabled due to bugs.")
+            logger.info("         Running in sequential mode instead.")
+            logger.info("         See docs/plans/bwind_parallel.md for status.")
         parallel = False  # Force to sequential
         # The read below ensures the forced value is observably used, keeping
         # static analyzers satisfied while preserving the current behavior.
@@ -1247,8 +1250,8 @@ def compute_human_policy_prior(
     # Measure memory after sliced_cache is initialized
     if not quiet:
         cache_initial = deep_sizeof(sliced_cache) / (1024**2) if sliced_cache else 0.0
-        print(f"\nActual memory (after sliced_cache init): Process RSS = {get_process_memory_mb():.1f} MB")
-        print(f"  sliced_cache (empty): {cache_initial:.1f} MB")
+        logger.info(f"\nActual memory (after sliced_cache init): Process RSS = {get_process_memory_mb():.1f} MB")
+        logger.info(f"  sliced_cache (empty): {cache_initial:.1f} MB")
     
     # ============================================================================
     # PARALLEL CODE TEMPORARILY DISABLED
@@ -1262,7 +1265,7 @@ def compute_human_policy_prior(
             num_workers = mp.cpu_count()
         
         if not quiet:
-            print(f"Using parallel execution with {num_workers} workers")
+            logger.info(f"Using parallel execution with {num_workers} workers")
         
         # Track already-archived levels
         archived_levels: Set[int] = set()
@@ -1273,20 +1276,20 @@ def compute_human_policy_prior(
         level_values_list: Optional[List[int]] = None
         if level_fct is not None:
             if not quiet:
-                print("Using fast level computation with provided level function")
+                logger.info("Using fast level computation with provided level function")
             # Pass successors to get max_successor_levels for archival
             dependency_levels, max_successor_levels, level_values_list = compute_dependency_levels_fast(
                 states, level_fct, successors
             )
         else:
             if not quiet:
-                print("Using general level computation")
+                logger.info("Using general level computation")
             dependency_levels = compute_dependency_levels_general(successors)
             max_successor_levels = None
             level_values_list = None
         
         if not quiet:
-            print(f"Computed {len(dependency_levels)} dependency levels")
+            logger.info(f"Computed {len(dependency_levels)} dependency levels")
             
             # Initialize shared data for worker processes
             # On Linux (fork), workers inherit these as copy-on-write
@@ -1302,7 +1305,7 @@ def compute_human_policy_prior(
             # Skip if using disk_dag - we'll load slices per level instead
             if disk_dag is None:
                 if not quiet:
-                    print("Storing DAG in shared memory...")
+                    logger.info("Storing DAG in shared memory...")
                 init_shared_dag(states, transitions)
             
             # Profiling counters
@@ -1354,7 +1357,7 @@ def compute_human_policy_prior(
                     memory_monitor.check(level_idx)
                 
                 if DEBUG:
-                    print(f"Processing level {level_idx} with {len(level)} states")
+                    logger.debug(f"Processing level {level_idx} with {len(level)} states")
                 
                 if len(level) <= num_workers:
                     # Few states - process sequentially to avoid overhead
@@ -1505,21 +1508,21 @@ def compute_human_policy_prior(
         # Print profiling results
         if PROFILE_PARALLEL:
             overhead = prof_fork_time + prof_submit_time + prof_wait_time + prof_merge_v_time + prof_merge_p_time
-            print("\n=== Parallelization Overhead Profile ===")
-            print(f"States processed in parallel: {prof_states_parallel}")
-            print(f"States processed sequentially: {prof_states_sequential}")
-            print(f"Batches submitted: {prof_batches}")
-            print(f"\nTime breakdown (parallel levels only):")
-            print(f"  Total parallel level time:  {prof_total_parallel_time:.4f}s")
-            print(f"  Fork overhead:              {prof_fork_time:.4f}s")
-            print(f"  Submit overhead:            {prof_submit_time:.4f}s")
-            print(f"  Wait + unpickle (result):   {prof_wait_time:.4f}s")
-            print(f"  Merge Vh-values:            {prof_merge_v_time:.4f}s")
-            print(f"  Merge policies:             {prof_merge_p_time:.4f}s")
-            print(f"  Sequential in parallel mode:{prof_seq_in_par_time:.4f}s")
-            print(f"\n  Overhead total:             {overhead:.4f}s")
+            logger.info("\n=== Parallelization Overhead Profile ===")
+            logger.info(f"States processed in parallel: {prof_states_parallel}")
+            logger.info(f"States processed sequentially: {prof_states_sequential}")
+            logger.info(f"Batches submitted: {prof_batches}")
+            logger.info("\nTime breakdown (parallel levels only):")
+            logger.info(f"  Total parallel level time:  {prof_total_parallel_time:.4f}s")
+            logger.info(f"  Fork overhead:              {prof_fork_time:.4f}s")
+            logger.info(f"  Submit overhead:            {prof_submit_time:.4f}s")
+            logger.info(f"  Wait + unpickle (result):   {prof_wait_time:.4f}s")
+            logger.info(f"  Merge Vh-values:            {prof_merge_v_time:.4f}s")
+            logger.info(f"  Merge policies:             {prof_merge_p_time:.4f}s")
+            logger.info(f"  Sequential in parallel mode:{prof_seq_in_par_time:.4f}s")
+            logger.info(f"\n  Overhead total:             {overhead:.4f}s")
             if prof_total_parallel_time > 0:
-                print(f"  Overhead percentage:        {100*overhead/prof_total_parallel_time:.1f}%")
+                logger.info(f"  Overhead percentage:        {100*overhead/prof_total_parallel_time:.1f}%")
             
             # Worker load balance analysis
             if prof_batch_times:
@@ -1527,16 +1530,16 @@ def compute_human_policy_prior(
                 min_batch = min(prof_batch_times)
                 max_batch = max(prof_batch_times)
                 mean_batch = sum_batch / len(prof_batch_times)
-                print(f"\nWorker batch times ({len(prof_batch_times)} batches):")
-                print(f"  Min batch time:             {min_batch:.4f}s")
-                print(f"  Max batch time:             {max_batch:.4f}s")
-                print(f"  Mean batch time:            {mean_batch:.4f}s")
-                print(f"  Sum of all batch times:     {sum_batch:.4f}s")
+                logger.info(f"\nWorker batch times ({len(prof_batch_times)} batches):")
+                logger.info(f"  Min batch time:             {min_batch:.4f}s")
+                logger.info(f"  Max batch time:             {max_batch:.4f}s")
+                logger.info(f"  Mean batch time:            {mean_batch:.4f}s")
+                logger.info(f"  Sum of all batch times:     {sum_batch:.4f}s")
                 if prof_total_parallel_time > 0:
                     theoretical_speedup = sum_batch / prof_total_parallel_time
-                    print(f"  Theoretical max speedup:    {theoretical_speedup:.2f}x")
-                    print(f"  Load imbalance (max/mean):  {max_batch/mean_batch:.2f}x")
-            print("=========================================")
+                    logger.info(f"  Theoretical max speedup:    {theoretical_speedup:.2f}x")
+                    logger.info(f"  Load imbalance (max/mean):  {max_batch/mean_batch:.2f}x")
+            logger.info("=========================================")
         
             # Store inline slice cache in sliced_cache (states processed sequentially in parallel mode)
             if inline_slice_cache:
@@ -1584,8 +1587,8 @@ def compute_human_policy_prior(
                              rho_h=rho_h, world_model=world_model)
         except KeyboardInterrupt:
             if not quiet:
-                print("\n[Phase1] Computation interrupted (KeyboardInterrupt).")
-                print("         Partial results have been computed.")
+                logger.info("\n[Phase1] Computation interrupted (KeyboardInterrupt).")
+                logger.info("         Partial results have been computed.")
             # Re-raise to allow caller to handle
             raise
     
@@ -1608,18 +1611,18 @@ def compute_human_policy_prior(
     
     # Print actual memory after backward induction
     if not quiet:
-        print(f"\nActual memory usage (after Phase 1 backward induction):")
-        print(f"  Process RSS: {get_process_memory_mb():.1f} MB")
+        logger.info("\nActual memory usage (after Phase 1 backward induction):")
+        logger.info(f"  Process RSS: {get_process_memory_mb():.1f} MB")
         vh_actual = deep_sizeof(Vh_values) / (1024**2)
         policies_actual = deep_sizeof(system2_policies) / (1024**2)
         cache_actual = deep_sizeof(sliced_cache) / (1024**2) if sliced_cache is not None else 0.0
-        print(f"  Vh_values: {vh_actual:.1f} MB")
-        print(f"  system2_policies: {policies_actual:.1f} MB")
+        logger.info(f"  Vh_values: {vh_actual:.1f} MB")
+        logger.info(f"  system2_policies: {policies_actual:.1f} MB")
         if sliced_cache is not None:
-            print(f"  sliced_cache: {cache_actual:.1f} MB")
+            logger.info(f"  sliced_cache: {cache_actual:.1f} MB")
         else:
-            print(f"  sliced_cache: DISABLED")
-        print(f"  Total measured Phase 1 structures: {vh_actual + policies_actual + cache_actual:.1f} MB")
+            logger.info("  sliced_cache: DISABLED")
+        logger.info(f"  Total measured Phase 1 structures: {vh_actual + policies_actual + cache_actual:.1f} MB")
     
     if return_Vh:
         # Convert V_values from list-indexed to state-indexed dict
