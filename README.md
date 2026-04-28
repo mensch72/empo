@@ -64,7 +64,7 @@ The EMPO framework so far provides:
 #### MultiGrid (`vendor/multigrid/`)
 Extended multi-agent gridworld environment with:
 - State management and transition probability computation
-- New object types: Rock, Block, UnsteadyGround, MagicWall
+- New object types: Rock, Block, Bush, UnsteadyGround, MagicWall
 - Map-based environment specification
 - Agent-specific capabilities (can_push_rocks, can_enter_magic_walls)
 

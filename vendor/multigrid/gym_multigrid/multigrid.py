@@ -316,7 +316,7 @@ class ConfigGoalGenerator:
         # Find all walkable cells (not containing immovable non-overlappable objects)
         # Agents can never stand on these cell types:
         non_walkable_types = {
-            'wall', 'lava', 'magicwall',
+            'wall', 'lava', 'magicwall', 'bush',
             'killbutton', 'pauseswitch', 'disablingswitch', 'controlbutton',
         }
         uncovered = []
@@ -493,7 +493,7 @@ class ConfigGoalSampler:
         # Find all walkable cells (not containing immovable non-overlappable objects)
         # Agents can never stand on these cell types:
         non_walkable_types = {
-            'wall', 'lava', 'magicwall',
+            'wall', 'lava', 'magicwall', 'bush',
             'killbutton', 'pauseswitch', 'disablingswitch', 'controlbutton',
         }
         uncovered = []
@@ -650,7 +650,8 @@ class World:
         'killbutton': 17,
         'pauseswitch': 18,
         'disablingswitch': 19,
-        'controlbutton': 20
+        'controlbutton': 20,
+        'bush': 21,
     }
     IDX_TO_OBJECT = dict(zip(OBJECT_TO_IDX.values(), OBJECT_TO_IDX.keys()))
 
@@ -1838,6 +1839,81 @@ class Rock(WorldObj):
         fill_coords(img, point_in_circle(0.65, 0.55, 0.10), darker_grey)
 
 
+class Bush(WorldObj):
+    """
+    Dense bush that all agents can attempt to walk through.
+
+    A bush is mutable but immobile. All agents can attempt to enter it via the
+    forward action, but the two agent types interact with it differently:
+
+    - **Robot-like agents** (``can_be_trampled_by`` returns True) **trample** the
+      bush: it is permanently removed from the grid and the cell becomes empty.
+      Robots always trample with certainty, regardless of ``enter_bush_success_prob``.
+
+    - **Human agents** (all others) **enter** the bush without trampling it: the
+      bush stays intact. The agent occupies the cell alongside the bush (like
+      terrain), and the bush is restored to the grid when the human leaves the
+      cell. Success is stochastic: it occurs with probability
+      ``enter_bush_success_prob`` (default 1.0, i.e. always succeeds by default).
+      When the attempt fails the agent stays put and the bush is unchanged.
+
+    enter_bush_success_prob: Probability (0.0 to 1.0) that a human agent's forward
+        attempt to enter a bush succeeds. Robots are unaffected — they always
+        trample with certainty. Values below 1.0 make human entry stochastic,
+        which smooths the human-power reward signal: even partial bush paths
+        increase reachability.
+    """
+
+    def __init__(self, world, trampled=False, enter_bush_success_prob=1.0):
+        super(Bush, self).__init__(world, 'bush', 'green')
+        self.trampled = trampled
+        assert 0.0 <= enter_bush_success_prob <= 1.0, (
+            f"enter_bush_success_prob must be between 0.0 and 1.0, got {enter_bush_success_prob}"
+        )
+        self.enter_bush_success_prob = enter_bush_success_prob
+
+    def can_overlap(self):
+        return False
+
+    def can_pickup(self):
+        return False
+
+    def can_be_trampled_by(self, agent):
+        return (
+            getattr(agent, 'can_push_rocks', False) or
+            getattr(agent, 'can_enter_magic_walls', False) or
+            getattr(agent, 'color', None) == 'grey'
+        )
+
+    def encode(self, world, current_agent=False):
+        if world.encode_dim == 3:
+            return (
+                world.OBJECT_TO_IDX[self.type],
+                world.COLOR_TO_IDX[self.color],
+                1 if self.trampled else 0,
+            )
+        return (
+            world.OBJECT_TO_IDX[self.type],
+            world.COLOR_TO_IDX[self.color],
+            1 if self.trampled else 0,
+            0,
+            0,
+            0,
+        )
+
+    def render(self, img):
+        if self.trampled:
+            return
+
+        c = COLORS[self.color]
+        dark = np.array([20, 90, 30])
+        light = np.array([90, 180, 75])
+        fill_coords(img, point_in_circle(0.35, 0.48, 0.28), c)
+        fill_coords(img, point_in_circle(0.58, 0.42, 0.30), light)
+        fill_coords(img, point_in_circle(0.56, 0.62, 0.26), c)
+        fill_coords(img, point_in_circle(0.42, 0.58, 0.22), dark)
+
+
 class Agent(WorldObj):
     def __init__(self, world, index=0, view_size=7, can_enter_magic_walls=False, can_push_rocks=False):
         super(Agent, self).__init__(world, 'agent', world.IDX_TO_COLOR[index])
@@ -2493,6 +2569,7 @@ def parse_map_string(map_spec, objects_set=World):
     - Wc : wall of color c
     - Bl : block
     - Ro : rock  
+    - Bu : bush (robot-tramplable obstacle)
     - Lc : locked door of color c
     - Cc : closed door of color c
     - Oc : open door of color c
@@ -2618,6 +2695,8 @@ def _parse_cell(cell_str, objects_set):
         return ('block', {})
     elif full_cell_code == 'Ro':
         return ('rock', {})
+    elif full_cell_code == 'Bu':
+        return ('bush', {})
     elif full_cell_code == 'La':
         return ('lava', {})
     elif full_cell_code == 'Sw':
@@ -2688,7 +2767,7 @@ def _parse_cell(cell_str, objects_set):
         raise ValueError(f"Unknown cell type: {cell_str}")
 
 
-def create_object_from_spec(cell_spec, objects_set, actions_set=None, stumble_probability=0.5, solidify_probability=0.1):
+def create_object_from_spec(cell_spec, objects_set, actions_set=None, stumble_probability=0.5, solidify_probability=0.1, enter_bush_success_prob=1.0):
     """
     Create a WorldObj from a cell specification.
     
@@ -2698,6 +2777,7 @@ def create_object_from_spec(cell_spec, objects_set, actions_set=None, stumble_pr
         actions_set: The Actions class to use (optional, needed for ControlButton)
         stumble_probability: Default stumble probability for UnsteadyGround (0.0 to 1.0)
         solidify_probability: Default solidify probability for MagicWall (0.0 to 1.0)
+        enter_bush_success_prob: Default probability for a human agent to successfully enter a Bush (0.0 to 1.0)
         
     Returns:
         WorldObj or None for empty cells
@@ -2713,6 +2793,9 @@ def create_object_from_spec(cell_spec, objects_set, actions_set=None, stumble_pr
         return Block(objects_set)
     elif obj_type == 'rock':
         return Rock(objects_set)
+    elif obj_type == 'bush':
+        return Bush(objects_set, trampled=params.get('trampled', False),
+                    enter_bush_success_prob=params.get('enter_bush_success_prob', enter_bush_success_prob))
     elif obj_type == 'lava':
         return Lava(objects_set)
     elif obj_type == 'switch':
@@ -2815,7 +2898,8 @@ class MultiGridEnv(WorldModel):
             config_file=None,
             config=None,
             stumble_probability=0.5,
-            solidify_probability=0.1
+            solidify_probability=0.1,
+            enter_bush_success_prob=1.0
     ):
         """
         Initialize a MultiGridEnv.
@@ -2849,6 +2933,7 @@ class MultiGridEnv(WorldModel):
                    If both config and config_file are provided, config_file takes precedence.
             stumble_probability: Default probability of stumbling on UnsteadyGround (0.0 to 1.0)
             solidify_probability: Default probability of MagicWall solidifying on failed entry (0.0 to 1.0)
+            enter_bush_success_prob: Default probability that a human agent successfully enters a Bush (0.0 to 1.0). Robots always trample with certainty regardless of this value.
         """
         # Load config from config file or dict if provided
         if config_file is not None:
@@ -2888,6 +2973,8 @@ class MultiGridEnv(WorldModel):
                 stumble_probability = config['stumble_probability']
             if solidify_probability == 0.1 and 'solidify_probability' in config:  # default: 0.1
                 solidify_probability = config['solidify_probability']
+            if enter_bush_success_prob == 1.0 and 'enter_bush_success_prob' in config:  # default: 1.0
+                enter_bush_success_prob = config['enter_bush_success_prob']
             # Handle action_class from config
             if actions_set is Actions and 'action_class' in config:
                 action_class_name = config['action_class']
@@ -2922,6 +3009,9 @@ class MultiGridEnv(WorldModel):
         
         # Store solidify_probability for use by MagicWall objects
         self.solidify_probability = solidify_probability
+        
+        # Store enter_bush_success_prob as the default for Bush objects
+        self.enter_bush_success_prob = enter_bush_success_prob
         
         # Initialize RNG early so we can use it for random orientations
         # This is done before reset() to allow random orientations to be drawn in __init__
@@ -3173,7 +3263,7 @@ class MultiGridEnv(WorldModel):
         # Track cells where stumbling occurred in the current step (for visual feedback)
         self.stumbled_cells = set()
         
-        # Build cache of mobile objects (blocks, rocks) and mutable objects (doors, boxes, magic walls)
+        # Build cache of mobile objects (blocks, rocks) and mutable objects (doors, boxes, magic walls, bushes)
         # This avoids full grid scans in get_state()
         self._build_object_cache()
         
@@ -3194,7 +3284,7 @@ class MultiGridEnv(WorldModel):
         Build cache of mobile and mutable objects to avoid full grid scans in get_state().
         
         Mobile objects: blocks and rocks (can be pushed)
-        Mutable objects: doors, boxes, magic walls, killbuttons, pauseswitches, controlbuttons (have mutable state)
+        Mutable objects: doors, boxes, magic walls, bushes, killbuttons, pauseswitches, controlbuttons (have mutable state)
         
         This cache stores references to the objects themselves, not their positions.
         Positions are read from the grid when get_state() is called.
@@ -3214,8 +3304,8 @@ class MultiGridEnv(WorldModel):
                 if obj_type in ('block', 'rock'):
                     self._mobile_objects.append(((i, j), cell))
                 
-                # Mutable objects: doors, boxes, magic walls, killbuttons, pauseswitches, controlbuttons
-                elif obj_type in ('door', 'box', 'magicwall', 'killbutton', 'pauseswitch', 'controlbutton'):
+                # Mutable objects: doors, boxes, magic walls, bushes, killbuttons, pauseswitches, controlbuttons
+                elif obj_type in ('door', 'box', 'magicwall', 'bush', 'killbutton', 'pauseswitch', 'controlbutton'):
                     self._mutable_objects.append(((i, j), cell))
         
         # Sort mobile objects by initial position for deterministic ordering
@@ -3315,6 +3405,7 @@ class MultiGridEnv(WorldModel):
             'box': 'B',
             'goal': 'G',
             'lava': 'V',
+            'bush': 'U',
         }
 
         # Short string for opened door
@@ -3386,7 +3477,8 @@ class MultiGridEnv(WorldModel):
                 if cell_spec is not None and cell_spec[0] != 'agent':
                     obj = create_object_from_spec(cell_spec, self.objects, self.actions, 
                                                   stumble_probability=self.stumble_probability,
-                                                  solidify_probability=self.solidify_probability)
+                                                  solidify_probability=self.solidify_probability,
+                                                  enter_bush_success_prob=self.enter_bush_success_prob)
                     if obj is not None:
                         self.grid.set(x, y, obj)
         
@@ -3532,6 +3624,11 @@ class MultiGridEnv(WorldModel):
                 return False
             can_push, _, _ = self._can_push_objects(agent, np.array([fwd_x, fwd_y]))
             return can_push
+
+        if fwd_cell.type == 'bush':
+            # All agents can attempt to enter a bush.
+            # Robots always succeed; humans succeed with enter_bush_success_prob.
+            return True
         
         # Check for magic walls
         if fwd_cell.type == 'magicwall' and fwd_cell.active:
@@ -3657,6 +3754,52 @@ class MultiGridEnv(WorldModel):
         
         # Set new position
         self.grid.set(*self.agents[agent_idx].pos, self.agents[agent_idx])
+
+    def _trample_bush(self, agent_idx, target_pos, bush):
+        """Trample a bush and move the agent into its now-empty cell.
+
+        Only called for robot-like agents (can_be_trampled_by returns True).
+        The bush is permanently removed from the grid.
+
+        Args:
+            agent_idx: Index of the agent doing the trampling.
+            target_pos: Grid position (x, y) of the bush to trample.
+            bush: The Bush object at target_pos.
+        
+        Returns:
+            bool: Always True (trampling always succeeds when this is called).
+        """
+        bush.trampled = True
+        self.grid.set(*target_pos, None)
+        self._move_agent_to_cell(agent_idx, target_pos, None)
+        return True
+
+    def _enter_bush(self, agent_idx, target_pos, bush):
+        """Move a human agent onto a bush without trampling it.
+
+        The bush stays intact. It is saved to terrain_grid so it persists
+        under the agent and is restored to the grid when the agent leaves the
+        cell — exactly the same mechanism used for unsteady ground and magic
+        walls.
+
+        Only called for non-robot (human) agents when their bush-entry attempt
+        has already been resolved to 'succeed'.
+
+        Args:
+            agent_idx: Index of the agent entering the bush.
+            target_pos: Grid position (x, y) of the bush cell.
+            bush: The Bush object at target_pos.
+
+        Returns:
+            bool: Always True (entry always succeeds when this is called).
+        """
+        # Pre-save the bush to terrain_grid so _move_agent_to_cell keeps it.
+        # _move_agent_to_cell only auto-saves cells with can_overlap() == True;
+        # by pre-saving we ensure the bush survives the move (same pattern as
+        # magic wall entry in _process_magic_wall_agents).
+        self.terrain_grid.set(*target_pos, bush)
+        self._move_agent_to_cell(agent_idx, target_pos, bush)
+        return True
     
     def _handle_switch(self, i, rewards, fwd_pos, fwd_cell):
         pass
@@ -3909,6 +4052,11 @@ class MultiGridEnv(WorldModel):
                     done = True
                     self._reward(agent_idx, rewards, 1)
                     self._move_agent_to_cell(agent_idx, fwd_pos, fwd_cell)
+                elif fwd_cell.type == 'bush':
+                    if fwd_cell.can_be_trampled_by(self.agents[agent_idx]):
+                        self._trample_bush(agent_idx, fwd_pos, fwd_cell)
+                    else:
+                        self._enter_bush(agent_idx, fwd_pos, fwd_cell)
                 elif fwd_cell.type == 'switch':
                     self._handle_switch(agent_idx, rewards, fwd_pos, fwd_cell)
                     self._move_agent_to_cell(agent_idx, fwd_pos, fwd_cell)
@@ -4068,6 +4216,11 @@ class MultiGridEnv(WorldModel):
                         done = True
                         self._reward(i, rewards, 1)
                         can_move = True
+                    elif fwd_cell.type == 'bush':
+                        if fwd_cell.can_be_trampled_by(self.agents[i]):
+                            can_move = self._trample_bush(i, fwd_pos, fwd_cell)
+                        else:
+                            can_move = self._enter_bush(i, fwd_pos, fwd_cell)
                     elif fwd_cell.type == 'switch':
                         self._handle_switch(i, rewards, fwd_pos, fwd_cell)
                         can_move = True
@@ -4080,7 +4233,7 @@ class MultiGridEnv(WorldModel):
                 else:
                     can_move = False
             
-            if can_move:
+            if can_move and not (fwd_cell is not None and fwd_cell.type == 'bush'):
                 self._move_agent_to_cell(i, fwd_pos, fwd_cell)
                 self._handle_special_moves(i, rewards, fwd_pos, fwd_cell)
         
@@ -4136,9 +4289,27 @@ class MultiGridEnv(WorldModel):
         
         return done
     
+    def _is_probabilistic_bush_trample(self, agent_idx, fwd_cell):
+        """
+        Return True when an agent facing fwd_cell would perform a stochastic bush trampling.
+
+        Robots (agents for which ``fwd_cell.can_be_trampled_by()`` returns True) always
+        trample with certainty — they are never stochastic.  Only non-robot (human) agents
+        facing an untrampled bush whose ``enter_bush_success_prob`` is strictly less than 1.0
+        produce a stochastic transition.
+        """
+        if fwd_cell is None or fwd_cell.type != 'bush':
+            return False
+        agent = self.agents[agent_idx]
+        # Robots always succeed with certainty - not stochastic
+        if fwd_cell.can_be_trampled_by(agent):
+            return False
+        # Human agent: stochastic if enter_bush_success_prob < 1.0
+        return fwd_cell.enter_bush_success_prob < 1.0
+    
     def _categorize_agents(self, actions, active_agents=None):
         """
-        Helper function to categorize agents into normal, unsteady-forward, and magic-wall-entry groups.
+        Helper function to categorize agents into normal, unsteady-forward, magic-wall-entry, and bush-trampling groups.
         This logic is shared between step() and transition_probabilities().
         
         **IMPORTANT NOTE FOR DEVELOPERS:**
@@ -4161,17 +4332,19 @@ class MultiGridEnv(WorldModel):
         Examples of stochastic elements that follow this pattern:
         - Unsteady ground: agent stumbles with probability, creating 3 outcomes (forward, left+forward, right+forward)
         - Magic walls: agent enters with probability, creating 2 outcomes (succeed, fail)
+        - Bush trampling: trampling succeeds with probability, creating 2 outcomes (succeed, fail)
         
         Args:
             actions: List of action indices, one per agent
             active_agents: List of active agent indices (if None, determines from agent states)
             
         Returns:
-            tuple: (normal_agents, unsteady_forward_agents, magic_wall_agents)
+            tuple: (normal_agents, unsteady_forward_agents, magic_wall_agents, bush_agents)
         """
         normal_agents = []
         unsteady_forward_agents = []
         magic_wall_agents = []
+        bush_agents = []
         
         # Determine active agents if not provided
         if active_agents is None:
@@ -4198,6 +4371,14 @@ class MultiGridEnv(WorldModel):
                     if fwd_cell.magic_side == 4 or approach_dir == fwd_cell.magic_side:
                         magic_wall_agents.append(i)
                         continue
+            
+            # Check if agent is attempting probabilistic bush trampling
+            if actions[i] == self.actions.forward:
+                fwd_pos = self.agents[i].front_pos
+                fwd_cell = self.grid.get(*fwd_pos)
+                if self._is_probabilistic_bush_trample(i, fwd_cell):
+                    bush_agents.append(i)
+                    continue
                 
             # Check if agent is on unsteady ground and attempting forward
             if (actions[i] == self.actions.forward and 
@@ -4206,7 +4387,7 @@ class MultiGridEnv(WorldModel):
             else:
                 normal_agents.append(i)
         
-        return normal_agents, unsteady_forward_agents, magic_wall_agents
+        return normal_agents, unsteady_forward_agents, magic_wall_agents, bush_agents
 
     def step(self, actions):
         # Clear visual feedback from previous step
@@ -4790,7 +4971,7 @@ class MultiGridEnv(WorldModel):
         - step_count: int
         - agent_states: tuple of (pos_x, pos_y, dir, terminated, started, paused, carrying_type, carrying_color, forced_next_action)
         - mobile_objects: tuple of (obj_type, pos_x, pos_y) for blocks/rocks
-        - mutable_objects: tuple of (obj_type, x, y, mutable_state...) for doors/boxes/magic walls
+        - mutable_objects: tuple of (obj_type, x, y, mutable_state...) for doors/boxes/magic walls/bushes
         
         Note: on_unsteady_ground is NOT stored in the state - it is derived from the
         agent's position and the terrain_grid when set_state() is called.
@@ -4828,7 +5009,7 @@ class MultiGridEnv(WorldModel):
             for j in range(self.grid.height):
                 for i in range(self.grid.width):
                     cell = self.grid.get(i, j)
-                    if cell is not None and cell.type in ('block', 'rock', 'door', 'box', 'magicwall', 'killbutton', 'pauseswitch', 'controlbutton'):
+                    if cell is not None and cell.type in ('block', 'rock', 'door', 'box', 'magicwall', 'bush', 'killbutton', 'pauseswitch', 'controlbutton'):
                         has_trackable = True
                         break
                 if has_trackable:
@@ -4875,6 +5056,12 @@ class MultiGridEnv(WorldModel):
                     'magicwall',
                     x, y,
                     obj.active,
+                ))
+            elif obj.type == 'bush':
+                mutable_objects.append((
+                    'bush',
+                    x, y,
+                    obj.trampled,
                 ))
             elif obj.type == 'killbutton':
                 mutable_objects.append((
@@ -5017,6 +5204,11 @@ class MultiGridEnv(WorldModel):
                     self.terrain_grid.set(*agent.pos, current_cell)
                     # Derive on_unsteady_ground from the terrain
                     agent.on_unsteady_ground = (current_cell.type == 'unsteadyground')
+                elif current_cell is not None and current_cell.type == 'bush':
+                    # Human agent is on an untrampled bush — the bush persists as
+                    # terrain under the agent (same pattern as magic wall entry).
+                    self.terrain_grid.set(*agent.pos, current_cell)
+                    agent.on_unsteady_ground = False
                 else:
                     self.terrain_grid.set(*agent.pos, None)
                     agent.on_unsteady_ground = False
@@ -5081,7 +5273,7 @@ class MultiGridEnv(WorldModel):
                 obj.cur_pos = np.array([x, y])
                 self.grid.set(x, y, obj)
         
-        # Restore mutable objects (doors, boxes, magic walls, killbuttons, pauseswitches)
+        # Restore mutable objects (doors, boxes, magic walls, bushes, killbuttons, pauseswitches)
         for mutable_obj in mutable_objects:
             obj_type = mutable_obj[0]
             x, y = mutable_obj[1], mutable_obj[2]
@@ -5111,6 +5303,26 @@ class MultiGridEnv(WorldModel):
                 active = mutable_obj[3]
                 if cell is not None and cell.type == 'magicwall':
                     cell.active = active
+
+            elif obj_type == 'bush':
+                trampled = mutable_obj[3]
+                cached_bush = None
+                if hasattr(self, '_mutable_objects'):
+                    for (obj_x, obj_y), obj in self._mutable_objects:
+                        if obj_x == x and obj_y == y and obj.type == 'bush':
+                            cached_bush = obj
+                            break
+
+                if cached_bush is not None:
+                    cached_bush.trampled = trampled
+                    terrain_cell = self.terrain_grid.get(x, y)
+                    if trampled:
+                        if cell is not None and cell is cached_bush:
+                            self.grid.set(x, y, None)
+                        if terrain_cell is cached_bush:
+                            self.terrain_grid.set(x, y, None)
+                    elif cell is None:
+                        self.grid.set(x, y, cached_bush)
             
             elif obj_type == 'killbutton':
                 enabled = mutable_obj[3]
@@ -5260,9 +5472,10 @@ class MultiGridEnv(WorldModel):
         
         # OPTIMIZATION 1: If ≤1 agents active, check if transition is deterministic
         # (only deterministic if the agent is NOT on unsteady ground attempting forward
-        # and NOT attempting to enter a magic wall)
+        # and NOT attempting to enter a magic wall, and NOT attempting probabilistic bush trampling)
         if len(active_agents) <= 1:
-            # Check if the single agent is on unsteady ground or attempting magic wall entry
+            # Check if the single agent is on unsteady ground, attempting magic wall entry,
+            # or attempting probabilistic bush trampling
             is_stochastic = False
             if len(active_agents) == 1:
                 agent_idx = active_agents[0]
@@ -5277,6 +5490,11 @@ class MultiGridEnv(WorldModel):
                             approach_dir = (self.agents[agent_idx].dir + 2) % 4
                             if approach_dir == fwd_cell.magic_side:
                                 is_stochastic = True
+                    if not is_stochastic:
+                        # Check if agent is trampling a probabilistic bush
+                        fwd_cell = self.grid.get(*self.agents[agent_idx].front_pos)
+                        if self._is_probabilistic_bush_trample(agent_idx, fwd_cell):
+                            is_stochastic = True
             
             if not is_stochastic:
                 # Only one or zero agents acting and not stochastic - order doesn't matter
@@ -5290,27 +5508,32 @@ class MultiGridEnv(WorldModel):
             for i in active_agents
         )
         if n_non_rotations < 2:
-            # Check if any agents are on unsteady ground or attempting magic wall entry
-            has_stochastic = any(
-                actions[i] == self.actions.forward and (
-                    self.agents[i].on_unsteady_ground or
-                    (self.agents[i].can_enter_magic_walls and
-                     self.grid.get(*self.agents[i].front_pos) is not None and
-                     self.grid.get(*self.agents[i].front_pos).type == 'magicwall' and
-                     (self.agents[i].dir + 2) % 4 == self.grid.get(*self.agents[i].front_pos).magic_side)
-                )
-                for i in active_agents
-            )
+            # Check if any agents are on unsteady ground, attempting magic wall entry,
+            # or attempting probabilistic bush trampling
+            def _is_stochastic_forward(i):
+                if actions[i] != self.actions.forward:
+                    return False
+                if self.agents[i].on_unsteady_ground:
+                    return True
+                fwd_cell = self.grid.get(*self.agents[i].front_pos)
+                if fwd_cell is None:
+                    return False
+                if (self.agents[i].can_enter_magic_walls and
+                        fwd_cell.type == 'magicwall' and
+                        (self.agents[i].dir + 2) % 4 == fwd_cell.magic_side):
+                    return True
+                return self._is_probabilistic_bush_trample(i, fwd_cell)
+            has_stochastic = any(_is_stochastic_forward(i) for i in active_agents)
             if not has_stochastic:
                 # Rotations are commutative and no stochastic agents - result is deterministic
                 successor_state = self._compute_successor_state(state, actions, tuple(range(num_agents)))
                 return [(1.0, successor_state)]
         
         # Use helper to categorize agents
-        normal_active_agents, unsteady_forward_agents, magic_wall_agents = self._categorize_agents(actions, active_agents)
+        normal_active_agents, unsteady_forward_agents, magic_wall_agents, bush_agents = self._categorize_agents(actions, active_agents)
         
         # OPTIMIZATION 3: Partition ONLY normal (non-stochastic) agents into conflict blocks
-        # Unsteady and magic wall agents are excluded because they're handled separately
+        # Unsteady, magic wall, and bush agents are excluded because they're handled separately
         # This is MORE efficient than permuting all active agents
         # Instead of k! permutations, we compute the Cartesian product of conflict blocks
         conflict_blocks = self._identify_conflict_blocks(actions, normal_active_agents)
@@ -5318,14 +5541,15 @@ class MultiGridEnv(WorldModel):
         # If no conflicts and no stochastic agents, result is deterministic
         if (all(len(block) == 1 for block in conflict_blocks) and 
             len(unsteady_forward_agents) == 0 and 
-            len(magic_wall_agents) == 0):
+            len(magic_wall_agents) == 0 and
+            len(bush_agents) == 0):
             successor_state = self._compute_successor_state(state, actions, tuple(range(num_agents)))
             return [(1.0, successor_state)]
         
-        # OPTIMIZATION 4: Compute outcomes via Cartesian product of conflict blocks, unsteady blocks, and magic wall blocks
+        # OPTIMIZATION 4: Compute outcomes via Cartesian product of conflict blocks, unsteady blocks, magic wall blocks, and bush blocks
         # Each outcome has probability = 1 / product(block_sizes)
         
-        # Build list of all blocks (conflict blocks + unsteady agent blocks + magic wall blocks)
+        # Build list of all blocks (conflict blocks + unsteady agent blocks + magic wall blocks + bush blocks)
         all_blocks = []
         
         # Add conflict blocks
@@ -5378,15 +5602,28 @@ class MultiGridEnv(WorldModel):
             ]
             all_blocks.append(('magicwall', agent_idx, outcomes))
         
+        # Add bush trampling blocks (one per bush-trampling agent)
+        # Each block has 2 outcomes: succeed (bush trampled, agent moves in) or fail (agent stays)
+        for agent_idx in bush_agents:
+            fwd_pos = self.agents[agent_idx].front_pos
+            fwd_cell = self.grid.get(*fwd_pos)
+            trample_prob = fwd_cell.enter_bush_success_prob if fwd_cell else 1.0
+            outcomes = [
+                (trample_prob, 'succeed'),
+                (1.0 - trample_prob, 'fail'),
+            ]
+            all_blocks.append(('bush', agent_idx, outcomes))
+        
         # Generate all possible outcome combinations
         # For conflict blocks: winner index (which agent wins) - uniform probability
         # For unsteady blocks: outcome index into (probability, outcome) pairs
         # For magic wall blocks: outcome index into (probability, outcome) pairs
+        # For bush blocks: outcome index into (probability, outcome) pairs
         
         def get_block_size(block):
             if block[0] == 'conflict':
                 return len(block[1])
-            elif block[0] in ['unsteady', 'magicwall']:
+            elif block[0] in ['unsteady', 'magicwall', 'bush']:
                 return len(block[2])  # Number of (probability, outcome) pairs
             else:
                 return 1
@@ -5401,7 +5638,7 @@ class MultiGridEnv(WorldModel):
                 if block[0] == 'conflict':
                     # Uniform random winner
                     outcome_indices.append(np.random.randint(size))
-                elif block[0] in ['unsteady', 'magicwall']:
+                elif block[0] in ['unsteady', 'magicwall', 'bush']:
                     # Sample according to outcome probabilities
                     probs = [block[2][j][0] for j in range(size)]
                     outcome_indices.append(np.random.choice(size, p=probs))
@@ -5434,10 +5671,18 @@ class MultiGridEnv(WorldModel):
                     _, outcome_type = block[2][outcome_indices[i]]
                     magic_wall_outcomes[agent_idx] = outcome_type
             
+            # Process bush blocks to determine outcomes
+            bush_outcomes = {}
+            for i, block in enumerate(all_blocks):
+                if block[0] == 'bush':
+                    agent_idx = block[1]
+                    _, outcome_type = block[2][outcome_indices[i]]
+                    bush_outcomes[agent_idx] = outcome_type
+            
             # Compute the single successor state
             succ_state = self._compute_successor_state_with_unsteady(
                 state, modified_actions, num_agents, active_agents,
-                conflict_blocks, conflict_winners, magic_wall_outcomes
+                conflict_blocks, conflict_winners, magic_wall_outcomes, bush_outcomes
             )
             return [(1.0, succ_state)]
         
@@ -5459,7 +5704,7 @@ class MultiGridEnv(WorldModel):
                 if block[0] == 'conflict':
                     # Uniform probability over conflict block members
                     outcome_probability *= 1.0 / len(block[1])
-                elif block[0] in ['unsteady', 'magicwall']:
+                elif block[0] in ['unsteady', 'magicwall', 'bush']:
                     # Use the probability from the (probability, outcome) pair
                     prob, _ = block[2][outcome_idx]
                     outcome_probability *= prob
@@ -5494,10 +5739,19 @@ class MultiGridEnv(WorldModel):
                     _, outcome_type = block[2][outcome_idx]  # Extract outcome from (probability, outcome) pair
                     magic_wall_outcomes[agent_idx] = outcome_type
             
+            # Process bush blocks to determine outcomes
+            bush_outcomes = {}
+            for i, block in enumerate(all_blocks):
+                if block[0] == 'bush':
+                    agent_idx = block[1]
+                    outcome_idx = outcome_indices[i]
+                    _, outcome_type = block[2][outcome_idx]  # Extract outcome from (probability, outcome) pair
+                    bush_outcomes[agent_idx] = outcome_type
+            
             # Compute the successor state for this outcome
             succ_state = self._compute_successor_state_with_unsteady(
                 state, modified_actions, num_agents, active_agents, 
-                conflict_blocks, conflict_winners, magic_wall_outcomes
+                conflict_blocks, conflict_winners, magic_wall_outcomes, bush_outcomes
             )
             
             # Aggregate probabilities for identical successor states
@@ -5797,14 +6051,15 @@ class MultiGridEnv(WorldModel):
     
     def _compute_successor_state_with_unsteady(self, state, modified_actions, num_agents, 
                                                active_agents, conflict_blocks, conflict_winners, 
-                                               magic_wall_outcomes=None):
+                                               magic_wall_outcomes=None, bush_outcomes=None):
         """
-        Compute successor state with unsteady ground and magic wall stochasticity.
+        Compute successor state with unsteady ground, magic wall, and bush trampling stochasticity.
         
         This handles the special processing order required for stochastic elements:
         1. Process normal agents first (with conflict resolution)
         2. Process unsteady-forward agents after (with stumbling outcomes)
-        3. Process magic wall entry attempts last (with probabilistic outcomes)
+        3. Process magic wall entry attempts (with probabilistic outcomes)
+        4. Process bush trampling attempts last (with probabilistic outcomes)
         
         Args:
             state: Current state tuple
@@ -5813,7 +6068,8 @@ class MultiGridEnv(WorldModel):
             active_agents: List of active agent indices
             conflict_blocks: List of conflict blocks
             conflict_winners: List of (block_idx, winner_agent_idx) tuples
-            magic_wall_outcomes: Optional dict mapping agent_idx -> outcome_type ('succeed' or 'fail')
+            magic_wall_outcomes: Optional dict mapping agent_idx -> outcome_type ('succeed', 'fail', or 'solidify')
+            bush_outcomes: Optional dict mapping agent_idx -> outcome_type ('succeed' or 'fail')
             
         Returns:
             tuple: The successor state
@@ -5831,11 +6087,12 @@ class MultiGridEnv(WorldModel):
             if agent.pos is not None and not agent.terminated:
                 self._initial_agent_positions.add(tuple(agent.pos))
         
-        # Separate agents into normal, unsteady-forward, and magic-wall
+        # Separate agents into normal, unsteady-forward, magic-wall, and bush-trampling
         normal_agents = []
         unsteady_forward_agents_list = []
         unsteady_outcomes_dict = {}  # agent_idx -> outcome_type
         magic_wall_agents_list = []
+        bush_agents_list = []
         
         for i in range(num_agents):
             if (self.agents[i].terminated or 
@@ -5851,9 +6108,16 @@ class MultiGridEnv(WorldModel):
                     unsteady_forward_agents_list.append(i)
                     unsteady_outcomes_dict[i] = outcome_type
             elif not self._is_still_action(action):
+                # The categorization below is mutually exclusive by construction:
+                # _categorize_agents() puts each agent in exactly one bucket (magic_wall,
+                # bush, unsteady, or normal) so an agent index can appear in at most one of
+                # magic_wall_outcomes and bush_outcomes.
                 # Check if this is a magic wall agent
                 if magic_wall_outcomes and i in magic_wall_outcomes:
                     magic_wall_agents_list.append(i)
+                # Check if this is a bush trampling agent
+                elif bush_outcomes and i in bush_outcomes:
+                    bush_agents_list.append(i)
                 else:
                     normal_agents.append(i)
         
@@ -5914,6 +6178,21 @@ class MultiGridEnv(WorldModel):
                     if fwd_cell and fwd_cell.type == 'magicwall':
                         fwd_cell.active = False
                 # If outcome is 'fail', agent stays in place and wall stays magic (no action)
+        
+        # Process bush agents (deterministic based on pre-sampled outcome).
+        # Agents in bush_agents_list are always non-robot (human) agents —
+        # robots are placed in normal_agents and handled deterministically above.
+        # On success, the human enters the bush without trampling it (bush stays).
+        if bush_agents_list:
+            for i in bush_agents_list:
+                outcome = bush_outcomes[i]
+                if outcome == 'succeed':
+                    # Human enters bush: bush stays, agent occupies the cell alongside it.
+                    fwd_pos = self.agents[i].front_pos
+                    fwd_cell = self.grid.get(*fwd_pos)
+                    if fwd_cell is not None and fwd_cell.type == 'bush':
+                        self._enter_bush(i, fwd_pos, fwd_cell)
+                # If outcome is 'fail', agent stays in place and bush remains (no action)
         
         # Check if max steps reached
         if self.step_count >= self.max_steps:

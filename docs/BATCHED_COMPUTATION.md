@@ -140,7 +140,7 @@ See `constants.py` for the exact bit masks and shifts used:
 
 | Bits | Field | Values |
 |------|-------|--------|
-| 0-4 | object_type | 0-28 = standard types (see `OBJECT_TYPE_TO_CHANNEL`), 30 = door, 31 = key |
+| 0-4 | object_type | 0-29 = standard types (see `OBJECT_TYPE_TO_CHANNEL`), 30 = door, 31 = key |
 | 5-7 | object_color | 0-6 = color index (for doors/keys) |
 | 8-9 | object_state | 0-3 = door state (none/open/closed/locked) |
 | 10-12 | agent_color | 0-6 = agent color, 7 = no agent |

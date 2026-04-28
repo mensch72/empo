@@ -261,6 +261,7 @@ The vendored `gym_multigrid` in `vendor/multigrid/` extends the original with:
 |------|-------------|
 | `Block` | Pushable by any agent |
 | `Rock` | Pushable only by authorized agents (based on `can_push_rocks`) |
+| `Bush` | Non-overlappable obstacle until a robot-like agent tramples it; then the cell becomes empty for all agents |
 
 #### Terrain Objects
 
@@ -328,6 +329,7 @@ class MyEnv(MultiGridEnv):
 | `Ae` | Grey agent |
 | `Ro` | Rock |
 | `Bl` | Block |
+| `Bu` | Bush |
 | `La` | Lava |
 | `Un` | Unsteady ground |
 | `Sw` | Switch |

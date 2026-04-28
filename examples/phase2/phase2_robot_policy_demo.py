@@ -140,8 +140,11 @@ class GenericGoalGenerator(PossibleGoalGenerator):
         for x in range(self.env.width):
             for y in range(self.env.height):
                 cell = grid.get(x, y)
-                # Cell is walkable if empty or contains only an agent
+                # Cell is a possible goal if empty, overlappable, occupied by
+                # an agent, or a bush that can become empty after trampling.
                 if cell is None:
+                    walkable.append((x, y))
+                elif getattr(cell, 'type', None) == 'bush':
                     walkable.append((x, y))
                 elif hasattr(cell, 'can_overlap') and cell.can_overlap():
                     walkable.append((x, y))

@@ -27,6 +27,7 @@ DEFAULT_PASSING_COSTS = {
     'rock': 50,
     'wall': float('inf'),
     'magicwall': float('inf'),
+    'bush': float('inf'),
     'lava': float('inf'),  # Deadly - impassable
     'unsteadyground': 2,
     'unknown': 2,
@@ -99,7 +100,7 @@ class PathDistanceCalculator:
                 cell = world_model.grid.get(x, y)
                 if cell is not None:
                     cell_type = getattr(cell, 'type', None)
-                    if cell_type in ('wall', 'magicwall', 'lava'):
+                    if cell_type in ('wall', 'magicwall', 'lava', 'bush'):
                         wall_grid[y, x] = True
         
         return wall_grid
@@ -213,7 +214,7 @@ class PathDistanceCalculator:
                         cell = world_model.grid.get(x, y)
                         if cell is not None:
                             cell_type = getattr(cell, 'type', None)
-                            if cell_type in ('wall', 'magicwall', 'lava'):
+                            if cell_type in ('wall', 'magicwall', 'lava', 'bush'):
                                 obstacles.add((x, y))
             dist = self.get_distance(source, target, obstacles)
             return dist  # Simple step count
@@ -287,6 +288,9 @@ class PathDistanceCalculator:
         
         elif cell_type in ('wall', 'magicwall'):
             return self.passing_costs.get('wall', float('inf'))
+
+        elif cell_type == 'bush':
+            return self.passing_costs.get('bush', float('inf'))
         
         elif cell_type == 'lava':
             return self.passing_costs.get('lava', float('inf'))
@@ -594,7 +598,7 @@ class PathDistanceCalculator:
                 if cell is not None:
                     cell_type = getattr(cell, 'type', None)
                     # Check if cell blocks movement
-                    if cell_type in ('wall', 'lava'):
+                    if cell_type in ('wall', 'lava', 'bush'):
                         obstacles.add((x, y))
                     elif cell_type == 'door':
                         # Locked/closed doors are obstacles
