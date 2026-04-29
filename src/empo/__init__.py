@@ -33,7 +33,7 @@ which has been extended with:
 Example usage:
     >>> from empo import WorldModel, PossibleGoal
     >>> from src.envs import SmallOneOrTwoChambersMapEnv
-    >>> 
+    >>>
     >>> env = SmallOneOrTwoChambersMapEnv()
     >>> state = env.get_state()
     >>> transitions = env.transition_probabilities(state, [0, 0])
@@ -43,7 +43,11 @@ from empo.world_model import WorldModel
 from empo.possible_goal import PossibleGoal, PossibleGoalGenerator, PossibleGoalSampler
 from empo.human_policy_prior import HumanPolicyPrior, TabularHumanPolicyPrior
 from empo.robot_policy import RobotPolicy
-from empo.backward_induction import compute_human_policy_prior, TabularRobotPolicy
+from empo.backward_induction import (
+    compute_human_policy_prior,
+    compute_robot_policy,
+    TabularRobotPolicy,
+)
 from empo.hierarchical import HierarchicalWorldModel, LevelMapper
 from empo.util.memory_monitor import MemoryMonitor, check_memory
 
@@ -53,6 +57,18 @@ try:
 except ImportError:
     _HAS_TRANSPORT = False
 
+# Tools environment (always available — no external vendor dependency)
+from empo.world_specific_helpers.tools import (
+    ToolsWorldModel,
+    HoldGoal,
+    WorkbenchGoal,
+    IdleGoal,
+    ToolsGoalGenerator,
+    ToolsGoalSampler,
+    ToolsHeuristicPolicy,
+    create_tools_env,
+)
+
 __version__ = "0.1.0"
 
 __all__ = [
@@ -60,7 +76,7 @@ __all__ = [
     "WorldModel",
     # Possible Goals
     "PossibleGoal",
-    "PossibleGoalGenerator", 
+    "PossibleGoalGenerator",
     "PossibleGoalSampler",
     # Human Policy Prior
     "HumanPolicyPrior",
@@ -70,22 +86,34 @@ __all__ = [
     "TabularRobotPolicy",
     # Backward Induction
     "compute_human_policy_prior",
+    "compute_robot_policy",
     # Hierarchical
     "HierarchicalWorldModel",
     "LevelMapper",
     # Memory Monitoring
     "MemoryMonitor",
     "check_memory",
+    # Tools Environment
+    "ToolsWorldModel",
+    "HoldGoal",
+    "WorkbenchGoal",
+    "IdleGoal",
+    "ToolsGoalGenerator",
+    "ToolsGoalSampler",
+    "ToolsHeuristicPolicy",
+    "create_tools_env",
 ]
 
 # Add transport exports if available
 if _HAS_TRANSPORT:
-    __all__.extend([
-        "TransportEnvWrapper",
-        "TransportActions",
-        "StepType",
-        "create_transport_env",
-        "TransportGoal",
-        "TransportGoalGenerator",
-        "TransportGoalSampler",
-    ])
+    __all__.extend(
+        [
+            "TransportEnvWrapper",
+            "TransportActions",
+            "StepType",
+            "create_transport_env",
+            "TransportGoal",
+            "TransportGoalGenerator",
+            "TransportGoalSampler",
+        ]
+    )
