@@ -16,6 +16,9 @@ from typing import Any, Tuple
 from empo.learning_based.phase2_ppo.actor_critic import EMPOActorCritic
 from empo.learning_based.phase2_ppo.config import PPOPhase2Config
 from empo.learning_based.phase2_ppo.trainer import PPOAuxiliaryNetworks
+from empo.learning_based.phase2.aggregate_goal_ability import (
+    infer_standard_x_h_lower_bound,
+)
 
 from empo.learning_based.multigrid.state_encoder import MultiGridStateEncoder
 from empo.learning_based.multigrid.goal_encoder import MultiGridGoalEncoder
@@ -31,6 +34,9 @@ from empo.learning_based.multigrid.phase2.aggregate_goal_ability import (
 )
 from empo.learning_based.multigrid.phase2.intrinsic_reward_network import (
     MultiGridIntrinsicRewardNetwork,
+)
+from empo.learning_based.multigrid.phase2.inverse_dynamics import (
+    MultiGridInverseDynamicsNetwork,
 )
 
 
@@ -150,6 +156,7 @@ def create_multigrid_ppo_networks(
     # to match the true flattened output size, which may differ from the
     # ``feature_dim`` parameter passed to this factory.
     actual_state_feature_dim = state_encoder.feature_dim
+    standard_x_h_lower_bound = infer_standard_x_h_lower_bound(env, config.gamma_h)
 
     # ── V_h^e ───────────────────────────────────────────────────────────
     v_h_e = MultiGridHumanGoalAchievementNetwork(
@@ -177,6 +184,8 @@ def create_multigrid_ppo_networks(
             state_feature_dim=actual_state_feature_dim,
             hidden_dim=config.hidden_dim,
             zeta=config.zeta,
+            gamma_h=config.gamma_h,
+            feasible_range=(1.0, float('inf')) if config.use_simplified_x_h else (standard_x_h_lower_bound, 1.0),
             max_agents=max_agents,
             agent_embedding_dim=agent_embedding_dim,
             state_encoder=state_encoder,
@@ -196,10 +205,27 @@ def create_multigrid_ppo_networks(
             state_encoder=state_encoder,
         ).to(device)
 
+    inverse_dynamics = None
+    if config.use_simplified_x_h and use_x_h:
+        inverse_dynamics = MultiGridInverseDynamicsNetwork(
+            config=config,
+            num_actions=config.num_actions,
+            grid_height=grid_height,
+            grid_width=grid_width,
+            num_agents_per_color=num_agents_per_color,
+            state_feature_dim=actual_state_feature_dim,
+            hidden_dim=config.hidden_dim,
+            max_agents=max_agents,
+            agent_embedding_dim=agent_embedding_dim,
+            state_encoder=state_encoder,
+            agent_encoder=agent_encoder,
+        ).to(device)
+
     auxiliary_networks = PPOAuxiliaryNetworks(
         v_h_e=v_h_e,
         x_h=x_h,
         u_r=u_r,
+        inverse_dynamics=inverse_dynamics,
     )
 
     return actor_critic, auxiliary_networks, state_encoder

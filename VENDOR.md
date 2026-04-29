@@ -405,3 +405,42 @@ The ai_transport environment requires:
 - matplotlib>=3.5.0
 
 These are already included in the main setup/requirements.txt.
+
+## PufferLib (`pufferlib/pufferl.py`)
+
+PufferLib is installed as a pip package (`pufferlib>=3.0` in `setup/requirements.txt`).
+We vendor a single patched file to override the installed version at container build time.
+
+### Location
+
+```
+vendor/pufferlib/pufferl.py
+```
+
+### Patch
+
+`pufferlib/pufferl.py` line 255 (original):
+```python
+r = torch.clamp(r, -1, 1)
+```
+**Removed.** PufferLib clamps all rewards to `[-1, 1]` by default. EMPO's `U_r` metric is
+intrinsically bounded above by 0 but unbounded below — variance normalization handles scale,
+not range clamping. The clamp was collapsing `U_r` to a constant in simplified mode.
+
+### How It Works
+
+The Dockerfile copies `vendor/pufferlib/pufferl.py` over the pip-installed version:
+```dockerfile
+COPY vendor/pufferlib/pufferl.py /tmp/pufferlib_pufferl_patch.py
+RUN python -c "import pufferlib, shutil, os; \
+    shutil.copy('/tmp/pufferlib_pufferl_patch.py', \
+                os.path.join(os.path.dirname(pufferlib.__file__), 'pufferl.py'))"
+```
+
+### Keeping in Sync
+
+When upgrading `pufferlib`, update `vendor/pufferlib/pufferl.py` by:
+1. `make shell` (enter container after upgrade)
+2. `cp $(python -c "import pufferlib, os; print(os.path.join(os.path.dirname(pufferlib.__file__), 'pufferl.py'))") vendor/pufferlib/pufferl.py`
+3. Re-apply the patch (remove the `r = torch.clamp(r, -1, 1)` line, add the EMPO comment)
+4. Rebuild the container

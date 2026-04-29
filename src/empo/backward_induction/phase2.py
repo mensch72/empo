@@ -107,8 +107,11 @@ def _rp_process_single_state(
     rho_h: float = 0.0,
     rho_r: float = 0.0,
     world_model: Optional['WorldModel'] = None,
+    use_simplified_x_h: bool = False,
+    epsilon_h: float = 0.0,
+    Xh_values: Optional[List[Dict[int, float]]] = None,
 ) -> Tuple[
-    Dict[int, Dict[PossibleGoal, float]],  # vh_results: agent -> goal -> value
+    Dict[int, Dict[PossibleGoal, float]],  # vh_results: agent -> goal -> V_h^e value; empty dict when use_simplified_x_h=True
     float,  # vr_result
     Optional[Dict[RobotActionProfile, float]],  # robot_policy (None for terminal)
     Dict[int, float],  # successor_probs: successor state_index -> transition probability
@@ -142,10 +145,24 @@ def _rp_process_single_state(
         terminal_Vr: Value for terminal states
         slice_cache: Optional SliceCache for this worker's batch (for writing).
             Structure: Dict[state_index, List[Dict[goal, array]]]
+        use_simplified_x_h: If True, compute X_h via the goal-agnostic recursion
+            X_h(s) = 1 + gamma_h^zeta * sum_{s'} q_h(s,s')^zeta * X_h(s')
+            where q_h(s,s') = max_{a_h} P(s'|s, a_h, pi_{-h}).
+            This bypasses V_h^e entirely; Xh_values must be provided.
+        epsilon_h: Bounded-rationality parameter (>= 0). When > 0, mixes the best
+            human action with a uniform prior:
+            q_h(s,s') = (1-epsilon_h)*max_{a_h} P(s'|s, a_h, pi_{-h})
+                        + epsilon_h * mean_{a_h} P(s'|s, a_h, pi_{-h}).
+            Only used when use_simplified_x_h=True.
+        Xh_values: List (indexed by state_index) of dicts mapping agent_index to
+            simplified X_h value. Values for successor states must be populated
+            before this state is processed (backward induction order).
+            Required when use_simplified_x_h=True.
     
     Returns:
         Tuple of:
-        - vh_results: Dict[agent_index, Dict[goal, float]] - V_h^e values for this state
+        - vh_results: Dict[agent_index, Dict[goal, float]] - V_h^e values (empty when
+          use_simplified_x_h=True, since V_h^e is not computed in that case)
         - vr_result: float - V_r value for this state
         - robot_policy: Dict[RobotActionProfile, float] or None (None for terminal states)
         - successor_probs: Dict[successor_state_index, float] - aggregate transition
@@ -221,9 +238,16 @@ def _rp_process_single_state(
     # Use log-space computation for numerical stability:
     # pi_r(a) ∝ (-Q_r(a))^{-beta_r} = exp(-beta_r * log(-Q_r(a)))
     log_neg_Qr = np.log(-Qr_values)  # Q_r values are always negative
-    log_powers = -beta_r * log_neg_Qr
-    log_normalizer = logsumexp(log_powers)
-    ps = np.exp(log_powers - log_normalizer)
+    if np.isinf(beta_r):
+        # Deterministic: uniform over actions with the smallest -Q_r (= largest Q_r)
+        min_val = log_neg_Qr.min()
+        best_mask = (log_neg_Qr == min_val)
+        ps = best_mask.astype(np.float64)
+        ps /= ps.sum()
+    else:
+        log_powers = -beta_r * log_neg_Qr
+        log_normalizer = logsumexp(log_powers)
+        ps = np.exp(log_powers - log_normalizer)
     robot_policy = {robot_action_profile: ps[idx] 
                    for idx, robot_action_profile in enumerate(robot_action_profiles)}
     
@@ -251,129 +275,233 @@ def _rp_process_single_state(
     
     # Compute V_h^e, X_h, and U_r values
     powersum = 0.0  # sum over humans of X_h^(-xi)
-    for agent_index in human_agent_indices:
-        vh_agent = vh_results[agent_index] = vres0.copy() if use_indexed else {}
-        
-        if DEBUG:
-            print(f"   Human agent {agent_index}")
-            # Check if at least one goal is achieved in this state
-            goals_achieved = []
-            for pg, _ in possible_goal_generator.generate(state, agent_index):
-                achieved = pg.is_achieved(state)
-                goals_achieved.append((pg, achieved))
-            if not any(a for _, a in goals_achieved):
-                print(f"   WARNING: No goal achieved in state {state_index}!")
-                for pg, a in goals_achieved:
-                    print(f"     {pg}: is_achieved={a}")
-        
-        xh = 0.0
-        some_goal_achieved_with_positive_prob = False
-        
-        for possible_goal, possible_goal_weight in possible_goal_generator.generate(state, agent_index):
-            if DEBUG:
-                print(f"    Possible goal: {possible_goal}")
-            
-            key = possible_goal.index if use_indexed else possible_goal
-            vh = 0.0
-            for robot_action_profile_index, robot_action_profile in enumerate(robot_action_profiles):
-                action_profile[robot_agent_indices] = robot_action_profile
-                v = 0.0
-                for human_action_profile_prob, human_action_profile in human_policy_prior.profile_distribution_with_fixed_goal(state, agent_index, possible_goal):
-                    action_profile[human_agent_indices] = human_action_profile
-                    action_profile_index = (action_profile @ action_powers).item()
-                    _, next_state_probabilities, next_state_indices = state_transitions[action_profile_index]
-                    
-                    # Look up attainment values from Phase 1 cache
-                    # The slice_cache is pre-populated with all values for this batch from Phase 1
-                    cached = None
-                    
-                    if slice_cache is not None:
-                        cached = this_state_cache[action_profile_index].get(possible_goal)
-                    
-                    if cached is not None:
-                        attainment_values_array = cached
-                    else:
-                        # Cache miss - compute attainment values
-                        # This should rarely happen if Phase 1 populated the cache correctly
-                        attainment_values_array = np.fromiter(
-                            (possible_goal.is_achieved(states[next_state_index]) 
-                             for next_state_index in next_state_indices),
-                            dtype=np.int8,
-                            count=len(next_state_indices)
+
+    if use_simplified_x_h:
+        # ===================================================================
+        # Simplified goal-agnostic X_h recursion (does not require V_h^e):
+        #   X_h(s) = 1 + gamma_h^zeta * sum_{s'} q_h(s,s')^zeta * X_h(s')
+        # where:
+        #   q_h(s,s') = max_{a_h} P(s'|s, a_h, pi_{-h})
+        # With bounded rationality (epsilon_h > 0):
+        #   q_h(s,s') = (1-eps)*max_{a_h} P(...) + eps * mean_{a_h} P(...)
+        # Terminal-state default: X_h(s') = 1.0.
+        # ===================================================================
+        assert Xh_values is not None, "Xh_values must be provided when use_simplified_x_h=True"
+        xh_state_results: Dict[int, float] = {}
+
+        # Pre-compute other-human joint profiles once per state (shared across agents)
+        # For each human h we need the marginal joint of all OTHER humans.
+        # We cache per-agent-index.
+        other_h_data: Dict[int, Tuple[List[int], List[Tuple[float, List[int]]]]] = {}
+        if len(human_agent_indices) > 1:
+            for agent_index in human_agent_indices:
+                other_positions: List[int] = []
+                other_marginals = []
+                for j in human_agent_indices:
+                    if j != agent_index:
+                        other_positions.append(j)
+                        other_marginals.append(
+                            human_policy_prior._to_probability_array(
+                                human_policy_prior(state, j)
+                            )
                         )
-                    
-                    if np.dot(next_state_probabilities, attainment_values_array) > 0.0:
-                        some_goal_achieved_with_positive_prob = True
-                    
-                    # Read successor values - use goal.index if indexed, else goal as key
-                    if use_indexed:
-                        try:
+                other_profiles = human_policy_prior._profile_distribution_numpy(other_marginals)
+                other_h_data[agent_index] = (other_positions, other_profiles)
+
+        for agent_index in human_agent_indices:
+            # p_per_ah[a_h] maps successor state index -> P(s'|s, a_h, pi_{-h})
+            p_per_ah: List[Dict[int, float]] = [{} for _ in range(num_actions)]
+
+            if len(human_agent_indices) == 1:
+                other_positions_h: List[int] = []
+                other_profiles_h: List[Tuple[float, List[int]]] = [(1.0, [])]
+            else:
+                other_positions_h, other_profiles_h = other_h_data[agent_index]
+
+            # Enumerate all a_h values
+            ap = action_profile.copy()
+            for a_h in range(num_actions):
+                ap[agent_index] = a_h
+                p = p_per_ah[a_h]
+
+                for rap_idx, rap in enumerate(robot_action_profiles):
+                    robot_w = float(ps[rap_idx])
+                    if robot_w == 0.0:
+                        continue
+                    ap[robot_agent_indices] = rap
+
+                    for other_prob, other_actions in other_profiles_h:
+                        w = robot_w * other_prob
+                        if w == 0.0:
+                            continue
+                        for j_pos, j_action in zip(other_positions_h, other_actions):
+                            ap[j_pos] = j_action
+                        ap_idx = int(ap @ action_powers)
+                        _, next_probs, next_indices = state_transitions[ap_idx]
+                        for prob, idx in zip(next_probs, next_indices):
+                            p[idx] = p.get(idx, 0.0) + w * float(prob)
+
+            # Collect all reachable successor indices
+            all_s_prime: Set[int] = set()
+            for ph in p_per_ah:
+                all_s_prime.update(ph.keys())
+
+            # X_h(s) = 1 + gamma_h^zeta * sum_{s'} q_h(s,s')^zeta * X_h(s')
+            gamma_h_zeta = gamma_h ** zeta
+            xh = 1.0  # base term
+
+            for s_prime_idx in all_s_prime:
+                max_p = max(
+                    p_per_ah[a_h].get(s_prime_idx, 0.0)
+                    for a_h in range(num_actions)
+                )
+
+                if epsilon_h > 0.0:
+                    mean_p = (
+                        sum(p_per_ah[a_h].get(s_prime_idx, 0.0) for a_h in range(num_actions))
+                        / num_actions
+                    )
+                    q_h = (1.0 - epsilon_h) * max_p + epsilon_h * mean_p
+                else:
+                    q_h = max_p
+
+                if q_h > 0.0:
+                    # X_h(s'): use computed value; default 1.0 for terminal states
+                    # (terminal states have X_h = 1 by definition in the simplified recursion)
+                    xh_s_prime = Xh_values[s_prime_idx].get(agent_index, 1.0)
+                    xh += gamma_h_zeta * (q_h ** zeta) * xh_s_prime
+
+            xh_state_results[agent_index] = xh
+            powersum += xh ** (-xi)
+
+        # Store simplified X_h for this state (used by predecessor states)
+        Xh_values[state_index] = xh_state_results
+        vh_results = {}  # V_h^e is not computed in simplified mode
+
+    else:
+        for agent_index in human_agent_indices:
+            vh_agent = vh_results[agent_index] = vres0.copy() if use_indexed else {}
+            
+            if DEBUG:
+                print(f"   Human agent {agent_index}")
+                # Check if at least one goal is achieved in this state
+                goals_achieved = []
+                for pg, _ in possible_goal_generator.generate(state, agent_index):
+                    achieved = pg.is_achieved(state)
+                    goals_achieved.append((pg, achieved))
+                if not any(a for _, a in goals_achieved):
+                    print(f"   WARNING: No goal achieved in state {state_index}!")
+                    for pg, a in goals_achieved:
+                        print(f"     {pg}: is_achieved={a}")
+            
+            xh = 0.0
+            some_goal_achieved_with_positive_prob = False
+            
+            for possible_goal, possible_goal_weight in possible_goal_generator.generate(state, agent_index):
+                if DEBUG:
+                    print(f"    Possible goal: {possible_goal}")
+                
+                key = possible_goal.index if use_indexed else possible_goal
+                vh = 0.0
+                for robot_action_profile_index, robot_action_profile in enumerate(robot_action_profiles):
+                    action_profile[robot_agent_indices] = robot_action_profile
+                    v = 0.0
+                    for human_action_profile_prob, human_action_profile in human_policy_prior.profile_distribution_with_fixed_goal(state, agent_index, possible_goal):
+                        action_profile[human_agent_indices] = human_action_profile
+                        action_profile_index = (action_profile @ action_powers).item()
+                        _, next_state_probabilities, next_state_indices = state_transitions[action_profile_index]
+                        
+                        # Look up attainment values from Phase 1 cache
+                        # The slice_cache is pre-populated with all values for this batch from Phase 1
+                        cached = None
+                        
+                        if slice_cache is not None:
+                            cached = this_state_cache[action_profile_index].get(possible_goal)
+                        
+                        if cached is not None:
+                            attainment_values_array = cached
+                        else:
+                            # Cache miss - compute attainment values
+                            # This should rarely happen if Phase 1 populated the cache correctly
+                            attainment_values_array = np.fromiter(
+                                (possible_goal.is_achieved(states[next_state_index]) 
+                                 for next_state_index in next_state_indices),
+                                dtype=np.int8,
+                                count=len(next_state_indices)
+                            )
+                        
+                        if np.dot(next_state_probabilities, attainment_values_array) > 0.0:
+                            some_goal_achieved_with_positive_prob = True
+                        
+                        # Read successor values - use goal.index if indexed, else goal as key
+                        if use_indexed:
+                            try:
+                                vhe_values_array = np.fromiter(
+                                    (Vh_values[next_state_index][agent_index][key]
+                                    for next_state_index in next_state_indices),
+                                    dtype=np.float16,
+                                    count=len(next_state_indices)
+                                )
+                            except KeyError:
+                                raise KeyError(f"Key error {Vh_values[next_state_indices[0]][agent_index]}")
+                        else:
                             vhe_values_array = np.fromiter(
-                                (Vh_values[next_state_index][agent_index][key]
-                                for next_state_index in next_state_indices),
+                                (Vh_values[next_state_index][agent_index].get(possible_goal, 0)
+                                 for next_state_index in next_state_indices),
                                 dtype=np.float16,
                                 count=len(next_state_indices)
                             )
-                        except KeyError:
-                            raise KeyError(f"Key error {Vh_values[next_state_indices[0]][agent_index]}")
-                    else:
-                        vhe_values_array = np.fromiter(
-                            (Vh_values[next_state_index][agent_index].get(possible_goal, 0)
-                             for next_state_index in next_state_indices),
-                            dtype=np.float16,
-                            count=len(next_state_indices)
-                        )
-                    # Use np.where to avoid intermediate array allocation
-                    # NumPy automatically promotes float16 to float64 during computation
-                    if rho_h > 0.0:
-                        # Duration-aware discounting for human achievement values
-                        # Only discount non-achieved successors (achieved stay at 1.0)
-                        if world_model is None:
-                            raise ValueError("world_model is required for duration-aware discounting (rho_h > 0)")
-                        # Use cached durations if available, otherwise compute and cache
-                        if action_profile_index in _duration_cache:
-                            durations_arr = _duration_cache[action_profile_index]
+                        # Use np.where to avoid intermediate array allocation
+                        # NumPy automatically promotes float16 to float64 during computation
+                        if rho_h > 0.0:
+                            # Duration-aware discounting for human achievement values
+                            # Only discount non-achieved successors (achieved stay at 1.0)
+                            if world_model is None:
+                                raise ValueError("world_model is required for duration-aware discounting (rho_h > 0)")
+                            # Use cached durations if available, otherwise compute and cache
+                            if action_profile_index in _duration_cache:
+                                durations_arr = _duration_cache[action_profile_index]
+                            else:
+                                transitions_list = [(float(p), states[i]) for p, i in zip(next_state_probabilities, next_state_indices)]
+                                durations_arr = np.array(world_model.transition_durations(state, action_profile.tolist(), transitions_list))
+                                if len(durations_arr) != len(next_state_indices):
+                                    raise ValueError(
+                                        f"transition_durations() returned {len(durations_arr)} durations but expected "
+                                        f"{len(next_state_indices)} (state_index={state_index}, action_profile_index={action_profile_index})")
+                                _duration_cache[action_profile_index] = durations_arr
+                            discount_factors_h = np.exp(-rho_h * durations_arr)
+                            successor_values = np.where(attainment_values_array, 1.0, discount_factors_h * vhe_values_array)
                         else:
-                            transitions_list = [(float(p), states[i]) for p, i in zip(next_state_probabilities, next_state_indices)]
-                            durations_arr = np.array(world_model.transition_durations(state, action_profile.tolist(), transitions_list))
-                            if len(durations_arr) != len(next_state_indices):
-                                raise ValueError(
-                                    f"transition_durations() returned {len(durations_arr)} durations but expected "
-                                    f"{len(next_state_indices)} (state_index={state_index}, action_profile_index={action_profile_index})")
-                            _duration_cache[action_profile_index] = durations_arr
-                        discount_factors_h = np.exp(-rho_h * durations_arr)
-                        successor_values = np.where(attainment_values_array, 1.0, discount_factors_h * vhe_values_array)
-                    else:
-                        # Standard gamma discounting (not duration-aware)
-                        successor_values = np.where(attainment_values_array, 1.0, gamma_h * vhe_values_array)
-                    v += human_action_profile_prob * np.dot(
-                        next_state_probabilities,
-                        successor_values
-                    )
-                vh += ps[robot_action_profile_index] * v
+                            # Standard gamma discounting (not duration-aware)
+                            successor_values = np.where(attainment_values_array, 1.0, gamma_h * vhe_values_array)
+                        v += human_action_profile_prob * np.dot(
+                            next_state_probabilities,
+                            successor_values
+                        )
+                    vh += ps[robot_action_profile_index] * v
+                
+                # Store computed value - use goal.index if indexed, else goal as key
+                if vh != 0.0:
+                    vh_agent[key] = np.float16(vh)
+                xh += possible_goal_weight * vh**zeta
+                
+                if DEBUG:
+                    print(f"      ...Vh = {vh:.4f}")
             
-            # Store computed value - use goal.index if indexed, else goal as key
-            if vh != 0.0:
-                vh_agent[key] = np.float16(vh)
-            xh += possible_goal_weight * vh**zeta
+            assert some_goal_achieved_with_positive_prob, \
+                f"No goal achievable with positive probability for agent {agent_index} in state {state_index}!"
+            
+            if xh == 0:
+                # xh is zero means no goal has positive expected achievement value
+                raise ValueError(
+                    f"xh=0 for agent {agent_index} in state {state_index}: "
+                    f"no goal is reachable! State: {state}"
+                )
             
             if DEBUG:
-                print(f"      ...Vh = {vh:.4f}")
-        
-        assert some_goal_achieved_with_positive_prob, \
-            f"No goal achievable with positive probability for agent {agent_index} in state {state_index}!"
-        
-        if xh == 0:
-            # xh is zero means no goal has positive expected achievement value
-            raise ValueError(
-                f"xh=0 for agent {agent_index} in state {state_index}: "
-                f"no goal is reachable! State: {state}"
-            )
-        
-        if DEBUG:
-            print(f"   ...Xh = {xh:.4f}")
-        
-        powersum += xh**(-xi)
+                print(f"   ...Xh = {xh:.4f}")
+            
+            powersum += xh**(-xi)
     
     y = powersum / len(human_agent_indices)  # average over humans
     ur = -(y**eta)
@@ -423,6 +551,9 @@ def _rp_compute_sequential(
     rho_h: float = 0.0,
     rho_r: float = 0.0,
     world_model: Optional['WorldModel'] = None,
+    use_simplified_x_h: bool = False,
+    epsilon_h: float = 0.0,
+    Xh_values: Optional[List[Dict[int, float]]] = None,
 ) -> None:
     """Sequential Phase 2 backward induction algorithm.
     
@@ -577,6 +708,9 @@ def _rp_compute_sequential(
             rho_h=rho_h,
             rho_r=rho_r,
             world_model=world_model,
+            use_simplified_x_h=use_simplified_x_h,
+            epsilon_h=epsilon_h,
+            Xh_values=Xh_values,
         )
         
         # Store results
@@ -848,7 +982,12 @@ class TabularRobotPolicy(RobotPolicy):
         
         profiles = list(dist.keys())
         probs = np.fromiter((dist[p] for p in profiles), dtype=np.float64, count=len(profiles))
-        probs = probs / probs.sum()  # normalize
+        total = probs.sum()
+        if total > 0 and np.isfinite(total):
+            probs = probs / total
+        else:
+            # Fallback for NaN/inf/zero: uniform over all profiles
+            probs = np.ones(len(profiles)) / len(profiles)
         idx = np.random.choice(len(profiles), p=probs)
         return profiles[idx]
     
@@ -949,7 +1088,13 @@ def compute_robot_policy(
     use_disk_slicing: bool = False,
     use_compression: bool = False,
     use_float16: bool = True,
-) -> Tuple[TabularRobotPolicy, Dict[State, float], Dict[State, Dict[int, Dict[PossibleGoal, float]]]]: ...
+    use_simplified_x_h: bool = False,
+    epsilon_h: float = 0.0,
+) -> Tuple[
+    TabularRobotPolicy,
+    Dict[State, float],
+    Union[Dict[State, Dict[int, Dict[PossibleGoal, float]]], Dict[State, Dict[int, float]]],
+]: ...
 
 
 @overload
@@ -1016,11 +1161,13 @@ def compute_robot_policy(
     use_disk_slicing: bool = False,
     use_compression: bool = False,
     use_float16: bool = True,
+    use_simplified_x_h: bool = False,
+    epsilon_h: float = 0.0,
 ) -> Union[
     TabularRobotPolicy,
     Tuple[TabularRobotPolicy, MarkovChain],
-    Tuple[TabularRobotPolicy, Dict[State, float], Dict[State, Dict[int, Dict[PossibleGoal, float]]]],
-    Tuple[TabularRobotPolicy, Dict[State, float], Dict[State, Dict[int, Dict[PossibleGoal, float]]], MarkovChain],
+    Tuple[TabularRobotPolicy, Dict[State, float], Union[Dict[State, Dict[int, Dict[PossibleGoal, float]]], Dict[State, Dict[int, float]]]],
+    Tuple[TabularRobotPolicy, Dict[State, float], Union[Dict[State, Dict[int, Dict[PossibleGoal, float]]], Dict[State, Dict[int, float]]], MarkovChain],
 ]:
     """
     Compute robot policy via backward induction on the state DAG.
@@ -1098,13 +1245,30 @@ def compute_robot_policy(
             You don't need to pass return_attainment_cache=True to Phase 1 anymore.
             
             The sliced cache structure allows efficient read access without merging overhead.
+        use_simplified_x_h: If True, compute X_h via the goal-agnostic simplified
+            recursion instead of summing V_h^e values over goals:
+                X_h(s) = 1 + gamma_h^zeta * sum_{s'} q_h(s,s')^zeta * X_h(s')
+            where q_h(s,s') = max_{a_h} P(s'|s, a_h, pi_{-h}).
+            Terminal states have X_h = 1. This bypasses Phase 1 goal computation
+            entirely and can be used with any value of zeta.
+            When return_values=True and use_simplified_x_h=True, the third return
+            value is Xh_dict: Dict[State, Dict[int, float]] mapping
+            state -> agent_idx -> simplified X_h value (not goal-conditioned V_h^e).
+        epsilon_h: Bounded-rationality mixing probability (>= 0). When > 0, q_h
+            blends the best human action with a uniform prior:
+                q_h(s,s') = (1-epsilon_h)*max_{a_h} P(s'|s, a_h, pi_{-h})
+                            + epsilon_h * mean_{a_h} P(s'|s, a_h, pi_{-h})
+            Only used when use_simplified_x_h=True.
     
     Returns:
         TabularRobotPolicy: Robot policy that can be called as policy(state).
         
-        If return_values=True, returns tuple (robot_policy, Vr_dict, Vh_dict) where:
+        If return_values=True, returns tuple (robot_policy, Vr_dict, Vh_or_Xh_dict) where:
         - Vr_dict maps state -> float (robot value function)
-        - Vh_dict maps state -> agent_idx -> goal -> float (human goal achievement values)
+        - Vh_or_Xh_dict when use_simplified_x_h=False: maps state -> agent_idx ->
+          goal -> float (human goal achievement values)
+        - Vh_or_Xh_dict when use_simplified_x_h=True: maps state -> agent_idx ->
+          float (simplified X_h values; no goal dimension)
         
         If return_markov_chain=True, a MarkovChain is appended to the return tuple.
         MarkovChain is a list indexed by state_index where each entry is a dict
@@ -1113,8 +1277,8 @@ def compute_robot_policy(
         Combined return patterns:
         - return_values=False, return_markov_chain=False: TabularRobotPolicy
         - return_values=False, return_markov_chain=True: (TabularRobotPolicy, MarkovChain)
-        - return_values=True, return_markov_chain=False: (TabularRobotPolicy, Vr_dict, Vh_dict)
-        - return_values=True, return_markov_chain=True: (TabularRobotPolicy, Vr_dict, Vh_dict, MarkovChain)
+        - return_values=True, return_markov_chain=False: (TabularRobotPolicy, Vr_dict, Vh_or_Xh_dict)
+        - return_values=True, return_markov_chain=True: (TabularRobotPolicy, Vr_dict, Vh_or_Xh_dict, MarkovChain)
     
     Example:
         >>> # Phase 1 automatically stores attainment cache on world_model
@@ -1293,6 +1457,11 @@ def compute_robot_policy(
     else:
         Vh_values: Union[VhValues, VhValuesSmall] = [[{} for _ in range(num_agents)] for _ in range(len(states))]
     Vr_values: VrValues = np.zeros(len(states))
+
+    # Allocate simplified X_h storage when requested (replaces per-goal V_h^e)
+    Xh_values: Optional[List[Dict[int, float]]] = None
+    if use_simplified_x_h:
+        Xh_values = [{} for _ in range(len(states))]
     
     # ============================================================================
     # WARN if parallel mode was requested
@@ -1557,6 +1726,9 @@ def compute_robot_policy(
                 level_fct, return_values, archive_dir, disk_dag, quiet, memory_profile,
                 markov_chain=markov_chain_data,
                 rho_h=rho_h, rho_r=rho_r, world_model=world_model,
+                use_simplified_x_h=use_simplified_x_h,
+                epsilon_h=epsilon_h,
+                Xh_values=Xh_values,
             )
         except KeyboardInterrupt:
             if not quiet:
@@ -1589,6 +1761,20 @@ def compute_robot_policy(
     if return_values:
         # Convert Vr_values from array to dict
         Vr_dict = {states[idx]: float(Vr_values[idx]) for idx in range(len(states))}
+        
+        if use_simplified_x_h:
+            # Return simplified X_h values instead of per-goal V_h^e values
+            # Structure: state -> agent_idx -> X_h (float), terminal states absent
+            assert Xh_values is not None
+            Xh_dict: Dict[State, Dict[int, float]] = {}
+            for state_idx, state in enumerate(states):
+                if Xh_values[state_idx]:
+                    Xh_dict[state] = dict(Xh_values[state_idx])
+            if _pbar is not None:
+                _pbar.close()
+            if return_markov_chain:
+                return robot_policy, Vr_dict, Xh_dict, markov_chain_data  # type: ignore[return-value]
+            return robot_policy, Vr_dict, Xh_dict  # type: ignore[return-value]
         
         # Convert Vh_values from list-indexed to state-indexed dict
         Vh_dict = {}

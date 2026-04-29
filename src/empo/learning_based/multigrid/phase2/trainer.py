@@ -11,6 +11,9 @@ import torch
 
 from gym_multigrid.multigrid import MultiGridEnv
 
+from empo.learning_based.phase2.aggregate_goal_ability import (
+    infer_standard_x_h_lower_bound,
+)
 from empo.learning_based.phase2.config import Phase2Config
 from empo.learning_based.phase2.trainer import BasePhase2Trainer, Phase2Networks
 from empo.learning_based.phase2.network_factory import create_count_based_curiosity
@@ -23,6 +26,7 @@ from .human_goal_ability import MultiGridHumanGoalAchievementNetwork
 from .aggregate_goal_ability import MultiGridAggregateGoalAbilityNetwork
 from .intrinsic_reward_network import MultiGridIntrinsicRewardNetwork
 from .robot_value_network import MultiGridRobotValueNetwork
+from .inverse_dynamics import MultiGridInverseDynamicsNetwork
 
 # Lookup table network imports
 
@@ -538,8 +542,19 @@ def create_phase2_networks(
     use_neural_x_h = config.x_h_use_network and not config.should_use_lookup_table('x_h')
     use_neural_u_r = config.u_r_use_network and not config.should_use_lookup_table('u_r')
     use_neural_v_r = config.v_r_use_network and not config.should_use_lookup_table('v_r')
+    use_neural_inverse_dynamics = (
+        config.use_simplified_x_h
+        and not config.should_use_lookup_table('v_h_e')
+    )
     
-    any_neural = use_neural_q_r or use_neural_v_h_e or use_neural_x_h or use_neural_u_r or use_neural_v_r
+    any_neural = (
+        use_neural_q_r
+        or use_neural_v_h_e
+        or use_neural_x_h
+        or use_neural_u_r
+        or use_neural_v_r
+        or use_neural_inverse_dynamics
+    )
     
     # If no neural networks needed, use all lookup tables
     if not any_neural:
@@ -567,10 +582,17 @@ def create_phase2_networks(
         
         x_h = None
         if config.x_h_use_network:
-            x_h = LookupTableAggregateGoalAbilityNetwork(
-                default_x_h=config.get_lookup_default('x_h'),
-                include_step_count=config.include_step_count,
-            )
+            if config.use_simplified_x_h:
+                x_h = LookupTableAggregateGoalAbilityNetwork(
+                    default_x_h=1.0,
+                    feasible_range=(1.0, float('inf')),
+                    include_step_count=config.include_step_count,
+                )
+            else:
+                x_h = LookupTableAggregateGoalAbilityNetwork(
+                    default_x_h=config.get_lookup_default('x_h'),
+                    include_step_count=config.include_step_count,
+                )
         
         u_r = None
         if config.u_r_use_network:
@@ -643,6 +665,7 @@ def create_phase2_networks(
     # Common parameters
     grid_height = env.height
     grid_width = env.width
+    standard_x_h_lower_bound = infer_standard_x_h_lower_bound(env, config.gamma_h)
     
     # =========================================================================
     # Create V_h^e first (it provides shared encoders to other networks)
@@ -815,6 +838,7 @@ def create_phase2_networks(
     x_h = None
     if config.x_h_use_network:
         if use_neural_x_h:
+            x_h_feasible_range = (1.0, float('inf')) if config.use_simplified_x_h else (standard_x_h_lower_bound, 1.0)
             x_h = MultiGridAggregateGoalAbilityNetwork(
                 grid_height=grid_height,
                 grid_width=grid_width,
@@ -829,14 +853,38 @@ def create_phase2_networks(
                 agent_encoder=shared_agent_encoder,       # From V_h^e (SHARED, used detached)
                 own_state_encoder=x_h_own_state_encoder,  # OWN (trained with X_h)
                 own_agent_encoder=x_h_own_agent_encoder,  # OWN (trained with X_h)
+                feasible_range=x_h_feasible_range,
             ).to(device)
         else:
             from empo.learning_based.phase2.lookup import LookupTableAggregateGoalAbilityNetwork
-            x_h = LookupTableAggregateGoalAbilityNetwork(
-                default_x_h=config.get_lookup_default('x_h'),
-                include_step_count=config.include_step_count,
-            )
+            if config.use_simplified_x_h:
+                x_h = LookupTableAggregateGoalAbilityNetwork(
+                    default_x_h=1.0,
+                    feasible_range=(1.0, float('inf')),
+                    include_step_count=config.include_step_count,
+                )
+            else:
+                x_h = LookupTableAggregateGoalAbilityNetwork(
+                    default_x_h=config.get_lookup_default('x_h'),
+                    include_step_count=config.include_step_count,
+                )
     
+    inverse_dynamics = None
+    if use_neural_inverse_dynamics:
+        inverse_dynamics = MultiGridInverseDynamicsNetwork(
+            config=config,
+            num_actions=env.action_space.n,
+            grid_height=grid_height,
+            grid_width=grid_width,
+            num_agents_per_color=num_agents_per_color,
+            state_feature_dim=hidden_dim,
+            hidden_dim=hidden_dim,
+            max_agents=max_agents,
+            agent_embedding_dim=agent_embedding_dim,
+            state_encoder=shared_state_encoder,
+            agent_encoder=shared_agent_encoder,
+        ).to(device)
+
     # U_r network (optional)
     u_r = None
     if config.u_r_use_network:
@@ -966,6 +1014,7 @@ def create_phase2_networks(
         x_h=x_h,
         u_r=u_r,
         v_r=v_r,
+            inverse_dynamics=inverse_dynamics,
         rnd=rnd,
         rnd_encoder_dims=rnd_encoder_dims,  # Store for coefficient computation
         human_rnd=human_rnd,

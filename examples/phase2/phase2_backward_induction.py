@@ -681,11 +681,11 @@ def main(
     num_rollouts: int = 20,
     parallel: bool = True,
     num_workers: Optional[int] = 4,
-    beta_h: float = 10.0,
-    beta_r: float = 100.0,
-    gamma_h: float = 0.95,
-    gamma_r: float = 0.99,
-    zeta: float = 2.0,
+    beta_h: float = 1e10,
+    beta_r: float = 1e10,
+    gamma_h: float = 0.999,
+    gamma_r: float = 0.999,
+    zeta: float = 1.1,
     xi: float = 1.0,
     eta: float = 1.1,
     terminal_Vr: float = -1e-10,
@@ -701,6 +701,7 @@ def main(
     actions_set=None,
     optimistic: bool = False,
     human_always_toggles: bool = False,
+    simple_power: bool = False,
 ):
     """
     Run Phase 2 backward induction demo.
@@ -957,6 +958,7 @@ def main(
         terminal_Vr=terminal_Vr,
         parallel=parallel,
         num_workers=num_workers,
+        use_simplified_x_h=simple_power,
         use_disk_slicing=True,  # Enable disk slicing (matches Phase 1)
         level_fct=lambda state: state[0],  # Extract timestep from MultiGrid state
 #        archive_dir=output_dir,  # Save archived values to output directory
@@ -1313,6 +1315,9 @@ if __name__ == "__main__":
     parser.add_argument('--profile', action='store_true',
                         help='Enable line profiling of backward_induction package '
                              '(requires line_profiler: pip install line_profiler)')
+    parser.add_argument('--simple-power', action='store_true',
+                        help='Use simplified (goal-agnostic) power metric X_h '
+                             'instead of full goal-conditioned computation')
     parser.add_argument('--optimistic', action='store_true',
                         help='Use best-case (max) over robot actions in Phase 1 '
                              'instead of worst-case (min)')
@@ -1371,4 +1376,5 @@ if __name__ == "__main__":
         actions_set=actions_set,
         optimistic=args.optimistic,
         human_always_toggles=args.human_always_toggles,
+        simple_power=args.simple_power,
     )

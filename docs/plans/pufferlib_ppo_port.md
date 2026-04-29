@@ -1727,7 +1727,7 @@ class PPOPhase2Config:
     
     # ----- Entropy schedule (optional, mimics β_r ramp-up) -----
     ppo_ent_coef_start: float = 0.1     # Initial entropy coefficient (high = exploratory)
-    ppo_ent_coef_end: float = 0.01      # Final entropy coefficient
+    ppo_ent_coef_end: float = 0.01      # Final entropy coefficient (cosine annealing)
     ppo_ent_anneal_steps: int = 10000   # Training steps to anneal entropy coefficient
     
     # ----- Network architecture -----

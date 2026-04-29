@@ -75,6 +75,7 @@ from empo.learning_based.phase2.human_goal_ability import (
 from empo.learning_based.phase2.aggregate_goal_ability import (
     BaseAggregateGoalAbilityNetwork,
 )
+from empo.learning_based.phase2.inverse_dynamics import BaseInverseDynamicsNetwork
 from empo.learning_based.phase2.intrinsic_reward_network import (
     BaseIntrinsicRewardNetwork,
 )
@@ -84,9 +85,6 @@ from .config import PPOPhase2Config
 
 logger = logging.getLogger(__name__)
 
-# Floor for X_h values to prevent numerical instability in X_h^{-ξ}
-# (division by zero / explosion when X_h → 0).  Matches the DQN path.
-_X_H_MIN = 1e-3
 
 
 # ======================================================================
@@ -106,11 +104,13 @@ class PPOAuxiliaryNetworks:
     v_h_e: BaseHumanGoalAchievementNetwork
     x_h: Optional[BaseAggregateGoalAbilityNetwork] = None
     u_r: Optional[BaseIntrinsicRewardNetwork] = None
+    inverse_dynamics: Optional[BaseInverseDynamicsNetwork] = None
 
     # Frozen copies for reward computation during rollouts
     v_h_e_target: Optional[BaseHumanGoalAchievementNetwork] = None
     x_h_target: Optional[BaseAggregateGoalAbilityNetwork] = None
     u_r_target: Optional[BaseIntrinsicRewardNetwork] = None
+    inverse_dynamics_target: Optional[BaseInverseDynamicsNetwork] = None
 
 
 # ======================================================================
@@ -150,7 +150,7 @@ class PPOPhase2Trainer:
 
         # Move auxiliary networks to the same device as the actor-critic
         # to prevent device-mismatch errors in forward() calls.
-        for net_name in ("v_h_e", "x_h", "u_r"):
+        for net_name in ("v_h_e", "x_h", "u_r", "inverse_dynamics"):
             net = getattr(auxiliary_networks, net_name, None)
             if net is not None and hasattr(net, "to"):
                 net.to(device)
@@ -174,6 +174,12 @@ class PPOPhase2Trainer:
                 lr=config.lr_u_r,
                 weight_decay=config.u_r_weight_decay,
             )
+        if auxiliary_networks.inverse_dynamics is not None:
+            self.aux_optimizers["inverse_dynamics"] = optim.Adam(
+                auxiliary_networks.inverse_dynamics.parameters(),
+                lr=1e-3, # Use a default or config.lr_inverse_dynamics if available
+                weight_decay=1e-5,
+            )
 
         # Auxiliary replay buffer
         self.aux_replay_buffer = Phase2ReplayBuffer(capacity=config.aux_buffer_size)
@@ -182,6 +188,13 @@ class PPOPhase2Trainer:
         self.global_env_step: int = 0
         self.ppo_iteration: int = 0
         self.aux_training_step: int = 0  # cumulative warm-up + in-loop aux steps
+        self._warmup_u_r_std: Optional[float] = None
+        self._latest_inverse_dynamics_stats: Dict[str, float] = {
+            "loss": 0.0,
+            "acc": 0.0,
+            "true_prob": 0.0,
+            "entropy": 0.0,
+        }
 
         # TensorBoard writer (initialised lazily in train())
         self.writer: Optional[Any] = None  # type: Optional[SummaryWriter]
@@ -193,12 +206,15 @@ class PPOPhase2Trainer:
     def freeze_auxiliary_networks(self) -> None:
         """Create frozen copies of auxiliary networks for reward computation."""
         nets = self.auxiliary_networks
-        nets.v_h_e_target = copy.deepcopy(nets.v_h_e)
-        nets.v_h_e_target.eval()
-        for p in nets.v_h_e_target.parameters():
-            p.requires_grad = False
-        if hasattr(nets.v_h_e_target, "to"):
-            nets.v_h_e_target.to(self.device)
+        if self.config.use_simplified_x_h:
+            nets.v_h_e_target = None
+        else:
+            nets.v_h_e_target = copy.deepcopy(nets.v_h_e)
+            nets.v_h_e_target.eval()
+            for p in nets.v_h_e_target.parameters():
+                p.requires_grad = False
+            if hasattr(nets.v_h_e_target, "to"):
+                nets.v_h_e_target.to(self.device)
         if nets.x_h is not None:
             nets.x_h_target = copy.deepcopy(nets.x_h)
             nets.x_h_target.eval()
@@ -213,6 +229,13 @@ class PPOPhase2Trainer:
                 p.requires_grad = False
             if hasattr(nets.u_r_target, "to"):
                 nets.u_r_target.to(self.device)
+        if nets.inverse_dynamics is not None:
+            nets.inverse_dynamics_target = copy.deepcopy(nets.inverse_dynamics)
+            nets.inverse_dynamics_target.eval()
+            for p in nets.inverse_dynamics_target.parameters():
+                p.requires_grad = False
+            if hasattr(nets.inverse_dynamics_target, "to"):
+                nets.inverse_dynamics_target.to(self.device)
 
     # ------------------------------------------------------------------
     # Auxiliary training
@@ -239,6 +262,139 @@ class PPOPhase2Trainer:
             next_state=next_state,
             transition_probs_by_action=transition_probs,
             terminal=terminal,
+        )
+
+    # ------------------------------------------------------------------
+    # Simplified X_h target computation
+    # ------------------------------------------------------------------
+
+    def _compute_simplified_x_h_td_target(
+        self,
+        states: List[Any],
+        next_states: List[Any],
+        human_indices: List[int],
+        terminals: Optional[List[bool]] = None,
+        world_model: Any = None,
+    ) -> torch.Tensor:
+        """Compute simplified X_h TD targets for the PPO path.
+
+        Delegates the heavy lifting to
+        :func:`~empo.learning_based.phase2.simplified_x_h.compute_simplified_x_h_td_targets`
+        after preparing PPO-specific inputs (robot policy from actor-critic,
+        X_h targets from auxiliary target network).
+
+        Parameters
+        ----------
+        states, next_states : list
+            Source / successor states, one per sample.
+        human_indices : list[int]
+            Focal human agent index for each sample.
+        terminals : list[bool] or None
+            Terminal flags.  ``True`` → X_h(s') = 1.
+        world_model : WorldModel or None
+            If ``None``, uses ``self._empo_env.world_model``.
+
+        Returns
+        -------
+        Tensor of shape ``(batch,)`` with TD targets.
+        """
+        from empo.learning_based.phase2.simplified_x_h import (
+            compute_simplified_x_h_td_targets,
+        )
+        from .env_wrapper import _flat_index_to_tuple
+
+        empo_env = getattr(self, "_empo_env", None)
+        if empo_env is None:
+            raise RuntimeError(
+                "_compute_simplified_x_h_td_target requires self._empo_env "
+                "to be set (call train() first, or set it manually)."
+            )
+
+        if world_model is None:
+            world_model = empo_env.world_model
+
+        cfg = self.config
+        nets = self.auxiliary_networks
+
+        if terminals is None:
+            terminals = [False] * len(states)
+
+        # --- X_h target values for next_states ---
+        x_h_target_net = nets.x_h_target or nets.x_h
+        with torch.no_grad():
+            x_h_next_list = []
+            for ns, h_idx, is_term in zip(next_states, human_indices, terminals):
+                if is_term:
+                    x_h_next_list.append(torch.tensor(1.0, device=self.device))
+                else:
+                    val = x_h_target_net(ns, world_model, h_idx, self.device)
+                    val = torch.as_tensor(val.squeeze(), device=self.device)
+                    x_h_next_list.append(val)
+            x_h_next_values = torch.stack(x_h_next_list)
+
+        # --- Robot policy per unique state (from actor-critic) ---
+        unique_states = list(dict.fromkeys(states))
+        robot_policy_per_state: Dict[Any, torch.Tensor] = {}
+        with torch.no_grad():
+            for state in unique_states:
+                obs = empo_env._state_to_obs(state)
+                obs_t = torch.tensor(obs, dtype=torch.float32, device=self.device)
+                if obs_t.dim() == 1:
+                    obs_t = obs_t.unsqueeze(0)
+                logits, _ = self.actor_critic(obs_t)
+                probs = torch.softmax(logits.squeeze(0), dim=-1)
+                robot_policy_per_state[state] = probs
+
+        # --- Other-human goal-agnostic probs function ---
+        # The PPO env wrapper's human_policy_prior has signature
+        # (state, h_idx, goal, world_model).  Passing goal=None yields the
+        # goal-agnostic marginal for HumanPolicyPrior subclasses.  For
+        # plain callables that ignore the goal (e.g. uniform priors) this
+        # also works.
+        hpp = empo_env.human_policy_prior
+        wm_ref = world_model
+
+        def _other_human_probs(state: Any, agent_index: int):
+            from empo.human_policy_prior import HumanPolicyPrior as _HPP
+
+            if isinstance(hpp, _HPP):
+                return hpp(state, agent_index)
+            return hpp(state, agent_index, None, wm_ref)
+
+        # --- action_index_to_tuple using env wrapper's convention ---
+        num_actions = cfg.num_actions
+        num_robots = cfg.num_robots
+
+        def _action_index_to_tuple(idx: int):
+            return _flat_index_to_tuple(idx, num_actions, num_robots)
+
+        human_agent_indices = empo_env.human_agent_indices
+        robot_agent_indices = empo_env.robot_agent_indices
+        num_agents = max(human_agent_indices + robot_agent_indices) + 1
+
+        return compute_simplified_x_h_td_targets(
+            states,
+            next_states,
+            human_indices,
+            gamma_h=cfg.gamma_h,
+            zeta=cfg.zeta,
+            epsilon_h=cfg.x_h_epsilon_h,
+            num_actions=num_actions,
+            num_agents=num_agents,
+            human_agent_indices=human_agent_indices,
+            robot_agent_indices=robot_agent_indices,
+            x_h_next_values=x_h_next_values,
+            robot_policy_per_state=robot_policy_per_state,
+            action_index_to_tuple=_action_index_to_tuple,
+            other_human_probs_fn=_other_human_probs,
+            world_model=world_model,
+            inverse_dynamics_network=(
+                self.auxiliary_networks.inverse_dynamics_target
+                or self.auxiliary_networks.inverse_dynamics
+            )
+            if cfg.use_simplified_x_h
+            else None,
+            device=self.device,
         )
 
     def train_auxiliary_step(
@@ -310,7 +466,6 @@ class PPOPhase2Trainer:
                                 goal,
                                 self.device,
                             )
-                            next_v = target_net.apply_hard_clamp(next_v)
                             target = cfg.gamma_h * next_v.squeeze()
                     v_h_e_targets.append(target)
 
@@ -330,7 +485,7 @@ class PPOPhase2Trainer:
                 losses["v_h_e_loss"] = loss_v.item()
 
         # -----------------------------------------------------------------
-        # X_h loss: MSE between X_h(s, h) and w_h * V_h^e(s, g_h)^ζ
+        # X_h loss: MSE between X_h(s, h) and target
         # -----------------------------------------------------------------
         if (
             nets.x_h is not None
@@ -341,23 +496,52 @@ class PPOPhase2Trainer:
             x_h_preds: List[torch.Tensor] = []
             x_h_targets_list: List[torch.Tensor] = []
 
-            for t in batch:
-                for h_idx, goal in t.goals.items():
-                    weight = t.goal_weights.get(h_idx, 1.0)
-                    pred = nets.x_h(t.state, world_model, h_idx, self.device)
-                    x_h_preds.append(pred.squeeze())
+            if cfg.use_simplified_x_h:
+                # Simplified goal-agnostic target via the recursion
+                #   X_h(s) = 1 + gamma_h^zeta * q_h(s,s')^zeta * X_h_target(s')
+                # In the learning-based path, q_h is approximated from the
+                # inverse-dynamics ratio P_theta(a_h | s, s') / pi_h(a_h | s).
+                # Collect (state, next_state, h_idx, terminal) per sample.
+                simp_states: List[Any] = []
+                simp_next: List[Any] = []
+                simp_hidx: List[int] = []
+                simp_term: List[bool] = []
 
+                for t in batch:
+                    for h_idx in t.goals.keys():
+                        pred = nets.x_h(t.state, world_model, h_idx, self.device)
+                        x_h_preds.append(pred.squeeze())
+                        simp_states.append(t.state)
+                        simp_next.append(t.next_state)
+                        simp_hidx.append(h_idx)
+                        simp_term.append(t.terminal)
+
+                if x_h_preds:
                     with torch.no_grad():
-                        v_target_net = nets.v_h_e_target or nets.v_h_e
-                        v_for_x = v_target_net(
-                            t.state, world_model, h_idx, goal, self.device
+                        target_x_h = self._compute_simplified_x_h_td_target(
+                            simp_states, simp_next, simp_hidx,
+                            terminals=simp_term,
+                            world_model=world_model,
                         )
-                        v_for_x = v_target_net.apply_hard_clamp(v_for_x)
-                        x_target = nets.x_h.compute_target(
-                            v_for_x.squeeze(),
-                            goal_weight=weight,
-                        )
-                    x_h_targets_list.append(x_target)
+                    x_h_targets_list = list(target_x_h.unbind())
+            else:
+                # Standard target from V_h^e: w_h * V_h^e(s, g_h)^ζ
+                for t in batch:
+                    for h_idx, goal in t.goals.items():
+                        weight = t.goal_weights.get(h_idx, 1.0)
+                        pred = nets.x_h(t.state, world_model, h_idx, self.device)
+                        x_h_preds.append(pred.squeeze())
+
+                        with torch.no_grad():
+                            v_target_net = nets.v_h_e_target or nets.v_h_e
+                            v_for_x = v_target_net(
+                                t.state, world_model, h_idx, goal, self.device
+                            )
+                            x_target = nets.x_h.compute_target(
+                                v_for_x.squeeze(),
+                                goal_weight=weight,
+                            )
+                        x_h_targets_list.append(x_target)
 
             if x_h_preds:
                 xp = torch.stack(x_h_preds)
@@ -396,8 +580,7 @@ class PPOPhase2Trainer:
                             xv = x_h_target_net(
                                 t.state, world_model, h_idx, self.device
                             )
-                            xv = x_h_target_net.apply_hard_clamp(xv)
-                            x_vals.append(max(xv.squeeze().item(), _X_H_MIN))
+                            x_vals.append(xv.squeeze().item())
                     if x_vals:
                         x_t = torch.tensor(x_vals, device=self.device)
                         y_t = (x_t ** (-cfg.xi)).mean()
@@ -417,6 +600,59 @@ class PPOPhase2Trainer:
                     nn.utils.clip_grad_norm_(nets.u_r.parameters(), cfg.u_r_grad_clip)
                 opt.step()
                 losses["u_r_loss"] = loss_u.item()
+
+        # -----------------------------------------------------------------
+        # inverse_dynamics loss: Cross-Entropy between predicted action logits and actual human actions
+        # -----------------------------------------------------------------
+        if (
+            nets.inverse_dynamics is not None
+            and world_model is not None
+            and "inverse_dynamics" in self.aux_optimizers
+            and (active_networks is None or "inverse_dynamics" in active_networks)
+            and cfg.use_simplified_x_h
+        ):
+            q_preds_list: List[torch.Tensor] = []
+            q_targets_list: List[torch.Tensor] = []
+
+            for t in batch:
+                for h_idx in t.goals.keys():
+                    if t.human_actions is None:
+                        continue
+                    # Ensure human action logic is properly hooked up
+                    # t.human_actions typically is a tuple per agent
+                    # Make sure humans are taking valid actions (not NOOP)
+                    # We might need the human's actual action integer from the tuple:
+                    
+                    if h_idx < len(t.human_actions):
+                        human_action = t.human_actions[h_idx]
+                        logits = nets.inverse_dynamics(t.state, t.next_state, world_model, h_idx, self.device)
+                        q_preds_list.append(logits)
+                        q_targets_list.append(torch.tensor(human_action, dtype=torch.long, device=self.device))
+            
+            if q_preds_list:
+                qp = torch.cat(q_preds_list, dim=0)
+                qt = torch.stack(q_targets_list)
+
+                loss_inv_dyn = torch.nn.functional.cross_entropy(qp, qt)
+                opt = self.aux_optimizers["inverse_dynamics"]
+                opt.zero_grad()
+                loss_inv_dyn.backward()
+                opt.step()
+                losses["inverse_dynamics_loss"] = loss_inv_dyn.item()
+
+                with torch.no_grad():
+                    probs = torch.softmax(qp, dim=-1)
+                    pred_actions = probs.argmax(dim=-1)
+                    true_prob = probs.gather(1, qt.unsqueeze(1)).mean().item()
+                    entropy = (
+                        -(probs * probs.clamp_min(1e-8).log()).sum(dim=-1).mean().item()
+                    )
+                    self._latest_inverse_dynamics_stats = {
+                        "loss": float(loss_inv_dyn.item()),
+                        "acc": float((pred_actions == qt).float().mean().item()),
+                        "true_prob": float(true_prob),
+                        "entropy": float(entropy),
+                    }
 
         return losses
 
@@ -443,6 +679,64 @@ class PPOPhase2Trainer:
         # same PPOAuxiliaryNetworks object, so frozen target updates are
         # immediately visible.  Nothing to do here.
         pass
+
+    @staticmethod
+    def _freeze_u_r_normalization_in_envs(
+        vecenv: Any, u_r_std: Optional[float] = None
+    ) -> None:
+        """Freeze/apply U_r normalization statistics in all environments.
+
+        If ``u_r_std`` is provided, apply this warmup std directly to each
+        environment and mark normalization as frozen. Otherwise each env
+        freezes from its own local warmup buffer.
+        """
+        envs = getattr(vecenv, "envs", None)
+        if envs is None:
+            envs = getattr(vecenv, "single_env", None)
+            if envs is not None:
+                envs = [envs]
+        if not envs:
+            return
+
+        _MAX_UNWRAP_DEPTH = 20
+
+        for env in envs:
+            # Unwrap PufferLib emulation layers to reach EMPOWorldModelEnv.
+            inner = env
+            depth = 0
+            while hasattr(inner, "env") and depth < _MAX_UNWRAP_DEPTH:
+                inner = inner.env
+                depth += 1
+            if u_r_std is not None:
+                if hasattr(inner, "_u_r_std"):
+                    inner._u_r_std = float(u_r_std)
+                if hasattr(inner, "_u_r_frozen"):
+                    inner._u_r_frozen = True
+                if hasattr(inner, "_u_r_warmup_buffer"):
+                    inner._u_r_warmup_buffer.clear()
+            else:
+                if hasattr(inner, "freeze_u_r_normalization"):
+                    inner.freeze_u_r_normalization()
+
+    @staticmethod
+    def _broadcast_stat_to_envs(vecenv: Any, attr: str, value: float) -> None:
+        """Set a scalar attribute on all unwrapped env instances."""
+        envs = getattr(vecenv, "envs", None)
+        if envs is None:
+            envs = getattr(vecenv, "single_env", None)
+            if envs is not None:
+                envs = [envs]
+        if not envs:
+            return
+        _MAX_UNWRAP_DEPTH = 20
+        for env in envs:
+            inner = env
+            depth = 0
+            while hasattr(inner, "env") and depth < _MAX_UNWRAP_DEPTH:
+                inner = inner.env
+                depth += 1
+            if hasattr(inner, attr):
+                setattr(inner, attr, value)
 
     def _collect_aux_data_from_rollout(self, pufferl: Any, vecenv: Any) -> None:
         """Extract auxiliary transition data from environment aux buffers.
@@ -522,6 +816,46 @@ class PPOPhase2Trainer:
                     transition_probs=transition_probs,
                     terminal=terminal,
                 )
+
+    @staticmethod
+    def _compute_reward_signal_stats(pufferl: Any) -> Dict[str, float]:
+        """Stats of the rollout reward signal used by PPO training.
+
+        Uses PuffeRL's internal reward buffer (same signal used for
+        advantage computation) and computes robust summary statistics over
+        finite entries.
+        """
+        rewards = getattr(pufferl, "rewards", None)
+        if rewards is None:
+            return {
+                "std": 0.0,
+                "mean": 0.0,
+                "min": 0.0,
+                "max": 0.0,
+            }
+        try:
+            flat = rewards.detach().reshape(-1)
+            finite = flat[torch.isfinite(flat)]
+            if finite.numel() == 0:
+                return {
+                    "std": 0.0,
+                    "mean": 0.0,
+                    "min": 0.0,
+                    "max": 0.0,
+                }
+            return {
+                "std": float(torch.std(finite, unbiased=False).item()),
+                "mean": float(torch.mean(finite).item()),
+                "min": float(torch.min(finite).item()),
+                "max": float(torch.max(finite).item()),
+            }
+        except Exception:
+            return {
+                "std": 0.0,
+                "mean": 0.0,
+                "min": 0.0,
+                "max": 0.0,
+            }
 
     # ------------------------------------------------------------------
     # TensorBoard helpers
@@ -719,16 +1053,23 @@ class PPOPhase2Trainer:
                     _, reward, terminated, truncated, info = env.step(action)
 
                     u_r = None
-                    if isinstance(info, dict) and "u_r" in info:
-                        u_r = info["u_r"]
-                    else:
-                        # Fall back to the scalar reward returned by env_step.
-                        u_r = reward
-                    # Many wrappers expose a scaled u_r; rescale to the underlying
-                    # U_r magnitude if _u_r_scale is present.
-                    scale_attr = getattr(env, "_u_r_scale", 1.0)
+                    if isinstance(info, dict):
+                        # Preferred key: raw theoretical U_r.
+                        if "u_r" in info:
+                            u_r = info["u_r"]
+                        # Backward compatibility: wrappers that expose only scaled PPO reward.
+                        elif "u_r_ppo" in info:
+                            scale_attr = getattr(env, "_u_r_scale", 1.0)
+                            u_r = float(info["u_r_ppo"]) * float(scale_attr)
+                    if u_r is None:
+                        # Fall back to scalar reward returned by env_step (likely scaled).
+                        scale_attr = getattr(env, "_u_r_scale", 1.0)
+                        try:
+                            u_r = float(reward) * float(scale_attr)
+                        except (TypeError, ValueError):
+                            continue
                     try:
-                        u_r = float(u_r) * float(scale_attr)
+                        u_r = float(u_r)
                     except (TypeError, ValueError):
                         # If casting fails, skip this sample.
                         continue
@@ -778,6 +1119,8 @@ class PPOPhase2Trainer:
             Per-iteration loss / metric dictionaries.
         """
         cfg = self.config
+        if cfg.use_simplified_x_h:
+            logger.info("Using simplified (goal-agnostic) power metric X_h")
         if num_iterations is None:
             n_iters = cfg.num_ppo_iterations
         else:
@@ -838,12 +1181,20 @@ class PPOPhase2Trainer:
         self.freeze_auxiliary_networks()
         self._sync_aux_nets_to_envs(vecenv)
 
+        # Freeze U_r post-warmup scaling statistics.
+        # Reuse warmup std from the single-env warmup phase so PPO vecenvs do
+        # not default to std=1 due to empty local warmup buffers.
+        self._freeze_u_r_normalization_in_envs(vecenv, self._warmup_u_r_std)
+
         all_metrics: List[Dict[str, float]] = warmup_metrics
         iteration = 0
         # Use a driver env for auxiliary forward passes (world_model access).
         # Bounded unwrapping to reach underlying EMPOWorldModelEnv, matching
         # the pattern in _collect_aux_data_from_rollout().
         wm = self._unwrap_world_model(vecenv.driver_env)
+
+        # Store environment wrapper reference for simplified X_h computation.
+        self._empo_env = self._unwrap_empo_env(vecenv.driver_env)
 
         prev_stage = cfg.get_warmup_stage(self.aux_training_step)
 
@@ -853,8 +1204,29 @@ class PPOPhase2Trainer:
             # --- PufferLib: collect rollout + PPO update ---
             pufferl.evaluate()
 
+            # Monitor exact reward-signal stats from PuffeRL rollout buffer.
+            reward_signal = self._compute_reward_signal_stats(pufferl)
+            u_r_signal_std = reward_signal["std"]
+            self._broadcast_stat_to_envs(
+                vecenv, "_u_r_signal_std", float(reward_signal["std"])
+            )
+            self._broadcast_stat_to_envs(
+                vecenv, "_u_r_signal_mean", float(reward_signal["mean"])
+            )
+            self._broadcast_stat_to_envs(
+                vecenv, "_u_r_signal_min", float(reward_signal["min"])
+            )
+            self._broadcast_stat_to_envs(
+                vecenv, "_u_r_signal_max", float(reward_signal["max"])
+            )
+
             # --- Extract auxiliary data from rollout info dicts ---
             self._collect_aux_data_from_rollout(pufferl, vecenv)
+
+            # Anneal entropy coefficient before each PPO update
+            pufferl.config['ent_coef'] = cfg.get_entropy_coef(
+                self.aux_training_step
+            )
 
             pufferl.train()
 
@@ -871,6 +1243,20 @@ class PPOPhase2Trainer:
                 if step_losses:
                     self.aux_training_step += 1
 
+            inv_dyn_stats = self._latest_inverse_dynamics_stats
+            self._broadcast_stat_to_envs(
+                vecenv, "_inv_dyn_loss", float(inv_dyn_stats["loss"])
+            )
+            self._broadcast_stat_to_envs(
+                vecenv, "_inv_dyn_acc", float(inv_dyn_stats["acc"])
+            )
+            self._broadcast_stat_to_envs(
+                vecenv, "_inv_dyn_true_prob", float(inv_dyn_stats["true_prob"])
+            )
+            self._broadcast_stat_to_envs(
+                vecenv, "_inv_dyn_entropy", float(inv_dyn_stats["entropy"])
+            )
+
             # Re-freeze auxiliary networks periodically and sync to envs
             if (iteration + 1) % cfg.reward_freeze_interval == 0:
                 self.freeze_auxiliary_networks()
@@ -879,6 +1265,14 @@ class PPOPhase2Trainer:
             metrics = {
                 **pufferl.losses,
                 **aux_losses,
+                "u_r_signal_std": reward_signal["std"],
+                "u_r_signal_mean": reward_signal["mean"],
+                "u_r_signal_min": reward_signal["min"],
+                "u_r_signal_max": reward_signal["max"],
+                "inv_dyn_loss": inv_dyn_stats["loss"],
+                "inv_dyn_acc": inv_dyn_stats["acc"],
+                "inv_dyn_true_prob": inv_dyn_stats["true_prob"],
+                "inv_dyn_entropy": inv_dyn_stats["entropy"],
                 "iteration": iteration,
                 "global_step": pufferl.global_step,
             }
@@ -904,6 +1298,31 @@ class PPOPhase2Trainer:
                 self._log_scalar("PPO/iteration", iteration, step)
                 self._log_scalar("PPO/global_env_step", pufferl.global_step, step)
                 self._log_scalar("PPO/entropy_coef", cfg.get_entropy_coef(step), step)
+                self._log_scalar(
+                    "Reward/u_r_clip_frac",
+                    pufferl.losses.get("u_r_clipped", 0),
+                    step,
+                )
+                self._log_scalar("Reward/u_r_signal_std", u_r_signal_std, step)
+                self._log_scalar("Reward/u_r_signal_mean", reward_signal["mean"], step)
+                self._log_scalar("Reward/u_r_signal_min", reward_signal["min"], step)
+                self._log_scalar("Reward/u_r_signal_max", reward_signal["max"], step)
+                self._log_scalar(
+                    "Diagnostics/inv_dyn_loss", inv_dyn_stats["loss"], step
+                )
+                self._log_scalar(
+                    "Diagnostics/inv_dyn_acc", inv_dyn_stats["acc"], step
+                )
+                self._log_scalar(
+                    "Diagnostics/inv_dyn_true_prob",
+                    inv_dyn_stats["true_prob"],
+                    step,
+                )
+                self._log_scalar(
+                    "Diagnostics/inv_dyn_entropy",
+                    inv_dyn_stats["entropy"],
+                    step,
+                )
                 cur_stage = cfg.get_warmup_stage(step)
                 self._log_scalar("Warmup/stage", cur_stage, step)
                 if cur_stage != prev_stage:
@@ -917,11 +1336,13 @@ class PPOPhase2Trainer:
 
             if iteration % 100 == 0:
                 logger.info(
-                    "PPO iter %d (step %d): policy_loss=%.4f value_loss=%.4f",
+                    "PPO iter %d (step %d): policy_loss=%.4f value_loss=%.4f u_r_clip_frac=%.3f u_r_signal_std=%.4f",
                     iteration,
                     pufferl.global_step,
                     pufferl.losses.get("policy_loss", 0),
                     pufferl.losses.get("value_loss", 0),
+                    pufferl.losses.get("u_r_clipped", 0),
+                    u_r_signal_std,
                 )
 
             # ── Checkpointing ────────────────────────────────────────────
@@ -973,6 +1394,9 @@ class PPOPhase2Trainer:
         self.freeze_auxiliary_networks()
 
         wm = getattr(env, "world_model", None)
+
+        # Store EMPO env reference for simplified X_h computation.
+        self._empo_env = self._unwrap_empo_env(env) or env
 
         warmup_metrics: List[Dict[str, float]] = []
         obs, info = env.reset()
@@ -1049,6 +1473,18 @@ class PPOPhase2Trainer:
         logger.info(
             "Warm-up complete after %d aux training steps", self.aux_training_step
         )
+
+        # Capture the warmup-estimated U_r std from the warmup env so it can
+        # be applied to PPO vector envs (which otherwise have empty warmup
+        # buffers and would fall back to std=1).
+        self._warmup_u_r_std = None
+        if hasattr(env, "freeze_u_r_normalization"):
+            env.freeze_u_r_normalization()
+            std_val = getattr(env, "_u_r_std", None)
+            if std_val is not None:
+                self._warmup_u_r_std = float(std_val)
+                logger.info("Warm-up u_r std = %.6f", self._warmup_u_r_std)
+
         env.close()
 
         # Clear the aux replay buffer to discard data collected under
@@ -1072,6 +1508,23 @@ class PPOPhase2Trainer:
             wm = getattr(current, "world_model", None)
             if wm is not None:
                 return wm
+            if hasattr(current, "env"):
+                current = current.env
+            else:
+                return None
+        return None
+
+    @staticmethod
+    def _unwrap_empo_env(env: Any) -> Any:
+        """Unwrap nested env wrappers to find the ``EMPOWorldModelEnv``."""
+        from .env_wrapper import EMPOWorldModelEnv
+
+        current = env
+        for _ in range(20):
+            if current is None:
+                return None
+            if isinstance(current, EMPOWorldModelEnv):
+                return current
             if hasattr(current, "env"):
                 current = current.env
             else:

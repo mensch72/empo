@@ -731,45 +731,132 @@ def test_ensure_negative():
     print("  ✓ ensure_negative test passed!")
 
 
+def test_simplified_x_h_config():
+    """Test Phase2Config simplified X_h options."""
+    print("Testing simplified X_h config...")
+
+    # Defaults
+    config = Phase2Config()
+    assert not config.use_simplified_x_h
+    assert config.x_h_epsilon_h == 0.0
+    print("  ✓ Default: use_simplified_x_h=False, x_h_epsilon_h=0.0")
+
+    # Simplified mode
+    config_s = Phase2Config(use_simplified_x_h=True)
+    assert config_s.use_simplified_x_h
+    assert config_s.x_h_epsilon_h == 0.0
+    print("  ✓ use_simplified_x_h=True accepted")
+
+    # Bounded rationality
+    config_e = Phase2Config(use_simplified_x_h=True, x_h_epsilon_h=0.1)
+    assert config_e.use_simplified_x_h
+    assert config_e.x_h_epsilon_h == 0.1
+    print("  ✓ x_h_epsilon_h=0.1 accepted")
+
+    print("  ✓ Simplified X_h config test passed!")
+
+
+def test_simplified_x_h_aggregate_goal_ability():
+    """Test AggregateGoalAbilityNetwork with unbounded feasible range for simplified X_h."""
+    from empo.learning_based.phase2.lookup.aggregate_goal_ability import (
+        LookupTableAggregateGoalAbilityNetwork,
+    )
+
+    print("Testing simplified X_h lookup table network...")
+
+    # Standard mode: X_h in (0, 1]
+    net_std = LookupTableAggregateGoalAbilityNetwork(
+        default_x_h=0.5,
+        feasible_range=(0.0, 1.0),
+        zeta=2.0,
+    )
+    net_std.train()
+    key = hash(('s', 0, 0))
+    param = net_std._get_or_create_entry(key)
+    param.data.fill_(2.0)  # above upper bound
+    # In training mode, SoftClamp uses asymptotic (soft) tails - output > 1.0 is expected.
+    # Switch to eval for hard clamping behavior.
+    net_std.eval()
+    out_eval = net_std.apply_hard_clamp(param)
+    assert float(out_eval) <= 1.0 + 1e-9, f"Expected <= 1.0 in standard eval mode, got {float(out_eval)}"
+    print("  ✓ Standard mode hard-clamps to (0, 1] in eval mode")
+
+    # Simplified mode: X_h in [1, +inf)
+    net_sim = LookupTableAggregateGoalAbilityNetwork(
+        default_x_h=1.0,
+        feasible_range=(1.0, float('inf')),
+        zeta=2.0,
+    )
+    net_sim.train()
+    param2 = net_sim._get_or_create_entry(key)
+
+    # Value below lower bound should be clamped to 1.0
+    param2.data.fill_(0.3)
+    out_below = net_sim.apply_clamp(param2)
+    assert float(out_below) >= 1.0, f"Expected >= 1.0, got {float(out_below)}"
+    print(f"  ✓ Simplified mode soft-clamps 0.3 -> {float(out_below):.4f} (>= 1.0)")
+
+    # Value above lower bound should pass through
+    param2.data.fill_(3.5)
+    out_above = net_sim.apply_clamp(param2)
+    assert abs(float(out_above) - 3.5) < 0.01, f"Expected ~3.5, got {float(out_above)}"
+    print(f"  ✓ Simplified mode passes 3.5 -> {float(out_above):.4f}")
+
+    # Hard clamp in eval mode
+    net_sim.eval()
+    param2.data.fill_(0.0)
+    out_hard = net_sim.apply_hard_clamp(param2)
+    assert float(out_hard) == 1.0, f"Expected hard clamp to 1.0, got {float(out_hard)}"
+    print("  ✓ Simplified mode hard-clamps 0.0 -> 1.0 in eval mode")
+
+    print("  ✓ Simplified X_h aggregate goal ability test passed!")
+
+
 def run_all_tests():
     """Run all tests."""
     print("=" * 60)
     print("Running Phase 2 Tests")
     print("=" * 60)
-    
+
     test_phase2_config()
     print()
-    
+
     test_phase2_replay_buffer()
     print()
-    
+
     test_multigrid_robot_q_network()
     print()
-    
+
     test_multigrid_human_goal_achievement_network()
     print()
-    
+
     test_multigrid_aggregate_goal_ability_network()
     print()
-    
+
     test_multigrid_intrinsic_reward_network()
     print()
-    
+
     test_multigrid_robot_value_network()
     print()
-    
+
     test_power_law_policy()
     print()
-    
+
     test_soft_clamp_in_phase2()
     print()
-    
+
     test_network_configs()
     print()
-    
+
     test_ensure_negative()
     print()
-    
+
+    test_simplified_x_h_config()
+    print()
+
+    test_simplified_x_h_aggregate_goal_ability()
+    print()
+
     print("=" * 60)
     print("All Phase 2 tests passed!")
     print("=" * 60)

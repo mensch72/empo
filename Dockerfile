@@ -52,6 +52,15 @@ RUN --mount=type=cache,target=/root/.cache/pip,uid=0,gid=0 \
     --extra-index-url https://pypi.org/simple \
     -r /tmp/requirements.txt
 
+# Patch pufferlib: remove hard reward clamp so U_r can be unbounded.
+# vendor/pufferlib/pufferl.py is a copy of the installed file with
+# `r = torch.clamp(r, -1, 1)` removed (see VENDOR.md for details).
+COPY vendor/pufferlib/pufferl.py /tmp/pufferlib_pufferl_patch.py
+RUN python -c "\
+import pufferlib, shutil, os; \
+shutil.copy('/tmp/pufferlib_pufferl_patch.py', \
+            os.path.join(os.path.dirname(pufferlib.__file__), 'pufferl.py'))"
+
 # Install dev dependencies only if DEV_MODE is set (for Docker Compose)
 # This allows the same Dockerfile to be used for both dev and production
 ARG DEV_MODE=false

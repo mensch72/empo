@@ -296,6 +296,26 @@ class Phase2Config:
     # error since X_h = E_g[V_h^e(s, g)^ζ] can be computed exactly from V_h^e samples.
     # When False, the goal sampler is used at each step to sample goals and compute X_h.
     x_h_use_network: bool = True
+
+    # =========================================================================
+    # Simplified goal-agnostic X_h computation
+    # =========================================================================
+    # When use_simplified_x_h=True, X_h is computed via the goal-agnostic recursion
+    #   X_h(s) = 1 + gamma_h^zeta * sum_{s'} q_h(s,s')^zeta * X_h(s')
+    # where q_h(s,s') = max_{a_h} P(s'|s, a_h, pi_{-h}).
+    # This bypasses V_h^e entirely. X_h >= 1 for all states (terminal states X_h = 1).
+    # The option is available for any value of zeta (not just close to 1).
+    #
+    # In the learning-based path, q_h is approximated from the inverse-dynamics
+    # ratio P_theta(a_h | s, s') / pi_h(a_h | s).
+    #
+    # Bounded rationality: when x_h_epsilon_h > 0, q_h mixes the best human action
+    # with a uniform prior over actions:
+    #   q_h(s,s') = (1 - eps) * max_{a_h} P(s'|s, a_h, pi_{-h})
+    #             + eps * mean_{a_h} P(s'|s, a_h, pi_{-h})
+    # This parameter is distinct from epsilon_h_start/epsilon_h_end (exploration).
+    use_simplified_x_h: bool = False
+    x_h_epsilon_h: float = 0.0   # Bounded-rationality mixing coefficient for simplified X_h
     
     # Whether to include step count (remaining time) in state encoding.
     # Set to False to verify that identical grid states get identical values.
@@ -384,6 +404,23 @@ class Phase2Config:
     
     def __post_init__(self):
         """Compute cumulative warmup thresholds and apply network flags."""
+        # Validate x_h_epsilon_h range: it is a mixing probability
+        if not 0.0 <= self.x_h_epsilon_h <= 1.0:
+            raise ValueError(
+                f"x_h_epsilon_h must be in [0.0, 1.0], got {self.x_h_epsilon_h!r}"
+            )
+        
+        # Warn if simplified X_h is requested but the X_h network is disabled,
+        # since the simplified recursion target is only applied when learning X_h.
+        if self.use_simplified_x_h and not self.x_h_use_network:
+            warnings.warn(
+                "use_simplified_x_h=True while x_h_use_network=False. "
+                "The simplified recursion target is only used when approximating X_h "
+                "with a network, so this combination is likely unintended.",
+                UserWarning,
+                stacklevel=2,
+            )
+        
         # Override X_h warmup duration to 0 if not using X_h network
         if not self.x_h_use_network:
             self.warmup_x_h_steps = 0
@@ -698,7 +735,7 @@ class Phase2Config:
             step: Current training step.
             
         Returns:
-            Set of network names to train: subset of {'v_h_e', 'x_h', 'u_r', 'q_r', 'v_r', 'rnd'}
+            Set of network names to train: subset of {'v_h_e', 'x_h', 'inverse_dynamics', 'u_r', 'q_r', 'v_r', 'rnd'}
         """
         active = set()
         
@@ -712,6 +749,8 @@ class Phase2Config:
         # X_h starts after V_h^e warmup (only if using network mode)
         if step >= self._warmup_v_h_e_end and self.x_h_use_network:
             active.add('x_h')
+            if self.use_simplified_x_h:
+                active.add('inverse_dynamics')
         
         # U_r starts after X_h warmup (only if using network mode)
         if step >= self._warmup_x_h_end and self.u_r_use_network:
