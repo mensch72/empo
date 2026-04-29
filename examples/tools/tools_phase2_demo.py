@@ -73,8 +73,14 @@ def run_dqn_rollout(
     robot_indices: List[int],
     beta_r: float = 10.0,
     device: str = "cpu",
+    goal_resample_prob: float = 0.0,
 ):
     """Run a single rollout using the trained Q_r network.
+
+    Args:
+        goal_resample_prob: Per-step probability of resampling each human's
+            goal regardless of whether it was achieved.  0 = only resample
+            on achievement.
 
     Returns a list of rendered frames and the number of steps taken.
     """
@@ -94,9 +100,11 @@ def run_dqn_rollout(
     for _step in range(env.max_steps):
         state = env.get_state()
 
-        # Re-assign goals for humans whose goal is achieved
+        # Re-assign goals: on achievement or with fixed per-step probability
         for h in human_indices:
-            if human_goals[h].is_achieved(state):
+            if human_goals[h].is_achieved(state) or (
+                goal_resample_prob > 0.0 and np.random.rand() < goal_resample_prob
+            ):
                 new_goal, _ = goal_sampler.sample(state, h)
                 human_goals[h] = new_goal
 
@@ -242,6 +250,13 @@ def main() -> None:
         type=int,
         default=5,
         help="Number of evaluation rollouts (default: 5)",
+    )
+    parser.add_argument(
+        "--rollout-goal-resample-prob",
+        type=float,
+        default=0.05,
+        help="Per-step probability of resampling a human's goal during "
+        "rollout regardless of achievement (default: 0.05)",
     )
     parser.add_argument(
         "--output-dir",
@@ -491,6 +506,7 @@ def main() -> None:
             robot_indices=robot_indices,
             beta_r=config.beta_r,
             device=args.device,
+            goal_resample_prob=args.rollout_goal_resample_prob,
         )
         all_frames.extend(frames)
         print(f"    {n_steps} steps, {len(frames)} frames")
