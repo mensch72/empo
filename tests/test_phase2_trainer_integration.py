@@ -19,7 +19,7 @@ import torch
 import torch.nn as nn
 
 from empo.learning_based.phase2.config import Phase2Config
-from empo.learning_based.phase2.replay_buffer import Phase2ReplayBuffer, Phase2Transition
+from empo.learning_based.phase2.replay_buffer import Phase2ReplayBuffer, Phase2Transition, PrioritizedPhase2ReplayBuffer
 from empo.learning_based.phase2.robot_q_network import BaseRobotQNetwork
 from empo.learning_based.phase2.human_goal_ability import BaseHumanGoalAchievementNetwork
 from empo.learning_based.phase2.aggregate_goal_ability import BaseAggregateGoalAbilityNetwork
@@ -917,6 +917,174 @@ class TestAsyncRNDSync:
         assert not trainer4._rnd_enabled(), "Should detect no RND enabled"
         
         print("✓ _rnd_enabled() correctly detects RND usage")
+
+
+# =============================================================================
+# PRIORITISED EXPERIENCE REPLAY INTEGRATION TESTS
+# =============================================================================
+
+class TestPrioritizedReplayIntegration:
+    """Test the PER code path in the trainer's training_step() and replay buffer creation."""
+
+    def test_trainer_creates_prioritized_buffer_when_configured(self):
+        """Trainer __setstate__ should create PrioritizedPhase2ReplayBuffer when enabled."""
+        from empo.learning_based.phase2.trainer import BasePhase2Trainer
+
+        config = Phase2Config(
+            use_prioritized_replay=True,
+            priority_alpha=0.6,
+            priority_beta_start=0.4,
+            priority_beta_end=1.0,
+            priority_epsilon=1e-6,
+            buffer_size=100,
+        )
+        networks = create_mock_networks()
+
+        # Concrete stub so __new__ succeeds (BasePhase2Trainer is abstract)
+        class _ConcreteTrainer(BasePhase2Trainer):
+            def get_state_features_for_rnd(self, states):
+                return None
+
+        # Construct instance without calling __init__
+        trainer = _ConcreteTrainer.__new__(_ConcreteTrainer)
+
+        # Simulate unpickled state: no replay_buffer yet, but config and networks present
+        state = {
+            "config": config,
+            "networks": networks,
+            "replay_buffer": None,
+            "profiler": None,
+            "_last_per_sample_priorities": None,
+        }
+
+        # Exercise the actual __setstate__ implementation
+        trainer.__setstate__(state)
+
+        # When use_prioritized_replay is True, __setstate__ should create a PrioritizedPhase2ReplayBuffer
+        assert isinstance(trainer.replay_buffer, PrioritizedPhase2ReplayBuffer)
+        print("✓ PER config creates PrioritizedPhase2ReplayBuffer via BasePhase2Trainer.__setstate__")
+
+    def test_prioritized_buffer_push_and_priority_update(self):
+        """Push transitions, update priorities, and verify higher-priority items sampled more."""
+        buf = PrioritizedPhase2ReplayBuffer(
+            capacity=50, alpha=1.0, beta_start=1.0, beta_end=1.0, epsilon=0.0
+        )
+        
+        # Push 10 transitions
+        for i in range(10):
+            buf.push(
+                state=f"s{i}",
+                robot_action=(0,),
+                goals={0: "g"},
+                goal_weights={0: 1.0},
+                human_actions=[0],
+                next_state=f"s{i+1}",
+            )
+        
+        # All start with max_priority=1.0
+        assert buf.size == 10
+        
+        # Update priorities: give index 0 much higher priority
+        buf.update_priorities([0], [100.0])
+        
+        # Sample many times and check index 0 is sampled more often
+        count_0 = 0
+        n_samples = 500
+        for _ in range(n_samples):
+            result = buf.sample(1, beta=1.0)
+            if result.indices[0] == 0:
+                count_0 += 1
+        
+        # With alpha=1.0 and one item having 100x priority, it should dominate sampling
+        assert count_0 > n_samples * 0.3, f"High-priority item sampled too rarely: {count_0}/{n_samples}"
+        print(f"✓ High-priority item sampled {count_0}/{n_samples} times")
+
+    def test_no_double_alpha_in_default_push(self):
+        """Verify that push() without explicit priority doesn't double-apply alpha.
+        
+        max_priority is already stored in alpha-scaled space by update_priorities().
+        The default push path should use max_priority directly, not re-apply alpha.
+        """
+        alpha = 0.6
+        buf = PrioritizedPhase2ReplayBuffer(
+            capacity=10, alpha=alpha, beta_start=1.0, beta_end=1.0, epsilon=0.0
+        )
+        
+        # Push one transition with explicit priority to set max_priority
+        buf.push(
+            state="s0", robot_action=(0,), goals={0: "g"},
+            goal_weights={0: 1.0}, human_actions=[0], next_state="s1",
+            priority=2.0,
+        )
+        # max_priority should be 2.0 ** alpha
+        expected_max_p = 2.0 ** alpha
+        assert abs(buf.max_priority - expected_max_p) < 1e-6, (
+            f"max_priority={buf.max_priority}, expected={expected_max_p}"
+        )
+        
+        # Push another transition WITHOUT explicit priority
+        buf.push(
+            state="s2", robot_action=(0,), goals={0: "g"},
+            goal_weights={0: 1.0}, human_actions=[0], next_state="s3",
+        )
+        
+        # Both transitions should have the same priority (max_priority).
+        # If alpha were double-applied, the second would have lower priority
+        # and be sampled less often.  Verify via sampling equality.
+        counts = {0: 0, 1: 0}
+        n_samples = 1000
+        for _ in range(n_samples):
+            result = buf.sample(1, beta=1.0)
+            counts[result.indices[0]] = counts.get(result.indices[0], 0) + 1
+        
+        # With equal priorities, each should be sampled ~50%.
+        # Allow generous margin for randomness.
+        ratio = counts[1] / n_samples
+        assert 0.3 < ratio < 0.7, (
+            f"Second push sampled {ratio:.0%} of the time — priorities are unequal, "
+            f"suggesting double-alpha application"
+        )
+        print("✓ No double alpha application in default push() path")
+
+    def test_setstate_backward_compat_missing_per_config(self):
+        """__setstate__ should handle old configs missing PER fields gracefully."""
+        from dataclasses import dataclass
+        from empo.learning_based.phase2.trainer import BasePhase2Trainer
+
+        @dataclass
+        class OldConfig:
+            """Simulates a pre-PER Phase2Config without PER fields."""
+            buffer_size: int = 100
+            # Deliberately missing: use_prioritized_replay, priority_alpha, etc.
+
+        old_config = OldConfig()
+        assert not hasattr(old_config, 'use_prioritized_replay')
+
+        # Concrete stub so __new__ succeeds (BasePhase2Trainer is abstract)
+        class _ConcreteTrainer(BasePhase2Trainer):
+            def get_state_features_for_rnd(self, states):
+                return None
+
+        # Construct instance without calling __init__
+        trainer = _ConcreteTrainer.__new__(_ConcreteTrainer)
+
+        # Simulate unpickled state from a pre-PER checkpoint
+        state = {
+            "config": old_config,
+            "replay_buffer": None,
+            "profiler": None,
+        }
+
+        # Exercise the actual __setstate__ — should not raise AttributeError
+        trainer.__setstate__(state)
+
+        # __setstate__ should have injected PER defaults onto the old config
+        assert trainer.config.use_prioritized_replay is False
+        assert trainer.config.priority_alpha == 0.6
+        # replay_buffer should be a plain (non-prioritized) buffer
+        assert isinstance(trainer.replay_buffer, Phase2ReplayBuffer)
+        assert not isinstance(trainer.replay_buffer, PrioritizedPhase2ReplayBuffer)
+        print("✓ Old config without PER fields handled gracefully via BasePhase2Trainer.__setstate__")
 
 
 # =============================================================================

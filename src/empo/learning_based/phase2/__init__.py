@@ -18,7 +18,7 @@ Submodules:
 
 from .config import Phase2Config
 from .robot_q_network import BaseRobotQNetwork
-from .replay_buffer import Phase2Transition, Phase2ReplayBuffer
+from .replay_buffer import Phase2Transition, Phase2ReplayBuffer, PrioritizedPhase2ReplayBuffer, PrioritizedBatch
 from .human_goal_ability import BaseHumanGoalAchievementNetwork
 from .robot_value_network import BaseRobotValueNetwork
 from .intrinsic_reward_network import BaseIntrinsicRewardNetwork
@@ -63,6 +63,8 @@ __all__ = [
     'BaseRobotQNetwork',
     'Phase2Transition',
     'Phase2ReplayBuffer',
+    'PrioritizedPhase2ReplayBuffer',
+    'PrioritizedBatch',
     'BaseHumanGoalAchievementNetwork',
     'BaseRobotValueNetwork',
     'BaseIntrinsicRewardNetwork',

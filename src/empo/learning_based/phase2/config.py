@@ -225,6 +225,29 @@ class Phase2Config:
     batch_size: int = 64
     x_h_batch_size: Optional[int] = None  # Larger batch for X_h (None = use batch_size)
     
+    # =========================================================================
+    # Prioritised experience replay (PER)
+    # =========================================================================
+    # When enabled, transitions are sampled proportionally to their priority
+    # instead of uniformly. Transitions where network predictions had large
+    # errors (indicating informative experiences) are sampled more often.
+    #
+    # Priority signal: Per-sample Q_r TD error magnitude. Transitions with
+    # large Q_r prediction errors are prioritised, as they represent the
+    # most informative experiences for learning the robot policy. This also
+    # captures the effect of X_h changes, since Q_r targets depend on X_h.
+    #
+    # Importance sampling (IS) weights correct for the non-uniform sampling
+    # distribution. Beta is annealed from priority_beta_start to priority_beta_end
+    # over training to gradually increase correction strength.
+    #
+    # See Schaul et al. (2016) "Prioritized Experience Replay" for theory.
+    use_prioritized_replay: bool = False       # Enable prioritised replay
+    priority_alpha: float = 0.6               # Priority exponent (0=uniform, 1=full)
+    priority_beta_start: float = 0.4          # IS correction start (annealed to beta_end)
+    priority_beta_end: float = 1.0            # IS correction end (1.0 = full correction)
+    priority_epsilon: float = 1e-6            # Small constant to prevent zero priority
+    
     # Training
     num_training_steps: int = 1e5  # Total training steps (gradient updates)
     steps_per_episode: int = 50
