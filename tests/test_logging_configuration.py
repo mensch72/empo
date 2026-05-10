@@ -2,6 +2,8 @@ import logging
 import ast
 from pathlib import Path
 
+import pytest
+
 from empo.util.logging import configure_logging
 
 
@@ -24,12 +26,8 @@ def test_configure_logging_uses_env_var(monkeypatch):
 
 
 def test_configure_logging_rejects_non_level_logging_attributes():
-    try:
+    with pytest.raises(ValueError):
         configure_logging("BASIC_FORMAT")
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("configure_logging() should reject non-level logging attributes")
 
 
 def _find_print_calls(tree: ast.AST):
