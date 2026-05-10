@@ -59,7 +59,7 @@ class TransportStateEncoder(BaseStateEncoder):
         ...     graph_data['global_features'],
         ...     graph_data['agent_features']
         ... )
-        >>> print(encoded.shape)
+        >>> encoded.shape
         torch.Size([1, 128])
     """
     

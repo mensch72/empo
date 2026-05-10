@@ -19,14 +19,17 @@ Usage:
         action = sample_action()
     
     # Get report:
-    print(profiler.report())
+    profiler.report()
 """
 
+import logging
 import time
 from collections import defaultdict
 from contextlib import contextmanager
 from typing import Dict, Optional
 
+
+logger = logging.getLogger(__name__)
 
 class NoOpProfiler:
     """
@@ -115,7 +118,7 @@ class TrainingProfiler:
             
             # ... more sections ...
         
-        print(profiler.report())
+        profiler.report()
     """
     
     # Category groupings for report
@@ -530,6 +533,6 @@ tr:hover { background: #f1f1f1; }
         with open(html_path, 'w') as f:
             f.write("\n".join(html_lines))
         
-        print(f"Profiler reports saved to:")
-        print(f"  Markdown: {md_path}")
-        print(f"  HTML: {html_path}")
+        logger.info("Profiler reports saved to:")
+        logger.info(f"  Markdown: {md_path}")
+        logger.info(f"  HTML: {html_path}")

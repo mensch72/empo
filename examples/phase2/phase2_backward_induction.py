@@ -65,6 +65,7 @@ from empo.backward_induction import (
 from empo import backward_induction as backward_induction_pkg
 from empo.human_policy_prior import TabularHumanPolicyPrior
 from empo.world_specific_helpers.multigrid import ReachCellGoal
+from empo.util.logging import configure_logging
 
 
 # =============================================================================
@@ -1321,6 +1322,8 @@ if __name__ == "__main__":
                              'toggleable object (button, switch, door) in front of it')
     
     args = parser.parse_args()
+
+    configure_logging()
     
     # Resolve actions class if specified
     actions_set = None

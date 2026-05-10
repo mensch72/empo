@@ -11,6 +11,7 @@ saving slices to disk, we can load only the necessary slice at each iteration.
 Memory reduction: ~10-20x for typical problems.
 """
 
+import logging
 import os
 import gc
 import pickle
@@ -18,6 +19,8 @@ import tempfile
 import shutil
 from typing import List, Dict, Tuple, Any, Optional
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 # Type aliases
 State = Any
@@ -242,11 +245,11 @@ class DiskBasedDAG:
             )
             storage_type = "tmpfs (RAM)" if is_tmpfs else "disk"
             
-            print(f"Slicing DAG into {len(timestep_states)} timesteps...")
-            print(f"  Cache directory: {disk_dag.cache_dir}")
-            print(f"  Storage type: {storage_type}")
-            print(f"  Compression: {use_compression}")
-            print(f"  Float16: {use_float16}")
+            logger.info(f"Slicing DAG into {len(timestep_states)} timesteps...")
+            logger.info(f"  Cache directory: {disk_dag.cache_dir}")
+            logger.info(f"  Storage type: {storage_type}")
+            logger.info(f"  Compression: {use_compression}")
+            logger.info(f"  Float16: {use_float16}")
         
         # Create and save each slice
         for timestep in sorted(timestep_states.keys()):
@@ -282,7 +285,7 @@ class DiskBasedDAG:
             disk_dag._save_slice(dag_slice)
             
             if not quiet and timestep % max(1, len(timestep_states) // 10) == 0:
-                print(f"  Saved timestep {timestep}: {len(state_indices)} states, "
+                logger.info(f"  Saved timestep {timestep}: {len(state_indices)} states, "
                       f"{dag_slice.memory_size_mb():.1f} MB")
             
             # Free memory immediately after saving to disk
@@ -297,7 +300,7 @@ class DiskBasedDAG:
                 os.path.getsize(f) / (1024**2) 
                 for f in disk_dag._slice_files.values()
             )
-            print(f"  Total disk size: {total_size_mb:.1f} MB")
+            logger.info(f"  Total disk size: {total_size_mb:.1f} MB")
         
         return disk_dag
     

@@ -1,0 +1,7 @@
+[lint]
+extend-select = ["T201"]
+
+[lint.per-file-ignores]
+"examples/**/*.py" = ["T201"]
+"tests/**/*.py" = ["T201"]
+"vendor/**/*.py" = ["T201"]

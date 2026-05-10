@@ -6,8 +6,10 @@ different parts of the EMPO framework.
 """
 
 from .memory_monitor import MemoryMonitor, check_memory
+from .logging import configure_logging
 
 __all__ = [
     'MemoryMonitor',
     'check_memory',
+    'configure_logging',
 ]

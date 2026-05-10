@@ -5,6 +5,7 @@ Extends BaseNeuralHumanPolicyPrior with transport-specific implementation
 using GNN-based encoding for network state.
 """
 
+import logging
 import torch
 import torch.optim as optim
 import random
@@ -18,6 +19,8 @@ from .q_network import TransportQNetwork
 from .policy_prior_network import TransportPolicyPriorNetwork
 from .constants import NUM_TRANSPORT_ACTIONS
 
+
+logger = logging.getLogger(__name__)
 
 # Default action encoding for transport environment
 DEFAULT_TRANSPORT_ACTION_ENCODING = {
@@ -66,7 +69,7 @@ class TransportNeuralHumanPolicyPrior(BaseNeuralHumanPolicyPrior):
         >>> 
         >>> # Get action probabilities for an agent
         >>> probs = prior(state=None, agent_idx=0, goal=goal)
-        >>> print(probs)
+        >>> probs
     """
     
     def __init__(
@@ -748,7 +751,7 @@ def train_transport_neural_policy_prior(
                     target_network.load_state_dict(q_network.state_dict())
         
         if verbose and (episode + 1) % 100 == 0:
-            print(f"Episode {episode + 1}/{num_episodes}")
+            logger.info(f"Episode {episode + 1}/{num_episodes}")
     
     return TransportNeuralHumanPolicyPrior(
         q_network=q_network,

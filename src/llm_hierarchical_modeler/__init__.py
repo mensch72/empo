@@ -48,7 +48,7 @@ Example usage:
     >>> 
     >>> # Get spawn information
     >>> spawns = get_spawn_points()
-    >>> print(f"Robot spawns at: ({spawns[0]['x']}, {spawns[0]['y']}, {spawns[0]['z']})")
+    >>> spawns[0]
 """
 
 from .minecraft_world import (

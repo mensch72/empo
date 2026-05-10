@@ -6,6 +6,7 @@ for explicit state management (get_state, set_state) and transition probability
 computation.
 """
 
+import logging
 from abc import abstractmethod
 from collections import deque
 from typing import List, Dict, Tuple, Any, Optional, Set, Union, overload, Literal
@@ -17,6 +18,8 @@ import heapq
 import gymnasium as gym
 import numpy as np
 from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
 
 # Type aliases for complex types
 State = Any  # State is typically a hashable tuple
@@ -491,18 +494,18 @@ class WorldModel(gym.Env):
         if return_probabilities:
             if True in self._dag_cache:
                 if not quiet:
-                    print("Using cached DAG (with probabilities)")
+                    logger.info("Using cached DAG (with probabilities)")
                 return self._dag_cache[True]
         else:
             # Can use either cached version for non-prob request
             if False in self._dag_cache:
                 if not quiet:
-                    print("Using cached DAG")
+                    logger.info("Using cached DAG")
                 return self._dag_cache[False]
             if True in self._dag_cache:
                 # Extract non-prob version from prob version
                 if not quiet:
-                    print("Using cached DAG (extracting from full version)")
+                    logger.info("Using cached DAG (extracting from full version)")
                 states, state_to_idx, successors, _ = self._dag_cache[True]
                 return states, state_to_idx, successors
         
@@ -754,10 +757,8 @@ class WorldModel(gym.Env):
                     state = futures[future]
                     try:
                         _, successor_states, action_data = future.result()
-                    except Exception as e:
-                        import sys, traceback
-                        print(f"Worker failed processing state: {e}", file=sys.stderr)
-                        traceback.print_exc(file=sys.stderr)
+                    except Exception:
+                        logger.exception("Worker failed processing state")
                         continue
                     
                     edges[state] = list(successor_states)

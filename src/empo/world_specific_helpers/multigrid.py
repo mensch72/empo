@@ -779,7 +779,7 @@ def render_test_map_values(
         env.reset()
         state = env.get_state()
         
-#        print(f"\n[DEBUG test_map {map_idx + 1}] Querying V_h^e for {len(goal_specs)} goals...")
+#        logger.debug(f"\n[DEBUG test_map {map_idx + 1}] Querying V_h^e for {len(goal_specs)} goals...")
         
         # Create fresh goals for this environment
         goals = []

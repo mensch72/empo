@@ -20,6 +20,7 @@ Attainment Cache:
     redundant is_achieved() computation between phases.
 """
 
+import logging
 import math
 import numpy as np
 import numpy.typing as npt
@@ -56,6 +57,8 @@ from .helpers import (
     VhValuesSmall,
 )
 from .phase1 import compute_human_policy_prior
+
+logger = logging.getLogger(__name__)
 
 # Type aliases
 VrValues = npt.NDArray[np.floating[Any]]  # Indexed as Vr_values[state_index]
@@ -163,7 +166,7 @@ def _rp_process_single_state(
         # Terminal state: V_h^e = 0 for all goals (dict defaults to 0), V_r = terminal_Vr, no robot policy
         vh_results: Dict[int, Dict[PossibleGoal, float]] = {}
         if DEBUG:
-            print(f"  Terminal state {state_index}")
+            logger.debug(f"  Terminal state {state_index}")
         return vh_results, terminal_Vr, None, {}
     
     # Non-terminal state: compute Q_r, pi_r, V_h^e, X_h, U_r, V_r
@@ -176,7 +179,7 @@ def _rp_process_single_state(
     _duration_cache: Dict[int, npt.NDArray] = {}
     
     if DEBUG:
-        print(f"  Transient state {state_index}")
+        logger.debug(f"  Transient state {state_index}")
     
     # Compute Q_r values for all robot action profiles
     Qr_values = np.zeros(len(robot_action_profiles))
@@ -255,23 +258,23 @@ def _rp_process_single_state(
         vh_agent = vh_results[agent_index] = vres0.copy() if use_indexed else {}
         
         if DEBUG:
-            print(f"   Human agent {agent_index}")
+            logger.debug(f"   Human agent {agent_index}")
             # Check if at least one goal is achieved in this state
             goals_achieved = []
             for pg, _ in possible_goal_generator.generate(state, agent_index):
                 achieved = pg.is_achieved(state)
                 goals_achieved.append((pg, achieved))
             if not any(a for _, a in goals_achieved):
-                print(f"   WARNING: No goal achieved in state {state_index}!")
+                logger.warning(f"   WARNING: No goal achieved in state {state_index}!")
                 for pg, a in goals_achieved:
-                    print(f"     {pg}: is_achieved={a}")
+                    logger.info(f"     {pg}: is_achieved={a}")
         
         xh = 0.0
         some_goal_achieved_with_positive_prob = False
         
         for possible_goal, possible_goal_weight in possible_goal_generator.generate(state, agent_index):
             if DEBUG:
-                print(f"    Possible goal: {possible_goal}")
+                logger.debug(f"    Possible goal: {possible_goal}")
             
             key = possible_goal.index if use_indexed else possible_goal
             vh = 0.0
@@ -358,7 +361,7 @@ def _rp_process_single_state(
             xh += possible_goal_weight * vh**zeta
             
             if DEBUG:
-                print(f"      ...Vh = {vh:.4f}")
+                logger.debug(f"      ...Vh = {vh:.4f}")
         
         assert some_goal_achieved_with_positive_prob, \
             f"No goal achievable with positive probability for agent {agent_index} in state {state_index}!"
@@ -371,7 +374,7 @@ def _rp_process_single_state(
             )
         
         if DEBUG:
-            print(f"   ...Xh = {xh:.4f}")
+            logger.debug(f"   ...Xh = {xh:.4f}")
         
         powersum += xh**(-xi)
     
@@ -385,7 +388,7 @@ def _rp_process_single_state(
         vr = ur + float(np.dot(ps, Qr_values))
     
     if DEBUG:
-        print(f"  ...Ur = {ur:.4f}, Vr = {vr:.4f}")
+        logger.debug(f"  ...Ur = {ur:.4f}, Vr = {vr:.4f}")
     
     return vh_results, vr, robot_policy, successor_probs
 
@@ -450,7 +453,7 @@ def _rp_compute_sequential(
     if use_indexed:
         n_goals = possible_goal_generator.n_goals
         vres0 = np.zeros(n_goals, dtype=np.float16)
-        print(f"Using indexed goals: VhValuesSmall with numpy arrays (n_goals={n_goals})")
+        logger.info(f"Using indexed goals: VhValuesSmall with numpy arrays (n_goals={n_goals})")
     else:
         vres0 = {}
 
@@ -469,7 +472,7 @@ def _rp_compute_sequential(
     previous_level: Optional[int] = None  # Track level transitions
     if level_fct is not None and archive_dir is not None:
         if not quiet:
-            print("Computing dependency levels for archival...")
+            logger.info("Computing dependency levels for archival...")
         from .helpers import compute_dependency_levels_fast, detect_archivable_levels, archive_value_slices
         from pathlib import Path
         # Build successors list - handle disk_dag case
@@ -598,14 +601,14 @@ def _rp_compute_sequential(
         
         # Periodic memory reporting
         if not quiet and states_processed > 0 and states_processed % memory_report_interval == 0:
-            print(f"\n[Phase2 Memory @ {states_processed}/{total_states} states] RSS: {get_process_memory_mb():.1f} MB")
+            logger.info(f"\n[Phase2 Memory @ {states_processed}/{total_states} states] RSS: {get_process_memory_mb():.1f} MB")
             if memory_profile:
                 # Detailed profiling with deep_sizeof (adds O(total_size) overhead)
                 vh_mb = deep_sizeof(Vh_values) / (1024**2)
                 vr_mb = deep_sizeof(Vr_values) / (1024**2)
                 pol_mb = deep_sizeof(robot_policy) / (1024**2)
                 cache_mb = deep_sizeof(slice_cache) / (1024**2) if slice_cache is not None else 0.0
-                print(f"  Vh_values: {vh_mb:.1f} MB, Vr_values: {vr_mb:.1f} MB, robot_policy: {pol_mb:.1f} MB, cache: {cache_mb:.1f} MB")
+                logger.info(f"  Vh_values: {vh_mb:.1f} MB, Vr_values: {vr_mb:.1f} MB, robot_policy: {pol_mb:.1f} MB, cache: {cache_mb:.1f} MB")
         
         # Check memory less frequently to reduce overhead
         if memory_monitor is not None:
@@ -1200,8 +1203,8 @@ def compute_robot_policy(
     if disk_dag is not None:
         # Reuse disk_dag from Phase 1
         if not quiet:
-            print("\n=== Reusing Disk-Based DAG from Phase 1 ===")
-            print(f"  Loaded DAG memory: {disk_dag.get_loaded_memory_mb():.1f} MB")
+            logger.info("\n=== Reusing Disk-Based DAG from Phase 1 ===")
+            logger.info(f"  Loaded DAG memory: {disk_dag.get_loaded_memory_mb():.1f} MB")
         # Get states and state_to_idx from world_model (cached during Phase 1 DAG build)
         # We need to rebuild these since they were not stored in disk_dag
         states, state_to_idx, successors, transitions = world_model.get_dag(return_probabilities=True, quiet=True)
@@ -1224,7 +1227,7 @@ def compute_robot_policy(
         states, state_to_idx, successors, transitions = world_model.get_dag(return_probabilities=True, quiet=quiet)
         
         if not quiet:
-            print("\n=== Creating Disk-Based DAG ===")
+            logger.info("\n=== Creating Disk-Based DAG ===")
         
         # Calculate memory stats before slicing
         # Note: num_goals not available here, use num_action_profiles as proxy
@@ -1232,7 +1235,7 @@ def compute_robot_policy(
                                         num_goals=num_action_profiles,  # proxy
                                         num_actions=num_actions)
         if not quiet:
-            print(f"Estimated memory: {mem_stats['total_mb']:.0f} MB")
+            logger.info(f"Estimated memory: {mem_stats['total_mb']:.0f} MB")
         
         # Create disk-based DAG
         num_action_profiles_for_cache = num_actions ** num_agents
@@ -1266,8 +1269,8 @@ def compute_robot_policy(
             if archive_dir is None:
                 freed_msg += " and successors"
             freed_msg += " freed from memory."
-            print(f"  Disk slicing complete. {freed_msg}")
-            print(f"  Loaded DAG memory: {disk_dag.get_loaded_memory_mb():.1f} MB")
+            logger.info(f"  Disk slicing complete. {freed_msg}")
+            logger.info(f"  Loaded DAG memory: {disk_dag.get_loaded_memory_mb():.1f} MB")
     else:
         # Normal mode: get DAG from world_model
         states, state_to_idx, successors, transitions = world_model.get_dag(return_probabilities=True, quiet=quiet)
@@ -1285,7 +1288,7 @@ def compute_robot_policy(
     if False and hasattr(possible_goal_generator, 'indexed') and possible_goal_generator.indexed:
         n_goals = possible_goal_generator.n_goals
         if not quiet:
-            print(f"Using indexed goals: VhValuesSmall with numpy arrays (n_goals={n_goals})")
+            logger.info(f"Using indexed goals: VhValuesSmall with numpy arrays (n_goals={n_goals})")
         Vh_values: Union[VhValues, VhValuesSmall] = [
             [np.zeros(n_goals, dtype=np.float16) for _ in range(num_agents)]
             for _ in range(len(states))
@@ -1299,9 +1302,9 @@ def compute_robot_policy(
     # ============================================================================
     if parallel:
         if not quiet:
-            print("WARNING: Parallel mode is currently disabled due to bugs.")
-            print("         Running in sequential mode instead.")
-            print("         See docs/plans/bwind_parallel.md for status.")
+            logger.warning("WARNING: Parallel mode is currently disabled due to bugs.")
+            logger.info("         Running in sequential mode instead.")
+            logger.info("         See docs/plans/bwind_parallel.md for status.")
     
     # Get sliced attainment cache: prioritize explicit parameter, then world_model cache, then create new
     num_action_profiles = num_actions ** num_agents
@@ -1310,7 +1313,7 @@ def compute_robot_policy(
         sliced_cache = getattr(world_model, '_attainment_cache', None)
         if sliced_cache is not None and isinstance(sliced_cache, SlicedAttainmentCache):
             if not quiet:
-                print(f"Using sliced attainment cache from world_model ({sliced_cache.num_states()} state entries)")
+                logger.info(f"Using sliced attainment cache from world_model ({sliced_cache.num_states()} state entries)")
         else:
             sliced_cache = None  # Wrong type or not set
     if sliced_cache is None:
@@ -1332,7 +1335,7 @@ def compute_robot_policy(
             num_workers = mp.cpu_count()
         
         if not quiet:
-            print(f"Using parallel execution with {num_workers} workers")
+            logger.info(f"Using parallel execution with {num_workers} workers")
         
         # Compute dependency levels and max successor levels for archival
         dependency_levels: List[List[int]]
@@ -1341,20 +1344,20 @@ def compute_robot_policy(
         archived_levels: Set[int] = set()  # Track already-archived levels
         if level_fct is not None:
             if not quiet:
-                print("Using fast level computation with provided level function")
+                logger.info("Using fast level computation with provided level function")
             # Pass successors for archival max_successor_levels computation
             dependency_levels, max_successor_levels, level_values_list = compute_dependency_levels_fast(
                 states, level_fct, successors
             )
         else:
             if not quiet:
-                print("Using general level computation")
+                logger.info("Using general level computation")
             dependency_levels = compute_dependency_levels_general(successors)
             max_successor_levels = None
             level_values_list = None
         
         if not quiet:
-            print(f"Computed {len(dependency_levels)} dependency levels")
+            logger.info(f"Computed {len(dependency_levels)} dependency levels")
         
         # Initialize shared data for worker processes
         params: Tuple[List[int], List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], float, float, float, float, float, float, float, float, float] = (
@@ -1368,7 +1371,7 @@ def compute_robot_policy(
         
         # Initialize shared memory for DAG data to avoid copy-on-write overhead
         if not quiet:
-            print("Storing DAG in shared memory...")
+            logger.info("Storing DAG in shared memory...")
         init_shared_dag(states, transitions)
         
         # Create memory monitor if enabled (for parallel mode - check at each level)
@@ -1389,7 +1392,7 @@ def compute_robot_policy(
                 memory_monitor.check(level_idx)
             
             if DEBUG:
-                print(f"Processing level {level_idx} with {len(level)} states")
+                logger.debug(f"Processing level {level_idx} with {len(level)} states")
             
             # Generate all possible robot action profiles (needed for sequential fallback)
             robot_action_profiles: List[RobotActionProfile] = [
@@ -1560,8 +1563,8 @@ def compute_robot_policy(
             )
         except KeyboardInterrupt:
             if not quiet:
-                print("\n[Phase2] Computation interrupted (KeyboardInterrupt).")
-                print("         Partial results have been computed.")
+                logger.info("\n[Phase2] Computation interrupted (KeyboardInterrupt).")
+                logger.info("         Partial results have been computed.")
             # Re-raise to allow caller to handle
             raise
 
@@ -1573,18 +1576,18 @@ def compute_robot_policy(
     
     # Print actual memory after Phase 2 backward induction
     if not quiet:
-        print(f"\nActual memory usage (after Phase 2 backward induction):")
-        print(f"  Process RSS: {get_process_memory_mb():.1f} MB")
+        logger.info("\nActual memory usage (after Phase 2 backward induction):")
+        logger.info(f"  Process RSS: {get_process_memory_mb():.1f} MB")
         vh_actual = deep_sizeof(Vh_values) / (1024**2)
         vr_actual = deep_sizeof(Vr_values) / (1024**2)
         policy_actual = deep_sizeof(robot_policy_values) / (1024**2)
         cache_actual = deep_sizeof(sliced_cache) / (1024**2) if sliced_cache is not None else 0.0
-        print(f"  Vh_values: {vh_actual:.1f} MB")
-        print(f"  Vr_values: {vr_actual:.1f} MB")
-        print(f"  robot_policy_values: {policy_actual:.1f} MB")
+        logger.info(f"  Vh_values: {vh_actual:.1f} MB")
+        logger.info(f"  Vr_values: {vr_actual:.1f} MB")
+        logger.info(f"  robot_policy_values: {policy_actual:.1f} MB")
         if sliced_cache is not None:
-            print(f"  sliced_cache: {cache_actual:.1f} MB")
-        print(f"  Total measured Phase 2 structures: {vh_actual + vr_actual + policy_actual + cache_actual:.1f} MB")
+            logger.info(f"  sliced_cache: {cache_actual:.1f} MB")
+        logger.info(f"  Total measured Phase 2 structures: {vh_actual + vr_actual + policy_actual + cache_actual:.1f} MB")
     
     if return_values:
         # Convert Vr_values from array to dict

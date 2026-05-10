@@ -9,6 +9,7 @@ Implements ``compute_hierarchical_robot_policy()`` which:
    macro decisions).
 """
 
+import logging
 import math
 from typing import List, Optional
 
@@ -18,6 +19,8 @@ from empo.backward_induction.phase2 import compute_robot_policy
 from empo.hierarchical.hierarchical_world_model import HierarchicalWorldModel
 from empo.hierarchical.hierarchical_robot_policy import HierarchicalRobotPolicy
 
+
+logger = logging.getLogger(__name__)
 
 def compute_hierarchical_robot_policy(
     hierarchical_model: HierarchicalWorldModel,
@@ -145,7 +148,7 @@ def compute_hierarchical_robot_policy(
 
     # ── Step 1: full macro-level solve ─────────────────────────
     if not quiet:
-        print("=== Hierarchical Backward Induction: Macro-Level (M^0) ===")
+        logger.info("=== Hierarchical Backward Induction: Macro-Level (M^0) ===")
 
     macro_policy, macro_Vr, macro_Xh = compute_robot_policy(
         macro_env,
@@ -167,7 +170,7 @@ def compute_hierarchical_robot_policy(
     )
 
     if not quiet:
-        print(
+        logger.info(
             f"  Macro-level solve complete: {len(macro_Vr)} states, "
             f"{len(macro_policy.values)} policy entries"
         )
@@ -199,6 +202,6 @@ def compute_hierarchical_robot_policy(
     )
 
     if not quiet:
-        print("=== Hierarchical policy ready (micro sub-problems on demand) ===")
+        logger.info("=== Hierarchical policy ready (micro sub-problems on demand) ===")
 
     return h_policy
