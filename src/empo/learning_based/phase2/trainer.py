@@ -17,7 +17,7 @@ import zipfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
-from queue import Empty
+from queue import Empty, Full
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -3580,10 +3580,8 @@ class BasePhase2Trainer(ABC):
                 shared_policy=shared_policy,
                 policy_lock=policy_lock,
             )
-        except Exception as e:
-            logger.info(f"[Actor {actor_id}] Error: {e}")
-            import traceback
-            traceback.print_exc()
+        except Exception:
+            logger.exception("[Actor %s] Error in async actor process", actor_id)
     
     def _actor_loop_async(
         self,
@@ -3665,9 +3663,12 @@ class BasePhase2Trainer(ABC):
                     # Increment shared env steps counter (for TensorBoard logging)
                     with shared_env_steps.get_lock():
                         shared_env_steps.value += 1
+                except Full:
+                    # Queue full during normal backpressure - skip transition quietly.
+                    logger.debug("[Actor %s] Transition queue full; dropping transition", actor_id)
                 except Exception:
-                    # Queue full or serialization error - skip transition
-                    logger.exception("Skipping transition after queue put failure")
+                    # Unexpected serialization or IPC error - skip transition and log details.
+                    logger.exception("[Actor %s] Failed to enqueue transition", actor_id)
 
     def _learner_loop(
         self,

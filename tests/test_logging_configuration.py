@@ -1,6 +1,5 @@
 import logging
-import tokenize
-from io import StringIO
+import ast
 from pathlib import Path
 
 from empo.util.logging import configure_logging
@@ -24,11 +23,32 @@ def test_configure_logging_uses_env_var(monkeypatch):
         root_logger.setLevel(original_level)
 
 
+def test_configure_logging_rejects_non_level_logging_attributes():
+    try:
+        configure_logging("BASIC_FORMAT")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("configure_logging() should reject non-level logging attributes")
+
+
+def _find_print_calls(tree: ast.AST):
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Name) and node.func.id == "print":
+            yield node
+        elif (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "print"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "builtins"
+        ):
+            yield node
+
+
 def test_src_tree_has_no_print_calls():
-    for relative_path in ('src/empo', 'src/llm_hierarchical_modeler'):
-        for path in (PROJECT_ROOT / relative_path).rglob('*.py'):
-            tokens = tokenize.generate_tokens(StringIO(path.read_text()).readline)
-            assert all(
-                not (token.type == tokenize.NAME and token.string == "print")
-                for token in tokens
-            ), f"Unexpected print() in {path}"
+    for relative_path in ("src/empo", "src/llm_hierarchical_modeler"):
+        for path in (PROJECT_ROOT / relative_path).rglob("*.py"):
+            tree = ast.parse(path.read_text(), filename=str(path))
+            assert not any(_find_print_calls(tree)), f"Unexpected print() call in {path}"

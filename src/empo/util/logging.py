@@ -5,6 +5,7 @@ import os
 from typing import Optional, Union
 
 DEFAULT_LOG_FORMAT = "%(levelname)s:%(name)s:%(message)s"
+VALID_LOG_LEVELS = logging.getLevelNamesMapping()
 
 
 def _normalize_level(level: Optional[Union[int, str]]) -> Union[int, str]:
@@ -14,8 +15,8 @@ def _normalize_level(level: Optional[Union[int, str]]) -> Union[int, str]:
         return logging.WARNING
     if isinstance(level, str):
         level_name = level.strip().upper()
-        if hasattr(logging, level_name):
-            return getattr(logging, level_name)
+        if level_name in VALID_LOG_LEVELS:
+            return VALID_LOG_LEVELS[level_name]
         raise ValueError(f"Invalid log level: {level}")
     return level
 
