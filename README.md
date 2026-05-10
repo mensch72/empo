@@ -458,7 +458,8 @@ empo/
 │       └── PROBABILISTIC_TRANSITIONS.md
 ├── docs/
 │   ├── API.md                 # API reference
-│   └── ISSUES.md              # Known issues and improvements
+│   ├── ISSUES.md              # Known issues and improvements
+│   └── plans/README.md        # Status index for design plans
 ├── tests/                     # Test suite
 ├── setup/scripts/
 │   ├── run_cluster.sh         # SLURM job script
