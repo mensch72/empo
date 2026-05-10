@@ -3664,7 +3664,7 @@ class BasePhase2Trainer(ABC):
                     with shared_env_steps.get_lock():
                         shared_env_steps.value += 1
                 except Full:
-                    # Queue full during normal backpressure - skip transition quietly.
+                    # Queue full during normal backpressure - skip transition with debug logging.
                     logger.debug("[Actor %s] Transition queue full; dropping transition", actor_id)
                 except Exception:
                     # Unexpected serialization or IPC error - skip transition and log details.

@@ -30,7 +30,7 @@ def test_configure_logging_rejects_non_level_logging_attributes():
         configure_logging("BASIC_FORMAT")
 
 
-def _find_print_calls(tree: ast.AST):
+def _iter_print_calls(tree: ast.AST):
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
@@ -49,4 +49,4 @@ def test_src_tree_has_no_print_calls():
     for relative_path in ("src/empo", "src/llm_hierarchical_modeler"):
         for path in (PROJECT_ROOT / relative_path).rglob("*.py"):
             tree = ast.parse(path.read_text(), filename=str(path))
-            assert not any(_find_print_calls(tree)), f"Unexpected print() call in {path}"
+            assert not any(_iter_print_calls(tree)), f"Unexpected print() call in {path}"
