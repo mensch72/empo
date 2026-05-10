@@ -45,6 +45,23 @@ def _iter_print_calls(tree: ast.AST):
             yield node
 
 
+def test_iter_print_calls_detects_print_and_builtins_print():
+    tree = ast.parse(
+        """
+import builtins
+
+print("hello")
+builtins.print("world")
+printer.print("ignored")
+print_value = 1
+"""
+    )
+
+    print_calls = list(_iter_print_calls(tree))
+
+    assert len(print_calls) == 2
+
+
 def test_src_tree_has_no_print_calls():
     for relative_path in ("src/empo", "src/llm_hierarchical_modeler"):
         for path in (PROJECT_ROOT / relative_path).rglob("*.py"):
