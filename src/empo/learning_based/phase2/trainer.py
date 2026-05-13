@@ -1873,6 +1873,7 @@ class BasePhase2Trainer(ABC):
         n_step: int,
     ) -> List[Phase2Transition]:
         """Recover the sampled rollout suffix needed for a trajectory target."""
+        # Phase2Config.__post_init__ already validates n_step >= 1 for n-step mode.
         # get_episode_suffix() counts future env_steps beyond the current
         # transition, while n_step counts sampled successor states. So n_step=1
         # needs only the current transition record (horizon=0), n_step=2 needs
@@ -1924,6 +1925,9 @@ class BasePhase2Trainer(ABC):
 
             frontier_transition = suffix[-1]
             frontier_state = frontier_transition.next_state
+            # Be defensive when replay data comes from older checkpoints or a
+            # partially available suffix: if the sampled frontier state itself
+            # is missing, skip the bootstrap instead of raising here.
             if frontier_state is None or frontier_transition.terminal:
                 continue
 
@@ -1985,6 +1989,8 @@ class BasePhase2Trainer(ABC):
             reward_suffix = suffix
 
             if mode == "n_step" and len(suffix) >= n_step:
+                # suffix[0] corresponds to s_{t+1}, so suffix[n_step - 1] is the
+                # nth sampled successor state used as the bootstrap frontier.
                 candidate = suffix[n_step - 1]
                 if candidate.next_state is not None and not candidate.terminal:
                     bootstrap_transition = candidate
@@ -2006,9 +2012,8 @@ class BasePhase2Trainer(ABC):
             if bootstrap_transition is not None:
                 frontier_states.append(bootstrap_transition.next_state)
                 frontier_entries.append(entry_idx)
-                # suffix[n_step - 1] is the nth sampled successor state because
-                # suffix[0] corresponds to s_{t+1}, suffix[1] to s_{t+2}, etc.
-                frontier_discounts.append(gamma_r ** len(suffix))
+                bootstrap_discount_step = len(reward_suffix) + 1
+                frontier_discounts.append(gamma_r ** bootstrap_discount_step)
 
         if reward_states:
             with torch.no_grad():

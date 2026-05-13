@@ -1069,6 +1069,8 @@ class TestTrajectoryTargets:
         batch = [trainer.replay_buffer.get_episode_transition(("actor", 0), 0)]
         targets = trainer._compute_trajectory_v_h_e_targets(batch, [(0, 0, "goal")])
 
+        # s1 is the first sampled successor (discount γ_h^0), so achieving at s2
+        # means the first-achievement term is γ_h^1.
         assert targets[0].item() == pytest.approx(0.5)
 
     def test_q_r_n_step_accumulates_rewards_then_bootstraps(self):
@@ -1085,6 +1087,7 @@ class TestTrajectoryTargets:
         batch = [trainer.replay_buffer.get_episode_transition(("actor", 0), 0)]
         targets = trainer._compute_trajectory_q_r_targets(batch)
 
+        # γ_r * U_r(s1) + γ_r² * U_r(s2) + γ_r³ * V_r(s3)
         assert targets[0].item() == pytest.approx(-1.5)
 
     def test_q_r_n_step_falls_back_to_shorter_open_suffix(self):
@@ -1101,6 +1104,7 @@ class TestTrajectoryTargets:
         batch = [trainer.replay_buffer.get_episode_transition(("actor", 0), 0)]
         targets = trainer._compute_trajectory_q_r_targets(batch)
 
+        # Replay ends early, so we use γ_r * U_r(s1) + γ_r² * V_r(s2).
         assert targets[0].item() == pytest.approx(0.5 * -1.0 + 0.25 * -3.0)
 
     def test_q_r_episode_drops_bootstrap_at_terminal(self):
@@ -1117,6 +1121,7 @@ class TestTrajectoryTargets:
         batch = [trainer.replay_buffer.get_episode_transition(("actor", 0), 0)]
         targets = trainer._compute_trajectory_q_r_targets(batch)
 
+        # Terminal suffix removes the frontier bootstrap, leaving γ_r * U_r(s1) + γ_r² * U_r(s2).
         assert targets[0].item() == pytest.approx(-1.0)
 
     def test_q_r_episode_bootstraps_when_suffix_stays_open(self):
@@ -1133,6 +1138,7 @@ class TestTrajectoryTargets:
         batch = [trainer.replay_buffer.get_episode_transition(("actor", 0), 0)]
         targets = trainer._compute_trajectory_q_r_targets(batch)
 
+        # Open episode suffix falls back to γ_r * U_r(s1) + γ_r² * V_r(s2).
         assert targets[0].item() == pytest.approx(0.5 * -1.0 + 0.25 * -3.0)
 
 
