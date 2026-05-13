@@ -2776,13 +2776,13 @@ class BasePhase2Trainer(ABC):
         """Mutable state for actor (environment interaction)."""
         def __init__(
             self,
-            state,
-            goals,
-            goal_weights,
+            state: Any,
+            goals: Dict[int, Any],
+            goal_weights: Dict[int, float],
             env_step_count: int = 0,
             actor_id: int = 0,
             episode_seq: int = 0,
-        ):
+        ) -> None:
             self.state = state
             self.goals = goals
             self.goal_weights = goal_weights
