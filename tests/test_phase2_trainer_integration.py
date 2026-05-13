@@ -281,6 +281,29 @@ class TestReplayBuffer:
         assert len(batch) == 5
         assert all(isinstance(t, Phase2Transition) for t in batch)
 
+    def test_episode_suffix_lookup(self):
+        """Replay buffer should recover ordered episode suffixes."""
+        buffer = Phase2ReplayBuffer(capacity=10)
+
+        for idx in range(4):
+            buffer.push(
+                state=f"state_{idx}",
+                robot_action=(0,),
+                goals={0: "goal"},
+                goal_weights={0: 1.0},
+                human_actions=[0],
+                next_state=f"state_{idx + 1}",
+                episode_id=("actor", 7),
+                env_step_index=idx,
+                terminal=(idx == 3),
+            )
+
+        root = buffer.get_episode_transition(("actor", 7), 1)
+        assert root is not None
+        suffix = buffer.get_episode_suffix(root, horizon=10)
+        assert [transition.env_step_index for transition in suffix] == [1, 2, 3]
+        assert buffer.get_episode_terminal_index(("actor", 7)) == 3
+
 
 # =============================================================================
 # TENSORBOARD LOGGING TESTS
@@ -536,6 +559,33 @@ class TestModelBasedTargets:
         
         assert transition.next_state is None
         assert transition.transition_probs_by_action is not None
+
+    def test_next_state_stored_for_trajectory_targets(self):
+        """Longer-horizon modes should keep sampled next_state even in model-based mode."""
+        config = Phase2Config(
+            use_model_based_targets=True,
+            v_h_e_target_mode="n_step",
+            batch_size=4,
+            buffer_size=100,
+        )
+
+        stored_next_state = 'some_state' if config.should_store_sampled_next_state() else None
+        transition = Phase2Transition(
+            state='current_state',
+            robot_action=(0,),
+            goals={0: 'goal'},
+            goal_weights={0: 1.0},
+            human_actions=[0],
+            next_state=stored_next_state,
+            transition_probs_by_action={0: [(1.0, 'successor_state')]},
+            terminal=False,
+            episode_id=("actor", 0),
+            env_step_index=0,
+        )
+
+        assert transition.next_state == 'some_state'
+        assert transition.episode_id == ("actor", 0)
+        assert transition.env_step_index == 0
     
     def test_next_state_stored_when_not_model_based(self):
         """When use_model_based_targets=False, next_state should be stored."""
@@ -581,6 +631,11 @@ class TestModelBasedTargets:
         """Verify default config uses model-based targets."""
         config = Phase2Config()
         assert config.use_model_based_targets is True
+
+    def test_invalid_target_mode_raises(self):
+        """Config should reject unsupported target horizon modes."""
+        with pytest.raises(ValueError, match="Invalid v_h_e_target_mode"):
+            Phase2Config(v_h_e_target_mode="bad_mode")
     
     def test_no_successor_states_stored_in_transitions(self):
         """

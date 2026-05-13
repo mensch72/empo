@@ -243,6 +243,14 @@ class Phase2Config:
     
     # Goal resampling
     goal_resample_prob: float = 0.01
+
+    # Target horizon configuration for optional longer-horizon Phase 2 targets.
+    # one_step keeps the existing exact bootstrap behavior.
+    # n_step and episode prepare trajectory-aware replay for sampled-suffix targets.
+    v_h_e_target_mode: str = "one_step"  # one_step | n_step | episode
+    q_r_target_mode: str = "one_step"    # one_step | n_step | episode
+    v_h_e_n_step: int = 5
+    q_r_n_step: int = 5
     
     # U_r loss computation: number of humans to sample (None = all humans)
     u_r_sample_humans: Optional[int] = None
@@ -384,6 +392,22 @@ class Phase2Config:
     
     def __post_init__(self):
         """Compute cumulative warmup thresholds and apply network flags."""
+        valid_target_modes = {"one_step", "n_step", "episode"}
+        if self.v_h_e_target_mode not in valid_target_modes:
+            raise ValueError(
+                f"Invalid v_h_e_target_mode={self.v_h_e_target_mode!r}. "
+                f"Expected one of {sorted(valid_target_modes)}."
+            )
+        if self.q_r_target_mode not in valid_target_modes:
+            raise ValueError(
+                f"Invalid q_r_target_mode={self.q_r_target_mode!r}. "
+                f"Expected one of {sorted(valid_target_modes)}."
+            )
+        if self.v_h_e_n_step < 1:
+            raise ValueError(f"v_h_e_n_step must be >= 1, got {self.v_h_e_n_step}.")
+        if self.q_r_n_step < 1:
+            raise ValueError(f"q_r_n_step must be >= 1, got {self.q_r_n_step}.")
+
         # Override X_h warmup duration to 0 if not using X_h network
         if not self.x_h_use_network:
             self.warmup_x_h_steps = 0
@@ -582,6 +606,37 @@ class Phase2Config:
         # Linear decay
         decay_rate = (self.epsilon_h_start - self.epsilon_h_end) / self.epsilon_h_decay_steps
         return self.epsilon_h_start - decay_rate * step
+
+    def uses_trajectory_v_h_e_targets(self) -> bool:
+        """Return True when V_h^e uses sampled trajectory suffixes."""
+        return self.v_h_e_target_mode != "one_step"
+
+    def uses_trajectory_q_r_targets(self) -> bool:
+        """Return True when Q_r uses sampled trajectory suffixes."""
+        return self.q_r_target_mode != "one_step"
+
+    def uses_trajectory_targets(self) -> bool:
+        """Return True when any Phase 2 target mode needs episode-aware replay."""
+        return self.uses_trajectory_v_h_e_targets() or self.uses_trajectory_q_r_targets()
+
+    def should_store_sampled_next_state(self) -> bool:
+        """
+        Return True when replay should keep the sampled next_state.
+
+        One-step model-based training keeps using transition_probabilities alone.
+        Longer-horizon modes need the sampled trajectory in replay even when
+        one-step targets still use model-based expectations elsewhere.
+        """
+        return (not self.use_model_based_targets) or self.uses_trajectory_targets()
+
+    def requires_fixed_goal_rollouts(self) -> bool:
+        """
+        Return True when mid-rollout goal resampling should be disabled.
+
+        Longer-horizon sampled targets assume a fixed hypothetical goal profile
+        over the stored rollout suffix.
+        """
+        return self.uses_trajectory_targets()
     
     def get_effective_grad_clip(self, network_name: str, current_lr: float) -> Optional[float]:
         """

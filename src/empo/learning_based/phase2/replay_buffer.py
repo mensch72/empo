@@ -34,6 +34,8 @@ class Phase2Transition:
         next_compact_features: Optional pre-computed compact features for next state.
         terminal: Whether this transition ends the episode (next_state has no continuation).
             When True, the V_h^e TD target should not bootstrap from next_state.
+        episode_id: Identifier for the rollout episode this transition belongs to.
+        env_step_index: Position of this transition within its episode.
     """
     state: Any
     robot_action: Tuple[int, ...]
@@ -45,6 +47,8 @@ class Phase2Transition:
     compact_features: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = None
     next_compact_features: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = None
     terminal: bool = False
+    episode_id: Optional[Any] = None
+    env_step_index: Optional[int] = None
 
 
 class Phase2ReplayBuffer:
@@ -69,6 +73,8 @@ class Phase2ReplayBuffer:
         self.capacity = capacity
         self.buffer: List[Phase2Transition] = []
         self.position = 0
+        self._episode_transitions: Dict[Any, Dict[int, Phase2Transition]] = {}
+        self._episode_terminal_indices: Dict[Any, int] = {}
     
     def push(
         self,
@@ -81,7 +87,9 @@ class Phase2ReplayBuffer:
         transition_probs_by_action: Optional[Dict[int, List[Tuple[float, Any]]]] = None,
         compact_features: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = None,
         next_compact_features: Optional[Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]] = None,
-        terminal: bool = False
+        terminal: bool = False,
+        episode_id: Optional[Any] = None,
+        env_step_index: Optional[int] = None,
     ) -> None:
         """
         Add a transition to the buffer.
@@ -97,7 +105,12 @@ class Phase2ReplayBuffer:
             compact_features: Optional pre-computed (global, agent, interactive, compressed_grid) tensors for state.
             next_compact_features: Optional pre-computed (global, agent, interactive, compressed_grid) tensors for next_state.
             terminal: Whether this transition ends the episode.
+            episode_id: Optional rollout episode identifier.
+            env_step_index: Optional env_step position within the episode.
         """
+        if (episode_id is None) != (env_step_index is None):
+            raise ValueError("episode_id and env_step_index must both be provided or both be None.")
+
         transition = Phase2Transition(
             state=state,
             robot_action=robot_action,
@@ -108,14 +121,18 @@ class Phase2ReplayBuffer:
             transition_probs_by_action=transition_probs_by_action,
             compact_features=compact_features,
             next_compact_features=next_compact_features,
-            terminal=terminal
+            terminal=terminal,
+            episode_id=episode_id,
+            env_step_index=env_step_index,
         )
-        
+
         if len(self.buffer) < self.capacity:
             self.buffer.append(transition)
         else:
+            self._remove_episode_reference(self.buffer[self.position])
             self.buffer[self.position] = transition
-        
+
+        self._index_episode_transition(transition)
         self.position = (self.position + 1) % self.capacity
     
     def sample(self, batch_size: int) -> List[Phase2Transition]:
@@ -133,8 +150,94 @@ class Phase2ReplayBuffer:
     def __len__(self) -> int:
         """Return number of transitions in buffer."""
         return len(self.buffer)
+
+    def get_episode_transition(
+        self,
+        episode_id: Any,
+        env_step_index: int,
+    ) -> Optional[Phase2Transition]:
+        """Get a specific transition from an episode-aware replay record."""
+        return self._episode_transitions.get(episode_id, {}).get(env_step_index)
+
+    def get_episode_terminal_index(self, episode_id: Any) -> Optional[int]:
+        """Get the cached terminal env_step_index for an episode, if present."""
+        return self._episode_terminal_indices.get(episode_id)
+
+    def get_episode_suffix(
+        self,
+        transition: Phase2Transition,
+        horizon: Optional[int] = None,
+    ) -> List[Phase2Transition]:
+        """
+        Recover an ordered suffix starting at the given transition.
+
+        Args:
+            transition: Transition whose episode suffix should be recovered.
+            horizon: Optional maximum number of future env_steps to include beyond
+                the current transition. None returns the remainder of the stored
+                episode segment.
+        """
+        if transition.episode_id is None or transition.env_step_index is None:
+            return [transition]
+
+        episode = self._episode_transitions.get(transition.episode_id)
+        if not episode:
+            return []
+
+        terminal_index = self._episode_terminal_indices.get(
+            transition.episode_id,
+            max(episode.keys()),
+        )
+        if horizon is None:
+            end_index = terminal_index
+        else:
+            end_index = min(transition.env_step_index + max(horizon, 0), terminal_index)
+
+        suffix: List[Phase2Transition] = []
+        for step_index in range(transition.env_step_index, end_index + 1):
+            suffix_transition = episode.get(step_index)
+            if suffix_transition is None:
+                break
+            suffix.append(suffix_transition)
+            if suffix_transition.terminal:
+                break
+        return suffix
     
     def clear(self) -> None:
         """Clear all transitions from the buffer."""
         self.buffer = []
         self.position = 0
+        self._episode_transitions = {}
+        self._episode_terminal_indices = {}
+
+    def _index_episode_transition(self, transition: Phase2Transition) -> None:
+        """Index a transition for episode-aware suffix lookup."""
+        if transition.episode_id is None or transition.env_step_index is None:
+            return
+
+        episode = self._episode_transitions.setdefault(transition.episode_id, {})
+        episode[transition.env_step_index] = transition
+        if transition.terminal:
+            self._episode_terminal_indices[transition.episode_id] = transition.env_step_index
+
+    def _remove_episode_reference(self, transition: Phase2Transition) -> None:
+        """Remove a transition from the episode index when the ring buffer overwrites it."""
+        if transition.episode_id is None or transition.env_step_index is None:
+            return
+
+        episode = self._episode_transitions.get(transition.episode_id)
+        if not episode:
+            return
+
+        episode.pop(transition.env_step_index, None)
+        if not episode:
+            self._episode_transitions.pop(transition.episode_id, None)
+            self._episode_terminal_indices.pop(transition.episode_id, None)
+            return
+
+        if self._episode_terminal_indices.get(transition.episode_id) == transition.env_step_index:
+            self._episode_terminal_indices.pop(transition.episode_id, None)
+            for step_index, remaining_transition in episode.items():
+                if remaining_transition.terminal:
+                    self._episode_terminal_indices[transition.episode_id] = step_index
+                    break

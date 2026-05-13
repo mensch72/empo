@@ -93,6 +93,9 @@ def test_phase2_config():
     assert config.xi == 1.0
     assert config.eta == 1.1
     assert config.beta_r == 10.0
+    assert config.v_h_e_target_mode == "one_step"
+    assert config.q_r_target_mode == "one_step"
+    assert config.uses_trajectory_targets() is False
     print("  ✓ Default config values")
     
     # Epsilon_r decay
@@ -113,10 +116,12 @@ def test_phase2_config():
         zeta=3.0,
         xi=2.0,
         eta=1.5,
-        beta_r=5.0
+        beta_r=5.0,
+        q_r_target_mode="episode",
     )
     assert custom_config.gamma_r == 0.95
     assert custom_config.zeta == 3.0
+    assert custom_config.should_store_sampled_next_state() is True
     print("  ✓ Custom config values")
     
     print("  ✓ Phase2Config test passed!")
@@ -165,6 +170,28 @@ def test_phase2_replay_buffer():
     buffer.clear()
     assert len(buffer) == 0
     print("  ✓ Clear works")
+
+    # Test episode-aware suffix lookup
+    episode_buffer = Phase2ReplayBuffer(capacity=10)
+    for i in range(3):
+        episode_buffer.push(
+            state=f"episode_state_{i}",
+            robot_action=(0, 1),
+            goals=goals,
+            goal_weights=goal_weights,
+            human_actions=human_actions,
+            next_state=f"episode_state_{i + 1}",
+            episode_id=("sync", 0),
+            env_step_index=i,
+            terminal=(i == 2),
+        )
+    suffix = episode_buffer.get_episode_suffix(
+        episode_buffer.get_episode_transition(("sync", 0), 1),
+        horizon=5,
+    )
+    assert [t.env_step_index for t in suffix] == [1, 2]
+    assert episode_buffer.get_episode_terminal_index(("sync", 0)) == 2
+    print("  ✓ Episode suffix lookup works")
     
     print("  ✓ Phase2ReplayBuffer test passed!")
 
