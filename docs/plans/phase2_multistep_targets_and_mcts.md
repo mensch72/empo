@@ -146,7 +146,41 @@ Multi-step and episode targets become more sensitive to policy drift. The simple
 
 If later search relabeling is added, stored states can be relabeled with current-network search statistics instead of relying only on historical behavior.
 
-### F. Model-based variants to consider later
+### F. Goal resampling during rollouts
+
+The current Phase 2 trainer can resample goals during an episode:
+
+- immediately after a sampled goal is achieved, and
+- stochastically via `goal_resample_prob`.
+
+That behavior is helpful for one-step training because it keeps data collection moving, but it is a poor fit for multi-step / episode targets. For longer-horizon targets, the rollout suffix should represent a **single fixed hypothetical goal assignment** from the root onward.
+
+Recommended plan:
+
+- when collecting data for `n_step` or `episode` target modes, **disable stochastic mid-rollout goal resampling**;
+- when a goal is achieved, treat that as the endpoint of the target for that `(human, goal)` pair rather than immediately assigning a new goal inside the same target suffix;
+- if continued environment interaction after goal achievement is still desired for throughput, start a **new rollout segment / new replay episode record** with freshly sampled goals instead of mutating the existing one in place;
+- for MCTS expansions, keep the goal profile fixed throughout the simulated tree rooted at the current state.
+
+In other words: for the longer-horizon path, goal resampling should happen at **root selection / episode-segment boundaries**, not inside the rollout used to define a target.
+
+### G. Sampling of initial states
+
+Longer-horizon targets and MCTS also need an explicit story for where rollout roots come from.
+
+Recommended plan:
+
+- sample initial states only at **episode boundaries** via the existing reset / `world_model_factory` machinery or an explicit initial-state sampler layered on top of it;
+- treat the initial-state distribution as a configurable part of the training setup, especially in ensemble mode where each episode may come from a different world model instance;
+- distinguish clearly between:
+  - **training initial-state sampling**: how a new real rollout starts, and
+  - **search root selection**: which already-observed state MCTS is run from;
+- do **not** sample fresh initial states inside MCTS itself; search must always start from the stored root state and expand forward from there;
+- if later work introduces start-state diversification beyond plain `reset()`, prefer to expose it explicitly through `WorldModel.initial_state()` or the factory layer rather than hiding it inside the target-construction code.
+
+This keeps the semantics clean: initial states determine which parts of the world model are explored by real rollouts, while MCTS refines action choice from a given root state without changing the state distribution by itself.
+
+### H. Model-based variants to consider later
 
 Once the simpler sampled-trajectory version exists, a more model-based extension can be added:
 
