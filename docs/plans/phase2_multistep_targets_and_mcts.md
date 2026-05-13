@@ -60,7 +60,7 @@ v_h_e_target_mode: str = "one_step"   # one_step | n_step | episode
 q_r_target_mode: str = "one_step"     # one_step | n_step | episode
 v_h_e_n_step: int = 5
 q_r_n_step: int = 5
-search_reanalyse_fraction: float = 0.0
+search_reanalyze_fraction: float = 0.0
 ```
 
 The `episode` mode should mean “use the available remainder of the episode from the sampled transition onward”, not “run an unbounded rollout outside the configured episode length”.
@@ -145,7 +145,7 @@ Multi-step and episode targets become more sensitive to policy drift. The simple
 - optionally clear or downweight stale data after major `beta_r` schedule transitions,
 - postpone importance sampling unless it proves necessary.
 
-If reanalysis is later added, stored states can be relabeled with current-network search statistics instead of relying only on historical behavior.
+If later search relabeling is added, stored states can be relabeled with current-network search statistics instead of relying only on historical behavior.
 
 ### F. Model-based variants to consider later
 
@@ -227,7 +227,7 @@ Recommended training use:
 2. **search-distillation, second iteration**
    - add an optional policy head or policy distillation loss,
    - train the direct policy approximation to match search visit counts,
-   - optionally relabel old states with fresh search via reanalysis.
+   - optionally relabel old states with fresh search.
 
 The first iteration is likely enough to test whether search materially improves data quality.
 
@@ -283,7 +283,7 @@ mcts_enable_after_training_step: int = 0
 ### Phase 5: Search-aware training refinements
 
 14. Evaluate whether MCTS-only acting already improves `V_h^e` and `Q_r`.
-15. If useful, add optional reanalysis of replay states with fresh search.
+15. If useful, add optional replay-state search relabeling.
 16. If still useful, add a dedicated policy-distillation head or loss.
 
 ## Validation Plan
