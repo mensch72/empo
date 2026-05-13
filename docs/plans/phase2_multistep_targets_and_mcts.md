@@ -60,7 +60,6 @@ v_h_e_target_mode: str = "one_step"   # one_step | n_step | episode
 q_r_target_mode: str = "one_step"     # one_step | n_step | episode
 v_h_e_n_step: int = 5
 q_r_n_step: int = 5
-search_reanalyze_fraction: float = 0.0
 ```
 
 The `episode` mode should mean “use the available remainder of the episode from the sampled transition onward”, not “run an unbounded rollout outside the configured episode length”.
@@ -108,7 +107,7 @@ Recommended first implementation:
 
 1. use the sampled episode suffix rather than branching over all robot actions at later steps,
 2. keep the current exact one-step expectation mode available,
-3. document clearly that `n_step` / `episode` is lower-bias for horizon length but higher-variance and more on-policy.
+3. document clearly that `n_step` / `episode` should reduce the long-horizon bias of one-step targets, but will usually be higher-variance and more on-policy.
 
 ### D. `Q_r` multi-step targets
 
@@ -173,7 +172,7 @@ The direct path remains the default. The MCTS path is an optional search wrapper
 Recommended first design:
 
 - **prior over root actions**: current `Q_r`-derived policy,
-- **leaf value**: `V_r` if present, otherwise `U_r + E_{a~π_r}[Q_r]` using the frozen target networks,
+- **leaf value**: `V_r` if present, otherwise `U_r + E_{a~π_r}[Q_r]`, where both `Q_r` and the policy used in that expectation come from the frozen target networks,
 - **tree policy**: PUCT-style selection,
 - **root policy output**: normalized visit counts, optionally temperature-controlled.
 
@@ -190,7 +189,7 @@ MCTS in this codebase must respect that successor generation depends on:
 Recommended first rollout semantics:
 
 1. treat the world model as a generative simulator,
-2. at each node, sample human actions from the currently configured human-side behavior model used during training,
+2. at each node, sample human actions from the same goal-conditioned Phase 1 human policy prior that is currently used to generate human actions during Phase 2 training,
 3. sample or enumerate successor states from `transition_probabilities`,
 4. evaluate leaves with the current frozen Phase 2 value stack.
 
