@@ -2792,7 +2792,7 @@ class BasePhase2Trainer(ABC):
             self.episode_id = (actor_id, episode_seq)
 
         def advance_episode(self) -> None:
-            """Advance to a new episode identifier and reset episode position."""
+            """Advance to a new episode identifier and reset the env_step counter to zero."""
             self.episode_seq += 1
             self.episode_id = (self.actor_id, self.episode_seq)
             self.env_step_count = 0

@@ -109,7 +109,10 @@ class Phase2ReplayBuffer:
             env_step_index: Optional env_step position within the episode.
         """
         if (episode_id is None) != (env_step_index is None):
-            raise ValueError("episode_id and env_step_index must both be provided or both be None.")
+            raise ValueError(
+                "episode_id and env_step_index must both be provided or both be None. "
+                f"Got episode_id={episode_id!r}, env_step_index={env_step_index!r}."
+            )
 
         transition = Phase2Transition(
             state=state,
@@ -179,6 +182,8 @@ class Phase2ReplayBuffer:
         """
         if transition.episode_id is None or transition.env_step_index is None:
             return [transition]
+        if horizon is not None and horizon < 0:
+            raise ValueError(f"horizon must be >= 0 or None, got {horizon}.")
 
         episode = self._episode_transitions.get(transition.episode_id)
         if not episode:
@@ -191,7 +196,7 @@ class Phase2ReplayBuffer:
         if horizon is None:
             end_index = terminal_index
         else:
-            end_index = min(transition.env_step_index + max(horizon, 0), terminal_index)
+            end_index = min(transition.env_step_index + horizon, terminal_index)
 
         suffix: List[Phase2Transition] = []
         for step_index in range(transition.env_step_index, end_index + 1):
