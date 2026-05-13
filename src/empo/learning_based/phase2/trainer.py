@@ -1878,6 +1878,8 @@ class BasePhase2Trainer(ABC):
         # transition, while n_step counts sampled successor states. So n_step=1
         # needs only the current transition record (horizon=0), n_step=2 needs
         # the current transition plus one future transition (horizon=1), etc.
+        # Concretely: horizon=0 -> [current_transition], horizon=1 ->
+        # [current_transition, next_transition].
         horizon = None if mode == "episode" else max(0, n_step - 1)
         return self.replay_buffer.get_episode_suffix(transition, horizon=horizon)
 
@@ -1988,7 +1990,7 @@ class BasePhase2Trainer(ABC):
             bootstrap_transition: Optional[Phase2Transition] = None
             reward_suffix = suffix
 
-            if mode == "n_step" and len(suffix) >= n_step:
+            if mode == "n_step" and len(suffix) == n_step:
                 # suffix[0] corresponds to s_{t+1}, so suffix[n_step - 1] is the
                 # nth sampled successor state used as the bootstrap frontier.
                 candidate = suffix[n_step - 1]

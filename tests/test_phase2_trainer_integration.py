@@ -1069,8 +1069,8 @@ class TestTrajectoryTargets:
         batch = [trainer.replay_buffer.get_episode_transition(("actor", 0), 0)]
         targets = trainer._compute_trajectory_v_h_e_targets(batch, [(0, 0, "goal")])
 
-        # s1 is the first sampled successor (discount γ_h^0), so achieving at s2
-        # means the first-achievement term is γ_h^1.
+        # s2 is reached at step_offset=1 in the sampled suffix, so the
+        # first-achievement term is γ_h^1.
         assert targets[0].item() == pytest.approx(0.5)
 
     def test_q_r_n_step_accumulates_rewards_then_bootstraps(self):
