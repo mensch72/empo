@@ -1087,6 +1087,22 @@ class TestTrajectoryTargets:
 
         assert targets[0].item() == pytest.approx(-1.5)
 
+    def test_q_r_n_step_falls_back_to_shorter_open_suffix(self):
+        """n-step Q_r should bootstrap from the last available open suffix state when replay is truncated."""
+        trainer = self._build_q_r_trainer(
+            mode="n_step",
+            n_step=5,
+            u_r_values={"s1": -1.0},
+            v_r_values={"s2": -3.0},
+        )
+        trainer.replay_buffer.push(**self._make_transition("s0", "s1", env_step_index=0).__dict__)
+        trainer.replay_buffer.push(**self._make_transition("s1", "s2", env_step_index=1).__dict__)
+
+        batch = [trainer.replay_buffer.get_episode_transition(("actor", 0), 0)]
+        targets = trainer._compute_trajectory_q_r_targets(batch)
+
+        assert targets[0].item() == pytest.approx(0.5 * -1.0 + 0.25 * -3.0)
+
     def test_q_r_episode_drops_bootstrap_at_terminal(self):
         """Episode-mode Q_r should sum sampled rewards and omit frontier bootstrap at terminal."""
         trainer = self._build_q_r_trainer(
@@ -1102,6 +1118,22 @@ class TestTrajectoryTargets:
         targets = trainer._compute_trajectory_q_r_targets(batch)
 
         assert targets[0].item() == pytest.approx(-1.0)
+
+    def test_q_r_episode_bootstraps_when_suffix_stays_open(self):
+        """Episode-mode Q_r should bootstrap from the last available state if replay ends before terminal."""
+        trainer = self._build_q_r_trainer(
+            mode="episode",
+            n_step=2,
+            u_r_values={"s1": -1.0},
+            v_r_values={"s2": -3.0},
+        )
+        trainer.replay_buffer.push(**self._make_transition("s0", "s1", env_step_index=0).__dict__)
+        trainer.replay_buffer.push(**self._make_transition("s1", "s2", env_step_index=1).__dict__)
+
+        batch = [trainer.replay_buffer.get_episode_transition(("actor", 0), 0)]
+        targets = trainer._compute_trajectory_q_r_targets(batch)
+
+        assert targets[0].item() == pytest.approx(0.5 * -1.0 + 0.25 * -3.0)
 
 
 # =============================================================================

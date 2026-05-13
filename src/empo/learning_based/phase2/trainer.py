@@ -1873,6 +1873,10 @@ class BasePhase2Trainer(ABC):
         n_step: int,
     ) -> List[Phase2Transition]:
         """Recover the sampled rollout suffix needed for a trajectory target."""
+        # get_episode_suffix() counts future env_steps beyond the current
+        # transition, while n_step counts sampled successor states. So n_step=1
+        # needs only the current transition record (horizon=0), n_step=2 needs
+        # the current transition plus one future transition (horizon=1), etc.
         horizon = None if mode == "episode" else max(0, n_step - 1)
         return self.replay_buffer.get_episode_suffix(transition, horizon=horizon)
 
@@ -1991,17 +1995,19 @@ class BasePhase2Trainer(ABC):
                     bootstrap_transition = candidate
                     reward_suffix = suffix[:-1]
 
-            for reward_offset, reward_transition in enumerate(reward_suffix, start=1):
+            for discount_step, reward_transition in enumerate(reward_suffix, start=1):
                 next_state = reward_transition.next_state
                 if next_state is None:
                     break
                 reward_states.append(next_state)
                 reward_entries.append(entry_idx)
-                reward_discounts.append(gamma_r ** reward_offset)
+                reward_discounts.append(gamma_r ** discount_step)
 
             if bootstrap_transition is not None:
                 frontier_states.append(bootstrap_transition.next_state)
                 frontier_entries.append(entry_idx)
+                # suffix[n_step - 1] is the nth sampled successor state because
+                # suffix[0] corresponds to s_{t+1}, suffix[1] to s_{t+2}, etc.
                 frontier_discounts.append(gamma_r ** len(suffix))
 
         if reward_states:
