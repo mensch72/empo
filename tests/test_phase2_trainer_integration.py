@@ -324,6 +324,40 @@ class TestReplayBuffer:
 
         assert buffer.get_episode_suffix(transition, horizon=5) == [transition]
 
+    def test_episode_suffix_falls_back_when_starting_step_missing(self):
+        """Suffix lookup should return the transition when its indexed env_step is missing."""
+        buffer = Phase2ReplayBuffer(capacity=10)
+        episode_id = ("actor", 8)
+        for idx in (0, 2):
+            buffer.push(
+                Phase2Transition(
+                    state=f"state_{idx}",
+                    robot_action=(0,),
+                    goals={0: "goal"},
+                    goal_weights={0: 1.0},
+                    human_actions=[0],
+                    next_state=f"state_{idx + 1}",
+                    episode_id=episode_id,
+                    env_step_index=idx,
+                    terminal=(idx == 2),
+                )
+            )
+
+        missing_start = Phase2Transition(
+            state="state_1",
+            robot_action=(0,),
+            goals={0: "goal"},
+            goal_weights={0: 1.0},
+            human_actions=[0],
+            next_state="state_2",
+            episode_id=episode_id,
+            env_step_index=1,
+            terminal=False,
+        )
+
+        assert buffer.get_episode_suffix(missing_start, horizon=0) == [missing_start]
+        assert buffer.get_episode_suffix(missing_start, horizon=5) == [missing_start]
+
     def test_terminal_index_recompute_keeps_latest_terminal(self):
         """Overwrites should retain the latest remaining terminal index."""
         buffer = Phase2ReplayBuffer(capacity=5)

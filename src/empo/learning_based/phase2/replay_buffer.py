@@ -209,7 +209,7 @@ class Phase2ReplayBuffer:
             suffix.append(suffix_transition)
             if suffix_transition.terminal:
                 break
-        return suffix
+        return suffix or [transition]
     
     def clear(self) -> None:
         """Clear all transitions from the buffer."""
