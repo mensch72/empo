@@ -2875,9 +2875,9 @@ class BasePhase2Trainer(ABC):
             actor_state.state,
             actor_state.goals,
             actor_state.goal_weights,
-            episode_id,
-            env_step_index,
-            terminal=is_terminal
+            episode_id=episode_id,
+            env_step_index=env_step_index,
+            terminal=is_terminal,
         )
         
         # Check if transition failed (environment ended or error)

@@ -190,7 +190,7 @@ class Phase2ReplayBuffer:
 
         episode = self._episode_transitions.get(transition.episode_id)
         if not episode:
-            return []
+            return [transition]
 
         terminal_index = self._episode_terminal_indices.get(
             transition.episode_id,
