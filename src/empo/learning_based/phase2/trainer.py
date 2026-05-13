@@ -247,6 +247,8 @@ class BasePhase2Trainer(ABC):
         # Training step counters
         self.total_env_steps = 0  # environment interaction steps
         self.training_step_count = 0  # gradient update steps (learning steps)
+        self._sync_actor_id = 0
+        self._next_episode_seq_by_actor: Dict[int, int] = {}
         
         # Shared env_steps counter for async mode (set by _learner_loop)
         # When buffer is cleared, this gets reset to allow actors to resume production
@@ -1468,6 +1470,8 @@ class BasePhase2Trainer(ABC):
         state: Any,
         goals: Dict[int, Any],
         goal_weights: Dict[int, float],
+        episode_id: Optional[Any] = None,
+        env_step_index: Optional[int] = None,
         terminal: bool = False
     ) -> Tuple[Phase2Transition, Any]:
         """
@@ -1486,6 +1490,8 @@ class BasePhase2Trainer(ABC):
             state: Current state.
             goals: Current goal assignments.
             goal_weights: Weights for each goal (from goal sampler).
+            episode_id: Optional rollout episode identifier for replay linkage.
+            env_step_index: Optional env_step position within the rollout episode.
             terminal: Whether this transition ends the episode (after this step,
                 the environment will be reset). When True, the V_h^e TD target
                 should not bootstrap from next_state.
@@ -1529,13 +1535,11 @@ class BasePhase2Trainer(ABC):
         if self.debug:
             print(f"[DEBUG] collect_transition: environment stepped, creating transition...")
         
-        # Create transition - reusing the same transition_probs_by_action
-        # When using model-based targets, we intentionally do NOT store next_state
-        # in the transition. This ensures the trainer uses the expected value over
-        # all possible successor states from transition_probs_by_action rather than
-        # the single observed next_state. Any code that tries to use next_state
-        # will fail with an error, making bugs obvious.
-        stored_next_state = None if self.config.use_model_based_targets else next_state
+        # Create transition - reusing the same transition_probs_by_action.
+        # One-step model-based training intentionally omits next_state so target
+        # code must use transition_probabilities(). Longer-horizon modes keep the
+        # sampled trajectory in replay for suffix reconstruction.
+        stored_next_state = next_state if self.config.should_store_sampled_next_state() else None
         
         transition = Phase2Transition(
             state=state,
@@ -1545,7 +1549,9 @@ class BasePhase2Trainer(ABC):
             human_actions=human_actions,
             next_state=stored_next_state,
             transition_probs_by_action=transition_probs_by_action,
-            terminal=terminal
+            terminal=terminal,
+            episode_id=episode_id,
+            env_step_index=env_step_index,
         )
         
         if self.debug:
@@ -2769,11 +2775,28 @@ class BasePhase2Trainer(ABC):
     
     class _ActorState:
         """Mutable state for actor (environment interaction)."""
-        def __init__(self, state, goals, goal_weights, env_step_count: int = 0):
+        def __init__(
+            self,
+            state: Any,
+            goals: Dict[int, Any],
+            goal_weights: Dict[int, float],
+            env_step_count: int = 0,
+            actor_id: int = 0,
+            episode_seq: int = 0,
+        ) -> None:
             self.state = state
             self.goals = goals
             self.goal_weights = goal_weights
             self.env_step_count = env_step_count  # Steps since last env reset
+            self.actor_id = actor_id
+            self.episode_seq = episode_seq
+            self.episode_id = (actor_id, episode_seq)
+
+        def advance_episode(self) -> None:
+            """Advance to a new episode identifier and reset the env_step counter to zero."""
+            self.episode_seq += 1
+            self.episode_id = (self.actor_id, self.episode_seq)
+            self.env_step_count = 0
     
     def _sample_goals(self, state) -> Tuple[Dict[int, Any], Dict[int, float]]:
         """Sample goals for all humans using the goal sampler.
@@ -2788,12 +2811,35 @@ class BasePhase2Trainer(ABC):
             goals[h] = goal
             goal_weights[h] = weight
         return goals, goal_weights
+
+    def _allocate_initial_episode_seq(self, actor_id: int) -> int:
+        """
+        Allocate a unique starting episode sequence number for an actor.
+
+        This keeps episode ids monotonic across repeated train() calls even when
+        replay is preserved, while still allowing actor-local increments within a
+        single training run.
+        """
+        next_episode_seq = max(
+            self._next_episode_seq_by_actor.get(actor_id, 0),
+            self.total_env_steps,
+        )
+        self._next_episode_seq_by_actor[actor_id] = next_episode_seq + 1
+        return next_episode_seq
     
-    def _init_actor_state(self) -> "_ActorState":
+    def _init_actor_state(self, actor_id: int = 0) -> "_ActorState":
         """Initialize actor state with fresh environment."""
         state = self.reset_environment()
         goals, goal_weights = self._sample_goals(state)
-        return BasePhase2Trainer._ActorState(state, goals, goal_weights, 0)
+        episode_seq = self._allocate_initial_episode_seq(actor_id)
+        return BasePhase2Trainer._ActorState(
+            state,
+            goals,
+            goal_weights,
+            0,
+            actor_id=actor_id,
+            episode_seq=episode_seq,
+        )
     
     def _actor_step(self, actor_state: "_ActorState") -> Optional[Phase2Transition]:
         """
@@ -2816,11 +2862,22 @@ class BasePhase2Trainer(ABC):
         if self.debug and is_terminal:
             print(f"[DEBUG] Terminal transition! env_step={actor_state.env_step_count}, "
                   f"steps_per_episode={self.config.steps_per_episode}")
+
+        if self.config.uses_trajectory_targets():
+            episode_id = actor_state.episode_id
+            env_step_index = actor_state.env_step_count
+        else:
+            episode_id = None
+            env_step_index = None
         
         # Collect one transition
         transition, next_state = self.collect_transition(
-            actor_state.state, actor_state.goals, actor_state.goal_weights,
-            terminal=is_terminal
+            actor_state.state,
+            actor_state.goals,
+            actor_state.goal_weights,
+            episode_id=episode_id,
+            env_step_index=env_step_index,
+            terminal=is_terminal,
         )
         
         # Check if transition failed (environment ended or error)
@@ -2828,39 +2885,40 @@ class BasePhase2Trainer(ABC):
             # Reset environment and return None
             actor_state.state = self.reset_environment()
             actor_state.goals, actor_state.goal_weights = self._sample_goals(actor_state.state)
-            actor_state.env_step_count = 0
+            actor_state.advance_episode()
             return None
         
         # Update actor state
         actor_state.state = next_state
         actor_state.env_step_count += 1
         
-        # Check if any goal was achieved - if so, resample that goal
-        # This prevents the agent from repeatedly seeing achieved=1 for the same goal
-        goals_to_resample = []
-        for h, g in actor_state.goals.items():
-            if self.check_goal_achieved(next_state, h, g):
-                goals_to_resample.append(h)
-        
-        if goals_to_resample:
-            # Resample only the achieved goals
-            with self.profiler.section("goal_sampling"):
-                new_goals, new_weights = self._sample_goals(next_state)
-            for h in goals_to_resample:
-                if h in new_goals:
-                    actor_state.goals[h] = new_goals[h]
-                    actor_state.goal_weights[h] = new_weights[h]
-        # Also resample goals with some probability (exploration)
-        elif random.random() < self.config.goal_resample_prob:
-            with self.profiler.section("goal_sampling"):
-                actor_state.goals, actor_state.goal_weights = self._sample_goals(actor_state.state)
+        if not self.config.requires_fixed_goal_rollouts():
+            # Check if any goal was achieved - if so, resample that goal
+            # This prevents the agent from repeatedly seeing achieved=1 for the same goal
+            goals_to_resample = []
+            for h, g in actor_state.goals.items():
+                if self.check_goal_achieved(next_state, h, g):
+                    goals_to_resample.append(h)
+            
+            if goals_to_resample:
+                # Resample only the achieved goals
+                with self.profiler.section("goal_sampling"):
+                    new_goals, new_weights = self._sample_goals(next_state)
+                for h in goals_to_resample:
+                    if h in new_goals:
+                        actor_state.goals[h] = new_goals[h]
+                        actor_state.goal_weights[h] = new_weights[h]
+            # Also resample goals with some probability (exploration)
+            elif random.random() < self.config.goal_resample_prob:
+                with self.profiler.section("goal_sampling"):
+                    actor_state.goals, actor_state.goal_weights = self._sample_goals(actor_state.state)
         
         # Reset environment periodically
         if actor_state.env_step_count >= self.config.steps_per_episode:
             actor_state.state = self.reset_environment()
             with self.profiler.section("goal_sampling"):
                 actor_state.goals, actor_state.goal_weights = self._sample_goals(actor_state.state)
-            actor_state.env_step_count = 0
+            actor_state.advance_episode()
         
         return transition
     
@@ -3233,7 +3291,7 @@ class BasePhase2Trainer(ABC):
         history = []
         
         # Initialize states
-        actor_state = self._init_actor_state()
+        actor_state = self._init_actor_state(actor_id=self._sync_actor_id)
         learner_state = self._init_learner_state()
         
         # Calculate env steps to training steps ratio
@@ -3300,7 +3358,9 @@ class BasePhase2Trainer(ABC):
                             transition.human_actions,
                             transition.next_state,
                             transition.transition_probs_by_action,
-                            terminal=transition.terminal
+                            terminal=transition.terminal,
+                            episode_id=transition.episode_id,
+                            env_step_index=transition.env_step_index,
                         )
                     self.total_env_steps += 1
                     
@@ -3600,7 +3660,7 @@ class BasePhase2Trainer(ABC):
         steps_since_sync = 0
         
         # Initialize actor state
-        actor_state = self._init_actor_state()
+        actor_state = self._init_actor_state(actor_id=actor_id)
         
         while not stop_event.is_set():
             # Throttle if actors are too far ahead of learner
@@ -3653,6 +3713,8 @@ class BasePhase2Trainer(ABC):
                     'next_state': transition.next_state,
                     'transition_probs_by_action': transition.transition_probs_by_action,
                     'terminal': transition.terminal,
+                    'episode_id': transition.episode_id,
+                    'env_step_index': transition.env_step_index,
                 }
                 
                 try:
@@ -3845,7 +3907,9 @@ class BasePhase2Trainer(ABC):
                     human_actions=trans_dict['human_actions'],
                     next_state=trans_dict['next_state'],
                     transition_probs_by_action=trans_dict.get('transition_probs_by_action'),
-                    terminal=trans_dict.get('terminal', False)
+                    terminal=trans_dict.get('terminal', False),
+                    episode_id=trans_dict.get('episode_id'),
+                    env_step_index=trans_dict.get('env_step_index'),
                 )
                 
                 # Record state visit for count-based curiosity
