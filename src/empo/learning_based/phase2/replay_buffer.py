@@ -245,7 +245,10 @@ class Phase2ReplayBuffer:
 
         if self._episode_terminal_indices.get(transition.episode_id) == transition.env_step_index:
             self._episode_terminal_indices.pop(transition.episode_id, None)
-            for step_index, remaining_transition in episode.items():
-                if remaining_transition.terminal:
-                    self._episode_terminal_indices[transition.episode_id] = step_index
-                    break
+            remaining_terminal_indices = [
+                step_index
+                for step_index, remaining_transition in episode.items()
+                if remaining_transition.terminal
+            ]
+            if remaining_terminal_indices:
+                self._episode_terminal_indices[transition.episode_id] = max(remaining_terminal_indices)

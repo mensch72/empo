@@ -1470,8 +1470,8 @@ class BasePhase2Trainer(ABC):
         state: Any,
         goals: Dict[int, Any],
         goal_weights: Dict[int, float],
-        episode_id: Any,
-        env_step_index: int,
+        episode_id: Optional[Any] = None,
+        env_step_index: Optional[int] = None,
         terminal: bool = False
     ) -> Tuple[Phase2Transition, Any]:
         """
@@ -1490,8 +1490,8 @@ class BasePhase2Trainer(ABC):
             state: Current state.
             goals: Current goal assignments.
             goal_weights: Weights for each goal (from goal sampler).
-            episode_id: Rollout episode identifier for replay linkage.
-            env_step_index: Position of this transition within the rollout episode.
+            episode_id: Optional rollout episode identifier for replay linkage.
+            env_step_index: Optional env_step position within the rollout episode.
             terminal: Whether this transition ends the episode (after this step,
                 the environment will be reset). When True, the V_h^e TD target
                 should not bootstrap from next_state.
@@ -2862,14 +2862,21 @@ class BasePhase2Trainer(ABC):
         if self.debug and is_terminal:
             print(f"[DEBUG] Terminal transition! env_step={actor_state.env_step_count}, "
                   f"steps_per_episode={self.config.steps_per_episode}")
+
+        if self.config.uses_trajectory_targets():
+            episode_id = actor_state.episode_id
+            env_step_index = actor_state.env_step_count
+        else:
+            episode_id = None
+            env_step_index = None
         
         # Collect one transition
         transition, next_state = self.collect_transition(
             actor_state.state,
             actor_state.goals,
             actor_state.goal_weights,
-            actor_state.episode_id,
-            actor_state.env_step_count,
+            episode_id,
+            env_step_index,
             terminal=is_terminal
         )
         

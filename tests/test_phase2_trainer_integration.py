@@ -14,6 +14,8 @@ See docs/FAQ.md for detailed justifications of each design choice.
 import copy
 import os
 import tempfile
+from contextlib import nullcontext
+from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn as nn
@@ -303,6 +305,170 @@ class TestReplayBuffer:
         suffix = buffer.get_episode_suffix(root, horizon=10)
         assert [transition.env_step_index for transition in suffix] == [1, 2, 3]
         assert buffer.get_episode_terminal_index(("actor", 7)) == 3
+
+    def test_terminal_index_recompute_keeps_latest_terminal(self):
+        """Overwrites should retain the latest remaining terminal index."""
+        buffer = Phase2ReplayBuffer(capacity=5)
+        transitions = [
+            Phase2Transition(
+                state="state_2",
+                robot_action=(0,),
+                goals={0: "goal"},
+                goal_weights={0: 1.0},
+                human_actions=[0],
+                next_state="state_3",
+                episode_id=("actor", 9),
+                env_step_index=2,
+                terminal=True,
+            ),
+            Phase2Transition(
+                state="state_4",
+                robot_action=(0,),
+                goals={0: "goal"},
+                goal_weights={0: 1.0},
+                human_actions=[0],
+                next_state="state_5",
+                episode_id=("actor", 9),
+                env_step_index=4,
+                terminal=True,
+            ),
+            Phase2Transition(
+                state="state_5",
+                robot_action=(0,),
+                goals={0: "goal"},
+                goal_weights={0: 1.0},
+                human_actions=[0],
+                next_state="state_6",
+                episode_id=("actor", 9),
+                env_step_index=5,
+                terminal=True,
+            ),
+            Phase2Transition(
+                state="state_1",
+                robot_action=(0,),
+                goals={0: "goal"},
+                goal_weights={0: 1.0},
+                human_actions=[0],
+                next_state="state_2",
+                episode_id=("actor", 9),
+                env_step_index=1,
+                terminal=False,
+            ),
+        ]
+
+        for transition in transitions:
+            buffer._index_episode_transition(transition)
+
+        assert buffer.get_episode_terminal_index(("actor", 9)) == 5
+
+        buffer._remove_episode_reference(
+            Phase2Transition(
+                state="state_5",
+                robot_action=(0,),
+                goals={0: "goal"},
+                goal_weights={0: 1.0},
+                human_actions=[0],
+                next_state="state_6",
+                episode_id=("actor", 9),
+                env_step_index=5,
+                terminal=True,
+            )
+        )
+
+        assert buffer.get_episode_terminal_index(("actor", 9)) == 4
+
+        buffer.push(
+            state="replacement",
+            robot_action=(0,),
+            goals={0: "goal"},
+            goal_weights={0: 1.0},
+            human_actions=[0],
+            next_state="replacement_next",
+            episode_id=("other", 0),
+            env_step_index=0,
+            terminal=False,
+        )
+        assert buffer.get_episode_terminal_index(("actor", 9)) == 4
+
+
+class TestActorStepTrajectoryMetadata:
+    """Test when actor collection attaches episode metadata."""
+
+    @staticmethod
+    def _build_trainer(uses_trajectory_targets: bool):
+        captured = {}
+
+        class MockTrainer:
+            def __init__(self):
+                self.debug = False
+                self.profiler = SimpleNamespace(section=lambda _name: nullcontext())
+                self.config = SimpleNamespace(
+                    steps_per_episode=5,
+                    goal_resample_prob=0.0,
+                    uses_trajectory_targets=lambda: uses_trajectory_targets,
+                    requires_fixed_goal_rollouts=lambda: False,
+                )
+
+            def collect_transition(self, state, goals, goal_weights, episode_id=None, env_step_index=None, terminal=False):
+                captured["episode_id"] = episode_id
+                captured["env_step_index"] = env_step_index
+                return (
+                    Phase2Transition(
+                        state=state,
+                        robot_action=(0,),
+                        goals=goals.copy(),
+                        goal_weights=goal_weights.copy(),
+                        human_actions=[0],
+                        next_state="next_state",
+                        terminal=terminal,
+                        episode_id=episode_id,
+                        env_step_index=env_step_index,
+                    ),
+                    "next_state",
+                )
+
+            def reset_environment(self):
+                return "reset_state"
+
+            def _sample_goals(self, state):
+                return {0: "goal"}, {0: 1.0}
+
+            def check_goal_achieved(self, next_state, human_idx, goal):
+                return False
+
+        actor_state = BasePhase2Trainer._ActorState(
+            state="state",
+            goals={0: "goal"},
+            goal_weights={0: 1.0},
+            env_step_count=2,
+            actor_id=7,
+            episode_seq=11,
+        )
+        return MockTrainer(), actor_state, captured
+
+    def test_actor_step_omits_episode_metadata_for_one_step_targets(self):
+        """Default one-step training should not attach episode replay metadata."""
+        trainer, actor_state, captured = self._build_trainer(uses_trajectory_targets=False)
+
+        transition = BasePhase2Trainer._actor_step(trainer, actor_state)
+
+        assert transition is not None
+        assert captured["episode_id"] is None
+        assert captured["env_step_index"] is None
+        assert transition.episode_id is None
+        assert transition.env_step_index is None
+
+    def test_actor_step_keeps_episode_metadata_for_trajectory_targets(self):
+        """Trajectory targets should keep episode replay metadata."""
+        trainer, actor_state, captured = self._build_trainer(uses_trajectory_targets=True)
+
+        transition = BasePhase2Trainer._actor_step(trainer, actor_state)
+
+        assert transition is not None
+        assert captured["episode_id"] == (7, 11)
+        assert captured["env_step_index"] == 2
+        assert transition.episode_id == (7, 11)
+        assert transition.env_step_index == 2
 
 
 class TestEpisodeIdAllocation:
