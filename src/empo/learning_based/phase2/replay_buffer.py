@@ -108,7 +108,10 @@ class Phase2ReplayBuffer:
             episode_id: Optional rollout episode identifier.
             env_step_index: Optional env_step position within the episode.
         """
-        if (episode_id is None) != (env_step_index is None):
+        if (
+            (episode_id is None and env_step_index is not None)
+            or (episode_id is not None and env_step_index is None)
+        ):
             raise ValueError(
                 "episode_id and env_step_index must both be provided or both be None. "
                 f"Got episode_id={episode_id!r}, env_step_index={env_step_index!r}."
@@ -178,7 +181,7 @@ class Phase2ReplayBuffer:
             transition: Transition whose episode suffix should be recovered.
             horizon: Optional maximum number of future env_steps to include beyond
                 the current transition. None returns the remainder of the stored
-                episode segment.
+                episode segment. A value of 0 returns only the current transition.
         """
         if transition.episode_id is None or transition.env_step_index is None:
             return [transition]

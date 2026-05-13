@@ -249,6 +249,8 @@ class Phase2Config:
     # n_step and episode prepare trajectory-aware replay for sampled-suffix targets.
     v_h_e_target_mode: str = "one_step"  # one_step | n_step | episode
     q_r_target_mode: str = "one_step"    # one_step | n_step | episode
+    # Lookahead horizon used when the corresponding target mode is "n_step".
+    # Must be >= 1.
     v_h_e_n_step: int = 5
     q_r_n_step: int = 5
     
