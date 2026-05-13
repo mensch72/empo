@@ -942,6 +942,168 @@ class TestModelBasedTargets:
                 "Successor states should be in transition_probs_by_action"
 
 
+class TestTrajectoryTargets:
+    """Tests for sampled-trajectory n-step and episode target construction."""
+
+    class _DictVhTarget:
+        def __init__(self, values):
+            self.values = values
+
+        def forward_batch(self, states, goals, human_indices, env, device):
+            return torch.tensor(
+                [self.values[(state, goal)] for state, goal in zip(states, goals)],
+                dtype=torch.float32,
+                device=device,
+            )
+
+        def apply_hard_clamp(self, values):
+            return values
+
+    class _DictVrTarget:
+        def __init__(self, values):
+            self.values = values
+
+        def forward_batch(self, states, env, device):
+            return torch.tensor(
+                [self.values[state] for state in states],
+                dtype=torch.float32,
+                device=device,
+            )
+
+    class _TrajectoryTrainer:
+        _get_trajectory_suffix = BasePhase2Trainer._get_trajectory_suffix
+        _compute_trajectory_v_h_e_targets = BasePhase2Trainer._compute_trajectory_v_h_e_targets
+        _compute_trajectory_q_r_targets = BasePhase2Trainer._compute_trajectory_q_r_targets
+
+    def _make_transition(self, state, next_state, *, episode_id=("actor", 0), env_step_index=0, terminal=False):
+        return Phase2Transition(
+            state=state,
+            robot_action=(0,),
+            goals={0: "goal"},
+            goal_weights={0: 1.0},
+            human_actions=[0],
+            next_state=next_state,
+            terminal=terminal,
+            episode_id=episode_id,
+            env_step_index=env_step_index,
+        )
+
+    def _build_v_h_e_trainer(self, mode, n_step, achieved_states=None, bootstrap_values=None, gamma_h=0.5):
+        trainer = self._TrajectoryTrainer()
+        trainer.device = "cpu"
+        trainer.env = None
+        trainer.training_step_count = 0
+        trainer.replay_buffer = Phase2ReplayBuffer(capacity=32)
+        trainer.config = Phase2Config(
+            v_h_e_target_mode=mode,
+            v_h_e_n_step=n_step,
+        )
+        trainer.networks = SimpleNamespace(
+            v_h_e=SimpleNamespace(gamma_h=gamma_h),
+            v_h_e_target=self._DictVhTarget(bootstrap_values or {}),
+        )
+        achieved_states = set(achieved_states or [])
+        trainer.check_goal_achieved = lambda state, human_idx, goal: state in achieved_states
+        return trainer
+
+    def _build_q_r_trainer(self, mode, n_step, u_r_values, v_r_values=None, gamma_r=0.5):
+        trainer = self._TrajectoryTrainer()
+        trainer.device = "cpu"
+        trainer.env = None
+        trainer.training_step_count = 0
+        trainer.replay_buffer = Phase2ReplayBuffer(capacity=32)
+        trainer.config = Phase2Config(
+            q_r_target_mode=mode,
+            q_r_n_step=n_step,
+            gamma_r=gamma_r,
+            v_r_use_network=True,
+        )
+        trainer.networks = SimpleNamespace(
+            v_r_target=self._DictVrTarget(v_r_values or {}),
+        )
+        trainer._compute_u_r_batch_target = lambda states: torch.tensor(
+            [u_r_values[state] for state in states],
+            dtype=torch.float32,
+            device=trainer.device,
+        )
+        return trainer
+
+    def test_v_h_e_n_step_bootstraps_from_frontier(self):
+        """n-step V_h^e should bootstrap when the goal is not reached within horizon."""
+        trainer = self._build_v_h_e_trainer(
+            mode="n_step",
+            n_step=2,
+            bootstrap_values={("s2", "goal"): 0.8},
+        )
+        for idx, (state, next_state) in enumerate((("s0", "s1"), ("s1", "s2"), ("s2", "s3"))):
+            trainer.replay_buffer.push(**self._make_transition(state, next_state, env_step_index=idx).__dict__)
+
+        batch = [trainer.replay_buffer.get_episode_transition(("actor", 0), 0)]
+        targets = trainer._compute_trajectory_v_h_e_targets(batch, [(0, 0, "goal")])
+
+        assert targets.shape == (1,)
+        assert targets[0].item() == pytest.approx(0.5 ** 2 * 0.8)
+
+    def test_v_h_e_episode_returns_zero_without_achievement(self):
+        """Episode-mode V_h^e should return zero when the sampled suffix never achieves the goal."""
+        trainer = self._build_v_h_e_trainer(mode="episode", n_step=2)
+        for idx, (state, next_state) in enumerate((("s0", "s1"), ("s1", "s2"), ("s2", "s3"))):
+            terminal = idx == 2
+            trainer.replay_buffer.push(**self._make_transition(state, next_state, env_step_index=idx, terminal=terminal).__dict__)
+
+        batch = [trainer.replay_buffer.get_episode_transition(("actor", 0), 0)]
+        targets = trainer._compute_trajectory_v_h_e_targets(batch, [(0, 0, "goal")])
+
+        assert targets[0].item() == pytest.approx(0.0)
+
+    def test_v_h_e_n_step_uses_first_achievement_time(self):
+        """n-step V_h^e should discount by the first sampled achievement step."""
+        trainer = self._build_v_h_e_trainer(
+            mode="n_step",
+            n_step=3,
+            achieved_states={"s2"},
+        )
+        for idx, (state, next_state) in enumerate((("s0", "s1"), ("s1", "s2"), ("s2", "s3"))):
+            trainer.replay_buffer.push(**self._make_transition(state, next_state, env_step_index=idx).__dict__)
+
+        batch = [trainer.replay_buffer.get_episode_transition(("actor", 0), 0)]
+        targets = trainer._compute_trajectory_v_h_e_targets(batch, [(0, 0, "goal")])
+
+        assert targets[0].item() == pytest.approx(0.5)
+
+    def test_q_r_n_step_accumulates_rewards_then_bootstraps(self):
+        """n-step Q_r should use intermediate U_r terms plus frontier V_r."""
+        trainer = self._build_q_r_trainer(
+            mode="n_step",
+            n_step=3,
+            u_r_values={"s1": -1.0, "s2": -2.0},
+            v_r_values={"s3": -4.0},
+        )
+        for idx, (state, next_state) in enumerate((("s0", "s1"), ("s1", "s2"), ("s2", "s3"))):
+            trainer.replay_buffer.push(**self._make_transition(state, next_state, env_step_index=idx).__dict__)
+
+        batch = [trainer.replay_buffer.get_episode_transition(("actor", 0), 0)]
+        targets = trainer._compute_trajectory_q_r_targets(batch)
+
+        assert targets[0].item() == pytest.approx(-1.5)
+
+    def test_q_r_episode_drops_bootstrap_at_terminal(self):
+        """Episode-mode Q_r should sum sampled rewards and omit frontier bootstrap at terminal."""
+        trainer = self._build_q_r_trainer(
+            mode="episode",
+            n_step=2,
+            u_r_values={"s1": -1.0, "s2": -2.0},
+            v_r_values={},
+        )
+        trainer.replay_buffer.push(**self._make_transition("s0", "s1", env_step_index=0).__dict__)
+        trainer.replay_buffer.push(**self._make_transition("s1", "s2", env_step_index=1, terminal=True).__dict__)
+
+        batch = [trainer.replay_buffer.get_episode_transition(("actor", 0), 0)]
+        targets = trainer._compute_trajectory_q_r_targets(batch)
+
+        assert targets[0].item() == pytest.approx(-1.0)
+
+
 # =============================================================================
 # ASYNC RND SYNC TESTS
 # =============================================================================

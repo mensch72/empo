@@ -1866,6 +1866,188 @@ class BasePhase2Trainer(ABC):
         
         return targets
 
+    def _get_trajectory_suffix(
+        self,
+        transition: Phase2Transition,
+        mode: str,
+        n_step: int,
+    ) -> List[Phase2Transition]:
+        """Recover the sampled rollout suffix needed for a trajectory target."""
+        horizon = None if mode == "episode" else max(0, n_step - 1)
+        return self.replay_buffer.get_episode_suffix(transition, horizon=horizon)
+
+    def _compute_trajectory_v_h_e_targets(
+        self,
+        batch: List[Phase2Transition],
+        v_h_e_data: List[Tuple[int, int, Any]],
+    ) -> torch.Tensor:
+        """
+        Compute sampled-trajectory V_h^e targets for n-step / episode modes.
+
+        The target checks successive sampled next states for first achievement.
+        If the goal is not achieved within the available suffix, it bootstraps
+        from the last available frontier state when the suffix is still open.
+        """
+        gamma_h = self.networks.v_h_e.gamma_h
+        mode = self.config.v_h_e_target_mode
+        n_step = self.config.v_h_e_n_step
+        targets = torch.zeros(len(v_h_e_data), device=self.device, dtype=torch.float32)
+
+        frontier_states: List[Any] = []
+        frontier_humans: List[int] = []
+        frontier_goals: List[Any] = []
+        frontier_entries: List[int] = []
+        frontier_discounts: List[float] = []
+
+        for entry_idx, (transition_idx, human_idx, goal) in enumerate(v_h_e_data):
+            suffix = self._get_trajectory_suffix(batch[transition_idx], mode, n_step)
+            achieved = False
+
+            for step_offset, suffix_transition in enumerate(suffix):
+                next_state = suffix_transition.next_state
+                if next_state is None:
+                    break
+                if self.check_goal_achieved(next_state, human_idx, goal):
+                    targets[entry_idx] = gamma_h ** step_offset
+                    achieved = True
+                    break
+                if suffix_transition.terminal:
+                    achieved = True
+                    break
+
+            if achieved or not suffix:
+                continue
+
+            frontier_transition = suffix[-1]
+            frontier_state = frontier_transition.next_state
+            if frontier_state is None or frontier_transition.terminal:
+                continue
+
+            frontier_states.append(frontier_state)
+            frontier_humans.append(human_idx)
+            frontier_goals.append(goal)
+            frontier_entries.append(entry_idx)
+            frontier_discounts.append(gamma_h ** len(suffix))
+
+        if frontier_states:
+            with torch.no_grad():
+                frontier_values = self.networks.v_h_e_target.forward_batch(
+                    frontier_states,
+                    frontier_goals,
+                    frontier_humans,
+                    self.env,
+                    self.device,
+                ).squeeze()
+                frontier_values = self.networks.v_h_e_target.apply_hard_clamp(frontier_values)
+                if frontier_values.dim() == 0:
+                    frontier_values = frontier_values.unsqueeze(0)
+
+            entry_indices = torch.tensor(frontier_entries, device=self.device, dtype=torch.long)
+            discounts = torch.tensor(frontier_discounts, device=self.device, dtype=torch.float32)
+            targets.scatter_add_(0, entry_indices, discounts * frontier_values)
+
+        return targets
+
+    def _compute_trajectory_q_r_targets(
+        self,
+        batch: List[Phase2Transition],
+    ) -> torch.Tensor:
+        """
+        Compute sampled-trajectory Q_r targets for the taken root actions only.
+
+        one_step mode keeps the existing all-actions exact backup. Trajectory
+        modes instead follow the sampled suffix:
+            γ_r U_r(s_{t+1}) + ... + γ_r^n V_r(s_{t+n})
+        with the final bootstrap removed when the suffix ends at a terminal step.
+        """
+        gamma_r = self.config.gamma_r
+        mode = self.config.q_r_target_mode
+        n_step = self.config.q_r_n_step
+        targets = torch.zeros(len(batch), device=self.device, dtype=torch.float32)
+
+        reward_states: List[Any] = []
+        reward_entries: List[int] = []
+        reward_discounts: List[float] = []
+        frontier_states: List[Any] = []
+        frontier_entries: List[int] = []
+        frontier_discounts: List[float] = []
+
+        for entry_idx, transition in enumerate(batch):
+            suffix = self._get_trajectory_suffix(transition, mode, n_step)
+            if not suffix:
+                continue
+
+            bootstrap_transition: Optional[Phase2Transition] = None
+            reward_suffix = suffix
+
+            if mode == "n_step" and len(suffix) >= n_step:
+                candidate = suffix[n_step - 1]
+                if candidate.next_state is not None and not candidate.terminal:
+                    bootstrap_transition = candidate
+                    reward_suffix = suffix[: n_step - 1]
+            elif mode == "episode":
+                candidate = suffix[-1]
+                if candidate.next_state is not None and not candidate.terminal:
+                    bootstrap_transition = candidate
+                    reward_suffix = suffix[:-1]
+
+            for reward_offset, reward_transition in enumerate(reward_suffix, start=1):
+                next_state = reward_transition.next_state
+                if next_state is None:
+                    break
+                reward_states.append(next_state)
+                reward_entries.append(entry_idx)
+                reward_discounts.append(gamma_r ** reward_offset)
+
+            if bootstrap_transition is not None:
+                frontier_states.append(bootstrap_transition.next_state)
+                frontier_entries.append(entry_idx)
+                frontier_discounts.append(gamma_r ** len(suffix))
+
+        if reward_states:
+            with torch.no_grad():
+                u_r_values = self._compute_u_r_batch_target(reward_states).squeeze()
+                if u_r_values.dim() == 0:
+                    u_r_values = u_r_values.unsqueeze(0)
+
+            entry_indices = torch.tensor(reward_entries, device=self.device, dtype=torch.long)
+            discounts = torch.tensor(reward_discounts, device=self.device, dtype=torch.float32)
+            targets.scatter_add_(0, entry_indices, discounts * u_r_values)
+
+        if frontier_states:
+            effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
+            with torch.no_grad():
+                if self.config.v_r_use_network:
+                    frontier_values = self.networks.v_r_target.forward_batch(
+                        frontier_states,
+                        self.env,
+                        self.device,
+                    ).squeeze()
+                else:
+                    frontier_u_r = self._compute_u_r_batch_target(frontier_states).squeeze()
+                    frontier_q_r = self.networks.q_r_target.forward_batch(
+                        frontier_states,
+                        self.env,
+                        self.device,
+                    )
+                    frontier_pi_r = self.networks.q_r_target.get_policy(
+                        frontier_q_r,
+                        beta_r=effective_beta_r,
+                    )
+                    frontier_values = compute_v_r_from_components(
+                        frontier_u_r.squeeze(),
+                        frontier_q_r,
+                        frontier_pi_r,
+                    )
+                if frontier_values.dim() == 0:
+                    frontier_values = frontier_values.unsqueeze(0)
+
+            entry_indices = torch.tensor(frontier_entries, device=self.device, dtype=torch.long)
+            discounts = torch.tensor(frontier_discounts, device=self.device, dtype=torch.float32)
+            targets.scatter_add_(0, entry_indices, discounts * frontier_values)
+
+        return targets
+
     def compute_losses(
         self,
         batch: List[Phase2Transition],
@@ -1997,7 +2179,10 @@ class BasePhase2Trainer(ABC):
             # This gives exact expected values rather than single-sample TD estimates
             with self.profiler.section("target_computation"):
                 with torch.no_grad():
-                    target_v_h_e = self._compute_model_based_v_h_e_targets(batch, v_h_e_data)
+                    if self.config.v_h_e_target_mode == "one_step":
+                        target_v_h_e = self._compute_model_based_v_h_e_targets(batch, v_h_e_data)
+                    else:
+                        target_v_h_e = self._compute_trajectory_v_h_e_targets(batch, v_h_e_data)
             
             # Debug logging for targets
             if self.debug and self.training_step_count % 100 == 0:
@@ -2130,33 +2315,45 @@ class BasePhase2Trainer(ABC):
             # Forward pass: get Q-values for all actions
             with self.profiler.section("forward_q_r"):
                 q_r_all = self.networks.q_r.forward_batch(states, self.env, self.device)
-            
-            # Compute model-based targets for ALL robot actions
-            # This allows us to update the entire Q-function per state, not just taken action
-            with torch.no_grad():
-                target_q_r_all = self._compute_model_based_q_r_targets(batch)
-            
-            # Loss: MSE over ALL action Q-values (full Bellman backup)
-            # Loss function depends on use_z_based_loss setting:
-            # - use_z_based_loss=True (legacy): z-space MSE in constant LR, Q-space in decay
-            # - use_z_based_loss=False (default): Q-space MSE throughout (faster outlier correction)
-            if self.config.should_use_z_loss(self.training_step_count):
-                # Z-space MSE for balanced gradients (legacy mode)
-                z_pred = to_z_space(q_r_all, self.config.eta, self.config.xi)
-                z_target = to_z_space(target_q_r_all, self.config.eta, self.config.xi)
-                losses['q_r'] = ((z_pred - z_target) ** 2).mean()
-            else:
-                # Q-space MSE (default: faster outlier correction, Robbins-Monro convergence)
-                losses['q_r'] = ((q_r_all - target_q_r_all) ** 2).mean()
-            
-            # Statistics: report for taken actions for comparability
             robot_actions = [t.robot_action for t in batch]
             action_indices = torch.tensor(
                 [self.networks.q_r.action_tuple_to_index(a) for a in robot_actions],
                 device=self.device
             )
-            q_r_pred_taken = q_r_all.gather(1, action_indices.unsqueeze(1)).squeeze(1)
-            target_q_r_taken = target_q_r_all.gather(1, action_indices.unsqueeze(1)).squeeze(1)
+
+            if self.config.q_r_target_mode == "one_step":
+                # Compute model-based targets for ALL robot actions
+                # This allows us to update the entire Q-function per state, not just taken action
+                with torch.no_grad():
+                    target_q_r_all = self._compute_model_based_q_r_targets(batch)
+
+                # Loss: MSE over ALL action Q-values (full Bellman backup)
+                # Loss function depends on use_z_based_loss setting:
+                # - use_z_based_loss=True (legacy): z-space MSE in constant LR, Q-space in decay
+                # - use_z_based_loss=False (default): Q-space MSE throughout (faster outlier correction)
+                if self.config.should_use_z_loss(self.training_step_count):
+                    # Z-space MSE for balanced gradients (legacy mode)
+                    z_pred = to_z_space(q_r_all, self.config.eta, self.config.xi)
+                    z_target = to_z_space(target_q_r_all, self.config.eta, self.config.xi)
+                    losses['q_r'] = ((z_pred - z_target) ** 2).mean()
+                else:
+                    # Q-space MSE (default: faster outlier correction, Robbins-Monro convergence)
+                    losses['q_r'] = ((q_r_all - target_q_r_all) ** 2).mean()
+
+                # Statistics: report for taken actions for comparability
+                q_r_pred_taken = q_r_all.gather(1, action_indices.unsqueeze(1)).squeeze(1)
+                target_q_r_taken = target_q_r_all.gather(1, action_indices.unsqueeze(1)).squeeze(1)
+            else:
+                q_r_pred_taken = q_r_all.gather(1, action_indices.unsqueeze(1)).squeeze(1)
+                with torch.no_grad():
+                    target_q_r_taken = self._compute_trajectory_q_r_targets(batch)
+
+                if self.config.should_use_z_loss(self.training_step_count):
+                    z_pred = to_z_space(q_r_pred_taken, self.config.eta, self.config.xi)
+                    z_target = to_z_space(target_q_r_taken, self.config.eta, self.config.xi)
+                    losses['q_r'] = ((z_pred - z_target) ** 2).mean()
+                else:
+                    losses['q_r'] = ((q_r_pred_taken - target_q_r_taken) ** 2).mean()
             
             with torch.no_grad():
                 stats = {
