@@ -25,7 +25,7 @@ from empo.learning_based.phase2.human_goal_ability import BaseHumanGoalAchieveme
 from empo.learning_based.phase2.aggregate_goal_ability import BaseAggregateGoalAbilityNetwork
 from empo.learning_based.phase2.intrinsic_reward_network import BaseIntrinsicRewardNetwork
 from empo.learning_based.phase2.robot_value_network import BaseRobotValueNetwork
-from empo.learning_based.phase2.trainer import Phase2Networks
+from empo.learning_based.phase2.trainer import Phase2Networks, BasePhase2Trainer
 
 
 # =============================================================================
@@ -303,6 +303,41 @@ class TestReplayBuffer:
         suffix = buffer.get_episode_suffix(root, horizon=10)
         assert [transition.env_step_index for transition in suffix] == [1, 2, 3]
         assert buffer.get_episode_terminal_index(("actor", 7)) == 3
+
+
+class TestEpisodeIdAllocation:
+    """Test unique episode-id allocation for replay-linked rollouts."""
+
+    def test_init_actor_state_uses_monotonic_episode_sequences(self):
+        """Repeated actor initialization should not reuse old episode ids."""
+
+        class MockTrainer:
+            def __init__(self):
+                self.total_env_steps = 0
+                self._next_episode_seq_by_actor = {}
+
+            def reset_environment(self):
+                return "state"
+
+            def _sample_goals(self, state):
+                return {0: "goal"}, {0: 1.0}
+
+            def _allocate_initial_episode_seq(self, actor_id):
+                return BasePhase2Trainer._allocate_initial_episode_seq(self, actor_id)
+
+        trainer = MockTrainer()
+
+        first = BasePhase2Trainer._init_actor_state(trainer, actor_id=0)
+        second = BasePhase2Trainer._init_actor_state(trainer, actor_id=0)
+        assert first.episode_id == (0, 0)
+        assert second.episode_id == (0, 1)
+
+        trainer.total_env_steps = 25
+        resumed = BasePhase2Trainer._init_actor_state(trainer, actor_id=0)
+        other_actor = BasePhase2Trainer._init_actor_state(trainer, actor_id=1)
+
+        assert resumed.episode_id == (0, 25)
+        assert other_actor.episode_id == (1, 25)
 
 
 # =============================================================================

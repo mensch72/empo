@@ -248,6 +248,7 @@ class BasePhase2Trainer(ABC):
         self.total_env_steps = 0  # environment interaction steps
         self.training_step_count = 0  # gradient update steps (learning steps)
         self._sync_actor_id = 0
+        self._next_episode_seq_by_actor: Dict[int, int] = {}
         
         # Shared env_steps counter for async mode (set by _learner_loop)
         # When buffer is cleared, this gets reset to allow actors to resume production
@@ -2810,18 +2811,34 @@ class BasePhase2Trainer(ABC):
             goals[h] = goal
             goal_weights[h] = weight
         return goals, goal_weights
+
+    def _allocate_initial_episode_seq(self, actor_id: int) -> int:
+        """
+        Allocate a unique starting episode sequence number for an actor.
+
+        This keeps episode ids monotonic across repeated train() calls even when
+        replay is preserved, while still allowing actor-local increments within a
+        single training run.
+        """
+        next_episode_seq = max(
+            self._next_episode_seq_by_actor.get(actor_id, 0),
+            self.total_env_steps,
+        )
+        self._next_episode_seq_by_actor[actor_id] = next_episode_seq + 1
+        return next_episode_seq
     
     def _init_actor_state(self, actor_id: int = 0) -> "_ActorState":
         """Initialize actor state with fresh environment."""
         state = self.reset_environment()
         goals, goal_weights = self._sample_goals(state)
+        episode_seq = self._allocate_initial_episode_seq(actor_id)
         return BasePhase2Trainer._ActorState(
             state,
             goals,
             goal_weights,
             0,
             actor_id=actor_id,
-            episode_seq=0,
+            episode_seq=episode_seq,
         )
     
     def _actor_step(self, actor_state: "_ActorState") -> Optional[Phase2Transition]:
