@@ -550,6 +550,25 @@ class TestActorStepTrajectoryMetadata:
         assert actor_state.goals == {0: "goal@next_state"}
         assert actor_state.goal_weights == {0: 2.0}
 
+    def test_fixed_goal_rollouts_keep_segment_open_without_achievement(self):
+        """Fixed-goal rollouts should keep the same segment while goals stay unmet."""
+        trainer, actor_state, captured = self._build_trainer(
+            uses_trajectory_targets=True,
+            requires_fixed_goal_rollouts=True,
+            achieved=False,
+        )
+
+        transition = BasePhase2Trainer._actor_step(trainer, actor_state)
+
+        assert transition is not None
+        assert captured["goal_checks"] == [("next_state", 0, "goal")]
+        assert actor_state.state == "next_state"
+        assert actor_state.env_step_count == 3
+        assert actor_state.rollout_step_index == 3
+        assert actor_state.episode_id == (7, 11)
+        assert actor_state.goals == {0: "goal"}
+        assert actor_state.goal_weights == {0: 1.0}
+
     def test_fixed_goal_rollouts_terminal_step_resets_once(self):
         """Terminal trajectory steps should not double-advance the replay segment."""
         trainer, actor_state, _captured = self._build_trainer(

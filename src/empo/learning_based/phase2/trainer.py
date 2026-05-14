@@ -3013,7 +3013,13 @@ class BasePhase2Trainer(ABC):
             self.episode_id = (actor_id, episode_seq)
 
         def advance_episode(self, reset_env_step_count: bool = True) -> None:
-            """Advance to a new replay segment and optionally reset the env-reset counter."""
+            """
+            Advance to a new replay segment and optionally reset the env-reset counter.
+
+            Use reset_env_step_count=False when splitting replay segments after
+            goal achievement without resetting the environment. Leave it at True
+            when the environment itself is reset and a fresh rollout starts.
+            """
             self.episode_seq += 1
             self.episode_id = (self.actor_id, self.episode_seq)
             self.rollout_step_index = 0
@@ -3140,8 +3146,9 @@ class BasePhase2Trainer(ABC):
             for h, g in actor_state.goals.items():
                 if self.check_goal_achieved(next_state, h, g):
                     goals_to_resample.append(h)
-            # Terminal steps already advance the replay segment below, so skip
-            # the fixed-goal restart here to avoid double-advancing episode ids.
+            # Terminal steps already call advance_episode() in the reset block
+            # below, so skip the fixed-goal restart here to avoid incrementing
+            # the replay segment id twice for the same collected transition.
             if goals_to_resample and not is_terminal:
                 # For longer-horizon replay, keep goals fixed within a stored
                 # rollout segment and start a new segment after achievement.
