@@ -569,8 +569,8 @@ class TestActorStepTrajectoryMetadata:
         assert actor_state.goals == {0: "goal"}
         assert actor_state.goal_weights == {0: 1.0}
 
-    def test_fixed_goal_rollouts_terminal_step_resets_once(self):
-        """Terminal trajectory steps should not double-advance the replay segment."""
+    def test_fixed_goal_rollouts_terminal_step_does_not_double_advance_segment(self):
+        """Terminal trajectory steps should advance the replay segment only once."""
         trainer, actor_state, _captured = self._build_trainer(
             uses_trajectory_targets=True,
             requires_fixed_goal_rollouts=True,

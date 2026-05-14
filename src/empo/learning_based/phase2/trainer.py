@@ -3040,6 +3040,14 @@ class BasePhase2Trainer(ABC):
             goal_weights[h] = weight
         return goals, goal_weights
 
+    def _get_achieved_goals(self, state, goals: Dict[int, Any]) -> List[int]:
+        """Return the human indices whose current goals are achieved in state."""
+        achieved_goals = []
+        for h, g in goals.items():
+            if self.check_goal_achieved(state, h, g):
+                achieved_goals.append(h)
+        return achieved_goals
+
     def _allocate_initial_episode_seq(self, actor_id: int) -> int:
         """
         Allocate a unique starting episode sequence number for an actor.
@@ -3125,10 +3133,7 @@ class BasePhase2Trainer(ABC):
         if not self.config.requires_fixed_goal_rollouts():
             # Check if any goal was achieved - if so, resample that goal
             # This prevents the agent from repeatedly seeing achieved=1 for the same goal
-            goals_to_resample = []
-            for h, g in actor_state.goals.items():
-                if self.check_goal_achieved(next_state, h, g):
-                    goals_to_resample.append(h)
+            goals_to_resample = self._get_achieved_goals(next_state, actor_state.goals)
             if goals_to_resample:
                 # Resample only the achieved goals
                 with self.profiler.section("goal_sampling"):
@@ -3142,13 +3147,11 @@ class BasePhase2Trainer(ABC):
                 with self.profiler.section("goal_sampling"):
                     actor_state.goals, actor_state.goal_weights = self._sample_goals(actor_state.state)
         else:
-            goals_to_resample = []
-            for h, g in actor_state.goals.items():
-                if self.check_goal_achieved(next_state, h, g):
-                    goals_to_resample.append(h)
-            # Terminal steps already call advance_episode() in the reset block
-            # below, so skip the fixed-goal restart here to avoid incrementing
-            # the replay segment id twice for the same collected transition.
+            goals_to_resample = self._get_achieved_goals(next_state, actor_state.goals)
+            # Terminal steps already call advance_episode() in the
+            # environment-reset block below, so skip the fixed-goal restart
+            # here to avoid incrementing the replay segment id twice for the
+            # same collected transition.
             if goals_to_resample and not is_terminal:
                 # For longer-horizon replay, keep goals fixed within a stored
                 # rollout segment and start a new segment after achievement.
