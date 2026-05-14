@@ -14,7 +14,7 @@ import tempfile
 import time
 import zipfile
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from queue import Empty
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -82,6 +82,70 @@ class Phase2Networks:
     v_h_e_target: Optional[BaseHumanGoalAchievementNetwork] = None
     x_h_target: Optional[BaseAggregateGoalAbilityNetwork] = None
     u_r_target: Optional[BaseIntrinsicRewardNetwork] = None
+
+
+@dataclass
+class Phase2SearchStats:
+    """Root search statistics captured during MCTS-based robot acting."""
+    action: Tuple[int, ...]
+    policy: Tuple[float, ...]
+    root_value: float
+    action_values: Tuple[float, ...]
+
+
+@dataclass
+class _MCTSNode:
+    """Internal node used by the acting-time MCTS policy-improvement path."""
+    state: Any
+    prior_policy: Optional[np.ndarray] = None
+    base_q_values: Optional[np.ndarray] = None
+    u_r_value: float = 0.0
+    base_state_value: float = 0.0
+    visit_count: int = 0
+    edge_visit_counts: Optional[np.ndarray] = None
+    edge_value_sums: Optional[np.ndarray] = None
+    children: Dict[int, Dict[int, "_MCTSNode"]] = field(default_factory=dict)
+
+    def estimated_q_values(self) -> np.ndarray:
+        """Return per-action Q estimates, mixing search rollouts with base network values."""
+        assert self.base_q_values is not None
+        if self.edge_visit_counts is None or self.edge_value_sums is None:
+            return self.base_q_values.copy()
+
+        q_values = self.base_q_values.astype(np.float64, copy=True)
+        visited = self.edge_visit_counts > 0
+        if np.any(visited):
+            q_values[visited] = self.edge_value_sums[visited] / self.edge_visit_counts[visited]
+        return q_values
+
+    def get_search_policy(self, temperature: float = 1.0) -> np.ndarray:
+        """Return the root/child policy induced by visit counts."""
+        assert self.prior_policy is not None
+        if self.edge_visit_counts is None:
+            return self.prior_policy.copy()
+
+        visits = self.edge_visit_counts.astype(np.float64)
+        if visits.sum() <= 0:
+            return self.prior_policy.copy()
+
+        if temperature != 1.0:
+            powered = np.power(visits, 1.0 / temperature, where=visits > 0, out=np.zeros_like(visits))
+            if powered.sum() > 0:
+                visits = powered
+
+        total = visits.sum()
+        if total <= 0:
+            return self.prior_policy.copy()
+        return visits / total
+
+    def estimated_state_value(self, temperature: float = 1.0) -> float:
+        """Return the current search-improved state-value estimate."""
+        if self.edge_visit_counts is None or self.edge_visit_counts.sum() <= 0:
+            return float(self.base_state_value)
+
+        search_policy = self.get_search_policy(temperature=temperature)
+        q_values = self.estimated_q_values()
+        return float(self.u_r_value + np.dot(search_policy, q_values))
 
 
 class BasePhase2Trainer(ABC):
@@ -918,18 +982,27 @@ class BasePhase2Trainer(ABC):
         Returns:
             Next state.
         """
-        # Build action list for all agents
-        actions = [0] * self.num_agents  # Default to idle for any gaps
-        
-        for i, human_idx in enumerate(self.human_agent_indices):
-            actions[human_idx] = human_actions[i]
-        
-        for i, robot_idx in enumerate(self.robot_agent_indices):
-            actions[robot_idx] = robot_action[i]
-        
+        actions = self._build_joint_action_profile(human_actions, robot_action)
+
         # Step environment and get new state (standard WorldModel API)
         self.env.step(actions)
         return self.env.get_state()
+
+    def _build_joint_action_profile(
+        self,
+        human_actions: List[int],
+        robot_action: Tuple[int, ...],
+    ) -> List[int]:
+        """Build a full joint action profile ordered by agent index."""
+        actions = [0] * self.num_agents  # Default to idle for any gaps
+
+        for i, human_idx in enumerate(self.human_agent_indices):
+            actions[human_idx] = human_actions[i]
+
+        for i, robot_idx in enumerate(self.robot_agent_indices):
+            actions[robot_idx] = robot_action[i]
+
+        return actions
     
     def reset_environment(self) -> Any:
         """
@@ -995,14 +1068,39 @@ class BasePhase2Trainer(ABC):
         Returns:
             Tuple of robot actions.
         """
-        
+        action, _ = self._sample_robot_action_with_stats(
+            state,
+            goals=None,
+            transition_probs_by_action=transition_probs_by_action,
+        )
+        return action
+
+    def _sample_robot_action_with_stats(
+        self,
+        state: Any,
+        goals: Optional[Dict[int, Any]] = None,
+        transition_probs_by_action: Optional[Dict[int, List[Tuple[float, Any]]]] = None,
+    ) -> Tuple[Tuple[int, ...], Optional[Phase2SearchStats]]:
+        """Sample a robot action and optionally return root MCTS search statistics."""
         epsilon = self.config.get_epsilon_r(self.training_step_count)
         effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
-        
+
         # Epsilon exploration: sample from exploration policy (with optional curiosity bonus)
         if torch.rand(1).item() < epsilon:
-            return self._sample_robot_exploration_action(state, transition_probs_by_action)
-        
+            return self._sample_robot_exploration_action(state, transition_probs_by_action), None
+
+        if (
+            goals is not None
+            and self.config.should_use_mcts_policy(self.training_step_count)
+            and hasattr(self.env, "transition_probabilities")
+        ):
+            search_stats = self._run_mcts_policy_search(
+                state,
+                goals,
+                effective_beta_r=effective_beta_r,
+            )
+            return search_stats.action, search_stats
+
         # Otherwise: sample from learned policy (with optional curiosity bonus)
         with torch.no_grad():
             q_values = self.networks.q_r_target.forward(
@@ -1014,10 +1112,11 @@ class BasePhase2Trainer(ABC):
                 q_values = self._add_curiosity_bonus_to_q_values(
                     state, q_values, transition_probs_by_action
                 )
-            
-            return self.networks.q_r_target.sample_action(
+
+            action = self.networks.q_r_target.sample_action(
                 q_values, beta_r=effective_beta_r
             )
+            return action, None
     
     def _curiosity_enabled_for_robot(self) -> bool:
         """Check if curiosity-driven exploration is enabled for the robot."""
@@ -1133,6 +1232,152 @@ class BasePhase2Trainer(ABC):
         probs_tensor = torch.tensor(base_probs, dtype=torch.float32)
         flat_idx = torch.multinomial(probs_tensor, 1).item()
         return self.networks.q_r_target.action_index_to_tuple(flat_idx)
+
+    def _sample_human_actions_for_search(
+        self,
+        state: Any,
+        goals: Dict[int, Any],
+    ) -> List[int]:
+        """Sample human actions for MCTS using the fixed goal-conditioned policy prior."""
+        num_actions = self.env.action_space.n
+        actions: List[int] = []
+        for human_idx in self.human_agent_indices:
+            goal = goals[human_idx]
+            probs = np.asarray(self.human_policy_prior(state, human_idx, goal), dtype=np.float64)
+            if probs.sum() <= 0:
+                probs = np.ones(num_actions, dtype=np.float64) / num_actions
+            else:
+                probs = probs / probs.sum()
+            actions.append(int(np.random.choice(num_actions, p=probs)))
+        return actions
+
+    def _evaluate_mcts_node(
+        self,
+        node: _MCTSNode,
+        goals: Dict[int, Any],
+        effective_beta_r: float,
+    ) -> None:
+        """Populate priors and value estimates for an MCTS node from frozen Phase 2 networks."""
+        del goals  # Goals are fixed at the tree level; the networks only need the state here.
+        with torch.no_grad():
+            q_values = self.networks.q_r_target.forward(node.state, self.env, self.device)
+            policy = self.networks.q_r_target.get_policy(q_values, beta_r=effective_beta_r)
+            u_r_tensor = self._compute_u_r_batch_target([node.state]).reshape(-1)
+            u_r_value = float(u_r_tensor[0].item())
+
+            if self.config.v_r_use_network and self.networks.v_r_target is not None:
+                base_state_value = float(
+                    self.networks.v_r_target.forward(node.state, self.env, self.device).reshape(-1)[0].item()
+                )
+            else:
+                base_state_value = float(
+                    compute_v_r_from_components(
+                        u_r_tensor,
+                        q_values,
+                        policy,
+                    ).reshape(-1)[0].item()
+                )
+
+        node.prior_policy = policy.detach().cpu().numpy().reshape(-1).astype(np.float64)
+        node.base_q_values = q_values.detach().cpu().numpy().reshape(-1).astype(np.float64)
+        node.u_r_value = u_r_value
+        node.base_state_value = base_state_value
+        node.edge_visit_counts = np.zeros_like(node.base_q_values, dtype=np.int64)
+        node.edge_value_sums = np.zeros_like(node.base_q_values, dtype=np.float64)
+
+    def _select_mcts_action_index(self, node: _MCTSNode) -> int:
+        """Select the next robot action to explore from a node using a PUCT score."""
+        assert node.prior_policy is not None
+        assert node.edge_visit_counts is not None
+
+        q_values = node.estimated_q_values()
+        total_visits = max(node.visit_count, 1)
+        exploration = (
+            self.config.mcts_c_puct
+            * node.prior_policy
+            * np.sqrt(total_visits)
+            / (1.0 + node.edge_visit_counts.astype(np.float64))
+        )
+        scores = q_values + exploration
+        return int(np.argmax(scores))
+
+    def _simulate_mcts(
+        self,
+        node: _MCTSNode,
+        goals: Dict[int, Any],
+        effective_beta_r: float,
+        depth: int,
+    ) -> float:
+        """Run one MCTS simulation below the given node and return its updated state value."""
+        if node.prior_policy is None:
+            self._evaluate_mcts_node(node, goals, effective_beta_r)
+            return node.estimated_state_value(temperature=self.config.mcts_temperature)
+
+        if depth >= self.config.mcts_max_depth:
+            return node.estimated_state_value(temperature=self.config.mcts_temperature)
+
+        action_idx = self._select_mcts_action_index(node)
+        robot_action = self.networks.q_r_target.action_index_to_tuple(action_idx)
+        human_actions = self._sample_human_actions_for_search(node.state, goals)
+        actions = self._build_joint_action_profile(human_actions, robot_action)
+
+        transitions = self.env.transition_probabilities(node.state, actions)
+        if not transitions:
+            simulated_q = 0.0
+        else:
+            probs = np.asarray([prob for prob, _ in transitions], dtype=np.float64)
+            probs = probs / probs.sum()
+            successor_index = int(np.random.choice(len(transitions), p=probs))
+            next_state = transitions[successor_index][1]
+
+            child_nodes = node.children.setdefault(action_idx, {})
+            next_state_hash = hash(next_state)
+            child_node = child_nodes.get(next_state_hash)
+            if child_node is None:
+                child_node = _MCTSNode(state=next_state)
+                child_nodes[next_state_hash] = child_node
+
+            child_state_value = self._simulate_mcts(
+                child_node,
+                goals,
+                effective_beta_r,
+                depth=depth + 1,
+            )
+            simulated_q = self.config.gamma_r * child_state_value
+
+        assert node.edge_visit_counts is not None
+        assert node.edge_value_sums is not None
+        node.edge_visit_counts[action_idx] += 1
+        node.edge_value_sums[action_idx] += simulated_q
+        node.visit_count += 1
+
+        return node.estimated_state_value(temperature=self.config.mcts_temperature)
+
+    def _run_mcts_policy_search(
+        self,
+        state: Any,
+        goals: Dict[int, Any],
+        effective_beta_r: float,
+    ) -> Phase2SearchStats:
+        """Run acting-time MCTS rooted at ``state`` and return root search statistics."""
+        root = _MCTSNode(state=state)
+        self._evaluate_mcts_node(root, goals, effective_beta_r)
+
+        for _ in range(self.config.mcts_num_simulations):
+            self._simulate_mcts(root, goals, effective_beta_r, depth=0)
+
+        search_policy = root.get_search_policy(temperature=self.config.mcts_temperature)
+        action_values = root.estimated_q_values()
+        if search_policy.sum() <= 0:
+            search_policy = root.prior_policy.copy()
+
+        action_idx = int(np.random.choice(len(search_policy), p=search_policy))
+        return Phase2SearchStats(
+            action=self.networks.q_r_target.action_index_to_tuple(action_idx),
+            policy=tuple(float(x) for x in search_policy.tolist()),
+            root_value=float(root.estimated_state_value(temperature=self.config.mcts_temperature)),
+            action_values=tuple(float(x) for x in action_values.tolist()),
+        )
     
     def _sample_curiosity_exploration_action(self, state: Any) -> Tuple[int, ...]:
         """
@@ -1523,7 +1768,11 @@ class BasePhase2Trainer(ABC):
         
         # Step 3: Sample robot action, passing transition_probs for curiosity bonus
         with self.profiler.section("sample_robot_action"):
-            robot_action = self.sample_robot_action(state, transition_probs_by_action)
+            robot_action, search_stats = self._sample_robot_action_with_stats(
+                state,
+                goals=goals,
+                transition_probs_by_action=transition_probs_by_action,
+            )
         
         if self.debug:
             print(f"[DEBUG] collect_transition: robot_action={robot_action}, stepping environment...")
@@ -1552,6 +1801,9 @@ class BasePhase2Trainer(ABC):
             terminal=terminal,
             episode_id=episode_id,
             env_step_index=env_step_index,
+            search_policy=None if search_stats is None else search_stats.policy,
+            search_value=None if search_stats is None else search_stats.root_value,
+            search_action_value=None if search_stats is None else search_stats.action_values,
         )
         
         if self.debug:
@@ -1582,16 +1834,10 @@ class BasePhase2Trainer(ABC):
         
         for action_idx in range(num_actions):
             robot_action = self.networks.q_r.action_index_to_tuple(action_idx)
-            
+
             # Build full action vector using ACTUAL human actions
-            actions = [0] * self.num_agents  # Default to idle for any gaps
-            
-            for i, human_idx in enumerate(self.human_agent_indices):
-                actions[human_idx] = human_actions[i]
-            
-            for i, robot_idx in enumerate(self.robot_agent_indices):
-                actions[robot_idx] = robot_action[i]
-            
+            actions = self._build_joint_action_profile(human_actions, robot_action)
+
             # Get transition probabilities
             trans_probs = self.env.transition_probabilities(state, actions)
             
@@ -3966,6 +4212,9 @@ class BasePhase2Trainer(ABC):
                     'terminal': transition.terminal,
                     'episode_id': transition.episode_id,
                     'env_step_index': transition.env_step_index,
+                    'search_policy': transition.search_policy,
+                    'search_value': transition.search_value,
+                    'search_action_value': transition.search_action_value,
                 }
                 
                 try:
@@ -4161,6 +4410,9 @@ class BasePhase2Trainer(ABC):
                     terminal=trans_dict.get('terminal', False),
                     episode_id=trans_dict.get('episode_id'),
                     env_step_index=trans_dict.get('env_step_index'),
+                    search_policy=trans_dict.get('search_policy'),
+                    search_value=trans_dict.get('search_value'),
+                    search_action_value=trans_dict.get('search_action_value'),
                 )
                 
                 # Record state visit for count-based curiosity

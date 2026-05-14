@@ -253,6 +253,16 @@ class Phase2Config:
     # Must be >= 1.
     v_h_e_n_step: int = 5
     q_r_n_step: int = 5
+
+    # Robot policy improvement path.
+    # direct keeps the existing closed-form Q_r -> π_r transform.
+    # mcts runs an acting-time tree search that uses Q_r as the root prior and
+    # V_r / U_r+Q_r as the leaf evaluator, while replay stores root statistics.
+    pi_r_mode: str = "direct"  # direct | mcts
+    mcts_num_simulations: int = 32
+    mcts_c_puct: float = 1.5
+    mcts_temperature: float = 1.0
+    mcts_max_depth: int = 5
     
     # U_r loss computation: number of humans to sample (None = all humans)
     u_r_sample_humans: Optional[int] = None
@@ -395,6 +405,7 @@ class Phase2Config:
     def __post_init__(self):
         """Compute cumulative warmup thresholds and apply network flags."""
         valid_target_modes = {"one_step", "n_step", "episode"}
+        valid_pi_r_modes = {"direct", "mcts"}
         if self.v_h_e_target_mode not in valid_target_modes:
             raise ValueError(
                 f"Invalid v_h_e_target_mode={self.v_h_e_target_mode!r}. "
@@ -409,6 +420,23 @@ class Phase2Config:
             raise ValueError(f"v_h_e_n_step must be >= 1, got {self.v_h_e_n_step}.")
         if self.q_r_n_step < 1:
             raise ValueError(f"q_r_n_step must be >= 1, got {self.q_r_n_step}.")
+        if self.pi_r_mode not in valid_pi_r_modes:
+            raise ValueError(
+                f"Invalid pi_r_mode={self.pi_r_mode!r}. "
+                f"Expected one of {sorted(valid_pi_r_modes)}."
+            )
+        if self.mcts_num_simulations < 1:
+            raise ValueError(
+                f"mcts_num_simulations must be >= 1, got {self.mcts_num_simulations}."
+            )
+        if self.mcts_c_puct <= 0:
+            raise ValueError(f"mcts_c_puct must be > 0, got {self.mcts_c_puct}.")
+        if self.mcts_temperature <= 0:
+            raise ValueError(
+                f"mcts_temperature must be > 0, got {self.mcts_temperature}."
+            )
+        if self.mcts_max_depth < 1:
+            raise ValueError(f"mcts_max_depth must be >= 1, got {self.mcts_max_depth}.")
 
         # Override X_h warmup duration to 0 if not using X_h network
         if not self.x_h_use_network:
@@ -639,6 +667,23 @@ class Phase2Config:
         over the stored rollout suffix.
         """
         return self.uses_trajectory_targets()
+
+    def uses_mcts_policy_improvement(self) -> bool:
+        """Return True when robot acting should use the MCTS policy-improvement path."""
+        return self.pi_r_mode == "mcts"
+
+    def should_use_mcts_policy(self, step: int) -> bool:
+        """
+        Return True when acting should switch from the direct π_r path to MCTS.
+
+        During warm-up ``beta_r=0`` and the policy should stay uniform/direct, so
+        MCTS is only enabled once the effective beta is positive.
+        """
+        return (
+            self.uses_mcts_policy_improvement()
+            and self.mcts_num_simulations > 0
+            and self.get_effective_beta_r(step) > 0.0
+        )
     
     def get_effective_grad_clip(self, network_name: str, current_lr: float) -> Optional[float]:
         """
