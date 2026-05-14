@@ -570,7 +570,13 @@ class TestTensorBoardLogging:
         def add_scalar(self, tag, value, step):
             self.scalars.append((tag, float(value), step))
 
+        def add_text(self, *_args, **_kwargs):
+            pass
+
         def add_histogram(self, *_args, **_kwargs):
+            pass
+
+        def flush(self):
             pass
     
     def test_tensorboard_import(self):
@@ -622,7 +628,7 @@ class TestTensorBoardLogging:
 
             def __init__(self):
                 self.writer = TestTensorBoardLogging._RecordingWriter()
-                self.profiler = SimpleNamespace(section=lambda _name: nullcontext())
+                self.profiler = SimpleNamespace(section=lambda _name: nullcontext(), step=lambda: None)
                 self.training_step_count = 6
                 self.total_env_steps = 0
                 self.verbose = False
@@ -637,6 +643,7 @@ class TestTensorBoardLogging:
                     get_learning_rate=lambda _net, _step, _count: 0.0,
                     get_effective_beta_r=lambda _step: 0.0,
                     is_in_warmup=lambda _step: False,
+                    is_in_decay_phase=lambda _step: False,
                     get_active_networks=lambda _step: {"q_r"},
                     get_warmup_stage=lambda _step: 4,
                 )
