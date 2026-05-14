@@ -491,6 +491,7 @@ class TestActorStepTrajectoryMetadata:
                 return {0: f"goal@{state}"}, {0: 2.0}
 
             def check_goal_achieved(self, next_state, human_idx, goal):
+                captured.setdefault("goal_checks", []).append((next_state, human_idx, goal))
                 return achieved
 
         actor_state = BasePhase2Trainer._ActorState(
@@ -541,6 +542,7 @@ class TestActorStepTrajectoryMetadata:
         assert transition is not None
         assert captured["episode_id"] == (7, 11)
         assert captured["env_step_index"] == 2
+        assert captured["goal_checks"] == [("next_state", 0, "goal")]
         assert actor_state.state == "next_state"
         assert actor_state.env_step_count == 3
         assert actor_state.rollout_step_index == 0

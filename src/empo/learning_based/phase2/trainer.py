@@ -3115,15 +3115,14 @@ class BasePhase2Trainer(ABC):
         actor_state.state = next_state
         actor_state.env_step_count += 1
         actor_state.rollout_step_index += 1
-
-        goals_to_resample = []
-        for h, g in actor_state.goals.items():
-            if self.check_goal_achieved(next_state, h, g):
-                goals_to_resample.append(h)
         
         if not self.config.requires_fixed_goal_rollouts():
             # Check if any goal was achieved - if so, resample that goal
             # This prevents the agent from repeatedly seeing achieved=1 for the same goal
+            goals_to_resample = []
+            for h, g in actor_state.goals.items():
+                if self.check_goal_achieved(next_state, h, g):
+                    goals_to_resample.append(h)
             if goals_to_resample:
                 # Resample only the achieved goals
                 with self.profiler.section("goal_sampling"):
@@ -3136,12 +3135,19 @@ class BasePhase2Trainer(ABC):
             elif random.random() < self.config.goal_resample_prob:
                 with self.profiler.section("goal_sampling"):
                     actor_state.goals, actor_state.goal_weights = self._sample_goals(actor_state.state)
-        elif goals_to_resample and not is_terminal:
-            # For longer-horizon replay, keep goals fixed within a stored rollout
-            # segment and start a new segment after achievement.
-            with self.profiler.section("goal_sampling"):
-                actor_state.goals, actor_state.goal_weights = self._sample_goals(actor_state.state)
-            actor_state.advance_episode(reset_env_step_count=False)
+        else:
+            goals_to_resample = []
+            for h, g in actor_state.goals.items():
+                if self.check_goal_achieved(next_state, h, g):
+                    goals_to_resample.append(h)
+            # Terminal steps already advance the replay segment below, so skip
+            # the fixed-goal restart here to avoid double-advancing episode ids.
+            if goals_to_resample and not is_terminal:
+                # For longer-horizon replay, keep goals fixed within a stored
+                # rollout segment and start a new segment after achievement.
+                with self.profiler.section("goal_sampling"):
+                    actor_state.goals, actor_state.goal_weights = self._sample_goals(actor_state.state)
+                actor_state.advance_episode(reset_env_step_count=False)
         
         # Reset environment periodically
         if actor_state.env_step_count >= self.config.steps_per_episode:
