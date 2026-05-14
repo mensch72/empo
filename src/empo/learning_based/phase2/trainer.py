@@ -3166,7 +3166,7 @@ class BasePhase2Trainer(ABC):
         state.start_time = time.time()
         state.start_step = self.training_step_count
         return state
-    
+
     def _learner_step(self, learner_state: "_LearnerState", pbar: Optional[tqdm] = None) -> Dict[str, float]:
         """
         Perform one training step with all logging and warmup handling.
@@ -3317,6 +3317,11 @@ class BasePhase2Trainer(ABC):
                             self.writer.add_scalar(f'Predictions/{key}_std', stats['std'], self.training_step_count)
                         if 'target_mean' in stats:
                             self.writer.add_scalar(f'Targets/{key}_mean', stats['target_mean'], self.training_step_count)
+                    if key == 'q_r':
+                        if 'all_actions_loss' in stats:
+                            self.writer.add_scalar('Loss/q_r_all_actions', stats['all_actions_loss'], self.training_step_count)
+                        if 'taken_action_loss' in stats:
+                            self.writer.add_scalar('Loss/q_r_taken_action', stats['taken_action_loss'], self.training_step_count)
                     # Log z-space values when available (for Q_r, V_r, U_r with z-space transform)
                     if 'z_mean' in stats:
                         self.writer.add_scalar(f'ZSpace/{key}_z_pred', stats['z_mean'], self.training_step_count)

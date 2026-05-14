@@ -562,6 +562,16 @@ class TestEpisodeIdAllocation:
 
 class TestTensorBoardLogging:
     """Test TensorBoard logging setup (FAQ item 18)."""
+
+    class _RecordingWriter:
+        def __init__(self):
+            self.scalars = []
+
+        def add_scalar(self, tag, value, step):
+            self.scalars.append((tag, float(value), step))
+
+        def add_histogram(self, *_args, **_kwargs):
+            pass
     
     def test_tensorboard_import(self):
         """TensorBoard should be importable."""
@@ -588,6 +598,68 @@ class TestTensorBoardLogging:
                 assert len(os.listdir(tmpdir)) > 0
         except ImportError:
             pytest.skip("TensorBoard not installed")
+
+    @pytest.mark.parametrize(
+        ("stats", "expected_tag", "unexpected_tag"),
+        [
+            (
+                {"q_r": {"mean": -1.0, "target_mean": -1.5, "all_actions_loss": 0.25}},
+                "Loss/q_r_all_actions",
+                "Loss/q_r_taken_action",
+            ),
+            (
+                {"q_r": {"mean": -1.0, "target_mean": -1.5, "taken_action_loss": 0.125}},
+                "Loss/q_r_taken_action",
+                "Loss/q_r_all_actions",
+            ),
+        ],
+    )
+    def test_q_r_mode_specific_loss_stats_reach_tensorboard(self, stats, expected_tag, unexpected_tag):
+        """q_r mode-specific loss stats should be emitted to TensorBoard."""
+
+        class MockTrainer:
+            _learner_step = BasePhase2Trainer._learner_step
+
+            def __init__(self):
+                self.writer = TestTensorBoardLogging._RecordingWriter()
+                self.profiler = SimpleNamespace(section=lambda _name: nullcontext())
+                self.training_step_count = 6
+                self.total_env_steps = 0
+                self.verbose = False
+                self.update_counts = {}
+                self._state_visit_counts = {}
+                self.networks = SimpleNamespace(q_r=None, v_h_e=None, x_h=None, u_r=None, v_r=None)
+                self.config = SimpleNamespace(
+                    u_r_use_network=False,
+                    v_r_use_network=False,
+                    get_epsilon_r=lambda _step: 0.0,
+                    get_epsilon_h=lambda _step: 0.0,
+                    get_learning_rate=lambda _net, _step, _count: 0.0,
+                    get_effective_beta_r=lambda _step: 0.0,
+                    is_in_warmup=lambda _step: False,
+                    get_active_networks=lambda _step: {"q_r"},
+                    get_warmup_stage=lambda _step: 4,
+                )
+
+            def training_step(self):
+                return {"q_r": 0.5}, {}, stats
+
+            def _compute_param_norms(self):
+                return {}
+
+        trainer = MockTrainer()
+        learner_state = BasePhase2Trainer._LearnerState(prev_stage=4, prev_stage_name="q_r")
+        learner_state.start_time = 0.0
+        learner_state.start_step = trainer.training_step_count
+
+        trainer._learner_step(learner_state)
+
+        tags = {tag for tag, _value, _step in trainer.writer.scalars}
+        assert expected_tag in tags
+        assert unexpected_tag not in tags
+        assert "Loss/q_r" in tags
+        assert "Predictions/q_r_mean" in tags
+        assert "Targets/q_r_mean" in tags
 
 
 # =============================================================================
