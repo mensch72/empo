@@ -258,7 +258,7 @@ class Phase2Config:
     # direct keeps the existing closed-form Q_r -> π_r transform.
     # mcts runs an acting-time tree search that uses Q_r as the root prior and
     # V_r / U_r+Q_r as the leaf evaluator, while replay stores root statistics.
-    pi_r_mode: str = "direct"  # direct | mcts
+    pi_r_mode: str = "direct"  # direct or mcts
     mcts_num_simulations: int = 32
     mcts_c_puct: float = 1.5
     mcts_temperature: float = 1.0

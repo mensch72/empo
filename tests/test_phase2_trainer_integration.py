@@ -1387,6 +1387,7 @@ class TestMCTSPolicyImprovement:
     """Tests for the optional acting-time MCTS robot policy path."""
 
     class _StaticQNetwork:
+        """Test double that returns fixed Q-values and a uniform prior policy."""
         num_action_combinations = 2
         num_actions = 2
 
@@ -1408,6 +1409,7 @@ class TestMCTSPolicyImprovement:
             return action_tuple[0]
 
     class _StaticVrTarget:
+        """Test double that returns fixed V_r values for searched leaf states."""
         def __init__(self, values):
             self.values = values
 
@@ -1415,6 +1417,7 @@ class TestMCTSPolicyImprovement:
             return torch.tensor([self.values[state]], dtype=torch.float32, device=device)
 
     class _TinySearchEnv:
+        """Minimal deterministic branch world model used to verify MCTS preferences."""
         action_space = SimpleNamespace(n=1)
 
         def transition_probabilities(self, state, actions):
@@ -1424,6 +1427,7 @@ class TestMCTSPolicyImprovement:
             return [(1.0, state)]
 
     class _SearchTrainer:
+        """Expose only the BasePhase2Trainer MCTS helpers needed by these tests."""
         _sample_robot_action_with_stats = BasePhase2Trainer._sample_robot_action_with_stats
         _run_mcts_policy_search = BasePhase2Trainer._run_mcts_policy_search
         _sample_human_actions_for_search = BasePhase2Trainer._sample_human_actions_for_search
