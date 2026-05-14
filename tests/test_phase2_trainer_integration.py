@@ -974,6 +974,17 @@ class TestTrajectoryTargets:
         _get_trajectory_suffix = BasePhase2Trainer._get_trajectory_suffix
         _compute_trajectory_v_h_e_targets = BasePhase2Trainer._compute_trajectory_v_h_e_targets
         _compute_trajectory_q_r_targets = BasePhase2Trainer._compute_trajectory_q_r_targets
+        compute_losses = BasePhase2Trainer.compute_losses
+
+    class _StaticQRNetwork:
+        def __init__(self, q_values):
+            self.q_values = torch.tensor(q_values, dtype=torch.float32)
+
+        def forward_batch(self, states, env, device):
+            return self.q_values.to(device)
+
+        def action_tuple_to_index(self, action_tuple):
+            return action_tuple[0] if isinstance(action_tuple, tuple) else action_tuple
 
     def _make_transition(self, state, next_state, *, episode_id=("actor", 0), env_step_index=0, terminal=False):
         return Phase2Transition(
@@ -1025,6 +1036,36 @@ class TestTrajectoryTargets:
             [u_r_values[state] for state in states],
             dtype=torch.float32,
             device=trainer.device,
+        )
+        return trainer
+
+    def _build_q_r_loss_stats_trainer(self, mode):
+        trainer = self._TrajectoryTrainer()
+        trainer.device = "cpu"
+        trainer.env = None
+        trainer.debug = False
+        trainer.training_step_count = 0
+        trainer.profiler = SimpleNamespace(section=lambda _name: nullcontext())
+        trainer.human_agent_indices = []
+        trainer.config = Phase2Config(
+            use_model_based_targets=(mode == "one_step"),
+            q_r_target_mode=mode,
+            warmup_v_h_e_steps=0,
+            warmup_x_h_steps=0,
+            warmup_u_r_steps=0,
+            warmup_q_r_steps=0,
+            x_h_use_network=False,
+            u_r_use_network=False,
+            v_r_use_network=False,
+        )
+        trainer.networks = SimpleNamespace(
+            q_r=self._StaticQRNetwork([[-1.0, -2.0]]),
+        )
+        trainer._compute_model_based_q_r_targets = lambda batch: torch.tensor(
+            [[-1.5, -2.5]], dtype=torch.float32, device=trainer.device
+        )
+        trainer._compute_trajectory_q_r_targets = lambda batch: torch.tensor(
+            [-1.5], dtype=torch.float32, device=trainer.device
         )
         return trainer
 
@@ -1123,6 +1164,34 @@ class TestTrajectoryTargets:
 
         # Terminal suffix removes the frontier bootstrap, leaving γ_r * U_r(s1) + γ_r² * U_r(s2).
         assert targets[0].item() == pytest.approx(-1.0)
+
+    @pytest.mark.parametrize(
+        ("mode", "present_key", "absent_key"),
+        [
+            ("one_step", "all_actions_loss", "taken_action_loss"),
+            ("n_step", "taken_action_loss", "all_actions_loss"),
+        ],
+    )
+    def test_q_r_prediction_stats_use_mode_specific_loss_key(self, mode, present_key, absent_key):
+        """Q_r stats should label the logged loss according to the target semantics."""
+        trainer = self._build_q_r_loss_stats_trainer(mode)
+        batch = [
+            Phase2Transition(
+                state="s0",
+                robot_action=(0,),
+                goals={},
+                goal_weights={},
+                human_actions=[],
+                next_state="s1",
+                transition_probs_by_action={0: [(1.0, "s1")], 1: [(1.0, "s1")]},
+                terminal=False,
+            )
+        ]
+
+        _losses, prediction_stats = trainer.compute_losses(batch)
+
+        assert present_key in prediction_stats["q_r"]
+        assert absent_key not in prediction_stats["q_r"]
 
     def test_q_r_episode_bootstraps_when_suffix_stays_open(self):
         """Episode-mode Q_r should bootstrap from the last available state if replay ends before terminal."""

@@ -2372,11 +2372,16 @@ class BasePhase2Trainer(ABC):
                     losses['q_r'] = ((q_r_pred_taken - target_q_r_taken) ** 2).mean()
             
             with torch.no_grad():
+                loss_stat_key = (
+                    'all_actions_loss'
+                    if self.config.q_r_target_mode == "one_step"
+                    else 'taken_action_loss'
+                )
                 stats = {
                     'mean': q_r_pred_taken.mean().item(),
                     'std': q_r_pred_taken.std().item() if q_r_pred_taken.numel() > 1 else 0.0,
                     'target_mean': target_q_r_taken.mean().item(),
-                    'all_actions_loss': losses['q_r'].item()
+                    loss_stat_key: losses['q_r'].item()
                 }
                 # Add z-space statistics when enabled
                 if self.config.use_z_space_transform:
