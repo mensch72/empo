@@ -1990,13 +1990,16 @@ class BasePhase2Trainer(ABC):
             bootstrap_transition: Optional[Phase2Transition] = None
             reward_suffix = suffix
 
-            if mode == "n_step" and len(suffix) == n_step:
-                # suffix[0] corresponds to s_{t+1}, so suffix[n_step - 1] is the
-                # nth sampled successor state used as the bootstrap frontier.
-                candidate = suffix[n_step - 1]
+            if mode == "n_step":
+                # suffix[0] corresponds to s_{t+1}. When enough sampled
+                # successors are available, suffix[n_step - 1] is therefore the
+                # nth successor state used as the bootstrap frontier. If replay
+                # ends early but the suffix is still open, fall back to the last
+                # available sampled successor as that frontier instead.
+                candidate = suffix[-1]
                 if candidate.next_state is not None and not candidate.terminal:
                     bootstrap_transition = candidate
-                    reward_suffix = suffix[: n_step - 1]
+                    reward_suffix = suffix[:-1]
             elif mode == "episode":
                 candidate = suffix[-1]
                 if candidate.next_state is not None and not candidate.terminal:
