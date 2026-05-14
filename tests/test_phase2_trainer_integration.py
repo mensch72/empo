@@ -490,6 +490,9 @@ class TestActorStepTrajectoryMetadata:
             def _sample_goals(self, state):
                 return {0: f"goal@{state}"}, {0: 2.0}
 
+            def _get_achieved_goals(self, state, goals):
+                return BasePhase2Trainer._get_achieved_goals(self, state, goals)
+
             def check_goal_achieved(self, next_state, human_idx, goal):
                 captured.setdefault("goal_checks", []).append((next_state, human_idx, goal))
                 return achieved
