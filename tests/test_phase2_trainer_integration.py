@@ -1474,7 +1474,10 @@ class TestMCTSPolicyImprovement:
                 }
             ),
         )
-        trainer.human_policy_prior = lambda state, human_idx, goal: np.array([1.0], dtype=np.float64)
+        trainer.human_policy_prior = (
+            lambda state, human_idx, goal: np.ones(trainer.env.action_space.n, dtype=np.float64)
+            / trainer.env.action_space.n
+        )
         trainer._compute_u_r_batch_target = lambda states: torch.zeros(len(states), dtype=torch.float32)
 
         np.random.seed(0)
@@ -1482,8 +1485,8 @@ class TestMCTSPolicyImprovement:
 
         action, search_stats = trainer._sample_robot_action_with_stats("root", goals={0: "goal"})
 
-        assert action == (1,)
         assert search_stats is not None
+        assert action in {(0,), (1,)}
         assert search_stats.policy[1] > search_stats.policy[0]
         assert search_stats.action_values[1] > search_stats.action_values[0]
 

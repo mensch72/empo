@@ -129,7 +129,9 @@ class _MCTSNode:
             return self.prior_policy.copy()
 
         if temperature != 1.0:
-            powered = np.power(visits, 1.0 / temperature, where=visits > 0, out=np.zeros_like(visits))
+            powered = np.zeros_like(visits)
+            positive_mask = visits > 0
+            powered[positive_mask] = np.power(visits[positive_mask], 1.0 / temperature)
             if powered.sum() > 0:
                 visits = powered
 
@@ -1254,11 +1256,9 @@ class BasePhase2Trainer(ABC):
     def _evaluate_mcts_node(
         self,
         node: _MCTSNode,
-        goals: Dict[int, Any],
         effective_beta_r: float,
     ) -> None:
         """Populate priors and value estimates for an MCTS node from frozen Phase 2 networks."""
-        del goals  # Goals are fixed at the tree level; the networks only need the state here.
         with torch.no_grad():
             q_values = self.networks.q_r_target.forward(node.state, self.env, self.device)
             policy = self.networks.q_r_target.get_policy(q_values, beta_r=effective_beta_r)
@@ -1310,7 +1310,7 @@ class BasePhase2Trainer(ABC):
     ) -> float:
         """Run one MCTS simulation below the given node and return its updated state value."""
         if node.prior_policy is None:
-            self._evaluate_mcts_node(node, goals, effective_beta_r)
+            self._evaluate_mcts_node(node, effective_beta_r)
             return node.estimated_state_value(temperature=self.config.mcts_temperature)
 
         if depth >= self.config.mcts_max_depth:
@@ -1361,7 +1361,7 @@ class BasePhase2Trainer(ABC):
     ) -> Phase2SearchStats:
         """Run acting-time MCTS rooted at ``state`` and return root search statistics."""
         root = _MCTSNode(state=state)
-        self._evaluate_mcts_node(root, goals, effective_beta_r)
+        self._evaluate_mcts_node(root, effective_beta_r)
 
         for _ in range(self.config.mcts_num_simulations):
             self._simulate_mcts(root, goals, effective_beta_r, depth=0)
