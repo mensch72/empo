@@ -35,7 +35,7 @@ class Phase2Transition:
         terminal: Whether this transition ends the episode (next_state has no continuation).
             When True, the V_h^e TD target should not bootstrap from next_state.
         episode_id: Identifier for the rollout episode this transition belongs to.
-        env_step_index: Position of this transition within its episode.
+        env_step_index: Position of this transition within its replay-linked rollout segment.
     """
     state: Any
     robot_action: Tuple[int, ...]
@@ -106,7 +106,7 @@ class Phase2ReplayBuffer:
             next_compact_features: Optional pre-computed (global, agent, interactive, compressed_grid) tensors for next_state.
             terminal: Whether this transition ends the episode.
             episode_id: Optional rollout episode identifier.
-            env_step_index: Optional env_step position within the episode.
+            env_step_index: Optional env_step position within the replay-linked rollout segment.
         """
         if (
             (episode_id is None and env_step_index is not None)
