@@ -445,7 +445,14 @@ class TestActorStepTrajectoryMetadata:
     """Test when actor collection attaches episode metadata."""
 
     @staticmethod
-    def _build_trainer(uses_trajectory_targets: bool):
+    def _build_trainer(
+        uses_trajectory_targets: bool,
+        *,
+        requires_fixed_goal_rollouts: bool = False,
+        achieved: bool = False,
+        env_step_count: int = 2,
+        rollout_step_index: int = 2,
+    ):
         captured = {}
 
         class MockTrainer:
@@ -456,7 +463,7 @@ class TestActorStepTrajectoryMetadata:
                     steps_per_episode=5,
                     goal_resample_prob=0.0,
                     uses_trajectory_targets=lambda: uses_trajectory_targets,
-                    requires_fixed_goal_rollouts=lambda: False,
+                    requires_fixed_goal_rollouts=lambda: requires_fixed_goal_rollouts,
                 )
 
             def collect_transition(self, state, goals, goal_weights, episode_id=None, env_step_index=None, terminal=False):
@@ -481,16 +488,17 @@ class TestActorStepTrajectoryMetadata:
                 return "reset_state"
 
             def _sample_goals(self, state):
-                return {0: "goal"}, {0: 1.0}
+                return {0: f"goal@{state}"}, {0: 2.0}
 
             def check_goal_achieved(self, next_state, human_idx, goal):
-                return False
+                return achieved
 
         actor_state = BasePhase2Trainer._ActorState(
             state="state",
             goals={0: "goal"},
             goal_weights={0: 1.0},
-            env_step_count=2,
+            env_step_count=env_step_count,
+            rollout_step_index=rollout_step_index,
             actor_id=7,
             episode_seq=11,
         )
@@ -519,6 +527,47 @@ class TestActorStepTrajectoryMetadata:
         assert captured["env_step_index"] == 2
         assert transition.episode_id == (7, 11)
         assert transition.env_step_index == 2
+
+    def test_fixed_goal_rollouts_start_new_segment_after_goal_achievement(self):
+        """Trajectory rollouts should start a new replay segment after achievement."""
+        trainer, actor_state, captured = self._build_trainer(
+            uses_trajectory_targets=True,
+            requires_fixed_goal_rollouts=True,
+            achieved=True,
+        )
+
+        transition = BasePhase2Trainer._actor_step(trainer, actor_state)
+
+        assert transition is not None
+        assert captured["episode_id"] == (7, 11)
+        assert captured["env_step_index"] == 2
+        assert actor_state.state == "next_state"
+        assert actor_state.env_step_count == 3
+        assert actor_state.rollout_step_index == 0
+        assert actor_state.episode_id == (7, 12)
+        assert actor_state.goals == {0: "goal@next_state"}
+        assert actor_state.goal_weights == {0: 2.0}
+
+    def test_fixed_goal_rollouts_terminal_step_resets_once(self):
+        """Terminal trajectory steps should not double-advance the replay segment."""
+        trainer, actor_state, _captured = self._build_trainer(
+            uses_trajectory_targets=True,
+            requires_fixed_goal_rollouts=True,
+            achieved=True,
+            env_step_count=4,
+            rollout_step_index=4,
+        )
+
+        transition = BasePhase2Trainer._actor_step(trainer, actor_state)
+
+        assert transition is not None
+        assert transition.terminal is True
+        assert actor_state.state == "reset_state"
+        assert actor_state.env_step_count == 0
+        assert actor_state.rollout_step_index == 0
+        assert actor_state.episode_id == (7, 12)
+        assert actor_state.goals == {0: "goal@reset_state"}
+        assert actor_state.goal_weights == {0: 2.0}
 
 
 class TestEpisodeIdAllocation:

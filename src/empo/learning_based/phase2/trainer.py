@@ -1491,7 +1491,7 @@ class BasePhase2Trainer(ABC):
             goals: Current goal assignments.
             goal_weights: Weights for each goal (from goal sampler).
             episode_id: Optional rollout episode identifier for replay linkage.
-            env_step_index: Optional env_step position within the rollout episode.
+            env_step_index: Optional env_step position within the replay-linked rollout segment.
             terminal: Whether this transition ends the episode (after this step,
                 the environment will be reset). When True, the V_h^e TD target
                 should not bootstrap from next_state.
@@ -2999,6 +2999,7 @@ class BasePhase2Trainer(ABC):
             goals: Dict[int, Any],
             goal_weights: Dict[int, float],
             env_step_count: int = 0,
+            rollout_step_index: int = 0,
             actor_id: int = 0,
             episode_seq: int = 0,
         ) -> None:
@@ -3006,15 +3007,18 @@ class BasePhase2Trainer(ABC):
             self.goals = goals
             self.goal_weights = goal_weights
             self.env_step_count = env_step_count  # Steps since last env reset
+            self.rollout_step_index = rollout_step_index  # Steps within current replay-linked rollout segment
             self.actor_id = actor_id
             self.episode_seq = episode_seq
             self.episode_id = (actor_id, episode_seq)
 
-        def advance_episode(self) -> None:
-            """Advance to a new episode identifier and reset the env_step counter to zero."""
+        def advance_episode(self, reset_env_step_count: bool = True) -> None:
+            """Advance to a new replay segment and optionally reset the env-reset counter."""
             self.episode_seq += 1
             self.episode_id = (self.actor_id, self.episode_seq)
-            self.env_step_count = 0
+            self.rollout_step_index = 0
+            if reset_env_step_count:
+                self.env_step_count = 0
     
     def _sample_goals(self, state) -> Tuple[Dict[int, Any], Dict[int, float]]:
         """Sample goals for all humans using the goal sampler.
@@ -3055,6 +3059,7 @@ class BasePhase2Trainer(ABC):
             goals,
             goal_weights,
             0,
+            0,
             actor_id=actor_id,
             episode_seq=episode_seq,
         )
@@ -3064,7 +3069,7 @@ class BasePhase2Trainer(ABC):
         Collect one transition from the environment.
         
         This is the shared actor logic used by both sync and async training.
-        Updates actor_state in place (state, goals, env_step_count).
+        Updates actor_state in place (state, goals, env_step_count, rollout_step_index).
         Handles environment reset when steps_per_episode is reached.
         
         Args:
@@ -3083,7 +3088,7 @@ class BasePhase2Trainer(ABC):
 
         if self.config.uses_trajectory_targets():
             episode_id = actor_state.episode_id
-            env_step_index = actor_state.env_step_count
+            env_step_index = actor_state.rollout_step_index
         else:
             episode_id = None
             env_step_index = None
@@ -3109,15 +3114,16 @@ class BasePhase2Trainer(ABC):
         # Update actor state
         actor_state.state = next_state
         actor_state.env_step_count += 1
+        actor_state.rollout_step_index += 1
+
+        goals_to_resample = []
+        for h, g in actor_state.goals.items():
+            if self.check_goal_achieved(next_state, h, g):
+                goals_to_resample.append(h)
         
         if not self.config.requires_fixed_goal_rollouts():
             # Check if any goal was achieved - if so, resample that goal
             # This prevents the agent from repeatedly seeing achieved=1 for the same goal
-            goals_to_resample = []
-            for h, g in actor_state.goals.items():
-                if self.check_goal_achieved(next_state, h, g):
-                    goals_to_resample.append(h)
-            
             if goals_to_resample:
                 # Resample only the achieved goals
                 with self.profiler.section("goal_sampling"):
@@ -3130,6 +3136,12 @@ class BasePhase2Trainer(ABC):
             elif random.random() < self.config.goal_resample_prob:
                 with self.profiler.section("goal_sampling"):
                     actor_state.goals, actor_state.goal_weights = self._sample_goals(actor_state.state)
+        elif goals_to_resample and not is_terminal:
+            # For longer-horizon replay, keep goals fixed within a stored rollout
+            # segment and start a new segment after achievement.
+            with self.profiler.section("goal_sampling"):
+                actor_state.goals, actor_state.goal_weights = self._sample_goals(actor_state.state)
+            actor_state.advance_episode(reset_env_step_count=False)
         
         # Reset environment periodically
         if actor_state.env_step_count >= self.config.steps_per_episode:
