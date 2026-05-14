@@ -979,11 +979,13 @@ class TestTrajectoryTargets:
     class _StaticQRNetwork:
         def __init__(self, q_values):
             self.q_values = torch.tensor(q_values, dtype=torch.float32)
+            self.action_index_calls = []
 
         def forward_batch(self, states, env, device):
             return self.q_values.to(device)
 
         def action_tuple_to_index(self, action_tuple):
+            self.action_index_calls.append(action_tuple)
             return action_tuple[0] if isinstance(action_tuple, tuple) else action_tuple
 
     def _make_transition(self, state, next_state, *, episode_id=("actor", 0), env_step_index=0, terminal=False):
@@ -1061,12 +1063,18 @@ class TestTrajectoryTargets:
         trainer.networks = SimpleNamespace(
             q_r=self._StaticQRNetwork([[-1.0, -2.0]]),
         )
-        trainer._compute_model_based_q_r_targets = lambda batch: torch.tensor(
-            [[-1.5, -2.5]], dtype=torch.float32, device=trainer.device
-        )
-        trainer._compute_trajectory_q_r_targets = lambda batch: torch.tensor(
-            [-1.5], dtype=torch.float32, device=trainer.device
-        )
+        trainer.q_r_target_calls = []
+
+        def _model_based_targets(batch):
+            trainer.q_r_target_calls.append(("one_step", len(batch)))
+            return torch.tensor([[-1.5, -2.5]], dtype=torch.float32, device=trainer.device)
+
+        def _trajectory_targets(batch):
+            trainer.q_r_target_calls.append((mode, len(batch)))
+            return torch.tensor([-1.5], dtype=torch.float32, device=trainer.device)
+
+        trainer._compute_model_based_q_r_targets = _model_based_targets
+        trainer._compute_trajectory_q_r_targets = _trajectory_targets
         return trainer
 
     def test_v_h_e_n_step_bootstraps_from_frontier(self):
@@ -1192,6 +1200,8 @@ class TestTrajectoryTargets:
 
         assert present_key in prediction_stats["q_r"]
         assert absent_key not in prediction_stats["q_r"]
+        assert trainer.networks.q_r.action_index_calls == [(0,)]
+        assert trainer.q_r_target_calls == [(mode, 1)]
 
     def test_q_r_episode_bootstraps_when_suffix_stays_open(self):
         """Episode-mode Q_r should bootstrap from the last available state if replay ends before terminal."""
