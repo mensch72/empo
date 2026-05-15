@@ -748,6 +748,7 @@ class TestTensorBoardLogging:
                     q_r=None, v_h_e=None, x_h=None, u_r=None, v_r=None
                 )
                 self.config = SimpleNamespace(
+                    q_r_target_mode="one_step",
                     u_r_use_network=False,
                     v_r_use_network=False,
                     get_epsilon_r=lambda _step: 0.0,
