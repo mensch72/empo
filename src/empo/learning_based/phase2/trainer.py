@@ -1349,6 +1349,31 @@ class BasePhase2Trainer(ABC):
         node.edge_visit_counts = np.zeros_like(node.base_q_values, dtype=np.int64)
         node.edge_value_sums = np.zeros_like(node.base_q_values, dtype=np.float64)
 
+    def _apply_mcts_root_noise(self, prior_policy: np.ndarray) -> np.ndarray:
+        """Mix optional Dirichlet noise into the root prior policy."""
+        noise_frac = self.config.mcts_root_noise_frac
+        if noise_frac <= 0.0:
+            return prior_policy.copy()
+
+        if prior_policy.size == 1:
+            return np.ones_like(prior_policy, dtype=np.float64)
+
+        dirichlet_noise = np.random.dirichlet(
+            np.full(
+                prior_policy.shape,
+                self.config.mcts_dirichlet_alpha,
+                dtype=np.float64,
+            )
+        )
+        mixed_policy = (
+            (1.0 - noise_frac) * prior_policy.astype(np.float64, copy=False)
+            + noise_frac * dirichlet_noise
+        )
+        total = mixed_policy.sum()
+        if total <= 0.0:
+            return prior_policy.copy()
+        return mixed_policy / total
+
     def _select_mcts_action_index(self, node: _MCTSNode) -> int:
         """Select the next robot action to explore from a node using a PUCT score."""
         assert node.prior_policy is not None
@@ -1426,6 +1451,8 @@ class BasePhase2Trainer(ABC):
         """Run acting-time MCTS rooted at ``state`` and return root search statistics."""
         root = _MCTSNode(state=state)
         self._evaluate_mcts_node(root, effective_beta_r)
+        assert root.prior_policy is not None
+        root.prior_policy = self._apply_mcts_root_noise(root.prior_policy)
 
         for _ in range(self.config.mcts_num_simulations):
             self._simulate_mcts(root, goals, effective_beta_r, depth=0)

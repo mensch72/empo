@@ -96,6 +96,8 @@ def test_phase2_config():
     assert config.v_h_e_target_mode == "one_step"
     assert config.q_r_target_mode == "one_step"
     assert config.pi_r_mode == "direct"
+    assert config.mcts_root_noise_frac == 0.0
+    assert config.mcts_enable_after_training_step == 0
     assert config.uses_trajectory_targets() is False
     print("  ✓ Default config values")
     
@@ -121,11 +123,15 @@ def test_phase2_config():
         q_r_target_mode="episode",
         pi_r_mode="mcts",
         mcts_num_simulations=8,
+        mcts_root_noise_frac=0.25,
+        mcts_enable_after_training_step=7,
     )
     assert custom_config.gamma_r == 0.95
     assert custom_config.zeta == 3.0
     assert custom_config.should_store_sampled_next_state() is True
     assert custom_config.uses_mcts_policy_improvement() is True
+    assert custom_config.should_use_mcts_policy(6) is False
+    assert custom_config.should_use_mcts_policy(7) is True
     print("  ✓ Custom config values")
     
     print("  ✓ Phase2Config test passed!")
