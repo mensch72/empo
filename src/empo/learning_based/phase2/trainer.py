@@ -1368,10 +1368,9 @@ class BasePhase2Trainer(ABC):
                 dtype=np.float64,
             )
         )
-        mixed_policy = (
-            (1.0 - noise_frac) * prior_policy.astype(np.float64, copy=False)
-            + noise_frac * dirichlet_noise
-        )
+        mixed_policy = (1.0 - noise_frac) * prior_policy.astype(
+            np.float64, copy=False
+        ) + noise_frac * dirichlet_noise
         total = mixed_policy.sum()
         if total <= 0.0:
             return prior_policy.copy()
@@ -2564,10 +2563,7 @@ class BasePhase2Trainer(ABC):
     ) -> Tuple[Optional[torch.Tensor], Dict[str, float]]:
         """Compute an optional search-policy distillation loss from stored MCTS visits."""
         total_entries = len(batch)
-        if (
-            total_entries == 0
-            or not self.config.uses_mcts_search_policy_distillation()
-        ):
+        if total_entries == 0 or not self.config.uses_mcts_search_policy_distillation():
             return None, {}
 
         target_indices: List[int] = []
@@ -2973,15 +2969,15 @@ class BasePhase2Trainer(ABC):
                     )
                     q_r_temporal_loss = ((z_pred - z_target) ** 2).mean()
                 else:
-                    q_r_temporal_loss = ((q_r_pred_taken - target_q_r_taken) ** 2).mean()
+                    q_r_temporal_loss = (
+                        (q_r_pred_taken - target_q_r_taken) ** 2
+                    ).mean()
 
             losses["q_r"] = q_r_temporal_loss
             q_r_relabel_metrics = self._maybe_relabel_mcts_search_stats(
                 batch, effective_beta_r
             )
-            q_r_policy_metrics.update(
-                q_r_relabel_metrics
-            )
+            q_r_policy_metrics.update(q_r_relabel_metrics)
             if self.config.uses_mcts_search_policy_distillation():
                 (
                     q_r_policy_distillation_loss,

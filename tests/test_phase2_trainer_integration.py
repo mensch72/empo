@@ -1561,8 +1561,12 @@ class TestTrajectoryTargets:
         losses, prediction_stats = trainer.compute_losses(batch)
 
         base_loss = prediction_stats["q_r"]["taken_action_loss"]
-        weighted_distill = prediction_stats["q_r"]["mcts_policy_distillation_weighted_loss"]
-        assert prediction_stats["q_r"]["mcts_policy_distillation_sample_rate"] == pytest.approx(1.0)
+        weighted_distill = prediction_stats["q_r"][
+            "mcts_policy_distillation_weighted_loss"
+        ]
+        assert prediction_stats["q_r"][
+            "mcts_policy_distillation_sample_rate"
+        ] == pytest.approx(1.0)
         assert prediction_stats["q_r"]["q_r_total_loss"] == pytest.approx(
             base_loss + weighted_distill
         )
@@ -1586,7 +1590,9 @@ class TestTrajectoryTargets:
 
         losses, prediction_stats = trainer.compute_losses(batch)
 
-        assert prediction_stats["q_r"]["mcts_policy_distillation_sample_rate"] == pytest.approx(0.0)
+        assert prediction_stats["q_r"][
+            "mcts_policy_distillation_sample_rate"
+        ] == pytest.approx(0.0)
         assert "mcts_policy_distillation_loss" not in prediction_stats["q_r"]
         assert losses["q_r"].item() == pytest.approx(
             prediction_stats["q_r"]["taken_action_loss"]
@@ -1610,7 +1616,9 @@ class TestTrajectoryTargets:
             u_r_use_network=False,
             v_r_use_network=False,
         )
-        trainer.env = SimpleNamespace(transition_probabilities=lambda state, actions: [])
+        trainer.env = SimpleNamespace(
+            transition_probabilities=lambda state, actions: []
+        )
         relabel_calls = []
         trainer._run_mcts_policy_search = (
             lambda state, goals, effective_beta_r, **kwargs: (
@@ -1648,15 +1656,15 @@ class TestTrajectoryTargets:
         assert batch[0].search_policy == (0.9, 0.1)
         assert batch[0].search_value == pytest.approx(-0.25)
         assert batch[0].search_action_value == (-0.5, -1.5)
-        assert prediction_stats["q_r"]["mcts_search_relabel_sample_rate"] == pytest.approx(
-            1.0
-        )
-        assert prediction_stats["q_r"]["mcts_search_relabel_refresh_rate"] == pytest.approx(
-            1.0
-        )
-        assert prediction_stats["q_r"]["mcts_policy_distillation_sample_rate"] == pytest.approx(
-            1.0
-        )
+        assert prediction_stats["q_r"][
+            "mcts_search_relabel_sample_rate"
+        ] == pytest.approx(1.0)
+        assert prediction_stats["q_r"][
+            "mcts_search_relabel_refresh_rate"
+        ] == pytest.approx(1.0)
+        assert prediction_stats["q_r"][
+            "mcts_policy_distillation_sample_rate"
+        ] == pytest.approx(1.0)
         assert losses["q_r"].item() > prediction_stats["q_r"]["taken_action_loss"]
 
     def test_q_r_episode_bootstraps_when_suffix_stays_open(self):
