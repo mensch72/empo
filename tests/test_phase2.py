@@ -99,7 +99,9 @@ def test_phase2_config():
     assert config.mcts_root_noise_frac == 0.0
     assert config.mcts_enable_after_training_step == 0
     assert config.mcts_policy_distillation_coef == 0.0
+    assert config.trajectory_replay_max_age_training_steps is None
     assert config.uses_trajectory_targets() is False
+    assert config.uses_fresh_trajectory_replay() is False
     assert config.uses_mcts_search_policy_distillation() is False
     print("  ✓ Default config values")
     
@@ -128,6 +130,8 @@ def test_phase2_config():
         mcts_root_noise_frac=0.25,
         mcts_enable_after_training_step=7,
         mcts_policy_distillation_coef=0.2,
+        async_training=True,
+        trajectory_replay_max_age_training_steps=11,
         beta_r_rampup_steps=0,
         warmup_v_h_e_steps=0,
         warmup_x_h_steps=0,
@@ -138,6 +142,7 @@ def test_phase2_config():
     assert custom_config.gamma_r == 0.95
     assert custom_config.zeta == 3.0
     assert custom_config.should_store_sampled_next_state() is True
+    assert custom_config.uses_fresh_trajectory_replay() is True
     assert custom_config.uses_mcts_policy_improvement() is True
     assert custom_config.uses_mcts_search_policy_distillation() is True
     assert custom_config.should_use_mcts_policy(6) is False
@@ -217,6 +222,26 @@ def test_phase2_replay_buffer():
     assert suffix[0].search_policy == (0.25, 0.75)
     assert suffix[0].search_action_value == (-0.8, -0.2)
     print("  ✓ Episode suffix lookup works")
+
+    fresh_buffer = Phase2ReplayBuffer(capacity=10)
+    for step in range(3):
+        fresh_buffer.push(
+            state=f"fresh_state_{step}",
+            robot_action=(0, 1),
+            goals=goals,
+            goal_weights=goal_weights,
+            human_actions=human_actions,
+            next_state=f"fresh_state_{step + 1}",
+            insertion_training_step=step * 3,
+        )
+    fresh_sample = fresh_buffer.sample(
+        1,
+        max_age_training_steps=1,
+        current_training_step=7,
+    )
+    assert len(fresh_sample) == 1
+    assert fresh_sample[0].state == "fresh_state_2"
+    print("  ✓ Fresh replay sampling works")
     
     print("  ✓ Phase2ReplayBuffer test passed!")
 

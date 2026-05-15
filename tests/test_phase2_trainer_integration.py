@@ -1883,6 +1883,38 @@ class TestMCTSPolicyImprovement:
         assert transition.search_value == pytest.approx(-0.4)
         assert transition.search_action_value == (-0.8, -0.2)
 
+    def test_push_transition_to_replay_preserves_search_stats(self):
+        """Replay insertion should keep MCTS root statistics for later distillation."""
+
+        class MockTrainer:
+            _push_transition_to_replay = BasePhase2Trainer._push_transition_to_replay
+
+            def __init__(self):
+                self.replay_buffer = Phase2ReplayBuffer(capacity=10)
+                self.training_step_count = 7
+
+        trainer = MockTrainer()
+        transition = Phase2Transition(
+            state="root",
+            robot_action=(1,),
+            goals={0: "goal"},
+            goal_weights={0: 1.0},
+            human_actions=[0],
+            next_state="next_state",
+            terminal=False,
+            search_policy=(0.1, 0.9),
+            search_value=-0.4,
+            search_action_value=(-0.8, -0.2),
+        )
+
+        trainer._push_transition_to_replay(transition)
+
+        stored = trainer.replay_buffer.buffer[0]
+        assert stored.search_policy == (0.1, 0.9)
+        assert stored.search_value == pytest.approx(-0.4)
+        assert stored.search_action_value == (-0.8, -0.2)
+        assert stored.insertion_training_step == 7
+
 
 # =============================================================================
 # ASYNC RND SYNC TESTS

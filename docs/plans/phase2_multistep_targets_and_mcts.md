@@ -1,6 +1,6 @@
 # Planning Document: Optional Multi-Step Targets and MCTS for Phase 2 DQN
 
-**Status:** In Progress (trajectory targets, acting-time MCTS, and optional search-policy distillation landed)  
+**Status:** In Progress (trajectory targets, acting-time MCTS, search-policy distillation, and async replay freshness controls landed)  
 **Date:** 2026-05-15
 
 ## Scope
@@ -23,6 +23,7 @@ The following pieces have already landed in the current code:
 - Sync and async data collection now preserve episode-linkage metadata and disable mid-rollout goal resampling when trajectory targets are enabled.
 - An optional acting-time MCTS path now exists for robot action selection, using `Q_r` as the prior and the frozen Phase 2 value stack as the leaf evaluator, with integration tests in `tests/test_phase2_trainer_integration.py`.
 - `Phase2Config` and the trainer now support an optional `Q_r` search-policy distillation loss that trains the direct `Q_r → π_r` policy approximation against stored MCTS root visit-count distributions.
+- Async trajectory-target runs can now prefer replay entries inserted within a configurable learner-age window via `trajectory_replay_max_age_training_steps`, while falling back to full-buffer sampling when fresh data is scarce.
 
 So this document should now be read as a **living status-and-next-steps plan**, not as a greenfield design.
 
@@ -348,7 +349,7 @@ noise, and delayed MCTS enablement via training-step gating.
 
 17. [x] Add optional root Dirichlet noise support for acting-time MCTS search diversity.
 18. [x] Gate MCTS enablement by an explicit training-step threshold in addition to the current warm-up / `beta_r` checks.
-19. [ ] Evaluate whether trajectory modes need age-based replay sampling or explicit stale-data downweighting in longer async runs.
+19. [x] Add an optional async replay-age cutoff for trajectory modes to prefer fresher data while preserving full-buffer fallback behavior.
 
 ## Validation Plan
 

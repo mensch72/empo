@@ -1916,6 +1916,27 @@ class BasePhase2Trainer(ABC):
 
         return transition, next_state
 
+    def _push_transition_to_replay(self, transition: Phase2Transition) -> None:
+        """Store a collected transition in replay with the current learner age stamp."""
+        self.replay_buffer.push(
+            state=transition.state,
+            robot_action=transition.robot_action,
+            goals=transition.goals,
+            goal_weights=transition.goal_weights,
+            human_actions=transition.human_actions,
+            next_state=transition.next_state,
+            transition_probs_by_action=transition.transition_probs_by_action,
+            compact_features=transition.compact_features,
+            next_compact_features=transition.next_compact_features,
+            terminal=transition.terminal,
+            episode_id=transition.episode_id,
+            env_step_index=transition.env_step_index,
+            search_policy=transition.search_policy,
+            search_value=transition.search_value,
+            search_action_value=transition.search_action_value,
+            insertion_training_step=self.training_step_count,
+        )
+
     def _precompute_transition_probs(
         self, state: Any, human_actions: List[int]
     ) -> Dict[int, List[Tuple[float, Any]]]:
@@ -3449,11 +3470,20 @@ class BasePhase2Trainer(ABC):
 
         # Sample batch for most networks
         with self.profiler.section("batch_sampling"):
-            batch = self.replay_buffer.sample(self.config.batch_size)
+            sample_kwargs = {}
+            if self.config.uses_fresh_trajectory_replay():
+                sample_kwargs = {
+                    "max_age_training_steps": (
+                        self.config.trajectory_replay_max_age_training_steps
+                    ),
+                    "current_training_step": self.training_step_count,
+                }
+
+            batch = self.replay_buffer.sample(self.config.batch_size, **sample_kwargs)
 
             # Sample potentially larger batch for X_h if configured
             if x_h_batch_size > self.config.batch_size:
-                x_h_batch = self.replay_buffer.sample(x_h_batch_size)
+                x_h_batch = self.replay_buffer.sample(x_h_batch_size, **sample_kwargs)
             else:
                 x_h_batch = batch
 
@@ -4541,18 +4571,7 @@ class BasePhase2Trainer(ABC):
                 if transition is not None:
                     # Push to replay buffer
                     with self.profiler.section("replay_buffer"):
-                        self.replay_buffer.push(
-                            transition.state,
-                            transition.robot_action,
-                            transition.goals,
-                            transition.goal_weights,
-                            transition.human_actions,
-                            transition.next_state,
-                            transition.transition_probs_by_action,
-                            terminal=transition.terminal,
-                            episode_id=transition.episode_id,
-                            env_step_index=transition.env_step_index,
-                        )
+                        self._push_transition_to_replay(transition)
                     self.total_env_steps += 1
 
                     # Record state visit for count-based curiosity
@@ -5158,8 +5177,7 @@ class BasePhase2Trainer(ABC):
             try:
                 trans_dict = transition_queue.get_nowait()
 
-                # Add to buffer using individual fields (matching push signature)
-                self.replay_buffer.push(
+                transition = Phase2Transition(
                     state=trans_dict["state"],
                     robot_action=trans_dict["robot_action"],
                     goals=trans_dict["goals"],
@@ -5176,6 +5194,7 @@ class BasePhase2Trainer(ABC):
                     search_value=trans_dict.get("search_value"),
                     search_action_value=trans_dict.get("search_action_value"),
                 )
+                self._push_transition_to_replay(transition)
 
                 # Record state visit for count-based curiosity
                 self.record_state_visit(trans_dict["state"])
