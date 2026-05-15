@@ -39,6 +39,7 @@ class Phase2Transition:
         search_policy: Optional root visit-count distribution from MCTS acting.
         search_value: Optional root state-value estimate from MCTS acting.
         search_action_value: Optional per-action root value estimates from MCTS acting.
+        insertion_training_step: Learner training_step when replay stored the transition.
     """
     state: Any
     robot_action: Tuple[int, ...]
@@ -55,6 +56,7 @@ class Phase2Transition:
     search_policy: Optional[Tuple[float, ...]] = None
     search_value: Optional[float] = None
     search_action_value: Optional[Tuple[float, ...]] = None
+    insertion_training_step: Optional[int] = None
 
 
 class Phase2ReplayBuffer:
@@ -99,6 +101,7 @@ class Phase2ReplayBuffer:
         search_policy: Optional[Tuple[float, ...]] = None,
         search_value: Optional[float] = None,
         search_action_value: Optional[Tuple[float, ...]] = None,
+        insertion_training_step: Optional[int] = None,
     ) -> None:
         """
         Add a transition to the buffer.
@@ -119,6 +122,8 @@ class Phase2ReplayBuffer:
             search_policy: Optional MCTS root policy stored with the transition.
             search_value: Optional MCTS root value estimate stored with the transition.
             search_action_value: Optional MCTS root per-action values stored with the transition.
+            insertion_training_step: Optional learner training_step when replay stored
+                the transition.
         """
         if (
             (episode_id is None and env_step_index is not None)
@@ -145,6 +150,7 @@ class Phase2ReplayBuffer:
             search_policy=search_policy,
             search_value=search_value,
             search_action_value=search_action_value,
+            insertion_training_step=insertion_training_step,
         )
 
         if len(self.buffer) < self.capacity:
@@ -156,17 +162,47 @@ class Phase2ReplayBuffer:
         self._index_episode_transition(transition)
         self.position = (self.position + 1) % self.capacity
     
-    def sample(self, batch_size: int) -> List[Phase2Transition]:
+    def sample(
+        self,
+        batch_size: int,
+        *,
+        max_age_training_steps: Optional[int] = None,
+        current_training_step: Optional[int] = None,
+    ) -> List[Phase2Transition]:
         """
         Sample a batch of transitions.
         
         Args:
             batch_size: Number of transitions to sample.
+            max_age_training_steps: Optional replay-age cutoff measured in learner
+                training_steps.
+            current_training_step: Current learner training_step for computing age.
         
         Returns:
             List of Phase2Transition objects.
         """
-        return random.sample(self.buffer, min(batch_size, len(self.buffer)))
+        population = self.buffer
+        sample_size = min(batch_size, len(population))
+
+        if max_age_training_steps is not None:
+            if current_training_step is None:
+                raise ValueError(
+                    "current_training_step is required when max_age_training_steps "
+                    "is provided."
+                )
+
+            fresh_population = [
+                transition
+                for transition in population
+                if transition.insertion_training_step is not None
+                and current_training_step - transition.insertion_training_step
+                <= max_age_training_steps
+            ]
+            if len(fresh_population) >= sample_size:
+                population = fresh_population
+                sample_size = min(batch_size, len(population))
+
+        return random.sample(population, sample_size)
     
     def __len__(self) -> int:
         """Return number of transitions in buffer."""

@@ -460,6 +460,14 @@ class Phase2Config:
                 "mcts_policy_distillation_coef must be >= 0, "
                 f"got {self.mcts_policy_distillation_coef}."
             )
+        if (
+            self.trajectory_replay_max_age_training_steps is not None
+            and self.trajectory_replay_max_age_training_steps < 0
+        ):
+            raise ValueError(
+                "trajectory_replay_max_age_training_steps must be >= 0 or None, "
+                f"got {self.trajectory_replay_max_age_training_steps}."
+            )
 
         # Override X_h warmup duration to 0 if not using X_h network
         if not self.x_h_use_network:
@@ -604,6 +612,11 @@ class Phase2Config:
     # Queue size for actor-to-learner transition queue.
     # Should be large enough to buffer actor output during learner training.
     async_queue_size: int = 10000
+
+    # In async trajectory-target runs, prefer replay entries inserted within this
+    # many learner training steps. Falls back to full-buffer sampling when there
+    # are not yet enough fresh entries.
+    trajectory_replay_max_age_training_steps: Optional[int] = None
     
     # =========================================================================
     # Checkpoint and Memory Monitoring
@@ -671,6 +684,14 @@ class Phase2Config:
     def uses_trajectory_targets(self) -> bool:
         """Return True when any Phase 2 target mode needs episode-aware replay."""
         return self.uses_trajectory_v_h_e_targets() or self.uses_trajectory_q_r_targets()
+
+    def uses_fresh_trajectory_replay(self) -> bool:
+        """Return True when async trajectory runs should prefer fresh replay data."""
+        return (
+            self.async_training
+            and self.uses_trajectory_targets()
+            and self.trajectory_replay_max_age_training_steps is not None
+        )
 
     def should_store_sampled_next_state(self) -> bool:
         """
@@ -1496,6 +1517,7 @@ class Phase2Config:
                 'async_min_buffer_size': self.async_min_buffer_size,
                 'max_env_steps_per_training_step': self.max_env_steps_per_training_step,
                 'async_queue_size': self.async_queue_size,
+                'trajectory_replay_max_age_training_steps': self.trajectory_replay_max_age_training_steps,
             },
             'network_architecture': {
                 'hidden_dim': self.hidden_dim,
