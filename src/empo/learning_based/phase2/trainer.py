@@ -2223,6 +2223,10 @@ class BasePhase2Trainer(ABC):
         The target checks successive sampled next states for first achievement.
         If the goal is not achieved within the available suffix, it bootstraps
         from the last available frontier state when the suffix is still open.
+
+        Returns:
+            If return_metrics is False, returns only the target tensor.
+            If return_metrics is True, returns (targets, metrics_dict).
         """
         gamma_h = self.networks.v_h_e.gamma_h
         mode = self.config.v_h_e_target_mode
@@ -2325,6 +2329,10 @@ class BasePhase2Trainer(ABC):
         modes instead follow the sampled suffix:
             γ_r U_r(s_{t+1}) + ... + γ_r^n V_r(s_{t+n})
         with the final bootstrap removed when the suffix ends at a terminal step.
+
+        Returns:
+            If return_metrics is False, returns only the target tensor.
+            If return_metrics is True, returns (targets, metrics_dict).
         """
         gamma_r = self.config.gamma_r
         mode = self.config.q_r_target_mode
@@ -3675,9 +3683,8 @@ class BasePhase2Trainer(ABC):
             self.start_step: int = 0
             # For tracking LR decay phase transition
             self.in_lr_decay_phase = in_lr_decay_phase
-            # For explicit reporting when Q_r changes between all-actions
-            # supervision (one_step mode) and taken-action-only supervision
-            # (trajectory target modes).
+            # Tracks runtime switches after the initial supervision mode is
+            # reported during learner-state initialization.
             self.prev_q_r_taken_action_supervision = prev_q_r_taken_action_supervision
 
     def _init_learner_state(self) -> "_LearnerState":
@@ -3693,9 +3700,19 @@ class BasePhase2Trainer(ABC):
             prev_stage_name,
             prev_param_norms,
             in_lr_decay_phase,
+            prev_q_r_taken_action_supervision=(
+                self.config.q_r_target_mode != "one_step"
+            ),
         )
         state.start_time = time.time()
         state.start_step = self.training_step_count
+        if self.verbose:
+            supervision_label = (
+                f"taken-action-only ({self.config.q_r_target_mode})"
+                if self.config.q_r_target_mode != "one_step"
+                else "all-actions exact backup"
+            )
+            print(f"[Training] Q_r supervision mode: {supervision_label}")
         return state
 
     def _learner_step(
