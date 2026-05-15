@@ -263,6 +263,9 @@ class Phase2Config:
     mcts_c_puct: float = 1.5
     mcts_temperature: float = 1.0
     mcts_max_depth: int = 5
+    mcts_dirichlet_alpha: float = 0.3
+    mcts_root_noise_frac: float = 0.0
+    mcts_enable_after_training_step: int = 0
     
     # U_r loss computation: number of humans to sample (None = all humans)
     u_r_sample_humans: Optional[int] = None
@@ -437,6 +440,20 @@ class Phase2Config:
             )
         if self.mcts_max_depth < 1:
             raise ValueError(f"mcts_max_depth must be >= 1, got {self.mcts_max_depth}.")
+        if self.mcts_dirichlet_alpha <= 0:
+            raise ValueError(
+                f"mcts_dirichlet_alpha must be > 0, got {self.mcts_dirichlet_alpha}."
+            )
+        if not 0.0 <= self.mcts_root_noise_frac <= 1.0:
+            raise ValueError(
+                "mcts_root_noise_frac must be in [0, 1], "
+                f"got {self.mcts_root_noise_frac}."
+            )
+        if self.mcts_enable_after_training_step < 0:
+            raise ValueError(
+                "mcts_enable_after_training_step must be >= 0, "
+                f"got {self.mcts_enable_after_training_step}."
+            )
 
         # Override X_h warmup duration to 0 if not using X_h network
         if not self.x_h_use_network:
@@ -682,6 +699,7 @@ class Phase2Config:
         return (
             self.uses_mcts_policy_improvement()
             and self.mcts_num_simulations > 0
+            and step >= self.mcts_enable_after_training_step
             and self.get_effective_beta_r(step) > 0.0
         )
     

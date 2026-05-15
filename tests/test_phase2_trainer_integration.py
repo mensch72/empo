@@ -748,6 +748,7 @@ class TestTensorBoardLogging:
                     q_r=None, v_h_e=None, x_h=None, u_r=None, v_r=None
                 )
                 self.config = SimpleNamespace(
+                    q_r_target_mode="one_step",
                     u_r_use_network=False,
                     v_r_use_network=False,
                     get_epsilon_r=lambda _step: 0.0,
@@ -1568,6 +1569,10 @@ class TestMCTSPolicyImprovement:
         def action_tuple_to_index(self, action_tuple):
             return action_tuple[0]
 
+        def sample_action(self, q_values, beta_r=None):
+            del beta_r
+            return (int(torch.argmax(q_values.reshape(-1)).item()),)
+
     class _StaticVrTarget:
         """Test double that returns fixed V_r values for searched leaf states."""
 
@@ -1601,9 +1606,70 @@ class TestMCTSPolicyImprovement:
             BasePhase2Trainer._sample_human_actions_for_search
         )
         _evaluate_mcts_node = BasePhase2Trainer._evaluate_mcts_node
+        _apply_mcts_root_noise = BasePhase2Trainer._apply_mcts_root_noise
         _select_mcts_action_index = BasePhase2Trainer._select_mcts_action_index
         _simulate_mcts = BasePhase2Trainer._simulate_mcts
         _build_joint_action_profile = BasePhase2Trainer._build_joint_action_profile
+
+    def test_mcts_enable_after_training_step_delays_search(self):
+        """MCTS should stay off until the configured training-step threshold is reached."""
+        trainer = self._SearchTrainer()
+        trainer.device = "cpu"
+        trainer.env = self._TinySearchEnv()
+        trainer.config = Phase2Config(
+            pi_r_mode="mcts",
+            epsilon_r_start=0.0,
+            epsilon_r_end=0.0,
+            beta_r=2.0,
+            beta_r_rampup_steps=0,
+            warmup_v_h_e_steps=0,
+            warmup_x_h_steps=0,
+            warmup_u_r_steps=0,
+            warmup_q_r_steps=0,
+            warmup_v_r_steps=0,
+            x_h_use_network=False,
+            u_r_use_network=False,
+            v_r_use_network=True,
+            mcts_enable_after_training_step=3,
+        )
+        trainer.training_step_count = 2
+        trainer.human_agent_indices = [0]
+        trainer.robot_agent_indices = [1]
+        trainer.num_agents = 2
+        trainer.networks = SimpleNamespace(
+            q_r_target=self._StaticQNetwork({"root": [-1.0, -1.0]}),
+            v_r_target=self._StaticVrTarget({"root": -1.0}),
+        )
+        trainer.human_policy_prior = (
+            lambda state, human_idx, goal: np.ones(
+                trainer.env.action_space.n, dtype=np.float64
+            )
+            / trainer.env.action_space.n
+        )
+        trainer._curiosity_enabled_for_robot = lambda: False
+
+        action, search_stats = trainer._sample_robot_action_with_stats(
+            "root", goals={0: "goal"}
+        )
+
+        assert action == (0,)
+        assert search_stats is None
+
+    def test_mcts_root_dirichlet_noise_perturbs_root_prior(self):
+        """Configured root Dirichlet noise should perturb the root prior policy."""
+        trainer = self._SearchTrainer()
+        trainer.config = Phase2Config(
+            pi_r_mode="mcts",
+            mcts_root_noise_frac=0.5,
+            mcts_dirichlet_alpha=0.3,
+        )
+
+        np.random.seed(0)
+        noisy = trainer._apply_mcts_root_noise(np.array([0.5, 0.5], dtype=np.float64))
+
+        assert noisy.sum() == pytest.approx(1.0)
+        assert noisy[0] != pytest.approx(0.5)
+        assert noisy[1] != pytest.approx(0.5)
 
     def test_mcts_prefers_higher_value_successor(self):
         """MCTS should shift visit mass toward the action with the better searched successor."""

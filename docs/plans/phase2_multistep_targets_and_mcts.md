@@ -1,6 +1,6 @@
 # Planning Document: Optional Multi-Step Targets and MCTS for Phase 2 DQN
 
-**Status:** In Progress (trajectory targets and acting-time MCTS foundation landed)  
+**Status:** In Progress (trajectory targets and acting-time MCTS refinements landed)  
 **Date:** 2026-05-15
 
 ## Scope
@@ -307,8 +307,8 @@ mcts_enable_after_training_step: int = 0
 ```
 
 The currently landed implementation includes `pi_r_mode`, `mcts_num_simulations`,
-`mcts_max_depth`, `mcts_c_puct`, and `mcts_temperature`. The Dirichlet-noise and
-delayed-enable settings above remain follow-up work rather than current behavior.
+`mcts_max_depth`, `mcts_c_puct`, `mcts_temperature`, optional root Dirichlet
+noise, and delayed MCTS enablement via training-step gating.
 
 ## Recommended Implementation Order
 
@@ -345,8 +345,8 @@ delayed-enable settings above remain follow-up work rather than current behavior
 
 ### Phase 6: Remaining search refinements
 
-17. [ ] Decide whether acting-time MCTS should support root Dirichlet noise for additional search diversity.
-18. [ ] Decide whether MCTS enablement should be gated by an explicit training-step threshold in addition to the current warm-up / `beta_r` checks.
+17. [x] Add optional root Dirichlet noise support for acting-time MCTS search diversity.
+18. [x] Gate MCTS enablement by an explicit training-step threshold in addition to the current warm-up / `beta_r` checks.
 19. [ ] Evaluate whether trajectory modes need age-based replay sampling or explicit stale-data downweighting in longer async runs.
 
 ## Validation Plan
