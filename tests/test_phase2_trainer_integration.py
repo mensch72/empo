@@ -1210,8 +1210,7 @@ class TestTrajectoryTargets:
 
         def get_policy(self, q_values, beta_r=None):
             del beta_r
-            probs = torch.softmax(-q_values, dim=-1)
-            return probs / probs.sum(dim=-1, keepdim=True)
+            return torch.softmax(-q_values, dim=-1)
 
     def _make_transition(
         self,

@@ -22,6 +22,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from tqdm import tqdm
 
@@ -44,6 +45,8 @@ from .lookup import get_all_lookup_tables, get_total_table_size
 from .rnd import RNDModule, HumanActionRNDModule
 from .count_based_curiosity import CountBasedCuriosity
 from .value_transforms import to_z_space, y_to_z_space
+
+POLICY_DISTILLATION_EPS = 1e-10
 
 # Try to import tensorboard (optional)
 try:
@@ -2526,11 +2529,13 @@ class BasePhase2Trainer(ABC):
         predicted_policy = self.networks.q_r.get_policy(
             q_r_values.index_select(0, index_tensor),
             beta_r=effective_beta_r,
-        ).clamp(min=1e-10)
+        ).clamp(min=POLICY_DISTILLATION_EPS)
 
-        distillation_loss = -(
-            target_policy_tensor * torch.log(predicted_policy)
-        ).sum(dim=1).mean()
+        distillation_loss = F.kl_div(
+            predicted_policy.log(),
+            target_policy_tensor,
+            reduction="batchmean",
+        )
         metrics["mcts_policy_distillation_loss"] = float(distillation_loss.item())
         metrics["mcts_policy_distillation_weighted_loss"] = (
             self.config.mcts_policy_distillation_coef
