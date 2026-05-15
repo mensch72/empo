@@ -1,8 +1,7 @@
 # Planning Document: Optional Multi-Step Targets and MCTS for Phase 2 DQN
 
-## Status
-
-Planning
+**Status:** In Progress (trajectory targets and acting-time MCTS foundation landed)  
+**Date:** 2026-05-15
 
 ## Scope
 
@@ -12,6 +11,19 @@ This document describes a plan for extending the **DQN-style neural Phase 2 path
 2. replace the current direct `π_r` derivation with an **MCTS-based policy improvement step** inspired by AlphaZero / AssistantZero.
 
 The goal is to add these features as **optional execution modes** while keeping the current one-step target path and direct `Q_r → π_r` path as the default baseline.
+
+## Current implementation status
+
+The repository no longer matches the original "planning only" state of this document.
+The following pieces have already landed in the current code:
+
+- `Phase2Config` now exposes `v_h_e_target_mode`, `q_r_target_mode`, `v_h_e_n_step`, `q_r_n_step`, and `pi_r_mode`, with trajectory-aware helper methods in `src/empo/learning_based/phase2/config.py`.
+- `Phase2ReplayBuffer` now stores `episode_id`, `env_step_index`, and optional MCTS root statistics (`search_policy`, `search_value`, `search_action_value`) and can recover ordered episode suffixes in `src/empo/learning_based/phase2/replay_buffer.py`.
+- The trainer now supports sampled-trajectory `n_step` / `episode` targets for both `V_h^e` and `Q_r`, including trajectory metrics and taken-action-only `Q_r` supervision outside `one_step` mode.
+- Sync and async data collection now preserve episode-linkage metadata and disable mid-rollout goal resampling when trajectory targets are enabled.
+- An optional acting-time MCTS path now exists for robot action selection, using `Q_r` as the prior and the frozen Phase 2 value stack as the leaf evaluator, with integration tests in `tests/test_phase2_trainer_integration.py`.
+
+So this document should now be read as a **living status-and-next-steps plan**, not as a greenfield design.
 
 ## Current Baseline
 
@@ -62,6 +74,8 @@ v_h_e_n_step: int = 5
 q_r_n_step: int = 5
 ```
 
+This configuration has now landed.
+
 The `episode` mode should mean “use the available remainder of the episode from the sampled transition onward”, not “run an unbounded rollout outside the configured episode length”.
 
 ### B. Replay and episode storage changes
@@ -109,6 +123,8 @@ Recommended first implementation:
 2. keep the current exact one-step expectation mode available,
 3. document clearly that `n_step` / `episode` should reduce the long-horizon bias of one-step targets, but will usually be higher-variance and more on-policy.
 
+This first sampled-trajectory implementation has now landed.
+
 ### D. `Q_r` multi-step targets
 
 The current one-step target is:
@@ -134,6 +150,8 @@ For the optional `n_step` / `episode` modes, the recommended first step is:
 - optionally recover some all-actions supervision later by running separate search/rollout expansions from each root action.
 
 This makes the first implementation much simpler and much closer to standard DQN / AlphaZero-style training targets.
+
+This split is now implemented in the trainer and reflected in logged supervision metrics.
 
 ### E. Off-policy handling
 
@@ -163,6 +181,8 @@ Recommended plan:
 - for MCTS expansions, keep the goal profile fixed throughout the simulated tree rooted at the current state.
 
 In other words: for the longer-horizon path, goal resampling should happen at **root selection / episode-segment boundaries**, not inside the rollout used to define a target.
+
+The replay-segment part of this plan has now landed in the shared actor logic.
 
 ### G. Sampling of initial states
 
@@ -286,38 +306,48 @@ mcts_root_noise_frac: float = 0.25
 mcts_enable_after_training_step: int = 0
 ```
 
+The currently landed implementation includes `pi_r_mode`, `mcts_num_simulations`,
+`mcts_max_depth`, `mcts_c_puct`, and `mcts_temperature`. The Dirichlet-noise and
+delayed-enable settings above remain follow-up work rather than current behavior.
+
 ## Recommended Implementation Order
 
 ### Phase 1: Target-horizon infrastructure
 
-1. Add config flags for `one_step` / `n_step` / `episode`.
-2. Extend replay storage with episode ordering metadata.
-3. Add episode-suffix retrieval utilities shared by sync and async paths.
+1. [x] Add config flags for `one_step` / `n_step` / `episode`.
+2. [x] Extend replay storage with episode ordering metadata.
+3. [x] Add episode-suffix retrieval utilities shared by sync and async paths.
 
 ### Phase 2: `V_h^e` trajectory targets
 
-4. Implement sampled-trajectory `n_step` and `episode` targets for `V_h^e`.
-5. Keep current model-based one-step target unchanged as the default.
-6. Add metrics comparing one-step vs multi-step target variance and achievement sparsity.
+4. [x] Implement sampled-trajectory `n_step` and `episode` targets for `V_h^e`.
+5. [x] Keep current model-based one-step target unchanged as the default.
+6. [x] Add metrics comparing one-step vs multi-step target variance and achievement sparsity.
 
 ### Phase 3: `Q_r` trajectory targets
 
-7. Implement taken-action `n_step` and `episode` targets for `Q_r`.
-8. Keep current all-actions one-step update path for baseline runs.
-9. Add explicit reporting when training switches from all-actions supervision to taken-action-only supervision.
+7. [x] Implement taken-action `n_step` and `episode` targets for `Q_r`.
+8. [x] Keep current all-actions one-step update path for baseline runs.
+9. [x] Add explicit reporting when training switches from all-actions supervision to taken-action-only supervision.
 
 ### Phase 4: MCTS acting path
 
-10. Introduce a `pi_r_mode` abstraction.
-11. Implement a search module that can run from a saved world-model state.
-12. Use current `Q_r` as prior and current frozen `V_r` stack as leaf evaluator.
-13. Store root visit counts and chosen action in replay.
+10. [x] Introduce a `pi_r_mode` abstraction.
+11. [x] Implement a search module that can run from a saved world-model state.
+12. [x] Use current `Q_r` as prior and current frozen `V_r` stack as leaf evaluator.
+13. [x] Store root visit counts and chosen action in replay.
 
 ### Phase 5: Search-aware training refinements
 
-14. Evaluate whether MCTS-only acting already improves `V_h^e` and `Q_r`.
-15. If useful, add optional replay-state search relabeling.
-16. If still useful, add a dedicated policy-distillation head or loss.
+14. [ ] Evaluate whether MCTS-only acting already improves `V_h^e` and `Q_r`.
+15. [ ] If useful, add optional replay-state search relabeling.
+16. [ ] If still useful, add a dedicated policy-distillation head or loss.
+
+### Phase 6: Remaining search refinements
+
+17. [ ] Decide whether acting-time MCTS should support root Dirichlet noise for additional search diversity.
+18. [ ] Decide whether MCTS enablement should be gated by an explicit training-step threshold in addition to the current warm-up / `beta_r` checks.
+19. [ ] Evaluate whether trajectory modes need age-based replay sampling or explicit stale-data downweighting in longer async runs.
 
 ## Validation Plan
 
@@ -345,11 +375,18 @@ mcts_enable_after_training_step: int = 0
 
 ## Recommended First Milestone
 
-The highest-leverage first milestone is:
+That original first milestone has now landed:
 
 1. add episode-aware replay storage,
 2. add optional sampled-trajectory `n_step` / `episode` targets for `V_h^e`,
 3. add optional taken-action `n_step` / `episode` targets for `Q_r`,
 4. add an acting-only MCTS mode that uses current `Q_r` as prior and current `V_r` stack for leaf evaluation.
 
-That milestone keeps the change set conceptually small while making it possible to answer the main practical question: whether longer-horizon targets and search-improved data materially help the DQN-style Phase 2 approximation.
+## Recommended Next Milestone
+
+The next highest-leverage milestone is now:
+
+1. run controlled comparisons of `one_step`, `n_step`, and `episode` targets on the same small world models,
+2. measure whether MCTS-only acting improves data quality enough to justify its cost,
+3. decide whether replay relabeling or policy distillation is worth adding,
+4. only then add extra search features such as Dirichlet root noise or a dedicated search-trained policy head.
