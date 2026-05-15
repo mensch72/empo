@@ -2509,6 +2509,8 @@ class BasePhase2Trainer(ABC):
                 continue
 
             target_indices.append(batch_idx)
+            # Replay may store raw visit counts or slightly drifted floating-point
+            # probabilities, so normalize defensively before computing KL targets.
             target_policies.append(policy / policy_sum)
 
         sample_rate = len(target_indices) / total_entries
@@ -2529,12 +2531,16 @@ class BasePhase2Trainer(ABC):
         predicted_policy = self.networks.q_r.get_policy(
             q_r_values.index_select(0, index_tensor),
             beta_r=effective_beta_r,
-        ).clamp(min=POLICY_DISTILLATION_EPS)
+        )
+        log_predicted_policy = torch.clamp_min(
+            predicted_policy, POLICY_DISTILLATION_EPS
+        ).log()
 
         distillation_loss = F.kl_div(
-            predicted_policy.log(),
+            log_predicted_policy,
             target_policy_tensor,
             reduction="batchmean",
+            log_target=False,
         )
         metrics["mcts_policy_distillation_loss"] = float(distillation_loss.item())
         metrics["mcts_policy_distillation_weighted_loss"] = (
