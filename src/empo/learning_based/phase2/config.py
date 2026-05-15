@@ -266,6 +266,7 @@ class Phase2Config:
     mcts_dirichlet_alpha: float = 0.3
     mcts_root_noise_frac: float = 0.0
     mcts_enable_after_training_step: int = 0
+    mcts_policy_distillation_coef: float = 0.0
     
     # U_r loss computation: number of humans to sample (None = all humans)
     u_r_sample_humans: Optional[int] = None
@@ -453,6 +454,11 @@ class Phase2Config:
             raise ValueError(
                 "mcts_enable_after_training_step must be >= 0, "
                 f"got {self.mcts_enable_after_training_step}."
+            )
+        if self.mcts_policy_distillation_coef < 0:
+            raise ValueError(
+                "mcts_policy_distillation_coef must be >= 0, "
+                f"got {self.mcts_policy_distillation_coef}."
             )
 
         # Override X_h warmup duration to 0 if not using X_h network
@@ -688,6 +694,10 @@ class Phase2Config:
     def uses_mcts_policy_improvement(self) -> bool:
         """Return True when robot acting should use the MCTS policy-improvement path."""
         return self.pi_r_mode == "mcts"
+
+    def uses_mcts_search_policy_distillation(self) -> bool:
+        """Return True when Q_r training should distill stored MCTS root policies."""
+        return self.mcts_policy_distillation_coef > 0.0
 
     def should_use_mcts_policy(self, step: int) -> bool:
         """

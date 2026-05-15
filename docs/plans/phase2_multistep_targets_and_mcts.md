@@ -1,6 +1,6 @@
 # Planning Document: Optional Multi-Step Targets and MCTS for Phase 2 DQN
 
-**Status:** In Progress (trajectory targets and acting-time MCTS refinements landed)  
+**Status:** In Progress (trajectory targets, acting-time MCTS, and optional search-policy distillation landed)  
 **Date:** 2026-05-15
 
 ## Scope
@@ -22,6 +22,7 @@ The following pieces have already landed in the current code:
 - The trainer now supports sampled-trajectory `n_step` / `episode` targets for both `V_h^e` and `Q_r`, including trajectory metrics and taken-action-only `Q_r` supervision outside `one_step` mode.
 - Sync and async data collection now preserve episode-linkage metadata and disable mid-rollout goal resampling when trajectory targets are enabled.
 - An optional acting-time MCTS path now exists for robot action selection, using `Q_r` as the prior and the frozen Phase 2 value stack as the leaf evaluator, with integration tests in `tests/test_phase2_trainer_integration.py`.
+- `Phase2Config` and the trainer now support an optional `Q_r` search-policy distillation loss that trains the direct `Q_r → π_r` policy approximation against stored MCTS root visit-count distributions.
 
 So this document should now be read as a **living status-and-next-steps plan**, not as a greenfield design.
 
@@ -341,7 +342,7 @@ noise, and delayed MCTS enablement via training-step gating.
 
 14. [ ] Evaluate whether MCTS-only acting already improves `V_h^e` and `Q_r`.
 15. [ ] If useful, add optional replay-state search relabeling.
-16. [ ] If still useful, add a dedicated policy-distillation head or loss.
+16. [x] Add an optional policy-distillation loss from stored MCTS root policies.
 
 ### Phase 6: Remaining search refinements
 
@@ -388,5 +389,5 @@ The next highest-leverage milestone is now:
 
 1. run controlled comparisons of `one_step`, `n_step`, and `episode` targets on the same small world models,
 2. measure whether MCTS-only acting improves data quality enough to justify its cost,
-3. decide whether replay relabeling or policy distillation is worth adding,
-4. only then add extra search features such as Dirichlet root noise or a dedicated search-trained policy head.
+3. decide whether replay relabeling is worth adding on top of the new distillation path,
+4. only then add extra search features such as a dedicated search-trained policy head.
