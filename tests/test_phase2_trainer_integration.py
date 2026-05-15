@@ -1304,12 +1304,16 @@ class TestTrajectoryTargets:
                 [[-1.5, -2.5]], dtype=torch.float32, device=trainer.device
             )
 
-        def _trajectory_targets(batch):
+        def _trajectory_targets(batch, return_metrics=False):
             trainer.q_r_target_calls.append((mode, len(batch)))
-            return (
-                torch.tensor([-1.5], dtype=torch.float32, device=trainer.device),
-                {"trajectory_bootstrap_rate": 1.0},
-            )
+            targets = torch.tensor([-1.5], dtype=torch.float32, device=trainer.device)
+            metrics = {
+                "trajectory_bootstrap_rate": 1.0,
+                "taken_action_supervision": 1.0,
+            }
+            if return_metrics:
+                return targets, metrics
+            return targets
 
         trainer._compute_model_based_q_r_targets = _model_based_targets
         trainer._compute_trajectory_q_r_targets = _trajectory_targets
