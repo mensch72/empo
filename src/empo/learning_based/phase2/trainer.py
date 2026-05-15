@@ -2133,6 +2133,7 @@ class BasePhase2Trainer(ABC):
         self,
         batch: List[Phase2Transition],
         v_h_e_data: List[Tuple[int, int, Any]],
+        return_metrics: bool = False,
     ) -> torch.Tensor:
         """
         Compute sampled-trajectory V_h^e targets for n-step / episode modes.
@@ -2145,6 +2146,8 @@ class BasePhase2Trainer(ABC):
         mode = self.config.v_h_e_target_mode
         n_step = self.config.v_h_e_n_step
         targets = torch.zeros(len(v_h_e_data), device=self.device, dtype=torch.float32)
+        achieved_within_suffix_count = 0
+        bootstrapped_suffix_count = 0
 
         frontier_states: List[Any] = []
         frontier_humans: List[int] = []
@@ -2154,7 +2157,8 @@ class BasePhase2Trainer(ABC):
 
         for entry_idx, (transition_idx, human_idx, goal) in enumerate(v_h_e_data):
             suffix = self._get_trajectory_suffix(batch[transition_idx], mode, n_step)
-            achieved = False
+            achieved_within_suffix = False
+            suffix_closed = False
 
             for step_offset, suffix_transition in enumerate(suffix):
                 next_state = suffix_transition.next_state
@@ -2162,13 +2166,14 @@ class BasePhase2Trainer(ABC):
                     break
                 if self.check_goal_achieved(next_state, human_idx, goal):
                     targets[entry_idx] = gamma_h ** step_offset
-                    achieved = True
+                    achieved_within_suffix = True
+                    achieved_within_suffix_count += 1
                     break
                 if suffix_transition.terminal:
-                    achieved = True
+                    suffix_closed = True
                     break
 
-            if achieved or not suffix:
+            if achieved_within_suffix or suffix_closed or not suffix:
                 continue
 
             frontier_transition = suffix[-1]
@@ -2201,12 +2206,29 @@ class BasePhase2Trainer(ABC):
             entry_indices = torch.tensor(frontier_entries, device=self.device, dtype=torch.long)
             discounts = torch.tensor(frontier_discounts, device=self.device, dtype=torch.float32)
             targets.scatter_add_(0, entry_indices, discounts * frontier_values)
+            bootstrapped_suffix_count = len(frontier_entries)
 
-        return targets
+        if not return_metrics:
+            return targets
+
+        total_entries = len(v_h_e_data)
+        achieved_rate = (
+            achieved_within_suffix_count / total_entries if total_entries > 0 else 0.0
+        )
+        metrics = {
+            "sampled_goal_achievement_rate": achieved_rate,
+            "sampled_goal_achievement_sparsity": 1.0 - achieved_rate,
+            "trajectory_bootstrap_rate": (
+                bootstrapped_suffix_count / total_entries if total_entries > 0 else 0.0
+            ),
+        }
+
+        return targets, metrics
 
     def _compute_trajectory_q_r_targets(
         self,
         batch: List[Phase2Transition],
+        return_metrics: bool = False,
     ) -> torch.Tensor:
         """
         Compute sampled-trajectory Q_r targets for the taken root actions only.
@@ -2308,7 +2330,16 @@ class BasePhase2Trainer(ABC):
             discounts = torch.tensor(frontier_discounts, device=self.device, dtype=torch.float32)
             targets.scatter_add_(0, entry_indices, discounts * frontier_values)
 
-        return targets
+        if not return_metrics:
+            return targets
+
+        total_entries = len(batch)
+        metrics = {
+            "trajectory_bootstrap_rate": (
+                len(frontier_entries) / total_entries if total_entries > 0 else 0.0
+            ),
+        }
+        return targets, metrics
 
     def compute_losses(
         self,
@@ -2443,8 +2474,13 @@ class BasePhase2Trainer(ABC):
                 with torch.no_grad():
                     if self.config.v_h_e_target_mode == "one_step":
                         target_v_h_e = self._compute_model_based_v_h_e_targets(batch, v_h_e_data)
+                        v_h_e_target_metrics = {}
                     else:
-                        target_v_h_e = self._compute_trajectory_v_h_e_targets(batch, v_h_e_data)
+                        target_v_h_e, v_h_e_target_metrics = self._compute_trajectory_v_h_e_targets(
+                            batch,
+                            v_h_e_data,
+                            return_metrics=True,
+                        )
             
             # Debug logging for targets
             if self.debug and self.training_step_count % 100 == 0:
@@ -2473,7 +2509,9 @@ class BasePhase2Trainer(ABC):
                 prediction_stats['v_h_e'] = {
                     'mean': v_h_e_pred.mean().item(),
                     'std': v_h_e_pred.std().item() if v_h_e_pred.numel() > 1 else 0.0,
-                    'target_mean': target_v_h_e.mean().item()
+                    'target_mean': target_v_h_e.mean().item(),
+                    'target_std': target_v_h_e.std().item() if target_v_h_e.numel() > 1 else 0.0,
+                    **v_h_e_target_metrics,
                 }
         
         # ----- X_h loss (batched, potentially larger batch) -----
@@ -2605,10 +2643,14 @@ class BasePhase2Trainer(ABC):
                 # Statistics: report for taken actions for comparability
                 q_r_pred_taken = q_r_all.gather(1, action_indices.unsqueeze(1)).squeeze(1)
                 target_q_r_taken = target_q_r_all.gather(1, action_indices.unsqueeze(1)).squeeze(1)
+                q_r_target_metrics = {'taken_action_supervision': 0.0}
             else:
                 q_r_pred_taken = q_r_all.gather(1, action_indices.unsqueeze(1)).squeeze(1)
                 with torch.no_grad():
-                    target_q_r_taken = self._compute_trajectory_q_r_targets(batch)
+                    target_q_r_taken, q_r_target_metrics = self._compute_trajectory_q_r_targets(
+                        batch,
+                        return_metrics=True,
+                    )
 
                 if self.config.should_use_z_loss(self.training_step_count):
                     z_pred = to_z_space(q_r_pred_taken, self.config.eta, self.config.xi)
@@ -2627,7 +2669,9 @@ class BasePhase2Trainer(ABC):
                     'mean': q_r_pred_taken.mean().item(),
                     'std': q_r_pred_taken.std().item() if q_r_pred_taken.numel() > 1 else 0.0,
                     'target_mean': target_q_r_taken.mean().item(),
-                    loss_stat_key: losses['q_r'].item()
+                    'target_std': target_q_r_taken.std().item() if target_q_r_taken.numel() > 1 else 0.0,
+                    loss_stat_key: losses['q_r'].item(),
+                    **q_r_target_metrics,
                 }
                 # Add z-space statistics when enabled
                 if self.config.use_z_space_transform:
@@ -3418,7 +3462,8 @@ class BasePhase2Trainer(ABC):
         """Mutable state for learner (warmup tracking and progress metrics)."""
         def __init__(self, prev_stage: int, prev_stage_name: str, 
                      prev_param_norms: Optional[Dict[str, float]] = None,
-                     in_lr_decay_phase: bool = False):
+                     in_lr_decay_phase: bool = False,
+                     prev_q_r_taken_action_supervision: Optional[bool] = None):
             self.prev_stage = prev_stage
             self.prev_stage_name = prev_stage_name
             # For tracking network parameter changes
@@ -3428,6 +3473,8 @@ class BasePhase2Trainer(ABC):
             self.start_step: int = 0
             # For tracking LR decay phase transition
             self.in_lr_decay_phase = in_lr_decay_phase
+            # For explicit reporting when Q_r supervision switches semantics.
+            self.prev_q_r_taken_action_supervision = prev_q_r_taken_action_supervision
     
     def _init_learner_state(self) -> "_LearnerState":
         """Initialize learner state for warmup tracking."""
@@ -3436,7 +3483,12 @@ class BasePhase2Trainer(ABC):
         prev_stage_name = self.config.get_warmup_stage_name(self.training_step_count)
         prev_param_norms = self._compute_param_norms()
         in_lr_decay_phase = self.config.is_in_decay_phase(self.training_step_count)
-        state = BasePhase2Trainer._LearnerState(prev_stage, prev_stage_name, prev_param_norms, in_lr_decay_phase)
+        state = BasePhase2Trainer._LearnerState(
+            prev_stage,
+            prev_stage_name,
+            prev_param_norms,
+            in_lr_decay_phase,
+        )
         state.start_time = time.time()
         state.start_step = self.training_step_count
         return state
@@ -3463,6 +3515,16 @@ class BasePhase2Trainer(ABC):
         
         # Increment training step counter (this is the gradient update counter)
         self.training_step_count += 1
+
+        q_r_taken_action_supervision = self.config.q_r_target_mode != "one_step"
+        if learner_state.prev_q_r_taken_action_supervision != q_r_taken_action_supervision:
+            supervision_label = (
+                f"taken-action-only ({self.config.q_r_target_mode})"
+                if q_r_taken_action_supervision
+                else "all-actions exact backup"
+            )
+            print(f"[Training] Q_r supervision mode: {supervision_label}")
+            learner_state.prev_q_r_taken_action_supervision = q_r_taken_action_supervision
         
         # Compute current parameter norms to track network changes
         current_param_norms = self._compute_param_norms()
@@ -3591,11 +3653,44 @@ class BasePhase2Trainer(ABC):
                             self.writer.add_scalar(f'Predictions/{key}_std', stats['std'], self.training_step_count)
                         if 'target_mean' in stats:
                             self.writer.add_scalar(f'Targets/{key}_mean', stats['target_mean'], self.training_step_count)
+                        if 'target_std' in stats:
+                            self.writer.add_scalar(f'Targets/{key}_std', stats['target_std'], self.training_step_count)
+                    if key == 'v_h_e':
+                        if 'sampled_goal_achievement_rate' in stats:
+                            self.writer.add_scalar(
+                                'Trajectory/v_h_e_sampled_goal_achievement_rate',
+                                stats['sampled_goal_achievement_rate'],
+                                self.training_step_count,
+                            )
+                        if 'sampled_goal_achievement_sparsity' in stats:
+                            self.writer.add_scalar(
+                                'Trajectory/v_h_e_sampled_goal_achievement_sparsity',
+                                stats['sampled_goal_achievement_sparsity'],
+                                self.training_step_count,
+                            )
+                        if 'trajectory_bootstrap_rate' in stats:
+                            self.writer.add_scalar(
+                                'Trajectory/v_h_e_bootstrap_rate',
+                                stats['trajectory_bootstrap_rate'],
+                                self.training_step_count,
+                            )
                     if key == 'q_r':
                         if 'all_actions_loss' in stats:
                             self.writer.add_scalar('Loss/q_r_all_actions', stats['all_actions_loss'], self.training_step_count)
                         if 'taken_action_loss' in stats:
                             self.writer.add_scalar('Loss/q_r_taken_action', stats['taken_action_loss'], self.training_step_count)
+                        if 'taken_action_supervision' in stats:
+                            self.writer.add_scalar(
+                                'Supervision/q_r_taken_action_only',
+                                stats['taken_action_supervision'],
+                                self.training_step_count,
+                            )
+                        if 'trajectory_bootstrap_rate' in stats:
+                            self.writer.add_scalar(
+                                'Trajectory/q_r_bootstrap_rate',
+                                stats['trajectory_bootstrap_rate'],
+                                self.training_step_count,
+                            )
                     # Log z-space values when available (for Q_r, V_r, U_r with z-space transform)
                     if 'z_mean' in stats:
                         self.writer.add_scalar(f'ZSpace/{key}_z_pred', stats['z_mean'], self.training_step_count)

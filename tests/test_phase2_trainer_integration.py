@@ -1229,7 +1229,10 @@ class TestTrajectoryTargets:
 
         def _trajectory_targets(batch):
             trainer.q_r_target_calls.append((mode, len(batch)))
-            return torch.tensor([-1.5], dtype=torch.float32, device=trainer.device)
+            return (
+                torch.tensor([-1.5], dtype=torch.float32, device=trainer.device),
+                {"trajectory_bootstrap_rate": 1.0},
+            )
 
         trainer._compute_model_based_q_r_targets = _model_based_targets
         trainer._compute_trajectory_q_r_targets = _trajectory_targets
@@ -1279,6 +1282,34 @@ class TestTrajectoryTargets:
         # s2 is reached at step_offset=1 in the sampled suffix, so the
         # first-achievement term is γ_h^1.
         assert targets[0].item() == pytest.approx(0.5)
+
+    def test_v_h_e_trajectory_metrics_report_achievement_sparsity(self):
+        """Trajectory V_h^e targets should expose sampled achievement and bootstrap rates."""
+        trainer = self._build_v_h_e_trainer(
+            mode="n_step",
+            n_step=2,
+            achieved_states={"s2"},
+            bootstrap_values={("s4", "goal"): 0.25},
+        )
+        for idx, (state, next_state) in enumerate(
+            (("s0", "s1"), ("s1", "s2"), ("s2", "s3"), ("s3", "s4"))
+        ):
+            trainer.replay_buffer.push(**self._make_transition(state, next_state, env_step_index=idx).__dict__)
+
+        batch = [
+            trainer.replay_buffer.get_episode_transition(("actor", 0), 0),
+            trainer.replay_buffer.get_episode_transition(("actor", 0), 2),
+        ]
+        targets, metrics = trainer._compute_trajectory_v_h_e_targets(
+            batch,
+            [(0, 0, "goal"), (1, 0, "goal")],
+            return_metrics=True,
+        )
+
+        assert targets.shape == (2,)
+        assert metrics["sampled_goal_achievement_rate"] == pytest.approx(0.5)
+        assert metrics["sampled_goal_achievement_sparsity"] == pytest.approx(0.5)
+        assert metrics["trajectory_bootstrap_rate"] == pytest.approx(0.5)
 
     def test_q_r_n_step_accumulates_rewards_then_bootstraps(self):
         """n-step Q_r should use intermediate U_r terms plus frontier V_r."""
@@ -1358,6 +1389,12 @@ class TestTrajectoryTargets:
 
         assert present_key in prediction_stats["q_r"]
         assert absent_key not in prediction_stats["q_r"]
+        assert prediction_stats["q_r"]["target_std"] == pytest.approx(0.0)
+        assert prediction_stats["q_r"]["taken_action_supervision"] == pytest.approx(
+            0.0 if mode == "one_step" else 1.0
+        )
+        if mode == "n_step":
+            assert prediction_stats["q_r"]["trajectory_bootstrap_rate"] == pytest.approx(1.0)
         assert trainer.networks.q_r.action_index_calls == [(0,)]
         assert trainer.q_r_target_calls == [(mode, 1)]
 
