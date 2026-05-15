@@ -1210,8 +1210,9 @@ class TestTrajectoryTargets:
 
         def get_policy(self, q_values, beta_r=None):
             del beta_r
-            # Match the project policy transform where less-negative Q_r values
-            # receive more probability mass.
+            # Match EMPO's Phase 2 policy transform: Q_r values are negative, and
+            # less-negative actions represent more human power, so softmax(-Q_r)
+            # assigns them more probability mass.
             return torch.softmax(-q_values, dim=-1)
 
     def _make_transition(

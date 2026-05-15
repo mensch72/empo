@@ -2532,9 +2532,11 @@ class BasePhase2Trainer(ABC):
             q_r_values.index_select(0, index_tensor),
             beta_r=effective_beta_r,
         )
-        log_predicted_policy = torch.clamp_min(
-            predicted_policy, POLICY_DISTILLATION_EPS
-        ).log()
+        # Clamp before log so zero-probability actions from the direct policy do
+        # not produce ``-inf`` when matching stored MCTS visit distributions.
+        log_predicted_policy = torch.log(
+            torch.clamp_min(predicted_policy, POLICY_DISTILLATION_EPS)
+        )
 
         distillation_loss = F.kl_div(
             log_predicted_policy,
@@ -2543,6 +2545,8 @@ class BasePhase2Trainer(ABC):
             log_target=False,
         )
         metrics["mcts_policy_distillation_loss"] = float(distillation_loss.item())
+        # Keep a pre-weighted logging metric so training dashboards can compare
+        # the contribution of this auxiliary term to the combined Q_r loss.
         metrics["mcts_policy_distillation_weighted_loss"] = (
             self.config.mcts_policy_distillation_coef
             * metrics["mcts_policy_distillation_loss"]
