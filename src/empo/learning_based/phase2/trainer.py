@@ -2228,7 +2228,7 @@ class BasePhase2Trainer(ABC):
         mode = self.config.v_h_e_target_mode
         n_step = self.config.v_h_e_n_step
         targets = torch.zeros(len(v_h_e_data), device=self.device, dtype=torch.float32)
-        achieved_within_suffix_count = 0
+        suffix_achievement_count = 0
         bootstrapped_suffix_count = 0
 
         frontier_states: List[Any] = []
@@ -2249,7 +2249,7 @@ class BasePhase2Trainer(ABC):
                 if self.check_goal_achieved(next_state, human_idx, goal):
                     targets[entry_idx] = gamma_h**step_offset
                     achieved_within_suffix = True
-                    achieved_within_suffix_count += 1
+                    suffix_achievement_count += 1
                     break
                 if suffix_transition.terminal:
                     suffix_closed = True
@@ -2301,7 +2301,7 @@ class BasePhase2Trainer(ABC):
 
         total_entries = len(v_h_e_data)
         achieved_rate = (
-            achieved_within_suffix_count / total_entries if total_entries > 0 else 0.0
+            suffix_achievement_count / total_entries if total_entries > 0 else 0.0
         )
         metrics = {
             "sampled_goal_achievement_rate": achieved_rate,
@@ -3675,7 +3675,9 @@ class BasePhase2Trainer(ABC):
             self.start_step: int = 0
             # For tracking LR decay phase transition
             self.in_lr_decay_phase = in_lr_decay_phase
-            # For explicit reporting when Q_r supervision switches semantics.
+            # For explicit reporting when Q_r changes between all-actions
+            # supervision (one_step mode) and taken-action-only supervision
+            # (trajectory target modes).
             self.prev_q_r_taken_action_supervision = prev_q_r_taken_action_supervision
 
     def _init_learner_state(self) -> "_LearnerState":
