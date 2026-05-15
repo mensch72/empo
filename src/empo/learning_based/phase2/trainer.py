@@ -1450,12 +1450,16 @@ class BasePhase2Trainer(ABC):
         state: Any,
         goals: Dict[int, Any],
         effective_beta_r: float,
+        *,
+        add_root_noise: bool = True,
+        sample_action: bool = True,
     ) -> Phase2SearchStats:
         """Run acting-time MCTS rooted at ``state`` and return root search statistics."""
         root = _MCTSNode(state=state)
         self._evaluate_mcts_node(root, effective_beta_r)
         assert root.prior_policy is not None
-        root.prior_policy = self._apply_mcts_root_noise(root.prior_policy)
+        if add_root_noise:
+            root.prior_policy = self._apply_mcts_root_noise(root.prior_policy)
 
         for _ in range(self.config.mcts_num_simulations):
             self._simulate_mcts(root, goals, effective_beta_r, depth=0)
@@ -1465,7 +1469,10 @@ class BasePhase2Trainer(ABC):
         if search_policy.sum() <= 0:
             search_policy = root.prior_policy.copy()
 
-        action_idx = int(np.random.choice(len(search_policy), p=search_policy))
+        if sample_action:
+            action_idx = int(np.random.choice(len(search_policy), p=search_policy))
+        else:
+            action_idx = int(np.argmax(search_policy))
         return Phase2SearchStats(
             action=self.networks.q_r_target.action_index_to_tuple(action_idx),
             policy=tuple(float(x) for x in search_policy.tolist()),
@@ -1474,6 +1481,55 @@ class BasePhase2Trainer(ABC):
             ),
             action_values=tuple(float(x) for x in action_values.tolist()),
         )
+
+    def _maybe_relabel_mcts_search_stats(
+        self,
+        batch: List[Phase2Transition],
+        effective_beta_r: float,
+    ) -> Dict[str, float]:
+        """Optionally refresh replayed MCTS root statistics with current-search targets."""
+        total_entries = len(batch)
+        metrics = {
+            "mcts_search_relabel_eligible_rate": 0.0,
+            "mcts_search_relabel_sample_rate": 0.0,
+            "mcts_search_relabel_refresh_rate": 0.0,
+        }
+        if (
+            total_entries == 0
+            or not self.config.uses_mcts_replay_search_relabeling()
+            or not hasattr(self.env, "transition_probabilities")
+            or effective_beta_r <= 0.0
+        ):
+            return metrics
+
+        eligible_count = 0
+        relabeled_count = 0
+        for transition in batch:
+            if not transition.goals:
+                continue
+            eligible_count += 1
+            if random.random() > self.config.mcts_relabel_search_policy_prob:
+                continue
+
+            search_stats = self._run_mcts_policy_search(
+                transition.state,
+                transition.goals,
+                effective_beta_r=effective_beta_r,
+                add_root_noise=False,
+                sample_action=False,
+            )
+            transition.search_policy = search_stats.policy
+            transition.search_value = search_stats.root_value
+            transition.search_action_value = search_stats.action_values
+            relabeled_count += 1
+
+        metrics["mcts_search_relabel_eligible_rate"] = eligible_count / total_entries
+        metrics["mcts_search_relabel_sample_rate"] = relabeled_count / total_entries
+        if eligible_count > 0:
+            metrics["mcts_search_relabel_refresh_rate"] = (
+                relabeled_count / eligible_count
+            )
+        return metrics
 
     def _sample_curiosity_exploration_action(self, state: Any) -> Tuple[int, ...]:
         """
@@ -2920,15 +2976,22 @@ class BasePhase2Trainer(ABC):
                     q_r_temporal_loss = ((q_r_pred_taken - target_q_r_taken) ** 2).mean()
 
             losses["q_r"] = q_r_temporal_loss
+            q_r_relabel_metrics = self._maybe_relabel_mcts_search_stats(
+                batch, effective_beta_r
+            )
+            q_r_policy_metrics.update(
+                q_r_relabel_metrics
+            )
             if self.config.uses_mcts_search_policy_distillation():
                 (
                     q_r_policy_distillation_loss,
-                    q_r_policy_metrics,
+                    q_r_distillation_metrics,
                 ) = self._compute_mcts_policy_distillation_loss(
                     q_r_all,
                     batch,
                     effective_beta_r,
                 )
+                q_r_policy_metrics.update(q_r_distillation_metrics)
                 if q_r_policy_distillation_loss is not None:
                     losses["q_r"] = losses["q_r"] + (
                         self.config.mcts_policy_distillation_coef

@@ -267,6 +267,7 @@ class Phase2Config:
     mcts_root_noise_frac: float = 0.0
     mcts_enable_after_training_step: int = 0
     mcts_policy_distillation_coef: float = 0.0
+    mcts_relabel_search_policy_prob: float = 0.0
     
     # U_r loss computation: number of humans to sample (None = all humans)
     u_r_sample_humans: Optional[int] = None
@@ -459,6 +460,11 @@ class Phase2Config:
             raise ValueError(
                 "mcts_policy_distillation_coef must be >= 0, "
                 f"got {self.mcts_policy_distillation_coef}."
+            )
+        if not 0.0 <= self.mcts_relabel_search_policy_prob <= 1.0:
+            raise ValueError(
+                "mcts_relabel_search_policy_prob must be in [0, 1], "
+                f"got {self.mcts_relabel_search_policy_prob}."
             )
         if (
             self.trajectory_replay_max_age_training_steps is not None
@@ -719,6 +725,10 @@ class Phase2Config:
     def uses_mcts_search_policy_distillation(self) -> bool:
         """Return True when Q_r training should distill stored MCTS root policies."""
         return self.mcts_policy_distillation_coef > 0.0
+
+    def uses_mcts_replay_search_relabeling(self) -> bool:
+        """Return True when replay samples should be refreshed with current MCTS targets."""
+        return self.mcts_relabel_search_policy_prob > 0.0
 
     def should_use_mcts_policy(self, step: int) -> bool:
         """

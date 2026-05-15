@@ -1194,6 +1194,9 @@ class TestTrajectoryTargets:
         _compute_trajectory_q_r_targets = (
             BasePhase2Trainer._compute_trajectory_q_r_targets
         )
+        _maybe_relabel_mcts_search_stats = (
+            BasePhase2Trainer._maybe_relabel_mcts_search_stats
+        )
         compute_losses = BasePhase2Trainer.compute_losses
 
     class _StaticQRNetwork:
@@ -1588,6 +1591,73 @@ class TestTrajectoryTargets:
         assert losses["q_r"].item() == pytest.approx(
             prediction_stats["q_r"]["taken_action_loss"]
         )
+
+    def test_q_r_search_policy_distillation_can_relabel_replay_with_fresh_search(self):
+        """Replay-state relabeling should refresh missing MCTS targets before distillation."""
+        trainer = self._build_q_r_distillation_trainer(coef=0.5)
+        trainer.config = Phase2Config(
+            use_model_based_targets=False,
+            q_r_target_mode="n_step",
+            mcts_policy_distillation_coef=0.5,
+            mcts_relabel_search_policy_prob=1.0,
+            beta_r=2.0,
+            beta_r_rampup_steps=0,
+            warmup_v_h_e_steps=0,
+            warmup_x_h_steps=0,
+            warmup_u_r_steps=0,
+            warmup_q_r_steps=0,
+            x_h_use_network=False,
+            u_r_use_network=False,
+            v_r_use_network=False,
+        )
+        trainer.env = SimpleNamespace(transition_probabilities=lambda state, actions: [])
+        relabel_calls = []
+        trainer._run_mcts_policy_search = (
+            lambda state, goals, effective_beta_r, **kwargs: (
+                relabel_calls.append((state, goals, effective_beta_r, kwargs))
+                or SimpleNamespace(
+                    policy=(0.9, 0.1),
+                    root_value=-0.25,
+                    action_values=(-0.5, -1.5),
+                )
+            )
+        )
+        batch = [
+            Phase2Transition(
+                state="s0",
+                robot_action=(0,),
+                goals={0: "goal"},
+                goal_weights={0: 1.0},
+                human_actions=[],
+                next_state="s1",
+                terminal=False,
+                search_policy=None,
+            )
+        ]
+
+        losses, prediction_stats = trainer.compute_losses(batch)
+
+        assert relabel_calls == [
+            (
+                "s0",
+                {0: "goal"},
+                2.0,
+                {"add_root_noise": False, "sample_action": False},
+            )
+        ]
+        assert batch[0].search_policy == (0.9, 0.1)
+        assert batch[0].search_value == pytest.approx(-0.25)
+        assert batch[0].search_action_value == (-0.5, -1.5)
+        assert prediction_stats["q_r"]["mcts_search_relabel_sample_rate"] == pytest.approx(
+            1.0
+        )
+        assert prediction_stats["q_r"]["mcts_search_relabel_refresh_rate"] == pytest.approx(
+            1.0
+        )
+        assert prediction_stats["q_r"]["mcts_policy_distillation_sample_rate"] == pytest.approx(
+            1.0
+        )
+        assert losses["q_r"].item() > prediction_stats["q_r"]["taken_action_loss"]
 
     def test_q_r_episode_bootstraps_when_suffix_stays_open(self):
         """Episode-mode Q_r should bootstrap from the last available state if replay ends before terminal."""

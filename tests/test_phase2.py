@@ -99,10 +99,12 @@ def test_phase2_config():
     assert config.mcts_root_noise_frac == 0.0
     assert config.mcts_enable_after_training_step == 0
     assert config.mcts_policy_distillation_coef == 0.0
+    assert config.mcts_relabel_search_policy_prob == 0.0
     assert config.trajectory_replay_max_age_training_steps is None
     assert config.uses_trajectory_targets() is False
     assert config.uses_fresh_trajectory_replay() is False
     assert config.uses_mcts_search_policy_distillation() is False
+    assert config.uses_mcts_replay_search_relabeling() is False
     print("  ✓ Default config values")
     
     # Epsilon_r decay
@@ -130,6 +132,7 @@ def test_phase2_config():
         mcts_root_noise_frac=0.25,
         mcts_enable_after_training_step=7,
         mcts_policy_distillation_coef=0.2,
+        mcts_relabel_search_policy_prob=0.5,
         async_training=True,
         trajectory_replay_max_age_training_steps=11,
         beta_r_rampup_steps=0,
@@ -145,6 +148,7 @@ def test_phase2_config():
     assert custom_config.uses_fresh_trajectory_replay() is True
     assert custom_config.uses_mcts_policy_improvement() is True
     assert custom_config.uses_mcts_search_policy_distillation() is True
+    assert custom_config.uses_mcts_replay_search_relabeling() is True
     assert custom_config.should_use_mcts_policy(6) is False
     assert custom_config.should_use_mcts_policy(7) is True
     print("  ✓ Custom config values")
