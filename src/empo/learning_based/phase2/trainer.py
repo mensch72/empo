@@ -2476,6 +2476,68 @@ class BasePhase2Trainer(ABC):
         }
         return targets, metrics
 
+    def _compute_mcts_policy_distillation_loss(
+        self,
+        q_r_values: torch.Tensor,
+        batch: List[Phase2Transition],
+        effective_beta_r: float,
+    ) -> Tuple[Optional[torch.Tensor], Dict[str, float]]:
+        """Compute an optional search-policy distillation loss from stored MCTS visits."""
+        total_entries = len(batch)
+        if (
+            total_entries == 0
+            or not self.config.uses_mcts_search_policy_distillation()
+        ):
+            return None, {}
+
+        target_indices: List[int] = []
+        target_policies: List[np.ndarray] = []
+        num_action_combinations = q_r_values.shape[1]
+
+        for batch_idx, transition in enumerate(batch):
+            if transition.search_policy is None:
+                continue
+            if len(transition.search_policy) != num_action_combinations:
+                continue
+
+            policy = np.asarray(transition.search_policy, dtype=np.float32)
+            policy_sum = float(policy.sum())
+            if policy_sum <= 0.0:
+                continue
+
+            target_indices.append(batch_idx)
+            target_policies.append(policy / policy_sum)
+
+        sample_rate = len(target_indices) / total_entries
+        metrics = {
+            "mcts_policy_distillation_sample_rate": sample_rate,
+        }
+        if not target_indices:
+            return None, metrics
+
+        index_tensor = torch.tensor(
+            target_indices, device=q_r_values.device, dtype=torch.long
+        )
+        target_policy_tensor = torch.tensor(
+            np.stack(target_policies),
+            device=q_r_values.device,
+            dtype=q_r_values.dtype,
+        )
+        predicted_policy = self.networks.q_r.get_policy(
+            q_r_values.index_select(0, index_tensor),
+            beta_r=effective_beta_r,
+        ).clamp(min=1e-10)
+
+        distillation_loss = -(
+            target_policy_tensor * torch.log(predicted_policy)
+        ).sum(dim=1).mean()
+        metrics["mcts_policy_distillation_loss"] = float(distillation_loss.item())
+        metrics["mcts_policy_distillation_weighted_loss"] = (
+            self.config.mcts_policy_distillation_coef
+            * metrics["mcts_policy_distillation_loss"]
+        )
+        return distillation_loss, metrics
+
     def compute_losses(
         self,
         batch: List[Phase2Transition],
@@ -2769,6 +2831,7 @@ class BasePhase2Trainer(ABC):
                 [self.networks.q_r.action_tuple_to_index(a) for a in robot_actions],
                 device=self.device,
             )
+            q_r_policy_metrics: Dict[str, float] = {}
 
             if self.config.q_r_target_mode == "one_step":
                 # Compute model-based targets for ALL robot actions
@@ -2786,10 +2849,10 @@ class BasePhase2Trainer(ABC):
                     z_target = to_z_space(
                         target_q_r_all, self.config.eta, self.config.xi
                     )
-                    losses["q_r"] = ((z_pred - z_target) ** 2).mean()
+                    q_r_temporal_loss = ((z_pred - z_target) ** 2).mean()
                 else:
                     # Q-space MSE (default: faster outlier correction, Robbins-Monro convergence)
-                    losses["q_r"] = ((q_r_all - target_q_r_all) ** 2).mean()
+                    q_r_temporal_loss = ((q_r_all - target_q_r_all) ** 2).mean()
 
                 # Statistics: report for taken actions for comparability
                 q_r_pred_taken = q_r_all.gather(1, action_indices.unsqueeze(1)).squeeze(
@@ -2816,9 +2879,25 @@ class BasePhase2Trainer(ABC):
                     z_target = to_z_space(
                         target_q_r_taken, self.config.eta, self.config.xi
                     )
-                    losses["q_r"] = ((z_pred - z_target) ** 2).mean()
+                    q_r_temporal_loss = ((z_pred - z_target) ** 2).mean()
                 else:
-                    losses["q_r"] = ((q_r_pred_taken - target_q_r_taken) ** 2).mean()
+                    q_r_temporal_loss = ((q_r_pred_taken - target_q_r_taken) ** 2).mean()
+
+            losses["q_r"] = q_r_temporal_loss
+            if self.config.uses_mcts_search_policy_distillation():
+                (
+                    q_r_policy_distillation_loss,
+                    q_r_policy_metrics,
+                ) = self._compute_mcts_policy_distillation_loss(
+                    q_r_all,
+                    batch,
+                    effective_beta_r,
+                )
+                if q_r_policy_distillation_loss is not None:
+                    losses["q_r"] = losses["q_r"] + (
+                        self.config.mcts_policy_distillation_coef
+                        * q_r_policy_distillation_loss
+                    )
 
             with torch.no_grad():
                 loss_stat_key = (
@@ -2839,8 +2918,10 @@ class BasePhase2Trainer(ABC):
                         if target_q_r_taken.numel() > 1
                         else 0.0
                     ),
-                    loss_stat_key: losses["q_r"].item(),
+                    loss_stat_key: q_r_temporal_loss.item(),
+                    "q_r_total_loss": losses["q_r"].item(),
                     **q_r_target_metrics,
+                    **q_r_policy_metrics,
                 }
                 # Add z-space statistics when enabled
                 if self.config.use_z_space_transform:

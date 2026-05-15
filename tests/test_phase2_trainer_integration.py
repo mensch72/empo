@@ -1208,6 +1208,11 @@ class TestTrajectoryTargets:
             self.action_index_calls.append(action_tuple)
             return action_tuple[0] if isinstance(action_tuple, tuple) else action_tuple
 
+        def get_policy(self, q_values, beta_r=None):
+            del beta_r
+            probs = torch.softmax(-q_values, dim=-1)
+            return probs / probs.sum(dim=-1, keepdim=True)
+
     def _make_transition(
         self,
         state,
@@ -1318,6 +1323,24 @@ class TestTrajectoryTargets:
 
         trainer._compute_model_based_q_r_targets = _model_based_targets
         trainer._compute_trajectory_q_r_targets = _trajectory_targets
+        return trainer
+
+    def _build_q_r_distillation_trainer(self, coef):
+        trainer = self._build_q_r_loss_stats_trainer("n_step")
+        trainer.config = Phase2Config(
+            use_model_based_targets=False,
+            q_r_target_mode="n_step",
+            mcts_policy_distillation_coef=coef,
+            beta_r=2.0,
+            beta_r_rampup_steps=0,
+            warmup_v_h_e_steps=0,
+            warmup_x_h_steps=0,
+            warmup_u_r_steps=0,
+            warmup_q_r_steps=0,
+            x_h_use_network=False,
+            u_r_use_network=False,
+            v_r_use_network=False,
+        )
         return trainer
 
     def test_v_h_e_n_step_bootstraps_from_frontier(self):
@@ -1513,6 +1536,56 @@ class TestTrajectoryTargets:
             ] == pytest.approx(1.0)
         assert trainer.networks.q_r.action_index_calls == [(0,)]
         assert trainer.q_r_target_calls == [(mode, 1)]
+
+    def test_q_r_search_policy_distillation_adds_weighted_loss(self):
+        """Q_r should optionally add a weighted distillation term from stored MCTS policies."""
+        trainer = self._build_q_r_distillation_trainer(coef=0.5)
+        batch = [
+            Phase2Transition(
+                state="s0",
+                robot_action=(0,),
+                goals={},
+                goal_weights={},
+                human_actions=[],
+                next_state="s1",
+                terminal=False,
+                search_policy=(0.2, 0.8),
+            )
+        ]
+
+        losses, prediction_stats = trainer.compute_losses(batch)
+
+        base_loss = prediction_stats["q_r"]["taken_action_loss"]
+        weighted_distill = prediction_stats["q_r"]["mcts_policy_distillation_weighted_loss"]
+        assert prediction_stats["q_r"]["mcts_policy_distillation_sample_rate"] == pytest.approx(1.0)
+        assert prediction_stats["q_r"]["q_r_total_loss"] == pytest.approx(
+            base_loss + weighted_distill
+        )
+        assert losses["q_r"].item() == pytest.approx(base_loss + weighted_distill)
+
+    def test_q_r_search_policy_distillation_ignores_missing_search_stats(self):
+        """Distillation should stay inactive for transitions that do not carry MCTS policies."""
+        trainer = self._build_q_r_distillation_trainer(coef=0.5)
+        batch = [
+            Phase2Transition(
+                state="s0",
+                robot_action=(0,),
+                goals={},
+                goal_weights={},
+                human_actions=[],
+                next_state="s1",
+                terminal=False,
+                search_policy=None,
+            )
+        ]
+
+        losses, prediction_stats = trainer.compute_losses(batch)
+
+        assert prediction_stats["q_r"]["mcts_policy_distillation_sample_rate"] == pytest.approx(0.0)
+        assert "mcts_policy_distillation_loss" not in prediction_stats["q_r"]
+        assert losses["q_r"].item() == pytest.approx(
+            prediction_stats["q_r"]["taken_action_loss"]
+        )
 
     def test_q_r_episode_bootstraps_when_suffix_stays_open(self):
         """Episode-mode Q_r should bootstrap from the last available state if replay ends before terminal."""

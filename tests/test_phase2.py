@@ -98,7 +98,9 @@ def test_phase2_config():
     assert config.pi_r_mode == "direct"
     assert config.mcts_root_noise_frac == 0.0
     assert config.mcts_enable_after_training_step == 0
+    assert config.mcts_policy_distillation_coef == 0.0
     assert config.uses_trajectory_targets() is False
+    assert config.uses_mcts_search_policy_distillation() is False
     print("  ✓ Default config values")
     
     # Epsilon_r decay
@@ -125,6 +127,7 @@ def test_phase2_config():
         mcts_num_simulations=8,
         mcts_root_noise_frac=0.25,
         mcts_enable_after_training_step=7,
+        mcts_policy_distillation_coef=0.2,
         beta_r_rampup_steps=0,
         warmup_v_h_e_steps=0,
         warmup_x_h_steps=0,
@@ -136,6 +139,7 @@ def test_phase2_config():
     assert custom_config.zeta == 3.0
     assert custom_config.should_store_sampled_next_state() is True
     assert custom_config.uses_mcts_policy_improvement() is True
+    assert custom_config.uses_mcts_search_policy_distillation() is True
     assert custom_config.should_use_mcts_policy(6) is False
     assert custom_config.should_use_mcts_policy(7) is True
     print("  ✓ Custom config values")
