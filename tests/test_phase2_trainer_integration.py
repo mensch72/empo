@@ -16,6 +16,7 @@ import os
 import tempfile
 from contextlib import nullcontext
 from types import SimpleNamespace
+import numpy as np
 import pytest
 import torch
 import torch.nn as nn
@@ -1039,6 +1040,11 @@ class TestModelBasedTargets:
         """Config should reject unsupported target horizon modes."""
         with pytest.raises(ValueError, match="Invalid v_h_e_target_mode"):
             Phase2Config(v_h_e_target_mode="bad_mode")
+
+    def test_invalid_pi_r_mode_raises(self):
+        """Config should reject unsupported robot policy-improvement modes."""
+        with pytest.raises(ValueError, match="Invalid pi_r_mode"):
+            Phase2Config(pi_r_mode="bad_mode")
     
     def test_no_successor_states_stored_in_transitions(self):
         """
@@ -1371,6 +1377,191 @@ class TestTrajectoryTargets:
 
         # Open episode suffix falls back to γ_r * U_r(s1) + γ_r² * V_r(s2).
         assert targets[0].item() == pytest.approx(0.5 * -1.0 + 0.25 * -3.0)
+
+
+# =============================================================================
+# MCTS POLICY-IMPROVEMENT TESTS
+# =============================================================================
+
+class TestMCTSPolicyImprovement:
+    """Tests for the optional acting-time MCTS robot policy path."""
+
+    class _StaticQNetwork:
+        """Test double that returns fixed Q-values and a uniform prior policy."""
+        num_action_combinations = 2
+        num_actions = 2
+
+        def __init__(self, q_values_by_state):
+            self.q_values_by_state = q_values_by_state
+
+        def forward(self, state, env, device):
+            return torch.tensor([self.q_values_by_state[state]], dtype=torch.float32, device=device)
+
+        def get_policy(self, q_values, beta_r=None):
+            del beta_r
+            probs = torch.ones_like(q_values)
+            return probs / probs.sum(dim=-1, keepdim=True)
+
+        def action_index_to_tuple(self, index):
+            return (index,)
+
+        def action_tuple_to_index(self, action_tuple):
+            return action_tuple[0]
+
+    class _StaticVrTarget:
+        """Test double that returns fixed V_r values for searched leaf states."""
+        def __init__(self, values):
+            self.values = values
+
+        def forward(self, state, env, device):
+            return torch.tensor([self.values[state]], dtype=torch.float32, device=device)
+
+    class _TinySearchEnv:
+        """Minimal deterministic branch world model used to verify MCTS preferences."""
+        action_space = SimpleNamespace(n=1)
+
+        def transition_probabilities(self, state, actions):
+            robot_action = actions[1]
+            if state == "root":
+                return [(1.0, "good" if robot_action == 1 else "bad")]
+            return [(1.0, state)]
+
+    class _SearchTrainer:
+        """Expose only the BasePhase2Trainer MCTS helpers needed by these tests."""
+        _sample_robot_action_with_stats = BasePhase2Trainer._sample_robot_action_with_stats
+        _run_mcts_policy_search = BasePhase2Trainer._run_mcts_policy_search
+        _sample_human_actions_for_search = BasePhase2Trainer._sample_human_actions_for_search
+        _evaluate_mcts_node = BasePhase2Trainer._evaluate_mcts_node
+        _select_mcts_action_index = BasePhase2Trainer._select_mcts_action_index
+        _simulate_mcts = BasePhase2Trainer._simulate_mcts
+        _build_joint_action_profile = BasePhase2Trainer._build_joint_action_profile
+
+    def test_mcts_prefers_higher_value_successor(self):
+        """MCTS should shift visit mass toward the action with the better searched successor."""
+        trainer = self._SearchTrainer()
+        trainer.device = "cpu"
+        trainer.env = self._TinySearchEnv()
+        trainer.config = Phase2Config(
+            pi_r_mode="mcts",
+            epsilon_r_start=0.0,
+            epsilon_r_end=0.0,
+            beta_r=2.0,
+            beta_r_rampup_steps=0,
+            warmup_v_h_e_steps=0,
+            warmup_x_h_steps=0,
+            warmup_u_r_steps=0,
+            warmup_q_r_steps=0,
+            warmup_v_r_steps=0,
+            x_h_use_network=False,
+            u_r_use_network=False,
+            v_r_use_network=True,
+            mcts_num_simulations=48,
+            mcts_max_depth=1,
+        )
+        trainer.training_step_count = 0
+        trainer.human_agent_indices = [0]
+        trainer.robot_agent_indices = [1]
+        trainer.num_agents = 2
+        trainer.networks = SimpleNamespace(
+            q_r_target=self._StaticQNetwork(
+                {
+                    "root": [-1.0, -1.0],
+                    "bad": [-1.0, -1.0],
+                    "good": [-1.0, -1.0],
+                }
+            ),
+            v_r_target=self._StaticVrTarget(
+                {
+                    "root": -1.0,
+                    "bad": -3.0,
+                    "good": -0.25,
+                }
+            ),
+        )
+        trainer.human_policy_prior = (
+            lambda state, human_idx, goal: np.ones(trainer.env.action_space.n, dtype=np.float64)
+            / trainer.env.action_space.n
+        )
+        trainer._compute_u_r_batch_target = lambda states: torch.zeros(len(states), dtype=torch.float32)
+
+        np.random.seed(0)
+        torch.manual_seed(0)
+
+        action, search_stats = trainer._sample_robot_action_with_stats("root", goals={0: "goal"})
+
+        assert search_stats is not None
+        assert action in {(0,), (1,)}
+        assert search_stats.policy[1] > search_stats.policy[0]
+        assert search_stats.action_values[1] > search_stats.action_values[0]
+
+    def test_collect_transition_stores_mcts_root_statistics(self):
+        """Collected transitions should retain root search metadata for later training/distillation."""
+
+        class MockTrainer:
+            collect_transition = BasePhase2Trainer.collect_transition
+            _precompute_transition_probs = BasePhase2Trainer._precompute_transition_probs
+            _build_joint_action_profile = BasePhase2Trainer._build_joint_action_profile
+
+            def __init__(self):
+                self.device = "cpu"
+                self.debug = False
+                self.profiler = SimpleNamespace(section=lambda _name: nullcontext())
+                self.config = Phase2Config(
+                    pi_r_mode="mcts",
+                    use_model_based_targets=True,
+                    epsilon_r_start=0.0,
+                    epsilon_r_end=0.0,
+                    beta_r=2.0,
+                    beta_r_rampup_steps=0,
+                    warmup_v_h_e_steps=0,
+                    warmup_x_h_steps=0,
+                    warmup_u_r_steps=0,
+                    warmup_q_r_steps=0,
+                    warmup_v_r_steps=0,
+                    x_h_use_network=False,
+                    u_r_use_network=False,
+                    v_r_use_network=False,
+                )
+                self.training_step_count = 0
+                self.human_agent_indices = [0]
+                self.robot_agent_indices = [1]
+                self.num_agents = 2
+                self.env = TestMCTSPolicyImprovement._TinySearchEnv()
+                self.networks = SimpleNamespace(
+                    q_r=SimpleNamespace(
+                        num_action_combinations=2,
+                        action_index_to_tuple=lambda idx: (idx,),
+                    )
+                )
+
+            def sample_human_actions(self, state, goals):
+                return [0]
+
+            def step_environment(self, state, robot_action, human_actions):
+                return "next_state"
+
+        trainer = MockTrainer()
+        trainer._sample_robot_action_with_stats = lambda state, goals, transition_probs_by_action: (
+            (1,),
+            SimpleNamespace(
+                policy=(0.1, 0.9),
+                root_value=-0.4,
+                action_values=(-0.8, -0.2),
+            ),
+        )
+
+        transition, _next_state = trainer.collect_transition(
+            "root",
+            {0: "goal"},
+            {0: 1.0},
+            episode_id=("actor", 0),
+            env_step_index=0,
+            terminal=False,
+        )
+
+        assert transition.search_policy == (0.1, 0.9)
+        assert transition.search_value == pytest.approx(-0.4)
+        assert transition.search_action_value == (-0.8, -0.2)
 
 
 # =============================================================================

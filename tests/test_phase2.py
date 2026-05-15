@@ -95,6 +95,7 @@ def test_phase2_config():
     assert config.beta_r == 10.0
     assert config.v_h_e_target_mode == "one_step"
     assert config.q_r_target_mode == "one_step"
+    assert config.pi_r_mode == "direct"
     assert config.uses_trajectory_targets() is False
     print("  ✓ Default config values")
     
@@ -118,10 +119,13 @@ def test_phase2_config():
         eta=1.5,
         beta_r=5.0,
         q_r_target_mode="episode",
+        pi_r_mode="mcts",
+        mcts_num_simulations=8,
     )
     assert custom_config.gamma_r == 0.95
     assert custom_config.zeta == 3.0
     assert custom_config.should_store_sampled_next_state() is True
+    assert custom_config.uses_mcts_policy_improvement() is True
     print("  ✓ Custom config values")
     
     print("  ✓ Phase2Config test passed!")
@@ -184,6 +188,9 @@ def test_phase2_replay_buffer():
             episode_id=("sync", 0),
             env_step_index=i,
             terminal=(i == 2),
+            search_policy=(0.25, 0.75),
+            search_value=-0.5,
+            search_action_value=(-0.8, -0.2),
         )
     suffix = episode_buffer.get_episode_suffix(
         episode_buffer.get_episode_transition(("sync", 0), 1),
@@ -191,6 +198,8 @@ def test_phase2_replay_buffer():
     )
     assert [t.env_step_index for t in suffix] == [1, 2]
     assert episode_buffer.get_episode_terminal_index(("sync", 0)) == 2
+    assert suffix[0].search_policy == (0.25, 0.75)
+    assert suffix[0].search_action_value == (-0.8, -0.2)
     print("  ✓ Episode suffix lookup works")
     
     print("  ✓ Phase2ReplayBuffer test passed!")

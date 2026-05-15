@@ -36,6 +36,9 @@ class Phase2Transition:
             When True, the V_h^e TD target should not bootstrap from next_state.
         episode_id: Identifier for the rollout episode this transition belongs to.
         env_step_index: Position of this transition within its replay-linked rollout segment.
+        search_policy: Optional root visit-count distribution from MCTS acting.
+        search_value: Optional root state-value estimate from MCTS acting.
+        search_action_value: Optional per-action root value estimates from MCTS acting.
     """
     state: Any
     robot_action: Tuple[int, ...]
@@ -49,6 +52,9 @@ class Phase2Transition:
     terminal: bool = False
     episode_id: Optional[Any] = None
     env_step_index: Optional[int] = None
+    search_policy: Optional[Tuple[float, ...]] = None
+    search_value: Optional[float] = None
+    search_action_value: Optional[Tuple[float, ...]] = None
 
 
 class Phase2ReplayBuffer:
@@ -90,6 +96,9 @@ class Phase2ReplayBuffer:
         terminal: bool = False,
         episode_id: Optional[Any] = None,
         env_step_index: Optional[int] = None,
+        search_policy: Optional[Tuple[float, ...]] = None,
+        search_value: Optional[float] = None,
+        search_action_value: Optional[Tuple[float, ...]] = None,
     ) -> None:
         """
         Add a transition to the buffer.
@@ -107,6 +116,9 @@ class Phase2ReplayBuffer:
             terminal: Whether this transition ends the episode.
             episode_id: Optional rollout episode identifier.
             env_step_index: Optional env_step position within the replay-linked rollout segment.
+            search_policy: Optional MCTS root policy stored with the transition.
+            search_value: Optional MCTS root value estimate stored with the transition.
+            search_action_value: Optional MCTS root per-action values stored with the transition.
         """
         if (
             (episode_id is None and env_step_index is not None)
@@ -130,6 +142,9 @@ class Phase2ReplayBuffer:
             terminal=terminal,
             episode_id=episode_id,
             env_step_index=env_step_index,
+            search_policy=search_policy,
+            search_value=search_value,
+            search_action_value=search_action_value,
         )
 
         if len(self.buffer) < self.capacity:
