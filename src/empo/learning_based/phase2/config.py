@@ -1525,6 +1525,7 @@ class Phase2Config:
                 "env_steps_per_training_step": self.env_steps_per_training_step,
                 "goal_resample_prob": self.goal_resample_prob,
                 "use_model_based_targets": self.use_model_based_targets,
+                "mcts_relabel_search_policy_prob": self.mcts_relabel_search_policy_prob,
             },
             "sampling": {
                 "u_r_sample_humans": self.u_r_sample_humans,
