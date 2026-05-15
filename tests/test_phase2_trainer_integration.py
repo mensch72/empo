@@ -1645,6 +1645,7 @@ class TestMCTSPolicyImprovement:
             )
             / trainer.env.action_space.n
         )
+        trainer._curiosity_enabled_for_robot = lambda: False
 
         action, search_stats = trainer._sample_robot_action_with_stats(
             "root", goals={0: "goal"}

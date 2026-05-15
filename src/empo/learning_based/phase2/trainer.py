@@ -3767,13 +3767,14 @@ class BasePhase2Trainer(ABC):
         # Increment training step counter (this is the gradient update counter)
         self.training_step_count += 1
 
-        q_r_taken_action_supervision = self.config.q_r_target_mode != "one_step"
+        q_r_target_mode = getattr(self.config, "q_r_target_mode", "one_step")
+        q_r_taken_action_supervision = q_r_target_mode != "one_step"
         if (
             learner_state.prev_q_r_taken_action_supervision
             != q_r_taken_action_supervision
         ):
             supervision_label = (
-                f"taken-action-only ({self.config.q_r_target_mode})"
+                f"taken-action-only ({q_r_target_mode})"
                 if q_r_taken_action_supervision
                 else "all-actions exact backup"
             )

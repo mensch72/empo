@@ -125,6 +125,12 @@ def test_phase2_config():
         mcts_num_simulations=8,
         mcts_root_noise_frac=0.25,
         mcts_enable_after_training_step=7,
+        beta_r_rampup_steps=0,
+        warmup_v_h_e_steps=0,
+        warmup_x_h_steps=0,
+        warmup_u_r_steps=0,
+        warmup_q_r_steps=0,
+        warmup_v_r_steps=0,
     )
     assert custom_config.gamma_r == 0.95
     assert custom_config.zeta == 3.0
