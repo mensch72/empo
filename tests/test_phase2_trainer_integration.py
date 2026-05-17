@@ -1188,11 +1188,17 @@ class TestTrajectoryTargets:
 
     class _TrajectoryTrainer:
         _get_trajectory_suffix = BasePhase2Trainer._get_trajectory_suffix
+        _compute_model_based_v_h_e_targets = (
+            BasePhase2Trainer._compute_model_based_v_h_e_targets
+        )
         _compute_trajectory_v_h_e_targets = (
             BasePhase2Trainer._compute_trajectory_v_h_e_targets
         )
         _compute_trajectory_q_r_targets = (
             BasePhase2Trainer._compute_trajectory_q_r_targets
+        )
+        _compute_mcts_policy_distillation_loss = (
+            BasePhase2Trainer._compute_mcts_policy_distillation_loss
         )
         _maybe_relabel_mcts_search_stats = (
             BasePhase2Trainer._maybe_relabel_mcts_search_stats
@@ -1203,6 +1209,7 @@ class TestTrajectoryTargets:
         def __init__(self, q_values):
             self.q_values = torch.tensor(q_values, dtype=torch.float32)
             self.action_index_calls = []
+            self.num_action_combinations = self.q_values.shape[1]
 
         def forward_batch(self, states, env, device):
             return self.q_values.to(device)
@@ -1211,12 +1218,26 @@ class TestTrajectoryTargets:
             self.action_index_calls.append(action_tuple)
             return action_tuple[0] if isinstance(action_tuple, tuple) else action_tuple
 
+        def action_index_to_tuple(self, index):
+            return (index,)
+
         def get_policy(self, q_values, beta_r=None):
             del beta_r
             # Match EMPO's Phase 2 policy transform: Q_r values are negative, and
             # less-negative actions represent more human power, so softmax(-Q_r)
             # assigns them more probability mass.
             return torch.softmax(-q_values, dim=-1)
+
+    class _StaticVhNetwork:
+        def __init__(self, gamma_h=0.5):
+            self.gamma_h = gamma_h
+
+        def forward_batch(self, states, goals, human_indices, env, device):
+            del goals, human_indices, env
+            return torch.zeros(len(states), dtype=torch.float32, device=device)
+
+        def apply_hard_clamp(self, values):
+            return values
 
     def _make_transition(
         self,
@@ -1306,6 +1327,9 @@ class TestTrajectoryTargets:
         )
         trainer.networks = SimpleNamespace(
             q_r=self._StaticQRNetwork([[-1.0, -2.0]]),
+            q_r_target=self._StaticQRNetwork([[-1.0, -2.0]]),
+            v_h_e=self._StaticVhNetwork(),
+            v_h_e_target=self._StaticVhNetwork(),
         )
         trainer.q_r_target_calls = []
 
