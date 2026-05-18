@@ -1,7 +1,7 @@
 # Reference grid showcasing all object types
 metadata:
   name: "All Object Types"
-  description: "10x7 grid showcasing all object types available in the multigrid environment: blocks, rocks, lava, switches, unsteady ground, goals, keys, balls, boxes, and doors."
+  description: "10x7 grid showcasing all object types available in the multigrid environment: blocks, rocks, bushes, lava, switches, unsteady ground, goals, keys, balls, boxes, and doors."
   author: "EMPO Framework"
   version: "1.0.0"
   created: "2025-01-01T00:00:00Z"
@@ -10,7 +10,7 @@ metadata:
 
 map: |
   We We We We We We We We We We
-  We Bl Ro La Sw Un .. .. .. We
+  We Bl Ro Bu La Sw Un .. .. We
   We Gr Kr Br Xr .. .. .. .. We
   We Lr Cr Or .. .. .. .. .. We
   We Mn Ms Mw Me .. .. .. .. We

@@ -263,10 +263,10 @@ Total Channels = num_object_type_channels + 3 + num_colors
                        |                   |       |
                        |                   |       +-- Per-color agent channels (7 standard colors)
                        |                   +-- "Other objects" channels (3: overlappable, immobile, mobile)
-                       +-- Object type channels (29 total, see OBJECT_TYPE_TO_CHANNEL)
+                       +-- Object type channels (30 total, see OBJECT_TYPE_TO_CHANNEL)
 ```
 
-### Object Type Channels (29 channels)
+### Object Type Channels (30 channels)
 
 | Channel Range | Object Type | Value Encoding |
 |---------------|-------------|----------------|
@@ -288,7 +288,7 @@ For off-policy learning, the full grid tensor (39 channels × H × W = 7644 byte
 
 | Bits | Field | Description |
 |------|-------|-------------|
-| 0-4 | object_type | 0-28 standard types (see `OBJECT_TYPE_TO_CHANNEL`), 30=door, 31=key |
+| 0-4 | object_type | 0-29 standard types (see `OBJECT_TYPE_TO_CHANNEL`), 30=door, 31=key |
 | 5-7 | object_color | 0-6 color index (for doors/keys) |
 | 8-9 | object_state | 0-3 door state (none/open/closed/locked) |
 | 10-12 | agent_color | 0-6 agent color, 7=no agent |

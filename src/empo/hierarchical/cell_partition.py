@@ -185,7 +185,7 @@ class CellPartition:
         width: int,
         height: int,
         *,
-        excluded_types: FrozenSet[str] = frozenset({'wall', 'lava'}),
+        excluded_types: FrozenSet[str] = frozenset({'wall', 'lava', 'bush'}),
         seed: Optional[int] = None,
     ) -> 'CellPartition':
         """Create a partition from a grid with ``.get(x, y)`` access.
@@ -200,7 +200,7 @@ class CellPartition:
             width: Grid width.
             height: Grid height.
             excluded_types: Cell types to exclude from the partition.
-                Defaults to ``{'wall', 'lava'}``.
+                Defaults to ``{'wall', 'lava', 'bush'}``.
             seed: Random seed for tie-breaking.
 
         Returns:

@@ -653,7 +653,7 @@ class HeuristicPotentialPolicy(HumanPolicyPrior):
         cell_type = getattr(cell, 'type', None)
         
         # Impassable obstacles (cannot be moved through even with pushing)
-        if cell_type in ('wall', 'magicwall', 'lava', 'killbutton', 'pauseswitch', 'disablingswitch', 'controlbutton'):
+        if cell_type in ('wall', 'magicwall', 'lava', 'bush', 'killbutton', 'pauseswitch', 'disablingswitch', 'controlbutton'):
             return False
         
         # Doors: closed/locked doors are obstacles (for simplicity)
@@ -867,7 +867,7 @@ class HeuristicPotentialPolicy(HumanPolicyPrior):
             if cell is not None:
                 cell_type = getattr(cell, 'type', None)
                 # Can't drop on walls, doors, keys, balls, boxes, etc.
-                if cell_type in ('wall', 'door', 'key', 'ball', 'box', 'block', 'rock', 'lava', 'magicwall'):
+                if cell_type in ('wall', 'door', 'key', 'ball', 'box', 'block', 'rock', 'lava', 'magicwall', 'bush'):
                     continue
             
             # Calculate potential for this cell

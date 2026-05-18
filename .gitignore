@@ -235,3 +235,7 @@ outputs/
 .vscode/settings.json
 resources
 experiments/
+
+# L2P vendored: exclude non-essential directories
+vendor/l2p/downward/
+vendor/l2p/paper_reconstructions/

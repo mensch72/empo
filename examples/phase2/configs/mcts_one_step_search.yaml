@@ -1,0 +1,12 @@
+v_h_e_target_mode: one_step
+q_r_target_mode: one_step
+v_h_e_n_step: 5
+q_r_n_step: 5
+pi_r_mode: mcts
+mcts_num_simulations: 32
+mcts_max_depth: 6
+mcts_c_puct: 1.5
+mcts_temperature: 1.0
+mcts_enable_after_training_step: 0
+mcts_root_noise_frac: 0.0
+
