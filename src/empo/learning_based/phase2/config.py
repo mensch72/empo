@@ -446,9 +446,9 @@ class Phase2Config:
                 f"Invalid pi_r_mode={self.pi_r_mode!r}. "
                 f"Expected one of {sorted(valid_pi_r_modes)}."
             )
-        if self.mcts_num_simulations < 1:
+        if self.mcts_num_simulations < 0:
             raise ValueError(
-                f"mcts_num_simulations must be >= 1, got {self.mcts_num_simulations}."
+                f"mcts_num_simulations must be >= 0, got {self.mcts_num_simulations}."
             )
         if self.mcts_c_puct <= 0:
             raise ValueError(f"mcts_c_puct must be > 0, got {self.mcts_c_puct}.")

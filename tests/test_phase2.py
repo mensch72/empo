@@ -104,6 +104,7 @@ def test_phase2_config():
     assert config.uses_fresh_trajectory_replay() is False
     assert config.uses_mcts_search_policy_distillation() is False
     assert config.uses_mcts_replay_search_relabeling() is False
+    assert config.should_use_mcts_policy(0) is False
     print("  ✓ Default config values")
 
     # Epsilon_r decay
@@ -154,6 +155,21 @@ def test_phase2_config():
     assert custom_config.uses_mcts_replay_search_relabeling() is True
     assert custom_config.should_use_mcts_policy(6) is False
     assert custom_config.should_use_mcts_policy(7) is True
+
+    # mcts_num_simulations=0 should be valid and explicitly disable search.
+    zero_sim_config = Phase2Config(
+        pi_r_mode="mcts",
+        mcts_num_simulations=0,
+        beta_r=2.0,
+        beta_r_rampup_steps=0,
+        warmup_v_h_e_steps=0,
+        warmup_x_h_steps=0,
+        warmup_u_r_steps=0,
+        warmup_q_r_steps=0,
+        warmup_v_r_steps=0,
+    )
+    assert zero_sim_config.uses_mcts_policy_improvement() is True
+    assert zero_sim_config.should_use_mcts_policy(0) is False
     print("  ✓ Custom config values")
 
     print("  ✓ Phase2Config test passed!")
