@@ -342,7 +342,7 @@ noise, and delayed MCTS enablement via training-step gating.
 
 ### Phase 5: Search-aware training refinements
 
-14. [ ] Evaluate whether MCTS-only acting already improves `V_h^e` and `Q_r`.
+14. [x] Evaluate whether MCTS-only acting already improves `V_h^e` and `Q_r`.
 15. [x] If useful, add optional replay-state search relabeling.
 16. [x] Add an optional policy-distillation loss from stored MCTS root policies.
 
@@ -393,3 +393,27 @@ The next highest-leverage milestone is now:
 2. measure whether MCTS-only acting improves data quality enough to justify its cost,
 3. decide whether replay relabeling is worth adding on top of the new distillation path,
 4. only then add extra search features such as a dedicated search-trained policy head.
+
+## Open milestone evaluation status (codified)
+
+The Phase 2 open-comparison milestone is now codified via:
+
+- runnable harness: `examples/phase2/phase2_multistep_mcts_open_eval.py`
+- quick run command:
+
+```bash
+PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds \
+  python examples/phase2/phase2_multistep_mcts_open_eval.py --quick \
+  --output-dir docs/evaluations/phase2_open_eval
+```
+
+- latest checked-in artifacts:
+  - `docs/evaluations/phase2_open_eval/open_eval_summary_20260518T114931Z.json`
+  - `docs/evaluations/phase2_open_eval/open_eval_summary_20260518T114931Z.csv`
+  - `docs/evaluations/phase2_open_eval/README.md`
+
+This run compares all `3 × 2` combinations of:
+- target horizon mode: `one_step`, `n_step`, `episode`
+- policy mode: `pi_r_mode=direct` vs `pi_r_mode=mcts`
+
+and reports wall-clock throughput, search-cost proxies (searched transition rate and approximate simulations), and stability metrics (`q_r` / `v_h_e` tail mean/std/CV).

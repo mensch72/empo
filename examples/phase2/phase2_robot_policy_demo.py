@@ -41,11 +41,28 @@ Usage:
     
     # Use saved policy for rollouts only (skip training)
     python examples/phase2/phase2_robot_policy_demo.py --use_policy policy.pt --rollouts 50  # Load & run
-    
+     
+    # Reproducible trajectory-target runs (via explicit config files)
+    PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds \
+        python examples/phase2/phase2_robot_policy_demo.py --quick \
+        --config examples/phase2/configs/trajectory_n_step_direct.yaml
+    PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds \
+        python examples/phase2/phase2_robot_policy_demo.py --quick \
+        --config examples/phase2/configs/trajectory_episode_direct.yaml
+
+    # Reproducible MCTS acting run (direct vs mcts policy mode)
+    PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds \
+        python examples/phase2/phase2_robot_policy_demo.py --quick \
+        --config examples/phase2/configs/mcts_one_step_search.yaml
+
     # Advanced options
     python examples/phase2/phase2_robot_policy_demo.py --debug   # Enable verbose debug output
     python examples/phase2/phase2_robot_policy_demo.py --profile # Profile training component timings
     python examples/phase2/phase2_robot_policy_demo.py --rollouts 100 --save_video my_rollouts.mp4
+
+    # Open milestone evaluation (target horizon × pi_r mode matrix)
+    PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds \
+        python examples/phase2/phase2_multistep_mcts_open_eval.py --quick
 
 Output:
 - TensorBoard logs in outputs/phase2_demo_<env_type>/
@@ -1743,7 +1760,8 @@ if __name__ == "__main__":
     
     # Save/restore options
     parser.add_argument('--config', type=str, default=None, metavar='PATH',
-                        help='Load config from YAML file (overrides defaults, extracts leaf values ignoring hierarchy)')
+                        help='Load config from YAML file (overrides defaults, extracts leaf values ignoring hierarchy). '
+                             'See examples/phase2/configs/*.yaml for reproducible trajectory/MCTS presets.')
     parser.add_argument('--save_networks', type=str, default=None, metavar='PATH',
                         help='Save all trained networks to PATH after training')
     parser.add_argument('--save_policy', type=str, default=None, metavar='PATH',
