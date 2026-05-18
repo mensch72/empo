@@ -1496,6 +1496,7 @@ class BasePhase2Trainer(ABC):
         if (
             total_entries == 0
             or not self.config.uses_mcts_replay_search_relabeling()
+            or self.config.mcts_num_simulations <= 0
             or not hasattr(self.env, "transition_probabilities")
             or effective_beta_r <= 0.0
         ):
