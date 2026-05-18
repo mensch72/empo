@@ -104,10 +104,10 @@ PYTHONPATH=src:vendor/multigrid:vendor/ai_transport python examples/transport/tr
 PYTHONPATH=src:vendor/multigrid python examples/diagnostics/bellman_backward_induction.py
 
 # Phase 2 trajectory/MCTS presets and open milestone evaluation
-python examples/phase2/phase2_robot_policy_demo.py --quick --config examples/phase2/configs/trajectory_n_step_direct.yaml
-python examples/phase2/phase2_robot_policy_demo.py --quick --config examples/phase2/configs/trajectory_episode_direct.yaml
-python examples/phase2/phase2_robot_policy_demo.py --quick --config examples/phase2/configs/mcts_one_step_search.yaml
-python examples/phase2/phase2_multistep_mcts_open_eval.py --quick
+PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds python examples/phase2/phase2_robot_policy_demo.py --quick --config examples/phase2/configs/trajectory_n_step_direct.yaml
+PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds python examples/phase2/phase2_robot_policy_demo.py --quick --config examples/phase2/configs/trajectory_episode_direct.yaml
+PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds python examples/phase2/phase2_robot_policy_demo.py --quick --config examples/phase2/configs/mcts_one_step_search.yaml
+PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds python examples/phase2/phase2_multistep_mcts_open_eval.py --quick
 ```
 
 ### Output Files

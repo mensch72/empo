@@ -43,13 +43,16 @@ Usage:
     python examples/phase2/phase2_robot_policy_demo.py --use_policy policy.pt --rollouts 50  # Load & run
      
     # Reproducible trajectory-target runs (via explicit config files)
-    python examples/phase2/phase2_robot_policy_demo.py --quick \
+    PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds \
+        python examples/phase2/phase2_robot_policy_demo.py --quick \
         --config examples/phase2/configs/trajectory_n_step_direct.yaml
-    python examples/phase2/phase2_robot_policy_demo.py --quick \
+    PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds \
+        python examples/phase2/phase2_robot_policy_demo.py --quick \
         --config examples/phase2/configs/trajectory_episode_direct.yaml
 
     # Reproducible MCTS acting run (direct vs mcts policy mode)
-    python examples/phase2/phase2_robot_policy_demo.py --quick \
+    PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds \
+        python examples/phase2/phase2_robot_policy_demo.py --quick \
         --config examples/phase2/configs/mcts_one_step_search.yaml
 
     # Advanced options
@@ -58,7 +61,8 @@ Usage:
     python examples/phase2/phase2_robot_policy_demo.py --rollouts 100 --save_video my_rollouts.mp4
 
     # Open milestone evaluation (target horizon × pi_r mode matrix)
-    python examples/phase2/phase2_multistep_mcts_open_eval.py --quick
+    PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds \
+        python examples/phase2/phase2_multistep_mcts_open_eval.py --quick
 
 Output:
 - TensorBoard logs in outputs/phase2_demo_<env_type>/

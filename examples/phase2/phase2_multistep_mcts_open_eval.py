@@ -24,7 +24,7 @@ import statistics
 import sys
 import time
 from datetime import datetime, timezone
-from typing import Dict, List
+from typing import Dict, List, TypeAlias
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.join(_SCRIPT_DIR, os.pardir, os.pardir)
@@ -51,6 +51,10 @@ We Ae Ro .. .. We
 We We Ay We We We
 We We We We We We
 """
+
+RunMetricValue: TypeAlias = float | str
+RunMetricRow: TypeAlias = Dict[str, RunMetricValue]
+JsonMetricValue: TypeAlias = float | str | None
 
 
 def _set_global_seed(seed: int) -> None:
@@ -135,7 +139,7 @@ def run_single_experiment(
     mcts_num_simulations: int,
     mcts_max_depth: int,
     mcts_c_puct: float,
-) -> Dict[str, float]:
+) -> RunMetricRow:
     _set_global_seed(seed)
     env = _create_world_model(max_steps=10)
     env.reset()
@@ -247,7 +251,7 @@ def run_single_experiment(
         searched_transition_count * config.mcts_num_simulations
     )
 
-    run_metrics: Dict[str, float] = {
+    run_metrics: RunMetricRow = {
         "target_mode": target_mode,
         "pi_r_mode": pi_r_mode,
         "seed": float(seed),
@@ -278,7 +282,7 @@ def run_single_experiment(
     return run_metrics
 
 
-def _float_for_json(value):
+def _float_for_json(value: RunMetricValue) -> JsonMetricValue:
     if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
         return None
     return value
@@ -345,7 +349,7 @@ def main() -> None:
 
     target_modes = ["one_step", "n_step", "episode"]
     pi_r_modes = ["direct", "mcts"]
-    rows: List[Dict[str, float]] = []
+    rows: List[RunMetricRow] = []
 
     print("=" * 78)
     print("Phase 2 open evaluation")
@@ -427,12 +431,18 @@ def main() -> None:
 
     print("\nSummary:")
     for row in rows:
+        target_mode_label = str(row["target_mode"])
+        pi_r_mode_label = str(row["pi_r_mode"])
+        wall_seconds = float(row["wall_clock_seconds"])
+        searched_transition_rate = float(row["searched_transition_rate"])
+        q_r_tail_std = float(row["q_r_tail_std"])
+        v_h_e_tail_std = float(row["v_h_e_tail_std"])
         print(
-            f"  {row['target_mode']:>8} | {row['pi_r_mode']:>6} | "
-            f"wall={row['wall_clock_seconds']:.2f}s | "
-            f"search_rate={row['searched_transition_rate']:.3f} | "
-            f"q_r_std={row['q_r_tail_std'] if not math.isnan(row['q_r_tail_std']) else float('nan'):.4f} | "
-            f"v_h_e_std={row['v_h_e_tail_std'] if not math.isnan(row['v_h_e_tail_std']) else float('nan'):.4f}"
+            f"  {target_mode_label:>8} | {pi_r_mode_label:>6} | "
+            f"wall={wall_seconds:.2f}s | "
+            f"search_rate={searched_transition_rate:.3f} | "
+            f"q_r_std={q_r_tail_std if not math.isnan(q_r_tail_std) else float('nan'):.4f} | "
+            f"v_h_e_std={v_h_e_tail_std if not math.isnan(v_h_e_tail_std) else float('nan'):.4f}"
         )
 
     print(f"\nSaved JSON: {json_path}")
