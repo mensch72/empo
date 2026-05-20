@@ -158,6 +158,12 @@ def run_single_experiment(
     config = Phase2Config(
         gamma_r=0.99,
         gamma_h=0.99,
+        gamma_h_curriculum=True,
+        gamma_h_start=0.0,
+        gamma_h_rampup_steps=max(1, int(0.10 * steps)),
+        gamma_r_curriculum=True,
+        gamma_r_start=0.0,
+        gamma_r_rampup_steps=max(1, int(0.10 * steps)),
         zeta=2.0,
         xi=1.0,
         eta=1.1,
