@@ -1116,12 +1116,12 @@ def main(
         num_training_steps = num_training_steps_override
         print(f"[OVERRIDE] Training steps set to {num_training_steps}")
     
-    warmup_v_h_e_steps = 0.1 * num_training_steps
-    warmup_x_h_steps = 0.1 * num_training_steps
-    warmup_u_r_steps = 0.05 * num_training_steps
-    warmup_q_r_steps = 0.1 * num_training_steps
-    warmup_v_r_steps = 0.05 * num_training_steps
-    beta_r_rampup_steps = 0.2 * num_training_steps
+    warmup_v_h_e_steps = int(0.1 * num_training_steps)
+    warmup_x_h_steps = int(0.1 * num_training_steps)
+    warmup_u_r_steps = int(0.05 * num_training_steps)
+    warmup_q_r_steps = int(0.1 * num_training_steps)
+    warmup_v_r_steps = int(0.05 * num_training_steps)
+    beta_r_rampup_steps = int(0.2 * num_training_steps)
     
     # Print async mode status
     if use_async:
@@ -1293,6 +1293,12 @@ def main(
     config = Phase2Config(
         gamma_r=0.99, # relatively impatient
         gamma_h=0.99, # relatively impatient
+        gamma_h_curriculum=True,
+        gamma_h_start=0.0,
+        gamma_h_rampup_steps=warmup_v_h_e_steps,
+        gamma_r_curriculum=True,
+        gamma_r_start=0.0,
+        gamma_r_rampup_steps=warmup_q_r_steps,
         zeta=2.0,      # Risk aversion
         xi=1.0,        # Inter-human inequality aversion
         eta=1.1,       # Intertemporal inequality aversion
