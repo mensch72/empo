@@ -8,6 +8,7 @@ Tests the modular architecture with:
 """
 
 import torch
+import pytest
 
 from empo.learning_based.phase2 import (
     Phase2Config,
@@ -171,6 +172,54 @@ def test_phase2_config():
     assert zero_sim_config.uses_mcts_policy_improvement() is True
     assert zero_sim_config.should_use_mcts_policy(0) is False
     print("  ✓ Custom config values")
+
+    # Gamma curricula defaults preserve prior behavior.
+    assert config.gamma_h_curriculum is False
+    assert config.gamma_r_curriculum is False
+    assert config.get_effective_gamma_h(0) == pytest.approx(config.gamma_h)
+    assert config.get_effective_gamma_r(0) == pytest.approx(config.gamma_r)
+
+    # Gamma curricula ramp linearly from start values.
+    gamma_cfg = Phase2Config(
+        gamma_h=0.9,
+        gamma_h_curriculum=True,
+        gamma_h_start=0.0,
+        gamma_h_rampup_steps=4,
+        warmup_v_h_e_steps=10,
+        gamma_r=0.8,
+        gamma_r_curriculum=True,
+        gamma_r_start=0.2,
+        gamma_r_rampup_steps=5,
+        warmup_q_r_steps=7,
+    )
+    assert gamma_cfg.get_effective_gamma_h(0) == pytest.approx(0.0)
+    assert gamma_cfg.get_effective_gamma_h(2) == pytest.approx(0.45)
+    assert gamma_cfg.get_effective_gamma_h(4) == pytest.approx(0.9)
+
+    q_r_stage_start = int(gamma_cfg._warmup_u_r_end)
+    assert gamma_cfg.get_effective_gamma_r(q_r_stage_start) == pytest.approx(0.2)
+    assert gamma_cfg.get_effective_gamma_r(q_r_stage_start + 5) == pytest.approx(0.8)
+
+    # beta_r continuation mode validation.
+    arclength_cfg = Phase2Config(beta_r_continuation_mode="arclength")
+    assert arclength_cfg.get_effective_beta_r(10**9) == pytest.approx(
+        arclength_cfg.beta_r
+    )
+
+    with pytest.raises(ValueError, match="Invalid beta_r_continuation_mode"):
+        Phase2Config(beta_r_continuation_mode="bad_mode")
+    with pytest.raises(
+        ValueError, match="gamma_h_rampup_steps must be <= warmup_v_h_e_steps"
+    ):
+        Phase2Config(
+            gamma_h_curriculum=True, gamma_h_rampup_steps=20, warmup_v_h_e_steps=10
+        )
+    with pytest.raises(
+        ValueError, match="gamma_r_rampup_steps must be <= warmup_q_r_steps"
+    ):
+        Phase2Config(
+            gamma_r_curriculum=True, gamma_r_rampup_steps=20, warmup_q_r_steps=10
+        )
 
     print("  ✓ Phase2Config test passed!")
 

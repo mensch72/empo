@@ -37,7 +37,11 @@ from empo.learning_based.phase2.intrinsic_reward_network import (
     BaseIntrinsicRewardNetwork,
 )
 from empo.learning_based.phase2.robot_value_network import BaseRobotValueNetwork
-from empo.learning_based.phase2.trainer import Phase2Networks, BasePhase2Trainer
+from empo.learning_based.phase2.trainer import (
+    Phase2Networks,
+    BasePhase2Trainer,
+    _MCTSNode,
+)
 
 # =============================================================================
 # MOCK NETWORKS FOR TESTING
@@ -1271,6 +1275,7 @@ class TestTrajectoryTargets:
         trainer.config = Phase2Config(
             v_h_e_target_mode=mode,
             v_h_e_n_step=n_step,
+            gamma_h=gamma_h,
         )
         trainer.networks = SimpleNamespace(
             v_h_e=SimpleNamespace(gamma_h=gamma_h),
@@ -1525,6 +1530,72 @@ class TestTrajectoryTargets:
 
         # Terminal suffix removes the frontier bootstrap, leaving γ_r * U_r(s1) + γ_r² * U_r(s2).
         assert targets[0].item() == pytest.approx(-1.0)
+
+    def test_v_h_e_trajectory_targets_use_effective_gamma_h(self):
+        """Trajectory V_h^e targets should use config-scheduled γ_h, not static network γ_h."""
+        trainer = self._build_v_h_e_trainer(
+            mode="n_step",
+            n_step=2,
+            bootstrap_values={("s2", "goal"): 0.8},
+            gamma_h=0.1,  # Deliberately different from scheduled config gamma.
+        )
+        trainer.config = Phase2Config(
+            v_h_e_target_mode="n_step",
+            v_h_e_n_step=2,
+            gamma_h=0.9,
+            gamma_h_curriculum=True,
+            gamma_h_start=0.1,
+            gamma_h_rampup_steps=4,
+            warmup_v_h_e_steps=8,
+        )
+        trainer.training_step_count = 2  # Effective γ_h = 0.5
+
+        for idx, (state, next_state) in enumerate(
+            (("s0", "s1"), ("s1", "s2"), ("s2", "s3"))
+        ):
+            trainer.replay_buffer.push(
+                **self._make_transition(state, next_state, env_step_index=idx).__dict__
+            )
+
+        batch = [trainer.replay_buffer.get_episode_transition(("actor", 0), 0)]
+        targets = trainer._compute_trajectory_v_h_e_targets(batch, [(0, 0, "goal")])
+
+        assert targets[0].item() == pytest.approx((0.5**2) * 0.8)
+
+    def test_q_r_trajectory_targets_use_effective_gamma_r(self):
+        """Trajectory Q_r targets should use config-scheduled γ_r."""
+        trainer = self._build_q_r_trainer(
+            mode="n_step",
+            n_step=2,
+            u_r_values={"s1": -1.0},
+            v_r_values={"s2": -3.0},
+            gamma_r=0.95,
+        )
+        trainer.config = Phase2Config(
+            q_r_target_mode="n_step",
+            q_r_n_step=2,
+            gamma_r=0.9,
+            gamma_r_curriculum=True,
+            gamma_r_start=0.1,
+            gamma_r_rampup_steps=4,
+            warmup_v_h_e_steps=0,
+            warmup_x_h_steps=0,
+            warmup_u_r_steps=0,
+            warmup_q_r_steps=8,
+            v_r_use_network=True,
+        )
+        trainer.training_step_count = 2  # Effective γ_r = 0.5
+
+        trainer.replay_buffer.push(
+            **self._make_transition("s0", "s1", env_step_index=0).__dict__
+        )
+        trainer.replay_buffer.push(
+            **self._make_transition("s1", "s2", env_step_index=1).__dict__
+        )
+        batch = [trainer.replay_buffer.get_episode_transition(("actor", 0), 0)]
+        targets = trainer._compute_trajectory_q_r_targets(batch)
+
+        assert targets[0].item() == pytest.approx(0.5 * -1.0 + (0.5**2) * -3.0)
 
     @pytest.mark.parametrize(
         ("mode", "present_key", "absent_key"),
@@ -1973,6 +2044,66 @@ class TestMCTSPolicyImprovement:
         assert action in {(0,), (1,)}
         assert search_stats.policy[1] > search_stats.policy[0]
         assert search_stats.action_values[1] > search_stats.action_values[0]
+
+    def test_mcts_simulation_uses_effective_gamma_r(self):
+        """MCTS backup should discount searched child values with effective γ_r."""
+        trainer = self._SearchTrainer()
+        trainer.device = "cpu"
+        trainer.env = self._TinySearchEnv()
+        trainer.config = Phase2Config(
+            pi_r_mode="mcts",
+            gamma_r=0.9,
+            gamma_r_curriculum=True,
+            gamma_r_start=0.1,
+            gamma_r_rampup_steps=4,
+            warmup_v_h_e_steps=0,
+            warmup_x_h_steps=0,
+            warmup_u_r_steps=0,
+            warmup_q_r_steps=8,
+            v_r_use_network=True,
+            mcts_max_depth=1,
+        )
+        trainer.training_step_count = 2  # Effective γ_r = 0.5
+        trainer.human_agent_indices = [0]
+        trainer.robot_agent_indices = [1]
+        trainer.num_agents = 2
+        trainer.networks = SimpleNamespace(
+            q_r_target=self._StaticQNetwork(
+                {
+                    "root": [-1.0, -1.0],
+                    "bad": [-1.0, -1.0],
+                    "good": [-1.0, -1.0],
+                }
+            ),
+            v_r_target=self._StaticVrTarget({"root": -1.0, "bad": -2.0, "good": -2.0}),
+        )
+        trainer.human_policy_prior = (
+            lambda state, human_idx, goal: np.ones(
+                trainer.env.action_space.n, dtype=np.float64
+            )
+            / trainer.env.action_space.n
+        )
+        trainer._compute_u_r_batch_target = lambda states: torch.zeros(
+            len(states), dtype=torch.float32
+        )
+
+        node = _MCTSNode(state="root")
+        trainer._evaluate_mcts_node(node, effective_beta_r=0.0)
+        effective_gamma_r = trainer.config.get_effective_gamma_r(
+            trainer.training_step_count
+        )
+        trainer._simulate_mcts(
+            node,
+            {0: "goal"},
+            effective_beta_r=0.0,
+            effective_gamma_r=effective_gamma_r,
+            depth=0,
+        )
+
+        assert node.edge_visit_counts is not None
+        assert node.edge_value_sums is not None
+        assert node.edge_visit_counts[0] == 1
+        assert node.edge_value_sums[0] == pytest.approx(-1.0)
 
     def test_collect_transition_stores_mcts_root_statistics(self):
         """Collected transitions should retain root search metadata for later training/distillation."""

@@ -183,6 +183,31 @@ class Phase2Config:
     # Beta_r schedule: ramps from 0 to beta_r over this many steps after warm-up ends
     beta_r_rampup_steps: int = 2e4
 
+    # Optional γ curricula nested in warm-up stages where each γ first becomes active.
+    # γ_h curriculum runs inside Stage 1 (V_h^e-only).
+    gamma_h_curriculum: bool = False
+    gamma_h_rampup_steps: int = 5_000
+    gamma_h_start: float = 0.0
+    # γ_r curriculum runs inside Stage 4 (+Q_r).
+    gamma_r_curriculum: bool = False
+    gamma_r_rampup_steps: int = 5_000
+    gamma_r_start: float = 0.0
+    # Optional continuation-predictor hooks (reserved for continuation module use).
+    use_tangent_predictor: bool = False
+
+    # β_r continuation mode.
+    # - sigmoid: existing schedule from get_effective_beta_r
+    # - arclength: β_r is expected to be handled externally by continuation logic
+    beta_r_continuation_mode: str = "sigmoid"  # sigmoid | arclength
+    beta_r_arclength_step: float = 0.05
+    beta_r_arclength_step_min: float = 1e-3
+    beta_r_arclength_step_max: float = 0.2
+    beta_r_arclength_w_arc: float = 100.0
+    beta_r_arclength_cg_iters: int = 50
+    beta_r_arclength_cg_tol: float = 1e-4
+    beta_r_arclength_corrector_iters: int = 100
+    beta_r_arclength_eps_floor: float = 1e-6
+
     # Learning rate schedule after warm-up
     # After warm-up, use 1/sqrt(t) decay: lr(t) = lr_base * sqrt(warmup) / sqrt(t)
     # This is a compromise between 1/t (for expectations) and constant (for Q-learning)
@@ -427,6 +452,7 @@ class Phase2Config:
         """Compute cumulative warmup thresholds and apply network flags."""
         valid_target_modes = {"one_step", "n_step", "episode"}
         valid_pi_r_modes = {"direct", "mcts"}
+        valid_beta_r_continuation_modes = {"sigmoid", "arclength"}
         if self.v_h_e_target_mode not in valid_target_modes:
             raise ValueError(
                 f"Invalid v_h_e_target_mode={self.v_h_e_target_mode!r}. "
@@ -445,6 +471,12 @@ class Phase2Config:
             raise ValueError(
                 f"Invalid pi_r_mode={self.pi_r_mode!r}. "
                 f"Expected one of {sorted(valid_pi_r_modes)}."
+            )
+        if self.beta_r_continuation_mode not in valid_beta_r_continuation_modes:
+            raise ValueError(
+                "Invalid beta_r_continuation_mode="
+                f"{self.beta_r_continuation_mode!r}. "
+                f"Expected one of {sorted(valid_beta_r_continuation_modes)}."
             )
         if self.mcts_num_simulations < 0:
             raise ValueError(
@@ -489,6 +521,75 @@ class Phase2Config:
             raise ValueError(
                 "trajectory_replay_max_age_training_steps must be >= 0 or None, "
                 f"got {self.trajectory_replay_max_age_training_steps}."
+            )
+        if self.gamma_h_rampup_steps < 0:
+            raise ValueError(
+                f"gamma_h_rampup_steps must be >= 0, got {self.gamma_h_rampup_steps}."
+            )
+        if self.gamma_r_rampup_steps < 0:
+            raise ValueError(
+                f"gamma_r_rampup_steps must be >= 0, got {self.gamma_r_rampup_steps}."
+            )
+        if (
+            self.gamma_h_curriculum
+            and self.gamma_h_rampup_steps > self.warmup_v_h_e_steps
+        ):
+            raise ValueError(
+                "gamma_h_rampup_steps must be <= warmup_v_h_e_steps, "
+                f"got {self.gamma_h_rampup_steps} > {self.warmup_v_h_e_steps}."
+            )
+        if (
+            self.gamma_r_curriculum
+            and self.gamma_r_rampup_steps > self.warmup_q_r_steps
+        ):
+            raise ValueError(
+                "gamma_r_rampup_steps must be <= warmup_q_r_steps, "
+                f"got {self.gamma_r_rampup_steps} > {self.warmup_q_r_steps}."
+            )
+        if not 0.0 <= self.gamma_h_start <= 1.0:
+            raise ValueError(
+                f"gamma_h_start must be in [0, 1], got {self.gamma_h_start}."
+            )
+        if not 0.0 <= self.gamma_r_start <= 1.0:
+            raise ValueError(
+                f"gamma_r_start must be in [0, 1], got {self.gamma_r_start}."
+            )
+        if self.beta_r_arclength_step <= 0:
+            raise ValueError(
+                f"beta_r_arclength_step must be > 0, got {self.beta_r_arclength_step}."
+            )
+        if self.beta_r_arclength_step_min <= 0:
+            raise ValueError(
+                "beta_r_arclength_step_min must be > 0, "
+                f"got {self.beta_r_arclength_step_min}."
+            )
+        if self.beta_r_arclength_step_max <= 0:
+            raise ValueError(
+                "beta_r_arclength_step_max must be > 0, "
+                f"got {self.beta_r_arclength_step_max}."
+            )
+        if self.beta_r_arclength_step_min > self.beta_r_arclength_step_max:
+            raise ValueError(
+                "beta_r_arclength_step_min must be <= beta_r_arclength_step_max, "
+                f"got {self.beta_r_arclength_step_min} > {self.beta_r_arclength_step_max}."
+            )
+        if self.beta_r_arclength_cg_iters < 1:
+            raise ValueError(
+                f"beta_r_arclength_cg_iters must be >= 1, got {self.beta_r_arclength_cg_iters}."
+            )
+        if self.beta_r_arclength_cg_tol <= 0:
+            raise ValueError(
+                f"beta_r_arclength_cg_tol must be > 0, got {self.beta_r_arclength_cg_tol}."
+            )
+        if self.beta_r_arclength_corrector_iters < 1:
+            raise ValueError(
+                "beta_r_arclength_corrector_iters must be >= 1, "
+                f"got {self.beta_r_arclength_corrector_iters}."
+            )
+        if self.beta_r_arclength_eps_floor <= 0:
+            raise ValueError(
+                "beta_r_arclength_eps_floor must be > 0, "
+                f"got {self.beta_r_arclength_eps_floor}."
             )
 
         # Override X_h warmup duration to 0 if not using X_h network
@@ -948,6 +1049,11 @@ class Phase2Config:
             # During warm-up: uniform random policy
             return 0.0
 
+        if self.beta_r_continuation_mode == "arclength":
+            # In arclength mode β_r is updated by continuation logic outside this helper.
+            # This helper keeps the scheduler non-invasive for existing call sites.
+            return self.beta_r
+
         # After warm-up: sigmoidal ramp up beta_r
         steps_after_warmup = step - warmup_end
 
@@ -975,6 +1081,48 @@ class Phase2Config:
         normalized = max(0.0, min(1.0, normalized))  # Clamp to [0, 1]
 
         return self.beta_r * normalized
+
+    def _get_effective_gamma(
+        self,
+        *,
+        step: int,
+        enabled: bool,
+        start_value: float,
+        target_value: float,
+        rampup_steps: int,
+        stage_start_step: int,
+    ) -> float:
+        """Linearly interpolate an effective γ during a stage-local curriculum."""
+        if not enabled:
+            return target_value
+        if step <= stage_start_step:
+            return start_value
+        if rampup_steps <= 0:
+            return target_value
+        progress = min(max(step - stage_start_step, 0), rampup_steps) / rampup_steps
+        return start_value + (target_value - start_value) * progress
+
+    def get_effective_gamma_h(self, step: int) -> float:
+        """Get effective γ_h for Stage-1 curriculum scheduling."""
+        return self._get_effective_gamma(
+            step=step,
+            enabled=self.gamma_h_curriculum,
+            start_value=self.gamma_h_start,
+            target_value=self.gamma_h,
+            rampup_steps=int(self.gamma_h_rampup_steps),
+            stage_start_step=0,
+        )
+
+    def get_effective_gamma_r(self, step: int) -> float:
+        """Get effective γ_r for Stage-4 curriculum scheduling."""
+        return self._get_effective_gamma(
+            step=step,
+            enabled=self.gamma_r_curriculum,
+            start_value=self.gamma_r_start,
+            target_value=self.gamma_r,
+            rampup_steps=int(self.gamma_r_rampup_steps),
+            stage_start_step=int(self._warmup_u_r_end),
+        )
 
     def get_learning_rate(
         self, network_name: str, step: int, update_count: int
@@ -1422,6 +1570,12 @@ class Phase2Config:
                 "discount_factors": {
                     "gamma_r": self.gamma_r,
                     "gamma_h": self.gamma_h,
+                    "gamma_r_curriculum": self.gamma_r_curriculum,
+                    "gamma_r_rampup_steps": self.gamma_r_rampup_steps,
+                    "gamma_r_start": self.gamma_r_start,
+                    "gamma_h_curriculum": self.gamma_h_curriculum,
+                    "gamma_h_rampup_steps": self.gamma_h_rampup_steps,
+                    "gamma_h_start": self.gamma_h_start,
                 },
                 "power_metric": {
                     "zeta": self.zeta,
@@ -1430,6 +1584,16 @@ class Phase2Config:
                 },
                 "robot_policy": {
                     "beta_r": self.beta_r,
+                    "beta_r_continuation_mode": self.beta_r_continuation_mode,
+                    "beta_r_arclength_step": self.beta_r_arclength_step,
+                    "beta_r_arclength_step_min": self.beta_r_arclength_step_min,
+                    "beta_r_arclength_step_max": self.beta_r_arclength_step_max,
+                    "beta_r_arclength_w_arc": self.beta_r_arclength_w_arc,
+                    "beta_r_arclength_cg_iters": self.beta_r_arclength_cg_iters,
+                    "beta_r_arclength_cg_tol": self.beta_r_arclength_cg_tol,
+                    "beta_r_arclength_corrector_iters": self.beta_r_arclength_corrector_iters,
+                    "beta_r_arclength_eps_floor": self.beta_r_arclength_eps_floor,
+                    "use_tangent_predictor": self.use_tangent_predictor,
                 },
             },
             "exploration": {

@@ -1397,6 +1397,7 @@ class BasePhase2Trainer(ABC):
         node: _MCTSNode,
         goals: Dict[int, Any],
         effective_beta_r: float,
+        effective_gamma_r: float,
         depth: int,
     ) -> float:
         """Run one MCTS simulation below the given node and return its updated state value."""
@@ -1432,9 +1433,10 @@ class BasePhase2Trainer(ABC):
                 child_node,
                 goals,
                 effective_beta_r,
+                effective_gamma_r,
                 depth=depth + 1,
             )
-            simulated_q = self.config.gamma_r * child_state_value
+            simulated_q = effective_gamma_r * child_state_value
 
         assert node.edge_visit_counts is not None
         assert node.edge_value_sums is not None
@@ -1457,11 +1459,18 @@ class BasePhase2Trainer(ABC):
         root = _MCTSNode(state=state)
         self._evaluate_mcts_node(root, effective_beta_r)
         assert root.prior_policy is not None
+        effective_gamma_r = self.config.get_effective_gamma_r(self.training_step_count)
         if add_root_noise:
             root.prior_policy = self._apply_mcts_root_noise(root.prior_policy)
 
         for _ in range(self.config.mcts_num_simulations):
-            self._simulate_mcts(root, goals, effective_beta_r, depth=0)
+            self._simulate_mcts(
+                root,
+                goals,
+                effective_beta_r,
+                effective_gamma_r,
+                depth=0,
+            )
 
         search_policy = root.get_search_policy(temperature=self.config.mcts_temperature)
         action_values = root.estimated_q_values()
@@ -2054,7 +2063,7 @@ class BasePhase2Trainer(ABC):
         Returns:
             Tensor of target values, one per entry in v_h_e_data.
         """
-        gamma_h = self.networks.v_h_e.gamma_h
+        gamma_h = self.config.get_effective_gamma_h(self.training_step_count)
         n_samples = len(v_h_e_data)
         num_actions = self.networks.q_r.num_action_combinations
         effective_beta_r = self.config.get_effective_beta_r(self.training_step_count)
@@ -2282,7 +2291,8 @@ class BasePhase2Trainer(ABC):
             # U_r is already accounted for via the definition of V_r:
             # V_r(s) = U_r(s) + E_{a~π_r}[Q_r(s,a)] (Equation 9),
             # so we do not add an extra U_r term here.
-            q_targets_all = self.config.gamma_r * v_r_all  # (n_unique,)
+            gamma_r = self.config.get_effective_gamma_r(self.training_step_count)
+            q_targets_all = gamma_r * v_r_all  # (n_unique,)
 
         # Phase 3: Aggregate targets back to (batch_size, num_actions)
         for batch_idx in range(batch_size):
@@ -2335,7 +2345,7 @@ class BasePhase2Trainer(ABC):
             If return_metrics is False, returns only the target tensor.
             If return_metrics is True, returns (targets, metrics_dict).
         """
-        gamma_h = self.networks.v_h_e.gamma_h
+        gamma_h = self.config.get_effective_gamma_h(self.training_step_count)
         mode = self.config.v_h_e_target_mode
         n_step = self.config.v_h_e_n_step
         targets = torch.zeros(len(v_h_e_data), device=self.device, dtype=torch.float32)
@@ -2441,7 +2451,7 @@ class BasePhase2Trainer(ABC):
             If return_metrics is False, returns only the target tensor.
             If return_metrics is True, returns (targets, metrics_dict).
         """
-        gamma_r = self.config.gamma_r
+        gamma_r = self.config.get_effective_gamma_r(self.training_step_count)
         mode = self.config.q_r_target_mode
         n_step = self.config.q_r_n_step
         targets = torch.zeros(len(batch), device=self.device, dtype=torch.float32)
