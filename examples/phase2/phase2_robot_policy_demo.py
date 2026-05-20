@@ -1116,12 +1116,12 @@ def main(
         num_training_steps = num_training_steps_override
         print(f"[OVERRIDE] Training steps set to {num_training_steps}")
     
-    warmup_v_h_e_steps = 0.1 * num_training_steps
-    warmup_x_h_steps = 0.1 * num_training_steps
-    warmup_u_r_steps = 0.05 * num_training_steps
-    warmup_q_r_steps = 0.1 * num_training_steps
-    warmup_v_r_steps = 0.05 * num_training_steps
-    beta_r_rampup_steps = 0.2 * num_training_steps
+    warmup_v_h_e_steps = int(0.1 * num_training_steps)
+    warmup_x_h_steps = int(0.1 * num_training_steps)
+    warmup_u_r_steps = int(0.05 * num_training_steps)
+    warmup_q_r_steps = int(0.1 * num_training_steps)
+    warmup_v_r_steps = int(0.05 * num_training_steps)
+    beta_r_rampup_steps = int(0.2 * num_training_steps)
     
     # Print async mode status
     if use_async:

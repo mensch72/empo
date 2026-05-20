@@ -450,6 +450,30 @@ class Phase2Config:
 
     def __post_init__(self):
         """Compute cumulative warmup thresholds and apply network flags."""
+        integer_step_fields = (
+            "num_training_steps",
+            "steps_per_episode",
+            "warmup_v_h_e_steps",
+            "warmup_x_h_steps",
+            "warmup_u_r_steps",
+            "warmup_q_r_steps",
+            "warmup_v_r_steps",
+            "beta_r_rampup_steps",
+            "gamma_h_rampup_steps",
+            "gamma_r_rampup_steps",
+        )
+        for field_name in integer_step_fields:
+            value = getattr(self, field_name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(
+                    f"{field_name} must be an integer number of training steps, got {value!r}."
+                )
+            if not float(value).is_integer():
+                raise ValueError(
+                    f"{field_name} must be an integer number of training steps, got {value!r}."
+                )
+            setattr(self, field_name, int(value))
+
         valid_target_modes = {"one_step", "n_step", "episode"}
         valid_pi_r_modes = {"direct", "mcts"}
         valid_beta_r_continuation_modes = {"sigmoid", "arclength"}
@@ -522,6 +546,10 @@ class Phase2Config:
                 "trajectory_replay_max_age_training_steps must be >= 0 or None, "
                 f"got {self.trajectory_replay_max_age_training_steps}."
             )
+        if not 0.0 < self.gamma_h <= 1.0:
+            raise ValueError(f"gamma_h must be in (0, 1], got {self.gamma_h}.")
+        if not 0.0 < self.gamma_r <= 1.0:
+            raise ValueError(f"gamma_r must be in (0, 1], got {self.gamma_r}.")
         if self.gamma_h_rampup_steps < 0:
             raise ValueError(
                 f"gamma_h_rampup_steps must be >= 0, got {self.gamma_h_rampup_steps}."
@@ -1109,7 +1137,7 @@ class Phase2Config:
             enabled=self.gamma_h_curriculum,
             start_value=self.gamma_h_start,
             target_value=self.gamma_h,
-            rampup_steps=int(self.gamma_h_rampup_steps),
+            rampup_steps=self.gamma_h_rampup_steps,
             stage_start_step=0,
         )
 
@@ -1120,8 +1148,8 @@ class Phase2Config:
             enabled=self.gamma_r_curriculum,
             start_value=self.gamma_r_start,
             target_value=self.gamma_r,
-            rampup_steps=int(self.gamma_r_rampup_steps),
-            stage_start_step=int(self._warmup_u_r_end),
+            rampup_steps=self.gamma_r_rampup_steps,
+            stage_start_step=self._warmup_u_r_end,
         )
 
     def get_learning_rate(

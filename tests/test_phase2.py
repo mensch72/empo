@@ -178,6 +178,8 @@ def test_phase2_config():
     assert config.gamma_r_curriculum is False
     assert config.get_effective_gamma_h(0) == pytest.approx(config.gamma_h)
     assert config.get_effective_gamma_r(0) == pytest.approx(config.gamma_r)
+    assert isinstance(config.num_training_steps, int)
+    assert isinstance(config.warmup_v_h_e_steps, int)
 
     # Gamma curricula ramp linearly from start values.
     gamma_cfg = Phase2Config(
@@ -224,6 +226,15 @@ def test_phase2_config():
         Phase2Config(
             gamma_r_curriculum=True, gamma_r_rampup_steps=20, warmup_q_r_steps=10
         )
+    with pytest.raises(ValueError, match=r"gamma_h must be in \(0, 1\]"):
+        Phase2Config(gamma_h=1.1)
+    with pytest.raises(ValueError, match=r"gamma_r must be in \(0, 1\]"):
+        Phase2Config(gamma_r=0.0)
+    with pytest.raises(
+        ValueError,
+        match="warmup_v_h_e_steps must be an integer number of training steps",
+    ):
+        Phase2Config(warmup_v_h_e_steps=10.5)
 
     print("  ✓ Phase2Config test passed!")
 
