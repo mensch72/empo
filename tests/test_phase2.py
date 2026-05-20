@@ -190,13 +190,17 @@ def test_phase2_config():
         gamma_r_curriculum=True,
         gamma_r_start=0.2,
         gamma_r_rampup_steps=5,
+        warmup_x_h_steps=0,
+        warmup_u_r_steps=0,
         warmup_q_r_steps=7,
+        x_h_use_network=False,
+        u_r_use_network=False,
     )
     assert gamma_cfg.get_effective_gamma_h(0) == pytest.approx(0.0)
     assert gamma_cfg.get_effective_gamma_h(2) == pytest.approx(0.45)
     assert gamma_cfg.get_effective_gamma_h(4) == pytest.approx(0.9)
 
-    q_r_stage_start = int(gamma_cfg._warmup_u_r_end)
+    q_r_stage_start = int(gamma_cfg.warmup_v_h_e_steps)
     assert gamma_cfg.get_effective_gamma_r(q_r_stage_start) == pytest.approx(0.2)
     assert gamma_cfg.get_effective_gamma_r(q_r_stage_start + 5) == pytest.approx(0.8)
 

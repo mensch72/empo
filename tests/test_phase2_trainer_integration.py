@@ -2075,7 +2075,7 @@ class TestMCTSPolicyImprovement:
                     "good": [-1.0, -1.0],
                 }
             ),
-            v_r_target=self._StaticVrTarget({"root": -1.0, "bad": -2.0, "good": -2.0}),
+            v_r_target=self._StaticVrTarget({"root": -1.0, "bad": -4.0, "good": -4.0}),
         )
         trainer.human_policy_prior = (
             lambda state, human_idx, goal: np.ones(
@@ -2103,7 +2103,7 @@ class TestMCTSPolicyImprovement:
         assert node.edge_visit_counts is not None
         assert node.edge_value_sums is not None
         assert node.edge_visit_counts[0] == 1
-        assert node.edge_value_sums[0] == pytest.approx(-1.0)
+        assert node.edge_value_sums[0] == pytest.approx(-2.0)
 
     def test_collect_transition_stores_mcts_root_statistics(self):
         """Collected transitions should retain root search metadata for later training/distillation."""
