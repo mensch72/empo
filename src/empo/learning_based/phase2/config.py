@@ -466,11 +466,11 @@ class Phase2Config:
             value = getattr(self, field_name)
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ValueError(
-                    f"{field_name} must be an integer number of training steps, got {value!r}."
+                    f"{field_name} must be an integer number of steps, got {value!r}."
                 )
             if not float(value).is_integer():
                 raise ValueError(
-                    f"{field_name} must be an integer number of training steps, got {value!r}."
+                    f"{field_name} must be an integer number of steps, got {value!r}."
                 )
             setattr(self, field_name, int(value))
 
