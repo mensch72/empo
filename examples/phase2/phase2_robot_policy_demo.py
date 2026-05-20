@@ -1293,6 +1293,12 @@ def main(
     config = Phase2Config(
         gamma_r=0.99, # relatively impatient
         gamma_h=0.99, # relatively impatient
+        gamma_h_curriculum=True,
+        gamma_h_start=0.0,
+        gamma_h_rampup_steps=warmup_v_h_e_steps,
+        gamma_r_curriculum=True,
+        gamma_r_start=0.0,
+        gamma_r_rampup_steps=warmup_q_r_steps,
         zeta=2.0,      # Risk aversion
         xi=1.0,        # Inter-human inequality aversion
         eta=1.1,       # Intertemporal inequality aversion
