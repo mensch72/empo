@@ -130,6 +130,12 @@ def _search_policy_entropy(policy: List[float]) -> float:
     return float(entropy)
 
 
+def _average_stats(history: List[Dict[str, float]], key: str) -> float:
+    """Compute the average value of a given key in the training history."""
+    values = [float(entry[key]) for entry in history if key in entry]
+    return float(statistics.fmean(values)) if values else float("nan")
+
+
 def run_single_experiment(
     target_mode: str,
     pi_r_mode: str,
@@ -251,6 +257,14 @@ def run_single_experiment(
         searched_transition_count * config.mcts_num_simulations
     )
 
+    # NOTE: history["q_r"] and history["v_h_e"] are TD *loss* values (from _learner_step),
+    # not Q_r / V_h_e predictions. Losses are always positive and scale with target variance.
+    avg_q_r_loss = _average_stats(history, "q_r")
+    avg_v_h_e_loss = _average_stats(history, "v_h_e")
+    # Actual network prediction means (negative for Q_r, in [0,1] for V_h_e)
+    avg_q_r_pred = _average_stats(history, "q_r_pred_mean")
+    avg_v_h_e_pred = _average_stats(history, "v_h_e_pred_mean")
+
     run_metrics: RunMetricRow = {
         "target_mode": target_mode,
         "pi_r_mode": pi_r_mode,
@@ -276,9 +290,24 @@ def run_single_experiment(
         "approx_search_simulations_per_training_step": float(
             approx_search_simulations / max(trainer.training_step_count, 1)
         ),
+        "q_r_loss_tail_count": float(0),
+        "q_r_loss_tail_mean": float(0),
+        "q_r_loss_tail_std": float(0),
+        "q_r_loss_tail_cv": float(0),
+        "v_h_e_loss_tail_count": float(0),
+        "v_h_e_loss_tail_mean": float(0),
+        "v_h_e_loss_tail_std": float(0),
+        "v_h_e_loss_tail_cv": float(0),
+        "avg_q_r_loss": avg_q_r_loss,
+        "avg_v_h_e_loss": avg_v_h_e_loss,
+        "avg_q_r_pred": avg_q_r_pred,
+        "avg_v_h_e_pred": avg_v_h_e_pred,
     }
-    run_metrics.update(_tail_stats(history, "q_r", tail_k=5))
-    run_metrics.update(_tail_stats(history, "v_h_e", tail_k=5))
+    # Rename keys to _loss to clarify these are TD losses, not value predictions
+    q_r_loss_stats = {f"q_r_loss{k[len('q_r'):]}": v for k, v in _tail_stats(history, "q_r", tail_k=5).items()}
+    v_h_e_loss_stats = {f"v_h_e_loss{k[len('v_h_e'):]}": v for k, v in _tail_stats(history, "v_h_e", tail_k=5).items()}
+    run_metrics.update(q_r_loss_stats)
+    run_metrics.update(v_h_e_loss_stats)
     return run_metrics
 
 
@@ -414,14 +443,18 @@ def main() -> None:
         "approx_search_simulations",
         "approx_search_simulations_per_second",
         "approx_search_simulations_per_training_step",
-        "q_r_tail_count",
-        "q_r_tail_mean",
-        "q_r_tail_std",
-        "q_r_tail_cv",
-        "v_h_e_tail_count",
-        "v_h_e_tail_mean",
-        "v_h_e_tail_std",
-        "v_h_e_tail_cv",
+        "q_r_loss_tail_count",
+        "q_r_loss_tail_mean",
+        "q_r_loss_tail_std",
+        "q_r_loss_tail_cv",
+        "v_h_e_loss_tail_count",
+        "v_h_e_loss_tail_mean",
+        "v_h_e_loss_tail_std",
+        "v_h_e_loss_tail_cv",
+        "avg_q_r_loss",
+        "avg_v_h_e_loss",
+        "avg_q_r_pred",
+        "avg_v_h_e_pred",
     ]
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=csv_fields)
@@ -435,14 +468,20 @@ def main() -> None:
         pi_r_mode_label = str(row["pi_r_mode"])
         wall_seconds = float(row["wall_clock_seconds"])
         searched_transition_rate = float(row["searched_transition_rate"])
-        q_r_tail_std = float(row["q_r_tail_std"])
-        v_h_e_tail_std = float(row["v_h_e_tail_std"])
+        q_r_loss_tail_std = float(row["q_r_loss_tail_std"])
+        v_h_e_loss_tail_std = float(row["v_h_e_loss_tail_std"])
+        avg_q_r_loss = float(row["avg_q_r_loss"])
+        avg_v_h_e_loss = float(row["avg_v_h_e_loss"])
+        avg_q_r_pred = float(row["avg_q_r_pred"])
+        avg_v_h_e_pred = float(row["avg_v_h_e_pred"])
         print(
             f"  {target_mode_label:>8} | {pi_r_mode_label:>6} | "
             f"wall={wall_seconds:.2f}s | "
             f"search_rate={searched_transition_rate:.3f} | "
-            f"q_r_std={q_r_tail_std if not math.isnan(q_r_tail_std) else float('nan'):.4f} | "
-            f"v_h_e_std={v_h_e_tail_std if not math.isnan(v_h_e_tail_std) else float('nan'):.4f}"
+            f"q_r_loss_std={q_r_loss_tail_std if not math.isnan(q_r_loss_tail_std) else float('nan'):.4f} | "
+            f"v_h_e_loss_std={v_h_e_loss_tail_std if not math.isnan(v_h_e_loss_tail_std) else float('nan'):.4f} | "
+            f"avg_q_r_loss={avg_q_r_loss:.4f} | avg_v_h_e_loss={avg_v_h_e_loss:.4f} | "
+            f"avg_Q_r={avg_q_r_pred:.4f} | avg_V_h_e={avg_v_h_e_pred:.4f}"
         )
 
     print(f"\nSaved JSON: {json_path}")

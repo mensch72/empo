@@ -3950,6 +3950,13 @@ class BasePhase2Trainer(ABC):
         with self.profiler.section("learner_total"):
             losses, grad_norms, pred_stats = self.training_step()
 
+        # Inject prediction means into losses dict so they appear in history entries.
+        # Keys: "q_r_pred_mean", "v_h_e_pred_mean" (actual network outputs, not loss values).
+        for net_key, hist_key in (("q_r", "q_r_pred_mean"), ("v_h_e", "v_h_e_pred_mean")):
+            stats = pred_stats.get(net_key, {})
+            if "mean" in stats:
+                losses[hist_key] = stats["mean"]
+
         # Increment training step counter (this is the gradient update counter)
         self.training_step_count += 1
 
