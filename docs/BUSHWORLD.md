@@ -176,19 +176,40 @@ compares backward induction with a learned policy and demonstrates the full
 lifecycle: checkpoint save/recovery, final-policy persistence and reload, optional
 extra rollouts from the saved policy, and annotated rollout movies.
 
+It runs in two modes:
+
+- **single-map mode** — one world (e.g.
+  [`bushworld_worlds/two_humans_one_robot.yaml`](../bushworld_worlds/two_humans_one_robot.yaml)
+  or its 7x3 sibling
+  [`two_humans_one_robot_7x3.yaml`](../bushworld_worlds/two_humans_one_robot_7x3.yaml)),
+  compared against the exact backward-induction reference.
+- **random-map-ensemble mode** — pass several worlds, or a directory such as
+  [`bushworld_worlds/two_humans_7x3_ensemble/`](../bushworld_worlds/two_humans_7x3_ensemble),
+  and the learner draws a fresh world each episode. The (per-map) backward
+  induction reference is skipped automatically. Ensemble worlds must share grid
+  size and player counts.
+
 ```bash
 # Inside the dev container (PYTHONPATH already set):
 python examples/bushworld/bushworld_compare.py --quick
 
-# Outside the container:
+# Single-map mode (outside the container):
 PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds \
     python examples/bushworld/bushworld_compare.py \
     --method lookup --rollouts 4
+
+# Random-map-ensemble mode over a directory of 7x3 worlds:
+python examples/bushworld/bushworld_compare.py --method neural \
+    --world bushworld_worlds/two_humans_7x3_ensemble
 
 # Neural learner, then resume + extra rollouts from the saved policy:
 python examples/bushworld/bushworld_compare.py --method neural --neural-iterations 600
 python examples/bushworld/bushworld_compare.py --method neural --extra-rollouts 3
 ```
+
+Movies default to `.mp4` (easy to pause/scrub); add `--movie-format gif` for a
+dependency-free GIF, or `--skip-bi` to skip the exact reference on larger
+single maps.
 
 ## Tests
 

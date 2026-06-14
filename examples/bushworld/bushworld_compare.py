@@ -30,10 +30,16 @@ Usage::
     # Inside the dev container (PYTHONPATH already set):
     python examples/bushworld/bushworld_compare.py --quick
 
-    # Outside the container:
+    # Outside the container (single-map mode):
     PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds \
         python examples/bushworld/bushworld_compare.py \
         --world bushworld_worlds/two_humans_one_robot.yaml --method lookup --rollouts 4
+
+    # Random-map-ensemble mode: train across several worlds (pass multiple files
+    # or a directory of worlds). The exact backward-induction reference is skipped
+    # automatically; the learner draws a fresh world each episode.
+    python examples/bushworld/bushworld_compare.py --method neural \
+        --world bushworld_worlds/two_humans_7x3_ensemble
 
     # Neural learner with checkpoint recovery:
     python examples/bushworld/bushworld_compare.py --method neural --neural-iterations 600
@@ -41,6 +47,9 @@ Usage::
     # Re-run to resume training from the checkpoint, then run extra rollouts from
     # the saved final policy without recomputing it:
     python examples/bushworld/bushworld_compare.py --method neural --extra-rollouts 3
+
+Movies default to ``.mp4`` (easy to pause/scrub frame by frame); pass
+``--movie-format gif`` for a dependency-free animated GIF instead.
 """
 
 import argparse
@@ -64,10 +73,75 @@ from empo.bushworld import (  # noqa: E402
     load_bushworld,
 )
 from empo.learning_based.phase2.config import Phase2Config  # noqa: E402
+from empo.learning_based.phase2.world_model_factory import (  # noqa: E402
+    EnsembleWorldModelFactory,
+)
 from empo.learning_based.bushworld.phase2 import (  # noqa: E402
     BushWorldRobotPolicy,
     train_bushworld_phase2,
 )
+
+
+class _BushWorldEnsembleLoader:
+    """Picklable callable that loads a random BushWorld from a fixed list of paths.
+
+    Used as the factory function for
+    :class:`~empo.learning_based.phase2.world_model_factory.EnsembleWorldModelFactory`
+    so the Phase 2 trainer can draw a fresh world each episode in
+    *random-map-ensemble* mode. It stores only the (absolute) world paths and a
+    seed, so it remains picklable for async actor processes.
+    """
+
+    def __init__(self, world_paths, seed: int = 0):
+        self._world_paths = [os.path.abspath(p) for p in world_paths]
+        self._seed = int(seed)
+        self._rng = np.random.default_rng(self._seed)
+
+    def __call__(self):
+        idx = int(self._rng.integers(len(self._world_paths)))
+        return load_bushworld(self._world_paths[idx])
+
+    def __getstate__(self):
+        # Drop the (unpicklable-by-value, non-deterministic) RNG; rebuild on load.
+        return {"_world_paths": self._world_paths, "_seed": self._seed}
+
+    def __setstate__(self, state):
+        self._world_paths = state["_world_paths"]
+        self._seed = state["_seed"]
+        self._rng = np.random.default_rng(self._seed)
+
+
+def resolve_worlds(world_args, repo_root: str) -> List[str]:
+    """Expand ``--world`` entries into an ordered list of absolute YAML paths.
+
+    Each entry may be a single YAML file or a directory; directories are
+    expanded to every ``*.yaml`` / ``*.yml`` file they contain (sorted). A
+    single resulting path means *single-map* mode; multiple paths mean
+    *random-map-ensemble* mode.
+    """
+    import glob as _glob
+
+    candidates: List[str] = []
+    for entry in world_args:
+        full = entry if os.path.isabs(entry) else os.path.join(repo_root, entry)
+        if os.path.isdir(full):
+            for ext in ("*.yaml", "*.yml"):
+                candidates.extend(sorted(_glob.glob(os.path.join(full, ext))))
+        else:
+            candidates.append(full)
+
+    seen = set()
+    resolved: List[str] = []
+    for p in candidates:
+        ap = os.path.abspath(p)
+        if ap not in seen:
+            seen.add(ap)
+            resolved.append(ap)
+    if not resolved:
+        raise FileNotFoundError(
+            f"No BushWorld YAML files found for --world {world_args!r}"
+        )
+    return resolved
 
 
 def _reachable_states(env, max_profiles=64):
@@ -191,12 +265,19 @@ def make_movie(frames: List[np.ndarray], path: str, fps: int = 2) -> Optional[st
 
 
 def run_rollouts(
-    env, policy, human_policy_prior, goal_sampler, *, n: int, base_seed: int,
-    output_dir: str, tag: str, make_movies: bool, movie_ext: str = "gif",
+    env_components_fn, policy, *, n: int, base_seed: int,
+    output_dir: str, tag: str, make_movies: bool, movie_ext: str = "mp4",
 ) -> dict:
-    """Run ``n`` rollouts under ``policy`` and (optionally) save movies."""
+    """Run ``n`` rollouts under ``policy`` and (optionally) save movies.
+
+    ``env_components_fn(seed)`` returns the ``(env, human_policy_prior,
+    goal_sampler)`` triple to use for that rollout. In single-map mode it always
+    returns the same world; in random-map-ensemble mode it draws a fresh world
+    each call.
+    """
     cleared, travel = [], []
     for i in range(n):
+        env, human_policy_prior, goal_sampler = env_components_fn(base_seed + i)
         frames, metrics = rollout(
             env, policy, human_policy_prior, goal_sampler=goal_sampler,
             seed=base_seed + i, render=make_movies, label=tag,
@@ -312,8 +393,13 @@ def build_config(args, resolved: str) -> Phase2Config:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--world", default="bushworld_worlds/two_humans_one_robot.yaml",
-                        help="Path to a BushWorld YAML world.")
+    parser.add_argument(
+        "--world", nargs="+",
+        default=["bushworld_worlds/two_humans_one_robot.yaml"],
+        help="One or more BushWorld YAML worlds (or directories of them). A "
+             "single world runs in single-map mode; two or more (or a "
+             "directory) run in random-map-ensemble mode, where the learner "
+             "draws a fresh world each episode.")
     parser.add_argument("--method", default="lookup",
                         choices=["lookup", "neural"],
                         help="Learning version for the learned policy.")
@@ -327,8 +413,14 @@ def main():
     parser.add_argument("--extra-rollouts", type=int, default=0,
                         help="Additional rollouts from the *saved* final learned policy.")
     parser.add_argument("--no-movie", action="store_true", help="Disable movie rendering.")
-    parser.add_argument("--movie-format", default="gif", choices=["gif", "mp4"],
-                        help="Movie container (gif needs no ffmpeg; mp4 needs imageio[ffmpeg]).")
+    parser.add_argument("--movie-format", default="mp4", choices=["gif", "mp4"],
+                        help="Movie container. Default mp4 (easy to scrub/pause; "
+                             "needs imageio[ffmpeg]); gif needs no ffmpeg.")
+    parser.add_argument("--skip-bi", action="store_true",
+                        help="Skip the exact backward-induction reference (and the "
+                             "learned-vs-exact comparison). Automatically enabled in "
+                             "random-map-ensemble mode, where the exact solver is "
+                             "per-map and can be expensive on larger worlds.")
     parser.add_argument("--seed", type=int, default=0)
     # Theory parameters.
     parser.add_argument("--beta-r", type=float, default=5.0)
@@ -358,13 +450,37 @@ def main():
 
     np.random.seed(args.seed)
 
-    # --- Load world and human policy prior -------------------------------- #
-    world_path = args.world
-    if not os.path.isabs(world_path):
-        world_path = os.path.join(_REPO_ROOT, world_path)
-    print(f"Loading BushWorld from {world_path}")
-    env = load_bushworld(world_path)
-    print(f"  {env!r}")
+    # --- Load world(s) and human policy prior ----------------------------- #
+    world_paths = resolve_worlds(args.world, _REPO_ROOT)
+    ensemble = len(world_paths) > 1
+    mode = "random-map-ensemble" if ensemble else "single-map"
+    print(f"Mode: {mode} ({len(world_paths)} world(s))")
+    for p in world_paths:
+        print(f"  - {os.path.relpath(p, _REPO_ROOT)}")
+
+    # Primary world: networks, the human prior and goal sampler are built from it.
+    env = load_bushworld(world_paths[0])
+    print(f"  primary: {env!r}")
+
+    if ensemble:
+        # Validate that ensemble worlds are mutually compatible. The learned
+        # networks (especially neural encoders) assume a fixed grid size and a
+        # fixed number of players across episodes.
+        for p in world_paths[1:]:
+            other = load_bushworld(p)
+            if (other.width, other.height, other.num_robots, other.num_humans) != (
+                env.width, env.height, env.num_robots, env.num_humans
+            ):
+                raise ValueError(
+                    "All ensemble worlds must share grid size and player counts. "
+                    f"{os.path.relpath(world_paths[0], _REPO_ROOT)} is "
+                    f"{env.width}x{env.height} with {env.num_robots} robot(s)/"
+                    f"{env.num_humans} human(s), but "
+                    f"{os.path.relpath(p, _REPO_ROOT)} is "
+                    f"{other.width}x{other.height} with {other.num_robots} robot(s)/"
+                    f"{other.num_humans} human(s)."
+                )
+
     human_policy_prior = ShortestPathHumanPolicyPrior(env, env.human_agent_indices)
     goal_generator = env.possible_goal_generator
     goal_sampler = goal_generator.get_sampler()
@@ -372,16 +488,32 @@ def main():
     config = build_config(args, resolved)
     print(f"  beta_r={args.beta_r}, gamma_h={args.gamma_h}, gamma_r={args.gamma_r}")
 
+    # The exact backward-induction reference is per-map; skip it for ensembles.
+    skip_bi = args.skip_bi or ensemble
+
+    # In ensemble mode, draw a fresh world each training episode.
+    world_model_factory = None
+    if ensemble:
+        world_model_factory = EnsembleWorldModelFactory(
+            _BushWorldEnsembleLoader(world_paths, seed=args.seed),
+            episodes_per_env=1,
+        )
+
     # --- Backward induction (exact reference) ----------------------------- #
-    print("\n=== Backward induction (exact Phase 2) ===")
-    bi_policy = compute_robot_policy(
-        env, list(env.human_agent_indices), list(env.robot_agent_indices),
-        goal_generator, human_policy_prior,
-        beta_r=args.beta_r, gamma_h=args.gamma_h, gamma_r=args.gamma_r,
-        zeta=args.zeta, xi=args.xi, eta=args.eta,
-        level_fct=lambda s: s[0], quiet=True,
-    )
-    print("  backward induction policy computed.")
+    bi_policy = None
+    if skip_bi:
+        reason = "ensemble mode" if ensemble else "--skip-bi"
+        print(f"\n=== Backward induction skipped ({reason}) ===")
+    else:
+        print("\n=== Backward induction (exact Phase 2) ===")
+        bi_policy = compute_robot_policy(
+            env, list(env.human_agent_indices), list(env.robot_agent_indices),
+            goal_generator, human_policy_prior,
+            beta_r=args.beta_r, gamma_h=args.gamma_h, gamma_r=args.gamma_r,
+            zeta=args.zeta, xi=args.xi, eta=args.eta,
+            level_fct=lambda s: s[0], quiet=True,
+        )
+        print("  backward induction policy computed.")
 
     # --- Learned policy with checkpointing -------------------------------- #
     ckpt_name = "neural.pt" if resolved == "neural" else "lookup.pt"
@@ -403,6 +535,7 @@ def main():
         device="cpu",
         verbose=True,
         tensorboard_dir=tb_dir,
+        world_model_factory=world_model_factory,
         checkpoint_path=checkpoint_path,
         checkpoint_interval=max(1, config.num_training_steps // 4),
         restore_networks_path=checkpoint_path if resume else None,
@@ -418,23 +551,49 @@ def main():
     print("  final policy reloaded from disk (verifying save/restore).")
 
     # --- Compare policies -------------------------------------------------- #
-    print("\n=== Policy comparison (learned vs backward induction) ===")
-    cmp = compare_policies(env, human_policy_prior, bi_policy, reloaded_policy)
-    print(f"  states compared: {cmp['num_states']}")
-    print(f"  max |pi_r diff|: {cmp['max_prob_diff']:.4e}")
-    print(f"  argmax agreement: {cmp['argmax_agreement'] * 100:.1f}%")
-    print("  (the learned policy uses the shared sampling-based trainer; it "
-          "approximates the backward-induction fixed point.)")
+    if bi_policy is not None:
+        print("\n=== Policy comparison (learned vs backward induction) ===")
+        cmp = compare_policies(env, human_policy_prior, bi_policy, reloaded_policy)
+        print(f"  states compared: {cmp['num_states']}")
+        print(f"  max |pi_r diff|: {cmp['max_prob_diff']:.4e}")
+        print(f"  argmax agreement: {cmp['argmax_agreement'] * 100:.1f}%")
+        print("  (the learned policy uses the shared sampling-based trainer; it "
+              "approximates the backward-induction fixed point.)")
+
+    # --- World providers for rollouts ------------------------------------- #
+    # In single-map mode every rollout uses the one loaded world; in ensemble
+    # mode each rollout draws a fresh world (with its own human prior / goal
+    # sampler) so the movies showcase the policy across the ensemble.
+    primary_components = (env, human_policy_prior, goal_sampler)
+
+    def single_map_components(_seed):
+        return primary_components
+
+    if ensemble:
+        _rollout_rng = np.random.default_rng(args.seed + 7)
+
+        def ensemble_components(_seed):
+            path = world_paths[int(_rollout_rng.integers(len(world_paths)))]
+            e = load_bushworld(path)
+            prior = ShortestPathHumanPolicyPrior(e, e.human_agent_indices)
+            sampler = e.possible_goal_generator.get_sampler()
+            return e, prior, sampler
+
+        env_components_fn = ensemble_components
+    else:
+        env_components_fn = single_map_components
 
     # --- Rollouts and movies ---------------------------------------------- #
     print("\n=== Rollouts ===")
-    bi_summary = run_rollouts(
-        env, bi_policy, human_policy_prior, goal_sampler,
-        n=args.rollouts, base_seed=args.seed, output_dir=args.output_dir,
-        tag="backward_induction", make_movies=make_movies, movie_ext=args.movie_format,
-    )
+    bi_summary = None
+    if bi_policy is not None:
+        bi_summary = run_rollouts(
+            single_map_components, bi_policy,
+            n=args.rollouts, base_seed=args.seed, output_dir=args.output_dir,
+            tag="backward_induction", make_movies=make_movies, movie_ext=args.movie_format,
+        )
     learned_summary = run_rollouts(
-        env, reloaded_policy, human_policy_prior, goal_sampler,
+        env_components_fn, reloaded_policy,
         n=args.rollouts, base_seed=args.seed + 1000, output_dir=args.output_dir,
         tag=f"learned_{resolved}", make_movies=make_movies, movie_ext=args.movie_format,
     )
@@ -445,7 +604,7 @@ def main():
         extra_policy = BushWorldRobotPolicy(path=policy_path, beta_r=args.beta_r)
         extra_policy.reset(env)
         run_rollouts(
-            env, extra_policy, human_policy_prior, goal_sampler,
+            env_components_fn, extra_policy,
             n=args.extra_rollouts, base_seed=args.seed + 2000,
             output_dir=args.output_dir, tag=f"extra_{resolved}",
             make_movies=make_movies, movie_ext=args.movie_format,
@@ -453,7 +612,8 @@ def main():
 
     print("\nDone.")
     print(f"  Outputs in: {args.output_dir}")
-    print(f"  Backward induction rollouts: {bi_summary}")
+    if bi_summary is not None:
+        print(f"  Backward induction rollouts: {bi_summary}")
     print(f"  Learned rollouts:            {learned_summary}")
 
 

@@ -69,11 +69,31 @@ def render_frame(
     state = env.get_state()
     _, positions, densities = state
 
+    # Normalize the annotation into a list of lines up front so we can size the
+    # figure tall enough to show every line. For small environments the grid is
+    # only a few tiles high, which would otherwise clip the side text panel.
+    if annotation_text is None:
+        lines: List[str] = []
+    elif isinstance(annotation_text, (list, tuple)):
+        lines = list(annotation_text)
+    else:
+        lines = str(annotation_text).splitlines()
+
     grid_px_w = width * tile_size
     grid_px_h = height * tile_size
     panel_px = annotation_panel_width if annotation_text is not None else 0
+
+    # Minimum vertical space (px) needed to render the annotation panel without
+    # clipping: one line per text line plus a little top/bottom padding.
+    line_px = annotation_font_size + 6
+    needed_panel_px = int((len(lines) + 1) * line_px + 16) if lines else 0
+
+    # The figure must be at least as tall as the grid, the annotation panel, and
+    # one tile (so a 1-row world still renders sensibly). The grid axes keep an
+    # equal aspect ratio, so extra height simply letterboxes the (square) grid.
+    fig_px_h = max(grid_px_h, needed_panel_px, tile_size, 1)
     fig_w = (grid_px_w + panel_px) / dpi
-    fig_h = max(grid_px_h, 1) / dpi
+    fig_h = fig_px_h / dpi
 
     fig = plt.figure(figsize=(fig_w, fig_h), dpi=dpi)
 
@@ -168,13 +188,8 @@ def render_frame(
         pax.axis("off")
         pax.set_xlim(0, 1)
         pax.set_ylim(0, 1)
-        lines = (
-            annotation_text
-            if isinstance(annotation_text, (list, tuple))
-            else str(annotation_text).splitlines()
-        )
         y_cursor = 0.98
-        line_step = (annotation_font_size + 4) / (fig_h * dpi)
+        line_step = line_px / (fig_h * dpi)
         for line in lines:
             color = "black"
             text = line
@@ -210,9 +225,15 @@ def save_movie(frames: List[np.ndarray], path: str, fps: int = 4) -> str:
     if not frames:
         raise ValueError("No frames to save")
 
-    # Pad frames to common dimensions.
+    is_gif = path.endswith(".gif")
+
+    # Pad frames to a common size. For non-GIF (e.g. mp4) containers the H.264
+    # encoder requires even width/height, so round the canvas up to even dims.
     max_h = max(f.shape[0] for f in frames)
     max_w = max(f.shape[1] for f in frames)
+    if not is_gif:
+        max_h += max_h % 2
+        max_w += max_w % 2
     padded = []
     for f in frames:
         if f.shape[0] != max_h or f.shape[1] != max_w:
@@ -224,7 +245,7 @@ def save_movie(frames: List[np.ndarray], path: str, fps: int = 4) -> str:
 
     import imageio.v3 as iio
 
-    if path.endswith(".gif"):
+    if is_gif:
         iio.imwrite(path, padded, duration=int(1000 / max(fps, 1)), loop=0)
     else:
         iio.imwrite(path, padded, fps=fps)
