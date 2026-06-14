@@ -18,15 +18,18 @@ finished world's behavior.
 
 ## Overview / checklist
 
-A complete new world (`src/empo/<yourworld>/`) typically consists of:
+A complete new world consists of a first-party world model package
+(`src/empo/<yourworld>/`) plus a learning package
+(`src/empo/learning_based/<yourworld>/`):
 
 1. **`env.py`** — the `WorldModel` subclass (state, dynamics, transitions).
 2. **`goals.py`** — `PossibleGoal`s + a `PossibleGoalGenerator`/`Sampler`.
 3. **`human_policy.py`** — a `HumanPolicyPrior` (heuristic or learned).
 4. **`loader.py`** — a YAML/map loader.
 5. **`rendering.py`** — frame rendering + movie generation.
-6. **`learning.py`** — wiring for the learning-based Phase 2 path (optional but
-   recommended; see step 8).
+6. **`empo/learning_based/<yourworld>/`** — encoders + Phase 2 networks + trainer
+   for the learning-based Phase 2 path (see step 8), mirroring
+   `empo/learning_based/multigrid/` and `empo/learning_based/bushworld/`.
 7. **`__init__.py`** — package exports.
 8. **An example world** under `<yourworld>_worlds/…`.
 9. **Tests** under `tests/test_<yourworld>.py`.
@@ -166,58 +169,66 @@ unit durations they are:
 
 `terminal_Vr` is a small negative constant and `V_h^e = 0` at terminal states.
 
-## Step 8 — Learning-based Phase 2 (`learning.py`)
+## Step 8 — Learning-based Phase 2 (`empo/learning_based/<yourworld>/`)
 
-You have two options:
-
-### Option A — A compact, self-contained learner (recommended to start)
-
-This is what BushWorld's [`learning.py`](../src/empo/bushworld/learning.py) does.
-It is small, readable, and a good template for any new world:
-
-- A `Phase2Params` dataclass mirroring `compute_robot_policy`'s theory
-  parameters.
-- `phase2_local_update(...)` — one **exact** EMPO Bellman backup at a state, used
-  by both learners (a faithful re-implementation of the equations in step 7).
-- **Tabular fitted value iteration** (`compute_tabular_phase2`) — dictionary value
-  tables iterated to a fixed point. Because transitions are exact, it converges to
-  the backward-induction solution and is your ground-truth validation.
-- **Neural fitted value iteration** (`compute_neural_phase2`) — a small state
-  encoder (`BushWorldStateEncoder`) plus Q_r / V_r / V_h^e heads, trained with
-  model-based one-step targets from a slowly-updated *target* network
-  (DQN/AlphaZero-style). Two practical lessons:
-  - **Normalize value targets.** EMPO `V_r`/`Q_r` can be large in magnitude;
-    fit them in O(1) space (BushWorld estimates a fixed `value_scale`).
-  - **The power-law policy is sensitive.** At large `beta_r`, small `Q_r` errors
-    move `pi_r` a lot — treat the neural policy as an approximation.
-- A `RobotPolicy` subclass for each (so rollouts use a uniform interface), plus
-  `save`/`load`.
-- A `train_*` dispatcher exposing `method=` selection, **checkpoint save/recovery**
-  (`checkpoint_path=`, `resume=`), and `save_policy`/`load_policy` for the final
-  policy.
-
-### Option B — The full `empo.learning_based` framework
-
-The repository also ships a large, production-grade learning stack
-(`empo/learning_based/phase2/`) with replay buffers, RND curiosity, warm-up
+Wire your world into the **shared** production learning stack
+(`empo/learning_based/phase2/`) — replay buffers, RND curiosity, warm-up
 schedules (see [`docs/WARMUP_DESIGN.md`](WARMUP_DESIGN.md)), MCTS acting, and
-async actor-learner training. It is currently specialized to MultiGrid
-(`empo/learning_based/multigrid/`, encoders in
-[`docs/ENCODER_ARCHITECTURE.md`](ENCODER_ARCHITECTURE.md)). Wiring a new world into
-it means implementing world-specific encoders and the five Phase 2 networks plus a
-`BasePhase2Trainer` subclass. `Phase2Config` also supports a tabular/lookup mode
-(`use_lookup_tables=True`) that works with any hashable state. Start with Option A,
-then graduate to Option B if you need its scale and features.
+async actor-learner training — instead of writing a bespoke learner. Mirror the
+existing per-environment packages exactly:
+`empo/learning_based/multigrid/` and `empo/learning_based/bushworld/`.
 
-Whichever you choose, **support all execution modes** your world is meant for
-(sync/async, with/without encoders, neural/lookup) and keep them consistent.
+Create `src/empo/learning_based/<yourworld>/` with the same layout:
+
+- `constants.py` — channel indices / feature sizes for your encoders.
+- `feature_extraction.py` — pure functions turning a state (and a goal, an agent
+  index) into fixed-size feature vectors.
+- `state_encoder.py`, `goal_encoder.py`, `agent_encoder.py` — `nn.Module`
+  encoders subclassing the base encoders (with the standard caching API:
+  `clear_cache`, `get_cache_stats`, `reset_cache_stats`, `get_config`).
+- `phase2/` subpackage with the **five** Phase 2 networks, each subclassing the
+  corresponding base in `empo/learning_based/phase2/`:
+  - `robot_q_network.py` → `Q_r` (one negative value per joint robot action),
+  - `human_goal_ability.py` → `V_h^e(s, g)` in `[0, 1]`,
+  - `aggregate_goal_ability.py` → `X_h(s)` in `(0, 1]`,
+  - `intrinsic_reward_network.py` → `y(s)`, `U_r(s)`,
+  - `robot_value_network.py` → `V_r(s)` (negative).
+  Each network exposes `forward(...)`, `forward_batch(...)`, and `get_config()`.
+- `phase2/robot_policy.py` — a `RobotPolicy` subclass that loads a trained `Q_r`
+  (neural **or** lookup-table) from a checkpoint saved by `trainer.save_policy()`.
+- `phase2/exploration_policies.py` — a uniform/Boltzmann exploration policy.
+- `phase2/trainer.py` — a thin `BasePhase2Trainer` subclass plus
+  `create_phase2_networks(env, config, num_robots, num_actions, ...)` (lookup and
+  neural branches) and a `train_<yourworld>_phase2(...)` convenience function.
+
+`Phase2Config` drives everything (theory parameters `beta_r`/`gamma_*`, warm-up
+schedule, buffer/batch sizes, exploration `epsilon_r_*`, and `use_lookup_tables`
+for the tabular/lookup mode that works with any hashable state). The base trainer
+calls a **goal sampler** (`env.possible_goal_generator.get_sampler()`), not the
+generator, and `save_policy()` writes a deployable policy that your
+`RobotPolicy` subclass reloads.
+
+> Two practical lessons carried over from MultiGrid/BushWorld:
+> - **Encoders are cached** for gradient flow and speed — follow the base
+>   encoder caching API.
+> - **The power-law policy `pi_r ∝ (−Q_r)^{−beta_r}` is sensitive.** At large
+>   `beta_r`, small `Q_r` errors move `pi_r` a lot, so the learned policy
+>   **approximates** the backward-induction fixed point. Use backward induction
+>   (step 7) when you need the exact policy.
+
+Encoder design is documented in
+[`docs/ENCODER_ARCHITECTURE.md`](ENCODER_ARCHITECTURE.md).
+
+Whichever execution modes your world is meant for (sync/async, with/without
+encoders, neural/lookup), **support them all** and keep them consistent.
 
 ## Step 9 — Package exports (`__init__.py`)
 
 Re-export the public classes and functions (env, goals, human policy, loader,
-learning entry points) so users can `from empo.<yourworld> import …`. Keep heavy
-optional deps (e.g. torch) imported lazily inside functions, as BushWorld's
-`learning.py` does, so importing the package stays cheap.
+rendering) so users can `from empo.<yourworld> import …`. Keep heavy optional
+deps (e.g. torch) out of the world-model package's import path; the learning code
+lives in `empo/learning_based/<yourworld>/` and is imported only when needed, so
+importing the world-model package stays cheap.
 
 ## Step 10 — An example world
 

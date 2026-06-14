@@ -114,35 +114,60 @@ policy = compute_robot_policy(
 
 ### Learning-based Phase 2
 
-`empo.bushworld.learning` provides a compact, self-contained learning path that
-matches the exact Phase 2 equations:
+BushWorld reuses the **shared** Phase 2 learning infrastructure (the same
+`BasePhase2Trainer` used for MultiGrid). The BushWorld-specific encoders and
+networks live under `empo.learning_based.bushworld`, mirroring
+`empo.learning_based.multigrid`:
 
 ```python
-from empo.bushworld.learning import Phase2Params, train_bushworld_phase2
-
-params = Phase2Params(beta_r=5.0, gamma_h=0.95, gamma_r=0.95)
-
-# Tabular fitted value iteration (converges to the backward-induction solution):
-policy, history = train_bushworld_phase2(env, hpp, params, method="tabular")
-
-# Neural fitted value iteration (DQN/AlphaZero-style approximation):
-policy, history = train_bushworld_phase2(
-    env, hpp, params, method="dqn",
-    checkpoint_path="ckpt.pt", num_iterations=600,
+from empo.learning_based.phase2.config import Phase2Config
+from empo.learning_based.bushworld.phase2 import (
+    train_bushworld_phase2,
+    BushWorldRobotPolicy,
 )
+
+goal_sampler = env.possible_goal_generator.get_sampler()
+
+# Neural networks:
+config = Phase2Config(beta_r=5.0, gamma_h=0.95, gamma_r=0.95, num_training_steps=600)
+q_r, networks, history, trainer = train_bushworld_phase2(
+    env,
+    list(env.human_agent_indices),
+    list(env.robot_agent_indices),
+    hpp,
+    goal_sampler,
+    config=config,
+    tensorboard_dir="runs/bushworld",
+    checkpoint_path="ckpt.pt",
+)
+
+# Lookup tables (fitted value iteration; set use_lookup_tables=True in the config):
+config = Phase2Config(use_lookup_tables=True, beta_r=5.0, num_training_steps=600)
+q_r, networks, history, trainer = train_bushworld_phase2(
+    env, list(env.human_agent_indices), list(env.robot_agent_indices),
+    hpp, goal_sampler, config=config,
+)
+
+# Persist and reload the deployable robot policy:
+trainer.save_policy("policy.pt")
+policy = BushWorldRobotPolicy(path="policy.pt", beta_r=5.0)
+policy.reset(env)
+action = policy.sample(env.get_state())
 ```
 
-- `method` ∈ {`"tabular"`/`"value_iteration"`, `"neural"`/`"dqn"`/`"alphazero"`}.
-- Passing `checkpoint_path=` saves training state and (with `resume=True`)
-  recovers from it.
-- `save_policy(policy, path)` / `load_policy(path, env)` persist and reload the
-  final policy.
+- The learner is configured entirely through `Phase2Config`
+  (`use_lookup_tables`, warm-up schedule, `beta_r`/`gamma_*`, buffer/batch sizes,
+  exploration `epsilon_r_*`, etc.) — exactly as for MultiGrid.
+- Passing `checkpoint_path=` (optionally with `checkpoint_interval=`) saves
+  training state; pass `restore_networks_path=` to resume from it.
+- `trainer.save_policy(path)` writes the deployable policy;
+  `BushWorldRobotPolicy(path=...)` reloads it.
 
-> The tabular learner reproduces the backward-induction fixed point (it solves
-> the same equations iteratively). The neural learner is an **approximation**;
-> because the power-law policy `pi_r ∝ (−Q_r)^{−beta_r}` is very sensitive to small
-> `Q_r` errors at large `beta_r`, exact policy agreement requires careful tuning
-> and more training. Use the tabular path when you need the exact policy.
+> The learner uses sampling-based fitted value iteration and **approximates** the
+> backward-induction fixed point. Because the power-law policy
+> `pi_r ∝ (−Q_r)^{−beta_r}` is very sensitive to small `Q_r` errors at large
+> `beta_r`, exact policy agreement requires careful tuning and more training. Use
+> backward induction when you need the exact policy.
 
 ## Example script
 
@@ -158,11 +183,11 @@ python examples/bushworld/bushworld_compare.py --quick
 # Outside the container:
 PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds \
     python examples/bushworld/bushworld_compare.py \
-    --method tabular --rollouts 4
+    --method lookup --rollouts 4
 
 # Neural learner, then resume + extra rollouts from the saved policy:
-python examples/bushworld/bushworld_compare.py --method dqn --neural-iterations 600
-python examples/bushworld/bushworld_compare.py --method dqn --extra-rollouts 3
+python examples/bushworld/bushworld_compare.py --method neural --neural-iterations 600
+python examples/bushworld/bushworld_compare.py --method neural --extra-rollouts 3
 ```
 
 ## Tests

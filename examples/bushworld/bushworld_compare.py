@@ -7,9 +7,11 @@ them:
 
 1. **Backward induction** (exact tabular Phase 2 over the reachable-state DAG),
    via :func:`empo.backward_induction.phase2.compute_robot_policy`.
-2. **Learning-based Phase 2** (``method='tabular'`` fitted value iteration, or
-   ``method='dqn'`` / ``'alphazero'`` neural fitted value iteration), via
-   :func:`empo.bushworld.learning.train_bushworld_phase2`.
+2. **Learning-based Phase 2** through the shared training infrastructure (the same
+   ``BasePhase2Trainer`` used for MultiGrid), via
+   :func:`empo.learning_based.bushworld.phase2.train_bushworld_phase2`
+   — ``--method lookup`` (lookup-table fitted value iteration) or
+   ``--method neural`` (neural networks).
 
 It demonstrates the full lifecycle requested for a new world model:
 
@@ -31,14 +33,14 @@ Usage::
     # Outside the container:
     PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds \
         python examples/bushworld/bushworld_compare.py \
-        --world bushworld_worlds/two_humans_one_robot.yaml --method tabular --rollouts 4
+        --world bushworld_worlds/two_humans_one_robot.yaml --method lookup --rollouts 4
 
     # Neural learner with checkpoint recovery:
-    python examples/bushworld/bushworld_compare.py --method dqn --neural-iterations 600
+    python examples/bushworld/bushworld_compare.py --method neural --neural-iterations 600
 
     # Re-run to resume training from the checkpoint, then run extra rollouts from
     # the saved final policy without recomputing it:
-    python examples/bushworld/bushworld_compare.py --method dqn --extra-rollouts 3
+    python examples/bushworld/bushworld_compare.py --method neural --extra-rollouts 3
 """
 
 import argparse
@@ -61,13 +63,34 @@ from empo.bushworld import (  # noqa: E402
     ShortestPathHumanPolicyPrior,
     load_bushworld,
 )
-from empo.bushworld.learning import (  # noqa: E402
-    Phase2Params,
-    enumerate_reachable_states,
-    load_policy,
-    save_policy,
+from empo.learning_based.phase2.config import Phase2Config  # noqa: E402
+from empo.learning_based.bushworld.phase2 import (  # noqa: E402
+    BushWorldRobotPolicy,
     train_bushworld_phase2,
 )
+
+
+def _reachable_states(env, max_profiles=64):
+    """Breadth-first enumeration of reachable states from the initial state."""
+    import itertools
+
+    seen = set()
+    frontier = [env.initial_state()]
+    profiles = list(
+        itertools.product(range(env.action_space.n), repeat=env.num_players)
+    )[:max_profiles]
+    while frontier:
+        s = frontier.pop()
+        if s in seen:
+            continue
+        seen.add(s)
+        if env.is_terminal(s):
+            continue
+        for pr in profiles:
+            for p, ns in env.transition_probabilities(s, list(pr)):
+                if p > 0 and ns not in seen:
+                    frontier.append(ns)
+    return seen
 
 
 # --------------------------------------------------------------------------- #
@@ -200,16 +223,23 @@ def run_rollouts(
 # --------------------------------------------------------------------------- #
 # Policy comparison
 # --------------------------------------------------------------------------- #
+def _policy_distribution(policy, state) -> dict:
+    """Return ``{action_profile: prob}`` for either policy type."""
+    if hasattr(policy, "get_distribution"):
+        return policy.get_distribution(state)
+    return policy(state)
+
+
 def compare_policies(env, human_policy_prior, policy_a, policy_b) -> dict:
     """Compare two robot policies over reachable non-terminal states."""
     states = [
-        s for s in enumerate_reachable_states(env, human_policy_prior)
+        s for s in _reachable_states(env)
         if not env.is_terminal(s)
     ]
     max_diff = 0.0
     argmax_agree = 0
     for s in states:
-        da, db = policy_a(s), policy_b(s)
+        da, db = _policy_distribution(policy_a, s), _policy_distribution(policy_b, s)
         for k in set(da) | set(db):
             max_diff = max(max_diff, abs(da.get(k, 0.0) - db.get(k, 0.0)))
         if da and db and max(da, key=da.get) == max(db, key=db.get):
@@ -224,14 +254,59 @@ def compare_policies(env, human_policy_prior, policy_a, policy_b) -> dict:
 # --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
-def build_params(args) -> Phase2Params:
-    return Phase2Params(
-        beta_r=args.beta_r,
-        gamma_h=args.gamma_h,
+def build_config(args, resolved: str) -> Phase2Config:
+    """Build a :class:`Phase2Config` for the lookup or neural learner."""
+    common = dict(
         gamma_r=args.gamma_r,
-        zeta=args.zeta,
-        xi=args.xi,
-        eta=args.eta,
+        gamma_h=args.gamma_h,
+        beta_r=args.beta_r,
+        steps_per_episode=8,
+        epsilon_r_start=0.6,
+        epsilon_r_end=0.1,
+    )
+    if resolved == "lookup":
+        n = args.lookup_iterations
+        return Phase2Config(
+            use_lookup_tables=True,
+            use_lookup_q_r=True,
+            use_lookup_v_h_e=True,
+            use_lookup_x_h=True,
+            use_lookup_u_r=True,
+            use_lookup_v_r=True,
+            u_r_use_network=True,
+            v_r_use_network=True,
+            lookup_use_adaptive_lr=True,
+            use_count_based_curiosity=True,
+            warmup_v_h_e_steps=max(1, n // 10),
+            warmup_x_h_steps=max(1, n // 10),
+            warmup_u_r_steps=max(1, n // 10),
+            warmup_q_r_steps=max(1, n // 10),
+            beta_r_rampup_steps=max(1, n // 10),
+            num_training_steps=n,
+            buffer_size=1000,
+            batch_size=64,
+            epsilon_r_decay_steps=max(1, n // 2),
+            **common,
+        )
+    n = args.neural_iterations
+    return Phase2Config(
+        use_lookup_tables=False,
+        use_encoders=True,
+        u_r_use_network=False,
+        v_r_use_network=False,
+        x_h_use_network=True,
+        hidden_dim=64,
+        goal_feature_dim=32,
+        warmup_v_h_e_steps=max(1, n // 10),
+        warmup_x_h_steps=max(1, n // 10),
+        warmup_u_r_steps=0,
+        warmup_q_r_steps=max(1, n // 10),
+        beta_r_rampup_steps=max(1, n // 10),
+        num_training_steps=n,
+        buffer_size=2000,
+        batch_size=64,
+        epsilon_r_decay_steps=max(1, n // 2),
+        **common,
     )
 
 
@@ -239,8 +314,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--world", default="bushworld_worlds/two_humans_one_robot.yaml",
                         help="Path to a BushWorld YAML world.")
-    parser.add_argument("--method", default="tabular",
-                        choices=["tabular", "value_iteration", "neural", "dqn", "alphazero"],
+    parser.add_argument("--method", default="lookup",
+                        choices=["lookup", "neural"],
                         help="Learning version for the learned policy.")
     parser.add_argument("--output-dir", default="outputs/bushworld_compare",
                         help="Directory for movies, checkpoints, and the saved policy.")
@@ -264,9 +339,9 @@ def main():
     parser.add_argument("--eta", type=float, default=1.0)
     # Learner controls.
     parser.add_argument("--neural-iterations", type=int, default=600,
-                        help="Training iterations for the neural learner.")
-    parser.add_argument("--max-iterations", type=int, default=1000,
-                        help="Max sweeps for the tabular learner.")
+                        help="Training steps for the neural learner.")
+    parser.add_argument("--lookup-iterations", type=int, default=600,
+                        help="Training steps for the lookup-table learner.")
     parser.add_argument("--quick", action="store_true",
                         help="Fast settings (fewer rollouts / iterations) for smoke testing.")
     args = parser.parse_args()
@@ -274,6 +349,7 @@ def main():
     if args.quick:
         args.rollouts = min(args.rollouts, 2)
         args.neural_iterations = min(args.neural_iterations, 150)
+        args.lookup_iterations = min(args.lookup_iterations, 150)
 
     os.makedirs(args.output_dir, exist_ok=True)
     checkpoint_dir = args.checkpoint_dir or os.path.join(args.output_dir, "checkpoints")
@@ -292,51 +368,53 @@ def main():
     human_policy_prior = ShortestPathHumanPolicyPrior(env, env.human_agent_indices)
     goal_generator = env.possible_goal_generator
     goal_sampler = goal_generator.get_sampler()
-    params = build_params(args)
-    print(f"  Phase 2 params: {params}")
+    resolved = args.method
+    config = build_config(args, resolved)
+    print(f"  beta_r={args.beta_r}, gamma_h={args.gamma_h}, gamma_r={args.gamma_r}")
 
     # --- Backward induction (exact reference) ----------------------------- #
     print("\n=== Backward induction (exact Phase 2) ===")
     bi_policy = compute_robot_policy(
         env, list(env.human_agent_indices), list(env.robot_agent_indices),
         goal_generator, human_policy_prior,
-        beta_r=params.beta_r, gamma_h=params.gamma_h, gamma_r=params.gamma_r,
-        zeta=params.zeta, xi=params.xi, eta=params.eta,
+        beta_r=args.beta_r, gamma_h=args.gamma_h, gamma_r=args.gamma_r,
+        zeta=args.zeta, xi=args.xi, eta=args.eta,
         level_fct=lambda s: s[0], quiet=True,
     )
     print("  backward induction policy computed.")
 
     # --- Learned policy with checkpointing -------------------------------- #
-    resolved = "neural" if args.method in ("neural", "dqn", "alphazero") else "tabular"
-    ckpt_name = "neural.pt" if resolved == "neural" else "tabular.pkl"
+    ckpt_name = "neural.pt" if resolved == "neural" else "lookup.pt"
     checkpoint_path = os.path.join(checkpoint_dir, ckpt_name)
-    resume = not args.no_resume
-    if resume and os.path.exists(checkpoint_path):
-        print(f"\n=== Learned policy ({args.method}) — resuming from {checkpoint_path} ===")
+    tb_dir = os.path.join(args.output_dir, "tensorboard")
+    resume = not args.no_resume and os.path.exists(checkpoint_path)
+    if resume:
+        print(f"\n=== Learned policy ({resolved}) — resuming from {checkpoint_path} ===")
     else:
-        print(f"\n=== Learned policy ({args.method}) — training from scratch ===")
+        print(f"\n=== Learned policy ({resolved}) — training from scratch ===")
 
-    learn_kwargs = dict(
-        method=args.method,
+    _q_r, _networks, history, trainer = train_bushworld_phase2(
+        env,
+        list(env.human_agent_indices),
+        list(env.robot_agent_indices),
+        human_policy_prior,
+        goal_sampler,
+        config=config,
+        device="cpu",
+        verbose=True,
+        tensorboard_dir=tb_dir,
         checkpoint_path=checkpoint_path,
-        resume=resume,
-        quiet=False,
-    )
-    if resolved == "neural":
-        learn_kwargs.update(num_iterations=args.neural_iterations, seed=args.seed)
-    else:
-        learn_kwargs.update(max_iterations=args.max_iterations)
-
-    learned_policy, history = train_bushworld_phase2(
-        env, human_policy_prior, params, **learn_kwargs
+        checkpoint_interval=max(1, config.num_training_steps // 4),
+        restore_networks_path=checkpoint_path if resume else None,
     )
     print(f"  checkpoint saved to {checkpoint_path}")
 
     # --- Save final policy and reload to verify round-trip ---------------- #
-    policy_path = os.path.join(args.output_dir, "final_policy" + (".pt" if resolved == "neural" else ".pkl"))
-    save_policy(learned_policy, policy_path)
+    policy_path = os.path.join(args.output_dir, "final_policy.pt")
+    trainer.save_policy(policy_path)
     print(f"  final policy saved to {policy_path}")
-    reloaded_policy = load_policy(policy_path, env)
+    reloaded_policy = BushWorldRobotPolicy(path=policy_path, beta_r=args.beta_r)
+    reloaded_policy.reset(env)
     print("  final policy reloaded from disk (verifying save/restore).")
 
     # --- Compare policies -------------------------------------------------- #
@@ -345,10 +423,8 @@ def main():
     print(f"  states compared: {cmp['num_states']}")
     print(f"  max |pi_r diff|: {cmp['max_prob_diff']:.4e}")
     print(f"  argmax agreement: {cmp['argmax_agreement'] * 100:.1f}%")
-    if resolved == "tabular":
-        print("  (tabular learner converges to the backward-induction fixed point.)")
-    else:
-        print("  (neural learner is an approximation; expect some disagreement.)")
+    print("  (the learned policy uses the shared sampling-based trainer; it "
+          "approximates the backward-induction fixed point.)")
 
     # --- Rollouts and movies ---------------------------------------------- #
     print("\n=== Rollouts ===")
@@ -360,17 +436,18 @@ def main():
     learned_summary = run_rollouts(
         env, reloaded_policy, human_policy_prior, goal_sampler,
         n=args.rollouts, base_seed=args.seed + 1000, output_dir=args.output_dir,
-        tag=f"learned_{args.method}", make_movies=make_movies, movie_ext=args.movie_format,
+        tag=f"learned_{resolved}", make_movies=make_movies, movie_ext=args.movie_format,
     )
 
     # --- Optional extra rollouts from the saved final policy --------------- #
     if args.extra_rollouts > 0:
         print(f"\n=== Extra rollouts from saved final policy ({args.extra_rollouts}) ===")
-        extra_policy = load_policy(policy_path, env)
+        extra_policy = BushWorldRobotPolicy(path=policy_path, beta_r=args.beta_r)
+        extra_policy.reset(env)
         run_rollouts(
             env, extra_policy, human_policy_prior, goal_sampler,
             n=args.extra_rollouts, base_seed=args.seed + 2000,
-            output_dir=args.output_dir, tag=f"extra_{args.method}",
+            output_dir=args.output_dir, tag=f"extra_{resolved}",
             make_movies=make_movies, movie_ext=args.movie_format,
         )
 

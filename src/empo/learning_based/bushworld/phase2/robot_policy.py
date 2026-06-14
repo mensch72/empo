@@ -99,3 +99,29 @@ class BushWorldRobotPolicy(RobotPolicy):
         with torch.no_grad():
             q_values = self.q_network.forward(state, self._world_model, self.device)
             return self.q_network.sample_action(q_values, beta_r=self.beta_r)
+
+    def get_distribution(self, state: Any) -> dict:
+        """Return the robot policy distribution ``{action_profile: prob}``.
+
+        Mirrors the call signature of :class:`TabularRobotPolicy` so the two
+        policy types can be compared with the same code.
+        """
+        import itertools
+
+        if self._world_model is None:
+            raise RuntimeError(
+                "Must call reset(world_model) before get_distribution()."
+            )
+        num_actions = self._world_model.action_space.n
+        num_robots = self._world_model.num_robots
+        with torch.no_grad():
+            q_values = self.q_network.forward(state, self._world_model, self.device)
+            probs = (
+                self.q_network.get_policy(q_values, beta_r=self.beta_r)
+                .detach()
+                .cpu()
+                .numpy()
+                .ravel()
+            )
+        profiles = list(itertools.product(range(num_actions), repeat=num_robots))
+        return {profile: float(probs[i]) for i, profile in enumerate(profiles)}
