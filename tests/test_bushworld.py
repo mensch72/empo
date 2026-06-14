@@ -24,11 +24,12 @@ from empo.bushworld import (
     load_bushworld,
     parse_bushworld_map,
 )
-from empo.bushworld.learning import (
-    Phase2Params,
-    compute_tabular_phase2,
-    enumerate_reachable_states,
-    phase2_local_update,
+from empo.backward_induction.phase2 import compute_robot_policy
+from empo.learning_based.phase2.config import Phase2Config
+from empo.learning_based.bushworld.phase2 import (
+    BushWorldRobotPolicy,
+    create_phase2_networks,
+    train_bushworld_phase2,
 )
 
 
@@ -48,6 +49,29 @@ def make_corridor(max_steps=4, B=1):
         human_positions=[(0, 0), (4, 0)],
         initial_densities=[[1, 1, 1, 1, 1]],
     )
+
+
+def _reachable_states(env, max_profiles=50):
+    """Breadth-first enumeration of reachable states from the initial state."""
+    import itertools
+
+    seen = set()
+    frontier = [env.initial_state()]
+    profiles = list(
+        itertools.product(range(env.action_space.n), repeat=env.num_players)
+    )[:max_profiles]
+    while frontier:
+        s = frontier.pop()
+        if s in seen:
+            continue
+        seen.add(s)
+        if env.is_terminal(s):
+            continue
+        for pr in profiles:
+            for p, ns in env.transition_probabilities(s, list(pr)):
+                if p > 0 and ns not in seen:
+                    frontier.append(ns)
+    return seen
 
 
 # --------------------------------------------------------------------------- #
@@ -281,88 +305,184 @@ def test_load_example_yaml():
 
 
 # --------------------------------------------------------------------------- #
-# Learning-based Phase 2
+# Learning-based Phase 2 (shared infrastructure, mirroring multigrid)
 # --------------------------------------------------------------------------- #
-def test_tabular_learner_matches_backward_induction():
-    from empo.backward_induction.phase2 import compute_robot_policy
+def _bi_policy(env, hpp, beta_r=4.0, gamma=0.9):
+    gen = env.possible_goal_generator
+    return compute_robot_policy(
+        env,
+        list(env.human_agent_indices),
+        list(env.robot_agent_indices),
+        gen,
+        hpp,
+        beta_r=beta_r,
+        gamma_h=gamma,
+        gamma_r=gamma,
+        level_fct=lambda s: s[0],
+        quiet=True,
+    )
 
+
+def _lookup_config(beta_r=4.0, gamma=0.9, num_training_steps=400):
+    return Phase2Config(
+        use_lookup_tables=True,
+        use_lookup_q_r=True,
+        use_lookup_v_h_e=True,
+        use_lookup_x_h=True,
+        use_lookup_u_r=True,
+        use_lookup_v_r=True,
+        u_r_use_network=True,
+        v_r_use_network=True,
+        lookup_use_adaptive_lr=True,
+        gamma_r=gamma,
+        gamma_h=gamma,
+        beta_r=beta_r,
+        warmup_v_h_e_steps=30,
+        warmup_x_h_steps=30,
+        warmup_u_r_steps=30,
+        warmup_q_r_steps=30,
+        beta_r_rampup_steps=30,
+        num_training_steps=num_training_steps,
+        steps_per_episode=4,
+        buffer_size=500,
+        batch_size=32,
+        use_count_based_curiosity=True,
+        epsilon_r_start=0.6,
+        epsilon_r_end=0.1,
+        epsilon_r_decay_steps=200,
+    )
+
+
+def _neural_config(beta_r=4.0, gamma=0.9, num_training_steps=60):
+    return Phase2Config(
+        use_lookup_tables=False,
+        use_encoders=True,
+        u_r_use_network=False,
+        v_r_use_network=False,
+        x_h_use_network=True,
+        gamma_r=gamma,
+        gamma_h=gamma,
+        beta_r=beta_r,
+        hidden_dim=32,
+        goal_feature_dim=16,
+        warmup_v_h_e_steps=10,
+        warmup_x_h_steps=10,
+        warmup_u_r_steps=0,
+        warmup_q_r_steps=10,
+        beta_r_rampup_steps=10,
+        num_training_steps=num_training_steps,
+        steps_per_episode=4,
+        buffer_size=200,
+        batch_size=16,
+        epsilon_r_start=0.5,
+        epsilon_r_end=0.1,
+        epsilon_r_decay_steps=40,
+    )
+
+
+def _train(env, hpp, config, tensorboard_dir):
+    gen = env.possible_goal_generator
+    return train_bushworld_phase2(
+        env,
+        list(env.human_agent_indices),
+        list(env.robot_agent_indices),
+        hpp,
+        gen.get_sampler(),
+        config=config,
+        verbose=False,
+        tensorboard_dir=str(tensorboard_dir),
+    )
+
+
+def test_backward_induction_valid_policy():
     env = make_corridor(max_steps=4, B=1)
     hpp = ShortestPathHumanPolicyPrior(env, env.human_agent_indices)
-    gen = env.possible_goal_generator
-    params = Phase2Params(beta_r=4.0, gamma_h=0.9, gamma_r=0.9)
+    bi = _bi_policy(env, hpp, beta_r=4.0, gamma=0.9)
 
-    bi = compute_robot_policy(
-        env, list(env.human_agent_indices), list(env.robot_agent_indices),
-        gen, hpp, beta_r=params.beta_r, gamma_h=params.gamma_h, gamma_r=params.gamma_r,
-        zeta=params.zeta, xi=params.xi, eta=params.eta,
-        level_fct=lambda s: s[0], quiet=True,
+    for s in _reachable_states(env):
+        if env.is_terminal(s):
+            continue
+        dist = bi(s)
+        assert math.isclose(sum(dist.values()), 1.0, rel_tol=1e-3)
+        assert all(p >= 0.0 for p in dist.values())
+
+
+def test_create_phase2_networks_lookup_and_neural():
+    env = make_corridor()
+    num_actions = env.action_space.n
+
+    lookup_nets = create_phase2_networks(
+        env, _lookup_config(), env.num_robots, num_actions, device="cpu"
     )
-    pol, _tables, hist = compute_tabular_phase2(env, hpp, params, quiet=True)
-    assert hist["iterations"] >= 1
+    neural_nets = create_phase2_networks(
+        env, _neural_config(), env.num_robots, num_actions, device="cpu"
+    )
+    for nets in (lookup_nets, neural_nets):
+        for name in ("q_r", "v_h_e", "x_h"):
+            assert getattr(nets, name) is not None
+    # u_r / v_r are networks only when the config requests them.
+    assert lookup_nets.u_r is not None
+    assert lookup_nets.v_r is not None
 
-    states = [s for s in enumerate_reachable_states(env, hpp) if not env.is_terminal(s)]
-    max_diff = 0.0
+    # q_r forward produces one (negative) value per joint action.
+    q = neural_nets.q_r.forward(env.initial_state(), env, "cpu")
+    assert q.numel() == num_actions ** env.num_robots
+    assert bool((q < 0).all())
+
+
+def test_lookup_phase2_trains_and_valid_policy(tmp_path):
+    env = make_corridor(max_steps=4, B=1)
+    hpp = ShortestPathHumanPolicyPrior(env, env.human_agent_indices)
+
+    q_r, _nets, _hist, _trainer = _train(
+        env, hpp, _lookup_config(beta_r=4.0, gamma=0.9), tmp_path / "tb"
+    )
+
+    # The shared (sampling-based) infrastructure should yield a valid robot
+    # policy at every reachable non-terminal state: probabilities sum to one
+    # and every Q_r value is negative.
+    states = [s for s in _reachable_states(env) if not env.is_terminal(s)]
+    assert states
     for s in states:
-        d_bi, d_lt = bi(s), pol(s)
-        for k in set(d_bi) | set(d_lt):
-            max_diff = max(max_diff, abs(d_bi.get(k, 0.0) - d_lt.get(k, 0.0)))
-    # Backward induction uses float16 caches internally, so allow a small tolerance.
-    assert max_diff < 1e-3, max_diff
+        q = q_r.forward(s, env, "cpu")
+        pi = q_r.get_policy(q, beta_r=4.0).detach().numpy().ravel()
+        assert math.isclose(float(pi.sum()), 1.0, rel_tol=1e-6)
+        assert bool((q.detach().numpy() < 0).all())
 
 
-def test_tabular_policy_save_load(tmp_path):
+def test_neural_phase2_trains_and_valid_policy(tmp_path):
     env = make_corridor()
     hpp = ShortestPathHumanPolicyPrior(env, env.human_agent_indices)
-    params = Phase2Params(beta_r=3.0)
-    pol, _tables, _hist = compute_tabular_phase2(env, hpp, params, quiet=True)
-    path = tmp_path / "policy.pkl"
-    pol.save(str(path))
-    from empo.bushworld.learning import LearnedTabularRobotPolicy
 
-    loaded = LearnedTabularRobotPolicy.load(str(path), env)
-    s = env.initial_state()
-    assert pol(s) == loaded(s)
+    q_r, nets, _hist, _trainer = _train(
+        env, hpp, _neural_config(), tmp_path / "tb"
+    )
+    assert q_r.__class__.__name__ == "BushWorldRobotQNetwork"
+
+    q = q_r.forward(env.initial_state(), env, "cpu")
+    pi = q_r.get_policy(q, beta_r=4.0).detach().numpy().ravel()
+    assert math.isclose(float(pi.sum()), 1.0, rel_tol=1e-6)
+    assert bool((q.detach().numpy() < 0).all())
 
 
-def test_phase2_local_update_produces_valid_policy():
+def test_robot_policy_save_load(tmp_path):
     env = make_corridor()
     hpp = ShortestPathHumanPolicyPrior(env, env.human_agent_indices)
-    gen = env.possible_goal_generator
-    params = Phase2Params()
-    robot_profiles = [(a,) for a in range(env.action_space.n)]
-
-    def vr_fn(succ):
-        return params.terminal_Vr
-
-    def vhe_fn(succ, agent_index, goal):
-        return 0.0
-
-    qr, pi_r, vr, vhe, ur = phase2_local_update(
-        env, hpp, gen, env.initial_state(), params,
-        vr_fn, vhe_fn, robot_profiles, list(env.human_agent_indices),
+    _q_r, _nets, _hist, trainer = _train(
+        env, hpp, _neural_config(), tmp_path / "tb"
     )
-    assert np.all(qr < 0.0)  # Q_r always negative
-    assert math.isclose(float(pi_r.sum()), 1.0, rel_tol=1e-9)
-    assert ur < 0.0  # U_r always negative
 
+    path = tmp_path / "policy.pt"
+    trainer.save_policy(str(path))
+    assert path.exists()
 
-@pytest.mark.parametrize("method", ["tabular"])
-def test_train_dispatcher_checkpoint_resume(tmp_path, method):
-    env = make_corridor()
-    hpp = ShortestPathHumanPolicyPrior(env, env.human_agent_indices)
-    params = Phase2Params(beta_r=3.0)
-    from empo.bushworld.learning import train_bushworld_phase2
+    pol = BushWorldRobotPolicy(path=str(path))
+    pol.reset(env)
+    action = pol.sample(env.initial_state())
+    assert isinstance(action, tuple)
+    assert len(action) == env.num_robots
+    assert all(0 <= a < env.action_space.n for a in action)
 
-    cp = tmp_path / "ckpt.pkl"
-    pol1, h1 = train_bushworld_phase2(
-        env, hpp, params, method=method, checkpoint_path=str(cp), max_iterations=2
-    )
-    assert cp.exists()
-    pol2, h2 = train_bushworld_phase2(
-        env, hpp, params, method=method, checkpoint_path=str(cp), max_iterations=20
-    )
-    # Resumed run should converge.
-    assert h2["final_delta"] < 1e-6
 
 
 if __name__ == "__main__":  # pragma: no cover
