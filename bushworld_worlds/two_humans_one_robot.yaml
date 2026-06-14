@@ -1,0 +1,30 @@
+metadata:
+  name: "Two Humans, One Robot"
+  description: >
+    A 1x7 corridor with two humans standing apart and one robot standing
+    between them, much closer to the left human. All cells start with bush
+    density 1 and B=1, so every human move is blocked unless the robot first
+    clears the bush in front of them. The robot must decide which human to
+    empower (or how to balance empowering both).
+  author: "EMPO Framework"
+  category: "bushworld"
+
+# Map encoding: Ro = robot, Hu = human, integer = bush density.
+# Cells occupied by a player use the bush density given by `fill_density`.
+map: |
+  Hu 1 Ro 1 1 1 Hu
+
+B: 1
+max_steps: 12
+fill_density: 1
+
+# Possible goals: every cell of the corridor (cell goals). Omit to get the
+# same default automatically.
+possible_goals:
+  - [0, 0]
+  - [1, 0]
+  - [2, 0]
+  - [3, 0]
+  - [4, 0]
+  - [5, 0]
+  - [6, 0]
