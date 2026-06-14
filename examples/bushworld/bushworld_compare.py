@@ -53,9 +53,14 @@ Movies default to ``.mp4`` (easy to pause/scrub frame by frame); pass
 """
 
 import argparse
+import glob
 import os
 import sys
 from typing import Dict, List, Optional, Tuple
+
+# Seed offset used when drawing ensemble worlds for rollouts (kept distinct from
+# the training/rollout seeds so rollout world selection is reproducible).
+ROLLOUT_WORLD_SEED_OFFSET = 7
 
 import numpy as np
 
@@ -89,7 +94,9 @@ class _BushWorldEnsembleLoader:
     :class:`~empo.learning_based.phase2.world_model_factory.EnsembleWorldModelFactory`
     so the Phase 2 trainer can draw a fresh world each episode in
     *random-map-ensemble* mode. It stores only the (absolute) world paths and a
-    seed, so it remains picklable for async actor processes.
+    seed, so it remains picklable for async actor processes. Each process gets
+    its own RNG (rebuilt from ``seed`` on unpickling via ``__setstate__``); the
+    callable is not intended to be shared across threads within a process.
     """
 
     def __init__(self, world_paths, seed: int = 0):
@@ -119,14 +126,12 @@ def resolve_worlds(world_args, repo_root: str) -> List[str]:
     single resulting path means *single-map* mode; multiple paths mean
     *random-map-ensemble* mode.
     """
-    import glob as _glob
-
     candidates: List[str] = []
     for entry in world_args:
         full = entry if os.path.isabs(entry) else os.path.join(repo_root, entry)
         if os.path.isdir(full):
             for ext in ("*.yaml", "*.yml"):
-                candidates.extend(sorted(_glob.glob(os.path.join(full, ext))))
+                candidates.extend(sorted(glob.glob(os.path.join(full, ext))))
         else:
             candidates.append(full)
 
@@ -570,7 +575,7 @@ def main():
         return primary_components
 
     if ensemble:
-        _rollout_rng = np.random.default_rng(args.seed + 7)
+        _rollout_rng = np.random.default_rng(args.seed + ROLLOUT_WORLD_SEED_OFFSET)
 
         def ensemble_components(_seed):
             path = world_paths[int(_rollout_rng.integers(len(world_paths)))]
