@@ -23,7 +23,8 @@ It demonstrates the full lifecycle requested for a new world model:
   *saved* final policy and runs additional rollouts from it (e.g. to keep
   generating trajectories without recomputing the policy).
 * **Movies** — rollouts under each policy are rendered to annotated movies (with
-  per-human goal overlays and a side text panel).
+  per-human goal overlays and a side text panel that includes the robot's exact
+  action probabilities π_r at each step).
 
 Usage::
 
@@ -74,6 +75,7 @@ for _p in ("src", "vendor/multigrid", "vendor/ai_transport", "multigrid_worlds")
 
 from empo.backward_induction.phase2 import compute_robot_policy  # noqa: E402
 from empo.bushworld import (  # noqa: E402
+    ACTION_NAMES,
     ShortestPathHumanPolicyPrior,
     load_bushworld,
 )
@@ -184,6 +186,35 @@ def sample_human_goals(env, goal_sampler, rng) -> Dict[int, object]:
     return goals
 
 
+def format_robot_action_probs(
+    distribution: Dict[Tuple[int, ...], float], num_robots: int, top_k: int = 3
+) -> List[str]:
+    """Render the robot policy ``{action_profile: prob}`` as annotation lines.
+
+    Returns one line per robot with that robot's marginal action probabilities
+    (sorted high to low), so a movie viewer can read the exact policy the robot
+    is sampling from at each step.
+    """
+    # Marginalize the joint distribution down to per-robot action probabilities.
+    marginals = [
+        {a: 0.0 for a in range(len(ACTION_NAMES))} for _ in range(num_robots)
+    ]
+    for profile, prob in distribution.items():
+        for r in range(num_robots):
+            if r < len(profile):
+                marginals[r][profile[r]] += prob
+
+    lines: List[str] = []
+    for r, marginal in enumerate(marginals):
+        ordered = sorted(marginal.items(), key=lambda kv: -kv[1])[:top_k]
+        parts = ", ".join(
+            f"{ACTION_NAMES[a]}={p:.2f}" for a, p in ordered if p > 0.0
+        )
+        prefix = f"r{r} pi:" if num_robots > 1 else "robot pi:"
+        lines.append(f"{prefix} {parts}")
+    return lines
+
+
 def rollout(
     env,
     robot_policy,
@@ -191,15 +222,17 @@ def rollout(
     *,
     goal_sampler,
     seed: int,
-    robot_epsilon: float = 0.0,
     render: bool = True,
     label: str = "",
 ) -> Tuple[List[np.ndarray], dict]:
     """Run one episode under ``robot_policy`` and sampled human behavior.
 
-    Returns ``(frames, metrics)``. ``metrics`` reports the total bush density the
-    robot cleared and the total human travel distance (a crude empowerment proxy:
-    a helpful robot clears bushes so humans can move more freely).
+    The robot acts under the *exact* learned policy: each joint robot action is
+    sampled from ``π_r(a_r) ∝ (−Q_r(s, a_r))^{−β_r}`` at the policy's configured
+    ``β_r`` (no argmax, no added exploration). Returns ``(frames, metrics)``.
+    ``metrics`` reports the total bush density the robot cleared and the total
+    human travel distance (a crude empowerment proxy: a helpful robot clears
+    bushes so humans can move more freely).
     """
     rng = np.random.default_rng(seed)
     env.reset(seed=seed)
@@ -213,14 +246,11 @@ def rollout(
     human_travel = 0
 
     num_actions = env.action_space.n
+    num_robots = len(env.robot_agent_indices)
     step = 0
     while not env.is_terminal(state):
-        if robot_epsilon > 0.0 and rng.random() < robot_epsilon:
-            robot_profile = tuple(
-                rng.integers(num_actions) for _ in env.robot_agent_indices
-            )
-        else:
-            robot_profile = robot_policy.sample(state)
+        # Exact learned robot policy at the configured beta_r (no exploration).
+        robot_profile = robot_policy.sample(state)
         # Humans act under their (goal-conditioned) prior toward their sampled goal.
         human_actions: List[int] = []
         for h in env.human_agent_indices:
@@ -232,11 +262,20 @@ def rollout(
             annotation = [
                 f"{label}",
                 f"step {step}/{env.max_steps}",
-                f"robot a={list(robot_profile)}",
+                f"robot a={[int(a) for a in robot_profile]}",
                 f"humans a={human_actions}",
             ]
+            annotation.extend(
+                format_robot_action_probs(
+                    _policy_distribution(robot_policy, state), num_robots
+                )
+            )
             frames.append(
-                env.render(annotation_text=annotation, goal_overlays=human_goals)
+                env.render(
+                    annotation_text=annotation,
+                    goal_overlays=human_goals,
+                    annotation_panel_width=320,
+                )
             )
 
         env.set_state(state)
@@ -251,7 +290,13 @@ def rollout(
 
     if render:
         annotation = [f"{label}", f"step {step}/{env.max_steps} (terminal)"]
-        frames.append(env.render(annotation_text=annotation, goal_overlays=human_goals))
+        frames.append(
+            env.render(
+                annotation_text=annotation,
+                goal_overlays=human_goals,
+                annotation_panel_width=320,
+            )
+        )
 
     final_density = sum(state[2])
     metrics = {
@@ -277,7 +322,6 @@ def make_movie(frames: List[np.ndarray], path: str, fps: int = 2) -> Optional[st
 def run_rollouts(
     env_components_fn, policy, *, n: int, base_seed: int,
     output_dir: str, tag: str, make_movies: bool, movie_ext: str = "mp4",
-    robot_epsilon: float = 0.0,
 ) -> dict:
     """Run ``n`` rollouts under ``policy`` and (optionally) save movies.
 
@@ -291,7 +335,7 @@ def run_rollouts(
         env, human_policy_prior, goal_sampler = env_components_fn(base_seed + i)
         frames, metrics = rollout(
             env, policy, human_policy_prior, goal_sampler=goal_sampler,
-            seed=base_seed + i, robot_epsilon=robot_epsilon,
+            seed=base_seed + i,
             render=make_movies, label=tag,
         )
         cleared.append(metrics["bush_cleared"])
@@ -448,14 +492,6 @@ def main():
                         help="Training steps for the lookup-table learner.")
     parser.add_argument("--quick", action="store_true",
                         help="Fast settings (fewer rollouts / iterations) for smoke testing.")
-    parser.add_argument(
-        "--rollout-robot-epsilon",
-        type=float,
-        default=None,
-        help="Optional epsilon-greedy exploration used only during rollout "
-             "movies/evaluation to avoid frozen final trajectories from saved "
-             "neural policies. Default: 0.05 for --method neural, 0.0 otherwise.",
-    )
     args = parser.parse_args()
 
     if args.quick:
@@ -605,13 +641,6 @@ def main():
 
     # --- Rollouts and movies ---------------------------------------------- #
     print("\n=== Rollouts ===")
-    rollout_robot_epsilon = (
-        args.rollout_robot_epsilon
-        if args.rollout_robot_epsilon is not None
-        else (0.05 if resolved == "neural" else 0.0)
-    )
-    if rollout_robot_epsilon > 0.0:
-        print(f"  rollout robot epsilon: {rollout_robot_epsilon:.3f}")
     bi_summary = None
     if bi_policy is not None:
         bi_summary = run_rollouts(
@@ -623,7 +652,6 @@ def main():
         env_components_fn, reloaded_policy,
         n=args.rollouts, base_seed=args.seed + 1000, output_dir=args.output_dir,
         tag=f"learned_{resolved}", make_movies=make_movies, movie_ext=args.movie_format,
-        robot_epsilon=rollout_robot_epsilon,
     )
 
     # --- Optional extra rollouts from the saved final policy --------------- #
@@ -636,7 +664,6 @@ def main():
             n=args.extra_rollouts, base_seed=args.seed + 2000,
             output_dir=args.output_dir, tag=f"extra_{resolved}",
             make_movies=make_movies, movie_ext=args.movie_format,
-            robot_epsilon=rollout_robot_epsilon,
         )
 
     print("\nDone.")
