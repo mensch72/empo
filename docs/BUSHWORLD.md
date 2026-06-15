@@ -169,6 +169,58 @@ action = policy.sample(env.get_state())
 > `beta_r`, exact policy agreement requires careful tuning and more training. Use
 > backward induction when you need the exact policy.
 
+### Learned Phase 1 human policy prior (optional)
+
+BushWorld's human prior is normally the heuristic
+`ShortestPathHumanPolicyPrior`. For full structural parity with MultiGrid, a
+*learned* alternative is also available under
+`empo.learning_based.bushworld.phase1`, which reuses the **shared, generic**
+Phase 1 DQN `Trainer` (no new training algorithm):
+
+```python
+from empo.learning_based.bushworld.phase1 import (
+    train_bushworld_neural_policy_prior,
+    BushWorldNeuralHumanPolicyPrior,
+)
+
+goal_sampler = env.possible_goal_generator.get_sampler()
+prior = train_bushworld_neural_policy_prior(
+    env,
+    human_agent_indices=list(env.human_agent_indices),
+    goal_sampler=goal_sampler,
+    num_episodes=200,
+)
+prior.save("phase1_prior.pt")
+prior = BushWorldNeuralHumanPolicyPrior.load(
+    "phase1_prior.pt", env, human_agent_indices=list(env.human_agent_indices),
+    goal_sampler=goal_sampler,
+)
+# prior(state, human_idx)        -> marginal action distribution (dict)
+# prior(state, human_idx, goal)  -> goal-conditioned distribution (dict)
+```
+
+### PPO variants (optional)
+
+PPO-based variants of both phases mirror
+`empo.learning_based.multigrid.phase1_ppo` / `phase2_ppo` and reuse the **shared**
+PufferLib PPO infrastructure (`Phase1PPOEnv`/`GoalConditionedActorCritic` and
+`EMPOWorldModelEnv`/`EMPOActorCritic`). They live under
+`empo.learning_based.bushworld.phase1_ppo` and
+`empo.learning_based.bushworld.phase2_ppo`, each providing a BushWorld-specific
+environment wrapper (observation encoding only) and a network factory:
+
+```python
+from empo.learning_based.bushworld.phase1_ppo import (
+    BushWorldPhase1PPOEnv, create_bushworld_phase1_ppo_networks,
+)
+from empo.learning_based.bushworld.phase2_ppo import (
+    BushWorldWorldModelEnv, create_bushworld_ppo_networks,
+)
+```
+
+Running PPO training requires `pufferlib`; the env wrappers and network
+factories themselves do not.
+
 ## Example script
 
 [`examples/bushworld/bushworld_compare.py`](../examples/bushworld/bushworld_compare.py)
@@ -215,5 +267,6 @@ single maps.
 
 ```bash
 PYTHONPATH=src:vendor/multigrid:vendor/ai_transport:multigrid_worlds \
-    python -m pytest tests/test_bushworld.py -v
+    python -m pytest tests/test_bushworld.py \
+        tests/test_bushworld_phase1.py tests/test_bushworld_ppo.py -v
 ```
