@@ -226,7 +226,13 @@ factories themselves do not.
 [`examples/bushworld/bushworld_compare.py`](../examples/bushworld/bushworld_compare.py)
 compares backward induction with a learned policy and demonstrates the full
 lifecycle: checkpoint save/recovery, final-policy persistence and reload, optional
-extra rollouts from the saved policy, and annotated rollout movies.
+extra rollouts from the saved policy, and annotated rollout movies. The learned
+policy checkpoint is keyed to the exact training problem — its filename embeds a
+digest of the map content (or, for randomly generated maps, the generation
+parameters) plus the method and theory/training parameters, and a sidecar
+`.meta.json` records the full key. A checkpoint is only resumed when this key
+matches exactly, so changing a parameter or the map never falsely restores a
+stale checkpoint.
 
 It runs in two modes:
 

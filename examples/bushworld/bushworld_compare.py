@@ -17,6 +17,11 @@ It demonstrates the full lifecycle requested for a new world model:
 
 * **Checkpointing & recovery** — the learner saves a checkpoint and, on a second
   run (or after interruption), resumes from it (``--checkpoint-dir`` / ``--resume``).
+  The checkpoint is keyed to the exact problem: its filename embeds a digest of
+  the map content (or the generation parameters for ``--random-maps``) plus the
+  method and theory/training parameters, and a sidecar ``.meta.json`` stores the
+  full key. It is only resumed when that key matches exactly, so changing a
+  parameter or the map never falsely restores a stale checkpoint.
 * **Final-policy persistence** — the learned policy is saved to disk and reloaded
   to verify round-tripping.
 * **Optional extra rollouts** — with ``--extra-rollouts N`` the script loads the
@@ -56,6 +61,7 @@ Movies default to ``.mp4`` (easy to pause/scrub frame by frame); pass
 import argparse
 import glob
 import hashlib
+import json
 import os
 import pickle
 import sys
@@ -397,6 +403,104 @@ def _save_bi_policy(cache_file: str, key: dict, policy) -> None:
         print(f"  backward induction policy cached to {cache_file}")
     except Exception as exc:  # noqa: BLE001 - cache is best-effort
         print(f"  WARNING: could not save BI cache ({exc}); continuing.")
+
+
+# --------------------------------------------------------------------------- #
+# Learned-policy checkpoint cache key
+# --------------------------------------------------------------------------- #
+# Bump if the checkpoint key structure changes incompatibly.
+_CKPT_CACHE_VERSION = 1
+
+
+def _world_content_hash(world_path: str) -> str:
+    """Return a content hash of a world file (falls back to the path string)."""
+    try:
+        with open(world_path, "rb") as f:
+            world_bytes = f.read()
+    except OSError:
+        world_bytes = world_path.encode("utf-8")
+    return hashlib.sha256(world_bytes).hexdigest()
+
+
+def _checkpoint_cache_key(
+    resolved: str, world_paths: List[str], random_maps: bool, args
+) -> Tuple[dict, str]:
+    """Build a cache key identifying the exact learned-policy training problem.
+
+    The key combines the *problem spec* with the theory and training parameters
+    that determine the learned policy. For fixed maps (single or ensemble) the
+    spec is the content hash of every world file; for randomly *generated* maps
+    the map changes every episode, so the spec is the generation parameters
+    instead of any specific map. A checkpoint is only restored when this key
+    matches exactly, so a different map (or generation setup) or different
+    parameters never resumes from a stale checkpoint.
+    """
+    if random_maps:
+        problem = {
+            "kind": "random-maps",
+            "random_size": args.random_size,
+            "random_robots": args.random_robots,
+            "random_humans": args.random_humans,
+            "random_B": args.random_B,
+            "random_max_steps": args.random_max_steps,
+            "random_fill_density": args.random_fill_density,
+        }
+    else:
+        problem = {
+            "kind": "fixed-maps",
+            "world_hashes": [_world_content_hash(p) for p in world_paths],
+        }
+    iterations = (
+        args.neural_iterations if resolved == "neural" else args.lookup_iterations
+    )
+    key = {
+        "version": _CKPT_CACHE_VERSION,
+        "method": resolved,
+        "problem": problem,
+        "iterations": iterations,
+        "beta_r": args.beta_r,
+        "gamma_h": args.gamma_h,
+        "gamma_r": args.gamma_r,
+        "zeta": args.zeta,
+        "xi": args.xi,
+        "eta": args.eta,
+        "seed": args.seed,
+    }
+    digest = hashlib.sha256(
+        json.dumps(key, sort_keys=True).encode("utf-8")
+    ).hexdigest()[:16]
+    return key, digest
+
+
+def _checkpoint_meta_path(checkpoint_path: str) -> str:
+    """Sidecar JSON path storing the problem key for a checkpoint."""
+    return checkpoint_path + ".meta.json"
+
+
+def _checkpoint_key_matches(checkpoint_path: str, key: dict) -> bool:
+    """Return True only if the checkpoint's stored key matches ``key`` exactly."""
+    meta_path = _checkpoint_meta_path(checkpoint_path)
+    try:
+        with open(meta_path, "r", encoding="utf-8") as f:
+            stored = json.load(f)
+    except FileNotFoundError:
+        return False
+    except Exception as exc:  # noqa: BLE001 - sidecar is best-effort
+        print(f"  could not read checkpoint metadata ({exc}); training fresh.")
+        return False
+    return stored == key
+
+
+def _save_checkpoint_meta(checkpoint_path: str, key: dict) -> None:
+    """Persist the problem key alongside a checkpoint for later validation."""
+    meta_path = _checkpoint_meta_path(checkpoint_path)
+    try:
+        tmp = meta_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(key, f, sort_keys=True)
+        os.replace(tmp, meta_path)
+    except Exception as exc:  # noqa: BLE001 - sidecar is best-effort
+        print(f"  WARNING: could not save checkpoint metadata ({exc}); continuing.")
 
 
 def resolve_worlds(world_args, repo_root: str) -> List[str]:
@@ -932,16 +1036,32 @@ def main():
                 _save_bi_policy(bi_cache_file, bi_cache_key, bi_policy)
 
     # --- Learned policy with checkpointing -------------------------------- #
-    ckpt_name = "neural.pt" if resolved == "neural" else "lookup.pt"
+    # Key the checkpoint to the exact problem spec (map content for fixed maps,
+    # generation parameters for random maps) plus the method and theory/training
+    # parameters. The digest is embedded in the filename and the full key is
+    # stored in a sidecar so a checkpoint is only resumed for an identical
+    # problem — never falsely restored after parameters or the map have changed.
+    ckpt_key, ckpt_digest = _checkpoint_cache_key(
+        resolved, world_paths, random_maps, args)
+    ckpt_name = f"{resolved}_{ckpt_digest}.pt"
     checkpoint_path = os.path.join(checkpoint_dir, ckpt_name)
     tb_dir = os.path.join(args.output_dir, "tensorboard")
-    resume = not args.no_resume and os.path.exists(checkpoint_path)
+    resume = (
+        not args.no_resume
+        and os.path.exists(checkpoint_path)
+        and _checkpoint_key_matches(checkpoint_path, ckpt_key)
+    )
     if resume:
         print(f"\n=== Learned policy ({resolved}) — resuming from {checkpoint_path} ===")
     else:
+        if not args.no_resume and os.path.exists(checkpoint_path):
+            print("  existing checkpoint key does not match this problem; training fresh.")
         print(f"\n=== Learned policy ({resolved}) — training from scratch ===")
 
     _timing = CoarseTimingProfiler()
+    # Record the problem key before training so periodic checkpoints written
+    # during an interrupted run can still be matched and resumed.
+    _save_checkpoint_meta(checkpoint_path, ckpt_key)
     _q_r, _networks, history, trainer = train_bushworld_phase2(
         env,
         list(env.human_agent_indices),
