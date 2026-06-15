@@ -15,9 +15,9 @@ metadata:
 # Map encoding: Ro = robot, Hu = human, integer = bush density.
 # Cells occupied by a player use the bush density given by `fill_density`.
 map: |
-  1 1 1 1 1 1 1
-  Hu 1 Ro 1 1 1 Hu
-  1 1 1 1 1 1 1
+  01 01 01 01 01 01 01
+  Hu 01 Ro 01 01 01 Hu
+  01 01 01 01 01 01 01
 
 B: 1
 max_steps: 12
