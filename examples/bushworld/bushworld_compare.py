@@ -453,7 +453,8 @@ def main():
         type=float,
         default=None,
         help="Optional epsilon-greedy exploration used only during rollout "
-             "movies/evaluation. Default: 0.05 for --method neural, 0.0 otherwise.",
+             "movies/evaluation to avoid frozen final trajectories from saved "
+             "neural policies. Default: 0.05 for --method neural, 0.0 otherwise.",
     )
     args = parser.parse_args()
 
@@ -604,6 +605,13 @@ def main():
 
     # --- Rollouts and movies ---------------------------------------------- #
     print("\n=== Rollouts ===")
+    rollout_robot_epsilon = (
+        args.rollout_robot_epsilon
+        if args.rollout_robot_epsilon is not None
+        else (0.05 if resolved == "neural" else 0.0)
+    )
+    if rollout_robot_epsilon > 0.0:
+        print(f"  rollout robot epsilon: {rollout_robot_epsilon:.3f}")
     bi_summary = None
     if bi_policy is not None:
         bi_summary = run_rollouts(
@@ -615,11 +623,7 @@ def main():
         env_components_fn, reloaded_policy,
         n=args.rollouts, base_seed=args.seed + 1000, output_dir=args.output_dir,
         tag=f"learned_{resolved}", make_movies=make_movies, movie_ext=args.movie_format,
-        robot_epsilon=(
-            args.rollout_robot_epsilon
-            if args.rollout_robot_epsilon is not None
-            else (0.05 if resolved == "neural" else 0.0)
-        ),
+        robot_epsilon=rollout_robot_epsilon,
     )
 
     # --- Optional extra rollouts from the saved final policy --------------- #
@@ -632,11 +636,7 @@ def main():
             n=args.extra_rollouts, base_seed=args.seed + 2000,
             output_dir=args.output_dir, tag=f"extra_{resolved}",
             make_movies=make_movies, movie_ext=args.movie_format,
-            robot_epsilon=(
-                args.rollout_robot_epsilon
-                if args.rollout_robot_epsilon is not None
-                else (0.05 if resolved == "neural" else 0.0)
-            ),
+            robot_epsilon=rollout_robot_epsilon,
         )
 
     print("\nDone.")
