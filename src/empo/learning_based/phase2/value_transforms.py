@@ -244,9 +244,11 @@ def compute_policy_from_z(
     eps: float = 1e-8
 ) -> torch.Tensor:
     """
-    Compute robot policy from z-values using power-law softmax.
+    Compute robot policy from z-values using power-law softmax (eq. 5).
     
-    The policy is π ∝ |Q_r|^{β_r} = (-Q_r)^{β_r} = z^{-ηξβ_r}.
+    The policy is π ∝ (-Q_r)^{-β_r} = |Q_r|^{-β_r} = z^{+ηξβ_r}, since
+    |Q_r| = z^{-ηξ}. Higher value (smaller |Q_r|, i.e. larger z) gets higher
+    probability, matching the backward-induction reference.
     
     This is numerically stable because we work with log(z) rather than
     computing the huge Q-values directly.
@@ -268,8 +270,8 @@ def compute_policy_from_z(
     # Clamp z away from 0 to avoid -inf in log
     z_clamped = z.clamp(min=eps)
     
-    # log(|Q|^{β_r}) = log(z^{-ηξ·β_r}) = -ηξβ_r * log(z)
-    log_unnorm_policy = -eta * xi * beta_r * torch.log(z_clamped)
+    # log(|Q|^{-β_r}) = log(z^{+ηξ·β_r}) = +ηξβ_r * log(z)
+    log_unnorm_policy = eta * xi * beta_r * torch.log(z_clamped)
     
     # Softmax for proper probabilities
     return F.softmax(log_unnorm_policy, dim=-1)
@@ -303,7 +305,7 @@ def get_policy_log_probs_from_z(
         return torch.full_like(z, -torch.log(torch.tensor(n_actions, dtype=z.dtype)))
     
     z_clamped = z.clamp(min=eps)
-    log_unnorm_policy = -eta * xi * beta_r * torch.log(z_clamped)
+    log_unnorm_policy = eta * xi * beta_r * torch.log(z_clamped)
     
     # log_softmax for numerical stability
     return F.log_softmax(log_unnorm_policy, dim=-1)

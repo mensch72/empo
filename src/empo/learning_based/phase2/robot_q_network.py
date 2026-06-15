@@ -194,7 +194,7 @@ class BaseRobotQNetwork(nn.Module, ABC):
         
         When use_z_space=True and z_values is provided, computes policy directly
         from z-values for numerical stability:
-            π ∝ z^{-ηξβ_r}  (since |Q| = z^{-ηξ})
+            π ∝ z^{+ηξβ_r}  (since |Q| = z^{-ηξ} and π ∝ |Q|^{-β_r})
         
         Args:
             q_values: Tensor of shape (..., num_action_combinations), all negative.
@@ -224,10 +224,10 @@ class BaseRobotQNetwork(nn.Module, ABC):
         
         # Use z-values if provided (more numerically stable for large |Q|)
         if z_values is not None:
-            # π ∝ |Q|^{β_r} = (z^{-ηξ})^{β_r} = z^{-ηξβ_r}
-            # log π ∝ -ηξβ_r * log(z)
+            # π ∝ |Q|^{-β_r} = (z^{-ηξ})^{-β_r} = z^{+ηξβ_r}
+            # log π ∝ +ηξβ_r * log(z)
             z_clamped = z_values.clamp(min=1e-10)
-            exponent = -self.eta * self.xi * beta_r
+            exponent = self.eta * self.xi * beta_r
             log_unnormalized = exponent * torch.log(z_clamped)
             
             # Subtract max for numerical stability
