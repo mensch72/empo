@@ -800,6 +800,9 @@ def create_phase2_networks(
             dropout=config.q_r_dropout,
             state_encoder=shared_state_encoder,       # From V_h^e (real or null)
             own_state_encoder=q_r_own_state_encoder,  # OWN (trained with Q_r)
+            use_z_space=config.use_z_space_transform,
+            eta=config.eta,
+            xi=config.xi,
         ).to(device)
     else:
         from empo.learning_based.phase2.lookup import LookupTableRobotQNetwork
@@ -874,6 +877,9 @@ def create_phase2_networks(
                 dropout=config.v_r_dropout,
                 state_encoder=shared_state_encoder,       # SHARED (used detached)
                 own_state_encoder=v_r_own_state_encoder,  # OWN (trained with V_r)
+                use_z_space=config.use_z_space_transform,
+                eta=config.eta,
+                xi=config.xi,
             ).to(device)
         else:
             from empo.learning_based.phase2.lookup import LookupTableRobotValueNetwork

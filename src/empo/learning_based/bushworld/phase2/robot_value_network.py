@@ -29,8 +29,11 @@ class BushWorldRobotValueNetwork(BaseRobotValueNetwork):
         gamma_r: float = 0.99,
         use_encoders: bool = True,
         state_encoder: Optional[BushWorldStateEncoder] = None,
+        use_z_space: bool = False,
+        eta: float = 1.1,
+        xi: float = 1.0,
     ):
-        super().__init__(gamma_r=gamma_r)
+        super().__init__(gamma_r=gamma_r, use_z_space=use_z_space, eta=eta, xi=xi)
         self.grid_height = grid_height
         self.grid_width = grid_width
         self.B = B
@@ -84,5 +87,8 @@ class BushWorldRobotValueNetwork(BaseRobotValueNetwork):
             "hidden_dim": self.hidden_dim,
             "gamma_r": self.gamma_r,
             "use_encoders": self.use_encoders,
+            "use_z_space": self.use_z_space,
+            "eta": self.eta,
+            "xi": self.xi,
             "state_encoder_config": self.state_encoder.get_config(),
         }

@@ -788,22 +788,18 @@ def build_config(args, resolved: str) -> Phase2Config:
         n = args.lookup_iterations
         return Phase2Config(
             use_lookup_tables=True,
-            use_lookup_q_r=True,
-            use_lookup_v_h_e=True,
-            use_lookup_x_h=True,
-            use_lookup_u_r=True,
-            use_lookup_v_r=True,
-            u_r_use_network=True,
-            v_r_use_network=True,
+            u_r_use_network=False,
+            v_r_use_network=False,
+            x_h_use_network=True,
             lookup_use_adaptive_lr=True,
             use_count_based_curiosity=True,
             warmup_v_h_e_steps=max(1, n // 10),
             warmup_x_h_steps=max(1, n // 10),
-            warmup_u_r_steps=max(1, n // 10),
+            warmup_u_r_steps=0,
             warmup_q_r_steps=max(1, n // 10),
             beta_r_rampup_steps=max(1, n // 10),
             num_training_steps=n,
-            buffer_size=1000,
+            buffer_size=2000,
             batch_size=64,
             epsilon_r_decay_steps=max(1, n // 2),
             **common,
@@ -817,6 +813,8 @@ def build_config(args, resolved: str) -> Phase2Config:
         x_h_use_network=True,
         hidden_dim=64,
         goal_feature_dim=32,
+        use_rnd=True,
+        use_z_space_transform=True,
         warmup_v_h_e_steps=max(1, n // 10),
         warmup_x_h_steps=max(1, n // 10),
         warmup_u_r_steps=0,
@@ -869,7 +867,7 @@ def main():
     parser.add_argument("--xi", type=float, default=1.0)
     parser.add_argument("--eta", type=float, default=1.0)
     # Learner controls.
-    parser.add_argument("--neural-iterations", type=int, default=600,
+    parser.add_argument("--neural-iterations", type=int, default=3000,
                         help="Training steps for the neural learner.")
     parser.add_argument("--lookup-iterations", type=int, default=600,
                         help="Training steps for the lookup-table learner.")

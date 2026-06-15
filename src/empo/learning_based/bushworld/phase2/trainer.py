@@ -328,6 +328,9 @@ def create_phase2_networks(
             hidden_dim=hidden_dim,
             beta_r=config.beta_r,
             use_encoders=use_encoders,
+            use_z_space=config.use_z_space_transform,
+            eta=config.eta,
+            xi=config.xi,
         ).to(device)
     else:
         from empo.learning_based.phase2.lookup import LookupTableRobotQNetwork
@@ -403,6 +406,9 @@ def create_phase2_networks(
                 hidden_dim=hidden_dim,
                 gamma_r=config.gamma_r,
                 use_encoders=use_encoders,
+                use_z_space=config.use_z_space_transform,
+                eta=config.eta,
+                xi=config.xi,
             ).to(device)
         else:
             from empo.learning_based.phase2.lookup import LookupTableRobotValueNetwork

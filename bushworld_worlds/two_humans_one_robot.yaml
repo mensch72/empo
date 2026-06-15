@@ -14,7 +14,7 @@ metadata:
 map: |
   Hu 01 Ro 01 01 01 Hu
 
-B: 1
+B: 10
 max_steps: 12
 fill_density: 1
 

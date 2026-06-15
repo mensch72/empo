@@ -73,6 +73,9 @@ class BushWorldRobotPolicy(RobotPolicy):
                     beta_r=self.beta_r,
                     feasible_range=config.get("feasible_range"),
                     use_encoders=config.get("use_encoders", True),
+                    use_z_space=config.get("use_z_space", False),
+                    eta=config.get("eta", 1.1),
+                    xi=config.get("xi", 1.0),
                 )
                 self.q_network.load_state_dict(checkpoint["q_r"])
         else:
