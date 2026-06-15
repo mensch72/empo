@@ -217,7 +217,7 @@ def rollout(
     while not env.is_terminal(state):
         if robot_epsilon > 0.0 and rng.random() < robot_epsilon:
             robot_profile = tuple(
-                int(rng.integers(num_actions)) for _ in env.robot_agent_indices
+                rng.integers(num_actions) for _ in env.robot_agent_indices
             )
         else:
             robot_profile = robot_policy.sample(state)
