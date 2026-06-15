@@ -73,23 +73,40 @@ class BushWorldPhase2Trainer(BasePhase2Trainer):
     # ------------------------------------------------------------------ #
     # Cache management
     # ------------------------------------------------------------------ #
+    def _iter_unique_encoders(self):
+        """Yield ``(name, encoder)`` for all unique encoders used by Phase 2 nets."""
+        seen_encoder_ids = set()
+        for network_name in ("q_r", "v_h_e", "x_h", "u_r", "v_r"):
+            network = getattr(self.networks, network_name, None)
+            if network is None:
+                continue
+            for encoder_name in ("state_encoder", "goal_encoder", "agent_encoder"):
+                encoder = getattr(network, encoder_name, None)
+                if encoder is None:
+                    continue
+                encoder_id = id(encoder)
+                if encoder_id in seen_encoder_ids:
+                    continue
+                seen_encoder_ids.add(encoder_id)
+                yield f"{network_name}.{encoder_name}", encoder
+
     def clear_caches(self):
-        """Clear encoder caches on the canonical (V_h^e) network's encoders."""
-        self.networks.v_h_e.state_encoder.clear_cache()
-        self.networks.v_h_e.goal_encoder.clear_cache()
-        self.networks.v_h_e.agent_encoder.clear_cache()
+        """Clear encoder caches across all instantiated BushWorld Phase 2 networks."""
+        for _name, encoder in self._iter_unique_encoders():
+            if hasattr(encoder, "clear_cache"):
+                encoder.clear_cache()
 
     def get_cache_stats(self) -> Dict[str, Tuple[int, int]]:
-        return {
-            "state": self.networks.v_h_e.state_encoder.get_cache_stats(),
-            "goal": self.networks.v_h_e.goal_encoder.get_cache_stats(),
-            "agent": self.networks.v_h_e.agent_encoder.get_cache_stats(),
-        }
+        stats: Dict[str, Tuple[int, int]] = {}
+        for name, encoder in self._iter_unique_encoders():
+            if hasattr(encoder, "get_cache_stats"):
+                stats[name] = encoder.get_cache_stats()
+        return stats
 
     def reset_cache_stats(self):
-        self.networks.v_h_e.state_encoder.reset_cache_stats()
-        self.networks.v_h_e.goal_encoder.reset_cache_stats()
-        self.networks.v_h_e.agent_encoder.reset_cache_stats()
+        for _name, encoder in self._iter_unique_encoders():
+            if hasattr(encoder, "reset_cache_stats"):
+                encoder.reset_cache_stats()
 
     # ------------------------------------------------------------------ #
     # RND feature hooks

@@ -202,8 +202,7 @@ def rollout(
     """
     rng = np.random.default_rng(seed)
     env.reset(seed=seed)
-    state = env.initial_state()
-    env.set_state(state)
+    state = env.get_state()
     robot_policy.reset(env)
 
     human_goals = sample_human_goals(env, goal_sampler, rng)

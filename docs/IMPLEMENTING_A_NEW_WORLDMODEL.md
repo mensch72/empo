@@ -126,8 +126,9 @@ Render the current state to an RGB array and provide a movie writer. BushWorld's
 - Uses a non-interactive matplotlib backend (`Agg`) so it works headless.
 - Supports an `annotation_text` side panel and `goal_overlays` (dashed outlines).
 - `save_movie(frames, path)` writes `.gif` (via Pillow, no extra deps) or `.mp4`
-  (via `imageio[ffmpeg]`). Prefer `.gif` as the default in examples so movies work
-  without ffmpeg.
+  (via `imageio[ffmpeg]`). Prefer `.mp4` as the default in examples for easier
+  scrubbing/playback, with `.gif` as a dependency-free fallback when ffmpeg is
+  unavailable.
 
 Delegate from `env.render(...)` to `render_frame(...)` so callers use the gym API.
 
