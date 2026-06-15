@@ -1,10 +1,10 @@
 """
-BushWorld-specific neural network encoders and Phase 2 implementations.
+BushWorld-specific neural network encoders and Phase 1 / Phase 2 implementations.
 
 This subpackage is the BushWorld analogue of
 :mod:`empo.learning_based.multigrid`. It contains the encoders that convert a
-BushWorld state into neural-network inputs, plus (in the ``phase2`` subpackage)
-the Phase 2 networks and trainer that reuse the shared Phase 2 infrastructure.
+BushWorld state into neural-network inputs, plus subpackages that reuse the
+shared training infrastructure (no new training algorithms) for both phases.
 
 Main components:
     - constants: Channel indices and feature sizes.
@@ -12,7 +12,14 @@ Main components:
     - state_encoder: ``BushWorldStateEncoder``.
     - goal_encoder: ``BushWorldGoalEncoder`` (cell and rectangle goals).
     - agent_encoder: ``BushWorldAgentEncoder``.
-    - phase2: Phase 2 networks, trainer, and deployable robot policy.
+    - phase1: Phase 1 (human policy prior) DQN networks, neural human policy
+      prior, and trainer (reuses the generic Phase 1 ``Trainer``).
+    - phase1_ppo: PPO-based Phase 1 env wrapper and network factory (reuses the
+      shared ``Phase1PPOEnv`` / ``GoalConditionedActorCritic``).
+    - phase2: Phase 2 (robot policy) networks, trainer, and deployable robot
+      policy.
+    - phase2_ppo: PPO-based Phase 2 env wrapper and network factory (reuses the
+      shared ``EMPOWorldModelEnv`` / ``EMPOActorCritic`` infrastructure).
 """
 
 from .agent_encoder import BushWorldAgentEncoder
@@ -34,3 +41,4 @@ __all__ = [
     "BushWorldGoalEncoder",
     "BushWorldAgentEncoder",
 ]
+
