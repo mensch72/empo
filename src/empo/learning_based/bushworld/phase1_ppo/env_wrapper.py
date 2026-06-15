@@ -21,6 +21,7 @@ import numpy as np
 import torch
 
 from empo.learning_based.phase1_ppo.env_wrapper import Phase1PPOEnv
+from empo.learning_based.bushworld.device_utils import module_device
 from empo.learning_based.bushworld.goal_encoder import BushWorldGoalEncoder
 from empo.learning_based.bushworld.state_encoder import BushWorldStateEncoder
 
@@ -80,13 +81,7 @@ class BushWorldPhase1PPOEnv(Phase1PPOEnv):
 
     def _state_to_obs(self, state: Any, goal: Any) -> np.ndarray:
         """Convert state + goal to a flat observation via the encoders."""
-        try:
-            encoder_device = next(self._state_encoder.parameters()).device
-        except StopIteration:
-            try:
-                encoder_device = next(self._state_encoder.buffers()).device
-            except StopIteration:
-                encoder_device = torch.device("cpu")
+        encoder_device = module_device(self._state_encoder)
 
         with torch.no_grad():
             state_input = self._state_encoder.tensorize_state(

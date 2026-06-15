@@ -76,8 +76,9 @@ def _make_phase1_env(env, feature_dim=32, goal_feature_dim=16, use_encoders=True
     human_idx = env.human_agent_indices[0]
     num_actions = env.action_space.n
     # All agents except the training human need a fallback policy.
+    # Each policy is called as ``policy(state, agent_idx) -> action``.
     others = {
-        idx: (lambda s, a: int(np.random.randint(num_actions)))
+        idx: (lambda state, agent_idx: int(np.random.randint(num_actions)))
         for idx in range(env.num_players)
         if idx != human_idx
     }

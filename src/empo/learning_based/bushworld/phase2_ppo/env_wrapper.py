@@ -22,6 +22,7 @@ import torch
 from gymnasium import spaces
 
 from empo.learning_based.phase2_ppo.env_wrapper import EMPOWorldModelEnv
+from empo.learning_based.bushworld.device_utils import module_device
 from empo.learning_based.bushworld.state_encoder import BushWorldStateEncoder
 
 
@@ -103,10 +104,7 @@ class BushWorldWorldModelEnv(EMPOWorldModelEnv):
         is an environment-side operation; gradients for the encoder flow
         through the auxiliary-network training path instead).
         """
-        encoder_device = next(self._state_encoder.parameters(), None)
-        encoder_device = (
-            encoder_device.device if encoder_device is not None else torch.device("cpu")
-        )
+        encoder_device = module_device(self._state_encoder)
         with torch.no_grad():
             state_t = self._state_encoder.tensorize_state(
                 state, self.world_model, device=encoder_device
