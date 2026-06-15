@@ -22,6 +22,13 @@ Usage:
     python examples/phase2/phase2_backward_induction.py --parallel  # Use parallel computation
     python examples/phase2/phase2_backward_induction.py --rollouts 20  # More rollouts
 
+Caching:
+    Backward induction results (the human policy prior and robot policy) are
+    saved to a cache file keyed by the parameters that define the problem (map,
+    beta, gamma, etc.). A later run with the same parameters restores the cached
+    policies instead of recomputing them. Use --recompute to force recomputation
+    and --no-cache to disable caching entirely.
+
 Theory Parameters (from EMPO paper):
     --beta_h    Inverse temperature for human policy (default: 10.0)
     --beta_r    Power-law concentration for robot policy (default: 100.0)
@@ -37,9 +44,12 @@ Output:
 
 import argparse
 import gc
+import hashlib
 import inspect
 import itertools
+import json
 import os
+import pickle
 import random
 import sys
 import time
@@ -676,6 +686,147 @@ def get_all_functions_from_module(module, _seen=None):
     return functions
 
 
+# =============================================================================
+# Backward Induction Result Caching
+# =============================================================================
+
+# Version tag for the cache format. Bump this if the structure of the cached
+# values changes in an incompatible way so that stale caches are ignored.
+BI_CACHE_VERSION = 1
+
+
+def build_problem_cache_key(
+    *,
+    world_path: Optional[str],
+    max_steps: Optional[int],
+    actions_name: Optional[str],
+    human_idx: Optional[int],
+    robot_idx: Optional[int],
+    beta_h: float,
+    beta_r: float,
+    gamma_h: float,
+    gamma_r: float,
+    zeta: float,
+    xi: float,
+    eta: float,
+    terminal_Vr: float,
+    goal_weights: Optional[Dict[Tuple[int, int], float]],
+    optimistic: bool,
+) -> Tuple[Dict[str, Any], str]:
+    """
+    Build a cache key that uniquely identifies a backward-induction problem.
+
+    Only parameters that change the computed policies are included (the map,
+    horizon, agent roles, the theory parameters beta/gamma/zeta/xi/eta, the
+    terminal robot value, the goal weights and the optimistic flag). Parameters
+    that only affect rollouts or how the computation is carried out (seed,
+    number of rollouts, parallel/workers, profiling, output paths, etc.) are
+    deliberately excluded so that cached results can be reused across them.
+
+    Args:
+        world_path: Path to the world YAML (the "map"), or None for trivial world.
+        max_steps: Resolved horizon (env.max_steps) for the episode.
+        actions_name: Name of the action class in use.
+        human_idx: Overridden human agent index, if any.
+        robot_idx: Overridden robot agent index, if any.
+        beta_h, beta_r, gamma_h, gamma_r, zeta, xi, eta: Theory parameters.
+        terminal_Vr: Robot value at terminal states.
+        goal_weights: Optional goal sampling weights.
+        optimistic: Whether Phase 1 uses best-case over robot actions.
+
+    Returns:
+        Tuple of (key_dict, digest) where key_dict is a JSON-serializable dict
+        describing the problem and digest is a short stable hash of it.
+    """
+    key_dict: Dict[str, Any] = {
+        'version': BI_CACHE_VERSION,
+        'world': world_path if world_path is not None else 'trivial',
+        'max_steps': max_steps,
+        'actions': actions_name,
+        'human_idx': human_idx,
+        'robot_idx': robot_idx,
+        'beta_h': beta_h,
+        'beta_r': beta_r,
+        'gamma_h': gamma_h,
+        'gamma_r': gamma_r,
+        'zeta': zeta,
+        'xi': xi,
+        'eta': eta,
+        'terminal_Vr': terminal_Vr,
+        # Sort items for a deterministic, order-independent representation.
+        'goal_weights': (
+            sorted((list(k), v) for k, v in goal_weights.items())
+            if goal_weights else None
+        ),
+        'optimistic': optimistic,
+    }
+    key_str = json.dumps(key_dict, sort_keys=True, default=str)
+    digest = hashlib.sha256(key_str.encode('utf-8')).hexdigest()[:16]
+    return key_dict, digest
+
+
+def load_cached_policies(cache_file: str, key_dict: Dict[str, Any]):
+    """
+    Load backward-induction value tables from a cache file.
+
+    The cached problem key must match ``key_dict`` exactly, otherwise the cache
+    is treated as a miss (so we only ever restore policies for the same problem).
+
+    Args:
+        cache_file: Path to the cache file.
+        key_dict: Expected problem key the cache must match.
+
+    Returns:
+        Tuple of (human_values, robot_values) on a hit, or None on a miss.
+    """
+    try:
+        with open(cache_file, 'rb') as f:
+            cached = pickle.load(f)
+    except Exception as e:  # noqa: BLE001 - cache is best-effort
+        print(f"  Could not read cache file ({e}); will recompute.")
+        return None
+
+    if cached.get('key_dict') != key_dict:
+        print("  Cache key does not match this problem; will recompute.")
+        return None
+
+    return cached.get('human_values'), cached.get('robot_values')
+
+
+def save_cached_policies(
+    cache_file: str,
+    key_dict: Dict[str, Any],
+    human_values: dict,
+    robot_values: dict,
+) -> None:
+    """
+    Save backward-induction value tables to a cache file, keyed by the problem.
+
+    Saving is best-effort: failures are reported but do not abort the run.
+
+    Args:
+        cache_file: Path to the cache file to write.
+        key_dict: Problem key describing the parameters that produced the values.
+        human_values: TabularHumanPolicyPrior.values for the human policy prior.
+        robot_values: TabularRobotPolicy.values for the robot policy.
+    """
+    payload = {
+        'key_dict': key_dict,
+        'human_values': human_values,
+        'robot_values': robot_values,
+    }
+    try:
+        os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+        # Write atomically via a temporary file to avoid corrupt caches.
+        tmp_file = f"{cache_file}.tmp"
+        with open(tmp_file, 'wb') as f:
+            pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(tmp_file, cache_file)
+        print(f"  Saved backward induction results to cache: {cache_file}")
+    except Exception as e:  # noqa: BLE001 - cache is best-effort
+        print(f"  WARNING: Could not save cache file ({e}); continuing.")
+
+
 def main(
     max_steps: Optional[int] = None,
     num_rollouts: int = 20,
@@ -701,6 +852,9 @@ def main(
     actions_set=None,
     optimistic: bool = False,
     human_always_toggles: bool = False,
+    cache: bool = True,
+    cache_dir: Optional[str] = None,
+    recompute: bool = False,
 ):
     """
     Run Phase 2 backward induction demo.
@@ -733,6 +887,12 @@ def main(
             instead of worst-case (min).
         human_always_toggles: If True, during rollouts the human always toggles
             any toggleable object (button, switch, door) in front of it.
+        cache: If True, save computed backward induction results to a cache file
+            and restore them on a later run with the same problem parameters.
+        cache_dir: Directory for the cache file (defaults to a 'bi_cache'
+            subdirectory of output_dir).
+        recompute: If True, ignore any existing cache and recompute the policies
+            (the freshly computed results are still written back to the cache).
     """
     # Set random seeds
     random.seed(seed)
@@ -868,86 +1028,20 @@ def main(
     memory_tracker.checkpoint("After environment setup", {"env": env, "goal_generator": goal_generator})
     
     # =========================================================================
-    # Phase 1: Compute Human Policy Prior
+    # Backward induction result cache
     # =========================================================================
-    print("=" * 70)
-    print("Phase 1: Computing Human Policy Prior")
-    print("=" * 70)
-    print(f"  beta_h (inverse temperature): {beta_h}")
-    print(f"  gamma_h (discount factor): {gamma_h}")
-    if parallel:
-        print(f"  Mode: parallel ({num_workers or 'auto'} workers)")
-    else:
-        print("  Mode: sequential")
-    print()
-    
-    t0 = time.time()
-    if profiler:
-        profiler.enable()
-    human_policy_prior = compute_human_policy_prior(
-        world_model=env,
-        human_agent_indices=env.human_agent_indices,
-        possible_goal_generator=goal_generator,
-        believed_others_policy=None,  # Uniform prior for others
+    # Build a cache key from the parameters that define the problem (map, agent
+    # roles, horizon, theory parameters, goal weights, optimistic flag). Results
+    # are only restored when this key matches exactly, so we never reuse policies
+    # computed for a different problem.
+    actions_name = getattr(env.actions, '__name__', str(env.actions))
+    cache_key_dict, cache_digest = build_problem_cache_key(
+        world_path=world_path,
+        max_steps=env.max_steps,
+        actions_name=actions_name,
+        human_idx=human_idx,
+        robot_idx=robot_idx,
         beta_h=beta_h,
-        gamma_h=gamma_h,
-        parallel=parallel,
-        num_workers=num_workers,
-        use_disk_slicing=True,  # Enable disk-based caching (auto-detects /dev/shm)
-        level_fct=lambda state: state[0],  # Extract timestep from MultiGrid state
-#        archive_dir=output_dir,  # Save archived values to output directory
-        optimistic=optimistic,
-    )
-    t1 = time.time()
-    
-    print(f"Human policy prior computed in {t1 - t0:.2f} seconds")
-    print(f"  States in policy: {len(human_policy_prior.values)}")
-    
-    # Memory checkpoint: After Phase 1
-    memory_tracker.checkpoint(
-        "After Phase 1 (peak during computation may be higher)",
-        {
-            "human_policy_prior.values": human_policy_prior.values,
-            "human_policy_prior": human_policy_prior,
-            "env": env,
-            "goal_generator": goal_generator,
-        }
-    )
-    
-    # Detailed memory profile after Phase 1
-    print_memory_profile(
-        "After Phase 1",
-        {
-            "human_policy_prior.values": human_policy_prior.values,
-            "human_policy_prior (object)": human_policy_prior,
-        },
-        top_n=10
-    )
-    
-    # =========================================================================
-    # Phase 2: Compute Robot Policy
-    # =========================================================================
-    print("=" * 70)
-    print("Phase 2: Computing Robot Policy")
-    print("=" * 70)
-    print(f"  beta_r (power-law concentration): {beta_r}")
-    print(f"  gamma_r (discount factor): {gamma_r}")
-    print(f"  zeta (risk aversion): {zeta}")
-    print(f"  xi (inter-human inequality aversion): {xi}")
-    print(f"  eta (intertemporal inequality aversion): {eta}")
-    if parallel:
-        print(f"  Mode: parallel ({num_workers or 'auto'} workers)")
-    else:
-        print("  Mode: sequential")
-    print()
-    
-    t0 = time.time()
-    robot_policy = compute_robot_policy(
-        world_model=env,
-        human_agent_indices=env.human_agent_indices,
-        robot_agent_indices=env.robot_agent_indices,
-        possible_goal_generator=goal_generator,
-        human_policy_prior=human_policy_prior,
         beta_r=beta_r,
         gamma_h=gamma_h,
         gamma_r=gamma_r,
@@ -955,47 +1049,180 @@ def main(
         xi=xi,
         eta=eta,
         terminal_Vr=terminal_Vr,
-        parallel=parallel,
-        num_workers=num_workers,
-        use_disk_slicing=True,  # Enable disk slicing (matches Phase 1)
-        level_fct=lambda state: state[0],  # Extract timestep from MultiGrid state
-#        archive_dir=output_dir,  # Save archived values to output directory
+        goal_weights=goal_weights,
+        optimistic=optimistic,
     )
-    if profiler:
-        profiler.disable()
-    t1 = time.time()
+    if cache:
+        cache_dir_resolved = cache_dir if cache_dir is not None else os.path.join(output_dir, 'bi_cache')
+        cache_file = os.path.join(cache_dir_resolved, f'bi_cache_{cache_digest}.pkl')
+    else:
+        cache_file = None
     
-    print(f"Robot policy computed in {t1 - t0:.2f} seconds")
-    print(f"  States in policy: {len(robot_policy.values)}")
-    print()
+    human_policy_prior = None
+    robot_policy = None
+    loaded_from_cache = False
+    if cache and not recompute and cache_file is not None and os.path.exists(cache_file):
+        print("=" * 70)
+        print("Restoring backward induction results from cache")
+        print("=" * 70)
+        print(f"  Cache file: {cache_file}")
+        restored = load_cached_policies(cache_file, cache_key_dict)
+        if restored is not None:
+            human_values, robot_values = restored
+            human_policy_prior = TabularHumanPolicyPrior(
+                env, env.human_agent_indices, goal_generator, human_values
+            )
+            robot_policy = TabularRobotPolicy(
+                env, env.robot_agent_indices, robot_values
+            )
+            loaded_from_cache = True
+            print(f"  Restored human policy prior: {len(human_policy_prior.values)} states")
+            print(f"  Restored robot policy: {len(robot_policy.values)} states")
+            print()
+    elif cache and recompute and cache_file is not None and os.path.exists(cache_file):
+        print("Cache exists but --recompute was requested; recomputing.")
+        print()
     
-    # Memory checkpoint: After Phase 2
-    memory_tracker.checkpoint(
-        "After Phase 2 (peak during computation may be higher)",
-        {
-            "robot_policy.values": robot_policy.values,
-            "robot_policy": robot_policy,
-            "human_policy_prior.values": human_policy_prior.values,
-            "human_policy_prior": human_policy_prior,
-            "env": env,
-            "goal_generator": goal_generator,
-        }
-    )
-    
-    # Print peak memory summary
-    memory_tracker.print_peak_summary(top_n=20)
-    memory_tracker.print_timeline()
-    
-    # Detailed memory profile after Phase 2
-    print_memory_profile(
-        "After Phase 2",
-        {
-            "robot_policy.values": robot_policy.values,
-            "robot_policy (object)": robot_policy,
-            "human_policy_prior.values": human_policy_prior.values,
-        },
-        top_n=15
-    )
+    if not loaded_from_cache:
+        # =====================================================================
+        # Phase 1: Compute Human Policy Prior
+        # =====================================================================
+        print("=" * 70)
+        print("Phase 1: Computing Human Policy Prior")
+        print("=" * 70)
+        print(f"  beta_h (inverse temperature): {beta_h}")
+        print(f"  gamma_h (discount factor): {gamma_h}")
+        if parallel:
+            print(f"  Mode: parallel ({num_workers or 'auto'} workers)")
+        else:
+            print("  Mode: sequential")
+        print()
+        
+        t0 = time.time()
+        if profiler:
+            profiler.enable()
+        human_policy_prior = compute_human_policy_prior(
+            world_model=env,
+            human_agent_indices=env.human_agent_indices,
+            possible_goal_generator=goal_generator,
+            believed_others_policy=None,  # Uniform prior for others
+            beta_h=beta_h,
+            gamma_h=gamma_h,
+            parallel=parallel,
+            num_workers=num_workers,
+            use_disk_slicing=True,  # Enable disk-based caching (auto-detects /dev/shm)
+            level_fct=lambda state: state[0],  # Extract timestep from MultiGrid state
+    #        archive_dir=output_dir,  # Save archived values to output directory
+            optimistic=optimistic,
+        )
+        t1 = time.time()
+        
+        print(f"Human policy prior computed in {t1 - t0:.2f} seconds")
+        print(f"  States in policy: {len(human_policy_prior.values)}")
+        
+        # Memory checkpoint: After Phase 1
+        memory_tracker.checkpoint(
+            "After Phase 1 (peak during computation may be higher)",
+            {
+                "human_policy_prior.values": human_policy_prior.values,
+                "human_policy_prior": human_policy_prior,
+                "env": env,
+                "goal_generator": goal_generator,
+            }
+        )
+        
+        # Detailed memory profile after Phase 1
+        print_memory_profile(
+            "After Phase 1",
+            {
+                "human_policy_prior.values": human_policy_prior.values,
+                "human_policy_prior (object)": human_policy_prior,
+            },
+            top_n=10
+        )
+        
+        # =====================================================================
+        # Phase 2: Compute Robot Policy
+        # =====================================================================
+        print("=" * 70)
+        print("Phase 2: Computing Robot Policy")
+        print("=" * 70)
+        print(f"  beta_r (power-law concentration): {beta_r}")
+        print(f"  gamma_r (discount factor): {gamma_r}")
+        print(f"  zeta (risk aversion): {zeta}")
+        print(f"  xi (inter-human inequality aversion): {xi}")
+        print(f"  eta (intertemporal inequality aversion): {eta}")
+        if parallel:
+            print(f"  Mode: parallel ({num_workers or 'auto'} workers)")
+        else:
+            print("  Mode: sequential")
+        print()
+        
+        t0 = time.time()
+        robot_policy = compute_robot_policy(
+            world_model=env,
+            human_agent_indices=env.human_agent_indices,
+            robot_agent_indices=env.robot_agent_indices,
+            possible_goal_generator=goal_generator,
+            human_policy_prior=human_policy_prior,
+            beta_r=beta_r,
+            gamma_h=gamma_h,
+            gamma_r=gamma_r,
+            zeta=zeta,
+            xi=xi,
+            eta=eta,
+            terminal_Vr=terminal_Vr,
+            parallel=parallel,
+            num_workers=num_workers,
+            use_disk_slicing=True,  # Enable disk slicing (matches Phase 1)
+            level_fct=lambda state: state[0],  # Extract timestep from MultiGrid state
+    #        archive_dir=output_dir,  # Save archived values to output directory
+        )
+        if profiler:
+            profiler.disable()
+        t1 = time.time()
+        
+        print(f"Robot policy computed in {t1 - t0:.2f} seconds")
+        print(f"  States in policy: {len(robot_policy.values)}")
+        print()
+        
+        # Memory checkpoint: After Phase 2
+        memory_tracker.checkpoint(
+            "After Phase 2 (peak during computation may be higher)",
+            {
+                "robot_policy.values": robot_policy.values,
+                "robot_policy": robot_policy,
+                "human_policy_prior.values": human_policy_prior.values,
+                "human_policy_prior": human_policy_prior,
+                "env": env,
+                "goal_generator": goal_generator,
+            }
+        )
+        
+        # Print peak memory summary
+        memory_tracker.print_peak_summary(top_n=20)
+        memory_tracker.print_timeline()
+        
+        # Detailed memory profile after Phase 2
+        print_memory_profile(
+            "After Phase 2",
+            {
+                "robot_policy.values": robot_policy.values,
+                "robot_policy (object)": robot_policy,
+                "human_policy_prior.values": human_policy_prior.values,
+            },
+            top_n=15
+        )
+        
+        # Save the freshly computed results to the problem-keyed cache.
+        if cache and cache_file is not None:
+            save_cached_policies(
+                cache_file,
+                cache_key_dict,
+                human_policy_prior.values,
+                robot_policy.values,
+            )
+            print()
     
     # Show robot policy for initial state
     initial_state = env.get_state()
@@ -1320,6 +1547,17 @@ if __name__ == "__main__":
                         help='During rollouts, the human always toggles any '
                              'toggleable object (button, switch, door) in front of it')
     
+    # Caching options for backward induction results
+    parser.add_argument('--no-cache', action='store_true',
+                        help='Disable saving/restoring backward induction results '
+                             '(by default results are cached per problem)')
+    parser.add_argument('--cache-dir', type=str, default=None,
+                        help='Directory for the backward induction cache file '
+                             '(default: a "bi_cache" subdirectory of the output directory)')
+    parser.add_argument('--recompute', action='store_true',
+                        help='Ignore any existing cache and recompute the policies '
+                             '(results are still written back to the cache)')
+    
     args = parser.parse_args()
     
     # Resolve actions class if specified
@@ -1371,4 +1609,7 @@ if __name__ == "__main__":
         actions_set=actions_set,
         optimistic=args.optimistic,
         human_always_toggles=args.human_always_toggles,
+        cache=not args.no_cache,
+        cache_dir=args.cache_dir,
+        recompute=args.recompute,
     )
