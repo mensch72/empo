@@ -55,8 +55,12 @@ Movies default to ``.mp4`` (easy to pause/scrub frame by frame); pass
 
 import argparse
 import glob
+import hashlib
 import os
+import pickle
 import sys
+import time
+from contextlib import contextmanager
 from typing import Dict, List, Optional, Tuple
 
 # Seed offset used when drawing ensemble worlds for rollouts (kept distinct from
@@ -74,11 +78,13 @@ for _p in ("src", "vendor/multigrid", "vendor/ai_transport", "multigrid_worlds")
         sys.path.insert(0, _full)
 
 from empo.backward_induction.phase2 import compute_robot_policy  # noqa: E402
+from empo.backward_induction.phase2 import TabularRobotPolicy  # noqa: E402
 from empo.bushworld import (  # noqa: E402
     ACTION_NAMES,
     ShortestPathHumanPolicyPrior,
     load_bushworld,
 )
+from empo.bushworld.env import BushWorld  # noqa: E402
 from empo.learning_based.phase2.config import Phase2Config  # noqa: E402
 from empo.learning_based.phase2.world_model_factory import (  # noqa: E402
     EnsembleWorldModelFactory,
@@ -118,6 +124,279 @@ class _BushWorldEnsembleLoader:
         self._world_paths = state["_world_paths"]
         self._seed = state["_seed"]
         self._rng = np.random.default_rng(self._seed)
+
+
+class _BushWorldRandomGenerator:
+    """Picklable callable that *generates* a fresh random BushWorld each call.
+
+    Unlike :class:`_BushWorldEnsembleLoader` (which picks a random YAML file from
+    a fixed list), this generator synthesises a brand-new map every time it is
+    called: it draws random distinct player positions and random per-cell bush
+    densities in ``[0, B]``. Grid size and player counts stay fixed so the
+    learned networks (which assume a fixed observation shape) remain valid across
+    episodes.
+
+    Used as the factory for
+    :class:`~empo.learning_based.phase2.world_model_factory.EnsembleWorldModelFactory`
+    so the trainer draws a freshly generated world each episode, and for the
+    rollout world provider so each rollout movie shows a new random map.
+
+    It stores only plain data plus a seed (the RNG is rebuilt on unpickling), so
+    it stays picklable for async actor processes.
+    """
+
+    def __init__(
+        self,
+        width: int,
+        height: int,
+        num_robots: int,
+        num_humans: int,
+        *,
+        B: int = 1,
+        max_steps: int = 12,
+        fill_density: Optional[int] = None,
+        render_tile_size: int = 48,
+        seed: int = 0,
+    ):
+        self._width = int(width)
+        self._height = int(height)
+        self._num_robots = int(num_robots)
+        self._num_humans = int(num_humans)
+        self._B = int(B)
+        self._max_steps = int(max_steps)
+        # When fill_density is None the player cells get a random density like
+        # any other cell; otherwise they are pinned to this value (mirroring the
+        # YAML ``fill_density`` semantics).
+        self._fill_density = None if fill_density is None else int(fill_density)
+        self._render_tile_size = int(render_tile_size)
+        self._seed = int(seed)
+        num_players = self._num_robots + self._num_humans
+        if num_players < 1:
+            raise ValueError("Random BushWorld needs at least one player")
+        if num_players > self._width * self._height:
+            raise ValueError(
+                f"Cannot place {num_players} players on a "
+                f"{self._width}x{self._height} grid"
+            )
+        self._rng = np.random.default_rng(self._seed)
+
+    def __call__(self) -> BushWorld:
+        num_players = self._num_robots + self._num_humans
+        ncells = self._width * self._height
+        # Random distinct player cells.
+        flat = self._rng.choice(ncells, size=num_players, replace=False)
+        positions = [(int(c % self._width), int(c // self._width)) for c in flat]
+        robot_positions = positions[: self._num_robots]
+        human_positions = positions[self._num_robots:]
+        # Random per-cell bush densities in [0, B].
+        densities = self._rng.integers(
+            0, self._B + 1, size=(self._height, self._width)
+        ).tolist()
+        if self._fill_density is not None:
+            fd = max(0, min(self._B, self._fill_density))
+            for (x, y) in positions:
+                densities[y][x] = fd
+        return BushWorld(
+            width=self._width,
+            height=self._height,
+            num_robots=self._num_robots,
+            num_humans=self._num_humans,
+            max_steps=self._max_steps,
+            B=self._B,
+            robot_positions=robot_positions,
+            human_positions=human_positions,
+            initial_densities=densities,
+            possible_goals=None,
+            render_tile_size=self._render_tile_size,
+        )
+
+    def __getstate__(self):
+        state = dict(self.__dict__)
+        state.pop("_rng", None)  # Rebuild the (unpicklable) RNG on load.
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._rng = np.random.default_rng(self._seed)
+
+
+@contextmanager
+def _null_section():
+    yield
+
+
+class CoarseTimingProfiler:
+    """Lightweight, low-overhead profiler that only splits *data generation*
+    (the actor collecting transitions) from *training* (the learner's gradient
+    updates), reporting both totals and per-step averages.
+
+    It implements the small profiler protocol used by the Phase 2 trainer, but
+    — unlike the full :class:`TrainingProfiler` — it only times two coarse
+    sections (``actor_total`` and ``learner_total``) and treats every other
+    section as a no-op. That keeps the per-call cost to a single set membership
+    test, so the instrumentation stays cheap ("non-costly") even though it runs
+    on every env step and every training step.
+
+    Because it exposes both a ``report()`` method and a ``_total_time``
+    attribute, the trainer prints (and saves) the report automatically at the
+    end of training.
+    """
+
+    _TIMED = ("actor_total", "learner_total")
+
+    def __init__(self):
+        self.times: Dict[str, float] = {"actor_total": 0.0, "learner_total": 0.0}
+        self.counts: Dict[str, int] = {"actor_total": 0, "learner_total": 0}
+        self._start_times: Dict[str, float] = {}
+        self._total_time: float = 0.0
+        self._profiling_start: Optional[float] = None
+
+    @contextmanager
+    def section(self, name: str):
+        if name not in self._TIMED:
+            # Cheapest possible path for the many fine-grained sections.
+            yield
+            return
+        start = time.perf_counter()
+        try:
+            yield
+        finally:
+            self.times[name] += time.perf_counter() - start
+            self.counts[name] += 1
+
+    def start(self, name: str):
+        if name in self._TIMED:
+            self._start_times[name] = time.perf_counter()
+
+    def stop(self, name: str):
+        if name in self._TIMED and name in self._start_times:
+            self.times[name] += time.perf_counter() - self._start_times.pop(name)
+            self.counts[name] += 1
+
+    def step(self):
+        pass
+
+    def start_profiling(self):
+        self._profiling_start = time.perf_counter()
+
+    def stop_profiling(self):
+        if self._profiling_start is not None:
+            self._total_time = time.perf_counter() - self._profiling_start
+
+    def reset(self):
+        self.times = {"actor_total": 0.0, "learner_total": 0.0}
+        self.counts = {"actor_total": 0, "learner_total": 0}
+        self._start_times.clear()
+        self._total_time = 0.0
+        self._profiling_start = None
+
+    def get_summary(self) -> Dict[str, float]:
+        return dict(self.times)
+
+    def report(self) -> str:
+        data_t = self.times["actor_total"]
+        train_t = self.times["learner_total"]
+        n_env = self.counts["actor_total"]
+        n_train = self.counts["learner_total"]
+        data_per = (data_t / n_env * 1000) if n_env else float("nan")
+        train_per = (train_t / n_train * 1000) if n_train else float("nan")
+        lines = [
+            "",
+            "=" * 70,
+            "TIMING: data generation vs training (lightweight)",
+            "=" * 70,
+            f"  Data generation (actor): {data_t:8.3f}s total over "
+            f"{n_env} env steps  ->  {data_per:7.3f} ms/step",
+            f"  Training (learner):      {train_t:8.3f}s total over "
+            f"{n_train} training steps  ->  {train_per:7.3f} ms/step",
+        ]
+        if self._total_time > 0:
+            measured = data_t + train_t
+            other = self._total_time - measured
+            lines.append(
+                f"  Other (overhead/logging): {other:8.3f}s   "
+                f"(total wall time {self._total_time:.3f}s)"
+            )
+        lines.append("=" * 70)
+        return "\n".join(lines)
+
+    def save_report(self, output_dir: str, basename: str = "timing_report") -> None:
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            path = os.path.join(output_dir, f"{basename}.txt")
+            with open(path, "w") as f:
+                f.write(self.report() + "\n")
+        except Exception as exc:  # noqa: BLE001 - reporting is best-effort
+            print(f"  WARNING: could not save timing report ({exc}).")
+
+
+# --------------------------------------------------------------------------- #
+# Backward-induction result cache
+# --------------------------------------------------------------------------- #
+# Bump if the cached structure changes incompatibly.
+_BI_CACHE_VERSION = 1
+
+
+def _bi_cache_key(world_path: str, args) -> Tuple[dict, str]:
+    """Build a cache key for the exact backward-induction policy.
+
+    The key combines the *content* of the world file (the map and every other
+    problem-defining field it carries) with the theory parameters that affect
+    the computed policy (beta_r, gamma_h, gamma_r, zeta, xi, eta). Results are
+    only restored when this key matches exactly, so a different map or different
+    parameters never reuse a stale policy.
+    """
+    try:
+        with open(world_path, "rb") as f:
+            world_bytes = f.read()
+    except OSError:
+        world_bytes = world_path.encode("utf-8")
+    world_hash = hashlib.sha256(world_bytes).hexdigest()
+    key = {
+        "version": _BI_CACHE_VERSION,
+        "world_hash": world_hash,
+        "beta_r": args.beta_r,
+        "gamma_h": args.gamma_h,
+        "gamma_r": args.gamma_r,
+        "zeta": args.zeta,
+        "xi": args.xi,
+        "eta": args.eta,
+    }
+    digest = hashlib.sha256(
+        repr(sorted(key.items())).encode("utf-8")
+    ).hexdigest()[:16]
+    return key, digest
+
+
+def _load_bi_policy(cache_file: str, key: dict, env, robot_indices):
+    """Restore a cached backward-induction policy, or return None on a miss."""
+    try:
+        with open(cache_file, "rb") as f:
+            cached = pickle.load(f)
+    except Exception as exc:  # noqa: BLE001 - cache is best-effort
+        print(f"  could not read BI cache ({exc}); recomputing.")
+        return None
+    if cached.get("key") != key:
+        print("  BI cache key does not match this problem; recomputing.")
+        return None
+    return TabularRobotPolicy(env, list(robot_indices), cached["values"])
+
+
+def _save_bi_policy(cache_file: str, key: dict, policy) -> None:
+    """Persist a backward-induction policy to the problem-keyed cache."""
+    try:
+        os.makedirs(os.path.dirname(cache_file), exist_ok=True)
+        tmp = cache_file + ".tmp"
+        with open(tmp, "wb") as f:
+            pickle.dump(
+                {"key": key, "values": policy.values},
+                f,
+                protocol=pickle.HIGHEST_PROTOCOL,
+            )
+        os.replace(tmp, cache_file)
+        print(f"  backward induction policy cached to {cache_file}")
+    except Exception as exc:  # noqa: BLE001 - cache is best-effort
+        print(f"  WARNING: could not save BI cache ({exc}); continuing.")
 
 
 def resolve_worlds(world_args, repo_root: str) -> List[str]:
@@ -492,6 +771,35 @@ def main():
                         help="Training steps for the lookup-table learner.")
     parser.add_argument("--quick", action="store_true",
                         help="Fast settings (fewer rollouts / iterations) for smoke testing.")
+    # Backward-induction result cache (single-map mode only).
+    parser.add_argument("--no-bi-cache", action="store_true",
+                        help="Do not save or restore the exact backward-induction "
+                             "policy. By default it is cached under "
+                             "<output-dir>/bi_cache and restored only for the "
+                             "exact same problem (map + theory parameters).")
+    parser.add_argument("--recompute-bi", action="store_true",
+                        help="Ignore any cached backward-induction policy and "
+                             "recompute it (the fresh result is then re-cached).")
+    # Randomly *generated* maps (a brand-new map every episode).
+    parser.add_argument("--random-maps", action="store_true",
+                        help="Train and roll out on freshly *generated* random "
+                             "maps (a new map every episode), instead of loading "
+                             "YAML worlds. Mutually exclusive with multiple "
+                             "--world files. Implies --skip-bi.")
+    parser.add_argument("--random-size", default="7x3", metavar="WxH",
+                        help="Grid size for --random-maps (default 7x3).")
+    parser.add_argument("--random-robots", type=int, default=1,
+                        help="Number of robots for --random-maps (default 1).")
+    parser.add_argument("--random-humans", type=int, default=2,
+                        help="Number of humans for --random-maps (default 2).")
+    parser.add_argument("--random-B", type=int, default=1,
+                        help="Max bush density B for --random-maps (default 1).")
+    parser.add_argument("--random-max-steps", type=int, default=12,
+                        help="Episode horizon for --random-maps (default 12).")
+    parser.add_argument("--random-fill-density", type=int, default=1,
+                        help="Bush density pinned on player cells for "
+                             "--random-maps (default 1; use -1 to leave player "
+                             "cells random like any other cell).")
     args = parser.parse_args()
 
     if args.quick:
@@ -506,36 +814,64 @@ def main():
 
     np.random.seed(args.seed)
 
-    # --- Load world(s) and human policy prior ----------------------------- #
-    world_paths = resolve_worlds(args.world, _REPO_ROOT)
-    ensemble = len(world_paths) > 1
-    mode = "random-map-ensemble" if ensemble else "single-map"
-    print(f"Mode: {mode} ({len(world_paths)} world(s))")
-    for p in world_paths:
-        print(f"  - {os.path.relpath(p, _REPO_ROOT)}")
+    # --- Load world(s) / build the random-map generator ------------------- #
+    random_maps = args.random_maps
+    map_generator = None
+    world_paths: List[str] = []
+    if random_maps:
+        if len(args.world) > 1:
+            raise ValueError("--random-maps cannot be combined with multiple --world files.")
+        try:
+            w_str, h_str = args.random_size.lower().split("x")
+            rand_w, rand_h = int(w_str), int(h_str)
+        except ValueError:
+            raise ValueError(f"--random-size must look like WxH (got {args.random_size!r}).")
+        fill = None if args.random_fill_density < 0 else args.random_fill_density
+        map_generator = _BushWorldRandomGenerator(
+            rand_w, rand_h, args.random_robots, args.random_humans,
+            B=args.random_B, max_steps=args.random_max_steps,
+            fill_density=fill, seed=args.seed,
+        )
+        ensemble = False
+        mode = "random-generated-map"
+        print(f"Mode: {mode} "
+              f"({rand_w}x{rand_h}, {args.random_robots} robot(s)/"
+              f"{args.random_humans} human(s), B={args.random_B}, "
+              f"a freshly generated map every episode)")
+        # Primary world: networks, the human prior and goal sampler are built
+        # from one freshly generated sample map.
+        env = map_generator()
+        print(f"  sample: {env!r}")
+    else:
+        world_paths = resolve_worlds(args.world, _REPO_ROOT)
+        ensemble = len(world_paths) > 1
+        mode = "random-map-ensemble" if ensemble else "single-map"
+        print(f"Mode: {mode} ({len(world_paths)} world(s))")
+        for p in world_paths:
+            print(f"  - {os.path.relpath(p, _REPO_ROOT)}")
 
-    # Primary world: networks, the human prior and goal sampler are built from it.
-    env = load_bushworld(world_paths[0])
-    print(f"  primary: {env!r}")
+        # Primary world: networks, the human prior and goal sampler are built from it.
+        env = load_bushworld(world_paths[0])
+        print(f"  primary: {env!r}")
 
-    if ensemble:
-        # Validate that ensemble worlds are mutually compatible. The learned
-        # networks (especially neural encoders) assume a fixed grid size and a
-        # fixed number of players across episodes.
-        for p in world_paths[1:]:
-            other = load_bushworld(p)
-            if (other.width, other.height, other.num_robots, other.num_humans) != (
-                env.width, env.height, env.num_robots, env.num_humans
-            ):
-                raise ValueError(
-                    "All ensemble worlds must share grid size and player counts. "
-                    f"{os.path.relpath(world_paths[0], _REPO_ROOT)} is "
-                    f"{env.width}x{env.height} with {env.num_robots} robot(s)/"
-                    f"{env.num_humans} human(s), but "
-                    f"{os.path.relpath(p, _REPO_ROOT)} is "
-                    f"{other.width}x{other.height} with {other.num_robots} robot(s)/"
-                    f"{other.num_humans} human(s)."
-                )
+        if ensemble:
+            # Validate that ensemble worlds are mutually compatible. The learned
+            # networks (especially neural encoders) assume a fixed grid size and a
+            # fixed number of players across episodes.
+            for p in world_paths[1:]:
+                other = load_bushworld(p)
+                if (other.width, other.height, other.num_robots, other.num_humans) != (
+                    env.width, env.height, env.num_robots, env.num_humans
+                ):
+                    raise ValueError(
+                        "All ensemble worlds must share grid size and player counts. "
+                        f"{os.path.relpath(world_paths[0], _REPO_ROOT)} is "
+                        f"{env.width}x{env.height} with {env.num_robots} robot(s)/"
+                        f"{env.num_humans} human(s), but "
+                        f"{os.path.relpath(p, _REPO_ROOT)} is "
+                        f"{other.width}x{other.height} with {other.num_robots} robot(s)/"
+                        f"{other.num_humans} human(s)."
+                    )
 
     human_policy_prior = ShortestPathHumanPolicyPrior(env, env.human_agent_indices)
     goal_generator = env.possible_goal_generator
@@ -544,12 +880,17 @@ def main():
     config = build_config(args, resolved)
     print(f"  beta_r={args.beta_r}, gamma_h={args.gamma_h}, gamma_r={args.gamma_r}")
 
-    # The exact backward-induction reference is per-map; skip it for ensembles.
-    skip_bi = args.skip_bi or ensemble
+    # The exact backward-induction reference is per-map; skip it for ensembles
+    # and for randomly generated maps (the map changes every episode).
+    skip_bi = args.skip_bi or ensemble or random_maps
 
-    # In ensemble mode, draw a fresh world each training episode.
+    # In ensemble / random-map mode, draw a fresh world each training episode.
     world_model_factory = None
-    if ensemble:
+    if random_maps:
+        world_model_factory = EnsembleWorldModelFactory(
+            map_generator, episodes_per_env=1,
+        )
+    elif ensemble:
         world_model_factory = EnsembleWorldModelFactory(
             _BushWorldEnsembleLoader(world_paths, seed=args.seed),
             episodes_per_env=1,
@@ -558,18 +899,37 @@ def main():
     # --- Backward induction (exact reference) ----------------------------- #
     bi_policy = None
     if skip_bi:
-        reason = "ensemble mode" if ensemble else "--skip-bi"
+        if random_maps:
+            reason = "random-generated-map mode"
+        elif ensemble:
+            reason = "ensemble mode"
+        else:
+            reason = "--skip-bi"
         print(f"\n=== Backward induction skipped ({reason}) ===")
     else:
         print("\n=== Backward induction (exact Phase 2) ===")
-        bi_policy = compute_robot_policy(
-            env, list(env.human_agent_indices), list(env.robot_agent_indices),
-            goal_generator, human_policy_prior,
-            beta_r=args.beta_r, gamma_h=args.gamma_h, gamma_r=args.gamma_r,
-            zeta=args.zeta, xi=args.xi, eta=args.eta,
-            level_fct=lambda s: s[0], quiet=True,
-        )
-        print("  backward induction policy computed.")
+        # Restore the exact policy if we have already solved this exact problem
+        # (same map + theory parameters); otherwise compute and cache it.
+        bi_cache_key = bi_cache_file = None
+        if not args.no_bi_cache:
+            bi_cache_key, bi_digest = _bi_cache_key(world_paths[0], args)
+            bi_cache_file = os.path.join(args.output_dir, "bi_cache", f"bi_{bi_digest}.pkl")
+            if not args.recompute_bi and os.path.exists(bi_cache_file):
+                bi_policy = _load_bi_policy(
+                    bi_cache_file, bi_cache_key, env, env.robot_agent_indices)
+                if bi_policy is not None:
+                    print(f"  restored cached backward induction policy from {bi_cache_file}")
+        if bi_policy is None:
+            bi_policy = compute_robot_policy(
+                env, list(env.human_agent_indices), list(env.robot_agent_indices),
+                goal_generator, human_policy_prior,
+                beta_r=args.beta_r, gamma_h=args.gamma_h, gamma_r=args.gamma_r,
+                zeta=args.zeta, xi=args.xi, eta=args.eta,
+                level_fct=lambda s: s[0], quiet=True,
+            )
+            print("  backward induction policy computed.")
+            if bi_cache_file is not None:
+                _save_bi_policy(bi_cache_file, bi_cache_key, bi_policy)
 
     # --- Learned policy with checkpointing -------------------------------- #
     ckpt_name = "neural.pt" if resolved == "neural" else "lookup.pt"
@@ -581,6 +941,7 @@ def main():
     else:
         print(f"\n=== Learned policy ({resolved}) — training from scratch ===")
 
+    _timing = CoarseTimingProfiler()
     _q_r, _networks, history, trainer = train_bushworld_phase2(
         env,
         list(env.human_agent_indices),
@@ -591,12 +952,15 @@ def main():
         device="cpu",
         verbose=True,
         tensorboard_dir=tb_dir,
+        profiler=_timing,
         world_model_factory=world_model_factory,
         checkpoint_path=checkpoint_path,
         checkpoint_interval=max(1, config.num_training_steps // 4),
         restore_networks_path=checkpoint_path if resume else None,
     )
     print(f"  checkpoint saved to {checkpoint_path}")
+    # The trainer auto-prints and saves the coarse timing report at the end of
+    # training (the profiler exposes both `report()` and `_total_time`).
 
     # --- Save final policy and reload to verify round-trip ---------------- #
     policy_path = os.path.join(args.output_dir, "final_policy.pt")
@@ -625,7 +989,15 @@ def main():
     def single_map_components(_seed):
         return primary_components
 
-    if ensemble:
+    if random_maps:
+        def random_map_components(_seed):
+            e = map_generator()
+            prior = ShortestPathHumanPolicyPrior(e, e.human_agent_indices)
+            sampler = e.possible_goal_generator.get_sampler()
+            return e, prior, sampler
+
+        env_components_fn = random_map_components
+    elif ensemble:
         _rollout_rng = np.random.default_rng(args.seed + ROLLOUT_WORLD_SEED_OFFSET)
 
         def ensemble_components(_seed):
