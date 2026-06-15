@@ -191,6 +191,7 @@ def rollout(
     *,
     goal_sampler,
     seed: int,
+    robot_epsilon: float = 0.0,
     render: bool = True,
     label: str = "",
 ) -> Tuple[List[np.ndarray], dict]:
@@ -214,7 +215,12 @@ def rollout(
     num_actions = env.action_space.n
     step = 0
     while not env.is_terminal(state):
-        robot_profile = robot_policy.sample(state)
+        if robot_epsilon > 0.0 and rng.random() < robot_epsilon:
+            robot_profile = tuple(
+                int(rng.integers(num_actions)) for _ in env.robot_agent_indices
+            )
+        else:
+            robot_profile = robot_policy.sample(state)
         # Humans act under their (goal-conditioned) prior toward their sampled goal.
         human_actions: List[int] = []
         for h in env.human_agent_indices:
@@ -271,6 +277,7 @@ def make_movie(frames: List[np.ndarray], path: str, fps: int = 2) -> Optional[st
 def run_rollouts(
     env_components_fn, policy, *, n: int, base_seed: int,
     output_dir: str, tag: str, make_movies: bool, movie_ext: str = "mp4",
+    robot_epsilon: float = 0.0,
 ) -> dict:
     """Run ``n`` rollouts under ``policy`` and (optionally) save movies.
 
@@ -284,7 +291,8 @@ def run_rollouts(
         env, human_policy_prior, goal_sampler = env_components_fn(base_seed + i)
         frames, metrics = rollout(
             env, policy, human_policy_prior, goal_sampler=goal_sampler,
-            seed=base_seed + i, render=make_movies, label=tag,
+            seed=base_seed + i, robot_epsilon=robot_epsilon,
+            render=make_movies, label=tag,
         )
         cleared.append(metrics["bush_cleared"])
         travel.append(metrics["human_travel"])
@@ -440,6 +448,13 @@ def main():
                         help="Training steps for the lookup-table learner.")
     parser.add_argument("--quick", action="store_true",
                         help="Fast settings (fewer rollouts / iterations) for smoke testing.")
+    parser.add_argument(
+        "--rollout-robot-epsilon",
+        type=float,
+        default=None,
+        help="Optional epsilon-greedy exploration used only during rollout "
+             "movies/evaluation. Default: 0.05 for --method neural, 0.0 otherwise.",
+    )
     args = parser.parse_args()
 
     if args.quick:
@@ -600,6 +615,11 @@ def main():
         env_components_fn, reloaded_policy,
         n=args.rollouts, base_seed=args.seed + 1000, output_dir=args.output_dir,
         tag=f"learned_{resolved}", make_movies=make_movies, movie_ext=args.movie_format,
+        robot_epsilon=(
+            args.rollout_robot_epsilon
+            if args.rollout_robot_epsilon is not None
+            else (0.05 if resolved == "neural" else 0.0)
+        ),
     )
 
     # --- Optional extra rollouts from the saved final policy --------------- #
@@ -612,6 +632,11 @@ def main():
             n=args.extra_rollouts, base_seed=args.seed + 2000,
             output_dir=args.output_dir, tag=f"extra_{resolved}",
             make_movies=make_movies, movie_ext=args.movie_format,
+            robot_epsilon=(
+                args.rollout_robot_epsilon
+                if args.rollout_robot_epsilon is not None
+                else (0.05 if resolved == "neural" else 0.0)
+            ),
         )
 
     print("\nDone.")
