@@ -154,6 +154,9 @@ class MultiGridRobotPolicy(RobotPolicy):
                     state_feature_dim=state_enc_config.get('feature_dim', config['hidden_dim']),
                     state_encoder=state_encoder,
                     own_state_encoder=own_state_encoder,
+                    use_z_space=config.get('use_z_space', False),
+                    eta=config.get('eta', 1.1),
+                    xi=config.get('xi', 1.0),
                 )
                 
                 # Load weights with validation

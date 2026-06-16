@@ -1,0 +1,18 @@
+metadata:
+  name: "7x3 Ensemble — diagonal humans"
+  description: >
+    A 7x3 BushWorld for the random-map-ensemble demo. The two humans sit in
+    opposite corners (top-left and bottom-right) with the robot in the centre,
+    so the robot must decide which diagonal to open up first. All cells start at
+    bush density 1 with B=1.
+  author: "EMPO Framework"
+  category: "bushworld"
+
+map: |
+  Hu 01 01 01 01 01 01
+  01 01 01 Ro 01 01 01
+  01 01 01 01 01 01 Hu
+
+B: 1
+max_steps: 12
+fill_density: 1
