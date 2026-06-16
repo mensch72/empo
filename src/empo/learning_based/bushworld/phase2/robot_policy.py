@@ -100,6 +100,19 @@ class BushWorldRobotPolicy(RobotPolicy):
                 "The world model is needed to tensorize the state."
             )
         with torch.no_grad():
+            if getattr(self.q_network, "use_z_space", False) and hasattr(
+                self.q_network, "forward_z"
+            ):
+                # Derive the policy directly from z for numerical stability
+                # (avoids forming very large |Q| values).
+                z_values = self.q_network.forward_z(
+                    state, self._world_model, self.device
+                )
+                policy = self.q_network.get_policy(
+                    None, beta_r=self.beta_r, z_values=z_values
+                )
+                flat_idx = torch.multinomial(policy.squeeze(0), 1).item()
+                return self.q_network.action_index_to_tuple(flat_idx)
             q_values = self.q_network.forward(state, self._world_model, self.device)
             return self.q_network.sample_action(q_values, beta_r=self.beta_r)
 
@@ -118,13 +131,33 @@ class BushWorldRobotPolicy(RobotPolicy):
         num_actions = self._world_model.action_space.n
         num_robots = self._world_model.num_robots
         with torch.no_grad():
-            q_values = self.q_network.forward(state, self._world_model, self.device)
-            probs = (
-                self.q_network.get_policy(q_values, beta_r=self.beta_r)
-                .detach()
-                .cpu()
-                .numpy()
-                .ravel()
-            )
+            if getattr(self.q_network, "use_z_space", False) and hasattr(
+                self.q_network, "forward_z"
+            ):
+                # Derive the policy directly from z for numerical stability
+                # (avoids forming very large |Q| values).
+                z_values = self.q_network.forward_z(
+                    state, self._world_model, self.device
+                )
+                probs = (
+                    self.q_network.get_policy(
+                        None, beta_r=self.beta_r, z_values=z_values
+                    )
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .ravel()
+                )
+            else:
+                q_values = self.q_network.forward(
+                    state, self._world_model, self.device
+                )
+                probs = (
+                    self.q_network.get_policy(q_values, beta_r=self.beta_r)
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .ravel()
+                )
         profiles = list(itertools.product(range(num_actions), repeat=num_robots))
         return {profile: float(probs[i]) for i, profile in enumerate(profiles)}

@@ -95,35 +95,38 @@ class BaseRobotQNetwork(nn.Module, ABC):
     def get_config(self) -> Dict[str, Any]:
         """Return configuration dict for save/load."""
     
-    def raw_to_z(self, raw_values: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
+    def raw_to_z(self, raw_values: torch.Tensor) -> torch.Tensor:
         """
         Convert raw network output to z ∈ (0, 1).
         
-        Uses sigmoid to map R → (0, 1).
+        Uses sigmoid to map R → (0, 1). No clamping is applied: flooring z would
+        cap the representable |Q| and, once several actions saturate at that
+        floor, make their Q-values *exactly* equal — collapsing the power-law
+        robot policy to a uniform distribution regardless of β_r.
         
         Args:
             raw_values: Raw network output (unbounded).
-            eps: Small value to keep z away from boundaries.
         
         Returns:
-            z-values in (eps, 1-eps).
+            z-values in (0, 1).
         """
-        return torch.sigmoid(raw_values).clamp(min=eps, max=1.0 - eps)
+        return torch.sigmoid(raw_values)
     
-    def z_to_q(self, z: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    def z_to_q(self, z: torch.Tensor) -> torch.Tensor:
         """
         Convert z-values to Q-values: Q = -z^{-ηξ}.
         
+        No flooring of z is applied so that distinct (small) z-values map to
+        distinct (large-magnitude) Q-values.
+        
         Args:
             z: z-values in (0, 1].
-            eps: Clamping epsilon.
         
         Returns:
             Q-values < 0.
         """
-        z_clamped = z.clamp(min=eps)
         exponent = -self.eta * self.xi
-        return -torch.pow(z_clamped, exponent)
+        return -torch.pow(z, exponent)
     
     def q_to_z(self, q: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
         """
@@ -226,9 +229,8 @@ class BaseRobotQNetwork(nn.Module, ABC):
         if z_values is not None:
             # π ∝ |Q|^{-β_r} = (z^{-ηξ})^{-β_r} = z^{+ηξβ_r}
             # log π ∝ +ηξβ_r * log(z)
-            z_clamped = z_values.clamp(min=1e-10)
             exponent = self.eta * self.xi * beta_r
-            log_unnormalized = exponent * torch.log(z_clamped)
+            log_unnormalized = exponent * torch.log(z_values)
             
             # Subtract max for numerical stability
             log_unnormalized = log_unnormalized - log_unnormalized.max(dim=-1, keepdim=True)[0]

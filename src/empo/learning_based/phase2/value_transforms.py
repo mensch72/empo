@@ -80,12 +80,9 @@ def from_z_space(
     Returns:
         Q-values, all negative.
     """
-    # Ensure z > 0 by clamping away from 0
-    z_clamped = z.clamp(min=eps)
-    
-    # Q = -z^{-ηξ}
+    # Q = -z^{-ηξ}  (no flooring of z: distinct tiny z must map to distinct |Q|)
     exponent = -eta * xi
-    return -torch.pow(z_clamped, exponent)
+    return -torch.pow(z, exponent)
 
 
 def y_to_z_space(
@@ -142,23 +139,21 @@ def z_to_y_space(
     return torch.pow(z_clamped, exponent)
 
 
-def raw_to_z(raw: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
+def raw_to_z(raw: torch.Tensor) -> torch.Tensor:
     """
     Convert raw network output to z ∈ (0, 1).
     
-    Uses sigmoid to map R → (0, 1). This is preferred over softplus
-    because z should be bounded in (0, 1] for typical Q-values ≤ -1.
+    Uses sigmoid to map R → (0, 1). No clamping is applied so that large-|Q|
+    targets (tiny z) stay representable and distinct rather than collapsing
+    onto an identical floor.
     
     Args:
         raw: Raw network output (unbounded).
-        eps: Small value to keep z away from exactly 0 or 1.
     
     Returns:
-        z-values in (eps, 1-eps).
+        z-values in (0, 1).
     """
-    # sigmoid maps R → (0, 1)
-    # Clamp to avoid numerical issues at boundaries
-    return torch.sigmoid(raw).clamp(min=eps, max=1.0 - eps)
+    return torch.sigmoid(raw)
 
 
 def z_to_q(

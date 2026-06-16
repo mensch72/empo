@@ -77,14 +77,28 @@ class BushWorldRobotQNetwork(BaseRobotQNetwork):
             nn.Linear(hidden_dim, self.num_action_combinations),
         )
 
-    def _network_forward(self, state_input: torch.Tensor) -> torch.Tensor:
+    def _network_raw(self, state_input: torch.Tensor) -> torch.Tensor:
         features = self.state_encoder(state_input)
-        raw_q = self.q_head(features)
-        return self.ensure_negative(raw_q)
+        return self.q_head(features)
+
+    def _network_forward(self, state_input: torch.Tensor) -> torch.Tensor:
+        return self.ensure_negative(self._network_raw(state_input))
 
     def forward(self, state: Any, world_model: Any, device: str = "cpu") -> torch.Tensor:
         state_input = self.state_encoder.tensorize_state(state, world_model, device)
         return self._network_forward(state_input)
+
+    def forward_z(self, state: Any, world_model: Any, device: str = "cpu") -> torch.Tensor:
+        """Return z-values z = sigmoid(raw) for the joint robot actions.
+
+        Only valid when ``use_z_space=True``. Deriving the policy directly from z
+        (π ∝ z^{ηξβ_r}) avoids forming the possibly enormous Q-values and is
+        numerically stable when |Q| spans many orders of magnitude.
+        """
+        if not self.use_z_space:
+            raise ValueError("forward_z() is only valid when use_z_space=True")
+        state_input = self.state_encoder.tensorize_state(state, world_model, device)
+        return self.get_z_values(self._network_raw(state_input))
 
     def forward_batch(self, states: List[Any], world_model: Any, device: str = "cpu") -> torch.Tensor:
         inputs = torch.cat(

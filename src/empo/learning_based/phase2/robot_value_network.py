@@ -108,15 +108,18 @@ class BaseRobotValueNetwork(nn.Module, ABC):
     def get_config(self) -> Dict[str, Any]:
         """Return configuration dict for save/load."""
     
-    def raw_to_z(self, raw_values: torch.Tensor, eps: float = 1e-7) -> torch.Tensor:
-        """Convert raw network output to z ∈ (0, 1)."""
-        return torch.sigmoid(raw_values).clamp(min=eps, max=1.0 - eps)
+    def raw_to_z(self, raw_values: torch.Tensor) -> torch.Tensor:
+        """Convert raw network output to z ∈ (0, 1).
+
+        No clamping: flooring z would cap the representable |V| and force
+        distinct values to collapse onto an identical floor.
+        """
+        return torch.sigmoid(raw_values)
     
-    def z_to_v(self, z: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    def z_to_v(self, z: torch.Tensor) -> torch.Tensor:
         """Convert z-values to V-values: V = -z^{-ηξ}."""
-        z_clamped = z.clamp(min=eps)
         exponent = -self.eta * self.xi
-        return -torch.pow(z_clamped, exponent)
+        return -torch.pow(z, exponent)
     
     def v_to_z(self, v: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
         """Convert V-values to z-values: z = (-V)^{-1/(ηξ)}."""
