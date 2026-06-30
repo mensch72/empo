@@ -65,13 +65,19 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
         max_disabling_switches: int = 4,
         max_control_buttons: int = 4,
         state_encoder: Optional[MultiGridStateEncoder] = None,
-        own_state_encoder: Optional[MultiGridStateEncoder] = None
+        own_state_encoder: Optional[MultiGridStateEncoder] = None,
+        use_z_space: bool = False,
+        eta: float = 1.1,
+        xi: float = 1.0
     ):
         super().__init__(
             num_actions=num_robot_actions,
             num_robots=num_robots,
             beta_r=beta_r,
-            feasible_range=feasible_range
+            feasible_range=feasible_range,
+            use_z_space=use_z_space,
+            eta=eta,
+            xi=xi
         )
         
         self.grid_height = grid_height
@@ -324,6 +330,9 @@ class MultiGridRobotQNetwork(BaseRobotQNetwork):
             'beta_r': self.beta_r,
             'feasible_range': self.feasible_range,
             'dropout': self.dropout_rate,
+            'use_z_space': self.use_z_space,
+            'eta': self.eta,
+            'xi': self.xi,
             'state_encoder_config': self.state_encoder.get_config(),
             'own_state_encoder_config': self.own_state_encoder.get_config(),
         }

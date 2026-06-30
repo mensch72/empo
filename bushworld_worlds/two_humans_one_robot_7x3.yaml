@@ -1,0 +1,27 @@
+metadata:
+  name: "Two Humans, One Robot (7x3)"
+  description: >
+    A 7x3 version of `two_humans_one_robot.yaml`. The two humans stand at the
+    far left and far right of the middle row, with one robot between them
+    (closer to the left human). Every cell starts at bush density 1 with B=1,
+    so the whole grid is impassable until the robot clears a path: a human can
+    only move into a neighbouring cell once the robot has reduced that cell's
+    bush below B. Compared with the 1x7 corridor, the extra rows give the robot
+    (and humans) two-dimensional routes to open up, while keeping the same
+    "which human to empower" dilemma.
+  author: "EMPO Framework"
+  category: "bushworld"
+
+# Map encoding: Ro = robot, Hu = human, integer = bush density.
+# Cells occupied by a player use the bush density given by `fill_density`.
+map: |
+  01 01 01 01 01 01 01
+  Hu 01 Ro 01 01 01 Hu
+  01 01 01 01 01 01 01
+
+B: 1
+max_steps: 12
+fill_density: 1
+
+# Possible goals default to every single cell of the grid when omitted, which
+# keeps each human's goal set reachable. Leave `possible_goals` unset here.

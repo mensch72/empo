@@ -627,6 +627,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines.
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** - Contribution guidelines
 - **[VENDOR.md](VENDOR.md)** - Managing vendored dependencies (Multigrid)
 - **[docs/PREBUILT_IMAGES.md](docs/PREBUILT_IMAGES.md)** - Using pre-built container images
+- **[docs/BUSHWORLD.md](docs/BUSHWORLD.md)** - The BushWorld world model
+- **[docs/IMPLEMENTING_A_NEW_WORLDMODEL.md](docs/IMPLEMENTING_A_NEW_WORLDMODEL.md)** - Step-by-step guide to adding a new WorldModel
 - **[.env.example](.env.example)** - Environment variables template
 
 ## License

@@ -463,6 +463,53 @@ class TestPowerLawPolicy:
         # Best action probability should increase with beta
         assert policy_low[0, 0] < policy_mid[0, 0] < policy_high[0, 0]
 
+    def test_z_space_policy_matches_q_space(self):
+        """z-space policy must match q-space: both π ∝ (-Q)^{-β}.
+
+        Regression test for a sign inversion in the z-space policy derivation,
+        where π ∝ z^{-ηξβ} (i.e. (-Q)^{+β}) was used instead of z^{+ηξβ}
+        (i.e. (-Q)^{-β}). The inverted form makes the robot prefer the
+        *lowest*-value action, soft-minimizing aggregate human power.
+        """
+        from empo.learning_based.phase2.robot_q_network import BaseRobotQNetwork
+        from empo.learning_based.phase2.value_transforms import (
+            to_z_space,
+            compute_policy_from_z,
+            get_policy_log_probs_from_z,
+        )
+
+        class _DummyQ(BaseRobotQNetwork):
+            def forward(self, *args, **kwargs):  # pragma: no cover - unused
+                raise NotImplementedError
+
+            def get_config(self):  # pragma: no cover - unused
+                return {}
+
+        eta, xi, beta_r = 1.1, 1.0, 5.0
+        net = _DummyQ(
+            num_actions=3, num_robots=1, beta_r=beta_r,
+            use_z_space=True, eta=eta, xi=xi,
+        )
+        # Action 0 has the least-negative Q (highest value) and must be preferred.
+        q_values = torch.tensor([[-1.0, -5.0, -100.0]])
+        z_values = to_z_space(q_values, eta, xi)
+
+        ref = self._get_policy(q_values, beta_r)
+        p_q = net.get_policy(q_values, beta_r=beta_r)
+        p_z = net.get_policy(None, beta_r=beta_r, z_values=z_values)
+        p_helper = compute_policy_from_z(z_values, beta_r, eta, xi)
+        p_logprob = get_policy_log_probs_from_z(z_values, beta_r, eta, xi).exp()
+
+        # The highest-value action (index 0) is preferred by every variant.
+        for policy in (ref, p_q, p_z, p_helper, p_logprob):
+            assert int(policy.argmax(dim=-1)) == 0
+
+        # All variants agree with the reference power-law policy.
+        assert torch.allclose(p_q, ref, atol=1e-6)
+        assert torch.allclose(p_z, ref, atol=1e-6)
+        assert torch.allclose(p_helper, ref, atol=1e-6)
+        assert torch.allclose(p_logprob, ref, atol=1e-6)
+
 
 # =============================================================================
 # 7. Q_r USES -SOFTPLUS FOR NEGATIVE Q VALUES
