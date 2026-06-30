@@ -83,6 +83,44 @@ The driver exits **loudly** when any bound is hit:
 
 It is designed to be re-run (e.g. from cron) to keep draining the queue.
 
+## Interacting with a running loop
+
+The loop is file-driven and checks for control signals **between iterations**, so
+nothing you do can corrupt an in-flight task — the current iteration always
+finishes first.
+
+**See what it's doing (read-only, safe anytime):**
+```bash
+python3 driver.py status
+```
+Prints the queue status counts, the in-progress task (if any), the next `todo`,
+the last few logged iterations, and whether a STOP is pending. It only reads the
+state files — it never touches the loop.
+
+**Stop it gracefully:**
+```bash
+touch state/STOP        # driver finishes the current iteration, then exits
+# ... or, if you have the terminal / pid:
+kill -TERM <pid>        # same; Ctrl-C works too (second Ctrl-C force-kills)
+```
+After a STOP-file stop, **delete the sentinel before re-running**:
+```bash
+rm state/STOP
+```
+
+**Steer the work (also between iterations):**
+- Add/re-prioritise/cancel tasks by editing `state/task_queue.md` (lower
+  `priority` = picked sooner; set `status: blocked` to skip one). Edit only while
+  the loop is paused/stopped or between iterations — edits made *during* an
+  iteration are overwritten when the driver writes the task's result back.
+- Append follow-up tasks to `state/new_tasks.md` (the append-only inbox); the
+  driver drains them into the queue and won't clobber your additions.
+
+There is intentionally **no live mid-task control** (no socket/REPL): an
+unattended driver that shells out to a blocking `claude` call can only be steered
+at iteration boundaries. The STOP file is the mechanism that works for remote /
+headless runs where you can't send Ctrl-C.
+
 ## Read the digest
 
 ```bash

@@ -19,6 +19,13 @@ Usage:
     python3 driver.py --dry-run       # print prompt + planned action, no claude
     python3 driver.py --max-iters 1   # override config bound for this run
     python3 driver.py --once          # exactly one iteration
+    python3 driver.py status          # print a live snapshot; does NOT touch the loop
+
+Interacting with a running loop (it checks BETWEEN iterations, never mid-task):
+    touch state/STOP                  # graceful stop: finishes the current
+                                      #   iteration, then exits cleanly
+    kill -TERM <pid> / Ctrl-C         # same: stop requested, exits after the
+                                      #   current iteration
 """
 from __future__ import annotations
 
@@ -26,6 +33,7 @@ import argparse
 import datetime as dt
 import json
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -34,6 +42,29 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parent
+
+# Set by SIGINT/SIGTERM. Checked between iterations so a stop never corrupts an
+# in-flight task -- the current iteration always finishes first.
+_STOP_REQUESTED = False
+
+
+def _request_stop(signum, _frame) -> None:
+    global _STOP_REQUESTED
+    _STOP_REQUESTED = True
+    name = signal.Signals(signum).name
+    print(f"\n[stop] {name} received -- will exit after the current iteration "
+          f"finishes. (Send it again to force-kill.)", flush=True)
+    # restore default so a second signal hard-kills immediately
+    signal.signal(signum, signal.SIG_DFL)
+
+
+def stop_requested(cfg: dict) -> str | None:
+    """Return a human reason if a graceful stop was requested, else None."""
+    if _STOP_REQUESTED:
+        return "signal (SIGINT/SIGTERM)"
+    if (p(cfg, "state_dir") / "STOP").exists():
+        return "state/STOP sentinel file"
+    return None
 
 
 def utcnow() -> str:
@@ -335,11 +366,71 @@ def iteration(cfg: dict, dry_run: bool) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# status snapshot (read-only; safe to run while a loop is going)
+# --------------------------------------------------------------------------- #
+def cmd_status(cfg: dict) -> int:
+    state = p(cfg, "state_dir")
+    _, tasks = parse_tasks((state / "task_queue.md").read_text())
+    counts: dict[str, int] = {}
+    for t in tasks:
+        counts[t.get("status", "?")] = counts.get(t.get("status", "?"), 0) + 1
+
+    print(f"harness status @ {utcnow()}")
+    print(f"  root: {ROOT}")
+    summary = ", ".join(f"{k}={v}" for k, v in sorted(counts.items())) or "no tasks"
+    print(f"  queue: {summary}")
+
+    inprog = [t for t in tasks if t.get("status") == "in_progress"]
+    if inprog:
+        for t in inprog:
+            print(f"  in-progress: {t['id']} ({t.get('type')}) -- "
+                  f"{t.get('description','')}")
+        print("    (in_progress => a loop is working this now, OR a previous run "
+              "was interrupted mid-task)")
+    nxt = pick_task(tasks)
+    print(f"  next todo: {nxt['id'] + ' (prio ' + str(nxt.get('priority')) + ')' if nxt else '(none)'}")
+
+    # last few experiment-log rows
+    log_path = state / "experiment_log.jsonl"
+    rows = []
+    if log_path.exists():
+        for line in log_path.read_text().splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if "_schema" not in obj:
+                rows.append(obj)
+    print(f"  iterations logged: {len(rows)}")
+    for r in rows[-3:]:
+        flag = "PASS" if r.get("passed") else "FAIL"
+        print(f"    [{r.get('timestamp')}] {r.get('task_id')} {flag} "
+              f"(${r.get('cost_usd')})")
+
+    if (state / "STOP").exists():
+        print("  STOP sentinel: PRESENT -> a running loop will exit after its "
+              "current iteration. `rm state/STOP` to clear.")
+    else:
+        print("  STOP sentinel: absent")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
 # loop
 # --------------------------------------------------------------------------- #
 def main() -> int:
+    # subcommand: `driver.py status` (read-only). Intercept before argparse so
+    # the existing flag interface for the run path is unchanged.
+    if len(sys.argv) > 1 and sys.argv[1] == "status":
+        return cmd_status(load_config())
+
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("command", nargs="?", default="run", choices=["run", "status"],
+                    help="'run' (default) the loop, or 'status' for a snapshot")
     ap.add_argument("--dry-run", action="store_true",
                     help="print the prompt and planned action; do NOT call claude")
     ap.add_argument("--once", action="store_true", help="run exactly one iteration")
@@ -348,6 +439,10 @@ def main() -> int:
     args = ap.parse_args()
 
     cfg = load_config()
+
+    # graceful-stop signals: finish the current iteration, then exit
+    signal.signal(signal.SIGINT, _request_stop)
+    signal.signal(signal.SIGTERM, _request_stop)
     max_iters = args.max_iters if args.max_iters is not None \
         else int(cfg["bounds"]["max_iterations_per_run"])
     if args.once:
@@ -363,6 +458,12 @@ def main() -> int:
 
     completed = 0
     for i in range(1, max_iters + 1):
+        reason = stop_requested(cfg)
+        if reason:
+            loud(f"GRACEFUL STOP requested via {reason} after {completed} "
+                 f"iteration(s). Exiting cleanly. "
+                 f"(If state/STOP, `rm state/STOP` before re-running.)")
+            return 0
         elapsed = time.time() - start
         if elapsed > hard_ceiling:
             loud(f"HARD WALL-CLOCK CEILING HIT ({elapsed:.0f}s > "
