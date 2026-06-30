@@ -1,0 +1,30 @@
+# config.yaml -- autonomous research harness settings.
+# Paths are relative to the harness root (the directory containing this file).
+
+paths:
+  state_dir:   state
+  prompts_dir: prompts
+  verify_dir:  verify
+  reports_dir: reports
+  runs_dir:    state/runs        # saved claude run JSON, one per iteration
+
+claude:
+  binary: claude                 # the CLI the driver shells out to
+  model:  opus                   # alias passed to `claude --model`
+  # NOTE: claude CLI v2.x exposes NO --max-turns flag (verified via --help).
+  # We therefore bound each iteration two ways instead of a turn count:
+  per_iteration_budget_usd: 1.0  # passed as --max-budget-usd
+  per_iteration_timeout_sec: 900 # wall-clock kill for a single claude call
+
+bounds:
+  max_iterations_per_run: 5      # driver stops after this many iterations
+  hard_wall_clock_sec: 7200      # hard ceiling for the WHOLE driver run
+
+permissions:
+  # DANGER ZONE. Setting this true makes the driver pass
+  # --dangerously-skip-permissions to claude so it can run fully unattended
+  # (no human to approve tool calls). This lets the agent run arbitrary
+  # commands without confirmation. Leave OFF unless you are in a disposable,
+  # network-isolated sandbox and you understand the risk. The driver prints a
+  # loud warning every iteration when this is on.
+  skip_permissions: false
