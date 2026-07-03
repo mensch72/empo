@@ -810,6 +810,7 @@ def build_config(args, resolved: str) -> Phase2Config:
         steps_per_episode=8,
         epsilon_r_start=0.6,
         epsilon_r_end=0.1,
+        plasticity_diagnostics_interval=args.plasticity_diagnostics_interval,
     )
     if resolved == "lookup":
         n = args.lookup_iterations
@@ -902,6 +903,11 @@ def main():
                         help="Training steps for the neural learner.")
     parser.add_argument("--lookup-iterations", type=int, default=600,
                         help="Training steps for the lookup-table learner.")
+    parser.add_argument("--plasticity-diagnostics-interval", type=int, default=0,
+                        help="Log plasticity-loss diagnostics (dormant/dead "
+                             "neurons, effective rank, weight norms) to "
+                             "TensorBoard every N training steps. 0 disables "
+                             "them. See docs/PLASTICITY_DIAGNOSTICS.md.")
     parser.add_argument("--quick", action="store_true",
                         help="Fast settings (fewer rollouts / iterations) for smoke testing.")
     # Backward-induction result cache (single-map mode only).

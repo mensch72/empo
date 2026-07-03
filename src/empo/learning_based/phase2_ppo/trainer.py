@@ -28,6 +28,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Set
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -81,6 +82,7 @@ from empo.learning_based.phase2.intrinsic_reward_network import (
 
 from .actor_critic import EMPOActorCritic
 from .config import PPOPhase2Config
+from .diagnostics import compute_plasticity_diagnostics
 
 logger = logging.getLogger(__name__)
 
@@ -545,6 +547,61 @@ class PPOPhase2Trainer:
             self.writer.add_text(tag, text, step)
 
     # ------------------------------------------------------------------
+    # Plasticity diagnostics
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _unwrap_empo_env(env: Any) -> Any:
+        """Unwrap PufferLib emulation layers to the env exposing ``_state_to_obs``."""
+        inner = env
+        for _ in range(20):
+            if inner is None:
+                return None
+            if hasattr(inner, "_state_to_obs"):
+                return inner
+            inner = getattr(inner, "env", None)
+        return None
+
+    def _log_plasticity_diagnostics(self, vecenv: Any, step: int) -> None:
+        """Compute and log plasticity-loss diagnostics for the actor-critic.
+
+        Probes the current policy network with a batch of states drawn from
+        the auxiliary replay buffer and logs dormant/dead-neuron fractions,
+        the effective rank of the shared representation, and weight norms.
+        Cheap enough to run periodically; skipped silently if no logging sink
+        or insufficient data is available.
+        """
+        if self.writer is None:
+            return
+        n = min(
+            len(self.aux_replay_buffer),
+            self.config.plasticity_diagnostics_batch_size,
+        )
+        if n < 2:
+            return
+
+        env = self._unwrap_empo_env(vecenv.driver_env)
+        if env is None:
+            return
+
+        batch = self.aux_replay_buffer.sample(n)
+        try:
+            obs = np.stack([env._state_to_obs(t.state) for t in batch])
+        except NotImplementedError:
+            # Base EMPOWorldModelEnv without an observation encoder.
+            return
+
+        obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device)
+        metrics = compute_plasticity_diagnostics(
+            self.actor_critic,
+            obs_t,
+            dormant_tau=self.config.plasticity_dormant_tau,
+        )
+        for k, v in metrics.items():
+            self._log_scalar(f"Plasticity/{k}", v, step)
+
+
+    # ------------------------------------------------------------------
     # Checkpoint save / load
     # ------------------------------------------------------------------
 
@@ -935,6 +992,13 @@ class PPOPhase2Trainer:
                         step,
                     )
                     prev_stage = cur_stage
+
+            # ── Plasticity diagnostics ───────────────────────────────────
+            if (
+                cfg.plasticity_diagnostics_interval > 0
+                and iteration % cfg.plasticity_diagnostics_interval == 0
+            ):
+                self._log_plasticity_diagnostics(vecenv, self.aux_training_step)
 
             if iteration % 100 == 0:
                 logger.info(

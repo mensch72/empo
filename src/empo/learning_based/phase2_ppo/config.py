@@ -106,6 +106,18 @@ class PPOPhase2Config:
     --------------
     use_z_space_transform : bool
         Apply z-space value transforms to auxiliary targets.
+
+    Plasticity diagnostics
+    ----------------------
+    plasticity_diagnostics_interval : int
+        Measure plasticity-loss indicators (dormant/dead neurons, effective
+        rank of the shared representation, weight-norm growth) every *N* PPO
+        iterations.  ``0`` disables them (default).
+    plasticity_diagnostics_batch_size : int
+        Number of replay-buffer states probed per diagnostics measurement.
+    plasticity_dormant_tau : float
+        Normalised-activation threshold below which a ReLU unit counts as
+        dormant (Sokar et al., 2023).
     """
 
     # ── Theory parameters (duplicated from DQN config on purpose) ────────
@@ -176,6 +188,15 @@ class PPOPhase2Config:
     # ── Logging ───────────────────────────────────────────────────────────
     tensorboard_dir: Optional[str] = None
     log_interval: int = 1
+
+    # ── Plasticity diagnostics ────────────────────────────────────────────
+    # Measure plasticity-loss indicators (dormant/dead neurons, effective
+    # rank of the shared representation, weight-norm growth) every N PPO
+    # iterations.  0 disables the diagnostics (default; they add an extra
+    # forward pass + SVD).
+    plasticity_diagnostics_interval: int = 0
+    plasticity_diagnostics_batch_size: int = 256
+    plasticity_dormant_tau: float = 0.025
 
     # ── Checkpointing ────────────────────────────────────────────────────
     checkpoint_interval: int = 0  # 0 = disabled; otherwise save every N PPO iters

@@ -258,6 +258,14 @@ class Phase2Config:
     batch_size: int = 64
     x_h_batch_size: Optional[int] = None  # Larger batch for X_h (None = use batch_size)
 
+    # Plasticity-loss diagnostics (dormant/dead neurons, effective rank of the
+    # shared representation, weight-norm growth of the robot networks).
+    # Measured every N training steps; 0 disables them (they add an extra
+    # forward pass + SVD over a probe batch).
+    plasticity_diagnostics_interval: int = 0
+    plasticity_diagnostics_batch_size: int = 256
+    plasticity_dormant_tau: float = 0.025  # normalized-activation dormant threshold
+
     # Training
     num_training_steps: int = 1e5  # Total training steps (gradient updates)
     steps_per_episode: int = 50
@@ -1757,6 +1765,9 @@ class Phase2Config:
                 "buffer_size": self.buffer_size,
                 "batch_size": self.batch_size,
                 "x_h_batch_size": self.x_h_batch_size,
+                "plasticity_diagnostics_interval": self.plasticity_diagnostics_interval,
+                "plasticity_diagnostics_batch_size": self.plasticity_diagnostics_batch_size,
+                "plasticity_dormant_tau": self.plasticity_dormant_tau,
                 "num_training_steps": self.num_training_steps,
                 "steps_per_episode": self.steps_per_episode,
                 "training_steps_per_env_step": self.training_steps_per_env_step,

@@ -45,6 +45,7 @@ from .lookup import get_all_lookup_tables, get_total_table_size
 from .rnd import RNDModule, HumanActionRNDModule
 from .count_based_curiosity import CountBasedCuriosity
 from .value_transforms import to_z_space, y_to_z_space
+from .diagnostics import compute_robot_network_plasticity
 from empo.learning_based.util.soft_clamp import SoftClamp
 
 POLICY_DISTILLATION_EPS = 1e-10
@@ -3985,6 +3986,51 @@ class BasePhase2Trainer(ABC):
         if self.networks.v_r is not None:
             self.networks.v_r.train()
 
+    def _log_plasticity_diagnostics(self) -> None:
+        """Log plasticity-loss diagnostics for the robot networks.
+
+        Probes the robot Q-network (and value network, when present) with a
+        batch of states drawn from the replay buffer and logs dormant/dead
+        neuron fractions, the effective rank of the shared representation,
+        and weight norms under the ``Plasticity/`` TensorBoard namespace.
+        Lookup-table networks (no ``nn.Module`` layers) are skipped.
+        """
+        if self.writer is None:
+            return
+        n = min(
+            len(self.replay_buffer),
+            self.config.plasticity_diagnostics_batch_size,
+        )
+        if n < 2:
+            return
+
+        batch = self.replay_buffer.sample(n)
+        states = [t.state for t in batch]
+
+        networks = {"q_r": self.networks.q_r}
+        if self.config.v_r_use_network and self.networks.v_r is not None:
+            networks["v_r"] = self.networks.v_r
+
+        try:
+            for name, net in networks.items():
+                metrics = compute_robot_network_plasticity(
+                    net,
+                    states,
+                    self.env,
+                    self.device,
+                    dormant_tau=self.config.plasticity_dormant_tau,
+                )
+                for metric, value in metrics.items():
+                    self.writer.add_scalar(
+                        f"Plasticity/{name}/{metric}",
+                        value,
+                        self.training_step_count,
+                    )
+        finally:
+            # measure_plasticity restores each probed net's own mode, but keep
+            # the shared restore for parity with the other eval() call-sites.
+            self._restore_train_mode()
+
     def _learner_step(
         self, learner_state: "_LearnerState", pbar: Optional[tqdm] = None
     ) -> Dict[str, float]:
@@ -4509,6 +4555,16 @@ class BasePhase2Trainer(ABC):
                 self.writer.add_scalar(
                     "LookupTable/total_entries", total_entries, self.training_step_count
                 )
+
+            # Log plasticity-loss diagnostics periodically (dormant/dead
+            # neurons, effective rank, weight-norm growth of the robot nets).
+            plasticity_interval = self.config.plasticity_diagnostics_interval
+            if (
+                plasticity_interval > 0
+                and self.training_step_count % plasticity_interval == 0
+            ):
+                with self.profiler.section("plasticity_diagnostics"):
+                    self._log_plasticity_diagnostics()
 
         # Check for warm-up stage transitions
         with self.profiler.section("warmup_check"):

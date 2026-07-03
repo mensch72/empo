@@ -1441,3 +1441,98 @@ class TestIsolation:
             assert (
                 "phase2_ppo" not in content
             ), "The DQN-path __init__.py should not reference phase2_ppo"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Plasticity diagnostics
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class TestPlasticityDiagnostics:
+    """Tests for phase2_ppo.diagnostics.compute_plasticity_diagnostics."""
+
+    def _make_ac(self):
+        return EMPOActorCritic(
+            state_encoder=None,
+            hidden_dim=32,
+            num_actions=7,
+            num_robots=1,
+            obs_dim=16,
+        )
+
+    def test_returns_expected_metric_keys(self):
+        from empo.learning_based.phase2_ppo.diagnostics import (
+            compute_plasticity_diagnostics,
+        )
+
+        ac = self._make_ac()
+        obs = torch.randn(64, 16)
+        metrics = compute_plasticity_diagnostics(ac, obs)
+
+        # Overall dormant/dead fractions.
+        assert "dormant_frac/overall" in metrics
+        assert "dead_frac/overall" in metrics
+        # Per-ReLU-layer entries for encoder + both heads.
+        for layer in ("encoder_1", "actor_1", "critic_1"):
+            assert f"dormant_frac/{layer}" in metrics
+            assert f"dead_frac/{layer}" in metrics
+        # Effective rank of the shared representation.
+        assert "effective_rank/srank" in metrics
+        assert "effective_rank/erank" in metrics
+        # Weight norms.
+        assert "weight_norm/total" in metrics
+        for module in ("encoder", "actor", "critic"):
+            assert f"weight_norm/{module}" in metrics
+
+    def test_metric_ranges(self):
+        from empo.learning_based.phase2_ppo.diagnostics import (
+            compute_plasticity_diagnostics,
+        )
+
+        ac = self._make_ac()
+        obs = torch.randn(64, 16)
+        metrics = compute_plasticity_diagnostics(ac, obs)
+
+        for key, val in metrics.items():
+            if key.startswith(("dormant_frac", "dead_frac")):
+                assert 0.0 <= val <= 1.0, f"{key} out of [0,1]: {val}"
+            if key.startswith("effective_rank"):
+                # Rank is bounded by the hidden dimension (32).
+                assert 0.0 <= val <= 32.0 + 1e-6, f"{key} out of range: {val}"
+            if key.startswith("weight_norm"):
+                assert val >= 0.0
+
+    def test_does_not_mutate_train_mode(self):
+        from empo.learning_based.phase2_ppo.diagnostics import (
+            compute_plasticity_diagnostics,
+        )
+
+        ac = self._make_ac()
+        obs = torch.randn(16, 16)
+
+        ac.train()
+        compute_plasticity_diagnostics(ac, obs)
+        assert ac.training is True
+
+        ac.eval()
+        compute_plasticity_diagnostics(ac, obs)
+        assert ac.training is False
+
+    def test_dead_neuron_detection(self):
+        """A layer that never fires should report dormant/dead fraction 1.0."""
+        from empo.learning_based.phase2_ppo.diagnostics import (
+            compute_plasticity_diagnostics,
+        )
+
+        ac = self._make_ac()
+        # Force the actor head's first linear layer to output large negatives so
+        # its ReLU is entirely dead for any non-negative-dominated input.
+        with torch.no_grad():
+            ac.actor[0].weight.zero_()
+            ac.actor[0].bias.fill_(-100.0)
+        obs = torch.randn(64, 16)
+        metrics = compute_plasticity_diagnostics(ac, obs)
+
+        assert metrics["dead_frac/actor_1"] == 1.0
+        assert metrics["dormant_frac/actor_1"] == 1.0
+
