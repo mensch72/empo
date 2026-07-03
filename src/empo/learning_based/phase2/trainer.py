@@ -4658,8 +4658,15 @@ class BasePhase2Trainer(ABC):
         # Periodic logging
         if self.training_step_count % 100 == 0:
             if losses and pbar is not None:
+                # Keep V_r(s0) visible: this set_postfix_str replaces the whole
+                # postfix (set per-step above), so prepend V_r(s0) here too when
+                # it is being reported (i.e. once Q_r is trained).
+                v_r_initial = getattr(self, "_last_v_r_initial", None)
+                v_r_part = (
+                    f"V_r(s0)={v_r_initial:.4f}, " if v_r_initial is not None else ""
+                )
                 loss_str = ", ".join(f"{k}={v:.4f}" for k, v in losses.items() if v > 0)
-                pbar.set_postfix_str(loss_str[:60])
+                pbar.set_postfix_str((v_r_part + loss_str)[:80])
 
             if self.debug:
                 stage = self.config.get_warmup_stage_name(self.training_step_count)
