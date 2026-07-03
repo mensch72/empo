@@ -1048,10 +1048,10 @@ class TransportGoalSampler(PossibleGoalSampler):
         goal = TransportGoal(self.env, agent_idx=human_agent_index, target_node=target_node)
         return goal, 1.0
 
-
-# =============================================================================
-# Cluster-Based Goal Classes
-# =============================================================================
+    def get_smallest_pw(self) -> float:
+        """Uniform over nodes with weight 1.0, so p*w = 1 / num_nodes."""
+        n = self.env.network.number_of_nodes()
+        return 1.0 / n
 
 class TransportClusterGoal(PossibleGoal):
     """
@@ -1223,3 +1223,9 @@ class TransportClusterGoalSampler(PossibleGoalSampler):
         target_cluster = self.rng.randint(0, self.env.num_clusters)
         goal = TransportClusterGoal(self.env, agent_idx=human_agent_index, target_cluster=target_cluster)
         return goal, 1.0
+
+    def get_smallest_pw(self) -> float:
+        """Uniform over clusters (or nodes when clustering is off), weight 1.0."""
+        if not self.env.use_clusters or self.env.num_clusters == 0:
+            return 1.0 / self.env.network.number_of_nodes()
+        return 1.0 / self.env.num_clusters

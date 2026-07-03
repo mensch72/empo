@@ -205,6 +205,26 @@ class MultiGridGoalSampler(PossibleGoalSampler):
         """Set random seed for reproducibility."""
         self._rng = np.random.default_rng(seed)
     
+    def get_smallest_pw(self) -> float:
+        """
+        Smallest sampling probability (weight is 1.0) over all rectangle goals.
+
+        A rectangle is sampled with P ∝ (1+x2-x1)*(1+y2-y1), independently in x
+        and y over the valid ranges. The least likely goal is a single cell
+        (x1=x2, y1=y2, weight 1 in each axis), so its probability is
+        1 / (T_x * T_y), where T_c = sum over 0<=c1<=c2<=nc-1 of (1+c2-c1) is the
+        per-axis normalizer for a range of nc cells.
+        """
+        def _axis_total(n_cells: int) -> int:
+            # sum over pairs 0<=c1<=c2<=n_cells-1 of (1 + c2 - c1)
+            return sum((n_cells - d) * (1 + d) for d in range(n_cells))
+
+        nx = self._x_range[1] - self._x_range[0] + 1
+        ny = self._y_range[1] - self._y_range[0] + 1
+        total_x = _axis_total(nx)
+        total_y = _axis_total(ny)
+        return 1.0 / (total_x * total_y)
+
     @staticmethod
     def _sample_coordinate_pair_weighted(n: int, rng: np.random.Generator) -> Tuple[int, int]:
         """

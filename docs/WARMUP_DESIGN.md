@@ -129,6 +129,25 @@ All networks continue training with:
 - **Start of ramp-up (stage 4→5)**: Removes all transitions collected during warmup when β_r = 0 (uniform random robot policy)
 - **End of ramp-up (stage 5→6)**: Removes transitions collected during ramp-up when β_r was increasing, ensuring fine-tuning uses only data collected with full β_r
 
+**Gradual buffer clearing (default, `gradual_buffer_clearing=True`)**: A hard clear at
+the stage 5→6 boundary causes a sudden data-distribution shift right when β_r reaches its
+nominal value, which can destabilize V_r (the buffer instantly refills with near-greedy
+on-policy rollouts). To avoid this, the stage 5→6 hard clear is replaced by a *gradual*
+clear: instead of dropping all pre-full-training transitions at once, the replay
+*sampling age limit* is tightened linearly between the start of full training
+(`full_warmup_end`) and the LR-decay start (`lr_constant_fraction · num_training_steps`).
+
+At each training step `t` in that window the oldest still-eligible insertion step moves
+linearly from `0` (include everything) up to `full_warmup_end` (exclude every
+pre-full-training transition). Equivalently, `max_age_training_steps` decreases from
+"the whole buffer" down to the window length, so the oldest transitions are phased out
+first. By the time the LR schedule begins to decay, only transitions collected under full
+β_r remain eligible for sampling. This works in both sync and async execution modes and is
+implemented via `Phase2Config.gradual_clearing_max_age()` and the replay buffer's existing
+age-based `sample(..., max_age_training_steps=..., current_training_step=...)` support.
+Set `gradual_buffer_clearing=False` to restore the hard clear at the stage 5→6 boundary.
+The stage 4→5 clear (removing β_r = 0 uniform-policy data) is unchanged.
+
 **Learning rate decay**: After the full warmup, learning rates decay as:
 
 ```

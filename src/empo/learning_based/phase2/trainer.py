@@ -45,6 +45,7 @@ from .lookup import get_all_lookup_tables, get_total_table_size
 from .rnd import RNDModule, HumanActionRNDModule
 from .count_based_curiosity import CountBasedCuriosity
 from .value_transforms import to_z_space, y_to_z_space
+from empo.learning_based.util.soft_clamp import SoftClamp
 
 POLICY_DISTILLATION_EPS = 1e-10
 
@@ -309,6 +310,13 @@ class BasePhase2Trainer(ABC):
 
         if self.debug:
             print("[DEBUG] BasePhase2Trainer.__init__: Initializing target networks...")
+
+        # Inject the X_h feasibility floor into the X_h network *before* creating
+        # target networks, so the frozen target copy inherits it. The network
+        # (not the trainer) is then responsible for outputting feasible,
+        # strictly-positive X_h: soft clamp while training, hard clamp in
+        # eval/target mode, both bounded below by the sampler-derived floor.
+        self._apply_x_h_feasible_floor()
 
         # Initialize target networks
         self._init_target_networks()
@@ -2868,9 +2876,11 @@ class BasePhase2Trainer(ABC):
                     u_r_flat_states, u_r_flat_humans, self.env, self.device
                 ).squeeze()
 
-                # Clamp X_h values and compute X_h^{-xi}
-                x_h_clamped = torch.clamp(x_h_all, min=1e-3, max=1.0)
-                x_h_power = x_h_clamped ** (-self.config.xi)
+                # X_h comes from the X_h target network, which already outputs
+                # feasible, strictly-positive values (hard clamp to [floor, 1] in
+                # eval/target mode), so X_h^{-xi} is finite without trainer-side
+                # clamping.
+                x_h_power = x_h_all ** (-self.config.xi)
 
                 # Aggregate by state using scatter_add: sum X_h^{-xi} for each state
                 # Build state indices: [0,0,0, 1,1,1, 2,2,2, ...] based on humans_per_state
@@ -3191,12 +3201,13 @@ class BasePhase2Trainer(ABC):
                 flat_states, flat_humans, self.env, self.device
             ).squeeze()
 
-            # Reshape to (n_states, n_humans) and compute mean over humans
+            # Reshape to (n_states, n_humans) and compute mean over humans.
+            # The X_h target network already outputs feasible, strictly-positive
+            # values (hard clamp to [floor, 1] in eval mode), so X_h^{-xi} is finite.
             x_h_reshaped = x_h_all.view(n_states, n_humans)
-            x_h_clamped = torch.clamp(x_h_reshaped, min=1e-3, max=1.0)
 
             # y = E[X_h^{-xi}] = mean over humans
-            y = (x_h_clamped ** (-self.config.xi)).mean(dim=1)
+            y = (x_h_reshaped ** (-self.config.xi)).mean(dim=1)
 
             # U_r = -y^eta
             u_r = -(y**self.config.eta)
@@ -3259,11 +3270,13 @@ class BasePhase2Trainer(ABC):
         # Compute X_h = mean over goals of V_h^e^zeta
         x_h = (v_h_e_reshaped**self.config.zeta).mean(dim=2)  # (n_states, n_humans)
 
-        # Clamp X_h values
-        x_h_clamped = torch.clamp(x_h, min=1e-3, max=1.0)
+        # Clamp X_h to its feasible range [floor, 1]: soft while gradients flow,
+        # hard otherwise. There is no X_h network in this mode, so the clamp is
+        # applied here to keep X_h^{-xi} finite.
+        x_h = self._clamp_x_h_feasible(x_h)
 
-        # y = E[X_h^{-xi}] = mean over humans
-        y = (x_h_clamped ** (-self.config.xi)).mean(dim=1)  # (n_states,)
+        # y = E[X_h^{-xi}] = mean over humans.
+        y = (x_h ** (-self.config.xi)).mean(dim=1)  # (n_states,)
 
         # U_r = -y^eta
         u_r = -(y**self.config.eta)
@@ -3541,11 +3554,24 @@ class BasePhase2Trainer(ABC):
         # Sample batch for most networks
         with self.profiler.section("batch_sampling"):
             sample_kwargs = {}
+            # Effective replay age limit combines the async fresh-replay window
+            # (if configured) with the gradual buffer-clearing schedule that
+            # phases out pre-full-training transitions oldest-first. Applies in
+            # all execution modes (sync and async).
+            age_candidates = []
             if self.config.uses_fresh_trajectory_replay():
+                age_candidates.append(
+                    self.config.trajectory_replay_max_age_training_steps
+                )
+            gradual_age = self.config.gradual_clearing_max_age(
+                self.training_step_count
+            )
+            if gradual_age is not None:
+                age_candidates.append(gradual_age)
+            age_candidates = [a for a in age_candidates if a is not None]
+            if age_candidates:
                 sample_kwargs = {
-                    "max_age_training_steps": (
-                        self.config.trajectory_replay_max_age_training_steps
-                    ),
+                    "max_age_training_steps": min(age_candidates),
                     "current_training_step": self.training_step_count,
                 }
 
@@ -3774,6 +3800,11 @@ class BasePhase2Trainer(ABC):
     def _init_actor_state(self, actor_id: int = 0) -> "_ActorState":
         """Initialize actor state with fresh environment."""
         state = self.reset_environment()
+        # Cache one initial state (and its world model) so the progress bar can
+        # report V_r(initial_state) as a lightweight training summary.
+        if getattr(self, "_vr_log_state", None) is None:
+            self._vr_log_state = state
+            self._vr_log_world_model = self.env
         goals, goal_weights = self._sample_goals(state)
         episode_seq = self._allocate_initial_episode_seq(actor_id)
         return BasePhase2Trainer._ActorState(
@@ -3938,6 +3969,22 @@ class BasePhase2Trainer(ABC):
             print(f"[Training] Q_r supervision mode: {supervision_label}")
         return state
 
+    def _restore_train_mode(self) -> None:
+        """Restore train() mode on main networks.
+
+        The ``get_v_r``/``get_u_r``/``get_x_h`` convenience methods switch the
+        networks they query to ``eval()``; call this after using them inside the
+        training loop so dropout/batchnorm behave correctly on subsequent steps.
+        """
+        self.networks.q_r.train()
+        self.networks.v_h_e.train()
+        if self.networks.x_h is not None:
+            self.networks.x_h.train()
+        if self.networks.u_r is not None:
+            self.networks.u_r.train()
+        if self.networks.v_r is not None:
+            self.networks.v_r.train()
+
     def _learner_step(
         self, learner_state: "_LearnerState", pbar: Optional[tqdm] = None
     ) -> Dict[str, float]:
@@ -4008,9 +4055,38 @@ class BasePhase2Trainer(ABC):
                     - learner_state.prev_param_norms.get("q_r", 0)
                 )
 
-                # Build postfix dict with v_h_e loss and network changes
+                # Query V_r at the cached initial state once as a compact,
+                # comparable training summary (mirrors the exact V_r(initial_state)
+                # reported by backward induction). get_v_r()/get_u_r() switch the
+                # queried networks to eval(), so restore train mode afterwards.
+                # Only meaningful once Q_r is actually being trained (V_r derives
+                # from Q_r); before that (V_h^e/X_h/U_r warm-up stages) it is
+                # reported as "n/a" rather than a misleading value.
+                q_r_being_trained = "q_r" in self.config.get_active_networks(
+                    self.training_step_count
+                )
+                if (
+                    q_r_being_trained
+                    and getattr(self, "_vr_log_state", None) is not None
+                ):
+                    try:
+                        self._last_v_r_initial = self.get_v_r(
+                            self._vr_log_state, self._vr_log_world_model
+                        )
+                    except Exception:
+                        self._last_v_r_initial = None
+                    finally:
+                        self._restore_train_mode()
+                else:
+                    self._last_v_r_initial = None
+
+                # Build postfix dict with V_r(initial state), v_h_e loss and changes
+                v_r_initial = getattr(self, "_last_v_r_initial", None)
                 postfix = {
-                    "v_h_e": f"{losses.get('v_h_e', 0):.4f}",
+                    "V_r(s0)": (
+                        f"{v_r_initial:.4f}" if v_r_initial is not None else "n/a"
+                    ),
+                    "vhe_loss": f"{losses.get('v_h_e', 0):.4f}",
                     "Δx_h": f"{x_h_change:.4f}",
                     "Δq_r": f"{q_r_change:.4f}",
                     "s/step": f"{avg_sec_per_step:.2f}",
@@ -4469,8 +4545,38 @@ class BasePhase2Trainer(ABC):
 
                 # Clear replay buffer at start of β_r ramp-up (transition to stage 5)
                 if current_stage == 5 and learner_state.prev_stage < 5:
-                    buffer_size_before = len(self.replay_buffer)
-                    self.replay_buffer.clear()
+                    if self.config.gradual_buffer_clearing:
+                        # Gradual clearing: do NOT hard-clear. The replay sampling
+                        # age limit is tightened linearly from here until the
+                        # LR-decay start (see
+                        # Phase2Config.gradual_clearing_max_age), phasing out the
+                        # warm-up transitions oldest-first and avoiding the sudden
+                        # distribution shift a hard clear causes.
+                        if self.verbose:
+                            print(
+                                "  [Training] Gradual replay-buffer clearing enabled: "
+                                "phasing out warm-up transitions until LR-decay start "
+                                "(no hard clear at start of β_r ramp-up)"
+                            )
+                        if self.writer is not None:
+                            self.writer.add_text(
+                                "Warmup/events",
+                                "Gradual replay-buffer clearing (no hard clear at start of β_r ramp-up)",
+                                global_step=self.training_step_count,
+                            )
+                    else:
+                        buffer_size_before = len(self.replay_buffer)
+                        self.replay_buffer.clear()
+                        if self.verbose:
+                            print(
+                                f"  [Training] Cleared replay buffer ({buffer_size_before} transitions) at start of β_r ramp-up"
+                            )
+                        if self.writer is not None:
+                            self.writer.add_text(
+                                "Warmup/events",
+                                f"Cleared replay buffer ({buffer_size_before} transitions) at start of β_r ramp-up",
+                                global_step=self.training_step_count,
+                            )
                     # In async mode, reset shared_env_steps so actors can resume production
                     # (otherwise throttling keeps them paused since env_steps >> training_steps)
                     if self._shared_env_steps is not None:
@@ -4480,21 +4586,37 @@ class BasePhase2Trainer(ABC):
                             print(
                                 "  [Async] Reset shared_env_steps to 0 to unthrottle actors"
                             )
-                    if self.verbose:
-                        print(
-                            f"  [Training] Cleared replay buffer ({buffer_size_before} transitions) at start of β_r ramp-up"
-                        )
-                    if self.writer is not None:
-                        self.writer.add_text(
-                            "Warmup/events",
-                            f"Cleared replay buffer ({buffer_size_before} transitions) at start of β_r ramp-up",
-                            global_step=self.training_step_count,
-                        )
 
                 # Clear replay buffer after β_r ramp-up is done (transition to stage 6)
                 if current_stage == 6 and learner_state.prev_stage == 5:
-                    buffer_size_before = len(self.replay_buffer)
-                    self.replay_buffer.clear()
+                    if self.config.gradual_buffer_clearing:
+                        # Gradual clearing already underway since the start of the
+                        # β_r ramp-up (see stage-5 transition); no hard clear here.
+                        if self.verbose:
+                            print(
+                                "  [Training] Gradual replay-buffer clearing in progress: "
+                                "phasing out old transitions until LR-decay start "
+                                "(no hard clear after β_r ramp-up)"
+                            )
+                        if self.writer is not None:
+                            self.writer.add_text(
+                                "Warmup/events",
+                                "Gradual replay-buffer clearing (no hard clear after β_r ramp-up)",
+                                global_step=self.training_step_count,
+                            )
+                    else:
+                        buffer_size_before = len(self.replay_buffer)
+                        self.replay_buffer.clear()
+                        if self.verbose:
+                            print(
+                                f"  [Training] Cleared replay buffer ({buffer_size_before} transitions) after β_r ramp-up"
+                            )
+                        if self.writer is not None:
+                            self.writer.add_text(
+                                "Warmup/events",
+                                f"Cleared replay buffer ({buffer_size_before} transitions) after β_r ramp-up",
+                                global_step=self.training_step_count,
+                            )
                     # In async mode, reset shared_env_steps so actors can resume production
                     if self._shared_env_steps is not None:
                         with self._shared_env_steps.get_lock():
@@ -4503,16 +4625,6 @@ class BasePhase2Trainer(ABC):
                             print(
                                 "  [Async] Reset shared_env_steps to 0 to unthrottle actors"
                             )
-                    if self.verbose:
-                        print(
-                            f"  [Training] Cleared replay buffer ({buffer_size_before} transitions) after β_r ramp-up"
-                        )
-                    if self.writer is not None:
-                        self.writer.add_text(
-                            "Warmup/events",
-                            f"Cleared replay buffer ({buffer_size_before} transitions) after β_r ramp-up",
-                            global_step=self.training_step_count,
-                        )
 
                 learner_state.prev_stage = current_stage
                 learner_state.prev_stage_name = current_stage_name
@@ -5480,12 +5592,65 @@ class BasePhase2Trainer(ABC):
             )
             return v_h_e.squeeze().item()
 
+    def _apply_x_h_feasible_floor(self) -> None:
+        """
+        Set the X_h network's feasible lower bound from the goal sampler.
+
+        The floor is ``min_g p_g * w_g`` (``goal_sampler.get_smallest_pw()``),
+        a valid lower bound for ``X_h = E_g[w_g * V_h^e^zeta]`` when at least one
+        goal is always achievable (``V_h^e = 1``). Injecting it into the X_h
+        network's ``feasible_range`` makes the network output feasible,
+        strictly-positive X_h (soft clamp while training, hard clamp in
+        eval/target mode) so that ``X_h^{-xi}`` — and hence ``U_r`` — stays
+        finite without any trainer-side patching.
+
+        No-op when there is no X_h network (``x_h_use_network=False``) or when the
+        sampler exposes no floor (``get_smallest_pw()`` returns ``None``).
+        """
+        x_h = getattr(self.networks, "x_h", None)
+        if x_h is None or not hasattr(x_h, "set_feasible_lower_bound"):
+            return
+        sampler = getattr(self, "goal_sampler", None)
+        if sampler is None:
+            return
+        floor = sampler.get_smallest_pw()
+        if floor is None or floor <= 0.0:
+            return
+        x_h.set_feasible_lower_bound(float(floor))
+
+    def _clamp_x_h_feasible(self, x_h: torch.Tensor) -> torch.Tensor:
+        """
+        Clamp an arithmetically-aggregated X_h to its feasible range [floor, 1].
+
+        Used on non-network X_h paths (where X_h is computed directly from V_h^e
+        samples rather than predicted by an X_h network). Mirrors the network's
+        ``apply_clamp``: a smooth :class:`SoftClamp` while gradients flow (so
+        training stays differentiable) and a hard ``torch.clamp`` otherwise.
+
+        The floor is ``min_g p_g * w_g`` (``goal_sampler.get_smallest_pw()``),
+        a valid lower bound for ``X_h = E_g[w_g * V_h^e^zeta]`` when at least one
+        goal is always achievable. It keeps ``X_h^{-xi}`` (and hence ``U_r``)
+        finite. When the sampler exposes no floor the value is returned unchanged.
+        """
+        sampler = getattr(self, "goal_sampler", None)
+        floor = sampler.get_smallest_pw() if sampler is not None else None
+        if floor is None or floor <= 0.0:
+            return x_h
+        floor = float(floor)
+        if x_h.requires_grad and torch.is_grad_enabled():
+            soft = getattr(self, "_x_h_soft_clamp", None)
+            if soft is None or getattr(self, "_x_h_soft_clamp_floor", None) != floor:
+                soft = SoftClamp(a=floor, b=1.0).to(self.device)
+                self._x_h_soft_clamp = soft
+                self._x_h_soft_clamp_floor = floor
+            return soft(x_h)
+        return torch.clamp(x_h, min=floor, max=1.0)
+
     def get_x_h(self, state: Any, world_model: Any, human_agent_idx: int) -> float:
         """
         Get X_h(s) - aggregate goal achievement ability for human h.
 
         If x_h_use_network=False, computes X_h directly from V_h^e samples.
-
         Args:
             state: Environment state.
             world_model: Environment/world model.
@@ -5500,8 +5665,9 @@ class BasePhase2Trainer(ABC):
                 x_h = self.networks.x_h.forward(
                     state, world_model, human_agent_idx, self.device
                 )
-                x_h_clamped = torch.clamp(x_h.squeeze(), min=1e-3, max=1.0)
-                return x_h_clamped.item()
+                # Network output is already clamped to its feasible range in
+                # eval mode (hard clamp to [floor, 1]).
+                return x_h.squeeze().item()
         else:
             # Compute X_h = E_g[V_h^e(s, g)^zeta] exactly from all goals
             # For TabularGoalSampler, use all goals with their probabilities
@@ -5560,8 +5726,8 @@ class BasePhase2Trainer(ABC):
                     # X_h = E[weight * V_h^e^zeta]
                     x_h = (weights_tensor * (v_h_e_values**self.config.zeta)).mean()
 
-                x_h_clamped = torch.clamp(x_h, min=1e-3, max=1.0)
-                return x_h_clamped.item()
+                # X_h is aggregated exactly from V_h^e in [0, 1]; no X_h network here.
+                return x_h.item()
 
     def get_q_r(self, state: Any, world_model: Any) -> np.ndarray:
         """

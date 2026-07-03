@@ -236,6 +236,27 @@ class PossibleGoalSampler(ABC):
                 - weight: Weight for this goal in X_h computation (float > 0)
         """
 
+    def get_smallest_pw(self) -> Optional[float]:
+        """
+        Smallest product of sampling probability and weight over the support.
+
+        Returns ``min_g p_g * w_g``, where ``p_g`` is the sampling probability of
+        goal ``g`` (summing to 1 over the support) and ``w_g`` is its X_h weight.
+
+        This is used as a lower bound (floor) for
+        ``X_h = E_g[w_g * V_h^e(s, g)^zeta]``: assuming at least one goal is
+        fully achievable (``V_h^e = 1``), the worst case is that a single
+        guaranteed goal ``g*`` contributes ``p_{g*} * w_{g*} * 1^zeta`` and every
+        other goal contributes 0, hence ``X_h >= min_g p_g * w_g``. The floor is
+        only a valid lower bound when the support really does contain an
+        always-achievable goal.
+
+        Returns:
+            The smallest ``p_g * w_g`` over the support, or ``None`` when the
+            sampler has no finite/known support and therefore provides no floor.
+        """
+        return None
+
 
 def approx_integral_over_possible_goals(
     state, 
@@ -393,6 +414,10 @@ class DeterministicGoalSampler(PossibleGoalSampler):
         """
         return self.goal, self.weight
 
+    def get_smallest_pw(self) -> float:
+        """Single goal sampled with probability 1, so p*w = weight."""
+        return float(self.weight)
+
 
 class DeterministicGoalGenerator(PossibleGoalGenerator):
     """
@@ -499,6 +524,10 @@ class TabularGoalSampler(PossibleGoalSampler):
         import random
         idx = random.choices(range(len(self.goals)), weights=self.probs, k=1)[0]
         return self.goals[idx], self.weights[idx]
+
+    def get_smallest_pw(self) -> float:
+        """Smallest prob_g * weight_g over the fixed goal list."""
+        return min(p * w for p, w in zip(self.probs, self.weights))
     
     def get_generator(self) -> 'TabularGoalGenerator':
         """

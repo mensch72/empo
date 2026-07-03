@@ -250,3 +250,7 @@ class BushWorldConfigGoalSampler(PossibleGoalSampler):
         goals = self._goals_for_agent(human_agent_index)
         idx = int(self._rng.choice(len(goals), p=self._probs))
         return goals[idx], 1.0
+
+    def get_smallest_pw(self) -> float:
+        """Weights are all 1.0, so p*w = smallest sampling probability."""
+        return float(np.min(self._probs))

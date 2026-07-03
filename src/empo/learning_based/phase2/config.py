@@ -775,6 +775,14 @@ class Phase2Config:
     # are not yet enough fresh entries.
     trajectory_replay_max_age_training_steps: Optional[int] = None
 
+    # Gradual buffer clearing (all execution modes). Instead of a hard replay
+    # buffer clear when the β_r ramp-up completes (start of full training),
+    # linearly tighten the replay-sampling age limit between full_warmup_end and
+    # the LR-decay start so pre-full-training transitions are phased out oldest
+    # first. This avoids the sudden data-distribution shift that can destabilize
+    # V_r right after ramp-up. Set to False to keep the hard buffer clear.
+    gradual_buffer_clearing: bool = True
+
     # =========================================================================
     # Checkpoint and Memory Monitoring
     # =========================================================================
@@ -974,6 +982,44 @@ class Phase2Config:
             full_warmup_end, int(self.lr_constant_fraction * self.num_training_steps)
         )
         return step >= decay_start_step and self.constant_lr_then_1_over_t
+
+    def gradual_clearing_max_age(self, step: int) -> Optional[int]:
+        """
+        Age limit (in training steps) for gradual replay-buffer clearing.
+
+        Replaces the hard buffer clear at the start of the β_r ramp-up. Between
+        ``_warmup_v_r_end`` (start of the β_r ramp-up, where the legacy hard clear
+        happened) and ``decay_start_step`` (where the LR schedule begins to
+        decay), the sampling age limit is tightened linearly so that transitions
+        inserted before the β_r ramp-up (the warm-up transitions) are phased out
+        oldest-first. By the end of the window only transitions inserted at/after
+        ``_warmup_v_r_end`` remain eligible for sampling.
+
+        Args:
+            step: Current training step.
+
+        Returns:
+            The maximum transition age (in training steps) to sample, or ``None``
+            when gradual clearing is disabled or ``step`` is outside the window.
+        """
+        if not self.gradual_buffer_clearing:
+            return None
+        # Gradual clearing begins at the start of the β_r ramp-up (where the
+        # legacy hard clear happened) and runs until the LR schedule begins.
+        t_start = self._warmup_v_r_end
+        t_end = max(
+            t_start, int(self.lr_constant_fraction * self.num_training_steps)
+        )
+        if t_end <= t_start:
+            return None
+        if step < t_start or step >= t_end:
+            return None
+        frac = (step - t_start) / (t_end - t_start)
+        # Oldest insertion step still eligible: moves linearly from 0 (include
+        # everything at t_start) up to t_start (exclude all pre-full-training
+        # transitions at t_end).
+        min_insertion_step = int(t_start * frac)
+        return max(0, step - min_insertion_step)
 
     def should_use_z_loss(self, step: int) -> bool:
         """
@@ -1782,6 +1828,7 @@ class Phase2Config:
                 "max_env_steps_per_training_step": self.max_env_steps_per_training_step,
                 "async_queue_size": self.async_queue_size,
                 "trajectory_replay_max_age_training_steps": self.trajectory_replay_max_age_training_steps,
+                "gradual_buffer_clearing": self.gradual_buffer_clearing,
             },
             "network_architecture": {
                 "hidden_dim": self.hidden_dim,

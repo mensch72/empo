@@ -122,6 +122,29 @@ class BaseAggregateGoalAbilityNetwork(nn.Module, ABC):
             self.feasible_range[1]
         )
     
+    def set_feasible_lower_bound(self, lower: float) -> None:
+        """
+        Set the lower bound of the feasible range (and rebuild the soft clamp).
+
+        X_h = E_g[w_g * V_h^e(s, g)^ζ] is bounded below by ``min_g p_g * w_g``
+        whenever at least one goal is always achievable (V_h^e = 1). That floor
+        depends on the goal sampler, so it is injected here after construction.
+        Both the soft clamp (used while training, self.training=True) and the hard
+        clamp (used in eval/target mode) then enforce X_h ∈ [lower, upper], so the
+        network — not the trainer — guarantees feasible, strictly-positive X_h.
+
+        Args:
+            lower: New lower bound; must satisfy 0 <= lower < upper.
+        """
+        upper = self.feasible_range[1]
+        lower = float(lower)
+        if not lower < upper:
+            raise ValueError(
+                f"feasible lower bound {lower} must be < upper bound {upper}"
+            )
+        self.feasible_range = (lower, upper)
+        self.soft_clamp = SoftClamp(a=lower, b=upper)
+    
     def compute_target(
         self,
         v_h_e: torch.Tensor,

@@ -113,22 +113,28 @@ class _BushWorldEnsembleLoader:
     callable is not intended to be shared across threads within a process.
     """
 
-    def __init__(self, world_paths, seed: int = 0):
+    def __init__(self, world_paths, seed: int = 0, max_steps: Optional[int] = None):
         self._world_paths = [os.path.abspath(p) for p in world_paths]
         self._seed = int(seed)
+        self._max_steps = None if max_steps is None else int(max_steps)
         self._rng = np.random.default_rng(self._seed)
 
     def __call__(self):
         idx = int(self._rng.integers(len(self._world_paths)))
-        return load_bushworld(self._world_paths[idx])
+        return load_bushworld(self._world_paths[idx], max_steps=self._max_steps)
 
     def __getstate__(self):
         # Drop the (unpicklable-by-value, non-deterministic) RNG; rebuild on load.
-        return {"_world_paths": self._world_paths, "_seed": self._seed}
+        return {
+            "_world_paths": self._world_paths,
+            "_seed": self._seed,
+            "_max_steps": self._max_steps,
+        }
 
     def __setstate__(self, state):
         self._world_paths = state["_world_paths"]
         self._seed = state["_seed"]
+        self._max_steps = state.get("_max_steps")
         self._rng = np.random.default_rng(self._seed)
 
 
@@ -340,7 +346,7 @@ class CoarseTimingProfiler:
 # Backward-induction result cache
 # --------------------------------------------------------------------------- #
 # Bump if the cached structure changes incompatibly.
-_BI_CACHE_VERSION = 1
+_BI_CACHE_VERSION = 2
 
 
 def _bi_cache_key(world_path: str, args) -> Tuple[dict, str]:
@@ -367,6 +373,7 @@ def _bi_cache_key(world_path: str, args) -> Tuple[dict, str]:
         "zeta": args.zeta,
         "xi": args.xi,
         "eta": args.eta,
+        "max_steps": args.max_steps,
     }
     digest = hashlib.sha256(
         repr(sorted(key.items())).encode("utf-8")
@@ -374,28 +381,44 @@ def _bi_cache_key(world_path: str, args) -> Tuple[dict, str]:
     return key, digest
 
 
+def _bi_initial_state_v_r(env, vr_dict) -> Optional[float]:
+    """V_r at the environment's initial state, from the backward-induction values.
+
+    ``vr_dict`` maps state -> float (the robot value function returned by
+    ``compute_robot_policy(..., return_values=True)``). We reset a fresh copy of
+    the world to its initial state and look up its value, so the number matches
+    the ``V_r(s0)`` the learning-based trainer reports during training.
+    """
+    env.reset()
+    initial_state = env.get_state()
+    if initial_state in vr_dict:
+        return float(vr_dict[initial_state])
+    return None
+
+
 def _load_bi_policy(cache_file: str, key: dict, env, robot_indices):
-    """Restore a cached backward-induction policy, or return None on a miss."""
+    """Restore a cached BI policy and its V_r(s0), or (None, None) on a miss."""
     try:
         with open(cache_file, "rb") as f:
             cached = pickle.load(f)
     except Exception as exc:  # noqa: BLE001 - cache is best-effort
         print(f"  could not read BI cache ({exc}); recomputing.")
-        return None
+        return None, None
     if cached.get("key") != key:
         print("  BI cache key does not match this problem; recomputing.")
-        return None
-    return TabularRobotPolicy(env, list(robot_indices), cached["values"])
+        return None, None
+    policy = TabularRobotPolicy(env, list(robot_indices), cached["values"])
+    return policy, cached.get("v_r_initial")
 
 
-def _save_bi_policy(cache_file: str, key: dict, policy) -> None:
+def _save_bi_policy(cache_file: str, key: dict, policy, v_r_initial=None) -> None:
     """Persist a backward-induction policy to the problem-keyed cache."""
     try:
         os.makedirs(os.path.dirname(cache_file), exist_ok=True)
         tmp = cache_file + ".tmp"
         with open(tmp, "wb") as f:
             pickle.dump(
-                {"key": key, "values": policy.values},
+                {"key": key, "values": policy.values, "v_r_initial": v_r_initial},
                 f,
                 protocol=pickle.HIGHEST_PROTOCOL,
             )
@@ -465,6 +488,7 @@ def _checkpoint_cache_key(
         "xi": args.xi,
         "eta": args.eta,
         "seed": args.seed,
+        "max_steps": args.max_steps,
     }
     digest = hashlib.sha256(
         json.dumps(key, sort_keys=True).encode("utf-8")
@@ -756,17 +780,20 @@ def compare_policies(env, human_policy_prior, policy_a, policy_b) -> dict:
         s for s in _reachable_states(env)
         if not env.is_terminal(s)
     ]
-    max_diff = 0.0
+    sq_sum = 0.0
+    n_terms = 0
     argmax_agree = 0
     for s in states:
         da, db = _policy_distribution(policy_a, s), _policy_distribution(policy_b, s)
         for k in set(da) | set(db):
-            max_diff = max(max_diff, abs(da.get(k, 0.0) - db.get(k, 0.0)))
+            diff = da.get(k, 0.0) - db.get(k, 0.0)
+            sq_sum += diff * diff
+            n_terms += 1
         if da and db and max(da, key=da.get) == max(db, key=db.get):
             argmax_agree += 1
     return {
         "num_states": len(states),
-        "max_prob_diff": max_diff,
+        "rmse_prob_diff": (sq_sum / n_terms) ** 0.5 if n_terms else 0.0,
         "argmax_agreement": argmax_agree / len(states) if states else 1.0,
     }
 
@@ -837,6 +864,10 @@ def main():
              "single world runs in single-map mode; two or more (or a "
              "directory) run in random-map-ensemble mode, where the learner "
              "draws a fresh world each episode.")
+    parser.add_argument("--max-steps", type=int, default=None,
+                        help="Override the episode horizon (max_steps) of the "
+                             "loaded world(s). In --random-maps mode this "
+                             "overrides --random-max-steps.")
     parser.add_argument("--method", default="lookup",
                         choices=["lookup", "neural"],
                         help="Learning version for the learned policy.")
@@ -931,7 +962,8 @@ def main():
         fill = None if args.random_fill_density < 0 else args.random_fill_density
         map_generator = _BushWorldRandomGenerator(
             rand_w, rand_h, args.random_robots, args.random_humans,
-            B=args.random_B, max_steps=args.random_max_steps,
+            B=args.random_B,
+            max_steps=args.max_steps if args.max_steps is not None else args.random_max_steps,
             fill_density=fill, seed=args.seed,
         )
         ensemble = False
@@ -953,7 +985,7 @@ def main():
             print(f"  - {os.path.relpath(p, _REPO_ROOT)}")
 
         # Primary world: networks, the human prior and goal sampler are built from it.
-        env = load_bushworld(world_paths[0])
+        env = load_bushworld(world_paths[0], max_steps=args.max_steps)
         print(f"  primary: {env!r}")
 
         if ensemble:
@@ -994,7 +1026,7 @@ def main():
         )
     elif ensemble:
         world_model_factory = EnsembleWorldModelFactory(
-            _BushWorldEnsembleLoader(world_paths, seed=args.seed),
+            _BushWorldEnsembleLoader(world_paths, seed=args.seed, max_steps=args.max_steps),
             episodes_per_env=1,
         )
 
@@ -1012,26 +1044,32 @@ def main():
         print("\n=== Backward induction (exact Phase 2) ===")
         # Restore the exact policy if we have already solved this exact problem
         # (same map + theory parameters); otherwise compute and cache it.
+        bi_v_r_initial = None
         bi_cache_key = bi_cache_file = None
         if not args.no_bi_cache:
             bi_cache_key, bi_digest = _bi_cache_key(world_paths[0], args)
             bi_cache_file = os.path.join(args.output_dir, "bi_cache", f"bi_{bi_digest}.pkl")
             if not args.recompute_bi and os.path.exists(bi_cache_file):
-                bi_policy = _load_bi_policy(
+                bi_policy, bi_v_r_initial = _load_bi_policy(
                     bi_cache_file, bi_cache_key, env, env.robot_agent_indices)
                 if bi_policy is not None:
                     print(f"  restored cached backward induction policy from {bi_cache_file}")
         if bi_policy is None:
-            bi_policy = compute_robot_policy(
+            bi_policy, bi_vr, _bi_vh = compute_robot_policy(
                 env, list(env.human_agent_indices), list(env.robot_agent_indices),
                 goal_generator, human_policy_prior,
                 beta_r=args.beta_r, gamma_h=args.gamma_h, gamma_r=args.gamma_r,
                 zeta=args.zeta, xi=args.xi, eta=args.eta,
                 level_fct=lambda s: s[0], quiet=True,
+                return_values=True,
             )
+            bi_v_r_initial = _bi_initial_state_v_r(env, bi_vr)
             print("  backward induction policy computed.")
             if bi_cache_file is not None:
-                _save_bi_policy(bi_cache_file, bi_cache_key, bi_policy)
+                _save_bi_policy(bi_cache_file, bi_cache_key, bi_policy, bi_v_r_initial)
+        if bi_v_r_initial is not None:
+            print(f"  V_r(initial_state) (backward induction) = {bi_v_r_initial:.4f}")
+            print("    (comparable to the 'V_r(s0)' shown during training)")
 
     # --- Learned policy with checkpointing -------------------------------- #
     # Key the checkpoint to the exact problem spec (map content for fixed maps,
@@ -1093,7 +1131,7 @@ def main():
         print("\n=== Policy comparison (learned vs backward induction) ===")
         cmp = compare_policies(env, human_policy_prior, bi_policy, reloaded_policy)
         print(f"  states compared: {cmp['num_states']}")
-        print(f"  max |pi_r diff|: {cmp['max_prob_diff']:.4e}")
+        print(f"  RMSE(pi_r): {cmp['rmse_prob_diff']:.4e}")
         print(f"  argmax agreement: {cmp['argmax_agreement'] * 100:.1f}%")
         print("  (the learned policy uses the shared sampling-based trainer; it "
               "approximates the backward-induction fixed point.)")
