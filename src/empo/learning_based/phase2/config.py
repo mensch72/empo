@@ -246,6 +246,18 @@ class Phase2Config:
     # See docs/VALUE_TRANSFORMATIONS.md for rationale.
     use_z_based_loss: bool = False
 
+    # Advantage/sensitivity-weighted Q_r loss (one_step target mode only).
+    # When True, each robot action's per-action squared error is weighted by the
+    # local softmax sensitivity w(a) = π_r(a)(1 - π_r(a)) of the target policy,
+    # then renormalized per state. This focuses capacity on decision-relevant
+    # action gaps (actions near the policy's decision boundary) rather than on
+    # absolute value magnitudes. Skipped while effective β_r = 0 (warm-up), where
+    # the policy is uniform and carries no decision signal.
+    q_r_advantage_weighted_loss: bool = False
+    # Additive floor on the per-action weights before renormalization, so that
+    # near-deterministic actions still receive a minimum gradient. 0 disables it.
+    q_r_advantage_weight_floor: float = 0.0
+
     # Target network updates
     q_r_target_update_interval: int = 100
     v_r_target_update_interval: int = 100
@@ -1812,6 +1824,9 @@ class Phase2Config:
                 "use_encoders": self.use_encoders,
                 "include_step_count": self.include_step_count,
                 "use_z_space_transform": self.use_z_space_transform,
+                "use_z_based_loss": self.use_z_based_loss,
+                "q_r_advantage_weighted_loss": self.q_r_advantage_weighted_loss,
+                "q_r_advantage_weight_floor": self.q_r_advantage_weight_floor,
             },
             "lookup_tables": {
                 "use_lookup_tables": self.use_lookup_tables,

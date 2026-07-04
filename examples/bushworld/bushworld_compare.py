@@ -843,6 +843,8 @@ def build_config(args, resolved: str) -> Phase2Config:
         goal_feature_dim=32,
         use_rnd=True,
         use_z_space_transform=True,
+        use_z_based_loss=False,
+        q_r_advantage_weighted_loss=True,
         warmup_v_h_e_steps=max(1, n // 10),
         warmup_x_h_steps=max(1, n // 10),
         warmup_u_r_steps=0,

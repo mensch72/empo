@@ -2959,10 +2959,41 @@ class BasePhase2Trainer(ABC):
                     z_target = to_z_space(
                         target_q_r_all, self.config.eta, self.config.xi
                     )
-                    q_r_temporal_loss = ((z_pred - z_target) ** 2).mean()
+                    per_action_sq = (z_pred - z_target) ** 2
                 else:
                     # Q-space MSE (default: faster outlier correction, Robbins-Monro convergence)
-                    q_r_temporal_loss = ((q_r_all - target_q_r_all) ** 2).mean()
+                    per_action_sq = (q_r_all - target_q_r_all) ** 2
+
+                if (
+                    self.config.q_r_advantage_weighted_loss
+                    and effective_beta_r > 0.0
+                ):
+                    # Weight each action's error by the local softmax sensitivity
+                    # w(a) = π_r(a)(1 - π_r(a)) of the target policy, renormalized
+                    # per state, to focus on decision-relevant action gaps.
+                    with torch.no_grad():
+                        if self.config.use_z_space_transform:
+                            z_for_policy = to_z_space(
+                                target_q_r_all, self.config.eta, self.config.xi
+                            )
+                            pi_target = self.networks.q_r.get_policy(
+                                target_q_r_all,
+                                beta_r=effective_beta_r,
+                                z_values=z_for_policy,
+                            )
+                        else:
+                            pi_target = self.networks.q_r.get_policy(
+                                target_q_r_all, beta_r=effective_beta_r
+                            )
+                        weights = pi_target * (1.0 - pi_target)
+                        if self.config.q_r_advantage_weight_floor > 0.0:
+                            weights = weights + self.config.q_r_advantage_weight_floor
+                        weights = weights / weights.sum(
+                            dim=-1, keepdim=True
+                        ).clamp_min(1e-8)
+                    q_r_temporal_loss = (weights * per_action_sq).sum(dim=-1).mean()
+                else:
+                    q_r_temporal_loss = per_action_sq.mean()
 
                 # Statistics: report for taken actions for comparability
                 q_r_pred_taken = q_r_all.gather(1, action_indices.unsqueeze(1)).squeeze(
