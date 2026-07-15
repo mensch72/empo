@@ -33,7 +33,7 @@ which has been extended with:
 Example usage:
     >>> from empo import WorldModel, PossibleGoal
     >>> from src.envs import SmallOneOrTwoChambersMapEnv
-    >>> 
+    >>>
     >>> env = SmallOneOrTwoChambersMapEnv()
     >>> state = env.get_state()
     >>> transitions = env.transition_probabilities(state, [0, 0])
@@ -53,6 +53,18 @@ try:
 except ImportError:
     _HAS_TRANSPORT = False
 
+# Tools environment (always available — no external vendor dependency)
+from empo.world_specific_helpers.tools import (
+    ToolsWorldModel,
+    HoldGoal,
+    WorkbenchGoal,
+    IdleGoal,
+    ToolsGoalGenerator,
+    ToolsGoalSampler,
+    ToolsHeuristicPolicy,
+    create_tools_env,
+)
+
 __version__ = "0.1.0"
 
 __all__ = [
@@ -60,7 +72,7 @@ __all__ = [
     "WorldModel",
     # Possible Goals
     "PossibleGoal",
-    "PossibleGoalGenerator", 
+    "PossibleGoalGenerator",
     "PossibleGoalSampler",
     # Human Policy Prior
     "HumanPolicyPrior",
@@ -76,16 +88,27 @@ __all__ = [
     # Memory Monitoring
     "MemoryMonitor",
     "check_memory",
+    # Tools Environment
+    "ToolsWorldModel",
+    "HoldGoal",
+    "WorkbenchGoal",
+    "IdleGoal",
+    "ToolsGoalGenerator",
+    "ToolsGoalSampler",
+    "ToolsHeuristicPolicy",
+    "create_tools_env",
 ]
 
 # Add transport exports if available
 if _HAS_TRANSPORT:
-    __all__.extend([
-        "TransportEnvWrapper",
-        "TransportActions",
-        "StepType",
-        "create_transport_env",
-        "TransportGoal",
-        "TransportGoalGenerator",
-        "TransportGoalSampler",
-    ])
+    __all__.extend(
+        [
+            "TransportEnvWrapper",
+            "TransportActions",
+            "StepType",
+            "create_transport_env",
+            "TransportGoal",
+            "TransportGoalGenerator",
+            "TransportGoalSampler",
+        ]
+    )
