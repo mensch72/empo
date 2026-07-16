@@ -90,7 +90,7 @@ def _rp_process_single_state(
     robot_action_profiles: List[RobotActionProfile],
     possible_goal_generator: PossibleGoalGenerator,
     num_agents: int,
-    num_actions: int,
+    n_actions_per_agent: List[int],
     action_powers: npt.NDArray[np.int64],
     human_policy_prior: TabularHumanPolicyPrior,
     beta_r: float,
@@ -130,7 +130,7 @@ def _rp_process_single_state(
         robot_action_profiles: Precomputed list of robot action profiles
         possible_goal_generator: Generator for possible goals
         num_agents: Total number of agents
-        num_actions: Number of actions available
+        num_actions: Number of actions per agent (list)
         action_powers: Precomputed powers for action profile indexing
         human_policy_prior: Human policy prior for computing expectations
         beta_r: Robot inverse temperature (power-law parameter)
@@ -400,7 +400,7 @@ def _rp_compute_sequential(
     robot_agent_indices: List[int], # the AI coordinates all robots 
     possible_goal_generator: PossibleGoalGenerator,
     num_agents: int, 
-    num_actions: int, 
+    n_actions_per_agent: List[int], 
     action_powers: npt.NDArray[np.int64],
     human_policy_prior: TabularHumanPolicyPrior, 
     beta_r: float, # softmax parameter for robots' power-law softmax policies
@@ -437,7 +437,7 @@ def _rp_compute_sequential(
     """
     # Generate all possible robot action profiles (cartesian product of actions for each robot)
     robot_action_profiles: List[RobotActionProfile] = [
-        tuple(actions) for actions in product(range(num_actions), repeat=len(robot_agent_indices))
+        tuple(actions) for actions in product(*[range(n_actions_per_agent[r]) for r in robot_agent_indices])
     ]
     
     total_states = len(states)
@@ -568,7 +568,7 @@ def _rp_compute_sequential(
         vh_results, vr_result, p_result, successor_probs = _rp_process_single_state(
             state_index, state, states, state_transitions, Vh_values, Vr_values,
             human_agent_indices, robot_agent_indices, robot_action_profiles,
-            possible_goal_generator, num_agents, num_actions, action_powers,
+            possible_goal_generator, num_agents, n_actions_per_agent, action_powers,
             human_policy_prior, beta_r, gamma_h, gamma_r, zeta, xi, eta, terminal_Vr,
             slice_cache=slice_cache,
             use_indexed=use_indexed,
@@ -731,18 +731,18 @@ def _rp_process_state_batch(
     Vr_values = _shared_Vr_values
     
     (human_agent_indices, robot_agent_indices, possible_goal_generator, 
-     num_agents, num_actions, action_powers, beta_r, gamma_h, gamma_r, 
+     num_agents, n_actions_per_agent, action_powers, beta_r, gamma_h, gamma_r, 
      zeta, xi, eta, terminal_Vr, rho_h, rho_r) = _shared_rp_params
     
     # Deserialize human_policy_prior
     human_policy_prior = cloudpickle.loads(_shared_human_policy_prior_pickle)
-    # The world_model is excluded from pickling, so we need to set num_actions directly
+    # The world_model is excluded from pickling, so we need to set n_actions_per_agent directly
     # for profile_distribution to work. Use a mock attribute access pattern.
-    human_policy_prior._num_actions_override = num_actions
+    human_policy_prior._num_actions_override = n_actions_per_agent
     
     # Generate all possible robot action profiles
     robot_action_profiles: List[RobotActionProfile] = [
-        tuple(actions) for actions in product(range(num_actions), repeat=len(robot_agent_indices))
+        tuple(actions) for actions in product(*[range(n_actions_per_agent[r]) for r in robot_agent_indices])
     ]
     
     vh_results: Dict[int, Dict[int, Dict[PossibleGoal, float]]] = {}
@@ -766,7 +766,7 @@ def _rp_process_state_batch(
         vh_results_state, vr_result, p_result, successor_probs = _rp_process_single_state(
             state_index, state, states, state_transitions, Vh_values, Vr_values,
             human_agent_indices, robot_agent_indices, robot_action_profiles,
-            possible_goal_generator, num_agents, num_actions, action_powers,
+            possible_goal_generator, num_agents, n_actions_per_agent, action_powers,
             human_policy_prior, beta_r, gamma_h, gamma_r, zeta, xi, eta, terminal_Vr,
             slice_cache=slice_cache,
             rho_h=rho_h,
@@ -817,7 +817,7 @@ class TabularRobotPolicy(RobotPolicy):
         self.world_model = world_model
         self.robot_agent_indices = robot_agent_indices
         self.values = values
-        self.num_actions: int = world_model.action_space.n  # type: ignore[attr-defined]
+        self.n_actions_per_agent: List[int] = world_model.n_actions_per_agent  # type: ignore[attr-defined]
     
     def __call__(self, state) -> Dict[RobotActionProfile, float]:
         """
@@ -844,7 +844,7 @@ class TabularRobotPolicy(RobotPolicy):
         dist = self(state)
         if not dist:
             # No policy for this state (terminal state?), return random
-            return tuple(np.random.randint(0, self.num_actions) for _ in self.robot_agent_indices)
+            return tuple(np.random.randint(0, self.n_actions_per_agent[r]) for r in self.robot_agent_indices)
         
         profiles = list(dist.keys())
         probs = np.fromiter((dist[p] for p in profiles), dtype=np.float64, count=len(profiles))
@@ -1156,10 +1156,10 @@ def compute_robot_policy(
     robot_policy_values: RobotPolicyDict = {}
 
     num_agents: int = len(world_model.agents)  # type: ignore[attr-defined]
-    num_actions: int = world_model.action_space.n  # type: ignore[attr-defined]
+    n_actions_per_agent: List[int] = world_model.n_actions_per_agent  # type: ignore[attr-defined]
 
-    # Precompute powers for action profile indexing
-    action_powers: npt.NDArray[np.int64] = num_actions ** np.arange(num_agents)
+    # Precompute powers for mixed-radix action profile indexing
+    action_powers: npt.NDArray[np.int64] = np.concatenate(([1], np.cumprod(n_actions_per_agent[:-1]))).astype(np.int64)
 
     # Resolve gamma_h / rho_h: at most one may be provided (neither → default 1.0)
     if gamma_h is not None and rho_h is not None:
@@ -1230,12 +1230,12 @@ def compute_robot_policy(
         # Note: num_goals not available here, use num_action_profiles as proxy
         mem_stats = estimate_dag_memory(states, transitions, num_agents,
                                         num_goals=num_action_profiles,  # proxy
-                                        num_actions=num_actions)
+                                        num_actions=max(n_actions_per_agent))
         if not quiet:
             print(f"Estimated memory: {mem_stats['total_mb']:.0f} MB")
         
         # Create disk-based DAG
-        num_action_profiles_for_cache = num_actions ** num_agents
+        num_action_profiles_for_cache = int(np.prod(n_actions_per_agent))
         disk_dag = DiskBasedDAG.from_dag(
             states, transitions, level_fct,
             cache_dir=None,  # Auto-select optimal location
@@ -1304,7 +1304,7 @@ def compute_robot_policy(
             print("         See docs/plans/bwind_parallel.md for status.")
     
     # Get sliced attainment cache: prioritize explicit parameter, then world_model cache, then create new
-    num_action_profiles = num_actions ** num_agents
+    num_action_profiles = int(np.prod(n_actions_per_agent))
     if sliced_cache is None:
         # Try to get cache from world_model (automatically stored by Phase 1)
         sliced_cache = getattr(world_model, '_attainment_cache', None)
@@ -1357,9 +1357,9 @@ def compute_robot_policy(
             print(f"Computed {len(dependency_levels)} dependency levels")
         
         # Initialize shared data for worker processes
-        params: Tuple[List[int], List[int], PossibleGoalGenerator, int, int, npt.NDArray[np.int64], float, float, float, float, float, float, float, float, float] = (
+        params: Tuple[List[int], List[int], PossibleGoalGenerator, int, List[int], npt.NDArray[np.int64], float, float, float, float, float, float, float, float, float] = (
             human_agent_indices, robot_agent_indices, possible_goal_generator, 
-            num_agents, num_actions, action_powers, beta_r, gamma_h, gamma_r, 
+            num_agents, n_actions_per_agent, action_powers, beta_r, gamma_h, gamma_r, 
             zeta, xi, eta, terminal_Vr, rho_h, rho_r
         )
         
@@ -1393,7 +1393,7 @@ def compute_robot_policy(
             
             # Generate all possible robot action profiles (needed for sequential fallback)
             robot_action_profiles: List[RobotActionProfile] = [
-                tuple(actions) for actions in product(range(num_actions), repeat=len(robot_agent_indices))
+                tuple(actions) for actions in product(*[range(n_actions_per_agent[r]) for r in robot_agent_indices])
             ]
             
             if len(level) <= num_workers:
@@ -1413,7 +1413,7 @@ def compute_robot_policy(
                     vh_results, vr_result, p_result, _successor_probs = _rp_process_single_state(
                         state_index, state, states, state_transitions, Vh_values, Vr_values,
                         human_agent_indices, robot_agent_indices, robot_action_profiles,
-                        possible_goal_generator, num_agents, num_actions, action_powers,
+                        possible_goal_generator, num_agents, n_actions_per_agent, action_powers,
                         human_policy_prior, beta_r, gamma_h, gamma_r, zeta, xi, eta, terminal_Vr,
                         slice_cache=inline_slice_cache,
                         rho_h=rho_h,
@@ -1550,7 +1550,7 @@ def compute_robot_policy(
             _rp_compute_sequential(
                 states, Vh_values, Vr_values, robot_policy_values, transitions,
                 human_agent_indices, robot_agent_indices, possible_goal_generator,
-                num_agents, num_actions, action_powers,
+                num_agents, n_actions_per_agent, action_powers,
                 human_policy_prior, beta_r, gamma_h, gamma_r, zeta, xi, eta, terminal_Vr,
                 progress_callback, memory_monitor,
                 sliced_cache,
